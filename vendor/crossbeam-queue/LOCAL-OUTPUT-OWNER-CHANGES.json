@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "status": "EXACT_LOCAL_FORMAT_REPLAYED_SOURCE_NOT_YET_RUNTIME_QUALIFIED",
+  "upstream_input_and_historical_format_receipts_unchanged": true,
+  "local_change": "public exclusive FIFO initialized-value borrow; existing push/pop algorithm and slot layout unchanged",
+  "files": [
+    {
+      "path": "src/array_queue.rs",
+      "parent_sha256_raw": "10744ef6baa127d6eaa6bdf05c62ac933f1c5fa23ea29fa247b855edb68be274",
+      "shipped_before_formatter_sha256_raw": "2f2d8e2ac13f92ae9f29717fe68cabc91fa79c959f43d706a7ddbe010ecd5621",
+      "shipped_sha256_raw": "2f2d8e2ac13f92ae9f29717fe68cabc91fa79c959f43d706a7ddbe010ecd5621"
+    }
+  ],
+  "safety": "exclusive mutable queue borrow, actual initialized slots; no copied private slot layout or concurrent payload read",
+  "refusal": "error/panic leaves head/tail/stamps and element ownership unchanged; callback interior side effects are not rolled back",
+  "scope": "nested payload observers must supply their own actual capacities; no generic T/root/OS/foreign completeness or performance claim",
+  "local_formatting": {
+    "rustfmt_version": "rustfmt 1.9.0-stable (8bab26f4f6 2026-07-14)",
+    "config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e",
+    "command": "rustfmt --config-path rustfmt.toml --config skip_children=true <array_queue.rs>",
+    "replayed_exactly": true,
+    "previous_formatting_receipt_unchanged": true
+  }
+}

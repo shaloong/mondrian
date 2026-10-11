@@ -28,6 +28,12 @@ pub mod interpret_asset_dialog;
 pub mod localization;
 pub mod menu_bar;
 pub mod modal;
+#[cfg(feature = "validation")]
+pub mod native_question_fixture;
+#[cfg(feature = "validation")]
+pub mod native_question_validation;
+pub(crate) mod native_visual_gui_section;
+pub(crate) mod native_visual_question_dialog;
 pub mod new_project_dialog;
 mod notifications;
 pub mod panels;

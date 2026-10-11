@@ -32,6 +32,7 @@ use super::{
         HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
         MAX_QUEUED_EVENTS,
     },
+    editor_attachment::EditorAttachment,
     module_loader::{load_module, VstModule},
 };
 
@@ -237,7 +238,8 @@ pub struct PluginImpl {
     output_events_owned: Arc<ArrayQueue<PluginEvent>>,
 
     // Plugin view
-    plugin_view: Option<ComPtr<IPlugView>>,
+    native_editor_owner: crate::plugin::NativeEditorAttachmentOwner,
+    plugin_view: EditorAttachment,
     editor_scale_factor: f32,
 
     // Editor resize plumbing: the IPlugFrame handed to the plugin's view, and the slot it
@@ -279,6 +281,51 @@ struct HostProcessData {
     // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
     // addresses are stable after allocation, so process() reuses these instead of rebuilding
     // them every block — keeping the steady-state audio path allocation-free.
+}
+
+impl<T> TypedSampleBuffers<T> {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::HostStorageRef;
+        visitor.visit(HostStorageRef::vector(&self.inputs)?)?;
+        for channel in &self.inputs {
+            visitor.visit(HostStorageRef::vector(channel)?)?;
+        }
+        visitor.visit(HostStorageRef::vector(&self.outputs)?)?;
+        for channel in &self.outputs {
+            visitor.visit(HostStorageRef::vector(channel)?)?;
+        }
+        visitor.visit(HostStorageRef::vector(&self.input_channel_ptrs.0)?)?;
+        for bus in &self.input_channel_ptrs.0 {
+            visitor.visit(HostStorageRef::vector(bus)?)?;
+        }
+        visitor.visit(HostStorageRef::vector(&self.output_channel_ptrs.0)?)?;
+        for bus in &self.output_channel_ptrs.0 {
+            visitor.visit(HostStorageRef::vector(bus)?)?;
+        }
+        Ok(())
+    }
+}
+
+impl HostProcessData {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::HostStorageRef;
+        visitor.visit(HostStorageRef::vector(&self.input_bus_buffers)?)?;
+        visitor.visit(HostStorageRef::vector(&self.output_bus_buffers)?)?;
+        match &self.sample_buffers {
+            HostSampleBuffers::F32(value) => value.visit_owned_storage(visitor)?,
+            HostSampleBuffers::F64(value) => value.visit_owned_storage(visitor)?,
+        }
+        visitor.visit(HostStorageRef::com(&self.input_param_changes))?;
+        self.input_param_changes.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::com(&self.output_param_changes))?;
+        self.output_param_changes.visit_owned_storage(visitor)
+    }
 }
 
 enum CallerAudioBuffers<'a> {
@@ -1048,16 +1095,7 @@ impl PluginImpl {
     /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
     /// the level is disabled.
     fn apply_controller_parameter(&self, id: u32, value: f64) {
-        let Some(controller) = self.controller.as_ref() else {
-            return;
-        };
-        let result = unsafe { controller.setParamNormalized(id, value) };
-        if result != kResultOk && result != kResultTrue {
-            log::debug!(
-                "setParamNormalized({id}) returned {result:#x}; applying anyway \
-                 (many plugins report kResultFalse on success)"
-            );
-        }
+        apply_controller_value(&self.controller, id, value)
     }
 
     /// Keep `IEditController` in step with a value queued for the processor.
@@ -1210,6 +1248,7 @@ impl PluginImpl {
     }
 
     fn load_with_class(path: &std::path::Path, requested_class_id: Option<&str>) -> Result<Self> {
+        let native_editor_owner = crate::plugin::NativeEditorAttachmentOwner::issue()?;
         let requested_class_id = requested_class_id
             .map(|requested| -> Result<String> {
                 crate::internal::utils::parse_class_uid(requested).ok_or_else(|| {
@@ -1387,6 +1426,7 @@ impl PluginImpl {
                     // connected, while the component is still inactive.
                     let component_state =
                         create_memory_stream_with_metadata(None, StreamStateType::Project);
+                    host_app.register_memory_stream(&component_state)?;
                     let component_state_ptr =
                         component_state.to_com_ptr::<IBStream>().ok_or_else(|| {
                             Error::InterfaceError(
@@ -1400,6 +1440,7 @@ impl PluginImpl {
                             None,
                             StreamStateType::Project,
                         );
+                        host_app.register_memory_stream(&controller_state)?;
                         let controller_state_ptr =
                             controller_state.to_com_ptr::<IBStream>().ok_or_else(|| {
                                 Error::InterfaceError(
@@ -1525,7 +1566,8 @@ impl PluginImpl {
                 output_events,
                 chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
                 output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
-                plugin_view: None,
+                native_editor_owner,
+                plugin_view: EditorAttachment::Empty,
                 editor_scale_factor: 1.0,
                 plug_frame,
                 editor_resize,
@@ -2081,347 +2123,285 @@ impl PluginImpl {
 }
 
 impl PluginImpl {
-    /// Process exactly `frames` samples starting at `frame_offset` within the caller's
-    /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
-    /// was set up to accept; `process` splits a larger caller block into successive chunks.
-    ///
-    /// The plugin-facing event list has already been staged with this chunk's events (see
-    /// [`stage_chunk_events`]); queued parameter changes are selected the same way here, by the
-    /// chunk their offset falls in. `is_last` marks the chunk that absorbs anything scheduled
-    /// past the end of the caller's block.
-    fn process_chunk(
+    fn capture_native_state_bounded(
         &mut self,
-        buffers: &mut CallerAudioBuffers<'_>,
-        frame_offset: usize,
-        frames: usize,
-        is_last: bool,
-    ) -> Result<()> {
-        let result = if let Some(ref mut data) = self.process_data {
-            unsafe {
-                // Clear output events only - input events should be preserved for processing
-                self.output_events.clear();
-
-                // Clear the output parameter queue too. VST3's ProcessData::outputParameterChanges
-                // describes changes for the *current* processing block only (see
-                // Steinberg::Vst::ProcessData / IParameterChanges docs); the reference
-                // ParameterChanges host helper exposes clearQueue() for exactly this reset.
-                // Without this, addParameterData()/addPoint() would keep appending to queues
-                // from prior blocks, mixing stale points into new ones, growing point storage
-                // unbounded, and risking a reallocation on the audio thread long after warm-up.
-                data.output_param_changes.clear_all();
-
-                // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
-                // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-                // it was longer, `process` has already split it into chunks of at most that
-                // maximum.
-                let frames = frames.min(self.block_size);
-                data.process_data.numSamples = frames as i32;
-
-                // Feed the queued parameter changes that belong to this chunk into the
-                // processor's input queue, rebased to the chunk — the same routing the events
-                // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
-                // split block.
-                for pc in &self.pending_param_changes {
-                    if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
-                    {
-                        data.input_param_changes.enqueue(pc.id, off, pc.value);
-                    }
-                }
-
-                // Route parameter edits the plugin's *own editor* reported via performEdit into
-                // the processor too, so turning a knob in the plugin GUI affects the audio — not
-                // just the host's display. (Some plugins relay editor→processor internally over
-                // the component/controller connection; others rely on the host to do this. We do
-                // it unconditionally; a plugin that also self-relays just gets the same value
-                // twice in the same block, which is idempotent.) Drained here at offset 0 and
-                // stashed for the host's display poll (get_parameter_changes).
-                if let Some(ref handler) = self.component_handler {
-                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
-                        if !gui_changes.is_empty() {
-                            for &(id, value) in gui_changes.iter() {
-                                data.input_param_changes.enqueue(id, 0, value);
-                            }
-                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
-                                // Bounded: nothing drains the stash unless the host polls
-                                // `get_parameter_changes`, and the realtime runner never does, so
-                                // an unbounded append here would grow forever and reallocate on
-                                // the audio thread. Both buffers are pre-reserved to the cap, so
-                                // the steady-state append allocates nothing.
-                                let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
-                                if room >= gui_changes.len() {
-                                    stash.append(&mut gui_changes);
-                                } else {
-                                    stash.extend(gui_changes.drain(..room));
-                                    gui_changes.clear();
-                                }
-                            } else {
-                                gui_changes.clear();
-                            }
-                        }
-                    }
-                }
-
-                match buffers {
-                    CallerAudioBuffers::Flat(buffers) => {
-                        data.sample_buffers
-                            .copy_inputs_from(&buffers.inputs, frame_offset, frames)
-                    }
-                    CallerAudioBuffers::Buses(buffers) => {
-                        data.sample_buffers.copy_inputs_from_buses(
-                            &buffers.inputs,
-                            frame_offset,
-                            frames,
-                            &data.input_bus_buffers,
-                            &self.bus_activation.audio_inputs,
-                        )
-                    }
-                }
-                data.sample_buffers.clear_outputs();
-                data.sample_buffers.update_input_silence_flags(
-                    &mut data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
-                    frames,
-                );
-                prepare_output_silence_flags(
-                    &mut data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
-                );
-
-                // Channel pointers and process-data input/output pointers were wired once in
-                // prepare_buffers (buffer addresses are stable), so there's nothing to rebuild
-                // here — keeping the steady-state path allocation-free.
-
-                // A zero-sample flush carries events/parameter queues only. The VST3 process
-                // contract requires no audio buses or pointers for that call.
-                let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
-                self._host_app.enter_data_exchange_process();
-                let process_result = self.processor.process(&mut data.process_data);
-                self._host_app.leave_data_exchange_process();
-                restore_process_audio_io(&mut data.process_data, saved_audio_io);
-
-                // Everything from here to the output copy is per-block cleanup and MUST run even
-                // when the plugin reported failure. Returning early instead would leave this
-                // block's events and parameter changes queued, so the next block would re-deliver
-                // every one of them — re-triggering held notes and growing the queues without
-                // bound for as long as the plugin keeps failing.
-
-                // Advance the transport so tempo-synced DSP (LFOs, sync'd delays/arps) sees
-                // a moving playhead instead of a frozen time-0. The context describes the
-                // block that was just processed; advancing here means the next block starts
-                // at the new sample position.
-                advance_process_context(
-                    &mut data.process_context,
-                    data.transport_tempo,
-                    frames as i64,
-                );
-
-                // Clear the staged input events AFTER processing, so the plugin got to see them
-                // and the next chunk starts from an empty list.
-                self.input_events.clear();
-                // Clear the input parameter queue too, so this block's values don't
-                // re-stick on the next block.
-                data.input_param_changes.clear_all();
-
-                // Processor-originated automation belongs to this block. Copy it into a
-                // bounded lock-free feedback queue, then clear it on both success and failure
-                // so stale points can never be re-reported.
-                let feedback = &self.output_param_feedback;
-                data.output_param_changes
-                    .for_each_active_point(|id, _offset, value| {
-                        feedback.force_push((id, value));
-                    });
-                data.output_param_changes.clear_all();
-
-                // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
-                // Drain the event list in place (no `mem::take`) and push each converted event
-                // into the lock-free output queue with `force_push`, which drops the oldest event
-                // when full. No lock and no allocation on the audio thread even while MIDI flows.
-                if !self.output_events.is_empty() {
-                    let out = &self.output_events_owned;
-                    self.output_events.drain_each(|event| {
-                        out.force_push(event);
-                    });
-                }
-
-                if process_result != kResultOk {
-                    // Leave the caller's buffers as they were (the playback bridges pre-fill them
-                    // with silence) rather than copying out whatever the failed call left behind.
-                    Err(Error::ProcessFailed(process_result))
-                } else {
-                    data.sample_buffers.update_output_silence_flags(
-                        &mut data.output_bus_buffers,
-                        &self.bus_activation.audio_outputs,
-                        frames,
-                    );
-                    match buffers {
-                        CallerAudioBuffers::Flat(buffers) => data.sample_buffers.copy_outputs_to(
-                            &mut buffers.outputs,
-                            frame_offset,
-                            frames,
-                            &data.output_bus_buffers,
-                            &self.bus_activation.audio_outputs,
-                        ),
-                        CallerAudioBuffers::Buses(buffers) => {
-                            data.sample_buffers.copy_outputs_to_buses(
-                                &mut buffers.outputs,
-                                frame_offset,
-                                frames,
-                                &data.output_bus_buffers,
-                                &self.bus_activation.audio_outputs,
-                            )
-                        }
-                    }
-                    Ok(())
-                }
-            }
-        } else {
-            Err(Error::Other("Process data not initialized".to_string()))
+        state_limit: usize,
+        buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        use super::bounded_configuration_stream::ConfigurationCaptureStream;
+        use crate::configuration_capture::{
+            BoundedConfigurationState, ConfigurationCaptureBuffers,
+            ConfigurationCaptureError as CaptureError, ConfigurationStatePart,
         };
-
-        result
-    }
-
-    /// Distribute the block's queued input events over its chunks and process each one.
-    ///
-    /// `total` is the caller's block length, already known non-zero by the caller; the empty
-    /// block is handled separately (some plugins use a zero-sample call to flush pending
-    /// parameter changes).
-    fn process_chunks(&mut self, buffers: &mut CallerAudioBuffers<'_>, total: usize) -> Result<()> {
-        // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
-        // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
-        // `block_size` is plain state and this loop must terminate regardless.
-        let step = self.block_size.max(1);
-        let mut offset = 0;
-        while offset < total {
-            let frames = (total - offset).min(step);
-            let is_last = offset + frames >= total;
-            stage_chunk_events(
-                &mut self.chunk_events,
-                &self.input_events,
-                offset,
-                frames,
-                is_last,
-            );
-            self.process_chunk(buffers, offset, frames, is_last)?;
-            offset += frames;
+        if thread::current().id() != self.control_thread {
+            return Err(CaptureError::WrongThread);
         }
-        Ok(())
-    }
-
-    fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
-        let data = self
-            .process_data
-            .as_ref()
-            .ok_or_else(|| Error::Other("Process data not initialized".to_string()))?;
-        let side = |buses: &[AudioBusBuffers], active: &[bool]| {
-            buses
-                .iter()
-                .enumerate()
-                .map(|(index, bus)| AudioBusConfig {
-                    channel_count: bus.numChannels.max(0) as usize,
-                    active: active.get(index).copied().unwrap_or(false),
-                })
-                .collect()
+        let header = crate::plugin::STATE_SNAPSHOT_HEADER_SIZE;
+        if !(header..=crate::plugin::MAX_STATE_SNAPSHOT_BYTES).contains(&state_limit) {
+            return Err(CaptureError::InvalidLimit { limit: state_limit });
+        }
+        let payload_limit = state_limit - header;
+        let separate_controller = self.controller.is_some() && !self.single_component;
+        let stream_count = if separate_controller { 2 } else { 1 };
+        let required = payload_limit
+            .checked_mul(stream_count)
+            .and_then(|bytes| bytes.checked_add(state_limit))
+            .ok_or(CaptureError::ExtentOverflow)?;
+        if required > buffer_grant {
+            return Err(CaptureError::BufferGrantExceeded {
+                required,
+                granted: buffer_grant,
+            });
+        }
+        // Reserve every capture/envelope buffer before calling native state code.
+        let component_stream = ComWrapper::new(ConfigurationCaptureStream::new(payload_limit)?);
+        let controller_stream = if separate_controller {
+            Some(ComWrapper::new(ConfigurationCaptureStream::new(
+                payload_limit,
+            )?))
+        } else {
+            None
         };
-        Ok(AudioBusLayout {
-            inputs: side(&data.input_bus_buffers, &self.bus_activation.audio_inputs),
-            outputs: side(&data.output_bus_buffers, &self.bus_activation.audio_outputs),
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(state_limit)
+            .map_err(|_| CaptureError::AllocationFailed)?;
+        let stream_payload_bytes = component_stream
+            .payload_allocation_bytes()?
+            .checked_add(match &controller_stream {
+                Some(stream) => stream.payload_allocation_bytes()?,
+                None => 0,
+            })
+            .ok_or(CaptureError::ExtentOverflow)?;
+        let buffers = ConfigurationCaptureBuffers {
+            stream_payload_bytes,
+            envelope_capacity_bytes: output.capacity(),
+        };
+        let actual_peak = buffers
+            .peak_buffer_bytes()
+            .ok_or(CaptureError::ExtentOverflow)?;
+        if actual_peak > buffer_grant {
+            return Err(CaptureError::BufferGrantExceeded {
+                required: actual_peak,
+                granted: buffer_grant,
+            });
+        }
+        self._host_app.register_capture_stream(&component_stream)?;
+        if let Some(stream) = controller_stream.as_ref() {
+            self._host_app.register_capture_stream(stream)?;
+        }
+        let component_ptr = component_stream
+            .to_com_ptr::<IBStream>()
+            .ok_or(CaptureError::StreamInterfaceUnavailable)?;
+        let component_result = unsafe { self.component.getState(component_ptr.as_ptr()) };
+        let component_len = component_stream.seal()?;
+        if component_result == kNotImplemented || component_result == kResultFalse {
+            return Err(CaptureError::Unavailable);
+        }
+        if component_result != kResultOk {
+            return Err(CaptureError::NativeFailure {
+                part: ConfigurationStatePart::Component,
+                result: component_result,
+            });
+        }
+        let mut controller_len = None;
+        if let (Some(controller), Some(stream)) = (&self.controller, &controller_stream) {
+            stream.set_write_limit(payload_limit - component_len)?;
+            let stream_ptr = stream
+                .to_com_ptr::<IBStream>()
+                .ok_or(CaptureError::StreamInterfaceUnavailable)?;
+            let result = unsafe { controller.getState(stream_ptr.as_ptr()) };
+            let captured_len = stream.seal()?;
+            if result == kResultOk {
+                controller_len = Some(captured_len);
+            } else if result != kNotImplemented && result != kResultFalse {
+                return Err(CaptureError::NativeFailure {
+                    part: ConfigurationStatePart::Controller,
+                    result,
+                });
+            }
+        }
+        crate::plugin::encode_configuration_capture_into(
+            &mut output,
+            &component_stream,
+            component_len,
+            controller_stream
+                .as_ref()
+                .zip(controller_len)
+                .map(|(stream, len)| (&**stream, len)),
+        )?;
+        Ok(BoundedConfigurationState {
+            bytes: output,
+            buffers,
         })
     }
 
-    fn validate_bus_buffers(&self, buffers: &BusAudioBuffers) -> Result<()> {
-        let data = self
-            .process_data
-            .as_ref()
-            .ok_or_else(|| Error::Other("Process data not initialized".to_string()))?;
-        let validate = |label: &str,
-                        supplied: &[AudioBusBuffer],
-                        expected: &[AudioBusBuffers],
-                        active: &[bool]|
-         -> Result<()> {
-            if supplied.len() != expected.len() {
-                return Err(Error::Other(format!(
-                    "{label} bus count mismatch: expected {}, got {}",
-                    expected.len(),
-                    supplied.len()
-                )));
-            }
-            for (index, (supplied, expected)) in supplied.iter().zip(expected).enumerate() {
-                let expected_active = active.get(index).copied().unwrap_or(false);
-                if supplied.active != expected_active {
-                    return Err(Error::Other(format!(
-                        "{label} bus {index} activation is stale: expected {expected_active}, got {}",
-                        supplied.active
-                    )));
-                }
-                let expected_channels = expected.numChannels.max(0) as usize;
-                if supplied.channels.len() != expected_channels {
-                    return Err(Error::Other(format!(
-                        "{label} bus {index} channel count mismatch: expected {expected_channels}, got {}",
-                        supplied.channels.len()
-                    )));
-                }
-            }
-            Ok(())
-        };
-        validate(
-            "input",
-            &buffers.inputs,
-            &data.input_bus_buffers,
-            &self.bus_activation.audio_inputs,
-        )?;
-        validate(
-            "output",
-            &buffers.outputs,
-            &data.output_bus_buffers,
-            &self.bus_activation.audio_outputs,
-        )
-    }
-
-    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
-        if !self.is_active || !self.is_processing {
-            return Err(Error::NotProcessing);
-        }
-
-        let _denormal = crate::internal::denormal::DenormalGuard::new();
-        let total = buffers.frame_count(self.block_size);
-        self.input_events.take_into_slots(&mut self.chunk_events);
-
-        let result = if total == 0 {
-            stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
-            self.process_chunk(buffers, 0, 0, true)
-        } else {
-            self.process_chunks(buffers, total)
-        };
-
-        self.chunk_events.clear();
-        self.pending_param_changes.clear();
-        result
+    fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
+        process_audio_bus_layout(&self.process_data, &self.bus_activation)
     }
 }
 
 impl PluginInternal for PluginImpl {
+    fn visit_retained_host_created_storage(
+        &mut self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        if thread::current().id() != self.control_thread {
+            return Err(crate::host_storage::HostStorageError::WrongThread);
+        }
+        use crate::host_storage::HostStorageRef;
+        visitor.visit(HostStorageRef::path(&self.info.path)?)?;
+        for text in [
+            &self.info.name,
+            &self.info.vendor,
+            &self.info.version,
+            &self.info.category,
+            &self.info.uid,
+        ] {
+            visitor.visit(HostStorageRef::string(text)?)?;
+        }
+        visitor.visit(HostStorageRef::vector(&self.compatibility)?)?;
+        for entry in &self.compatibility {
+            visitor.visit(HostStorageRef::string(&entry.new_class_id)?)?;
+            visitor.visit(HostStorageRef::vector(&entry.old_class_ids)?)?;
+            for class in &entry.old_class_ids {
+                visitor.visit(HostStorageRef::string(class)?)?;
+            }
+        }
+        visitor.visit(HostStorageRef::vector(&self.bus_activation.audio_inputs)?)?;
+        visitor.visit(HostStorageRef::vector(&self.bus_activation.audio_outputs)?)?;
+        visitor.visit(HostStorageRef::vector(&self.bus_activation.event_inputs)?)?;
+        visitor.visit(HostStorageRef::vector(&self.bus_activation.event_outputs)?)?;
+        visitor.visit(HostStorageRef::vector(&self.active_notes)?)?;
+        visitor.visit(HostStorageRef::vector(
+            &self.midi_mapping_cache.assignments,
+        )?)?;
+        visitor.visit(HostStorageRef::vector(&self.program_change_cache)?)?;
+        visitor.visit(HostStorageRef::vector(&self.pending_param_changes)?)?;
+        let units = self
+            .unit_cache
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        if let Some(units) = units.as_ref() {
+            visitor.visit(HostStorageRef::vector(units)?)?;
+            for unit in units {
+                visitor.visit(HostStorageRef::string(&unit.name)?)?;
+                visitor.visit(HostStorageRef::vector(&unit.programs)?)?;
+                for name in &unit.programs {
+                    visitor.visit(HostStorageRef::string(name)?)?;
+                }
+            }
+        }
+        drop(units);
+        if let Some(process) = &self.process_data {
+            visitor.visit(HostStorageRef::boxed(process))?;
+            process.visit_owned_storage(visitor)?;
+        }
+        if let Some(connection) = &self.connection {
+            connection.visit_owned_storage(visitor)?;
+        }
+        visitor.visit(HostStorageRef::com(&self.input_events))?;
+        self.input_events.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::com(&self.output_events))?;
+        self.output_events.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::arc(&self.gui_param_changes_for_host))?;
+        {
+            let changes = self
+                .gui_param_changes_for_host
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(HostStorageRef::vector(&changes)?)?;
+        }
+        visitor.visit(HostStorageRef::arc(&self.output_param_feedback))?;
+        visitor.visit(HostStorageRef::queue(self.output_param_feedback.as_ref()))?;
+        visitor.visit(HostStorageRef::queue(&self.deferred_controller_sync))?;
+        visitor.visit(HostStorageRef::vector(&self.chunk_events)?)?;
+        for event in self.chunk_events.iter().flatten() {
+            super::com_implementations::visit_event_payload(event, visitor)?;
+        }
+        visitor.visit(HostStorageRef::com(&self.plug_frame))?;
+        self.plug_frame.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::arc(&self.editor_resize))?;
+        visitor.visit(HostStorageRef::arc(&self.output_events_owned))?;
+        // The product's retained child has no external output consumer aliases.
+        // A library user may create such handles; in that case a complete
+        // payload borrow requires an explicit consumer/producer handoff and is
+        // refused here instead of inspecting concurrent slots or charging zero.
+        let output = Arc::get_mut(&mut self.output_events_owned)
+            .ok_or(crate::host_storage::HostStorageError::NonExclusiveSharedOwner)?;
+        visitor.visit(HostStorageRef::queue(output))?;
+        output.try_for_each_occupied(|event| {
+            super::com_implementations::visit_event_payload(event, visitor)
+        })?;
+        if let Some(handler) = &self.component_handler {
+            visitor.visit(HostStorageRef::com(handler))?;
+            handler.visit_owned_storage(visitor)?;
+        }
+        visitor.visit(HostStorageRef::boxed(&self._module))?;
+        self._module.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::com(&self._host_app))?;
+        self._host_app.visit_progress_storage(visitor)?;
+        self._host_app.visit_data_exchange_storage(visitor)?;
+        self._host_app.visit_retained_com_storage(visitor)
+    }
+    fn native_editor_attachment_owner(&self) -> Option<crate::plugin::NativeEditorAttachmentOwner> {
+        Some(self.native_editor_owner)
+    }
+
+    fn split_editor_processing(
+        &mut self,
+    ) -> Result<crate::plugin::PluginEditorProcessingSplit<'_>> {
+        self.ensure_control_thread("split editor and processing roles")?;
+        if !self.is_active || !self.is_processing || self.process_data.is_none() {
+            return Err(Error::NotProcessing);
+        }
+        let editor = PluginEditorFields {
+            controller: &self.controller,
+            component_handler: &self.component_handler,
+            native_editor_owner: self.native_editor_owner,
+            plugin_view: &mut self.plugin_view,
+            editor_scale_factor: &mut self.editor_scale_factor,
+            plug_frame: &self.plug_frame,
+            editor_resize: &self.editor_resize,
+            deferred_controller_sync: &self.deferred_controller_sync,
+            host_app: &self._host_app,
+            control_thread: self.control_thread,
+            #[cfg(target_os = "linux")]
+            run_loop: &self.run_loop,
+        };
+        let processor = PluginProcessFields {
+            processor: &self.processor,
+            is_active: self.is_active,
+            is_processing: self.is_processing,
+            sample_rate: self.sample_rate,
+            block_size: self.block_size,
+            process_data: &mut self.process_data,
+            bus_activation: &self.bus_activation,
+            component_handler: &self.component_handler,
+            pending_param_changes: &mut self.pending_param_changes,
+            input_events: &self.input_events,
+            output_events: &self.output_events,
+            chunk_events: &mut self.chunk_events,
+            gui_param_changes_for_host: &self.gui_param_changes_for_host,
+            output_param_feedback: &self.output_param_feedback,
+            output_events_owned: &self.output_events_owned,
+            deferred_controller_sync: &self.deferred_controller_sync,
+            host_app: &self._host_app,
+        };
+        Ok(crate::plugin::PluginEditorProcessingSplit::from_roles(
+            Box::new(editor),
+            Box::new(processor),
+        ))
+    }
+
     fn set_process_timeline_context(
         &mut self,
         context: crate::audio::ProcessTimelineContext,
     ) -> Result<()> {
-        if !self.is_processing {
-            return Err(Error::NotProcessing);
-        }
-        if context.sample_rate == 0 || f64::from(context.sample_rate) != self.sample_rate {
-            return Err(Error::InvalidParameter(
-                "signal timeline rate differs from prepared processing".to_string(),
-            ));
-        }
-        let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
-        // Assignment keeps the SDK pointer to this field stable. This adapter
-        // owns no second timeline: optional author facts are unavailable here.
-        data.process_context = unsafe { std::mem::zeroed() };
-        data.process_context.sampleRate = f64::from(context.sample_rate);
-        data.process_context.projectTimeSamples = context.sample_position;
-        data.process_context.state =
-            process_context_state(data.process_context_requirements, false, 0);
-        Ok(())
+        self.process_fields().set_signal_timeline_context(context)
     }
 
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
@@ -2552,7 +2532,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
-        self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
+        self.process_fields()
+            .process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
     }
 
     fn native_audio_bus_info(&self) -> Result<crate::audio::NativeAudioBusInfoSet> {
@@ -2618,8 +2599,9 @@ impl PluginInternal for PluginImpl {
     }
 
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
-        self.validate_bus_buffers(buffers)?;
-        self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
+        validate_process_bus_buffers(&self.process_data, &self.bus_activation, buffers)?;
+        self.process_fields()
+            .process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
     }
 
     fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
@@ -3068,383 +3050,76 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn native_editor_pending_detach(&self) -> Option<crate::error::EditorDetachStage> {
+        self.plugin_view.pending_detach()
+    }
+
     fn has_editor(&self) -> bool {
-        // First check our cached value
-        if self.info.has_gui {
-            return true;
-        }
-
-        // An open editor is proof enough, and probing for a second view while one is attached
-        // upsets plugins that assume a single live view.
-        if self.plugin_view.is_some() {
-            return true;
-        }
-
-        // Otherwise do a runtime check
-        if let Some(ref controller) = self.controller {
-            unsafe {
-                // Check if controller can create an editor view
-                let view_type = c"editor".as_ptr();
-                let view_ptr = controller.createView(view_type);
-                if !view_ptr.is_null() {
-                    // Release the probe view; never call `removed()` on it — that pairs with
-                    // `attached()`, and an unmatched `removed()` crashes some plugins that
-                    // initialize their close state only on attach.
-                    let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
-                    true
-                } else {
-                    false
-                }
-            }
-        } else {
-            false
-        }
+        has_editor_view(self.info.has_gui, &self.plugin_view, &self.controller)
     }
 
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
-        if self.plugin_view.is_some() {
-            return Err(Error::Other("Editor already open".to_string()));
-        }
-        if parent.is_null() {
-            return Err(Error::Other(
-                "editor parent window handle is null".to_string(),
-            ));
-        }
-
-        if let Some(ref controller) = self.controller {
-            unsafe {
-                // Create editor view
-                let view_type = c"editor".as_ptr();
-                let view_ptr = controller.createView(view_type);
-                if view_ptr.is_null() {
-                    return Err(Error::Other("Failed to create editor view".to_string()));
-                }
-
-                let view = ComPtr::<IPlugView>::from_raw(view_ptr)
-                    .ok_or_else(|| Error::Other("Failed to wrap view".to_string()))?;
-
-                // Get view size
-                let mut view_rect = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 400,
-                    bottom: 300,
-                };
-
-                if view.getSize(&mut view_rect) != kResultOk {
-                    return Err(Error::Other("Failed to get view size".to_string()));
-                }
-                view_rect_size(&view_rect)?;
-
-                // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
-                // request host-side resizes; requests land in `editor_resize`.
-                let frame = self.plug_frame.to_com_ptr::<IPlugFrame>().ok_or_else(|| {
-                    Error::Other("Failed to create editor plug frame".to_string())
-                })?;
-                let frame_result = view.setFrame(frame.as_ptr());
-                if frame_result != kResultOk && frame_result != kResultTrue {
-                    return Err(Error::Other(format!(
-                        "Plugin rejected editor plug frame: {frame_result:#x}"
-                    )));
-                }
-
-                // Offer the current scale factor, but never let the answer decide whether the
-                // editor opens: a view that declines simply renders at its own scale.
-                let _ = set_view_scale_factor(&view, self.editor_scale_factor);
-
-                // Platform-specific attachment
-                #[cfg(target_os = "macos")]
-                let platform_type = kPlatformTypeNSView;
-                #[cfg(target_os = "windows")]
-                let platform_type = kPlatformTypeHWND;
-                #[cfg(target_os = "linux")]
-                let platform_type = kPlatformTypeX11EmbedWindowID;
-                #[cfg(target_os = "android")]
-                {
-                    view.setFrame(std::ptr::null_mut());
-                    return Err(Error::Other(
-                        "embedded VST3 editors are not supported on Android".to_string(),
-                    ));
-                }
-
-                // Check platform support
-                #[cfg(not(target_os = "android"))]
-                if view.isPlatformTypeSupported(platform_type) != kResultOk {
-                    view.setFrame(std::ptr::null_mut());
-                    return Err(Error::Other("Platform type not supported".to_string()));
-                }
-
-                // Attach to parent window
-                #[cfg(not(target_os = "android"))]
-                let attach_result = view.attached(parent, platform_type);
-                #[cfg(not(target_os = "android"))]
-                if attach_result != kResultOk {
-                    view.setFrame(std::ptr::null_mut());
-                    return Err(Error::Other(format!(
-                        "Failed to attach view: {:#x}",
-                        attach_result
-                    )));
-                }
-
-                #[cfg(not(target_os = "android"))]
-                {
-                    self.plugin_view = Some(view);
-                    Ok(())
-                }
-            }
-        } else {
-            Err(Error::Other("No controller available".to_string()))
-        }
+        self.editor_fields().open_editor(parent)
     }
 
     fn close_editor(&mut self) -> Result<()> {
-        let mut close_error = None;
-        if let Some(view) = self.plugin_view.take() {
-            unsafe {
-                let removed_result = view.removed();
-                // Break the view -> host-frame reference before releasing the view. The frame
-                // intentionally never retains the view, so this also avoids a COM retain cycle.
-                let frame_result = view.setFrame(std::ptr::null_mut());
-                if removed_result != kResultOk && removed_result != kResultTrue {
-                    close_error = Some(Error::Other(format!(
-                        "Failed to detach editor view: {removed_result:#x}"
-                    )));
-                } else if frame_result != kResultOk && frame_result != kResultTrue {
-                    close_error = Some(Error::Other(format!(
-                        "Failed to clear editor plug frame: {frame_result:#x}"
-                    )));
-                }
-            }
-        }
-        // Drop any run-loop registrations the editor left behind. A well-behaved plugin
-        // unregisters its own handlers and timers during `removed()`, but one that doesn't would
-        // otherwise leave live ComPtrs into a view that no longer exists — and since
-        // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
-        // its frame loop would then dispatch straight into the removed view.
-        #[cfg(target_os = "linux")]
-        if let Ok(mut reg) = self.run_loop.lock() {
-            reg.handlers.clear();
-            reg.timers.clear();
-        }
-        close_error.map_or(Ok(()), Err)
+        self.editor_fields().close_editor()
     }
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
-        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
-
-        // Fire due timers. Snapshot the handlers, then invoke with the lock
-        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
-        // (VSTGUI does), which takes the same lock.
-        let now = std::time::Instant::now();
-        let mut due = Vec::new();
-        if let Ok(mut reg) = self.run_loop.lock() {
-            for timer in reg.timers.iter_mut() {
-                if now >= timer.due {
-                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
-                    due.push(timer.handler.clone());
-                }
-            }
-        }
-        for handler in due {
-            unsafe { handler.onTimer() };
-        }
-
-        // Poll registered fds (zero timeout - never blocks the UI thread)
-        // and notify ready ones. Same snapshot-then-invoke pattern.
-        let handlers: Vec<_> = match self.run_loop.lock() {
-            Ok(reg) => reg.handlers.clone(),
-            Err(_) => return,
-        };
-        if handlers.is_empty() {
-            return;
-        }
-        let mut fds: Vec<libc::pollfd> = handlers
-            .iter()
-            .map(|&(_, fd)| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
-            .collect();
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
-        if ready > 0 {
-            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-                    unsafe { handler.onFDIsSet(*fd) };
-                }
-            }
-        }
+        self.editor_fields().service_run_loop()
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
-        if let Some(view) = self.plugin_view.as_ref() {
-            unsafe {
-                let mut view_rect = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                };
-                if view.getSize(&mut view_rect) != kResultOk {
-                    return Err(Error::Other("Failed to query open editor size".to_string()));
-                }
-                return view_rect_size(&view_rect);
-            }
-        }
-
-        if let Some(ref controller) = self.controller {
-            unsafe {
-                // Create a temporary view to get size
-                let view_type = c"editor".as_ptr();
-                let view_ptr = controller.createView(view_type);
-                if view_ptr.is_null() {
-                    return Err(Error::Other(
-                        "Failed to create view for size query".to_string(),
-                    ));
-                }
-
-                let view = ComPtr::<IPlugView>::from_raw(view_ptr)
-                    .ok_or_else(|| Error::Other("Failed to wrap plug view".to_string()))?;
-
-                // Get view size
-                let mut view_rect = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 400,
-                    bottom: 300,
-                };
-
-                let result = view.getSize(&mut view_rect);
-
-                // Released when `view` drops; do not call `removed()` — it pairs with
-                // `attached()`, which this probe never calls.
-
-                if result == kResultOk {
-                    view_rect_size(&view_rect)
-                } else {
-                    Ok((800, 600)) // Default size
-                }
-            }
-        } else {
-            Err(Error::Other("No controller available".to_string()))
-        }
+        query_editor_size(&self.plugin_view, &self.controller)
     }
 
     fn editor_can_resize(&self) -> bool {
-        unsafe {
-            if let Some(view) = self.plugin_view.as_ref() {
-                return view.canResize() == kResultTrue;
-            }
-
-            let Some(controller) = self.controller.as_ref() else {
-                return false;
-            };
-            let view_ptr = controller.createView(c"editor".as_ptr());
-            let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) else {
-                return false;
-            };
-            view.canResize() == kResultTrue
-        }
+        can_resize_editor(&self.plugin_view, &self.controller)
     }
 
     fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
-        if width <= 0 || height <= 0 {
-            return Err(Error::Other(
-                "editor dimensions must be greater than zero".to_string(),
-            ));
-        }
-        let view = self
-            .plugin_view
-            .as_ref()
-            .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
-
-        unsafe {
-            if view.canResize() != kResultTrue {
-                let mut current = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                };
-                if view.getSize(&mut current) != kResultOk {
-                    return Err(Error::Other(
-                        "Plugin editor is fixed-size and its size could not be queried".to_string(),
-                    ));
-                }
-                return view_rect_size(&current);
-            }
-
-            let mut requested = ViewRect {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            // The view constrains `requested` in place. `kResultFalse` means it left the rect
-            // alone (nothing to constrain, or it wants a different size than asked for) — a
-            // refusal to adapt, not a broken call — so take whatever rect it ended up with and
-            // only reject result codes that mean the call itself failed.
-            let constraint_result = view.checkSizeConstraint(&mut requested);
-            let constrained = constraint_result == kResultOk
-                || constraint_result == kResultTrue
-                || constraint_result == kResultFalse
-                || constraint_result == kNotImplemented;
-            if !constrained {
-                return Err(Error::Other(format!(
-                    "Plugin failed to check the editor size constraint: {constraint_result:#x}"
-                )));
-            }
-            let accepted = view_rect_size(&requested)?;
-
-            // The SDK calls onSize only when the size actually changes; re-sending the current
-            // one makes VSTGUI-based editors rebuild their frame for nothing.
-            let mut current = ViewRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            if view.getSize(&mut current) == kResultOk
-                && view_rect_size(&current).ok() == Some(accepted)
-            {
-                return Ok(accepted);
-            }
-
-            let resize_result = view.onSize(&mut requested);
-            if resize_result != kResultOk && resize_result != kResultTrue {
-                return Err(Error::Other(format!(
-                    "Plugin rejected editor resize: {resize_result:#x}"
-                )));
-            }
-            Ok(accepted)
-        }
+        self.editor_fields().resize_editor(width, height)
     }
 
     fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
-        if !factor.is_finite() || factor <= 0.0 {
-            return Err(Error::Other(
-                "editor scale factor must be finite and greater than zero".to_string(),
-            ));
-        }
-        let supported = match self.plugin_view.as_ref() {
-            Some(view) => unsafe { set_view_scale_factor(view, factor)? },
-            None => false,
-        };
-        self.editor_scale_factor = factor;
-        Ok(supported)
+        self.editor_fields().set_editor_scale_factor(factor)
     }
 
     fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
         self.get_parameter_changes()
     }
 
-    fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
-        self.service_control_thread_caches();
-        self.component_handler
+    fn editor_capture_source_status_since(
+        &self,
+        revision: u64,
+    ) -> Result<Option<crate::plugin::NativeEditorEventSourceStatus>> {
+        self.ensure_control_thread("native editor capture source coherence")?;
+        let handler = self
+            .component_handler
             .as_ref()
-            .map(|h| h.take_parameter_edits())
-            .unwrap_or_default()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.editor_capture_source_status_since(revision))
+    }
+
+    fn editor_event_source_status(&self) -> Result<crate::plugin::NativeEditorEventSourceStatus> {
+        self.ensure_control_thread("native editor source observation")?;
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.editor_event_source_status())
+    }
+
+    fn take_editor_events(&mut self) -> Result<crate::plugin::NativeEditorEventDrain> {
+        self.ensure_control_thread("native editor event drain")?;
+        self.service_control_thread_caches();
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.take_editor_events())
     }
 
     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
@@ -3487,6 +3162,35 @@ impl PluginInternal for PluginImpl {
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
             .dismiss_context_menu(menu_id)
+    }
+
+    fn pending_restart_flags(&self) -> crate::plugin::RestartFlags {
+        self.component_handler
+            .as_ref()
+            .map(|handler| handler.pending_restart_flags())
+            .unwrap_or_default()
+    }
+
+    fn pending_restart_cohort(&self) -> Option<crate::plugin::RestartCohort> {
+        self.component_handler
+            .as_ref()
+            .map(|handler| handler.pending_restart_cohort())
+    }
+
+    fn retire_restart_cohort(&mut self, expected: crate::plugin::RestartCohort) -> Result<bool> {
+        self.ensure_control_thread("native restart cohort retirement")?;
+        Ok(self
+            .component_handler
+            .as_ref()
+            .is_some_and(|handler| handler.retire_restart_cohort(expected)))
+    }
+
+    fn claim_retired_restart_serial(&mut self, serial: u32) -> Result<bool> {
+        self.ensure_control_thread("native retired restart serial claim")?;
+        Ok(self
+            .component_handler
+            .as_ref()
+            .is_some_and(|handler| handler.claim_retired_restart_serial(serial)))
     }
 
     fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
@@ -3955,6 +3659,7 @@ impl PluginInternal for PluginImpl {
                 return Ok(None);
             }
             let stream = create_memory_stream_with_metadata(None, StreamStateType::TrackPreset);
+            self._host_app.register_memory_stream(&stream)?;
             let stream_ptr = stream
                 .as_com_ref::<IBStream>()
                 .ok_or_else(|| Error::InterfaceError("failed to create IBStream".to_string()))?;
@@ -4001,6 +3706,7 @@ impl PluginInternal for PluginImpl {
                 None,
                 StreamStateType::TrackPreset,
             );
+            self._host_app.register_memory_stream(&stream)?;
             let stream_ptr = stream
                 .as_com_ref::<IBStream>()
                 .ok_or_else(|| Error::InterfaceError("failed to create IBStream".to_string()))?;
@@ -4035,6 +3741,7 @@ impl PluginInternal for PluginImpl {
                 return Ok(None);
             }
             let stream = create_memory_stream_with_metadata(None, StreamStateType::TrackPreset);
+            self._host_app.register_memory_stream(&stream)?;
             let stream_ptr = stream
                 .as_com_ref::<IBStream>()
                 .ok_or_else(|| Error::InterfaceError("failed to create IBStream".to_string()))?;
@@ -4068,6 +3775,7 @@ impl PluginInternal for PluginImpl {
                 None,
                 StreamStateType::TrackPreset,
             );
+            self._host_app.register_memory_stream(&stream)?;
             let stream_ptr = stream
                 .as_com_ref::<IBStream>()
                 .ok_or_else(|| Error::InterfaceError("failed to create IBStream".to_string()))?;
@@ -4274,11 +3982,91 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn reactivate_configuration_stopped(
+        &mut self,
+    ) -> std::result::Result<(), crate::configuration_capture::ConfigurationCaptureError> {
+        use crate::configuration_capture::{
+            ConfigurationCaptureError as CaptureError, ConfigurationLifecyclePhase as Phase,
+        };
+        if thread::current().id() != self.control_thread {
+            return Err(CaptureError::WrongThread);
+        }
+        // This slice only admits a latency request at the already applied setup.
+        // setupProcessing while active is forbidden, and device/mode changes
+        // require a separately admitted complete configuration transaction.
+        if self.applied_setup != Some(self.current_setup()) {
+            return Err(CaptureError::ChangedSetup);
+        }
+        if self.is_processing {
+            let result = unsafe { self.processor.setProcessing(0) };
+            if result != kResultOk && result != kNotImplemented {
+                return Err(CaptureError::LifecycleFailure {
+                    phase: Phase::StopProcessing,
+                    result,
+                });
+            }
+            self.is_processing = false;
+        }
+        if self.is_active {
+            let result = self.set_component_active(false);
+            if result != kResultOk {
+                return Err(CaptureError::LifecycleFailure {
+                    phase: Phase::Deactivate,
+                    result,
+                });
+            }
+            self.is_active = false;
+        }
+        let result = self.set_component_active(true);
+        if result != kResultOk {
+            return Err(CaptureError::LifecycleFailure {
+                phase: Phase::Activate,
+                result,
+            });
+        }
+        self.is_active = true;
+        // Old note state is no longer an admitted continuation of this component.
+        self.active_notes.clear();
+        Ok(())
+    }
+
+    fn save_state_bounded(
+        &mut self,
+        state_limit: usize,
+        buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        use crate::configuration_capture::ConfigurationCaptureError as CaptureError;
+        if thread::current().id() != self.control_thread {
+            return Err(CaptureError::WrongThread);
+        }
+        if self.is_processing {
+            return Err(CaptureError::StillProcessing);
+        }
+        self.capture_native_state_bounded(state_limit, buffer_grant)
+    }
+
+    fn capture_author_state_bounded(
+        &mut self,
+        state_limit: usize,
+        buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        // Full &mut PluginImpl is unavailable while scoped DSP fields are borrowed.
+        // getState is a main-thread authored configuration read, not a checkpoint.
+        self.capture_native_state_bounded(state_limit, buffer_grant)
+    }
+
     fn save_state(&self) -> Result<Vec<u8>> {
         self.drain_deferred_controller_sync();
         unsafe {
             let component_stream =
                 create_memory_stream_with_metadata(None, StreamStateType::Project);
+            self._host_app.register_memory_stream(&component_stream)?;
             let component_ptr = component_stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                 Error::InterfaceError("Failed to create component state stream".into())
             })?;
@@ -4297,6 +4085,7 @@ impl PluginInternal for PluginImpl {
                 self.controller.as_ref().filter(|_| !self.single_component)
             {
                 let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
+                self._host_app.register_memory_stream(&stream)?;
                 let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                     Error::InterfaceError("Failed to create controller state stream".into())
                 })?;
@@ -4352,6 +4141,7 @@ impl PluginInternal for PluginImpl {
 
             let apply_result = (|| -> Result<()> {
                 let comp_stream = create_state_restore_stream(snapshot.component.clone(), context);
+                self._host_app.register_memory_stream(&comp_stream)?;
                 let comp_ptr = comp_stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                     Error::InterfaceError("Failed to create component state stream".into())
                 })?;
@@ -4366,6 +4156,7 @@ impl PluginInternal for PluginImpl {
                     if let Some(controller) = self.controller.as_ref() {
                         let stream =
                             create_state_restore_stream(snapshot.component.clone(), context);
+                        self._host_app.register_memory_stream(&stream)?;
                         let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                             Error::InterfaceError(
                                 "Failed to create controller component-state stream".into(),
@@ -4385,6 +4176,7 @@ impl PluginInternal for PluginImpl {
                     (self.controller.as_ref(), snapshot.controller.as_ref())
                 {
                     let stream = create_state_restore_stream(controller_state.clone(), context);
+                    self._host_app.register_memory_stream(&stream)?;
                     let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                         Error::InterfaceError("Failed to create controller state stream".into())
                     })?;
@@ -4790,8 +4582,13 @@ impl Drop for PluginImpl {
         // plugin's platform frame and its idle timer alive, pointing at a host window the caller
         // is about to destroy. `open_editor` and `close_editor` pair attach/removed correctly, but
         // a host that drops the plugin with the editor open (or is unwound past its own close)
-        // never reaches `close_editor`, so do it here too. It is a no-op when no view is attached.
-        let _ = PluginInternal::close_editor(self);
+        // never reaches `close_editor`, so do it here too. An isolated product
+        // must explicitly close before dropping this owner and terminate its child
+        // without native destruction if removal remains unresolved. Drop cannot
+        // supply successful removal evidence for a failed native callback.
+        if let Err(error) = PluginInternal::close_editor(self) {
+            log::error!("native owner dropped after unresolved editor removal: {error}");
+        }
 
         let _ = self.stop_processing();
         self._host_app.shutdown_data_exchange();
@@ -5584,4 +5381,1293 @@ mod editor_scale_tests {
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
+}
+
+fn apply_controller_value(controller: &Option<ComPtr<IEditController>>, id: u32, value: f64) {
+    let Some(controller) = controller.as_ref() else {
+        return;
+    };
+    let result = unsafe { controller.setParamNormalized(id, value) };
+    if result != kResultOk && result != kResultTrue {
+        log::debug!(
+            "setParamNormalized({id}) returned {result:#x}; applying anyway \
+                 (many plugins report kResultFalse on success)"
+        );
+    }
+}
+
+fn process_audio_bus_layout(
+    process_data: &Option<Box<HostProcessData>>,
+    activation: &BusActivationState,
+) -> Result<AudioBusLayout> {
+    let data = process_data
+        .as_ref()
+        .ok_or_else(|| Error::Other("Process data not initialized".to_string()))?;
+    let side = |buses: &[AudioBusBuffers], active: &[bool]| {
+        buses
+            .iter()
+            .enumerate()
+            .map(|(index, bus)| AudioBusConfig {
+                channel_count: bus.numChannels.max(0) as usize,
+                active: active.get(index).copied().unwrap_or(false),
+            })
+            .collect()
+    };
+    Ok(AudioBusLayout {
+        inputs: side(&data.input_bus_buffers, &activation.audio_inputs),
+        outputs: side(&data.output_bus_buffers, &activation.audio_outputs),
+    })
+}
+
+fn validate_process_bus_buffers(
+    process_data: &Option<Box<HostProcessData>>,
+    activation: &BusActivationState,
+    buffers: &BusAudioBuffers,
+) -> Result<()> {
+    let data = process_data
+        .as_ref()
+        .ok_or_else(|| Error::Other("Process data not initialized".to_string()))?;
+    let validate = |label: &str,
+                    supplied: &[AudioBusBuffer],
+                    expected: &[AudioBusBuffers],
+                    active: &[bool]|
+     -> Result<()> {
+        if supplied.len() != expected.len() {
+            return Err(Error::Other(format!(
+                "{label} bus count mismatch: expected {}, got {}",
+                expected.len(),
+                supplied.len()
+            )));
+        }
+        for (index, (supplied, expected)) in supplied.iter().zip(expected).enumerate() {
+            let expected_active = active.get(index).copied().unwrap_or(false);
+            if supplied.active != expected_active {
+                return Err(Error::Other(format!(
+                    "{label} bus {index} activation is stale: expected {expected_active}, got {}",
+                    supplied.active
+                )));
+            }
+            let expected_channels = expected.numChannels.max(0) as usize;
+            if supplied.channels.len() != expected_channels {
+                return Err(Error::Other(format!(
+                        "{label} bus {index} channel count mismatch: expected {expected_channels}, got {}",
+                        supplied.channels.len()
+                    )));
+            }
+        }
+        Ok(())
+    };
+    validate(
+        "input",
+        &buffers.inputs,
+        &data.input_bus_buffers,
+        &activation.audio_inputs,
+    )?;
+    validate(
+        "output",
+        &buffers.outputs,
+        &data.output_bus_buffers,
+        &activation.audio_outputs,
+    )
+}
+
+/// Disjoint mutable DSP fields, borrowed from the sole loaded PluginImpl.
+/// No controller/component lifecycle or IPlugView capability reaches this role.
+struct PluginProcessFields<'a> {
+    processor: &'a ComPtr<IAudioProcessor>,
+    is_active: bool,
+    is_processing: bool,
+    sample_rate: f64,
+    block_size: usize,
+    process_data: &'a mut Option<Box<HostProcessData>>,
+    bus_activation: &'a BusActivationState,
+    component_handler: &'a Option<ComWrapper<ComponentHandler>>,
+    pending_param_changes: &'a mut Vec<ParameterChange>,
+    input_events: &'a ComWrapper<HostEventList>,
+    output_events: &'a ComWrapper<HostEventList>,
+    chunk_events: &'a mut Vec<Option<PluginEvent>>,
+    gui_param_changes_for_host: &'a Arc<Mutex<Vec<(u32, f64)>>>,
+    output_param_feedback: &'a Arc<ArrayQueue<(u32, f64)>>,
+    output_events_owned: &'a Arc<ArrayQueue<PluginEvent>>,
+    deferred_controller_sync: &'a ArrayQueue<(u32, f64)>,
+    host_app: &'a HostApplication,
+}
+
+/// Only native editor and controller fields; it never borrows DSP storage.
+struct PluginEditorFields<'a> {
+    controller: &'a Option<ComPtr<IEditController>>,
+    component_handler: &'a Option<ComWrapper<ComponentHandler>>,
+    native_editor_owner: crate::plugin::NativeEditorAttachmentOwner,
+    plugin_view: &'a mut EditorAttachment,
+    editor_scale_factor: &'a mut f32,
+    plug_frame: &'a ComWrapper<HostPlugFrame>,
+    editor_resize: &'a Arc<Mutex<Option<(i32, i32)>>>,
+    deferred_controller_sync: &'a ArrayQueue<(u32, f64)>,
+    host_app: &'a HostApplication,
+    control_thread: ThreadId,
+    #[cfg(target_os = "linux")]
+    run_loop: &'a Arc<Mutex<RunLoopRegistry>>,
+}
+
+impl PluginImpl {
+    fn process_fields(&mut self) -> PluginProcessFields<'_> {
+        PluginProcessFields {
+            processor: &self.processor,
+            is_active: self.is_active,
+            is_processing: self.is_processing,
+            sample_rate: self.sample_rate,
+            block_size: self.block_size,
+            process_data: &mut self.process_data,
+            bus_activation: &self.bus_activation,
+            component_handler: &self.component_handler,
+            pending_param_changes: &mut self.pending_param_changes,
+            input_events: &self.input_events,
+            output_events: &self.output_events,
+            chunk_events: &mut self.chunk_events,
+            gui_param_changes_for_host: &self.gui_param_changes_for_host,
+            output_param_feedback: &self.output_param_feedback,
+            output_events_owned: &self.output_events_owned,
+            deferred_controller_sync: &self.deferred_controller_sync,
+            host_app: &self._host_app,
+        }
+    }
+
+    fn editor_fields(&mut self) -> PluginEditorFields<'_> {
+        PluginEditorFields {
+            controller: &self.controller,
+            component_handler: &self.component_handler,
+            native_editor_owner: self.native_editor_owner,
+            plugin_view: &mut self.plugin_view,
+            editor_scale_factor: &mut self.editor_scale_factor,
+            plug_frame: &self.plug_frame,
+            editor_resize: &self.editor_resize,
+            deferred_controller_sync: &self.deferred_controller_sync,
+            host_app: &self._host_app,
+            control_thread: self.control_thread,
+            #[cfg(target_os = "linux")]
+            run_loop: &self.run_loop,
+        }
+    }
+}
+
+impl PluginProcessFields<'_> {
+    fn process_chunk(
+        &mut self,
+        buffers: &mut CallerAudioBuffers<'_>,
+        frame_offset: usize,
+        frames: usize,
+        is_last: bool,
+    ) -> Result<()> {
+        let result = if let Some(data) = self.process_data.as_mut() {
+            unsafe {
+                // Clear output events only - input events should be preserved for processing
+                self.output_events.clear();
+
+                // Clear the output parameter queue too. VST3's ProcessData::outputParameterChanges
+                // describes changes for the *current* processing block only (see
+                // Steinberg::Vst::ProcessData / IParameterChanges docs); the reference
+                // ParameterChanges host helper exposes clearQueue() for exactly this reset.
+                // Without this, addParameterData()/addPoint() would keep appending to queues
+                // from prior blocks, mixing stale points into new ones, growing point storage
+                // unbounded, and risking a reallocation on the audio thread long after warm-up.
+                data.output_param_changes.clear_all();
+
+                // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
+                // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
+                // it was longer, `process` has already split it into chunks of at most that
+                // maximum.
+                let frames = frames.min(self.block_size);
+                data.process_data.numSamples = frames as i32;
+
+                // Feed the queued parameter changes that belong to this chunk into the
+                // processor's input queue, rebased to the chunk — the same routing the events
+                // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
+                // split block.
+                for pc in self.pending_param_changes.iter() {
+                    if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
+                    {
+                        data.input_param_changes.enqueue(pc.id, off, pc.value);
+                    }
+                }
+
+                // Route parameter edits the plugin's *own editor* reported via performEdit into
+                // the processor too, so turning a knob in the plugin GUI affects the audio — not
+                // just the host's display. (Some plugins relay editor→processor internally over
+                // the component/controller connection; others rely on the host to do this. We do
+                // it unconditionally; a plugin that also self-relays just gets the same value
+                // twice in the same block, which is idempotent.) Drained here at offset 0 and
+                // stashed for the host's display poll (get_parameter_changes).
+                if let Some(ref handler) = self.component_handler {
+                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
+                        if !gui_changes.is_empty() {
+                            for &(id, value) in gui_changes.iter() {
+                                data.input_param_changes.enqueue(id, 0, value);
+                            }
+                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
+                                // Bounded: nothing drains the stash unless the host polls
+                                // `get_parameter_changes`, and the realtime runner never does, so
+                                // an unbounded append here would grow forever and reallocate on
+                                // the audio thread. Both buffers are pre-reserved to the cap, so
+                                // the steady-state append allocates nothing.
+                                let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
+                                if room >= gui_changes.len() {
+                                    stash.append(&mut gui_changes);
+                                } else {
+                                    stash.extend(gui_changes.drain(..room));
+                                    gui_changes.clear();
+                                }
+                            } else {
+                                gui_changes.clear();
+                            }
+                        }
+                    }
+                }
+
+                match buffers {
+                    CallerAudioBuffers::Flat(buffers) => {
+                        data.sample_buffers
+                            .copy_inputs_from(&buffers.inputs, frame_offset, frames)
+                    }
+                    CallerAudioBuffers::Buses(buffers) => {
+                        data.sample_buffers.copy_inputs_from_buses(
+                            &buffers.inputs,
+                            frame_offset,
+                            frames,
+                            &data.input_bus_buffers,
+                            &self.bus_activation.audio_inputs,
+                        )
+                    }
+                }
+                data.sample_buffers.clear_outputs();
+                data.sample_buffers.update_input_silence_flags(
+                    &mut data.input_bus_buffers,
+                    &self.bus_activation.audio_inputs,
+                    frames,
+                );
+                prepare_output_silence_flags(
+                    &mut data.output_bus_buffers,
+                    &self.bus_activation.audio_outputs,
+                );
+
+                // Channel pointers and process-data input/output pointers were wired once in
+                // prepare_buffers (buffer addresses are stable), so there's nothing to rebuild
+                // here — keeping the steady-state path allocation-free.
+
+                // A zero-sample flush carries events/parameter queues only. The VST3 process
+                // contract requires no audio buses or pointers for that call.
+                let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
+                self.host_app.enter_data_exchange_process();
+                let process_result = self.processor.process(&mut data.process_data);
+                self.host_app.leave_data_exchange_process();
+                restore_process_audio_io(&mut data.process_data, saved_audio_io);
+
+                // Everything from here to the output copy is per-block cleanup and MUST run even
+                // when the plugin reported failure. Returning early instead would leave this
+                // block's events and parameter changes queued, so the next block would re-deliver
+                // every one of them — re-triggering held notes and growing the queues without
+                // bound for as long as the plugin keeps failing.
+
+                // Advance the transport so tempo-synced DSP (LFOs, sync'd delays/arps) sees
+                // a moving playhead instead of a frozen time-0. The context describes the
+                // block that was just processed; advancing here means the next block starts
+                // at the new sample position.
+                advance_process_context(
+                    &mut data.process_context,
+                    data.transport_tempo,
+                    frames as i64,
+                );
+
+                // Clear the staged input events AFTER processing, so the plugin got to see them
+                // and the next chunk starts from an empty list.
+                self.input_events.clear();
+                // Clear the input parameter queue too, so this block's values don't
+                // re-stick on the next block.
+                data.input_param_changes.clear_all();
+
+                // Processor-originated automation belongs to this block. Copy it into a
+                // bounded lock-free feedback queue, then clear it on both success and failure
+                // so stale points can never be re-reported.
+                let feedback = &self.output_param_feedback;
+                data.output_param_changes
+                    .for_each_active_point(|id, _offset, value| {
+                        feedback.force_push((id, value));
+                    });
+                data.output_param_changes.clear_all();
+
+                // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
+                // Drain the event list in place (no `mem::take`) and push each converted event
+                // into the lock-free output queue with `force_push`, which drops the oldest event
+                // when full. No lock and no allocation on the audio thread even while MIDI flows.
+                if !self.output_events.is_empty() {
+                    let out = &self.output_events_owned;
+                    self.output_events.drain_each(|event| {
+                        out.force_push(event);
+                    });
+                }
+
+                if process_result != kResultOk {
+                    // Leave the caller's buffers as they were (the playback bridges pre-fill them
+                    // with silence) rather than copying out whatever the failed call left behind.
+                    Err(Error::ProcessFailed(process_result))
+                } else {
+                    data.sample_buffers.update_output_silence_flags(
+                        &mut data.output_bus_buffers,
+                        &self.bus_activation.audio_outputs,
+                        frames,
+                    );
+                    match buffers {
+                        CallerAudioBuffers::Flat(buffers) => data.sample_buffers.copy_outputs_to(
+                            &mut buffers.outputs,
+                            frame_offset,
+                            frames,
+                            &data.output_bus_buffers,
+                            &self.bus_activation.audio_outputs,
+                        ),
+                        CallerAudioBuffers::Buses(buffers) => {
+                            data.sample_buffers.copy_outputs_to_buses(
+                                &mut buffers.outputs,
+                                frame_offset,
+                                frames,
+                                &data.output_bus_buffers,
+                                &self.bus_activation.audio_outputs,
+                            )
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        } else {
+            Err(Error::Other("Process data not initialized".to_string()))
+        };
+
+        result
+    }
+
+    fn process_chunks(&mut self, buffers: &mut CallerAudioBuffers<'_>, total: usize) -> Result<()> {
+        // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
+        // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
+        // `block_size` is plain state and this loop must terminate regardless.
+        let step = self.block_size.max(1);
+        let mut offset = 0;
+        while offset < total {
+            let frames = (total - offset).min(step);
+            let is_last = offset + frames >= total;
+            stage_chunk_events(
+                self.chunk_events,
+                self.input_events,
+                offset,
+                frames,
+                is_last,
+            );
+            self.process_chunk(buffers, offset, frames, is_last)?;
+            offset += frames;
+        }
+        Ok(())
+    }
+
+    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
+        if !self.is_active || !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+
+        let _denormal = crate::internal::denormal::DenormalGuard::new();
+        let total = buffers.frame_count(self.block_size);
+        self.input_events.take_into_slots(self.chunk_events);
+
+        let result = if total == 0 {
+            stage_chunk_events(self.chunk_events, self.input_events, 0, 0, true);
+            self.process_chunk(buffers, 0, 0, true)
+        } else {
+            self.process_chunks(buffers, total)
+        };
+
+        self.chunk_events.clear();
+        self.pending_param_changes.clear();
+        result
+    }
+
+    fn set_signal_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        if !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        if context.sample_rate == 0 || f64::from(context.sample_rate) != self.sample_rate {
+            return Err(Error::InvalidParameter(
+                "signal timeline rate differs from prepared processing".to_string(),
+            ));
+        }
+        let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
+        // Assignment keeps the SDK pointer to this field stable. This adapter
+        // owns no second timeline: optional author facts are unavailable here.
+        data.process_context = unsafe { std::mem::zeroed() };
+        data.process_context.sampleRate = f64::from(context.sample_rate);
+        data.process_context.projectTimeSamples = context.sample_position;
+        data.process_context.state =
+            process_context_state(data.process_context_requirements, false, 0);
+        Ok(())
+    }
+}
+
+impl PluginEditorFields<'_> {
+    fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
+        if self.plugin_view.is_present() {
+            return Err(Error::Other("Editor already open".to_string()));
+        }
+        if parent.is_null() {
+            return Err(Error::Other(
+                "editor parent window handle is null".to_string(),
+            ));
+        }
+
+        if let Some(ref controller) = self.controller {
+            unsafe {
+                // Create editor view
+                let view_type = c"editor".as_ptr();
+                let view_ptr = controller.createView(view_type);
+                if view_ptr.is_null() {
+                    return Err(Error::EditorUnavailable);
+                }
+
+                let view = ComPtr::<IPlugView>::from_raw(view_ptr)
+                    .ok_or_else(|| Error::Other("Failed to wrap view".to_string()))?;
+
+                // Get view size
+                let mut view_rect = ViewRect {
+                    left: 0,
+                    top: 0,
+                    right: 400,
+                    bottom: 300,
+                };
+
+                if view.getSize(&mut view_rect) != kResultOk {
+                    return Err(Error::Other("Failed to get view size".to_string()));
+                }
+                view_rect_size(&view_rect)?;
+
+                // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
+                // request host-side resizes; requests land in `editor_resize`.
+                let frame = self.plug_frame.to_com_ptr::<IPlugFrame>().ok_or_else(|| {
+                    Error::Other("Failed to create editor plug frame".to_string())
+                })?;
+                let frame_result = view.setFrame(frame.as_ptr());
+                if frame_result != kResultOk && frame_result != kResultTrue {
+                    return Err(Error::Other(format!(
+                        "Plugin rejected editor plug frame: {frame_result:#x}"
+                    )));
+                }
+
+                // Offer the current scale factor, but never let the answer decide whether the
+                // editor opens: a view that declines simply renders at its own scale.
+                let _ = set_view_scale_factor(&view, *self.editor_scale_factor);
+
+                // Platform-specific attachment
+                #[cfg(target_os = "macos")]
+                let platform_type = kPlatformTypeNSView;
+                #[cfg(target_os = "windows")]
+                let platform_type = kPlatformTypeHWND;
+                #[cfg(target_os = "linux")]
+                let platform_type = kPlatformTypeX11EmbedWindowID;
+                #[cfg(target_os = "android")]
+                {
+                    self.plugin_view.clear_unattached_frame(view)?;
+                    return Err(Error::Other(
+                        "embedded VST3 editors are not supported on Android".to_string(),
+                    ));
+                }
+
+                // Check platform support
+                #[cfg(not(target_os = "android"))]
+                if view.isPlatformTypeSupported(platform_type) != kResultOk {
+                    self.plugin_view.clear_unattached_frame(view)?;
+                    return Err(Error::EditorPlatformUnsupported);
+                }
+
+                // Attach to parent window
+                #[cfg(not(target_os = "android"))]
+                let attach_result = view.attached(parent, platform_type);
+                #[cfg(not(target_os = "android"))]
+                if attach_result != kResultOk {
+                    self.plugin_view.clear_unattached_frame(view)?;
+                    return Err(Error::Other(format!(
+                        "Failed to attach view: {:#x}",
+                        attach_result
+                    )));
+                }
+
+                #[cfg(not(target_os = "android"))]
+                {
+                    *self.plugin_view = EditorAttachment::Attached(view);
+                    Ok(())
+                }
+            }
+        } else {
+            Err(Error::EditorUnavailable)
+        }
+    }
+
+    fn close_editor(&mut self) -> Result<()> {
+        let result = self.plugin_view.detach();
+        // Remove callbacks only after the view has actually accepted removed.
+        // On unknown removal it still owns its host frame and registrations.
+        #[cfg(target_os = "linux")]
+        if self.plugin_view.removal_complete() {
+            let mut registry = self.run_loop.lock().map_err(|_| {
+                Error::Other("editor run-loop state is poisoned during removal".to_string())
+            })?;
+            registry.handlers.clear();
+            registry.timers.clear();
+        }
+        result
+    }
+
+    fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
+        if width <= 0 || height <= 0 {
+            return Err(Error::Other(
+                "editor dimensions must be greater than zero".to_string(),
+            ));
+        }
+        let view = self
+            .plugin_view
+            .live_view()?
+            .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
+
+        unsafe {
+            if view.canResize() != kResultTrue {
+                let mut current = ViewRect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                };
+                if view.getSize(&mut current) != kResultOk {
+                    return Err(Error::Other(
+                        "Plugin editor is fixed-size and its size could not be queried".to_string(),
+                    ));
+                }
+                return view_rect_size(&current);
+            }
+
+            let mut requested = ViewRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            };
+            // The view constrains `requested` in place. `kResultFalse` means it left the rect
+            // alone (nothing to constrain, or it wants a different size than asked for) — a
+            // refusal to adapt, not a broken call — so take whatever rect it ended up with and
+            // only reject result codes that mean the call itself failed.
+            let constraint_result = view.checkSizeConstraint(&mut requested);
+            let constrained = constraint_result == kResultOk
+                || constraint_result == kResultTrue
+                || constraint_result == kResultFalse
+                || constraint_result == kNotImplemented;
+            if !constrained {
+                return Err(Error::Other(format!(
+                    "Plugin failed to check the editor size constraint: {constraint_result:#x}"
+                )));
+            }
+            let accepted = view_rect_size(&requested)?;
+
+            // The SDK calls onSize only when the size actually changes; re-sending the current
+            // one makes VSTGUI-based editors rebuild their frame for nothing.
+            let mut current = ViewRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if view.getSize(&mut current) == kResultOk
+                && view_rect_size(&current).ok() == Some(accepted)
+            {
+                return Ok(accepted);
+            }
+
+            let resize_result = view.onSize(&mut requested);
+            if resize_result != kResultOk && resize_result != kResultTrue {
+                return Err(Error::Other(format!(
+                    "Plugin rejected editor resize: {resize_result:#x}"
+                )));
+            }
+            Ok(accepted)
+        }
+    }
+
+    fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(Error::Other(
+                "editor scale factor must be finite and greater than zero".to_string(),
+            ));
+        }
+        let supported = match self.plugin_view.live_view()? {
+            Some(view) => unsafe { set_view_scale_factor(view, factor)? },
+            None => false,
+        };
+        *self.editor_scale_factor = factor;
+        Ok(supported)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn service_run_loop(&mut self) {
+        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
+
+        // Fire due timers. Snapshot the handlers, then invoke with the lock
+        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
+        // (VSTGUI does), which takes the same lock.
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        if let Ok(mut reg) = self.run_loop.lock() {
+            for timer in reg.timers.iter_mut() {
+                if now >= timer.due {
+                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
+                    due.push(timer.handler.clone());
+                }
+            }
+        }
+        for handler in due {
+            unsafe { handler.onTimer() };
+        }
+
+        // Poll registered fds (zero timeout - never blocks the UI thread)
+        // and notify ready ones. Same snapshot-then-invoke pattern.
+        let handlers: Vec<_> = match self.run_loop.lock() {
+            Ok(reg) => reg.handlers.clone(),
+            Err(_) => return,
+        };
+        if handlers.is_empty() {
+            return;
+        }
+        let mut fds: Vec<libc::pollfd> = handlers
+            .iter()
+            .map(|&(_, fd)| libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
+        if ready > 0 {
+            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
+                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+                    unsafe { handler.onFDIsSet(*fd) };
+                }
+            }
+        }
+    }
+}
+
+fn has_editor_view(
+    info_has_gui: bool,
+    plugin_view: &EditorAttachment,
+    controller: &Option<ComPtr<IEditController>>,
+) -> bool {
+    // First check our cached value
+    if info_has_gui {
+        return true;
+    }
+
+    // An open editor is proof enough, and probing for a second view while one is attached
+    // upsets plugins that assume a single live view.
+    if plugin_view.is_present() {
+        return true;
+    }
+
+    // Otherwise do a runtime check
+    if let Some(ref controller) = controller {
+        unsafe {
+            // Check if controller can create an editor view
+            let view_type = c"editor".as_ptr();
+            let view_ptr = controller.createView(view_type);
+            if !view_ptr.is_null() {
+                // Release the probe view; never call `removed()` on it — that pairs with
+                // `attached()`, and an unmatched `removed()` crashes some plugins that
+                // initialize their close state only on attach.
+                let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
+                true
+            } else {
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
+fn query_editor_size(
+    plugin_view: &EditorAttachment,
+    controller: &Option<ComPtr<IEditController>>,
+) -> Result<(i32, i32)> {
+    if let Some(view) = plugin_view.live_view()? {
+        unsafe {
+            let mut view_rect = ViewRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            if view.getSize(&mut view_rect) != kResultOk {
+                return Err(Error::Other("Failed to query open editor size".to_string()));
+            }
+            return view_rect_size(&view_rect);
+        }
+    }
+
+    if let Some(ref controller) = controller {
+        unsafe {
+            // Create a temporary view to get size
+            let view_type = c"editor".as_ptr();
+            let view_ptr = controller.createView(view_type);
+            if view_ptr.is_null() {
+                return Err(Error::EditorUnavailable);
+            }
+
+            let view = ComPtr::<IPlugView>::from_raw(view_ptr)
+                .ok_or_else(|| Error::Other("Failed to wrap plug view".to_string()))?;
+
+            // Get view size
+            let mut view_rect = ViewRect {
+                left: 0,
+                top: 0,
+                right: 400,
+                bottom: 300,
+            };
+
+            let result = view.getSize(&mut view_rect);
+
+            // Released when `view` drops; do not call `removed()` — it pairs with
+            // `attached()`, which this probe never calls.
+
+            if result == kResultOk {
+                view_rect_size(&view_rect)
+            } else {
+                Ok((800, 600)) // Default size
+            }
+        }
+    } else {
+        Err(Error::EditorUnavailable)
+    }
+}
+
+fn can_resize_editor(
+    plugin_view: &EditorAttachment,
+    controller: &Option<ComPtr<IEditController>>,
+) -> bool {
+    unsafe {
+        let Ok(view) = plugin_view.live_view() else {
+            return false;
+        };
+        if let Some(view) = view {
+            return view.canResize() == kResultTrue;
+        }
+
+        let Some(controller) = controller.as_ref() else {
+            return false;
+        };
+        let view_ptr = controller.createView(c"editor".as_ptr());
+        let Some(view) = ComPtr::<IPlugView>::from_raw(view_ptr) else {
+            return false;
+        };
+        view.canResize() == kResultTrue
+    }
+}
+
+impl PluginEditorFields<'_> {
+    fn ensure_control_thread(&self) -> Result<()> {
+        if thread::current().id() == self.control_thread {
+            Ok(())
+        } else {
+            Err(Error::Other(
+                "native editor control must run on its initializing thread".to_string(),
+            ))
+        }
+    }
+}
+
+impl crate::plugin::PluginEditorRole for PluginEditorFields<'_> {
+    fn attachment_owner(&self) -> Result<crate::plugin::NativeEditorAttachmentOwner> {
+        self.ensure_control_thread()?;
+        Ok(self.native_editor_owner)
+    }
+    fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
+        self.ensure_control_thread()?;
+        PluginEditorFields::open_editor(self, parent)
+    }
+    fn close_editor(&mut self) -> Result<()> {
+        self.ensure_control_thread()?;
+        PluginEditorFields::close_editor(self)
+    }
+    fn editor_size(&self) -> Result<(i32, i32)> {
+        self.ensure_control_thread()?;
+        query_editor_size(self.plugin_view, self.controller)
+    }
+    fn editor_can_resize(&self) -> Result<bool> {
+        self.ensure_control_thread()?;
+        Ok(can_resize_editor(self.plugin_view, self.controller))
+    }
+    fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
+        self.ensure_control_thread()?;
+        PluginEditorFields::resize_editor(self, width, height)
+    }
+    fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
+        self.ensure_control_thread()?;
+        PluginEditorFields::set_editor_scale_factor(self, factor)
+    }
+    fn editor_event_source_status(&self) -> Result<crate::plugin::NativeEditorEventSourceStatus> {
+        self.ensure_control_thread()?;
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.editor_event_source_status())
+    }
+
+    fn take_editor_events(&mut self) -> Result<crate::plugin::NativeEditorEventDrain> {
+        self.ensure_control_thread()?;
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.take_editor_events())
+    }
+    fn pending_restart_cohort(&self) -> Result<Option<crate::plugin::RestartCohort>> {
+        self.ensure_control_thread()?;
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(Some(handler.pending_restart_cohort()))
+    }
+    fn take_restart_flags(&mut self) -> Result<crate::plugin::RestartFlags> {
+        self.ensure_control_thread()?;
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        Ok(handler.take_restart_flags())
+    }
+    fn service_controller(&mut self) -> Result<()> {
+        self.ensure_control_thread()?;
+        while let Some((id, value)) = self.deferred_controller_sync.pop() {
+            apply_controller_value(self.controller, id, value);
+        }
+        self.host_app.service_main_thread_data_exchange();
+        Ok(())
+    }
+    fn parameter(&self, id: u32) -> Result<f64> {
+        self.ensure_control_thread()?;
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::InterfaceError("No controller available".to_string()))?;
+        Ok(unsafe { controller.getParamNormalized(id) })
+    }
+    fn take_editor_resize_request(&self) -> Result<Option<(i32, i32)>> {
+        self.ensure_control_thread()?;
+        self.editor_resize
+            .lock()
+            .map(|mut requested| requested.take())
+            .map_err(|_| Error::Other("editor resize slot is poisoned".to_string()))
+    }
+    fn service_run_loop(&mut self) -> Result<()> {
+        self.ensure_control_thread()?;
+        #[cfg(target_os = "linux")]
+        PluginEditorFields::service_run_loop(self);
+        Ok(())
+    }
+}
+
+impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
+    fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        self.set_signal_timeline_context(context)
+    }
+    fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) || sample_offset < 0 {
+            return Err(Error::InvalidParameter(
+                "normalized processor parameter or sample offset is invalid".to_string(),
+            ));
+        }
+        if self.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
+            return Err(Error::Other(
+                "processor parameter queue is full".to_string(),
+            ));
+        }
+        self.pending_param_changes.push(ParameterChange {
+            id,
+            value,
+            sample_offset,
+        });
+        self.deferred_controller_sync.force_push((id, value));
+        Ok(())
+    }
+    fn queue_unconsumed_editor_values(&mut self) -> Result<bool> {
+        if !self.pending_param_changes.is_empty() {
+            return Err(Error::Other(
+                "unconsumed editor replay cannot replace an already staged parameter queue"
+                    .to_string(),
+            ));
+        }
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
+        let values = &mut self.pending_param_changes;
+        let accepted = handler.visit_unconsumed_editor_values(|id, value| {
+            if values.len() >= MAX_PENDING_PARAM_CHANGES {
+                return false;
+            }
+            values.push(ParameterChange {
+                id,
+                value,
+                sample_offset: 0,
+            });
+            true
+        });
+        if !accepted {
+            // No native process occurred. Refuse the whole incomplete source,
+            // never process a silently truncated value prefix.
+            values.clear();
+            return Ok(false);
+        }
+        Ok(true)
+    }
+    fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
+        validate_process_bus_buffers(self.process_data, self.bus_activation, buffers)?;
+        self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
+    }
+}
+
+#[cfg(test)]
+mod editor_detach_failure_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+    use vst3::Class;
+
+    struct DetachProbe {
+        attached: AtomicBool,
+        removal_result: Arc<AtomicI32>,
+        frame_result: Arc<AtomicI32>,
+        removals: Arc<AtomicUsize>,
+        frame_clears: Arc<AtomicUsize>,
+    }
+
+    impl Class for DetachProbe {
+        type Interfaces = (IPlugView,);
+    }
+    impl IPlugViewTrait for DetachProbe {
+        unsafe fn isPlatformTypeSupported(&self, _kind: FIDString) -> tresult {
+            kResultOk
+        }
+        unsafe fn attached(&self, _parent: *mut std::ffi::c_void, _kind: FIDString) -> tresult {
+            self.attached.store(true, Ordering::SeqCst);
+            kResultOk
+        }
+        unsafe fn removed(&self) -> tresult {
+            assert!(
+                self.attached.load(Ordering::SeqCst),
+                "removed requires a still attached view"
+            );
+            self.removals.fetch_add(1, Ordering::SeqCst);
+            let result = self.removal_result.load(Ordering::SeqCst);
+            if result == kResultOk || result == kResultTrue {
+                self.attached.store(false, Ordering::SeqCst);
+            }
+            result
+        }
+        unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+            if frame.is_null() {
+                self.frame_clears.fetch_add(1, Ordering::SeqCst);
+                self.frame_result.load(Ordering::SeqCst)
+            } else {
+                kResultOk
+            }
+        }
+        unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+            unsafe {
+                *size = ViewRect {
+                    left: 0,
+                    top: 0,
+                    right: 640,
+                    bottom: 480,
+                };
+            }
+            kResultOk
+        }
+        unsafe fn onWheel(&self, _distance: f32) -> tresult {
+            kResultOk
+        }
+        unsafe fn onKeyDown(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
+            kResultOk
+        }
+        unsafe fn onKeyUp(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
+            kResultOk
+        }
+        unsafe fn onSize(&self, _size: *mut ViewRect) -> tresult {
+            kResultOk
+        }
+        unsafe fn onFocus(&self, _state: TBool) -> tresult {
+            kResultOk
+        }
+        unsafe fn canResize(&self) -> tresult {
+            kResultTrue
+        }
+        unsafe fn checkSizeConstraint(&self, _size: *mut ViewRect) -> tresult {
+            kResultOk
+        }
+    }
+
+    /// This is the real private close implementation with a native ABI view
+    /// probe, not a physical HWND/module-load test. Seed attachment is paired
+    /// through the actual IPlugView callback before closing it.
+    struct Fixture {
+        controller: Option<ComPtr<IEditController>>,
+        handler: Option<ComWrapper<ComponentHandler>>,
+        view: EditorAttachment,
+        native_editor_owner: crate::plugin::NativeEditorAttachmentOwner,
+        scale: f32,
+        frame: ComWrapper<HostPlugFrame>,
+        resize: Arc<Mutex<Option<(i32, i32)>>>,
+        deferred: ArrayQueue<(u32, f64)>,
+        host: HostApplication,
+        #[cfg(target_os = "linux")]
+        run_loop: Arc<Mutex<RunLoopRegistry>>,
+        removal_result: Arc<AtomicI32>,
+        frame_result: Arc<AtomicI32>,
+        removals: Arc<AtomicUsize>,
+        frame_clears: Arc<AtomicUsize>,
+    }
+
+    impl Fixture {
+        fn new(removal: tresult, clear: tresult) -> Self {
+            let removal_result = Arc::new(AtomicI32::new(removal));
+            let frame_result = Arc::new(AtomicI32::new(clear));
+            let removals = Arc::new(AtomicUsize::new(0));
+            let frame_clears = Arc::new(AtomicUsize::new(0));
+            let resize = Arc::new(Mutex::new(None));
+            #[cfg(target_os = "linux")]
+            let run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            #[cfg(target_os = "linux")]
+            let frame = create_host_plug_frame(Arc::clone(&resize), Arc::clone(&run_loop));
+            #[cfg(not(target_os = "linux"))]
+            let frame = create_host_plug_frame(Arc::clone(&resize));
+            let probe = ComWrapper::new(DetachProbe {
+                attached: AtomicBool::new(false),
+                removal_result: Arc::clone(&removal_result),
+                frame_result: Arc::clone(&frame_result),
+                removals: Arc::clone(&removals),
+                frame_clears: Arc::clone(&frame_clears),
+            });
+            let view = probe.to_com_ptr::<IPlugView>().expect("view interface");
+            let frame_ptr = frame.to_com_ptr::<IPlugFrame>().expect("frame interface");
+            let mut mock_parent = 0_u8;
+            unsafe {
+                assert_eq!(view.setFrame(frame_ptr.as_ptr()), kResultOk);
+                assert_eq!(
+                    view.attached((&mut mock_parent as *mut u8).cast(), c"probe".as_ptr()),
+                    kResultOk
+                );
+            }
+            Self {
+                controller: None,
+                handler: None,
+                view: EditorAttachment::Attached(view),
+                native_editor_owner: crate::plugin::NativeEditorAttachmentOwner::issue()
+                    .expect("native fixture owner"),
+                scale: 1.0,
+                frame,
+                resize,
+                deferred: ArrayQueue::new(4),
+                host: HostApplication::default(),
+                #[cfg(target_os = "linux")]
+                run_loop,
+                removal_result,
+                frame_result,
+                removals,
+                frame_clears,
+            }
+        }
+        fn fields(&mut self) -> PluginEditorFields<'_> {
+            PluginEditorFields {
+                controller: &self.controller,
+                component_handler: &self.handler,
+                native_editor_owner: self.native_editor_owner,
+                plugin_view: &mut self.view,
+                editor_scale_factor: &mut self.scale,
+                plug_frame: &self.frame,
+                editor_resize: &self.resize,
+                deferred_controller_sync: &self.deferred,
+                host_app: &self.host,
+                control_thread: thread::current().id(),
+                #[cfg(target_os = "linux")]
+                run_loop: &self.run_loop,
+            }
+        }
+        fn close(&mut self) -> Result<()> {
+            self.fields().close_editor()
+        }
+    }
+
+    #[test]
+    fn failed_editor_removal_cannot_become_a_successful_second_close() {
+        let mut fixture = Fixture::new(kResultFalse, kResultOk);
+        assert!(
+            fixture.close().is_err(),
+            "native remove failure must be explicit"
+        );
+        fixture.removal_result.store(kResultOk, Ordering::SeqCst);
+        assert!(
+            fixture.close().is_err(),
+            "a failed removal cannot lose the live view and pretend a later close succeeded"
+        );
+        assert_eq!(
+            fixture.removals.load(Ordering::SeqCst),
+            1,
+            "unknown attachment must not be retried as a fresh remove"
+        );
+        assert_eq!(
+            fixture.frame_clears.load(Ordering::SeqCst),
+            0,
+            "a possibly attached native view must retain its live host frame"
+        );
+    }
+
+    #[test]
+    fn failed_editor_frame_clear_retries_only_frame_clear_not_removed() {
+        let mut fixture = Fixture::new(kResultOk, kResultFalse);
+        assert!(
+            fixture.close().is_err(),
+            "native frame clear failure must be explicit"
+        );
+        fixture.frame_result.store(kResultOk, Ordering::SeqCst);
+        fixture
+            .close()
+            .expect("only a successful frame clear completes closure");
+        assert_eq!(
+            fixture.removals.load(Ordering::SeqCst),
+            1,
+            "removed callback is paired once with attached"
+        );
+        assert_eq!(
+            fixture.frame_clears.load(Ordering::SeqCst),
+            2,
+            "the still-owned view must receive the actual clear retry"
+        );
+    }
+
+    #[test]
+    fn successful_editor_close_is_paired_once_and_repeated_close_is_noop() {
+        let mut fixture = Fixture::new(kResultOk, kResultOk);
+        fixture.close().expect("removed and cleared");
+        fixture.close().expect("already closed");
+        assert_eq!(fixture.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 1);
+    }
+    struct UnusedProcessingRole;
+    impl crate::plugin::PluginProcessingRole for UnusedProcessingRole {
+        fn set_process_timeline_context(
+            &mut self,
+            _context: crate::audio::ProcessTimelineContext,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn queue_parameter_at(&mut self, _id: u32, _value: f64, _offset: i32) -> Result<()> {
+            Ok(())
+        }
+        fn queue_unconsumed_editor_values(&mut self) -> Result<bool> {
+            Ok(true)
+        }
+        fn process_bus_audio(&mut self, _buffers: &mut BusAudioBuffers) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn temporary_editor_role_drop_preserves_owner_view_until_explicit_close() {
+        let mut fixture = Fixture::new(kResultOk, kResultOk);
+        {
+            let roles = crate::plugin::PluginEditorProcessingSplit::from_roles(
+                Box::new(fixture.fields()),
+                Box::new(UnusedProcessingRole),
+            );
+            drop(roles);
+        }
+        assert_eq!(
+            fixture.removals.load(Ordering::SeqCst),
+            0,
+            "a temporary role is not the native view lifetime owner"
+        );
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 0);
+        fixture
+            .close()
+            .expect("full native owner explicitly removes its view");
+        assert_eq!(fixture.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_remove_reports_exact_native_stage_and_refuses_live_ui() {
+        let mut fixture = Fixture::new(kResultFalse, kResultOk);
+        assert!(matches!(
+            fixture.close(),
+            Err(Error::EditorDetachFailed {
+                stage: crate::error::EditorDetachStage::Removal,
+                result
+            }) if result == kResultFalse
+        ));
+        assert!(
+            matches!(
+                fixture.fields().resize_editor(800, 600),
+                Err(Error::EditorLifecycleBlocked)
+            ),
+            "unknown attachment cannot perform live UI actions"
+        );
+        fixture.removal_result.store(kResultOk, Ordering::SeqCst);
+        assert!(
+            matches!(
+                fixture.close(),
+                Err(Error::EditorDetachFailed {
+                    stage: crate::error::EditorDetachStage::Removal,
+                    result
+                }) if result == kResultFalse
+            ),
+            "a later source change does not prove the first failed remove completed"
+        );
+        assert_eq!(fixture.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn failed_frame_clear_retains_exact_native_step_until_real_cleanup() {
+        let mut fixture = Fixture::new(kResultOk, kResultFalse);
+        for _ in 0..2 {
+            assert!(matches!(
+                fixture.close(),
+                Err(Error::EditorDetachFailed {
+                    stage: crate::error::EditorDetachStage::FrameClear,
+                    result
+                }) if result == kResultFalse
+            ));
+        }
+        fixture.frame_result.store(kResultOk, Ordering::SeqCst);
+        fixture
+            .close()
+            .expect("actual native frame cleanup accepted");
+        assert_eq!(
+            fixture.removals.load(Ordering::SeqCst),
+            1,
+            "successful removed cannot be called twice"
+        );
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 3);
+    }
+}
+
+pub(crate) fn native_editor_processing_layouts() -> [std::alloc::Layout; 2] {
+    [
+        std::alloc::Layout::new::<PluginEditorFields<'static>>(),
+        std::alloc::Layout::new::<PluginProcessFields<'static>>(),
+    ]
 }

@@ -44,6 +44,11 @@ libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 
+[target.'cfg(all(target_os = "windows", target_env = "msvc", target_arch = "x86_64"))'.dependencies]
+# Ship the supported compiler with the executable instead of depending on a
+# developer SDK DLL or the legacy FXC dynamic-array compilation restrictions.
+wgpu = { workspace = true, features = ["static-dxc"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVReturn", "objc2", "objc2-metal"] }

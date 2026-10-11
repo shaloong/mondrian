@@ -1,0 +1,34 @@
+{
+    // Owned metadata fixture; no installed plugin or SDK generator is required.
+    "Name": "Metadata Fixture",
+    "Version": "1.0",
+    "Factory Info": {
+        "Vendor": "Mondrian",
+        "URL": "https://example.test/metadata//fixture",
+        "E-Mail": "fixture@example.test",
+        "Flags": { "Unicode": true, "Classes Discardable": false, },
+    },
+    "Classes": [
+        {
+            "CID": "00112233445566778899AABBCCDDEEFF",
+            "Category": "Audio Module Class",
+            "Name": "Metadata Synth",
+            "Vendor": "Mondrian",
+            "Version": "1.0",
+            "SDKVersion": "VST 3.8.1",
+            "Sub Categories": [ "Instrument", "Synth", ],
+            "Class Flags": 0,
+            "Cardinality": 2147483647,
+        },
+        {
+            "CID": "102132435465768798A9BACBDCEDFE0F",
+            "Category": "Component Controller Class",
+            "Name": "Metadata Synth Controller",
+        },
+        {
+            "CID": "2031425364758697A8B9CADBECFD0E1F",
+            "Category": "Test Class",
+            "Name": "Metadata Synth Tests",
+        },
+    ],
+}

@@ -82,6 +82,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     mondrian_platform::prepare_graphics_process()?;
+    #[cfg(feature = "validation")]
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--prepare-native-question-fixture")) {
+        let path = std::env::args_os()
+            .nth(2)
+            .ok_or("fixture preparation requires one JSON request path")?;
+        if std::env::args_os().nth(3).is_some() {
+            return Err("unexpected fixture preparation argument".into());
+        }
+        return mondrian_app::app_ui::native_question_fixture::prepare_native_question_fixture_file(
+            std::path::Path::new(&path),
+        );
+    }
+    #[cfg(feature = "validation")]
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--validate-native-question")) {
+        let path = std::env::args_os()
+            .nth(2)
+            .ok_or("Question validation requires one JSON request path")?;
+        if std::env::args_os().nth(3).is_some() {
+            return Err("unexpected Question validation argument".into());
+        }
+        return mondrian_app::app_ui::window::run_app_ui_native_question_validation_file(
+            std::path::Path::new(&path),
+        );
+    }
     mondrian_app::app_ui::window::run_app_ui()
 }
 

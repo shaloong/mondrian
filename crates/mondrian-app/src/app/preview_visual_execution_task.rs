@@ -80,6 +80,7 @@ enum VisualExecutionWork {
 #[derive(Debug, Clone)]
 pub(crate) struct VisualExecutionTaskPayload {
     epoch: PlaybackEpoch,
+    native_gui_work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
     work: VisualExecutionWork,
     #[cfg(test)]
     control: VisualExecutionTestControl,
@@ -95,6 +96,7 @@ impl VisualExecutionTaskPayload {
     ) -> Self {
         Self {
             epoch,
+            native_gui_work: None,
             work: VisualExecutionWork::HeterogeneousCpuPrefixBatch {
                 request,
                 gpu_grant,
@@ -103,6 +105,14 @@ impl VisualExecutionTaskPayload {
             #[cfg(test)]
             control: VisualExecutionTestControl::default(),
         }
+    }
+
+    pub(crate) fn with_native_gui_work(
+        mut self,
+        work: Option<super::preview_native_gui::PreviewNativeGuiWorkBatch>,
+    ) -> Self {
+        self.native_gui_work = work;
+        self
     }
 
     /// Playback Session captured by this immutable task.
@@ -246,6 +256,16 @@ pub(crate) enum VisualExecutionTaskFailure {
 }
 
 impl VisualExecutionTaskFailure {
+    /// Canonical user-blocked receipt from the renderer's actual failed work.
+    pub(crate) fn processor_blocked(
+        &self,
+    ) -> Option<&std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>> {
+        match self {
+            Self::RendererBatch(error) => error.processor_blocked(),
+            _ => None,
+        }
+    }
+
     fn is_broker_cancellation(&self) -> bool {
         matches!(self, Self::BrokerCanceled { .. })
     }
@@ -273,6 +293,27 @@ pub(crate) struct VisualExecutionPrefixReady {
 }
 
 impl VisualExecutionPrefixReady {
+    /// Read the existing sole lease cancellation authority before observing facts.
+    pub(crate) fn feedback_observation_is_active(&self) -> bool {
+        self.lease
+            .broker
+            .execution_cancellation_evidence(self.identity.execution_id)
+            .is_none()
+    }
+    /// Move actual metadata; only the current Viewer adapter may publish it.
+    pub(crate) fn take_processor_feedback(
+        &mut self,
+    ) -> Result<
+        mondrian_effects::EffectProcessorFeedbackBatch,
+        mondrian_effects::EffectProcessorFeedbackError,
+    > {
+        match &mut self.output {
+            VisualExecutionTaskOutput::HeterogeneousCpuPrefixBatch { output, .. } => {
+                output.take_processor_feedback()
+            }
+        }
+    }
+
     /// Complete logical artifact identity.
     pub(crate) const fn key(&self) -> VisualExecutionTaskKey {
         self.identity.key
@@ -356,6 +397,11 @@ impl VisualExecutionFailed {
 /// One result emitted by the dedicated CPU preparation worker.
 #[derive(Debug)]
 pub(crate) enum VisualExecutionTaskResult {
+    /// Bounded actual execution observation, with no Broker completion lease.
+    Progress(super::preview_processor_feedback::PreviewProcessorProgressUpdate),
+    /// Same bounded transport, opaque exact owner/work/service identity.
+    NativeQuestion(super::preview_native_gui::NativeVisualQuestionPresentation),
+    NativeGuiAction(super::preview_native_gui::NativeVisualGuiActionDelivery),
     /// CPU work succeeded; completion authority remains inside the lease.
     PrefixReady(VisualExecutionPrefixReady),
     /// CPU preparation truly terminated and no lease remains active.
@@ -657,10 +703,19 @@ impl VisualExecutionTask {
         let broker =
             FrameWorkBroker::new_with_clock(config.max_pending, config.max_queued, clock.clone());
         let worker_broker = broker.clone();
+        let worker_clock = clock.clone();
         let (result_sender, result_receiver) = mpsc::sync_channel(config.result_capacity);
         let worker = thread::Builder::new()
             .name("mondrian-preview-visual-execution".to_owned())
-            .spawn(move || visual_execution_worker(worker_broker, result_sender, work_notifier))
+            .spawn(move || {
+                visual_execution_worker(
+                    worker_broker,
+                    worker_clock,
+                    config.result_capacity,
+                    result_sender,
+                    work_notifier,
+                )
+            })
             .map_err(VisualExecutionTaskStartError::WorkerStart)?;
         Ok(Self {
             broker,
@@ -716,6 +771,12 @@ impl VisualExecutionTask {
     #[cfg(test)]
     pub(crate) fn diagnostics(&self) -> FrameWorkBrokerDiagnostics {
         self.broker.diagnostics()
+    }
+
+    /// Wake the sole Broker owner for an actual GUI-lifetime boundary. This
+    /// adds neither frame work nor a second request/result transport.
+    pub(crate) fn reconcile_native_guis(&self) {
+        self.broker.interrupt_worker_waits();
     }
 
     /// Poll at most one worker result without blocking the caller.
@@ -788,13 +849,33 @@ impl Drop for VisualExecutionTask {
 
 fn visual_execution_worker(
     broker: VisualExecutionBroker,
+    clock: SharedVisualExecutionClock,
+    result_capacity: usize,
     results: mpsc::SyncSender<VisualExecutionTaskResult>,
     work_notifier: PreviewWorkNotifier,
 ) {
     let _exit_notification = work_notifier.worker_exit_notification();
     let mut executor = HeterogeneousCpuPrefixBatchExecutor::default();
-    while let Some(received) = broker.receive(FrameWorkerLane::Any) {
-        let (execution, expired) = match received {
+    let mut lifecycle_revision = broker.worker_lifecycle_revision();
+    loop {
+        let received = match broker.receive_timeout_after_lifecycle_revision(
+            FrameWorkerLane::Any,
+            Duration::from_secs(60),
+            lifecycle_revision,
+        ) {
+            mondrian_playback::FrameWorkReceiveWait::Work(received) => received,
+            mondrian_playback::FrameWorkReceiveWait::Interrupted { revision } => {
+                lifecycle_revision = revision;
+                executor.reconcile_processor_guis();
+                continue;
+            }
+            mondrian_playback::FrameWorkReceiveWait::TimedOut => {
+                executor.reconcile_processor_guis();
+                continue;
+            }
+            mondrian_playback::FrameWorkReceiveWait::Closed => break,
+        };
+        let (mut execution, expired) = match received {
             FrameWorkReceive::Ready(execution) => (execution, false),
             FrameWorkReceive::Expired(execution) => (execution, true),
         };
@@ -806,6 +887,80 @@ fn visual_execution_worker(
             work_class: execution.work_class,
         };
         let lease = VisualExecutionLease::new(broker.clone(), identity);
+        // Project the actual dequeued Broker deadline once, conservatively.
+        // A later broker deadline cancellation remains the owning checkpoint.
+        let sampled_at = Instant::now();
+        let owner_deadline = execution.deadline.map(|deadline| {
+            let remaining = deadline
+                .duration_since_origin()
+                .saturating_sub(clock.now().duration_since_origin());
+            sampled_at.checked_add(remaining).unwrap_or(sampled_at)
+        });
+        let scope = super::preview_processor_feedback::PreviewProcessorFeedbackScope {
+            key: Some(
+                super::preview_processor_feedback::PreviewProcessorWorkKey::Visual(identity.key),
+            ),
+            generation: identity.generation,
+            epoch: identity.epoch,
+        };
+        let action_results = results.clone();
+        let action_notifier = work_notifier.clone();
+        let question_results = results.clone();
+        let question_notifier = work_notifier.clone();
+        let question_service = execution.payload.native_gui_work.take().and_then(|work| {
+            work.service(
+                result_capacity,
+                move |presentation| {
+                    if presentation.scope() != scope {
+                        presentation.dismiss();
+                        return false;
+                    }
+                    if question_results
+                        .try_send(VisualExecutionTaskResult::NativeQuestion(presentation))
+                        .is_ok()
+                    {
+                        question_notifier.result_became_pollable();
+                        true
+                    } else {
+                        false
+                    }
+                },
+                move |action| {
+                    if action_results
+                        .try_send(VisualExecutionTaskResult::NativeGuiAction(action))
+                        .is_ok()
+                    {
+                        action_notifier.result_became_pollable();
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+        });
+        let progress_results = results.clone();
+        let progress_notifier = work_notifier.clone();
+        let progress_publication =
+            move |receipt: &mondrian_effects::EffectProcessorProgressReceipt| {
+                // Full progress channels drop observational metadata only.
+                // They never block DSP, cancellation or terminal publication.
+                let update = super::preview_processor_feedback::PreviewProcessorProgressUpdate {
+                    scope,
+                    receipt: Some(receipt.clone()),
+                };
+                if progress_results.try_send(VisualExecutionTaskResult::Progress(update)).is_ok() {
+                    progress_notifier.result_became_pollable();
+                }
+            };
+        let sink = match question_service {
+            Some(question_service) => super::preview_processor_feedback::PreviewProcessorProgressPublisher::with_question_service(
+                result_capacity, question_service, progress_publication),
+            None => super::preview_processor_feedback::PreviewProcessorProgressPublisher::new_observer(result_capacity, progress_publication),
+        };
+        executor.bind_processor_observation(mondrian_effects::EffectProcessorObservation {
+            sink: Some(sink),
+            deadline: owner_deadline,
+        });
         let outcome = if expired {
             Err(broker
                 .execution_cancellation_evidence(identity.execution_id)
@@ -826,6 +981,8 @@ fn visual_execution_worker(
                 })
             })
         };
+        executor
+            .bind_processor_observation(mondrian_effects::EffectProcessorObservation::default());
         let result = match outcome {
             Ok(output) => VisualExecutionTaskResult::PrefixReady(VisualExecutionPrefixReady {
                 identity,
@@ -908,6 +1065,11 @@ fn terminal_failure_evidence(
     failure: &VisualExecutionTaskFailure,
 ) -> Option<ExecutionTerminalEvidence> {
     let binding = terminal_binding?;
+    // A standards-defined persistent user blocker is not an execution fault.
+    // Its exact consumed binding and typed receipt are separate no-frame facts.
+    if failure.processor_blocked().is_some() {
+        return None;
+    }
     (!failure.is_broker_cancellation()).then_some(ExecutionTerminalEvidence {
         generation: binding.generation,
         priority: terminal_priority(binding.priority, binding.work_class),

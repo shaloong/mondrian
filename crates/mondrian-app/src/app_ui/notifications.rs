@@ -79,7 +79,9 @@ impl NotificationOverlay {
                 self.visible.remove(index);
             }
             let duration = match notification.severity {
-                AppNotificationSeverity::Success => Duration::from_secs(5),
+                AppNotificationSeverity::Information | AppNotificationSeverity::Success => {
+                    Duration::from_secs(5)
+                }
                 AppNotificationSeverity::Warning => Duration::from_secs(8),
                 AppNotificationSeverity::Error => Duration::from_secs(10),
             };
@@ -155,6 +157,7 @@ impl NotificationOverlay {
             let colors = &ctx.theme.colors;
             ctx.encoder.draw_rect(rect, colors.popover, 6.0);
             let accent = match toast.source.severity {
+                AppNotificationSeverity::Information => colors.popover_foreground,
                 AppNotificationSeverity::Success => colors.success,
                 AppNotificationSeverity::Warning => colors.warning,
                 AppNotificationSeverity::Error => colors.destructive_foreground,
@@ -173,7 +176,7 @@ impl NotificationOverlay {
 
 fn toast_priority(severity: AppNotificationSeverity) -> u8 {
     match severity {
-        AppNotificationSeverity::Success => 0,
+        AppNotificationSeverity::Information | AppNotificationSeverity::Success => 0,
         AppNotificationSeverity::Warning => 1,
         AppNotificationSeverity::Error => 2,
     }

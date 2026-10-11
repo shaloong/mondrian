@@ -602,8 +602,9 @@ fn handle(
             },
             Err(e) => err("SelectProgram", e),
         }),
-        HostCommand::TakeParameterEdits => with(plugin, |p| HostResponse::ParameterEdits {
-            edits: p.take_parameter_edits(),
+        HostCommand::TakeEditorEvents => with(plugin, |p| match p.take_editor_events() {
+            Ok(drain) => HostResponse::EditorEvents { drain },
+            Err(error) => err("TakeEditorEvents", error),
         }),
         HostCommand::TakeParameterChanges => with(plugin, |p| HostResponse::ParameterChanges {
             changes: p.get_parameter_changes(),

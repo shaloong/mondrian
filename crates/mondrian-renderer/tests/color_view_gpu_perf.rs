@@ -1083,7 +1083,9 @@ fn create_spatially_varying_4k_working_frame(
     let layer = GpuCompositeLayer {
         source: GpuCompositeLayerSource::SolidColor(Color { r: 0.18, g: 0.42, b: 0.73, a: 1.0 }),
         opacity: 1.0,
-        blend_mode: mondrian_core::types::BlendMode::Normal,
+        blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+            mondrian_core::types::BlendMode::Normal,
+        ),
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan: Some(&effect_plan),
         frame_seed: 0x4d53,

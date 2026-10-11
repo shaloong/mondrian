@@ -14,6 +14,10 @@ pub(crate) struct ProcessorParameterEventScratch {
 }
 
 impl ProcessorParameterEventScratch {
+    pub(crate) fn resource_buffers(&self) -> (&Vec<AudioParameterEvent>, &Vec<Range<usize>>) {
+        (&self.events, &self.lane_ranges)
+    }
+
     pub(crate) fn new(maximum_lanes: usize, event_capacity: usize) -> Self {
         Self {
             lane_ranges: Vec::with_capacity(maximum_lanes),
@@ -36,6 +40,7 @@ pub(crate) fn prepare_parameter_event_batch<'a>(
     let required_events = processor
         .parameter_curves
         .iter()
+        .flatten()
         .try_fold(0_usize, |count, curve| {
             count.checked_add(if request.frames == 0 {
                 0
@@ -54,6 +59,10 @@ pub(crate) fn prepare_parameter_event_batch<'a>(
     scratch.events.clear();
     for curve in &processor.parameter_curves {
         let start = scratch.events.len();
+        let Some(curve) = curve else {
+            scratch.lane_ranges.push(start..start);
+            continue;
+        };
         if request.frames > 0 && curve.is_constant() {
             scratch
                 .events

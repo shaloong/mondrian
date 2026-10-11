@@ -1,0 +1,139 @@
+use clap_sys::host::clap_host;
+use std::ffi::{CStr, CString, NulError};
+use std::pin::Pin;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+struct HostInfoInner {
+    name: Pin<Box<CStr>>,
+    vendor: Pin<Box<CStr>>,
+    url: Pin<Box<CStr>>,
+    version: Pin<Box<CStr>>,
+}
+
+/// Human-readable information and description about the host.
+///
+/// This information is passed to plugins at instantiation time by [`PluginInstance::new`](crate::prelude::PluginInstance::new).
+///
+/// See the [`new`](HostInfo::new) method's documentation for an example of how to instantiate it.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    inner: Arc<HostInfoInner>,
+}
+
+impl HostInfo {
+    /// Creates a new host information container from its components.
+    ///
+    /// * `name`: The name of the host. Example: `"Bitwig Studio"`
+    /// * `vendor`: The software vendor of the host. Example: `"Bitwig GmbH"`
+    /// * `url`: Example: `"https://bitwig.com"`
+    /// * `version`: The version string of the host. Example: `"4.3.2"`
+    ///
+    /// All parameters are copied into new string buffers.
+    ///
+    /// # Errors
+    ///
+    /// All parameters must not contain the null (`\0`) character. If any of them do, a [`NulError`] is returned.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use clack_host::host::HostInfo;
+    ///
+    /// let info = HostInfo::new("Bitwig Studio", "Bitwig GmbH", "https://bitwig.com", "4.3.2");
+    /// ```
+    ///
+    pub fn new(name: &str, vendor: &str, url: &str, version: &str) -> Result<Self, NulError> {
+        Ok(Self::new_from_cstring(
+            CString::new(name)?,
+            CString::new(vendor)?,
+            CString::new(url)?,
+            CString::new(version)?,
+        ))
+    }
+
+    /// An infallible version of [`new`](HostInfo::new).
+    ///
+    /// This method takes ownership of preexisting [`CString`] buffers, and therefore cannot fail
+    /// from null byte errors, and performs fewer allocations compared to [`new`](HostInfo::new).
+    ///
+    /// See the documentation for [`new`](HostInfo::new) for more information about the arguments.
+    pub fn new_from_cstring(
+        name: CString,
+        vendor: CString,
+        url: CString,
+        version: CString,
+    ) -> Self {
+        Self {
+            inner: Arc::new(HostInfoInner {
+                name: Pin::new(name.into_boxed_c_str()),
+                vendor: Pin::new(vendor.into_boxed_c_str()),
+                url: Pin::new(url.into_boxed_c_str()),
+                version: Pin::new(version.into_boxed_c_str()),
+            }),
+        }
+    }
+
+    /// Creates a new host information container using the data originally provided to a plugin.
+    #[cfg(feature = "clack-plugin")]
+    pub fn from_plugin(info: &clack_plugin::host::HostInfo) -> Self {
+        fn from_opt(str: Option<&CStr>) -> CString {
+            match str {
+                None => CString::new("").unwrap(),
+                Some(str) => CString::from(str),
+            }
+        }
+
+        Self::new_from_cstring(
+            from_opt(info.name()),
+            from_opt(info.vendor()),
+            from_opt(info.url()),
+            from_opt(info.version()),
+        )
+    }
+
+    /// Returns the name of the host.
+    #[inline]
+    pub fn name(&self) -> &CStr {
+        &self.inner.name
+    }
+
+    /// Returns the software vendor of the host.
+    #[inline]
+    pub fn vendor(&self) -> &CStr {
+        &self.inner.vendor
+    }
+
+    /// Returns the host's web homepage's URL.
+    #[inline]
+    pub fn url(&self) -> &CStr {
+        &self.inner.url
+    }
+
+    /// Returns the version string of the host
+    #[inline]
+    pub fn version(&self) -> &CStr {
+        &self.inner.version
+    }
+
+    /// Borrow the SDK's information Arc payload and four complete C-string Boxes.
+    /// C-string layouts include the terminating NUL. Cloned HostInfo handles
+    /// return the same identities, so these allocations must be charged once.
+    pub fn sdk_owned_storage(&self) -> [crate::storage::HostStorageRef<'_>; 5] {
+        use crate::storage::HostStorageRef;
+        [
+            HostStorageRef::from_arc(&self.inner),
+            HostStorageRef::boxed_value(self.inner.name.as_ref().get_ref()),
+            HostStorageRef::boxed_value(self.inner.vendor.as_ref().get_ref()),
+            HostStorageRef::boxed_value(self.inner.url.as_ref().get_ref()),
+            HostStorageRef::boxed_value(self.inner.version.as_ref().get_ref()),
+        ]
+    }
+
+    pub(crate) fn write_to_raw(&self, host: &mut clap_host) {
+        host.name = self.inner.name.as_ptr();
+        host.vendor = self.inner.vendor.as_ptr();
+        host.url = self.inner.url.as_ptr();
+        host.version = self.inner.version.as_ptr();
+    }
+}

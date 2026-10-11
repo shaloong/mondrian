@@ -496,7 +496,7 @@ fn route_create_options(
             (!matches!(owner_source, AudioRouteSource::Bus { bus_id, .. } if bus_id == bus.id))
                 .then_some((
                     AudioRouteDestination::Bus(bus.id),
-                    format!("Bus · {}", bus.name),
+                    localizer.format_text("audio-sidechain-bus", "identity", &bus.name),
                 ))
         })
         .collect::<Vec<_>>();
@@ -608,7 +608,7 @@ fn destination_label(
                         &bus_id.to_string(),
                     )
                 },
-                |bus| format!("Bus · {}", bus.name),
+                |bus| localizer.format_text("audio-sidechain-bus", "identity", &bus.name),
             )
         }
         AudioRouteDestination::Output(output_id) => sequence
@@ -1469,6 +1469,8 @@ mod scalar_contract_tests {
                         mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
                     )]
                         .automation
+                        .as_ref()
+                        .expect("bound host curve")
                         .default_value
                 }
                 ScalarContractField::Trim => {

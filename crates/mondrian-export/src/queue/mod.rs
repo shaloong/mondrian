@@ -8253,7 +8253,7 @@ fn render_prepared_visual_node_gpu(
                         &adjustment.effect_graph,
                     )?,
                     opacity: adjustment.opacity,
-                    blend_mode: adjustment.blend_mode,
+                    blend_policy: adjustment.blend_policy,
                     frame_seed: adjustment.frame_seed,
                 }
             }
@@ -8263,7 +8263,7 @@ fn render_prepared_visual_node_gpu(
                     &grade.effect_graph,
                 )?,
                 opacity: 1.0,
-                blend_mode: mondrian_core::BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                 frame_seed: grade.frame_seed,
             },
             TimelineRenderPlanElement::CrossDissolve(transition) => {
@@ -8823,7 +8823,7 @@ fn render_prepared_visual_node_into(
                     TimelineAdjustmentLayer {
                         effect_graph: adjustment.effect_graph.clone(),
                         opacity: adjustment.opacity,
-                        blend_mode: Some(adjustment.blend_mode),
+                        blend_policy: adjustment.blend_policy,
                         frame_seed: adjustment.frame_seed,
                     },
                 ));
@@ -8833,7 +8833,7 @@ fn render_prepared_visual_node_into(
                     TimelineAdjustmentLayer {
                         effect_graph: grade.effect_graph.clone(),
                         opacity: 1.0,
-                        blend_mode: None,
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                         frame_seed: grade.frame_seed,
                     },
                 ));
@@ -9522,6 +9522,7 @@ fn resolve_export_temporal_batches(
             );
         }
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: tile.frame_extent().width(),
             height: tile.frame_extent().height(),
             data: tile.pixels().to_vec(),
@@ -9641,6 +9642,7 @@ fn resolve_export_temporal_source(
             let pixel = [color.r, color.g, color.b, color.a];
             (
                 CpuColorFrame::working(WorkingRgbaF32Frame {
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: extent.width(),
                     height: extent.height(),
                     data: vec![pixel; extent.width() as usize * extent.height() as usize],
@@ -9663,11 +9665,9 @@ fn resolve_export_temporal_source(
             expected.height()
         ));
     }
-    if descriptor.color_space.working() != Some(color_context.working_color_space())
-        || descriptor.alpha != mondrian_renderer::ColorFrameAlpha::StraightCoverage
-    {
+    if descriptor.color_space.working() != Some(color_context.working_color_space()) {
         return Err(format!(
-            "Clip {} temporal source did not resolve to parent working-space straight alpha",
+            "Clip {} temporal source did not resolve to parent working-space image contract",
             batch.placement().clip_id
         ));
     }
@@ -9688,7 +9688,18 @@ fn export_temporal_tile(
             .data
             .get(start..end)
             .ok_or_else(|| "temporal ROI exceeded the resolved export frame".to_owned())?;
-        pixels.extend_from_slice(row);
+        for sample in row {
+            pixels.push(
+                mondrian_effects::convert_alpha_sample(
+                    *sample,
+                    source.alpha,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                )
+                .map_err(|error| {
+                    format!("temporal Coverage source materialization refused: {error}")
+                })?,
+            );
+        }
     }
     EffectFrameTileF32::new(
         request.time(),
@@ -10114,6 +10125,7 @@ fn finish_empty_sequence_target(
     match target {
         SequenceRenderTarget::Working(output) => {
             **output = Some(CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width,
                 height,
                 data: vec![[0.0, 0.0, 0.0, 0.0]; width as usize * height as usize],
@@ -11024,7 +11036,12 @@ mod tests {
                 materialization.residency().format().domain() == EffectColorDomain::AlphaMask
             })
         );
-        assert_eq!(route.cpu_frontier_retained_bytes(), 2 * 4 * 3 * 16);
+        assert_eq!(
+            route.cpu_frontier_retained_bytes(),
+            2 * 4 * 3 * 16
+                + u64::try_from(mondrian_effects::EffectProcessorFeedbackBatch::storage_bytes())
+                    .expect("feedback storage fits retained-byte domain")
+        );
         assert_eq!(session.heterogeneous_route_contracts.len(), 1);
     }
 
@@ -11280,9 +11297,15 @@ mod tests {
             .color
             .working_color_space;
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &input.rgba_f32().data,
-            extent.width(),
-            extent.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(extent.width(), extent.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input.rgba_f32().data,
+            ),
             &graph,
             frame_seed,
         )
@@ -11355,9 +11378,15 @@ mod tests {
         session.composite_scratch.bind_effect_execution_generation(generation);
         let source = vec![[color.r, color.g, color.b, color.a]; 12];
         let expected = apply_compiled_effect_graph_rgba_f32(
-            &source,
-            extent.width(),
-            extent.height(),
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(extent.width(), extent.height()),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &source,
+            ),
             &graph,
             frame_seed,
         )
@@ -17752,7 +17781,9 @@ mod tests {
                         })
                         .expect("compile adjustment graph"),
                         opacity: 1.0,
-                        blend_mode: Some(BlendMode::Normal),
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                            BlendMode::Normal,
+                        ),
                         frame_seed: 0,
                     },
                 ),

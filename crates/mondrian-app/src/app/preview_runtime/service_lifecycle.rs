@@ -219,6 +219,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         } else {
             self.execution.borrow_mut().invalidate(|| generation);
         }
+        self.retire_processor_feedback_view();
         (pending_requests, queued_jobs)
     }
 

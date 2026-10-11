@@ -823,6 +823,43 @@ impl ExecutionResourceCoordinator {
         self.state.lock().heavy_slot_allocator.acknowledge_close(close_epoch, domain)
     }
 
+    /// Start the existing observer with a test-owned probe before its first poll.
+    /// The current inventory, cadence, classification, and consuming shutdown
+    /// remain owned by this coordinator; an active observer cannot be replaced.
+    #[cfg(test)]
+    fn test_start_execution_memory_probe<P>(&self, probe: P) -> std::io::Result<()>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        let mut runtime = self.native_memory_runtime.lock();
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "native memory observer admission is closed",
+            ));
+        }
+        if runtime.is_some() || self.native_memory_start_attempted.swap(true, Ordering::AcqRel) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "native memory observer startup was already attempted",
+            ));
+        }
+        match NativeMemoryObservationRuntime::start_with_probe_and_inventory(
+            probe,
+            Arc::clone(&self.native_memory_inventory),
+        ) {
+            Ok(started) => {
+                self.native_memory_worker_started.store(true, Ordering::Release);
+                *runtime = Some(started);
+                Ok(())
+            }
+            Err(error) => {
+                saturating_atomic_add(&self.native_memory_start_failures, 1);
+                Err(error)
+            }
+        }
+    }
+
     /// Sample process and whole-system pressure no more than once per fixed
     /// monotonic cadence. The explicit instant is the test/Headless scheduling
     /// Seam.
@@ -1199,6 +1236,16 @@ impl Default for ExecutionResourceCoordinator {
 }
 
 impl AppState {
+    /// Inject only the native memory input of an otherwise ordinary Host test.
+    /// This must precede the first resource-observer poll and workload admission.
+    #[cfg(test)]
+    pub(crate) fn test_start_execution_memory_probe<P>(&self, probe: P) -> std::io::Result<()>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        self.execution_resources.test_start_execution_memory_probe(probe)
+    }
+
     /// Bind immutable capacity from the exact active Viewer GPU generation to
     /// the existing product resource authority.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1918,12 +1965,12 @@ fn preview_heterogeneous_effect_execution_decision(
     max_processor_instances: usize,
     max_processor_bytes: usize,
 ) -> PreviewHeterogeneousEffectExecutionDecision {
-    // `max_batch_pixel_bytes` is a policy ceiling. Renderer admission counts
-    // each immutable CPU input plus every Effects-owned frontier value for the
+    // `max_batch_retained_bytes` is a policy ceiling. Renderer admission counts
+    // each immutable CPU input, every Effects-owned frontier value, and bounded processor feedback for the
     // prepared route. One UHD input plus one frontier is 253.125 MiB, so
     // MinimumSupported admits that baseline shape; wider frontiers consume
     // proportionally more authority rather than being hidden by this policy.
-    let max_batch_pixel_bytes = match class {
+    let max_batch_retained_bytes = match class {
         MachineResourceClass::BelowMinimum | MachineResourceClass::UnknownConservative => {
             128 * MIB as u64
         }
@@ -1947,7 +1994,7 @@ fn preview_heterogeneous_effect_execution_decision(
                 PREVIEW_HETEROGENEOUS_MAX_STEPS,
             ),
             PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS,
-            max_batch_pixel_bytes,
+            max_batch_retained_bytes,
         ),
         gpu_continuation: HeterogeneousGpuResourceGrant::new(
             effect_working_bytes,
@@ -2602,7 +2649,7 @@ mod tests {
         let minimum_cpu = minimum.preview.heterogeneous_effects.cpu_prefix_grant();
         assert!(minimum_cpu.max_batch_items() >= 1);
         assert!(
-            minimum_cpu.max_batch_pixel_bytes() >= UHD_CPU_PREFIX_RETAINED_BYTES,
+            minimum_cpu.max_batch_retained_bytes() >= UHD_CPU_PREFIX_RETAINED_BYTES,
             "8 GiB must admit one UHD Float32 input plus one CPU frontier value"
         );
         assert!(
@@ -2623,8 +2670,8 @@ mod tests {
                 .preview
                 .heterogeneous_effects
                 .cpu_prefix_grant()
-                .max_batch_pixel_bytes()
-                > minimum_cpu.max_batch_pixel_bytes()
+                .max_batch_retained_bytes()
+                > minimum_cpu.max_batch_retained_bytes()
         );
     }
 
@@ -2689,8 +2736,8 @@ mod tests {
             nominal_cpu.max_batch_items()
         );
         assert_eq!(
-            critical_cpu.max_batch_pixel_bytes(),
-            nominal_cpu.max_batch_pixel_bytes()
+            critical_cpu.max_batch_retained_bytes(),
+            nominal_cpu.max_batch_retained_bytes()
         );
         assert_eq!(
             critical_cpu.effect_session().max_working_bytes,
@@ -3744,6 +3791,55 @@ mod tests {
     }
 
     #[test]
+    fn scripted_memory_observer_uses_current_inventory_and_consuming_shutdown() {
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        let probe = || CountingMemoryProbe {
+            calls: AtomicUsize::new(0),
+            private_committed_bytes: 64 * MIB as u64,
+        };
+        coordinator
+            .test_start_execution_memory_probe(probe())
+            .expect("start scripted observer");
+        assert_eq!(
+            coordinator
+                .test_start_execution_memory_probe(probe())
+                .expect_err("cannot replace owner")
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        coordinator.poll_native_memory_observation(Duration::ZERO);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while coordinator.decision().memory_observation.is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "scripted observer did not publish its sample"
+            );
+            coordinator.poll_native_memory_observation(Duration::ZERO);
+            std::thread::yield_now();
+        }
+        let facts = coordinator.endurance_runtime_facts();
+        assert!(facts.startup_attempted);
+        assert!(facts.worker_started);
+        assert_eq!(facts.worker_health_failures, 0);
+        assert_eq!(facts.queue_depth, 0);
+        assert_eq!(facts.running_work, 0);
+        assert_eq!(facts.owned_resources, 0);
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.started_workers, 1);
+        assert_eq!(terminal.terminated_workers, 1);
+        assert!(terminal.lifecycle_closed());
+        assert_eq!(
+            coordinator
+                .test_start_execution_memory_probe(probe())
+                .expect_err("closed owner cannot restart")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
     fn observer_panic_retains_started_identity_and_unexpected_exit_health() {
         struct PanickingMemoryProbe;
 
@@ -3990,5 +4086,196 @@ mod tests {
 
         assert_eq!(decision.revision, u64::MAX);
         assert_eq!(decision.pressure, ExecutionResourcePressure::Elevated);
+    }
+    #[test]
+    #[ignore = "requires a fresh pinned product helper and the owned SessionProbe bundle"]
+    fn authored_uhd_processor_retains_only_its_owned_storage_under_professional_grant() {
+        use mondrian_core::{
+            Rational, SampleAspectRatio, TimelineTime, TimelineTimeRange, WorkingColorSpace,
+        };
+        use mondrian_effects::{
+            EffectColorDomain, EffectExecutionSession, EffectExecutionSessionConfig,
+            EffectFloatFrameView, EffectFrameContext, EffectFrameExtent, EffectProcessorControl,
+            EffectValueFormat, EffectWorkingPrecision, LutPreparationCache, PreparedEffectProgram,
+        };
+        const TEST: &str = "app::execution_resource_coordination::tests::authored_uhd_processor_retains_only_its_owned_storage_under_professional_grant";
+        const RECEIPT: &str = "MONDRIAN_OPENFX_PROCESSOR_OWNER_RECEIPT";
+        let directory = tempfile::tempdir().expect("owned receipt directory");
+        let receipt_path = directory.path().join("owners.tsv");
+        if !crate::openfx_host::shared_frame_tests::qualification_child(
+            TEST,
+            &[
+                (
+                    "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                    "resident_owner_receipt",
+                ),
+                (RECEIPT, receipt_path.to_str().expect("UTF-8 receipt path")),
+            ],
+        ) {
+            return;
+        }
+        let helper = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned product helper"),
+        );
+        let probe = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned probe"),
+        );
+        let receipt_path =
+            std::path::PathBuf::from(std::env::var_os(RECEIPT).expect("receipt path"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &probe)
+            .expect("real isolated inspection");
+        let effect_type = crate::openfx_effect::register_selected_openfx_filter(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+        )
+        .expect("register the actual native factory");
+        let occurrence =
+            mondrian_effects::instantiate_effect_node(effect_type).expect("author occurrence");
+        let context = EffectFrameContext::new(
+            Rational::FPS_24,
+            SampleAspectRatio::SQUARE,
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(10, 24).expect("duration"),
+            )
+            .expect("author range"),
+        )
+        .expect("frame domain");
+        let prepared = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+            &[occurrence],
+            &[],
+            &[],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            context,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("immutable actual author program");
+        let decision =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Professional))
+                .update_demand(ExecutionResourceDemandSnapshot {
+                    preview_realtime: true,
+                    ..ExecutionResourceDemandSnapshot::default()
+                });
+        let policy = decision.preview.effect_cache;
+        assert_eq!(policy.max_working_bytes, 768 * MIB);
+        assert_eq!(
+            (policy.max_processor_instances, policy.max_processor_bytes),
+            (8, 384 * MIB)
+        );
+        // Exact production preview_runtime mapping; no grant is increased.
+        let config = EffectExecutionSessionConfig {
+            max_cache_entries: policy.max_entries,
+            max_cache_bytes: policy.max_bytes,
+            max_working_bytes: policy.max_working_bytes,
+            max_gpu_plan_entries: policy.max_gpu_plan_entries,
+            max_gpu_plan_bytes: policy.max_gpu_plan_bytes,
+            max_processor_instances: policy.max_processor_instances,
+            max_processor_bytes: policy.max_processor_bytes,
+        };
+        let width = 3840;
+        let height = 2160;
+        let count = width as usize * height as usize;
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        );
+        let mut input = vec![[1.5, -0.25, 0.75, 0.5]; count];
+        input[0] = [0.125, 2.5, 0.25, 0.75];
+        input[count - 1] = [0.875, 0.25, -0.5, 0.125];
+        let mut execution = EffectExecutionSession::new(config);
+        let mut diagnostics = Vec::new();
+        for frame in [0, 7] {
+            execution.bind_generation(frame as u64 + 1);
+            input.reverse();
+            let graph = prepared
+                .evaluate(TimelineTime::new(frame, 24).expect("exact time"))
+                .expect("same occurrence at a new authored time");
+            let output = execution
+                .apply_compiled_rgba_f32(
+                    EffectFloatFrameView::new(
+                        EffectFrameExtent::new(width, height),
+                        format,
+                        &input,
+                    ),
+                    &graph,
+                    frame,
+                    &mut EffectProcessorControl::uncancelled(),
+                )
+                .expect("complete UHD frame under the actual Professional policy");
+            assert_eq!(
+                output.pixels(),
+                input.as_slice(),
+                "independent Basic gain=1 oracle"
+            );
+            drop(output);
+            diagnostics.push(execution.diagnostics());
+        }
+        let contents = std::fs::read_to_string(&receipt_path).expect("actual native owner records");
+        let records: Vec<_> = contents
+            .lines()
+            .map(|line| {
+                let (pid, uid) = line.split_once('\t').expect("PID and actual image identifier");
+                let pid =
+                    pid.parse::<std::num::NonZeroU32>().expect("actual nonzero native process ID");
+                let parts: Vec<_> = uid.split(':').collect();
+                assert_eq!(parts.len(), 4);
+                assert_eq!((parts[0], parts[3]), ("mondrian-ofx", "Source"));
+                assert_eq!(parts[1].len(), 32);
+                assert!(parts[1].bytes().all(|byte| byte.is_ascii_hexdigit()));
+                let generation =
+                    parts[2].parse::<std::num::NonZeroU64>().expect("image generation");
+                (pid, parts[1].to_owned(), generation)
+            })
+            .collect();
+        assert_eq!(records.len(), 2, "two real native renders, no DSP replay");
+        for sample in &diagnostics {
+            assert_eq!(sample.processor_instances, 1,
+                "the returned output is caller-owned and must not consume optional native retention");
+            assert!(sample.processor_bytes <= policy.max_processor_bytes);
+        }
+        assert_eq!(
+            records[0].0, records[1].0,
+            "same actual worker survived seek/change"
+        );
+        assert_eq!(
+            records[0].1, records[1].1,
+            "same parent-issued owner namespace"
+        );
+        assert_ne!(
+            records[0].2, records[1].2,
+            "new raster invalidates image analysis"
+        );
+        execution.reconfigure(EffectExecutionSessionConfig {
+            max_processor_instances: 0,
+            max_processor_bytes: 0,
+            ..config
+        });
+        assert_eq!(execution.diagnostics().processor_instances, 0);
+        let graph = prepared
+            .evaluate(TimelineTime::new(8, 24).expect("exact time"))
+            .expect("same actual author program");
+        let output = execution
+            .apply_compiled_rgba_f32(
+                EffectFloatFrameView::new(EffectFrameExtent::new(width, height), format, &input),
+                &graph,
+                8,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("optional zero never rejects an otherwise active-admitted frame");
+        assert_eq!(output.pixels(), input.as_slice());
+        drop(output);
+        assert_eq!(execution.diagnostics().processor_instances, 0);
+        let contents = std::fs::read_to_string(&receipt_path).expect("replacement owner record");
+        let replacement = contents.lines().last().expect("third record");
+        assert_eq!(contents.lines().count(), 3);
+        let (_, uid) = replacement.split_once('\t').expect("actual native record");
+        assert_ne!(
+            uid.split(':').nth(1).expect("new owner"),
+            records[0].1,
+            "actual eviction cannot be hidden as same-owner reuse; OS PID reuse is legal"
+        );
     }
 }

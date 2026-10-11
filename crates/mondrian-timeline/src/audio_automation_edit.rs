@@ -228,6 +228,45 @@ impl AudioAutomationCurveContract {
         &self.schema
     }
 
+    /// Prepare one definition-domain write at an exact owner-local author time.
+    ///
+    /// Rewriting an existing key retains its identity, interpolation and tangent
+    /// intent. A new key uses the definition's first admitted interpolation.
+    /// The same complete edit/constraint validator performs the mutation; no
+    /// sample/frame projection or second curve algorithm is used here.
+    pub fn preview_value_at_time(
+        &self,
+        curve: &ExactAutomationCurve,
+        time: TimelineTime,
+        value: f64,
+    ) -> Result<ExactAutomationCurve, AudioAutomationEditError> {
+        let mut keyframe = match curve.keyframes.iter().find(|key| key.time == time) {
+            Some(existing) => existing.clone(),
+            None => {
+                let interpolation = self
+                    .schema
+                    .allowed_interpolations
+                    .first()
+                    .ok_or(AudioAutomationEditError::InterpolationNotAllowed)?;
+                let mut fresh = ExactAutomationKeyframe::linear(time, value);
+                fresh.interpolation_to_next = match interpolation {
+                    ParameterInterpolation::Hold => {
+                        mondrian_core::AutomationSegmentInterpolation::Hold
+                    }
+                    ParameterInterpolation::Linear => {
+                        mondrian_core::AutomationSegmentInterpolation::Linear
+                    }
+                    ParameterInterpolation::Bezier => {
+                        mondrian_core::AutomationSegmentInterpolation::Bezier
+                    }
+                };
+                fresh
+            }
+        };
+        keyframe.value = value;
+        self.preview_edit(curve, &AudioAutomationEdit::UpsertKeyframe { keyframe })
+    }
+
     /// Prepare one exact curve without publishing state, generation or author history.
     /// Identity, scalar and handle values, animation and interpolation are definition-admitted.
     pub fn preview_edit(
@@ -342,6 +381,9 @@ pub enum AudioAutomationEditBlocker {
 /// Fail-closed stable-address or parameter-contract failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAutomationAddressError {
+    /// The captured numeric definition cannot provide a valid explicit binding value.
+    #[error("Audio parameter definition is invalid: {0}")]
+    ParameterContract(AudioAuthoringError),
     /// Track is absent from the Sequence audio Timeline.
     #[error("Audio automation references an unknown audio Track: {0}")]
     UnknownTrack(TrackId),
@@ -571,8 +613,19 @@ pub fn inspect_audio_automation<'a>(
                 target: target.clone(),
                 time_domain: rack_time_domain(sequence, rack),
                 curve_contract: AudioAutomationCurveContract::processor(parameter.schema.clone()),
-                default_value: parameter.automation.default_value,
-                curve: Some(&parameter.automation),
+                default_value: parameter
+                    .automation
+                    .as_ref()
+                    .map_or_else(
+                        || {
+                            crate::audio::processor_parameter_default_value(
+                                &parameter.schema.default_value,
+                            )
+                        },
+                        |curve| Ok(curve.default_value),
+                    )
+                    .map_err(AudioAutomationAddressError::ParameterContract)?,
+                curve: parameter.automation.as_ref(),
                 value_contract: AudioAutomationValueContract {
                     value_type: parameter.schema.value_type,
                     hard_range: numeric.hard_range,
@@ -604,7 +657,7 @@ pub fn apply_audio_automation_edit(
         .map_err(invalid_automation)?,
     };
     let prepared = inspection.curve_contract().preview_edit(&source, &request.edit)?;
-    if source == prepared {
+    if inspection.curve().is_some() && source == prepared {
         return Ok(AudioAutomationEditOutcome { changed: false });
     }
     let mut candidate = sequence.clone();

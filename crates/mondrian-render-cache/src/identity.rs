@@ -1,4 +1,4 @@
-use mondrian_core::ResolvedVisualFrameIdentity;
+use mondrian_core::{ColorFrameAlphaFormats, ResolvedVisualFrameIdentity};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -27,38 +27,21 @@ impl TimelineRenderCacheFormat {
     }
 }
 
-/// Alpha interpretation of cached working-linear samples.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TimelineRenderCacheAlpha {
-    /// RGB is unassociated and alpha is straight coverage.
-    StraightCoverage,
-}
-
-impl TimelineRenderCacheAlpha {
-    pub(crate) const fn code(self) -> u8 {
-        match self {
-            Self::StraightCoverage => 1,
-        }
-    }
-
-    pub(crate) const fn from_code(code: u8) -> Option<Self> {
-        match code {
-            1 => Some(Self::StraightCoverage),
-            _ => None,
-        }
-    }
-}
-
 /// Complete content-addressed identity of one cached Timeline frame.
 #[derive(Debug, Clone, Copy)]
 pub struct TimelineRenderCacheIdentity {
     digest: [u8; 32],
     expected_extent: Option<(u32, u32)>,
+    alpha_admission: ColorFrameAlphaFormats,
 }
 
 impl TimelineRenderCacheIdentity {
     pub(crate) const fn from_digest(digest: [u8; 32]) -> Self {
-        Self { digest, expected_extent: None }
+        Self {
+            digest,
+            expected_extent: None,
+            alpha_admission: ColorFrameAlphaFormats::ALL,
+        }
     }
 
     /// Bind one complete resolved visual identity to its physical cache envelope.
@@ -67,18 +50,23 @@ impl TimelineRenderCacheIdentity {
         width: u32,
         height: u32,
         format: TimelineRenderCacheFormat,
-        alpha: TimelineRenderCacheAlpha,
+        alpha_admission: ColorFrameAlphaFormats,
     ) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(b"mondrian.timeline-render-cache.identity.v2");
+        hasher.update(b"mondrian.timeline-render-cache.identity.v3");
         field(&mut hasher, b"resolved-visual", &visual.digest());
         field(&mut hasher, b"width", &width.to_le_bytes());
         field(&mut hasher, b"height", &height.to_le_bytes());
         field(&mut hasher, b"format", &[format.code()]);
-        field(&mut hasher, b"alpha", &[alpha.code()]);
+        field(
+            &mut hasher,
+            b"alpha-admission",
+            &[alpha_admission.identity_code()],
+        );
         Self {
             digest: hasher.finalize().into(),
             expected_extent: Some((width, height)),
+            alpha_admission,
         }
     }
 
@@ -89,6 +77,11 @@ impl TimelineRenderCacheIdentity {
 
     pub(crate) const fn expected_extent(self) -> Option<(u32, u32)> {
         self.expected_extent
+    }
+
+    /// Complete actual-association admission bound into the semantic signature.
+    pub const fn alpha_admission(self) -> ColorFrameAlphaFormats {
+        self.alpha_admission
     }
 
     /// Lowercase hexadecimal filename identity.
@@ -142,7 +135,7 @@ mod tests {
             width,
             2160,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-            TimelineRenderCacheAlpha::StraightCoverage,
+            ColorFrameAlphaFormats::only(mondrian_core::ColorFrameAlpha::StraightCoverage),
         )
     }
 
@@ -157,7 +150,7 @@ mod tests {
         let hex = identity(b"frame-10", 3840).hex();
         assert_eq!(
             hex,
-            "85f05971f32b99e5b72830d8c58d3cfc3bcb021f2f5bc6ac85e10938e8161fd7"
+            "4ac3cedc2e9e815a4de8b2c8e7d8b27770302ffb0511e9ea091c945ccb384e3d"
         );
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));

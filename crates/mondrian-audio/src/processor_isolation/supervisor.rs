@@ -6,6 +6,7 @@ use super::protocol::{
 use super::{IsolatedAudioProcessorWorkerSpec, ISOLATED_AUDIO_PROCESSOR_ENDPOINT_ENV};
 use crate::{AudioProcessorHostError, AudioRenderContract};
 use memmap2::{MmapMut, MmapOptions};
+use sha2::Digest;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -85,6 +86,9 @@ impl SupervisedAudioWorker {
         }
         let prepare = PrepareWire {
             schema_version: PROTOCOL_VERSION,
+            native_lane: super::native_worker_lane_wire::NativeWorkerLaneWire::capture(
+                spec.native_lane,
+            )?,
             nonce,
             payload: spec.preparation_payload.clone(),
             execution_contract: ExecutionContractWire::capture(spec.plugin_execution_contract)?,
@@ -182,7 +186,7 @@ impl SupervisedAudioWorker {
         &mut self,
         operation: &'static str,
         command: WorkerCommand,
-    ) -> Result<(), AudioProcessorHostError> {
+    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
         if !self.active {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
@@ -200,8 +204,436 @@ impl SupervisedAudioWorker {
             WorkerResponse::read_from(&mut self.control)
         })();
         match result {
-            Ok(WorkerResponse::Completed) => Ok(()),
+            Ok(WorkerResponse::Completed) => Ok(None),
+            Ok(WorkerResponse::CompletedWithPending(request)) => Ok(Some(request)),
+            Ok(WorkerResponse::DeferredForConfiguration(request)) => {
+                Err(AudioProcessorHostError::ReprepareRequired(request))
+            }
             Ok(WorkerResponse::Failed(detail)) => {
+                self.terminate();
+                Err(worker_failed_detail(operation, &detail))
+            }
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
+    fn admit_native_object(
+        &mut self,
+        object: crate::NativeAudioObjectObservation,
+    ) -> Result<(), AudioProcessorHostError> {
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.child.try_wait() {
+            Ok(None) if self.child.id() == object.process_id().get() => Ok(()),
+            Ok(_) => {
+                self.terminate();
+                Err(worker_failed_detail(
+                    "native object observation",
+                    "native object belongs to a retired or different supervised child",
+                ))
+            }
+            Err(error) => {
+                self.terminate();
+                Err(worker_failed("native object observation", error))
+            }
+        }
+    }
+
+    pub(super) fn observe_native_audio_object(
+        &mut self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        // Capability preparation must not consume unrelated diagnostic events.
+        self.poll_native_observations(crate::NativeAudioObservationConsumption::Preserve)
+            .map(|observations| observations.object)
+    }
+
+    pub(super) fn poll_native_observations(
+        &mut self,
+        consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        self.poll_native_observations_with_timeout(consumption, self.state_entry_timeout)
+    }
+
+    pub(super) fn preflight_native_observations(
+        &mut self,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        self.poll_native_observations_with_timeout(
+            crate::NativeAudioObservationConsumption::Preserve,
+            self.operation_timeout,
+        )
+    }
+
+    fn poll_native_observations_with_timeout(
+        &mut self,
+        consumption: crate::NativeAudioObservationConsumption,
+        timeout: Duration,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        let operation = "native observation";
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if let Err(error) = self.configure_control_timeout(timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::PollNativeObservations,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            super::native_audio_object_wire::write_observation_request(
+                &mut self.control,
+                consumption,
+            )?;
+            super::native_audio_object_wire::read_observation_reply(&mut self.control)
+        })();
+        match result {
+            Ok(observations) => {
+                if observations.owner_process_id().map(|pid| pid.get()) != Some(self.child.id()) {
+                    self.terminate();
+                    return Err(worker_failed_detail(
+                        operation,
+                        "observation belongs to a different supervised child",
+                    ));
+                }
+                match self.child.try_wait() {
+                    Ok(None) => {}
+                    Ok(_) => {
+                        self.terminate();
+                        return Err(worker_failed_detail(
+                            operation,
+                            "native observation child already retired",
+                        ));
+                    }
+                    Err(error) => {
+                        self.terminate();
+                        return Err(worker_failed(operation, error));
+                    }
+                }
+                if let Some(object) = observations.object {
+                    self.admit_native_object(object)?;
+                }
+                Ok(observations)
+            }
+            Err(error) => {
+                let error = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn bind_native_audio_object(
+        &mut self,
+        request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        let operation = "native object binding";
+        if self.child.id() != request.expected_object.process_id().get() {
+            // A stale/foreign requested owner is a typed intent refusal, not
+            // evidence that the currently retained child/socket is corrupt.
+            return Ok(crate::NativeAudioObjectBindOutcome::Refused(
+                crate::NativeAudioObjectBindRefusal::ObjectChanged,
+            ));
+        }
+        self.admit_native_object(request.expected_object)?;
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::BindNativeObject,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            super::native_audio_object_wire::write_bind_request(&mut self.control, request)?;
+            super::native_audio_object_wire::read_bind_reply(&mut self.control, request)
+        })();
+        match result {
+            Ok(outcome) => {
+                if let crate::NativeAudioObjectBindOutcome::Bound(receipt) = outcome {
+                    self.admit_native_object(receipt.object())?;
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                let error = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn prepare_native_author_state_entry(
+        &mut self,
+        request: crate::NativeAudioAuthorStateEntryRequest<'_>,
+    ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        use crate::NativeAudioAuthorStateEntryOutcome as Outcome;
+        let operation = "native author state-entry preparation";
+        if request.binding.expected_object.process_id().get() != self.child.id() {
+            return Ok(Outcome::Refused(
+                crate::NativeAudioAuthorStateEntryRefusal::OwnerChanged,
+            ));
+        }
+        // A retry intentionally names the OLD object. Only the child's private
+        // exact preparation may acknowledge that link; an old object cannot be
+        // sent through the ordinary new-object admission shortcut.
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::PrepareAuthorStateEntry,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            super::native_audio_author_state_entry_wire::write_request(
+                &mut self.control,
+                &request,
+            )?;
+            super::native_audio_author_state_entry_wire::read_reply(&mut self.control)
+        })();
+        match result {
+            Ok(Outcome::Prepared(receipt)) => {
+                let expected_digest: [u8; 32] = sha2::Sha256::digest(request.configuration).into();
+                if receipt.source_binding() != request.binding
+                    || receipt.source() != request.source
+                    || receipt.configuration_bytes() != request.configuration.len()
+                    || receipt.configuration_sha256() != expected_digest
+                {
+                    self.terminate();
+                    return Err(worker_failed(
+                        operation,
+                        "actual preparation differs from requested owner/configuration",
+                    ));
+                }
+                self.admit_native_object(receipt.object())?;
+                Ok(Outcome::Prepared(receipt))
+            }
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let error = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn open_native_audio_editor(
+        &mut self,
+        request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        self.editor_control(request.binding(), Some(&request))
+    }
+
+    pub(super) fn close_native_audio_editor(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        self.editor_control(binding, None)
+    }
+
+    fn editor_control(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+        open: Option<&crate::NativeAudioEditorOpenRequest>,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        use super::native_audio_editor_wire::{self as wire, EditorReply};
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if self.child.id() != binding.expected_object.process_id().get() {
+            return Ok(crate::NativeAudioEditorOutcome::Refused(
+                crate::NativeAudioEditorRefusal::OwnerChanged,
+            ));
+        }
+        self.admit_native_object(binding.expected_object)?;
+        let operation = if open.is_some() {
+            "native editor open"
+        } else {
+            "native editor close"
+        };
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: if open.is_some() {
+                    super::protocol::CommandKind::EditorOpen
+                } else {
+                    super::protocol::CommandKind::EditorClose
+                },
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            if let Some(request) = open {
+                wire::write_open_request(&mut self.control, request)?;
+            } else {
+                super::native_audio_object_wire::write_bind_request(&mut self.control, binding)?;
+            }
+            wire::read_reply(&mut self.control, binding, open.is_some())
+        })();
+        match result {
+            Ok(EditorReply::Outcome(outcome)) => {
+                self.admit_native_object(binding.expected_object)?;
+                Ok(outcome)
+            }
+            Ok(EditorReply::Failed(detail)) => {
+                self.terminate();
+                Err(worker_failed_detail(operation, &detail))
+            }
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
+    pub(super) fn query_native_configuration_cohort(
+        &mut self,
+    ) -> Result<Option<super::NativeRequestCohort>, AudioProcessorHostError> {
+        let operation = "configuration cohort query";
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::PollConfigurationCohort,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            super::native_configuration_wire::read_cohort_reply(&mut self.control)
+        })();
+        match result {
+            Ok(cohort) => Ok(cohort),
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
+    pub(super) fn service_native_configuration(
+        &mut self,
+        request: super::NativeConfigurationControlRequest<'_>,
+    ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        use super::native_configuration_wire::{self as wire, ControlReply};
+        let operation = "configuration control";
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        wire::validate_request(&request)
+            .map_err(|error| AudioProcessorHostError::InvalidContract(error.to_string()))?;
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::ServiceConfiguration,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            wire::write_request(&mut self.control, &request)?;
+            wire::read_reply(&mut self.control, &request)
+        })();
+        match result {
+            Ok(ControlReply::Outcome(outcome)) => Ok(outcome),
+            Ok(ControlReply::Failed(detail)) => {
+                self.terminate();
+                Err(worker_failed_detail(operation, &detail))
+            }
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
+
+    pub(super) fn stage_native_configuration_seed(
+        &mut self,
+        request: super::NativeConfigurationSeedRequest<'_>,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        super::native_configuration_seed_wire::validate_stage(&request)
+            .map_err(|error| AudioProcessorHostError::InvalidContract(error.to_string()))?;
+        self.seed_control(
+            "configuration seed stage",
+            super::protocol::CommandKind::StageConfigurationSeed,
+            request.ticket,
+            request.seed_capacity_grant_bytes,
+            Some(&request),
+        )
+    }
+
+    pub(super) fn commit_native_configuration_seed(
+        &mut self,
+        staged: super::NativeConfigurationSeedReceipt,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        self.seed_control(
+            "configuration seed commit",
+            super::protocol::CommandKind::CommitConfigurationSeed,
+            staged.ticket,
+            staged.child_seed_capacity_bytes,
+            None,
+        )
+    }
+
+    fn seed_control(
+        &mut self,
+        operation: &'static str,
+        kind: super::protocol::CommandKind,
+        ticket: super::NativeConfigurationSeedTicket,
+        grant: usize,
+        stage: Option<&super::NativeConfigurationSeedRequest<'_>>,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        use super::native_configuration_seed_wire::{self as wire, SeedReply};
+        if !self.active {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand { kind, start_sample: 0, frames: 0, event_count: 0 }
+                .write_to(&mut self.control)?;
+            if let Some(request) = stage {
+                wire::write_stage(&mut self.control, request)?;
+            } else {
+                wire::write_commit(&mut self.control, ticket)?;
+            }
+            wire::read_reply(&mut self.control, ticket, grant)
+        })();
+        match result {
+            Ok(SeedReply::Outcome(outcome)) => Ok(outcome),
+            Ok(SeedReply::Failed(detail)) => {
                 self.terminate();
                 Err(worker_failed_detail(operation, &detail))
             }
@@ -632,18 +1064,24 @@ mod control_timeout_worker_lifecycle {
         assert_eq!(worker.control.write_timeout()?, Some(operation));
         assert!(worker.control.nodelay()?);
 
-        worker.invoke(
-            "qualification state entry",
-            command(super::super::protocol::CommandKind::EnterState, 0),
-        )?;
+        assert_eq!(
+            worker.invoke(
+                "qualification state entry",
+                command(super::super::protocol::CommandKind::EnterState, 0),
+            )?,
+            None
+        );
         assert_eq!(worker.configured_control_timeout, Some(enter));
         assert_eq!(worker.control.read_timeout()?, Some(enter));
         assert_eq!(worker.control.write_timeout()?, Some(enter));
         for block in 0..8 {
-            worker.invoke(
-                "qualification process",
-                command(super::super::protocol::CommandKind::Process, block * 4),
-            )?;
+            assert_eq!(
+                worker.invoke(
+                    "qualification process",
+                    command(super::super::protocol::CommandKind::Process, block * 4),
+                )?,
+                None
+            );
             assert_eq!(worker.configured_control_timeout, Some(operation));
             assert_eq!(worker.control.read_timeout()?, Some(operation));
             assert_eq!(worker.control.write_timeout()?, Some(operation));
@@ -651,10 +1089,13 @@ mod control_timeout_worker_lifecycle {
         }
         // Switch back to the long state budget before shutdown, exercising its
         // real transition to the existing shorter control budget.
-        worker.invoke(
-            "qualification state entry",
-            command(super::super::protocol::CommandKind::EnterState, 100),
-        )?;
+        assert_eq!(
+            worker.invoke(
+                "qualification state entry",
+                command(super::super::protocol::CommandKind::EnterState, 100),
+            )?,
+            None
+        );
         let _completed_gracefully = worker.shutdown();
         assert!(!worker.active);
         assert_eq!(
@@ -678,14 +1119,20 @@ mod control_timeout_worker_lifecycle {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let budget = Duration::from_millis(100);
         let mut worker = launch_existing_test_child(budget, budget)?;
-        worker.invoke(
-            "qualification state entry",
-            command(super::super::protocol::CommandKind::EnterState, 0),
-        )?;
-        worker.invoke(
-            "qualification process",
-            command(super::super::protocol::CommandKind::Process, 0),
-        )?;
+        assert_eq!(
+            worker.invoke(
+                "qualification state entry",
+                command(super::super::protocol::CommandKind::EnterState, 0),
+            )?,
+            None
+        );
+        assert_eq!(
+            worker.invoke(
+                "qualification process",
+                command(super::super::protocol::CommandKind::Process, 0),
+            )?,
+            None
+        );
         let _completed_gracefully = worker.shutdown();
         assert!(!worker.active);
         assert_eq!(worker.configured_control_timeout, Some(budget));
@@ -700,10 +1147,13 @@ mod control_timeout_worker_lifecycle {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut worker =
             launch_existing_test_child(Duration::from_secs(1), Duration::from_secs(30))?;
-        worker.invoke(
-            "qualification state entry",
-            command(super::super::protocol::CommandKind::EnterState, 0),
-        )?;
+        assert_eq!(
+            worker.invoke(
+                "qualification state entry",
+                command(super::super::protocol::CommandKind::EnterState, 0),
+            )?,
+            None
+        );
         // This alias observes connection retirement, not another handle's options.
         // The actual worker handle's shutdown budget is checked above. A clone
         // retained the old timeout on the qualified Windows implementation.

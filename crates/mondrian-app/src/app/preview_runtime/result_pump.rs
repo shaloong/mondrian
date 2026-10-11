@@ -87,6 +87,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             candidate_retry_required: false,
             needs_follow_up_poll: false,
             frame_delivery_candidates,
+            processor_feedback: None,
+            processor_progress: None,
+            native_gui_actions: Default::default(),
         }
     }
 

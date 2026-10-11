@@ -11,7 +11,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Current serialized Playback Evidence schema.
-pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 6;
+pub const PLAYBACK_EVIDENCE_SCHEMA_VERSION: u32 = 7;
 
 /// Bounded retention policy for one evidence collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +186,8 @@ pub struct PlaybackStateResidency {
     pub playing_us: u64,
     /// Time under recovery policy.
     pub recovering_us: u64,
+    /// Time retaining play intent while native configuration blocks audio.
+    pub native_audio_control_hold_us: u64,
     /// Time at content end.
     pub ended_us: u64,
     /// Time blocked by correctness/capability policy.
@@ -379,6 +381,7 @@ struct PlaybackStateResidencyDuration {
     priming: Duration,
     playing: Duration,
     recovering: Duration,
+    native_audio_control_hold: Duration,
     ended: Duration,
     blocked: Duration,
 }
@@ -391,6 +394,7 @@ impl PlaybackStateResidencyDuration {
             priming_us: duration_us(self.priming),
             playing_us: duration_us(self.playing),
             recovering_us: duration_us(self.recovering),
+            native_audio_control_hold_us: duration_us(self.native_audio_control_hold),
             ended_us: duration_us(self.ended),
             blocked_us: duration_us(self.blocked),
         }
@@ -836,7 +840,9 @@ impl PlaybackEvidenceCollector {
             || !previous_clock_running
             || matches!(
                 snapshot.state,
-                TransportState::Stopped | TransportState::Blocked
+                TransportState::Stopped
+                    | TransportState::Blocked
+                    | TransportState::HoldingForNativeAudioControl
             )
             || snapshot.position.frame == previous_frame
         {
@@ -914,6 +920,9 @@ impl PlaybackEvidenceCollector {
                 TransportState::Priming => &mut self.state_residency.priming,
                 TransportState::Playing => &mut self.state_residency.playing,
                 TransportState::Recovering => &mut self.state_residency.recovering,
+                TransportState::HoldingForNativeAudioControl => {
+                    &mut self.state_residency.native_audio_control_hold
+                }
                 TransportState::Ended => &mut self.state_residency.ended,
                 TransportState::Blocked => &mut self.state_residency.blocked,
             };

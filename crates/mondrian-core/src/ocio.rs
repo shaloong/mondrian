@@ -3671,6 +3671,12 @@ impl OcioCpuProcessorSession {
     }
 
     /// Apply a color-space processor through this Session.
+    ///
+    /// `data` must contain complete RGBA pixels (four components per pixel).
+    /// Every supplied and produced component must be finite, including alpha
+    /// and identity conversions. A failed output check can leave `data` modified;
+    /// callers must publish pixels only after success. Invalid samples do not
+    /// invalidate the processor or change the caller's alpha interpretation.
     pub fn convert_identity_float(
         &mut self,
         engine: &ColorEngine,
@@ -3680,7 +3686,7 @@ impl OcioCpuProcessorSession {
     ) -> Result<(), String> {
         validate_engine_working_identities(engine, &[src, dst])?;
         if data.is_empty() || src == dst {
-            return Ok(());
+            return validate_ocio_float_buffer(data, "input");
         }
         self.apply(
             engine,
@@ -3690,6 +3696,9 @@ impl OcioCpuProcessorSession {
     }
 
     /// Apply a display/view processor through this Session.
+    ///
+    /// Input and output buffers have the same complete-RGBA and finite-component contract as
+    /// [`Self::convert_identity_float`]; this does not interpret alpha coverage.
     pub fn display_transform_identity_float(
         &mut self,
         engine: &ColorEngine,
@@ -3751,6 +3760,7 @@ impl OcioCpuProcessorSession {
         request: OcioStaticProcessorRequest,
         data: &mut [f32],
     ) -> Result<(), String> {
+        validate_ocio_float_buffer(data, "input")?;
         // Dynamic-property payloads mutate the owner-thread CPUProcessor and do
         // not alter the config or processor graph. Excluding them from this key
         // preserves the expensive processor while still applying the current
@@ -3763,7 +3773,7 @@ impl OcioCpuProcessorSession {
             self.hits = self.hits.saturating_add(1);
             apply_engine_dynamic_properties_to_cpu(engine, processor)?;
             apply_cpu_processor_float(processor, data);
-            return Ok(());
+            return validate_ocio_float_buffer(data, "output");
         }
 
         let (processor, shared_hit) = cpu_processor_from_static(engine, &request)?;
@@ -3776,7 +3786,7 @@ impl OcioCpuProcessorSession {
         let Some(cache) = &mut self.cache else {
             apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
             apply_cpu_processor_float(&processor, data);
-            return Ok(());
+            return validate_ocio_float_buffer(data, "output");
         };
         if cache.len() == self.capacity {
             self.evictions = self.evictions.saturating_add(1);
@@ -3787,8 +3797,21 @@ impl OcioCpuProcessorSession {
             .ok_or_else(|| "OCIO CPU processor Session lost a selected processor".to_owned())?;
         apply_engine_dynamic_properties_to_cpu(engine, processor)?;
         apply_cpu_processor_float(processor, data);
-        Ok(())
+        validate_ocio_float_buffer(data, "output")
     }
+}
+
+fn validate_ocio_float_buffer(data: &[f32], boundary: &str) -> Result<(), String> {
+    if !data.len().is_multiple_of(4) {
+        return Err(format!(
+            "OCIO {boundary} buffer must contain complete RGBA pixels, got {} components",
+            data.len()
+        ));
+    }
+    if let Some(index) = data.iter().position(|value| !value.is_finite()) {
+        return Err(format!("OCIO {boundary} component {index} must be finite"));
+    }
+    Ok(())
 }
 
 fn apply_uncached_cpu_processor(
@@ -3796,10 +3819,11 @@ fn apply_uncached_cpu_processor(
     request: OcioStaticProcessorRequest,
     data: &mut [f32],
 ) -> Result<(), String> {
+    validate_ocio_float_buffer(data, "input")?;
     let (processor, _shared_hit) = cpu_processor_from_static(engine, &request)?;
     apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
     apply_cpu_processor_float(&processor, data);
-    Ok(())
+    validate_ocio_float_buffer(data, "output")
 }
 
 fn validate_engine_display_view_selection(
@@ -3875,7 +3899,7 @@ pub(crate) fn apply_ocio_identity_float(
 ) -> Result<(), String> {
     validate_engine_working_identities(engine, &[src, dst])?;
     if data.is_empty() || src == dst {
-        return Ok(());
+        return validate_ocio_float_buffer(data, "input");
     }
     apply_uncached_cpu_processor(
         engine,
@@ -6239,5 +6263,158 @@ colorspaces:
             error.contains("does not expose required dynamic property"),
             "{error}"
         );
+    }
+
+    mod rgba_shape_boundary_tests {
+        use super::*;
+
+        fn identity() -> OcioColorSpaceIdentity {
+            OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709)
+        }
+
+        fn malformed_buffers() -> impl Iterator<Item = Vec<f32>> {
+            [1, 2, 3, 5, 6, 7, 4097].into_iter().map(|length| vec![0.25; length])
+        }
+
+        fn bits(data: &[f32]) -> Vec<u32> {
+            data.iter().map(|value| value.to_bits()).collect()
+        }
+
+        #[test]
+        fn ocio_rgba_shape_session_identity_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            let mut session = OcioCpuProcessorSession::new(1);
+            let mut empty = [];
+            session
+                .convert_identity_float(&engine, &mut empty, identity(), identity())
+                .expect("empty complete raster is valid");
+            let mut positive = [f32::MAX, -0.0, -f32::MAX, -3.0];
+            let before = bits(&positive);
+            session
+                .convert_identity_float(&engine, &mut positive, identity(), identity())
+                .expect("all finite raw RGBA lanes are valid without interpreting alpha");
+            assert_eq!(bits(&positive), before);
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(session.convert_identity_float(&engine, &mut data, identity(), identity()).is_err(),
+                    "a Session identity conversion must reject an incomplete RGBA pixel at length {}", data.len());
+                assert_eq!(
+                    bits(&data),
+                    before,
+                    "input refusal happens before any transform"
+                );
+            }
+            assert_eq!(session.diagnostics().misses, 0);
+            assert_eq!(session.diagnostics().entries, 0);
+        }
+
+        #[test]
+        fn ocio_rgba_shape_engine_identity_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            let mut positive = [f32::MAX, -0.0, -f32::MAX, -3.0];
+            let before = bits(&positive);
+            engine
+                .convert_identity_float(&mut positive, identity(), identity())
+                .expect("public engine identity admits one complete finite pixel");
+            assert_eq!(bits(&positive), before);
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(engine.convert_identity_float(&mut data, identity(), identity()).is_err(),
+                    "an engine identity conversion must reject an incomplete RGBA pixel at length {}", data.len());
+                assert_eq!(bits(&data), before);
+            }
+        }
+
+        #[test]
+        fn ocio_rgba_shape_session_transform_refuses_partial_pixels_without_cache_changes() {
+            let engine = ColorEngine::mondrian_standard();
+            engine.ensure_loaded().expect("stock engine available");
+            let destination = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+            for capacity in [0, 1] {
+                let mut session = OcioCpuProcessorSession::new(capacity);
+                let mut positive = [0.25, 0.5, 0.75, -3.0];
+                session
+                    .convert_identity_float(&engine, &mut positive, identity(), destination)
+                    .expect("a complete finite pixel executes the native nonidentity transform");
+                assert!(positive.iter().all(|value| value.is_finite()));
+                assert_eq!(positive[3].to_bits(), (-3.0_f32).to_bits());
+                for mut data in malformed_buffers() {
+                    let before = bits(&data);
+                    let cache = session.diagnostics();
+                    assert!(session.convert_identity_float(&engine, &mut data, identity(), destination).is_err(),
+                        "cached and unretained Session transforms must reject partial RGBA at length {}", data.len());
+                    assert_eq!(bits(&data), before);
+                    assert_eq!(
+                        session.diagnostics(),
+                        cache,
+                        "invalid storage does not acquire or access a processor"
+                    );
+                }
+                let mut recovered = [0.25, 0.5, 0.75, -3.0];
+                session
+                    .convert_identity_float(&engine, &mut recovered, identity(), destination)
+                    .expect("the same processor Session remains usable after input refusal");
+                assert!(recovered.iter().all(|value| value.is_finite()));
+            }
+        }
+
+        #[test]
+        fn ocio_rgba_shape_engine_transform_refuses_partial_pixels_without_mutation() {
+            let engine = ColorEngine::mondrian_standard();
+            engine.ensure_loaded().expect("stock engine available");
+            let destination = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020);
+            let mut positive = [0.25, 0.5, 0.75, -3.0];
+            engine
+                .convert_identity_float(&mut positive, identity(), destination)
+                .expect("uncached public engine transform executes one complete finite pixel");
+            assert!(positive.iter().all(|value| value.is_finite()));
+            for mut data in malformed_buffers() {
+                let before = bits(&data);
+                assert!(
+                    engine.convert_identity_float(&mut data, identity(), destination).is_err(),
+                    "an uncached engine transform must reject partial RGBA at length {}",
+                    data.len()
+                );
+                assert_eq!(bits(&data), before);
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_float_finite_boundary_identity_and_uncached_admit_all_lanes_without_alpha_interpretation(
+    ) {
+        let engine = ColorEngine::mondrian_standard();
+        engine.ensure_loaded().expect("stock engine available");
+        let identity = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709);
+        let original = [f32::MAX, -0.0, -f32::MAX, -3.0];
+        let mut session = OcioCpuProcessorSession::new(1);
+        let mut positive = original;
+        session
+            .convert_identity_float(&engine, &mut positive, identity, identity)
+            .expect("Core admits finite raw Float lanes without a coverage policy");
+        assert_eq!(positive.map(f32::to_bits), original.map(f32::to_bits));
+        engine
+            .convert_identity_float(&mut positive, identity, identity)
+            .expect("uncached raw identity has the same finite-only contract");
+        assert_eq!(positive.map(f32::to_bits), original.map(f32::to_bits));
+        for lane in 0..4 {
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut data = original;
+                data[lane] = invalid;
+                let before = data.map(f32::to_bits);
+                assert!(session
+                    .convert_identity_float(&engine, &mut data, identity, identity)
+                    .is_err());
+                assert_eq!(
+                    data.map(f32::to_bits),
+                    before,
+                    "refused input is not processed"
+                );
+                assert!(engine.convert_identity_float(&mut data, identity, identity).is_err());
+                assert_eq!(data.map(f32::to_bits), before);
+            }
+        }
+        assert_eq!(session.diagnostics().misses, 0);
+        assert_eq!(session.diagnostics().entries, 0);
     }
 }

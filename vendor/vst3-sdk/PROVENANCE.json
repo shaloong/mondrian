@@ -34,13 +34,13 @@
     },
     {
       "path": "com-scrape-types/src/class.rs",
-      "bytes": 10883,
-      "sha256": "a52f26b439833deb4a88164104890416810ac6fc21233c2ccdb3ae70bb88a16c"
+      "bytes": 14428,
+      "sha256": "3a09bea443a721115a128ccabe70c9dd22a238fa0e6023d1d540913680a008fc"
     },
     {
       "path": "com-scrape-types/src/lib.rs",
-      "bytes": 6989,
-      "sha256": "51da8e7aa748ac38b64514fab0b1fcea7b9b3eee0d0152fed84107b6531a97fa"
+      "bytes": 7035,
+      "sha256": "7bfdd1d37a9ef8ddd3bff723901c2feb18df9254c6ffeabcd087b64242317172"
     },
     {
       "path": "com-scrape-types/src/ptr.rs",
@@ -94,13 +94,23 @@
     },
     {
       "path": "src/lib.rs",
-      "bytes": 2946,
-      "sha256": "c78a30c2090c71921e602fbc875ad0ba27aaf7bb6002dee8ba34363ac9d5065a"
+      "bytes": 2955,
+      "sha256": "2f34e7f44e2e08003370f6d5bc8b7dfd56dd4efcba517dbf43b2bef0b887bf87"
     },
     {
       "path": "src/support.rs",
       "bytes": 6326,
       "sha256": "70b10e60b5c35b19c17093ebdf0f2f36d539e6896c7f673528800d901702f95c"
+    },
+    {
+      "path": "LOCAL-OWNER-CHANGES.json",
+      "bytes": 3956,
+      "sha256": "97e3257e5044ce9731fe86f939f75e1a8ceecde0a1158e838fe974be596bc572"
+    },
+    {
+      "path": "LOCAL-OWNER-FORMAT-CHANGES.json",
+      "bytes": 1051,
+      "sha256": "bc1454b634b31285be59427951215f19796f212206d7d602fabadc70ce369eb2"
     }
   ],
   "local_packaging_changes": {
@@ -164,5 +174,38 @@
       "ITestPlugProvider2"
     ],
     "FUnknown_trait": "Original upstream generator uses the canonical custom COM support seam."
+  },
+  "local_runtime_deltas": [
+    {
+      "purpose": "Public borrowed COM wrapper Arc payload identity/layout; no generated ABI, header or refcount interpretation changed.",
+      "files": [
+        "com-scrape-types/src/class.rs",
+        "com-scrape-types/src/lib.rs"
+      ],
+      "full_std_arc_allocation_not_claimed": true,
+      "qualification": "Source-only; exact actual allocator and compiler/target std profile still required."
+    },
+    {
+      "purpose": "Canonical ComWeak borrowing and allocation lifetime observation; generated ABI/header/refcount code unchanged.",
+      "files": [
+        "com-scrape-types/src/class.rs",
+        "com-scrape-types/src/lib.rs",
+        "src/lib.rs"
+      ],
+      "receipt": "LOCAL-OWNER-CHANGES.json",
+      "receipt_sha256_raw": "97e3257e5044ce9731fe86f939f75e1a8ceecde0a1158e838fe974be596bc572",
+      "full_std_arc_allocation_not_claimed": true,
+      "qualification": "Windows GNU: complete VST3 host library 260 passed and actual allocator/class/generated COM reference lifetime control 1 passed, both zero failed/ignored with stable sources. Whole allocation/candidate peak, native plugin and cross-platform performance remain unqualified.",
+      "local_formatting_receipt": "LOCAL-OWNER-FORMAT-CHANGES.json",
+      "local_formatting_receipt_sha256_raw": "bc1454b634b31285be59427951215f19796f212206d7d602fabadc70ce369eb2"
+    }
+  ],
+  "local_formatting": {
+    "receipt": "LOCAL-FORMAT-CHANGES.json",
+    "receipt_sha256_raw": "d1d99e2233c99ebf3e0571e12c55542d9a881a1f72d09d39e30492777c77c29b",
+    "file_count": 2,
+    "official_input_bytes_unchanged": true,
+    "generated_abi_bytes_unchanged": true,
+    "runtime_qualification": false
   }
 }

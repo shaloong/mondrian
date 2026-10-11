@@ -2828,13 +2828,20 @@ primary/default stream and unknown native channel-layout labels come from Fluent
 Media language tags, user-authored stream titles, stable identities and named
 multichannel speaker layouts retain their canonical values. Re-projecting locale
 changes labels without modifying component selection, channel mapping or author
-generation. Both catalogs carry the same message IDs.
+generation. Rack Bus ownership, Mixer route destinations and route-create menus
+resolve their owned Bus prefix through the existing Fluent caption. Missing Bus
+identities use the existing unavailable-owner message. User-authored Bus names
+and stable identities remain opaque arguments in English, Chinese and pseudo
+locale projections. Both catalogs carry the same message IDs.
 
 Inspector position, scale and anchor axis controls emit sparse channel edits,
 resolved against the current Clip at admission. They never capture sibling
 values in callbacks. Viewer gestures explicitly replace complete vectors, and
-compensated anchor gestures still commit anchor and position atomically. Both
-forms use Core's tagged parameter-write contract and the existing authoring
+compensated anchor gestures still commit anchor and position atomically. The
+Viewer compensation uses the complete current linear transform, including
+rotation and nonuniform scale. Its addressed parameter batch is the application
+anchor-drag entry point. Both forms use Core's tagged parameter-write contract
+and the existing authoring
 transaction. Clip, Effect and Mask share that same write algebra. The alpha API
 requires an explicit write kind; there is no legacy
 payload interpretation. Opacity and scale percentages use Double presentation
@@ -4608,3 +4615,306 @@ rebind, automation and lock/delete boundaries refuse stale owners before author
 mutation. Discrete keyboard nudges and confirmed numeric text remain separate
 scalar commands. Host regression receipts, rather than this source description,
 qualify the actual Router/capture/author behavior.
+
+
+### Numeric keyboard adjustments and pointer coordinates
+
+A numeric Slider/Input pair routes focused numeric keys through its actual
+NumberInputModel and exact `T` storage. Arrow keys use the declared domain step,
+Shift multiplies that step, Page uses the existing numeric Page increment and
+Home/End select admitted hard endpoints. A legal baseline outside the pointer
+soft range and wide integers never roundtrip through normalized Float32 geometry
+to calculate a keyboard successor. Focused numeric text retains Left/Right and
+Home/End text navigation, draft/IME/selection and commit/cancel behavior. Generic
+Sliders without a numeric pair still edit their own coordinate model.
+
+The existing Router `before_child_event` seam also offers KeyDown to ancestors
+of the actual focus target, stopping at the active modal scope. A numeric pair
+accepts only classified numeric keys while enabled and while `ctx.focus` owns its
+exact Slider; modifiers and other keys continue their normal route. No cloned
+numeric model, second focus manager or restored callback is introduced. An
+active pointer edit seals through its existing Finish before a distinct keyboard
+command; Escape continues the pointer Cancel route. A hard-bound no-op remains
+owned and adds no author history. Fresh typed callbacks still enter the sole
+author Session, which rejects stale, locked, deleted and rebound owners.
+
+Pointer edits retain the soft-range ratio/snapping path, and the existing peer
+synchronization publishes actual typed UI values/readouts. UI intent is not
+author success; Host acceptance/refusal still rebuilds from canonical state.
+Actual Host and Router regression receipts qualify the behavior. This design
+does not claim native AT action delivery or general Inspector focus retention.
+
+### Localized rack ownership captions
+
+Rack and mixer captions preserve author-provided bus names and typed owner addresses. Fluent interpolations retain Unicode directional isolation, including mixed Arabic and Latin names. Tests compare the rendered captions with the isolating marks present; translations never rewrite the author name or replace the owner identity.
+
+
+### Native audio cleanup hold projection
+
+App playback observes the existing Playback Engine ticket through
+`native_audio_control_hold_ticket` before allowing queued PCM reprime. Native
+control completion finalizes that same ticket through the existing Media result
+path; the UI does not construct a replacement hold, Runtime owner, or authoring
+transaction.
+
+## Native visual Question presentation
+
+The generic Inspector control subtree owns a private GUI presence claim. Selection
+metadata or a copied panel model cannot create it. Question dialogs reuse the
+shell's modal focus/Tab scope, theme tokens, localization and existing event
+router. Local Button activation callbacks use the existing enabled/pointer/key
+activation path and do not encode Yes/No in a serializable author Action. Full
+plugin text is shown in a scroll view. Only the actual Window surface-presented
+receipt for the painted current dialog marks human waiting. A constructed dialog,
+paint-only or skipped surface does not. Escape/dismissal is Failed, never a fake No.
+
+### Native audio editor author delivery and product controls
+
+The audio Rack native Open/Close row uses semantic widgets and existing Localizer catalogs. Product-owned capability, opening, pending and refusal labels are translated; external plug-in and parameter names remain their native metadata. The selected exact processor occurrence is carried with the sole Session/sequence/schema and an explicit TimelineTime owner domain. UI metadata locates work but cannot issue an installed native-owner lease.
+
+ResolveAndOpen runs through the existing Media worker and resolves/revalidates the actual current Hosted object rather than allocating a full UI inventory or opening a second controller. App accepts native callback proposals through the existing native Session gesture once. It retains accepted work across compilation, preparation and Ack retries, shares the already-issued author snapshot, and updates author metadata with the actual Plan/registered-claim swap. A callback proposal is not author success; stale owner/schema/session/time and failed resource admission remain typed pending/refusal states.
+
+Nonterminal Value batches can be auditioned after exact same-live Plan install/Ack. Begin and timestamp GroupFinish are not whole-gesture stop gates. The actual attachment target is kept separately from the current author target so Value batches do not orphan a queued Close. Terminal opaque peer synchronization, complete native Undo/save/reopen and physical GUI presentation remain qualification gaps; no window or unsupported capability alone establishes complete interaction support.
+
+## Actual native Question Window qualification
+
+The `validation` feature exposes `mondrian --validate-native-question request.json`
+on the normal product executable. Its existing internal worker dispatch remains
+the native child entry. The request names a real `.mdp`, native bundle and exact
+Sequence/Clip/Effect at the project playhead; these addresses grant no GUI or
+author capability. The existing Inspector section lifetime, active Dock panel,
+current Preview EditorRefresh work and sole Effects bank must admit the Question.
+
+The driver observes the original opaque cell only after the actual Window
+`render_draw_commands` result passes the existing Host surface gate, including
+the atlas follow-up. It never calls `presented`, `answer`, Dialog/child `event`,
+manual focus setters or a second renderer. One typed event per bounded Window
+tick enters the same `WinitUiRuntime`/`EventRouter` and ordinary action-drain seam
+as native input. Tab and Shift-Tab must visit the three actual modal controls;
+background pointer input cannot mutate the canonical author Session/history.
+The No pointer point comes from the exact original Button layout, not separately
+measured coordinates. Keyboard Yes, pointer No and Escape are separate real runs.
+
+The original cell retains its actual terminal reply for read-only observation;
+service sampling remains Unavailable after finish. A matching current feedback
+receipt must preserve work scope, preparation, provider revision, parent owner,
+supervised PID, native owner and Render invocation. A later service cannot satisfy
+that match. Window/App/EventLoop owners are consumed through the existing return
+and shutdown seams on success and operation failure. Timeout/setup failure never
+counts as native or physical qualification. Rust-owner shutdown does not assert
+OS compositor/process termination.
+
+This gate proves an actual surface-admitted Question, routed local input and
+matching native completion metadata. It does **not** prove the resulting Float
+working pixels, GPU readback, monitor precision or full native authoring. Those
+remain their independently pinned native/render gates; no shadow render or second
+pixel interpretation is introduced. The two portable observer/layout controls
+are new API contracts, not OLD behavioral RED or physical GUI acceptance.
+
+### Native Question saved fixture and first UI admission
+
+Host startup constructs an inert pending Preview projection when a Sequence is
+open. It does not Render before constructing the actual control subtree. The
+first Window Preview request synchronizes that root's real native effect section
+presence and active Inspector panel, using the existing registry. Ordinary startup
+and the validation driver share this ordering; selecting an effect or naming an
+author target cannot create a GUI claim. Workspace startup marks its pending
+Preview dirty so the ordinary first Window event admits output. Transport tests
+settle this real first refresh before measuring later action-only Render counts
+or Ready-to-Loading transitions; constructor state is not rendered evidence.
+
+With `validation`, the normal product command
+`--prepare-native-question-fixture absolute-request.json` uses public supervised
+OpenFX inspect/register, the sole App authoring Session, the existing AddToClip
+product action, and canonical App save/open. It creates a five-second generated
+SolidColor Clip at exact time zero and a registered owned SessionProbe occurrence
+in a new `.mdp`. Its qualification compares the complete saved/reopened Clip,
+effect/schema and Sequence settings, checks clean paused state, writes three typed
+requests, then consumes the actual App owners. It never writes project JSON/ZIP,
+creates a native Render/GUI capability, or answers a Question.
+
+The creator is setup and durable persistence evidence, not Window/native GUI
+acceptance. Fresh matching product and SessionProbe artifacts must execute the
+three real Window runs. Their actual surface/router/original native completion
+oracles remain required. Generated color media is a real Timeline source but does
+not qualify an external FFmpeg video decoder. Float pixel/readback acceptance and
+physical OS termination remain separate gates.
+
+### Inspector values after native reference removal
+
+An audio parameter with no host automation reference projects `static_value=None`
+and no automation plot. Inspector displays the localized plugin-controlled state,
+not the schema default as a current native value. Current native plain-value
+observations are ephemeral UI facts; unavailable observations remain unavailable.
+An explicit Reset action may deliberately bind the definition default through
+the existing author transaction. Parameter definitions and stable targets remain
+available, and native parameter/state changes still require the sole installed
+owner and Session admission.
+
+### Question operation and consuming Window shutdown budgets
+
+The real Question driver has an operation deadline for modal input and the
+original native completion. Expiry remains a failed operation. At consuming
+Window exit, one separate product shutdown deadline is frozen and shared by
+GPU retirement, Host services, Tokio and the returned App owner. The private
+validation handback carries that actual Instant; no component renews it. The
+surface-reopen driver's caller-owned external consuming deadline retains its
+existing exact meaning, including honest expiry. Setup failures and abnormal
+handbacks remain explicit failures rather than successful native completion.
+
+Validation records at most sixteen distinct read-only surface observations,
+retaining the final one: actual Window/adapter, whether an opaque Question was
+painted, its numeric owner/service coordinates, state before/after the unchanged
+surface gate, and actual renderer upload/resource diagnostics. These observations
+do not grant Presented, routed input, GUI authority, or float pixel acceptance;
+missing glyphs are not repaired with fabricated fallback acceptance.
+
+The startup ownership qualification keeps its twenty-six fault routes, opaque
+payload refusal, and two normal routes, but each actual App/Host lifecycle runs
+in a private validation-only non-inlined helper. The aggregate driver retains
+only reports. It neither increases the process stack nor changes product Host
+construction. Source extraction alone is not stack or native qualification.
+# Native Question validation observations
+
+## Same-view native audio attachment refresh
+
+The existing observation completion can refresh a visible native editor's
+current author target while retaining its original queued Close address. The
+attachment observation identifies the actual object and process but grants no
+author permission. An outstanding handoff retains its admitted target; after
+the exact acknowledgement clears that work, a repeated observation can refresh
+the same view without reopening it. Replacement clears the visible attachment
+and never implicitly opens a new native editor. Pending local processors expose
+their actual local epoch without an invented DSP coordinate.
+
+
+The validation Window records a bounded, read-only snapshot of actual Viewer
+geometry, current demand, section lifetime, Preview admission counters and
+worker callback evidence around each physical paint. Sampling does not issue
+work, bind a native GUI, renew a ticket, answer a Question or relax the product
+presentation gate. An absent native Question must be diagnosed before input
+or surface acceptance can be claimed.
+
+## Complete CPU composition and Viewer output
+
+The Adjustment Normal selector means effect strength (`Mix`), while Normal on
+ordinary Clips means source-over. App lowering carries the sole compiler's typed
+policy through both ordinary and heterogeneous Viewer layers; it never infers a
+second blend rule. Identity Mix can be omitted, while an explicit Blend over an
+identity effect remains an observable composite.
+
+A CPU-only Adjustment consumes the complete composited root through the existing
+serial CPU Preview owner. The same renderer compositor and compiled effect graphs
+execute that work; the Window never runs plugin Render or a second composition.
+The request explicitly selects either an encoded CPU raster or a working Float32
+result. A working result preserves its RGB, alpha association and color identity,
+then enters the ordinary GPU Viewer output and monitor stages. Fixed sRGB raster
+fallback still refuses unsupported monitor policies.
+
+Both CPU result kinds enter the sole playback Frame Store under the exact semantic
+output key and shared Viewer byte budget. Working admission charges actual Vec
+capacity, and immutable frame clones share the existing Arc pixels. Results are
+accepted only for the exact pending generation, epoch and output key. Cancelled,
+stale and unfunded results cannot become current presentation or loop as false
+successful residency. No additional cache, worker or effect interpretation is
+introduced. Source implementation does not by itself qualify a GPU submission,
+native plugin, physical display or performance deadline.
+
+## Shared native opaque state completion
+
+Native author handoff observes Preserved versus StateEntryRequired from the real
+Runtime. For state entry the App waits for Media output retirement, finalizes the
+real clock anchor, and commits through the existing author Snapshot and Source
+guards. The same issued Snapshot Arc is shared; no UI cursor or owner is minted.
+The accepted renderer Arc remains reusable only while its issued author fence,
+Sequence and presentation execution still match. Meter publisher metadata is
+swapped outside final guards and read on Main without the DSP/native mutex.
+
+An acknowledged state entry closes the old native attachment presentation. It
+does not report GUI acceptance, cancellation/Undo native reseed, physical device
+delivery or first-Play preservation as tested. Those have independent gates.
+
+### Exact CPU Working completion and its GPU continuation
+
+The production whole-root CPU compositor uses the existing single pending slot
+and result channel. One attempt captures the semantic key, issued output nonce,
+generation, epoch, complete playback intent, output target and candidate identity.
+Ready/failure publication must match that exact attempt. For an uncacheable graph,
+the completed Float32 result is detached once from the sole Playback Frame Store;
+a later request executes the graph again. A reusable result may stay resident.
+No second pixel holding map or native result cache is introduced.
+
+The ordinary identity upload preserves the scalar feedback from the matching
+actual CPU completion. It does not replace owner/progress/warning facts with an
+empty retirement view. New speculative work does not rebind current UI feedback.
+Generation invalidation retires the single pending completion and any unconsumed
+uncacheable record. Wrong/stale completions cannot publish feedback or pixels.
+
+The original immutable Float32 Arc and its Store-issued byte lease travel in the
+existing GPU candidate. Direct persisted working-cache hits also require Viewer
+admission before upload. Program Output and nondefault monitor adaptation remain
+the existing GPU contracts. Raster requests validate their output contract before
+scratch admission or compositor/processor entry. CPU Adjustment still executes
+the sole complete timeline compositor; neither a shadow render nor RGBA8 detour
+is used. The original GPU/device and physical Window acceptance gates remain
+required; source replay and portable ownership tests do not supply that evidence.
+
+WorkingGpu completion carries no output-transform diagnostic because that
+transform has not run yet; Raster completion carries the actual transform
+diagnostic. Absence is not a fabricated zero-work backend receipt.
+
+Working CPU pixels remain charged through the exact GPU submission owner and
+retire when its completion owner drops. The current published GPU texture keeps
+only its existing GPU output lease. A cached working frame may then be evicted
+before the next reservation. Under a one-frame Viewer grant, a still-live prior
+submission produces honest backpressure; its completion retirement restores
+headroom for the next exact frame. UHD 3840 by 2160 Float32 RGBA occupies
+132,710,400 bytes (126.5625 MiB) before metadata/capacity growth, so one fits a
+128 MiB pixel grant and two do not. No budget is enlarged from observed usage.
+The sequential portable control exercises real CPU callbacks and candidates
+through the existing submission lifecycle's controlled completion port; it does
+not claim a physical device callback or Window acceptance.
+Its authored preview scale is explicitly full resolution, and its first actual
+candidate extent is checked before enforcing the one-frame pixel grant. A
+logical Sequence resolution alone does not determine resolved preview residency.
+
+Request and completion structs place their work/resource lease after all payload
+fields, so ordinary Rust field retirement drops pixel owners before their charge.
+A refused actual-capacity completion keeps its work lease while explicitly
+retiring frame/cache/execution payloads, then releases the charge before sending
+cold failure metadata. Stale, cancellation, Busy and disconnect retirement must
+follow these same owners. The existing device-loss/timeout quarantine path is
+separate safety retirement; it is not successful callback/presentation evidence.
+
+GPU candidate preparation retains its `PreviewOwnedWorkingFrame` intact across
+every fallible output-boundary and layer-preparation branch. A layer only shares
+the original immutable pixel Arc. The successfully constructed candidate shares
+the same resource lease before the preparation owner retires; failed preparation
+drops layer payloads and then that owner's pixels before its charge. No detached
+pixel/lease local pair may create an uncharged early-return lifetime.
+
+### Timeline audio submitted-window continuity
+
+The Timeline PCM Adapter maps Media's generation into the sole Audio entry and
+retains generation protocol checks. Audio Delivery owns the submitted-window
+cursor; App has no second sample cursor or DSP continuity controller. Its common
+whole-root native preflight precedes exact signed-window validation, so a queued
+later window remains a typed native hold while the first window awaits cleanup
+or canonical author acceptance. Failed independent admitted windows retain the
+same-duration silence policy; stateful failures retain the sole Session poison
+policy. Same-live parameter handoff preserves the submitted cursor; an actual
+state-entry replacement clears it and requires a fresh generation entry.
+
+Native inspection interaction fixtures retain one boxed Host throughout their
+construction and split sidechain and Mixer setup into separate functions. This
+keeps large Host return values off nested test frames while exercising the same
+Host actions and Undo history on the default test-thread stack.
+
+Asset relink completion fixtures supply explicit default machine preferences
+and a unique preferences path, so installed plugin restoration is a separate
+workflow. A test-owned complete memory probe runs in the same resource observer,
+inventory, cadence, classifier, and slot allocator as the product. The relink
+controls retain real import, helper preparation, SQLite publication, terminal
+refresh, and the ten-second completion deadline. Critical pressure retains the
+queued request and original Asset path; a later observed Nominal sample admits
+that same request and publishes its Completed result.

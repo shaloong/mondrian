@@ -3,6 +3,19 @@
 //! 高级效果系统：LUT 调色 / 滤镜 / 转场 / 蒙版
 
 pub mod adjustment;
+pub use mondrian_core::EffectPassBlendPolicy;
+pub mod alpha_contract;
+mod float_frame;
+pub use alpha_contract::{
+    ColorFrameAlphaFormats, EffectAlphaConsumer, EffectAlphaContract, EffectAlphaOutputContract,
+};
+pub use float_frame::{
+    blend_float_frames_controlled, blend_float_frames_in_place, convert_alpha_sample,
+    materialize_finite_coverage_controlled, materialize_straight_coverage,
+    mix_float_frames_controlled, normal_over_output_alpha, over_float_sample,
+    validate_float32_frame_storage, EffectAlphaConversionFailure, EffectFloatFrame,
+    EffectFloatFrameError, EffectFloatFrameView,
+};
 pub mod chroma_key;
 pub mod color_curves;
 pub mod coverage;
@@ -24,10 +37,15 @@ pub mod plugin_contract;
 pub mod plugin_sdk;
 pub mod prepared;
 pub mod primary_grade;
+mod processor_feedback;
+mod processor_question;
+pub use processor_feedback::*;
 mod processor_residency;
 pub use processor_residency::{
     EffectFloatProcessorFactory, EffectFloatProcessorInstance, EffectFloatProcessorPreparation,
-    EffectProcessorControl, EffectProcessorStopReason,
+    EffectFloatProcessorSizing, EffectFloatProcessorStorage, EffectProcessorControl,
+    EffectProcessorHostResourceRefusal, EffectProcessorHostResourceRefusalReceipt,
+    EffectProcessorInvocationError, EffectProcessorRetention, EffectProcessorStopReason,
 };
 pub mod qualifier;
 pub mod temporal_execution;
@@ -104,10 +122,11 @@ pub use hdr_grading::{
     HDR_GRADING_SAMPLE_ROWS, HDR_GRADING_ZONE_COUNT,
 };
 pub use heterogeneous_execution::{
-    plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan, EffectCompletionToken,
-    EffectGraphExecutionBudget, EffectGraphExecutionBudgetKind, EffectGraphExecutionPlanError,
-    EffectGraphExecutionRequest, EffectGraphExecutionStep, EffectMaterializationId,
-    EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
+    plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan,
+    EffectAlphaMaterializationAdmission, EffectCompletionToken, EffectGraphExecutionBudget,
+    EffectGraphExecutionBudgetKind, EffectGraphExecutionPlanError, EffectGraphExecutionRequest,
+    EffectGraphExecutionStep, EffectMaterializationId, EffectPlannedAlpha,
+    EffectPlannedValueFormat, EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
     HeterogeneousCpuCompletionEvidence, HeterogeneousCpuExecutionStopReason,
     HeterogeneousCpuTransferEvidence, HeterogeneousEffectShapeIdentity,
     PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
@@ -151,3 +170,10 @@ pub use tracking::{
     TrackingFrame, TrackingObservation, TrackingQuality, TrackingRegion, TrackingTransform,
 };
 pub use transition::Transition;
+
+pub use processor_question::{
+    EffectProcessorGuiActionFeedback, EffectProcessorGuiActionReceipt, EffectProcessorGuiAdmission,
+    EffectProcessorGuiPresence, EffectProcessorGuiState, EffectProcessorLiveQuestion,
+    EffectProcessorQuestionId, EffectProcessorQuestionReceipt, EffectProcessorQuestionReply,
+    EffectProcessorQuestionService, EffectProcessorQuestionState, EffectProcessorQuestionView,
+};

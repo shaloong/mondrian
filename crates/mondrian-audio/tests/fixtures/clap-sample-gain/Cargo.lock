@@ -11,7 +11,6 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 [[package]]
 name = "clack-common"
 version = "0.2.0"
-source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
 dependencies = [
  "bitflags",
  "clap-sys",
@@ -20,7 +19,6 @@ dependencies = [
 [[package]]
 name = "clack-extensions"
 version = "0.2.0"
-source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
 dependencies = [
  "bitflags",
  "clack-common",
@@ -31,7 +29,6 @@ dependencies = [
 [[package]]
 name = "clack-plugin"
 version = "0.2.0"
-source = "git+https://github.com/prokopyl/clack.git?rev=27ca28391b57a61bad4bb5099288a7bf9247350d#27ca28391b57a61bad4bb5099288a7bf9247350d"
 dependencies = [
  "clack-common",
  "clap-sys",
@@ -40,7 +37,6 @@ dependencies = [
 [[package]]
 name = "clap-sys"
 version = "0.5.0"
-source = "git+https://github.com/micahrj/clap-sys.git?rev=25d7f53fdb6363ad63fbd80049cb7a42a97ac156#25d7f53fdb6363ad63fbd80049cb7a42a97ac156"
 
 [[package]]
 name = "mondrian-clap-sample-gain-fixture"

@@ -211,12 +211,14 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
         .expect("identity GPU plan"),
     );
     let base = Arc::new(CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: 4,
         height: 4,
         color_space: WorkingColorSpace::LinearRec709,
         data: vec![[0.0, 0.0, 1.0, 1.0]; 16],
     }));
     let overlay = Arc::new(CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: 2,
         height: 2,
         color_space: WorkingColorSpace::LinearRec709,
@@ -277,6 +279,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
 
 fn data_frame() -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: 2,
         height: 1,
         data: vec![[0.125, 0.5, 1.25, 1.0], [-0.25, 0.75, 2.0, 0.5]],

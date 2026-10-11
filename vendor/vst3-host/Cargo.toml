@@ -3,9 +3,8 @@ name = "vst3-host"
 version = "0.9.0"
 authors = ["Helge Sverre <helge.sverre@gmail.com>"]
 edition = "2021"
-# Default-feature floor (cpal 0.18 needs 1.85). The optional `egui-widgets` feature
-# requires a newer toolchain (egui/eframe 0.34 need Rust 1.92).
-rust-version = "1.85"
+# This canonical vendored host uses the product toolchain/MSRV.
+rust-version = "1.97.1"
 description = "Safe, simple VST3 plugin hosting with audio playback, MIDI, and crash protection"
 documentation = "https://docs.rs/vst3-host"
 readme = "README.md"
@@ -27,6 +26,8 @@ vst3 = { path = "../vst3-sdk" }
 libloading = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Official Moduleinfo and IPluginCompatibility metadata are full JSON5.
+json5 = "=1.3.1"
 thiserror = "2.0"
 log = "0.4"
 libc = "0.2"
@@ -34,7 +35,7 @@ libc = "0.2"
 rtrb = "0.3"
 # Lock-free bounded MPMC queue for output MIDI: the audio thread pushes emitted events and a
 # UI thread drains them without either locking the other (crossbeam-utils is already in-tree).
-crossbeam-queue = "0.3"
+crossbeam-queue = { path = "../crossbeam-queue" }
 
 # Optional dependencies
 cpal = { version = "0.18", optional = true }

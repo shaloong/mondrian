@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "status": "QUALIFIED_WINDOWS_COM_WEAK_LIFETIME_AND_HOST_STORAGE_CONTROLS_NOT_COMPLETE_RESOURCE_ADMISSION",
+  "previous_formatting_receipt": {
+    "receipt": "LOCAL-FORMAT-CHANGES.json",
+    "receipt_sha256_raw": "d1d99e2233c99ebf3e0571e12c55542d9a881a1f72d09d39e30492777c77c29b",
+    "file_count": 2,
+    "official_input_bytes_unchanged": true,
+    "generated_abi_bytes_unchanged": true,
+    "runtime_qualification": false
+  },
+  "files": [
+    {
+      "path": "com-scrape-types/src/class.rs",
+      "preimage_sha256_raw": "ca4fba5c4764b1b17530b71cd23ed5732d01e89cdd5dd2b7fe02d5483841807c",
+      "shipped_sha256_raw": "3a09bea443a721115a128ccabe70c9dd22a238fa0e6023d1d540913680a008fc",
+      "shipped_sha256_lf": "3a09bea443a721115a128ccabe70c9dd22a238fa0e6023d1d540913680a008fc",
+      "change": "canonical std Weak borrowing of the same COM runtime allocation",
+      "before_local_formatting_sha256_raw": "87ac22635bb23560f50c72267ade97cd63ec5e84136fb3557c1c1e267e026a3b"
+    },
+    {
+      "path": "com-scrape-types/src/lib.rs",
+      "preimage_sha256_raw": "4ce5d166dc7001922789cffd9dd3d823f8c52131478a927804c31403dcf2fdcd",
+      "shipped_sha256_raw": "7bfdd1d37a9ef8ddd3bff723901c2feb18df9254c6ffeabcd087b64242317172",
+      "shipped_sha256_lf": "7bfdd1d37a9ef8ddd3bff723901c2feb18df9254c6ffeabcd087b64242317172",
+      "change": "canonical std Weak borrowing of the same COM runtime allocation",
+      "before_local_formatting_sha256_raw": "7ae900ccc2705588399a907c91acd1086e9c146bc1a5039167995b1ba26bcf15"
+    },
+    {
+      "path": "src/lib.rs",
+      "preimage_sha256_raw": "c78a30c2090c71921e602fbc875ad0ba27aaf7bb6002dee8ba34363ac9d5065a",
+      "shipped_sha256_raw": "2f34e7f44e2e08003370f6d5bc8b7dfd56dd4efcba517dbf43b2bef0b887bf87",
+      "shipped_sha256_lf": "2f34e7f44e2e08003370f6d5bc8b7dfd56dd4efcba517dbf43b2bef0b887bf87",
+      "change": "Expose the sole ComWeak implementation through the existing SDK facade."
+    }
+  ],
+  "generated_abi_bytes_unchanged": true,
+  "no_second_com_runtime": true,
+  "complete_std_arc_or_root_admission_not_claimed": true,
+  "local_owner_formatting": {
+    "receipt": "LOCAL-OWNER-FORMAT-CHANGES.json",
+    "receipt_sha256_raw": "bc1454b634b31285be59427951215f19796f212206d7d602fabadc70ce369eb2"
+  },
+  "qualification": {
+    "target": "x86_64-pc-windows-gnu",
+    "controls": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "-j",
+          "1",
+          "--manifest-path",
+          "vendor/vst3-host/Cargo.toml",
+          "--lib",
+          "",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "summary": "test result: ok. 260 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s",
+        "source_stable": true,
+        "log_sha256_raw": "0ec029f8c127afa956ae54af7d5da43a71913e497985402962fcb98d88685320",
+        "qualification_sha256_raw": "bbbe106669cce2eea790416bb89d9b8d9f0a64a5c223ee666ecb2ff898b6fc18"
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "--offline",
+          "--locked",
+          "-j",
+          "1",
+          "-p",
+          "mondrian-audio",
+          "--all-features",
+          "--test",
+          "native_sdk_container_storage",
+          "native_sdk_container_com_weak_",
+          "--",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s",
+        "source_stable": true,
+        "log_sha256_raw": "20d55618a59b4f28a230395e214cc5754965a89bb10eca3105cd066f899e29e1",
+        "qualification_sha256_raw": "61624cb6bae403d82403bc18aa0c84173ab2e06b6728f133665953a200ae15c6"
+      }
+    ],
+    "limits": "No whole standard Arc allocation, thread allocation, candidate peak, native plugin performance or cross-platform qualification is asserted."
+  }
+}

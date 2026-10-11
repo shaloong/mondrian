@@ -6,7 +6,7 @@
 
 use super::super::{ClapParameterDescriptor, SharedParameterEvent};
 use super::*;
-use crate::{AudioProcessingMode, AudioProcessorTail, AudioRenderContract};
+use crate::{AudioProcessingMode, AudioProcessorFactory, AudioProcessorTail, AudioRenderContract};
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
     PluginAudioPortsImpl,
@@ -16,6 +16,7 @@ use clack_extensions::params::{
     PluginMainThreadParams, PluginParams,
 };
 use clack_plugin::events::spaces::CoreEventSpace;
+use clack_plugin::prelude::OutputEvents;
 use clack_plugin::prelude::{
     Audio, ChannelPair, DefaultPluginFactory, Events, HostAudioProcessorHandle,
     HostMainThreadHandle, HostSharedHandle, Plugin, PluginAudioConfiguration as PluginConfig,
@@ -306,6 +307,7 @@ fn prepared_worker(
     )
     .expect("SDK-owned reference entry");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::new(
             0,
@@ -435,4 +437,263 @@ fn clap_parameter_full_capacity_reset_process_is_allocation_free_and_preserves_a
             }
         }
     }
+}
+
+// This reference reuses the existing independent parameter-order PCM oracle.
+// It only adds actual native CLAP log callbacks; it links no host log parser.
+struct LogOrderPlugin;
+struct LogOrderProcessor<'a> {
+    inner: ParameterOrderProcessor,
+    host: HostSharedHandle<'a>,
+    logger: clack_extensions::log::HostLog,
+}
+
+impl Plugin for LogOrderPlugin {
+    type AudioProcessor<'a> = LogOrderProcessor<'a>;
+    type Shared<'a> = ();
+    type MainThread<'a> = ParameterOrderMain;
+    fn declare_extensions(builder: &mut PluginExtensions<Self>, _shared: Option<&()>) {
+        builder.register::<PluginAudioPorts>().register::<PluginParams>();
+    }
+}
+impl DefaultPluginFactory for LogOrderPlugin {
+    fn get_descriptor() -> PluginDescriptor {
+        ParameterOrderPlugin::get_descriptor()
+    }
+    fn new_shared(_host: HostSharedHandle<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+    fn new_main_thread<'a>(
+        _host: HostMainThreadHandle<'a>,
+        _shared: &'a (),
+    ) -> Result<ParameterOrderMain, PluginError> {
+        Ok(ParameterOrderMain)
+    }
+}
+impl PluginAudioProcessorParams for LogOrderProcessor<'_> {
+    fn flush(&mut self, input: &clack_plugin::prelude::InputEvents, output: &mut OutputEvents) {
+        self.inner.flush(input, output);
+    }
+}
+impl<'a> clack_plugin::plugin::PluginAudioProcessor<'a, (), ParameterOrderMain>
+    for LogOrderProcessor<'a>
+{
+    fn activate(
+        host: HostAudioProcessorHandle<'a>,
+        _main: &ParameterOrderMain,
+        _shared: &'a (),
+        _config: PluginConfig,
+    ) -> Result<Self, PluginError> {
+        let host = host.shared();
+        let logger = host
+            .get_extension::<clack_extensions::log::HostLog>()
+            .ok_or(PluginError::Message("host log extension is unavailable"))?;
+        Ok(Self { inner: ParameterOrderProcessor, host, logger })
+    }
+    fn process(
+        &mut self,
+        process: Process,
+        audio: Audio,
+        events: Events,
+    ) -> Result<ProcessStatus, PluginError> {
+        use clack_extensions::log::LogSeverity;
+        for severity in [
+            LogSeverity::Debug,
+            LogSeverity::Info,
+            LogSeverity::Warning,
+            LogSeverity::Error,
+            LogSeverity::Fatal,
+            LogSeverity::HostMisbehaving,
+            LogSeverity::PluginMisbehaving,
+        ] {
+            self.logger.log(&self.host, severity, c"bounded native log 🙂");
+        }
+        self.inner.process(process, audio, events)
+    }
+}
+
+fn prepared_log_worker(
+    frames: usize,
+    mode: AudioProcessingMode,
+) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+    let entry =
+        PluginEntry::load_from_clack::<SinglePluginEntry<LogOrderPlugin>>(c"/test/log-order")
+            .expect("owned independent native logger entry");
+    let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        native_lane: None,
+        payload: Vec::new(),
+        plugin_execution_contract: AudioProcessorExecutionContract::new(
+            0,
+            AudioProcessorTail::None,
+            true,
+            true,
+            true,
+            0,
+        )
+        .expect("oracle contract"),
+        auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+        parameter_ids: vec![
+            ParameterId::new("clap.param.17").expect("left"),
+            ParameterId::new("clap.param.3").expect("right"),
+        ],
+        render_contract: render_contract(frames, mode),
+    };
+    let descriptors = [17, 3].map(|id| ClapParameterDescriptor {
+        id,
+        name: if id == 17 { "Left" } else { "Right" }.to_owned(),
+        min_value: 0.0,
+        max_value: 1.0,
+        default_value: 1.0,
+        current_value: 1.0,
+        automatable: true,
+        stepped: false,
+        enumeration: false,
+        read_only: false,
+        hidden: false,
+    });
+    prepare_loaded(
+        request,
+        entry,
+        c"org.mondrian.test.parameter-storage",
+        None,
+        &descriptors,
+        &[17, 3],
+    )
+}
+
+#[test]
+fn clap_host_log_native_producer_requires_actual_host_extension_on_activation() {
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        // Existing public/native API only. Before host behavior is implemented
+        // this fails at actual CLAP activation, not a missing new Rust method.
+        assert!(
+            prepared_log_worker(64, mode).is_ok(),
+            "an actual legal producer needs the advertised host log extension"
+        );
+    }
+}
+
+#[test]
+fn clap_host_log_full_parameter_callback_has_zero_allocations_and_preserves_seven_severities_pcm() {
+    let frames = 64;
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        let mut worker =
+            prepared_log_worker(frames, mode).expect("actual log-capable product worker");
+        let parameter_ids = [
+            ParameterId::new("clap.param.17").expect("left"),
+            ParameterId::new("clap.param.3").expect("right"),
+        ];
+        let mut events = Vec::with_capacity(frames * 2);
+        for lane in 0..2 {
+            for frame in 0..frames {
+                events.push(SharedParameterEvent {
+                    lane,
+                    sample_offset: frame as u32,
+                    value: if lane == 0 {
+                        (frame + 1) as f64 / frames as f64
+                    } else {
+                        (frames - frame) as f64 / frames as f64
+                    },
+                });
+            }
+        }
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let mut pcm = vec![0.5; frames * 2];
+        worker.enter_state(0).expect("warm same owner entry");
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                0,
+                frames,
+                render_contract(frames, mode),
+                &mut pcm,
+                &auxiliary,
+                &[],
+                &parameter_ids,
+                &events,
+            ))
+            .expect("warm native callback");
+        worker
+            .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
+            .expect("warm same-owner observation");
+        for origin in [0, 73, -31, 4096] {
+            pcm.fill(0.5);
+            let (result, counts) = measure(|| {
+                worker.enter_state(origin)?;
+                worker.process(IsolatedAudioProcessorWorkerBlock::new(
+                    origin,
+                    frames,
+                    render_contract(frames, mode),
+                    &mut pcm,
+                    &auxiliary,
+                    &[],
+                    &parameter_ids,
+                    &events,
+                ))
+            });
+            result.expect("actual full-capacity native logged DSP");
+            assert_eq!(
+                counts,
+                AllocationCounts::default(),
+                "no callback allocations/bookkeeping: {counts:?}"
+            );
+            let preserved = worker
+                .poll_native_observations(crate::NativeAudioObservationConsumption::Preserve)
+                .expect("pure capability poll");
+            assert!(preserved.logs.records().is_empty());
+            let observed = worker
+                .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
+                .expect("sole bounded receiver");
+            assert!(!observed.logs.incomplete());
+            assert_eq!(observed.logs.records().len(), 7);
+            for (raw, record) in observed.logs.records().iter().enumerate() {
+                assert_eq!(record.raw_severity(), raw as i32);
+                assert!(record.severity().is_some());
+                assert_eq!(record.text(), Ok("bounded native log 🙂"));
+                assert!(!record.truncated() && !record.invalid_utf8());
+            }
+            assert!(worker
+                .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
+                .expect("no duplicate delivery")
+                .logs
+                .records()
+                .is_empty());
+            for (frame, samples) in pcm.chunks_exact(2).enumerate() {
+                assert_eq!(samples[0], 0.5 * ((frame + 1) as f32 / frames as f32));
+                assert_eq!(samples[1], 0.5 * ((frames - frame) as f32 / frames as f32));
+            }
+        }
+    }
+}
+
+#[test]
+fn native_factory_storage_actual_isolated_visitor_is_nonallocating_after_owners_exist() {
+    let factory = super::super::tests::pure_seed_factory(
+        crate::NativeConfigurationFormat::ClapState,
+        Some(&[8; 32]),
+    );
+    let mut observed = Vec::with_capacity(64);
+    // Warm the same interface and allocator TLS before measuring; clear only
+    // local observation metadata, never the immutable factory or native state.
+    factory
+        .visit_host_owned_storage(&mut |storage| {
+            observed.push(storage);
+            Ok(())
+        })
+        .expect("warm observer");
+    let expected = observed.len();
+    observed.clear();
+    let (result, counts) = measure(|| {
+        factory.visit_host_owned_storage(&mut |storage| {
+            observed.push(storage);
+            Ok(())
+        })
+    });
+    result.expect("same actual isolated factory observation");
+    assert_eq!(observed.len(), expected);
+    assert_eq!(counts.allocations, 0);
+    assert_eq!(counts.reallocations, 0);
+    assert_eq!(
+        counts.requested_bytes, 0,
+        "owning visitor/observation bookkeeping must not allocate"
+    );
 }

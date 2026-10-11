@@ -74,6 +74,7 @@ async fn production_color_output_stays_gpu_resident_through_nvenc() {
     .expect("same-device CUDA/NVENC Session");
 
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: WIDTH,
         height: HEIGHT,
         color_space: WorkingColorSpace::LinearRec709,

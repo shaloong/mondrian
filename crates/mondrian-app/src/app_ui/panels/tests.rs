@@ -7228,6 +7228,8 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         numeric_curve: None,
     };
     let disabled_effect = InspectorEffectModel {
+        native_author_view: None,
+        native_gui_controller: None,
         effect_id,
         label: "Gaussian Blur".to_string(),
         enabled: false,
@@ -10676,6 +10678,7 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
                 .copied()
                 .expect("numeric"),
             true,
+            &chinese_localizer(),
         );
         widget.layout(Rect::new(0.0, 0.0, 220.0, 28.0));
         let actions = RefCell::new(Vec::new());
@@ -10743,11 +10746,11 @@ fn audio_rack_numeric_widget_preserves_double_and_rejects_fractional_integer_inp
                 .parameters[0]
                 .static_value
         };
-        assert_eq!(snapshot(&state), expected);
+        assert_eq!(snapshot(&state), Some(expected));
         assert!(state.undo_timeline().expect("undo"));
         assert_eq!(snapshot(&state), parameter.static_value);
         assert!(state.redo_timeline().expect("redo"));
-        assert_eq!(snapshot(&state), expected);
+        assert_eq!(snapshot(&state), Some(expected));
     }
 }
 
@@ -11497,6 +11500,8 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         audio_processor_racks: Vec::new(),
         clip_properties: Vec::new(),
         effects: vec![InspectorEffectModel {
+            native_author_view: None,
+            native_gui_controller: None,
             effect_id,
             label: "Gaussian Blur".to_owned(),
             enabled: true,
@@ -14086,6 +14091,7 @@ fn typed_static_parameter_widget_for_rack(rack: &AudioProcessorRackModel) -> Box
             .copied()
             .expect("scalar contract"),
         true,
+        &chinese_localizer(),
     )
 }
 

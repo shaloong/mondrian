@@ -1726,3 +1726,71 @@ Inspection and refused edits never publish state or history.
 admission without querying native bus availability. Product route controls and
 actual mutations share this inspection; disabled routes and unavailable plugin
 ports retain their author identity and remain removable under the same lock rule.
+
+### Native processor author transactions
+
+SetNativeAuthorState is one closed, targeted Rack operation. The existing Rack
+query owns address, shared-Scope lock and Processor resolution. Pinned native
+definition and each written ParameterSchema must match exactly; duplicate IDs,
+invalid scalar values and an unchosen keyed write are explicitly refused.
+A qualified exact owner-time policy preserves and edits the existing curve.
+Parameters and optional opaque bytes publish together after complete candidate
+Audio Program validation. None preserves opaque state; Some(empty) is an explicit
+replacement. Neighboring processors, bypass, routes and unwritten curves remain
+current. Opaque data remains structurally shared; Timeline cannot interpret its
+format, prove native callback origin, or install execution state.
+
+### Native parameter automation author policy
+
+Native audio author values carry a closed `NativeAudioParameterWriteMode`:
+`Unkeyed` refuses any existing keys; `AtOwnerTime(DomainTime)` writes at an
+explicit exact Sequence or Processing Scope time. The resolved automation
+inspection checks that domain. `AudioAutomationCurveContract::preview_value_at_time`
+retains an existing key identity/interpolation/tangent intent, or creates a key
+using the definition's first admitted interpolation, then uses the ordinary
+complete curve edit and normalization. A private prepared batch prevents partial
+parameter/state publication; the complete Audio Program still validates before
+the candidate Sequence is published. No native normalized coordinate, sample
+cursor or UI frame is a substitute author time. The product must prove actual
+installed origin separately and hand accepted values to the same-live canonical
+audio Plan before acknowledging their retained native delivery.
+
+### Native host parameter reference removal
+
+`AudioProcessorParameter::automation` is an explicit optional host reference.
+`Some` owns the existing exact curve and unkeyed host value. `None` keeps the
+stable `ParameterId`, complete schema and display facts, but has no host value
+or keyframes. The definition default remains metadata. Native opaque state and
+current native observations own the plugin value; clearing a reference does not
+reset it. Built-ins require a present host curve.
+
+`NativeAudioParameterOperation` preserves the source order of Values and
+ClearAutomation operations, including repeated IDs. Timeline prepares the whole
+ordered batch before the existing Session publishes it. Clear removes the entire
+curve, including an unkeyed value. Clearing an already removed ID is a no-op, not
+a new parameter. A later admitted Value explicitly binds a new host curve. An
+invalid suffix refuses all preceding operations and opaque-state changes.
+Explicit key authoring still uses the sole exact owner-domain curve contract.
+
+
+### Native parameter execution time
+
+Native Process parameter callbacks use audio_automation_execution_time over the
+same exact owner/domain projection as UI audio automation. Execution refuses
+outside a selected occurrence's half-open extent; it never clamps a callback to
+an endpoint or fabricates a boundary key. Inspector playhead projection retains
+its existing explicit clamping policy. An absent native automation reference
+keeps stable schema metadata; a real Value may create its canonical reference,
+while Clear and RESCAN_VALUES never substitute schema.default as native current.
+
+
+### Native audio gesture finality
+
+`AuthoringSession::finish_native_audio_gesture` receives the explicit native
+completion kind in addition to the targeted update. Nonterminal observations do
+not seal history. Coherent configuration requires actual opaque bytes. Parameter
+completion requires both the current authored processor and completion to have
+no opaque state; it cannot persist scalar edits beside a stale private seed.
+Both paths use the same pending group, one Undo entry and normal archive snapshot.
+The product supplies finality only after the retained callback prefix, canonical
+parameter Plan and exact same-object acknowledgement have been accepted.

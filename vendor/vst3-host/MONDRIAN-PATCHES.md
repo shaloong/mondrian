@@ -21,3 +21,12 @@ No process callback, mixer, state envelope or automation implementation is forke
 SDK contract: https://github.com/steinbergmedia/vst3_pluginterfaces/blob/master/vst/ivstcomponent.h
 
 Three loader files only have upstream trailing whitespace removed for patch hygiene.
+
+## Format-neutral Windows native editor parent
+
+`WindowsNativeEditorContainer` borrows the same STA/main owner and reuses the
+existing WndProc, physical client resize, bounded message service and close/DPI
+observations. It owns no plugin/controller or author/install permission. The
+format adapter must acknowledge its native GUI destruction before explicit
+parent destruction. This lets the CLAP adapter borrow a real Win32 parent
+without manufacturing an `IPlugView` or second window/event interpretation.

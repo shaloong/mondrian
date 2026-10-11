@@ -8,6 +8,7 @@
 
 pub mod audio_layout;
 pub mod audio_mix;
+pub mod audio_owner_installation;
 pub mod audio_time;
 pub mod authoring;
 pub mod automation;
@@ -22,6 +23,8 @@ pub mod display_probe;
 pub mod display_timecode;
 pub mod dynamic_hdr;
 pub mod effect_data;
+mod effect_pass_blend;
+pub use effect_pass_blend::EffectPassBlendPolicy;
 pub mod error;
 pub mod events;
 pub mod execution_cancellation;
@@ -30,8 +33,14 @@ pub mod gallery;
 pub mod grade_graph;
 pub mod hdr_metadata;
 pub mod icc;
+pub mod image_alpha;
+pub use image_alpha::{ColorFrameAlpha, ColorFrameAlphaFormats};
 pub mod mask_data;
 pub mod media_contract;
+pub mod native_audio;
+pub mod native_audio_author;
+pub mod native_audio_editor;
+pub mod native_audio_parameter_observation;
 pub mod native_path;
 mod numeric_bezier;
 pub mod ocio;
@@ -47,6 +56,7 @@ pub mod types;
 
 pub use audio_layout::*;
 pub use audio_mix::*;
+pub use audio_owner_installation::*;
 pub use audio_time::*;
 pub use authoring::{
     AuthoringAllocationId, AuthoringFootprint, AuthoringFootprintClaim,
@@ -70,6 +80,10 @@ pub use gallery::*;
 pub use grade_graph::*;
 pub use hdr_metadata::*;
 pub use media_contract::*;
+pub use native_audio::*;
+pub use native_audio_author::*;
+pub use native_audio_editor::*;
+pub use native_audio_parameter_observation::*;
 pub use native_path::*;
 pub use ocio::*;
 pub use parameter::*;
@@ -80,3 +94,11 @@ pub use signal_compliance::*;
 pub use timeline_time::*;
 pub use title::*;
 pub use types::*;
+
+mod native_audio_diagnostics;
+pub use native_audio_diagnostics::{
+    NativeAudioDiagnosticBatch, NativeAudioDiagnosticExtentError, NativeAudioDiagnosticInsertion,
+    NativeAudioDiagnosticLocation, NativeAudioDiagnosticLoss, NativeAudioDiagnosticMessageFacts,
+    NativeAudioDiagnosticRecord, NativeAudioDiagnosticSeverity, NativeAudioDiagnosticSource,
+    NATIVE_AUDIO_DIAGNOSTIC_MESSAGE_BYTES, NATIVE_AUDIO_DIAGNOSTIC_RECORDS,
+};

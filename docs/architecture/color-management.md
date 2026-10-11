@@ -2022,3 +2022,32 @@ most-significant alignment; planar ten-bit uses least-significant alignment.
 This avoids CPU RGB expansion without changing the working domain, alpha
 contract, output transform, or CPU-addressable consumer requirements. A compact
 CPU payload still requires upload and is never evidence of GPU-resident decode.
+
+## Canonical Float association boundary
+
+Core working Float frames own actual association. A CPU working-identity request preserves that association; an actual identity change admits finite straight coverage at the canonical Effects materializer before OCIO. CPU Program Output clones the raster once into the canonical Effects frame and materializes finite straight coverage before stock OCIO. Both paths validate finite output after OCIO. Opaque output retains alpha one; raw associated emission or extended alpha must first be explicitly composited to Opaque, or the consumer returns a typed frame error. GPU/color planning retains coverage-only admission. Alpha is never silently clamped by this seam.
+
+### Finite OCIO CPU publication
+
+The Core CPU processor Session and uncached engine entry points admit finite
+Float32 components before applying OCIO and refuse nonfinite output afterward.
+Identity conversions still validate input. These checks interpret neither
+association nor coverage and never clamp RGB or alpha. Real alpha bits remain
+unchanged because the packed OCIO tile carries synthetic zero alpha and copies
+back RGB only. A failed sample does not retire a valid processor/cache entry;
+the mutable raw buffer may contain failed output and must not be published.
+
+Encoded-float import, linear-float import, and monitor adaptation first bind the
+actual alpha and addressed extent in the sole Effects complete-frame admission.
+Successful Core execution preserves those admitted contracts, so the caller
+publishes that same owned raster and actual alpha. Linear import now collects
+one validated RGBA array raster directly, rather than cloning a flat raster and
+allocating a second array raster. Owned monitor adaptation moves its existing
+allocation; a borrowed monitor wrapper retains its existing copy-on-write cost.
+
+Complete-frame admission and Core finite input validation both scan the input;
+Core scans output once. The duplicate admission pass is an explicit cost of the
+current typed boundaries, with no additional full-frame clone. Performance
+qualification is separate from source review and unit correctness. GPU execution
+has its own admission/readback boundaries; this change does not qualify GPU,
+monitor hardware, or physical color accuracy.

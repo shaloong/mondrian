@@ -65,14 +65,17 @@ pub(crate) struct AudioProcessorParameterModel {
     pub(crate) parameter_id: ParameterId,
     pub(crate) label: String,
     pub(crate) schema: ParameterSchema,
-    pub(crate) static_value: f64,
+    pub(crate) static_value: Option<f64>,
+    pub(crate) native_presentation: Option<mondrian_core::NativeAudioParameterFact>,
+    /// Persisted discovery visibility used only until an actual same-owner query.
+    pub(crate) metadata_hidden: bool,
     pub(crate) keyframe_count: usize,
     pub(crate) automation: Option<AudioAutomationCurveModel>,
 }
 
 impl AudioProcessorParameterModel {
     pub(crate) fn is_static_editable(&self) -> bool {
-        self.keyframe_count == 0 && self.schema.numeric.is_some()
+        self.static_value.is_some() && self.keyframe_count == 0 && self.schema.numeric.is_some()
     }
 }
 
@@ -106,6 +109,66 @@ pub(crate) fn bind_audio_scalar_author_lease(
                 rack.source_sequence_id,
             );
         for processor in &mut rack.processors {
+            processor.native_editor = processor.native_format.map(|_format| {
+                let payload = rack.scalar_author_lease.map(|lease| {
+                    crate::app::product_action::AudioNativeEditorPayload {
+                        session_id: lease.session_id,
+                        sequence_id: lease.sequence_id,
+                        address: rack.address,
+                        occurrence: rack.native_editor_time_context.scope_occurrence,
+                        processor_id: processor.processor_id,
+                        definition: processor.definition.clone(),
+                        sequence_time: rack.native_editor_time_context.sequence_time,
+                        open: true,
+                    }
+                });
+                processor.parameters.append(&mut processor.hidden_native_parameters);
+                for parameter in &mut processor.parameters {
+                    parameter.native_presentation = payload.as_ref().and_then(|payload| {
+                        state
+                            .native_audio_parameter_presentation(payload, &parameter.parameter_id)
+                            .cloned()
+                    });
+                    if let Some(name) =
+                        parameter.native_presentation.as_ref().and_then(|fact| fact.name.as_ref())
+                    {
+                        parameter.label = name.clone();
+                    }
+                }
+                let projected = std::mem::take(&mut processor.parameters);
+                (processor.parameters, processor.hidden_native_parameters) =
+                    projected.into_iter().partition(|parameter| {
+                        !parameter
+                            .native_presentation
+                            .as_ref()
+                            .and_then(|fact| fact.hidden)
+                            .unwrap_or(parameter.metadata_hidden)
+                    });
+                let (opened, pending) = payload.as_ref().map_or((false, false), |payload| {
+                    state.native_audio_editor_surface_state(payload)
+                });
+                let action = payload.filter(|_| rack.is_editable && !pending && cfg!(windows)).map(
+                    |mut payload| {
+                        payload.open = !opened;
+                        crate::app::product_action::ProductAction::Audio(
+                            crate::app::product_action::AudioProductAction::NativeEditor(payload),
+                        )
+                        .into_external_action()
+                    },
+                );
+                AudioNativeEditorControlModel {
+                    label_key: if pending {
+                        "native-editor-control-pending"
+                    } else if !cfg!(windows) {
+                        "native-editor-unavailable"
+                    } else if opened {
+                        "native-editor-close"
+                    } else {
+                        "native-editor-open"
+                    },
+                    action,
+                }
+            });
             for route in &mut processor.sidechain_routes {
                 route.scalar_target = rack.scalar_author_lease.filter(|_| rack.is_editable && route.is_editable && route.static_gain.is_some())
                     .zip(rack.input_inspection_target).map(|(lease, owner)| crate::app::parameter_gesture::AudioScalarGestureTarget {
@@ -121,13 +184,22 @@ pub(crate) fn bind_audio_scalar_author_lease(
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AudioNativeEditorControlModel {
+    pub(crate) label_key: &'static str,
+    pub(crate) action: Option<mondrian_editor_state::Action>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct AudioProcessorInstanceModel {
     pub(crate) definition: AudioProcessorDefinitionRef,
     pub(crate) processor_id: AudioProcessorInstanceId,
     pub(crate) label: String,
     pub(crate) bypassed: bool,
     pub(crate) native_format: Option<NativeAudioFormat>,
+    pub(crate) native_editor: Option<AudioNativeEditorControlModel>,
     pub(crate) parameters: Vec<AudioProcessorParameterModel>,
+    /// Same sole row projection retained for native INFO unhide; no author state.
+    hidden_native_parameters: Vec<AudioProcessorParameterModel>,
     pub(crate) input_query: Option<AudioProcessorInputQueryModel>,
     pub(crate) sidechain_routes: Vec<super::audio_sidechain::SidechainRouteModel>,
     pub(crate) sidechain_inputs: Vec<super::audio_sidechain::SidechainInputModel>,
@@ -141,6 +213,8 @@ pub(crate) struct AudioProcessorRackModel {
     /// Fresh author lifetime; pure Sequence projections cannot authorize controls.
     pub(crate) scalar_author_lease: Option<crate::app::parameter_gesture::AudioScalarAuthorLease>,
     pub(crate) input_inspection_target: Option<mondrian_audio::AudioProcessorInputInspectionTarget>,
+    pub(crate) native_editor_time_context:
+        crate::app_ui::audio_automation::AudioAutomationTimeContext,
     pub(crate) title: String,
     pub(crate) ownership_label: String,
     pub(crate) is_editable: bool,
@@ -320,6 +394,7 @@ pub(crate) fn project_audio_processor_rack(
         address,
         source_sequence_id: sequence.id,
         scalar_author_lease: None,
+        native_editor_time_context: time_context,
         input_inspection_target: match address {
             AudioProcessorRackAddress::ChannelStrip { owner, rack } => Some(
                 mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack },
@@ -482,8 +557,14 @@ fn rack_ownership_label(
             }
             AudioChannelStripOwner::Bus { bus_id } => {
                 sequence.audio_program.buses.iter().find(|bus| bus.id == bus_id).map_or_else(
-                    || format!("Bus · {bus_id}"),
-                    |bus| format!("Bus · {}", bus.name),
+                    || {
+                        localizer.format_text(
+                            "audio-mixer-missing-bus",
+                            "identity",
+                            &bus_id.to_string(),
+                        )
+                    },
+                    |bus| localizer.format_text("audio-sidechain-bus", "identity", &bus.name),
                 )
             }
             AudioChannelStripOwner::ProgramOutput { output_id } => sequence
@@ -544,31 +625,13 @@ fn project_processor(
         AudioProcessorDefinitionRef::BuiltIn { definition_id, .. } => Some(definition_id.as_str()),
         AudioProcessorDefinitionRef::Vst3 { .. } | AudioProcessorDefinitionRef::Clap { .. } => None,
     };
-    AudioProcessorInstanceModel {
-        definition: processor.definition.clone(),
-        input_query: None,
-        sidechain_routes: super::audio_sidechain::retained_routes(
-            sequence,
-            processor.id,
-            localizer,
-            time_context,
-        ),
-        sidechain_inputs: Vec::new(),
-        processor_id: processor.id,
-        label: processor_label(&processor.definition, localizer),
-        bypassed: processor.bypassed,
-        native_format: match processor.definition {
-            AudioProcessorDefinitionRef::Clap { .. } => Some(NativeAudioFormat::Clap),
-            AudioProcessorDefinitionRef::Vst3 { .. } => Some(NativeAudioFormat::Vst3),
-            AudioProcessorDefinitionRef::BuiltIn { .. } => None,
-        },
-        parameters: processor
+    let parameter_rows =
+        processor
             .parameters
             .values()
-            .filter(|parameter| !parameter.ui.hidden)
             .map(|parameter| {
                 let parameter_id = parameter.schema.parameter_id.clone();
-                let automation = viewport.and_then(|viewport| {
+                let automation = parameter.automation.as_ref().and(viewport).and_then(|viewport| {
                     project_audio_automation(
                         sequence,
                         mondrian_timeline::AudioAutomationTarget::ProcessorParameter {
@@ -586,12 +649,46 @@ fn project_processor(
                         parameter_label(definition_id, &parameter_id, localizer)
                     }),
                     schema: parameter.schema.clone(),
-                    static_value: parameter.automation.default_value,
-                    keyframe_count: parameter.automation.keyframes.len(),
+                    static_value: parameter.automation.as_ref().map(|curve| curve.default_value),
+                    native_presentation: None,
+                    metadata_hidden: parameter.ui.hidden,
+                    keyframe_count: parameter
+                        .automation
+                        .as_ref()
+                        .map_or(0, |curve| curve.keyframes.len()),
                     automation,
                 }
             })
-            .collect(),
+            .collect::<Vec<_>>();
+    let (parameters, hidden_native_parameters) = parameter_rows
+        .into_iter()
+        .partition::<Vec<_>, _>(|parameter| !parameter.metadata_hidden);
+    let hidden_native_parameters = if definition_id.is_none() {
+        hidden_native_parameters
+    } else {
+        Vec::new()
+    };
+    AudioProcessorInstanceModel {
+        definition: processor.definition.clone(),
+        input_query: None,
+        native_editor: None,
+        sidechain_routes: super::audio_sidechain::retained_routes(
+            sequence,
+            processor.id,
+            localizer,
+            time_context,
+        ),
+        sidechain_inputs: Vec::new(),
+        processor_id: processor.id,
+        label: processor_label(&processor.definition, localizer),
+        bypassed: processor.bypassed,
+        native_format: match processor.definition {
+            AudioProcessorDefinitionRef::Clap { .. } => Some(NativeAudioFormat::Clap),
+            AudioProcessorDefinitionRef::Vst3 { .. } => Some(NativeAudioFormat::Vst3),
+            AudioProcessorDefinitionRef::BuiltIn { .. } => None,
+        },
+        parameters,
+        hidden_native_parameters,
     }
 }
 
@@ -1012,7 +1109,10 @@ mod tests {
             )
         });
         assert_eq!(projected[0].ownership_label, sequence.audio_tracks[0].name);
-        assert_eq!(projected[1].ownership_label, "Bus · Dialog");
+        assert_eq!(
+            projected[1].ownership_label,
+            "总线 · \u{2068}Dialog\u{2069}"
+        );
         assert!(projected[2].ownership_label.starts_with("节目输出 · "));
         assert!(projected.iter().all(|rack| rack.is_editable));
 
@@ -1031,6 +1131,62 @@ mod tests {
             .edit_disabled_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("已锁定")));
+    }
+
+    #[test]
+    fn bus_rack_captions_isolate_mixed_direction_names_without_changing_owner() {
+        let (mut sequence, _) = sequence_with_gain_scope();
+        let native_name = "حوار Dialog 🎚️";
+        let bus_id = mondrian_core::MixBusId::new();
+        sequence.audio_program.buses.push(mondrian_timeline::audio::AudioMixBus {
+            id: bus_id,
+            name: native_name.to_owned(),
+            strip: mondrian_timeline::audio::AudioChannelStrip::default(),
+        });
+        let missing_id = mondrian_core::MixBusId::new();
+        for (locale, existing_prefix, missing_prefix) in [
+            (AppUiLocale::ZhCn, "总线", "缺失总线"),
+            (AppUiLocale::EnUs, "Bus", "Missing Bus"),
+        ] {
+            let localizer = Localizer::new(locale).expect("bundled locale");
+            for (id, expected, editable) in [
+                (
+                    bus_id,
+                    format!("{existing_prefix} · \u{2068}{native_name}\u{2069}"),
+                    true,
+                ),
+                (
+                    missing_id,
+                    format!("{missing_prefix} · \u{2068}{missing_id}\u{2069}"),
+                    false,
+                ),
+            ] {
+                let address = AudioProcessorRackAddress::ChannelStrip {
+                    owner: AudioChannelStripOwner::Bus { bus_id: id },
+                    rack: AudioChannelStripRack::PostFader,
+                };
+                let rack = project_audio_processor_rack(
+                    &sequence,
+                    address,
+                    &localizer,
+                    crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                        &sequence,
+                        sequence.playhead,
+                    ),
+                );
+                assert_eq!(rack.ownership_label, expected);
+                assert_eq!(rack.address, address);
+                assert_eq!(rack.source_sequence_id, sequence.id);
+                assert_eq!(rack.is_editable, editable);
+            }
+        }
+        let original = sequence
+            .audio_program
+            .buses
+            .iter()
+            .find(|bus| bus.id == bus_id)
+            .expect("original bus remains present");
+        assert_eq!(original.name, native_name);
     }
 
     fn static_parameter_parts(
@@ -1090,6 +1246,8 @@ mod tests {
             .expect("exact canonical processor")
             .parameters[&static_parameter_parts(&target).2.parameter_id]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value
         };
         let before = snapshot(&state);
@@ -1128,6 +1286,8 @@ mod tests {
             .get_mut(&static_parameter_parts(&target).2.parameter_id)
             .expect("parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -3.0))
             .expect("keyframe");
         let model = crate::app_ui::panels::InspectorPanelModel::from_app_state(&state, &chinese());
@@ -1624,6 +1784,43 @@ mod tests {
             .expect("cancel")
             .author_state_eq_ignoring_revision(&original));
         assert!(!state.can_undo_action());
+    }
+
+    #[test]
+    fn native_parameter_references_absent_curve_has_no_invented_inspector_value() {
+        let (mut sequence, _) = sequence_with_gain_scope();
+        let scope_id = sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_id;
+        let scope = sequence
+            .audio_program
+            .processing_scopes
+            .iter_mut()
+            .find(|scope| scope.id == scope_id)
+            .expect("same Scope");
+        let processor = &mut scope.processors.processors[0];
+        processor.definition = AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.native.references".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([7; 32]),
+        };
+        let schema = processor.parameters.values().next().expect("definition").schema.clone();
+        processor.parameters.values_mut().next().expect("definition").automation = None;
+        let rack = project_audio_processor_rack(
+            &sequence,
+            AudioProcessorRackAddress::ProcessingScope { scope_id },
+            &chinese(),
+            crate::app_ui::audio_automation::AudioAutomationTimeContext::at_sequence_time(
+                &sequence,
+                TimelineTime::ZERO,
+            ),
+        );
+        let parameter = &rack.processors[0].parameters[0];
+        assert_eq!(parameter.schema, schema);
+        assert_eq!(
+            parameter.static_value, None,
+            "definition default is not current native value"
+        );
+        assert!(parameter.automation.is_none());
+        assert!(!parameter.is_static_editable());
     }
 }
 

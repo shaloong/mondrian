@@ -361,3 +361,10 @@ without changing commands, checked state, stable semantic IDs or submenu paths.
 The widget library does not supply an English context-menu or timeline name.
 Unkeyed user/vendor labels remain opaque. Expanded pseudo copy is inspected in
 full independently of width-limited drawing.
+
+## Native visual Question labels
+
+Native visual Question title and Yes/No/Dismiss labels use the bundled en-US and
+zh-CN Fluent catalogs. Plugin-authored question text remains complete original
+UTF-8 and is shown in the same bounded scrollable dialog; it is not translated or
+truncated by the host.

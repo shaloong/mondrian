@@ -5,9 +5,33 @@
 //! discovery and ABI loading live behind the Worker factory Interface; they do
 //! not enter Timeline compilation or the in-process Processor Host.
 
+mod clap_audio_role;
 mod clap_discovery;
+#[cfg(windows)]
+mod clap_gui_owner;
+mod clap_gui_requests;
+mod clap_main_services;
+/// Bounded typed ownership of the actual CLAP output callbacks.
+/// These source facts do not grant an author Session or installed runtime lease.
+pub mod clap_output_events;
 mod clap_parameter_events;
+mod clap_parameter_prefix;
+pub mod clap_parameter_source;
+mod clap_signal_fields;
 mod clap_worker;
+mod native_audio_author_state_entry_wire;
+mod native_audio_author_wire;
+mod native_audio_editor_wire;
+mod native_audio_log;
+mod native_audio_object_wire;
+mod native_audio_parameter_wire;
+mod native_configuration_control;
+mod native_configuration_seed;
+mod native_configuration_seed_wire;
+mod native_configuration_wire;
+mod native_request_cohort;
+mod native_worker_command;
+mod native_worker_lane_wire;
 mod protocol;
 mod supervisor;
 mod vst3_catalog;
@@ -36,6 +60,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use supervisor::SupervisedAudioWorker;
+
+pub use native_configuration_seed::{
+    NativeConfigurationOwnedSeed, NativeConfigurationSeedOutcome, NativeConfigurationSeedReceipt,
+    NativeConfigurationSeedRefusal, NativeConfigurationSeedRequest, NativeConfigurationSeedTicket,
+};
+
+pub use native_configuration_control::{
+    NativeConfigurationCandidate, NativeConfigurationControlOutcome,
+    NativeConfigurationControlRequest, NativeConfigurationFormat, NativeConfigurationRefusal,
+    NativeControlBufferReceipt, NativeRequestCohort,
+};
 
 pub use clap_discovery::{
     probe_clap_plugin_registration, run_clap_discovery_worker, scan_clap_library_descriptors,
@@ -84,6 +119,7 @@ pub struct IsolatedAudioProcessorWorkerSpec {
     startup_timeout: Duration,
     state_entry_timeout: Duration,
     operation_timeout: Duration,
+    native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
 }
 
 impl IsolatedAudioProcessorWorkerSpec {
@@ -117,6 +153,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             startup_timeout: Duration::from_secs(5),
             state_entry_timeout: Duration::from_secs(5),
             operation_timeout,
+            native_lane: None,
         };
         spec.validate()?;
         Ok(spec)
@@ -134,6 +171,17 @@ impl IsolatedAudioProcessorWorkerSpec {
     /// Override or remove the standard product dispatch argument.
     pub fn with_dispatch_argument(mut self, argument: Option<OsString>) -> Self {
         self.dispatch_argument = argument;
+        self
+    }
+
+    /// Declare the concrete adapter's measured additional native lane request.
+    /// The sole Session grant remains authority; the child must match this exact
+    /// request before native load and compare actual created roles before Ready.
+    pub fn with_native_worker_lane_resources(
+        mut self,
+        profile: Option<crate::NativeWorkerLaneResourceProfile>,
+    ) -> Self {
+        self.native_lane = profile;
         self
     }
 
@@ -272,6 +320,52 @@ pub struct IsolatedAudioProcessorFactory {
 }
 
 impl IsolatedAudioProcessorFactory {
+    // A new owning payload is prepared before publication. In particular, do
+    // not clone the old preparation Vec only to replace and retire that copy.
+    fn rebind_configuration_seed(
+        &self,
+        format: NativeConfigurationFormat,
+        configuration: &[u8],
+    ) -> Result<Self, AudioProcessorHostError> {
+        let preparation_payload = match format {
+            NativeConfigurationFormat::Vst3ComponentAndController => {
+                vst3_worker::payload_with_configuration_seed(
+                    &self.spec.preparation_payload,
+                    configuration,
+                )?
+            }
+            NativeConfigurationFormat::ClapState => clap_worker::payload_with_configuration_seed(
+                &self.spec.preparation_payload,
+                configuration,
+            )?,
+        };
+        if preparation_payload.len() > MAX_CONTROL_FRAME_BYTES / 2 {
+            return Err(invalid_contract(
+                "native seed payload exceeds the existing preparation limit",
+            ));
+        }
+        let spec = IsolatedAudioProcessorWorkerSpec {
+            helper_executable: self.spec.helper_executable.clone(),
+            helper_arguments: self.spec.helper_arguments.clone(),
+            dispatch_argument: self.spec.dispatch_argument.clone(),
+            preparation_payload,
+            plugin_execution_contract: self.spec.plugin_execution_contract,
+            auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            parameter_ids: self.spec.parameter_ids.clone(),
+            render_contract: self.spec.render_contract,
+            startup_timeout: self.spec.startup_timeout,
+            state_entry_timeout: self.spec.state_entry_timeout,
+            operation_timeout: self.spec.operation_timeout,
+            native_lane: self.spec.native_lane,
+        };
+        Ok(Self {
+            input_names: self.input_names.clone(),
+            spec,
+            execution_contract: self.execution_contract,
+            layout: self.layout,
+        })
+    }
+
     /// Validate a Worker contract through a real launch/handshake before a Plan
     /// retains this Factory.
     pub fn prepare(
@@ -286,7 +380,11 @@ impl IsolatedAudioProcessorFactory {
         )?;
         let execution_contract = spec
             .plugin_execution_contract
-            .with_additional_session_scratch_bytes(layout.total_bytes)?;
+            .with_additional_session_scratch_bytes(layout.total_bytes)?
+            .with_additional_session_scratch_bytes(spec.native_lane.map_or(
+                0,
+                crate::NativeWorkerLaneResourceProfile::additional_session_reservation_bytes,
+            ))?;
         let (mut validation, input_names) =
             SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
         if !validation.shutdown() {
@@ -306,6 +404,48 @@ impl IsolatedAudioProcessorFactory {
 }
 
 impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        use crate::AudioProcessorFactoryStorageBorrow as Storage;
+        visitor(Storage::complete(&self.input_names)?)?;
+        for name in &self.input_names {
+            visitor(Storage::complete(&name.bus_key)?)?;
+            visitor(Storage::complete(&name.name)?)?;
+        }
+        visitor(Storage::path(&self.spec.helper_executable)?)?;
+        visitor(Storage::complete(&self.spec.helper_arguments)?)?;
+        for argument in &self.spec.helper_arguments {
+            visitor(Storage::os_string(argument)?)?;
+        }
+        if let Some(argument) = &self.spec.dispatch_argument {
+            visitor(Storage::os_string(argument)?)?;
+        }
+        visitor(Storage::complete(&self.spec.preparation_payload)?)?;
+        visitor(Storage::complete(&self.spec.auxiliary_inputs.buses)?)?;
+        for bus in &self.spec.auxiliary_inputs.buses {
+            visitor(Storage::complete(&bus.bus_key)?)?;
+        }
+        visitor(Storage::complete(&self.spec.parameter_ids)?)?;
+        for id in &self.spec.parameter_ids {
+            visitor(Storage::complete(id.storage_owner())?)?;
+        }
+        Ok(())
+    }
+
+    fn with_native_configuration_seed(
+        &self,
+        format: NativeConfigurationFormat,
+        configuration: &[u8],
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        Ok(Some(Arc::new(
+            self.rebind_configuration_seed(format, configuration)?,
+        )))
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
@@ -327,10 +467,84 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
             render_contract: self.spec.render_contract,
             failed: false,
+            pending_reprepare: None,
+            staged_configuration_seed: None,
+            native_plugin_contract: self.spec.plugin_execution_contract,
         }))
     }
 }
 
+// Two pure passes of the SAME concrete serde serializer determine and then
+// write the exact bounded payload, without an oversized geometric output Vec.
+fn encode_native_configuration_payload<T: serde::Serialize>(
+    payload: &T,
+) -> Result<Vec<u8>, AudioProcessorHostError> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+            let next = self
+                .0
+                .checked_add(input.len())
+                .filter(|bytes| *bytes <= MAX_CONTROL_FRAME_BYTES / 2)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "native seed preparation payload limit exceeded",
+                    )
+                })?;
+            self.0 = next;
+            Ok(input.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, payload).map_err(|error| {
+        invalid_contract(&format!("native seed payload measurement refused: {error}"))
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(count.0).map_err(|error| {
+        invalid_contract(&format!("native seed payload allocation refused: {error}"))
+    })?;
+    if bytes.capacity() > MAX_CONTROL_FRAME_BYTES / 2 {
+        return Err(invalid_contract(
+            "native seed actual output capacity exceeds the preparation bound",
+        ));
+    }
+    struct Exact<'a> {
+        bytes: &'a mut Vec<u8>,
+        limit: usize,
+    }
+    impl std::io::Write for Exact<'_> {
+        fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .len()
+                .checked_add(input.len())
+                .filter(|bytes| *bytes <= self.limit)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "native seed exceeded its measured serialization extent",
+                    )
+                })?;
+            self.bytes.extend_from_slice(input);
+            Ok(input.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(&mut Exact { bytes: &mut bytes, limit: count.0 }, payload).map_err(
+        |error| invalid_contract(&format!("native seed payload encoding refused: {error}")),
+    )?;
+    if bytes.len() != count.0 {
+        return Err(invalid_contract(
+            "native seed payload changed between pure serialization passes",
+        ));
+    }
+    Ok(bytes)
+}
 impl fmt::Debug for IsolatedAudioProcessorFactory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -348,9 +562,253 @@ struct IsolatedAudioProcessor {
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     render_contract: AudioRenderContract,
     failed: bool,
+    pending_reprepare: Option<mondrian_core::NativeAudioReprepareRequest>,
+    staged_configuration_seed: Option<NativeConfigurationSeedReceipt>,
+    native_plugin_contract: AudioProcessorExecutionContract,
 }
 
 impl AudioProcessor for IsolatedAudioProcessor {
+    fn open_native_audio_editor(
+        &mut self,
+        request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.open_native_audio_editor(request) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn close_native_audio_editor(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.close_native_audio_editor(binding) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn native_audio_object_observation(
+        &mut self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.observe_native_audio_object() {
+            Ok(object) => Ok(object),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn native_observations_supported(&self) -> bool {
+        true
+    }
+
+    fn poll_native_observations(
+        &mut self,
+        consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.poll_native_observations(consumption) {
+            Ok(observations) => Ok(observations),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn preflight_native_observations(
+        &mut self,
+        _expected_object: crate::NativeAudioObjectObservation,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.preflight_native_observations() {
+            Ok(mut observations) => {
+                // Preserve the adapter's existing sticky request: a serviced
+                // native callback becoming empty is not graph/PDC installation.
+                self.pending_reprepare = observations.pending_reprepare.or(self.pending_reprepare);
+                observations.pending_reprepare = self.pending_reprepare;
+                Ok(observations)
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn bind_native_audio_object(
+        &mut self,
+        request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.bind_native_audio_object(request) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn prepare_native_author_state_entry(
+        &mut self,
+        request: crate::NativeAudioAuthorStateEntryRequest<'_>,
+    ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.prepare_native_author_state_entry(request) {
+            Ok(crate::NativeAudioAuthorStateEntryOutcome::Prepared(receipt)) => {
+                if receipt.contract() != self.native_plugin_contract {
+                    self.failed = true;
+                    return Err(AudioProcessorHostError::InvalidContract(
+                        "restored native plugin contract changed".to_owned(),
+                    ));
+                }
+                Ok(crate::NativeAudioAuthorStateEntryOutcome::Prepared(receipt))
+            }
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn native_configuration_cohort(
+        &mut self,
+    ) -> Result<Option<NativeRequestCohort>, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        self.worker.query_native_configuration_cohort()
+    }
+
+    fn service_native_configuration(
+        &mut self,
+        request: NativeConfigurationControlRequest<'_>,
+    ) -> Result<NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        let expected = request.expected_cohort.request;
+        let outcome = self.worker.service_native_configuration(request);
+        match outcome {
+            Ok(outcome) => {
+                self.pending_reprepare = Some(expected);
+                Ok(outcome)
+            }
+            Err(AudioProcessorHostError::InvalidContract(detail)) => {
+                Err(AudioProcessorHostError::InvalidContract(detail))
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn stage_native_configuration_seed(
+        &mut self,
+        request: NativeConfigurationSeedRequest<'_>,
+    ) -> Result<NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.stage_native_configuration_seed(request) {
+            Ok(outcome) => {
+                if let NativeConfigurationSeedOutcome::Accepted(receipt) = outcome {
+                    self.staged_configuration_seed = Some(receipt);
+                }
+                Ok(outcome)
+            }
+            Err(error @ AudioProcessorHostError::InvalidContract(_)) => Err(error),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn commit_native_configuration_seed(
+        &mut self,
+        ticket: NativeConfigurationSeedTicket,
+    ) -> Result<NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        let Some(staged) =
+            self.staged_configuration_seed.filter(|receipt| receipt.ticket == ticket)
+        else {
+            return Ok(NativeConfigurationSeedOutcome::Refused(
+                NativeConfigurationSeedRefusal::SeedNotStaged,
+            ));
+        };
+        match self.worker.commit_native_configuration_seed(staged) {
+            Ok(outcome) => {
+                if let NativeConfigurationSeedOutcome::Accepted(_) = outcome {
+                    self.staged_configuration_seed = None;
+                    self.pending_reprepare = None;
+                }
+                Ok(outcome)
+            }
+            Err(error @ AudioProcessorHostError::InvalidContract(_)) => Err(error),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn preflight_reprepare(
+        &mut self,
+    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.invoke(
+            "pending query",
+            WorkerCommand {
+                kind: CommandKind::PollPending,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            },
+        ) {
+            Ok(pending) => {
+                self.pending_reprepare = pending.or(self.pending_reprepare);
+                Ok(self.pending_reprepare)
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
         if self.failed {
             return Err(AudioProcessorHostError::PoisonedInstance);
@@ -364,10 +822,20 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 event_count: 0,
             },
         );
-        if result.is_err() {
-            self.failed = true;
+        match result {
+            Ok(pending) => {
+                self.pending_reprepare = pending.or(self.pending_reprepare);
+                Ok(())
+            }
+            Err(AudioProcessorHostError::ReprepareRequired(request)) => {
+                self.pending_reprepare = Some(request);
+                Err(AudioProcessorHostError::ReprepareRequired(request))
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
         }
-        result
     }
 
     fn process(
@@ -378,6 +846,11 @@ impl AudioProcessor for IsolatedAudioProcessor {
     ) -> Result<(), AudioProcessorHostError> {
         if self.failed {
             return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if !context.has_root_window_admission()
+            && let Some(request) = self.preflight_reprepare()?
+        {
+            return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
         let request = context.request();
         if context.sample_rate().hz() != self.render_contract.sample_rate
@@ -500,9 +973,16 @@ impl AudioProcessor for IsolatedAudioProcessor {
                     .map_err(|_| invalid_contract("event count is not protocol-representable"))?,
             },
         );
-        if let Err(error) = result {
-            self.failed = true;
-            return Err(error);
+        match result {
+            Ok(pending) => self.pending_reprepare = pending.or(self.pending_reprepare),
+            Err(AudioProcessorHostError::ReprepareRequired(request)) => {
+                self.pending_reprepare = Some(request);
+                return Err(AudioProcessorHostError::ReprepareRequired(request));
+            }
+            Err(error) => {
+                self.failed = true;
+                return Err(error);
+            }
         }
         let shared = self.worker.shared_mut();
         let main_end = layout
@@ -522,6 +1002,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
 
 /// Immutable request received by a child-side native plugin Adapter.
 pub struct IsolatedAudioProcessorWorkerPrepareRequest {
+    native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
     payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
@@ -530,6 +1011,12 @@ pub struct IsolatedAudioProcessorWorkerPrepareRequest {
 }
 
 impl IsolatedAudioProcessorWorkerPrepareRequest {
+    /// Matching known native lane request, never a complete grant or owner lease.
+    pub const fn native_worker_lane_resources(
+        &self,
+    ) -> Option<crate::NativeWorkerLaneResourceProfile> {
+        self.native_lane
+    }
     /// Opaque parent-supplied native Adapter payload.
     pub fn payload(&self) -> &[u8] {
         &self.payload
@@ -563,6 +1050,12 @@ impl IsolatedAudioProcessorWorkerPrepareRequest {
 
 /// Child-side factory for a concrete VST3, CLAP, or other native Adapter.
 pub trait IsolatedAudioProcessorWorkerFactory {
+    /// Same-binary owning-type request, computed before foreign plugin load.
+    fn native_worker_lane_resources(
+        &self,
+    ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+        Ok(None)
+    }
     /// Load, restore, negotiate, and return one exclusive native instance.
     fn prepare(
         &self,
@@ -572,6 +1065,156 @@ pub trait IsolatedAudioProcessorWorkerFactory {
 
 /// Exclusive native processor instance owned entirely by one Worker process.
 pub trait IsolatedAudioProcessorWorker {
+    /// Exact request matched before native load and retained by this actual owner.
+    fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
+        None
+    }
+    /// Actual retained staged-seed allocation, independent of the decoded request.
+    /// Byte capacity and alignment are observed from the current native owner.
+    fn native_staged_seed_layout(&self) -> crate::NativeHostBufferLayout {
+        crate::NativeHostBufferLayout { bytes: 0, alignment: 1 }
+    }
+    /// Whether this concrete native adapter admits actual disjoint thread roles.
+    /// This is an execution capability, never editor or authoring permission.
+    fn uses_native_processing_split(&self) -> bool {
+        false
+    }
+
+    /// Borrow the same native instance into its real main and DSP roles.
+    /// No native owner can be replaced until both roles end and DSP joins.
+    fn split_native_processing(
+        &mut self,
+    ) -> Result<IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
+        Err(AudioProcessorHostError::Unavailable(
+            "native adapter has no scoped main/DSP roles".into(),
+        ))
+    }
+
+    /// Lower the actual native parent Close source intent through this same binding.
+    /// Canonical host-frame cleanup may remain pending; no fake close is returned.
+    /// Replacement/termination separately requires complete lifecycle cleanup.
+    fn service_native_editor_close_request(
+        &mut self,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioEditorOutcome::Refused(
+            crate::NativeAudioEditorRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Strict lifecycle cleanup before replacement/termination of this owner.
+    /// It must succeed completely or cause isolated retirement.
+    fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
+        Ok(())
+    }
+
+    /// Actual current load facts on this child owner; no installed/author permission.
+    fn native_audio_object_observation(
+        &self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
+    /// Observe one bounded diagnostic batch after the scoped DSP role joins.
+    /// This is the sole observation request, not a second callback transport.
+    fn poll_native_observations(
+        &mut self,
+        _consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        Ok(crate::NativeAudioObservations {
+            object: self.native_audio_object_observation()?,
+            editor_cleanup: self.native_editor_detach_stage(),
+            ..Default::default()
+        })
+    }
+
+    /// Acknowledge one exact object after the scoped DSP role has ended/joined.
+    /// Unsupported adapters remain explicit; seed tickets are not object bindings.
+    fn bind_native_audio_object(
+        &mut self,
+        _request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioObjectBindOutcome::Refused(
+            crate::NativeAudioObjectBindRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Attach this actual bound native object's view after DSP join.
+    /// The sole Runtime has already admitted its installed owner lease.
+    fn open_native_audio_editor(
+        &mut self,
+        _request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioEditorOutcome::Refused(
+            crate::NativeAudioEditorRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Close this same bound view; native teardown failure retains its owner.
+    fn close_native_audio_editor(
+        &mut self,
+        _binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioEditorOutcome::Refused(
+            crate::NativeAudioEditorRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Read only the sole actual native attachment's unresolved detach state.
+    /// This is lifecycle observation, never an independent author permission.
+    fn native_editor_detach_stage(&self) -> Option<crate::NativeAudioEditorCloseStage> {
+        None
+    }
+
+    /// Pure snapshot for a subsequent bounded non-RT service on this exact owner.
+    fn prepare_native_author_state_entry(
+        &mut self,
+        _request: crate::NativeAudioAuthorStateEntryRequest<'_>,
+    ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        Ok(crate::NativeAudioAuthorStateEntryOutcome::Refused(
+            crate::NativeAudioAuthorStateEntryRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Pure snapshot for a subsequent bounded non-RT service on this exact owner.
+    fn native_configuration_cohort(&self) -> Option<NativeRequestCohort> {
+        None
+    }
+
+    /// Legally reactivate and capture retained configuration; never install a plan.
+    fn service_native_configuration(
+        &mut self,
+        _request: NativeConfigurationControlRequest<'_>,
+    ) -> Result<NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        Ok(NativeConfigurationControlOutcome::CapabilityRefused(
+            NativeConfigurationRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Adopt a bounded same-child seed without processing, plan or clock publication.
+    fn stage_native_configuration_seed(
+        &mut self,
+        _seed: NativeConfigurationOwnedSeed,
+    ) -> Result<NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        Ok(NativeConfigurationSeedOutcome::Refused(
+            NativeConfigurationSeedRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Move a preowned exact seed after a current native request serial claim.
+    fn commit_native_configuration_seed(
+        &mut self,
+        _ticket: NativeConfigurationSeedTicket,
+    ) -> Result<NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        Ok(NativeConfigurationSeedOutcome::Refused(
+            NativeConfigurationSeedRefusal::UnsupportedAdapter,
+        ))
+    }
+
+    /// Pure observation of recorded callbacks; never service control or metadata.
+    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
+        None
+    }
+
     /// Revalidated native scheduling and mode facts.
     fn execution_contract(&self) -> AudioProcessorExecutionContract;
 
@@ -747,3 +1390,11 @@ pub fn run_isolated_audio_processor_worker(
 fn invalid_contract(detail: &str) -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(detail.to_owned())
 }
+
+mod native_worker_ingress;
+mod native_worker_processing;
+mod native_worker_roles;
+pub use native_worker_roles::{
+    IsolatedAudioProcessorMainRole, IsolatedAudioProcessorProcessingRole,
+    IsolatedAudioProcessorWorkerSplit,
+};

@@ -41,7 +41,9 @@ pub use audio_automation_edit::{
     AudioAutomationEditError, AudioAutomationEditOutcome, AudioAutomationEditRequest,
     AudioAutomationInspection, AudioAutomationTarget, AudioAutomationValueContract,
 };
-pub use audio_automation_time::{audio_automation_author_time, AudioAutomationTimeError};
+pub use audio_automation_time::{
+    audio_automation_author_time, audio_automation_execution_time, AudioAutomationTimeError,
+};
 pub use audio_channel_strip_edit::{
     apply_audio_channel_strip_edit, audio_channel_strip, inspect_audio_channel_strip,
     AudioChannelStripAddressError, AudioChannelStripEdit, AudioChannelStripEditBlocker,
@@ -56,9 +58,11 @@ pub use audio_component_edit::{
 };
 pub use audio_processor_edit::{
     apply_audio_processor_rack_edit, audio_processor_rack, inspect_audio_processor_rack,
-    AudioChannelStripRack, AudioProcessorRackAddress, AudioProcessorRackEdit,
-    AudioProcessorRackEditError, AudioProcessorRackEditOutcome, AudioProcessorRackEditRequest,
-    AudioProcessorRackInspection, AudioProcessorRackPlacement,
+    inspect_native_audio_authoring, AudioChannelStripRack, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditError, AudioProcessorRackEditOutcome,
+    AudioProcessorRackEditRequest, AudioProcessorRackInspection, AudioProcessorRackPlacement,
+    NativeAudioAuthorUpdate, NativeAudioParameterOperation, NativeAudioParameterWrite,
+    NativeAudioParameterWriteMode,
 };
 pub use audio_routing_edit::{
     apply_audio_routing_edit, inspect_audio_mix_bus, inspect_audio_mix_buses,

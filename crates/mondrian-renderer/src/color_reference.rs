@@ -519,7 +519,7 @@ fn validate_rgba_f32(
                 }
             }
         }
-        if !(0.0..=1.0).contains(&pixel[3]) {
+        if descriptor.alpha != ColorFrameAlpha::Opaque && !descriptor.alpha.admits_alpha(pixel[3]) {
             return Err(ColorReferenceValidationError::AlphaOutOfRange {
                 pixel_index,
                 value: pixel[3],

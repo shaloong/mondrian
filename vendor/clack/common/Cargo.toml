@@ -1,0 +1,27 @@
+[package]
+name = "clack-common"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/prokopyl/clack"
+description = "Various utilities for working with the CLAP audio plugin API, for both plugins and hosts."
+categories = ["api-bindings", "multimedia::audio"]
+keywords = ["clap", "audio", "plugin", "host", "bindings"]
+authors = ["Adrien Prokopowicz <prokopylmc@gmail.com>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap-sys = { workspace = true }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+static_assertions = "1.1.0"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "status": "REPLAYED_LOCAL_FORMAT_AND_DECLARED_SOURCE_CORRECTIONS_NOT_RUNTIME_QUALIFICATION",
+  "rustfmt_sha256_raw": "84abd1fa0d8e9e0dd4c2bce3544e650b4137ee87ec8179e8e16dbb974af11db0",
+  "files": [
+    {
+      "path": "src/array_queue.rs",
+      "preimage_sha256_raw": "bedfaf478e468b082c3cb10db17de0514355dce8e328b1ee91aacd015f7fe201",
+      "shipped_sha256_raw": "10744ef6baa127d6eaa6bdf05c62ac933f1c5fa23ea29fa247b855edb68be274",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/lib.rs",
+      "preimage_sha256_raw": "b19dd214ac75b0734cddca4d986a3c91a363d8efd9a635f586a76210099790ab",
+      "shipped_sha256_raw": "370b7559ed9c061862d754d9b1f736078ff399ddce7f2b3bec04818206456865",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    }
+  ],
+  "official_inputs_unchanged": true,
+  "generated_raw_unchanged": true
+}

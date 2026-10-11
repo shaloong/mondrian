@@ -229,6 +229,25 @@ jobs:
           }
           & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
+      - name: Activate MSVC x64 and verify static DXC prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./scripts/enter-windows-development.ps1 -MsvcOnly
+          foreach ($variableName in @('INCLUDE', 'LIB', 'LIBPATH', 'PATH',
+              'VCToolsInstallDir', 'VCToolsVersion', 'VSINSTALLDIR',
+              'VSCMD_ARG_TGT_ARCH', 'VSCMD_ARG_HOST_ARCH', 'WindowsSdkDir',
+              'WindowsSDKVersion', 'UniversalCRTSdkDir', 'UCRTVersion',
+              'CC', 'CXX', 'ASM')) {
+            $variableValue = [Environment]::GetEnvironmentVariable($variableName, 'Process')
+            if ([string]::IsNullOrWhiteSpace($variableValue) -or
+                $variableValue.Contains("`r") -or $variableValue.Contains("`n")) {
+              throw "Cannot publish the activated MSVC environment variable: $variableName"
+            }
+            "$variableName=$variableValue" | Out-File `
+              -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'
         shell: pwsh

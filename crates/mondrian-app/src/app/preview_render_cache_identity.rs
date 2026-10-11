@@ -140,7 +140,7 @@ pub(crate) fn canonical_resolved_node_materialization(
             ResolvedPreviewElement::Adjustment(adjustment) => {
                 bytes.u8(2);
                 bytes.f32(adjustment.opacity);
-                bytes.json(&adjustment.blend_mode)?;
+                bytes.json(&adjustment.blend_policy)?;
                 encode_effect(&adjustment.effect_graph, adjustment.frame_seed, &mut bytes)?;
             }
             ResolvedPreviewElement::Media {

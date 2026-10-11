@@ -22,17 +22,15 @@ use mondrian_effects::{
     EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
 use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
-use mondrian_render_cache::{
-    TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
-};
+use mondrian_render_cache::{TimelineRenderCacheFormat, TimelineRenderCacheIdentity};
 use mondrian_renderer::{
     basic_title_raster_request_identity,
     color::{RenderColorStageDiagnostics, WorkingColorModule},
     execute_prepared_visual_closure, prepare_bound_visual_frame_closure,
     project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
-    ColorFrameAlpha, CpuColorFrame, PreparedHeterogeneousEffectRoute,
-    PreparedTimelinePreviewEffectRoutes, PreparedVisualAuthorSnapshotIdentity,
-    PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    CpuColorFrame, PreparedHeterogeneousEffectRoute, PreparedTimelinePreviewEffectRoutes,
+    PreparedVisualAuthorSnapshotIdentity, PreparedVisualChildCanvasPolicy,
+    PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
     PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
     PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
     PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
@@ -569,7 +567,7 @@ where
                 target_resolution.width,
                 target_resolution.height,
                 TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-                TimelineRenderCacheAlpha::StraightCoverage,
+                mondrian_core::ColorFrameAlphaFormats::ALL,
             )
         });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
@@ -1017,6 +1015,7 @@ where
         }
         let frame = MediaPreviewFrame::from_working(
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: tile.frame_extent().width(),
                 height: tile.frame_extent().height(),
                 data: tile.pixels().to_vec(),
@@ -1171,6 +1170,7 @@ where
         TimelineTemporalSource::SolidColor { color } => {
             let extent = demand.effect_request.frame_extent();
             let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: extent.width(),
                 height: extent.height(),
                 data: vec![
@@ -1231,7 +1231,6 @@ fn preview_temporal_source_from_media_frame<MediaFrame, TitleFrame>(
     let expected = demand.effect_request.frame_extent();
     if descriptor.width != expected.width()
         || descriptor.height != expected.height()
-        || descriptor.alpha != ColorFrameAlpha::StraightCoverage
         || descriptor.color_space.working() != Some(working_color_space)
     {
         return Err(PreviewTimelineAbort::Unavailable(
@@ -1272,7 +1271,21 @@ fn preview_temporal_tile(
                 "temporal ROI exceeded its resolved Preview source frame",
             ))
         })?;
-        pixels.extend_from_slice(row);
+        for sample in row {
+            pixels.push(
+                mondrian_effects::convert_alpha_sample(
+                    *sample,
+                    source.alpha,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                )
+                .map_err(|error| {
+                    PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
+                        PreviewOutputStage::InputAdaptation,
+                        format!("temporal Coverage source materialization refused: {error}"),
+                    ))
+                })?,
+            );
+        }
     }
     EffectFrameTileF32::new(
         demand.effect_request.time(),
@@ -1634,7 +1647,7 @@ where
                     TimelineAdjustmentLayer {
                         effect_graph: adjustment.effect_graph,
                         opacity: adjustment.opacity,
-                        blend_mode: Some(adjustment.blend_mode),
+                        blend_policy: adjustment.blend_policy,
                         frame_seed: adjustment.frame_seed,
                     },
                 ));
@@ -1644,7 +1657,7 @@ where
                     TimelineAdjustmentLayer {
                         effect_graph: grade.effect_graph,
                         opacity: 1.0,
-                        blend_mode: None,
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                         frame_seed: grade.frame_seed,
                     },
                 ));

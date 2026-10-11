@@ -1147,24 +1147,19 @@ Detailed implementation history and remaining boundaries:
    No broad warning suppression was added. Keep bounded protocol-test execution distinct from
    unnecessarily repeated release linking of every product/tool executable;
    preserve the real public-interface compile checks and test coverage.
-   `preview_visual_protocol` now has a validation-only Cargo example/libtest
-   entry, not a top-level integration target. The original 26 private tests across
-   the real worker-lifecycle, notifier, visual-task and dependency-observer
-   Modules live in independent `crates/mondrian-app/tests/protocol/` files, excluded from ordinary
-   library source inputs. One additional test covers already-terminal string
-   and opaque panics at an expired join deadline. Run `cargo test --release -p
-   mondrian-app --features validation --example preview_visual_protocol -j 1 -- --test-threads=1` with
-   `CARGO_INCREMENTAL=0`. Cargo owns library/native/profile/loader selection;
-   no one-off manually linked runner is required. Neither a product binary nor
-   an alternative Runtime was introduced. Local release evidence: initial
-   migration26/26 passed (build6m34s); adding only the new case27/27 passed
-   (build1m08s). Both Cargo graphs contained no companion binaries or App lib-test;
-   the second kept the ordinary App library fresh. The non-test example returned
-   the expected usage failure. These are iteration observations, not a controlled
-   performance baseline. Cold or changed ordinary App library builds remain
-   expensive. Performance evidence/owner support extraction and
-   bounded production-linked owner tests are still unfinished; source protocol
-   tests do not replace App Runtime/GPU/physical closure qualification.
+   The private protocol tests remain in independent
+   `crates/mondrian-app/tests/protocol/` files, loaded only by their owning App
+   library modules under `cfg(test)`. Native GUI/processor feedback integration
+   makes the App module context part of their real contract, so the former
+   source-including example has been removed. Use the explicit `--lib` module
+   filters documented in the commercialization qualification architecture, with
+   `CARGO_INCREMENTAL=0`. Cargo owns the actual library/native/profile/loader;
+   no duplicate App messages or GUI service stubs are introduced.
+   Earlier example migration observations (26/26 and then27/27) remain historical
+   evidence of that previous source graph, not qualification of the current
+   linked App. Current protocol tests require a freshly matched library test
+   artifact. Performance evidence/owner support extraction is still unfinished;
+   protocol tests do not replace App Runtime/GPU/physical closure qualification.
 3. Close the capsule lifecycle: sealed namespace, spawn-time admission,
    retained child leases, explicit Windows access-control evidence, and
    fallible process-owner cleanup. Static owners do not run TempDir cleanup

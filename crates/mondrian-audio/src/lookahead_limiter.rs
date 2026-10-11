@@ -30,14 +30,17 @@ pub(super) fn prepare_lookahead_limiter(
     let (ceiling_slot, ceiling) = parameter(&request, &ceiling_id, "Ceiling")?;
     let (lookahead_slot, lookahead) = parameter(&request, &lookahead_id, "Lookahead")?;
     let (release_slot, release) = parameter(&request, &release_id, "Release")?;
+    let ceiling_curve = bound_curve(ceiling)?;
+    let lookahead_curve = bound_curve(lookahead)?;
+    let release_curve = bound_curve(release)?;
     if request.parameters().len() != 3
         || ceiling.schema != lookahead_limiter_ceiling_parameter_schema()
         || lookahead.schema != lookahead_limiter_lookahead_parameter_schema()
         || release.schema != lookahead_limiter_release_parameter_schema()
-        || ceiling.automation.parameter_id != ceiling_id
-        || lookahead.automation.parameter_id != lookahead_id
-        || release.automation.parameter_id != release_id
-        || !lookahead.automation.keyframes.is_empty()
+        || ceiling_curve.parameter_id != ceiling_id
+        || lookahead_curve.parameter_id != lookahead_id
+        || release_curve.parameter_id != release_id
+        || !lookahead_curve.keyframes.is_empty()
         || request.opaque_state().is_some()
     {
         return Err(AudioProcessorHostError::InvalidContract(
@@ -46,7 +49,7 @@ pub(super) fn prepare_lookahead_limiter(
     }
 
     let lookahead_frames = milliseconds_to_frames_ceil(
-        lookahead.automation.default_value,
+        lookahead_curve.default_value,
         request.render_contract().sample_rate,
     )?;
     let channel_layout = request.render_contract().channel_layout;
@@ -86,12 +89,22 @@ pub(super) fn prepare_lookahead_limiter(
         ceiling_slot,
         lookahead_slot,
         release_slot,
-        lookahead_ms: lookahead.automation.default_value,
+        lookahead_ms: lookahead_curve.default_value,
         lookahead_frames,
         max_block_frames,
         channel_layout,
         execution_contract,
     }))
+}
+
+fn bound_curve(
+    parameter: &mondrian_timeline::audio::AudioProcessorParameter,
+) -> Result<&mondrian_core::ExactAutomationCurve, AudioProcessorHostError> {
+    parameter.automation.as_ref().ok_or_else(|| {
+        AudioProcessorHostError::InvalidContract(
+            "built-in Lookahead Limiter requires host parameter values".to_owned(),
+        )
+    })
 }
 
 fn parameter<'a>(

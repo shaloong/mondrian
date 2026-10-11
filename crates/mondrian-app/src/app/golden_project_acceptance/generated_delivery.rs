@@ -923,6 +923,9 @@ pub(super) fn render_program_audio_reference(
         },
         &ExecutionCancellationToken::new(),
     )?;
+    let mondrian_media::AudioPcmRenderOutcome::Rendered(buffer) = buffer else {
+        bail!("canonical audio reference did not produce PCM: {buffer:?}");
+    };
     stereo_signal_evidence(start_sample, frame_count, &buffer.samples)
 }
 

@@ -422,6 +422,8 @@ pub struct CompiledEffectGraph {
     /// Exact modes implemented and Definition-admitted for each reachable
     /// executable node.
     node_execution_modes: HashMap<EffectGraphNodeId, EffectExecutionModes>,
+    /// Exact implementation/provider association admission retained by the sole IR.
+    node_alpha_contracts: HashMap<EffectGraphNodeId, crate::EffectAlphaContract>,
 }
 
 impl CompiledEffectGraph {
@@ -503,6 +505,14 @@ impl CompiledEffectGraph {
         self.node_execution_modes.get(&node_id).copied()
     }
 
+    /// Complete provider alpha declaration for one reachable compiled value.
+    pub fn node_alpha_contract(
+        &self,
+        node: EffectGraphNodeId,
+    ) -> Option<crate::EffectAlphaContract> {
+        self.node_alpha_contracts.get(&node).copied()
+    }
+
     pub(crate) fn retained_bytes_estimate(&self) -> usize {
         let binding_nodes = self
             .stage_bindings
@@ -564,6 +574,9 @@ impl CompiledEffectGraph {
                     .saturating_mul(std::mem::size_of::<CompiledEffectStageBinding>()),
             )
             .saturating_add(binding_nodes)
+            .saturating_add(self.node_alpha_contracts.capacity().saturating_mul(
+                std::mem::size_of::<(EffectGraphNodeId, crate::EffectAlphaContract)>(),
+            ))
             .saturating_add(
                 self.node_execution_modes
                     .capacity()
@@ -762,6 +775,7 @@ impl PreparedEffectGraphTopology {
         constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
         let (output_cache_policy, estimated_cost, output_cache_enabled) =
             compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+        let node_alpha_contracts = compile_node_alpha_contracts(&graph, &self.schedule)?;
         let identity = graph.semantic_identity();
         Some(Arc::new(CompiledEffectGraph {
             signature_hash: identity.diagnostic_hash(),
@@ -777,6 +791,7 @@ impl PreparedEffectGraphTopology {
             execution_envelope,
             stage_bindings,
             node_execution_modes,
+            node_alpha_contracts,
         }))
     }
 }
@@ -1882,6 +1897,36 @@ pub fn compile_reference_effect_graph_in_domain(
     compile_scheduled_render_graph(graph)
 }
 
+fn compile_node_alpha_contracts(
+    graph: &EffectRenderGraph,
+    schedule: &EffectExecutionSchedule,
+) -> Option<HashMap<EffectGraphNodeId, crate::EffectAlphaContract>> {
+    schedule
+        .ordered_nodes
+        .iter()
+        .map(|id| {
+            let node = graph.node(*id)?;
+            let contract = match &node.kind {
+                EffectGraphNodeKind::Source => crate::EffectAlphaContract::IDENTITY,
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::Custom { processor: Some(binding), .. },
+                    ..
+                } => binding.alpha_contract(),
+                EffectGraphNodeKind::Blend { blend_mode: BlendMode::Normal, .. }
+                | EffectGraphNodeKind::MultiInput { blend_mode: BlendMode::Normal, .. } => {
+                    crate::EffectAlphaContract::NORMAL_OVER
+                }
+                _ => crate::EffectAlphaContract::COVERAGE_OPERATION,
+            };
+            contract.is_valid().then_some((*id, contract))
+        })
+        .collect::<Option<HashMap<_, _>>>()
+}
+
 fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEffectGraph> {
     let schedule = schedule_effect_render_graph(&graph)?;
     if !reachable_custom_processor_snapshots_are_complete(&graph, &schedule) {
@@ -1896,6 +1941,7 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
     constrain_cache_profiles_by_execution_envelope(&mut node_profiles, &execution_envelope);
     let (output_cache_policy, estimated_cost, output_cache_enabled) =
         compiled_effect_graph_cache_profile(&graph, &node_profiles)?;
+    let node_alpha_contracts = compile_node_alpha_contracts(&graph, &schedule)?;
     let identity = graph.semantic_identity();
     Some(CompiledEffectGraph {
         node_use_counts: effect_graph_node_use_counts(&graph),
@@ -1909,6 +1955,7 @@ fn compile_scheduled_render_graph(graph: EffectRenderGraph) -> Option<CompiledEf
         execution_envelope,
         stage_bindings,
         node_execution_modes,
+        node_alpha_contracts,
         graph,
         schedule,
     })

@@ -486,7 +486,15 @@ impl ExportVisualRenderSession {
                 .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
                     route.route.prepared_work(),
                     generation,
-                    &input.rgba_f32().data,
+                    mondrian_effects::EffectFloatFrameView::new(
+                        extent,
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            input.rgba_f32().alpha,
+                        ),
+                        &input.rgba_f32().data,
+                    ),
                     route.frame_seed,
                     working_color_space,
                     &mut checkpoint,

@@ -285,7 +285,10 @@ impl PreviewTransportSnapshot {
     pub(crate) const fn is_playing(self) -> bool {
         matches!(
             self.state,
-            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            TransportState::Priming
+                | TransportState::Playing
+                | TransportState::Recovering
+                | TransportState::HoldingForNativeAudioControl
         )
     }
 

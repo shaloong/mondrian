@@ -202,7 +202,7 @@ def main() -> None:
     lock = tomllib.loads((worktree / "Cargo.lock").read_text(encoding="utf-8"))
     sdk_packages = [entry for entry in lock["package"] if entry["name"] in
                     {"clack-common", "clack-host", "clack-plugin", "clack-extensions", "clap-sys", "vst3-host", "vst3"}]
-    source_dirs = ("crates/mondrian-audio/src", "crates/mondrian-core/src", "crates/mondrian-timeline/src", "vendor/vst3-host/src", "vendor/vst3-sdk")
+    source_dirs = ("crates/mondrian-audio/src", "crates/mondrian-core/src", "crates/mondrian-timeline/src", "vendor/vst3-host/src", "vendor/vst3-sdk", "vendor/clack", "vendor/clap-sys", "vendor/crossbeam-queue")
     sources = source_files(*source_dirs, cwd=worktree)
     audio_artifacts = (args.clap_worker, args.vst3_worker, args.clap_fixture, args.vst3_fixture, args.audio_test_executable)
     openfx_artifacts = (args.openfx_worker, args.openfx_reference, args.openfx_test_executable)
@@ -265,6 +265,32 @@ def main() -> None:
     build["vst3_sdk_provenance"] = {"path":"vendor/vst3-sdk/PROVENANCE.json",
                                     "sha256":digest(provenance_path),
                                     "manifest":canonical_provenance}
+    # Path Clack packages likewise require explicit immutable source receipts.
+    clack_sdk = worktree / "vendor/clack"
+    clack_provenance_path = clack_sdk / "PROVENANCE.json"
+    clack_provenance = json.loads(clack_provenance_path.read_text(encoding="utf-8"))
+    for shipped in clack_provenance["shipped_files"]:
+        shipped_path = Path(shipped["path"])
+        if shipped_path.is_absolute() or ".." in shipped_path.parts:
+            raise RuntimeError("Canonical Clack provenance contains an invalid relative path")
+        if digest(clack_sdk / shipped_path) != shipped["sha256"]:
+            raise RuntimeError(f"Canonical Clack source changed: {shipped_path}")
+    build["clack_sdk_provenance"] = {"path": "vendor/clack/PROVENANCE.json",
+                                     "sha256": digest(clack_provenance_path),
+                                     "manifest": clack_provenance}
+    # The sole official header-generated CLAP path package has no Git lock ID.
+    clap_sdk = worktree / "vendor/clap-sys"
+    clap_provenance_path = clap_sdk / "PROVENANCE.json"
+    clap_provenance = json.loads(clap_provenance_path.read_text(encoding="utf-8"))
+    for shipped in clap_provenance["shipped_files"]:
+        shipped_path = Path(shipped["path"])
+        if shipped_path.is_absolute() or ".." in shipped_path.parts:
+            raise RuntimeError("Canonical CLAP provenance contains an invalid relative path")
+        if digest(clap_sdk / shipped_path) != shipped["sha256"]:
+            raise RuntimeError(f"Canonical CLAP source changed: {shipped_path}")
+    build["clap_sdk_provenance"] = {"path": "vendor/clap-sys/PROVENANCE.json",
+                                    "sha256": digest(clap_provenance_path),
+                                    "manifest": clap_provenance}
     artifacts = [{"role": role, "path": str(path.resolve(strict=True)),
                   "sha256": digest(path.resolve(strict=True)), "bytes": path.stat().st_size}
                  for role, path in (("clap_worker", args.clap_worker), ("vst3_worker", args.vst3_worker),

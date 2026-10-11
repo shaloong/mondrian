@@ -877,7 +877,11 @@ fn audio_state_name(state: AudioPlaybackState) -> &'static str {
         AudioPlaybackState::WaitingForSource => "WaitingForSource",
         AudioPlaybackState::Prerolling => "Prerolling",
         AudioPlaybackState::Recovering => "Recovering",
+        AudioPlaybackState::RepreparePending => "RepreparePending",
+        AudioPlaybackState::NativeAuthorPending => "NativeAuthorPending",
         AudioPlaybackState::RenderBlocked => "RenderBlocked",
+        AudioPlaybackState::EditorCleanupPending => "EditorCleanupPending",
+        AudioPlaybackState::EditorCleanupCompletePaused => "EditorCleanupCompletePaused",
         AudioPlaybackState::Active => "Active",
     }
 }

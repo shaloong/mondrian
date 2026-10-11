@@ -4785,6 +4785,9 @@ fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
                 },
                 &cancellation,
             )?;
+            let mondrian_media::AudioPcmRenderOutcome::Rendered(rendered) = rendered else {
+                anyhow::bail!("audio source smoke did not produce PCM: {rendered:?}");
+            };
             anyhow::ensure!(
                 rendered.frame_count() == 2_048,
                 "audio render extent shifted"

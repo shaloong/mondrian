@@ -2747,9 +2747,15 @@ mod tests {
                 panic!("keyer must remain attached to the solid Clip");
             };
             let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
-                &[keyed_pixel],
-                1,
-                1,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    &[keyed_pixel],
+                ),
                 &solid.effect_graph,
                 solid.frame_seed,
             )

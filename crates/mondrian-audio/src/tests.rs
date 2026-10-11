@@ -16,6 +16,9 @@ use mondrian_timeline::audio::{
 use mondrian_timeline::{Clip, Sequence};
 use std::sync::{Arc, Mutex};
 
+#[path = "tests/continuity_evidence.rs"]
+mod continuity_evidence_tests;
+
 #[path = "tests/lookahead_limiter.rs"]
 mod lookahead_limiter_tests;
 
@@ -1987,6 +1990,8 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
         .get_mut(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
         .expect("author gain parameter")
         .automation
+        .as_mut()
+        .expect("bound host curve")
         .default_value = 6.0;
     let processor = &compiled
         .track_channels
@@ -2007,6 +2012,8 @@ fn unresolved_plugin_survives_semantic_ir_and_fails_at_preparation() {
     assert_eq!(
         processor.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
             .automation
+            .as_ref()
+            .expect("bound host curve")
             .default_value,
         0.0
     );
@@ -4032,4 +4039,216 @@ fn assert_late_sidechain_pdc(
             }
         }
     }
+}
+
+#[path = "tests/native_owner.rs"]
+mod native_owner_tests;
+
+#[path = "tests/native_pending_ticket.rs"]
+mod native_pending_ticket_tests;
+
+#[path = "tests/native_author_handoff.rs"]
+mod native_author_handoff_tests;
+
+#[path = "tests/session_storage.rs"]
+mod session_storage_tests;
+
+struct NativeReferenceResolver;
+struct NativeReferenceFactory;
+struct NativeReferenceProcessor {
+    value: f64,
+}
+impl AudioProcessorResolver for NativeReferenceResolver {
+    fn prepare(
+        &self,
+        request: AudioProcessorPrepareRequest<'_>,
+    ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+        assert!(
+            matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. } if plugin_id == "test.native.references")
+        );
+        assert_eq!(request.parameters().len(), 1);
+        Ok(Arc::new(NativeReferenceFactory))
+    }
+}
+impl AudioProcessorFactory for NativeReferenceFactory {
+    fn execution_contract(&self) -> AudioProcessorExecutionContract {
+        AudioProcessorExecutionContract::stateless()
+    }
+    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        Ok(Box::new(NativeReferenceProcessor { value: 0.75 }))
+    }
+}
+impl AudioProcessor for NativeReferenceProcessor {
+    fn enter_state(&mut self, _start: i64) -> Result<(), AudioProcessorHostError> {
+        Ok(())
+    }
+    fn process(
+        &mut self,
+        _context: AudioProcessorProcessContext,
+        audio: &mut dyn AudioProcessorAudioIo,
+        parameters: AudioParameterEventBatch<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        assert_eq!(
+            parameters.parameter_id(0).map(ParameterId::as_str),
+            Some("clap.param.1")
+        );
+        let events = parameters.events(0).expect("stable metadata lane");
+        let channels = audio.main_layout().channel_count();
+        for (frame, samples) in audio.main_interleaved().chunks_exact_mut(channels).enumerate() {
+            for event in events.iter().filter(|event| event.sample_offset as usize == frame) {
+                self.value = event.value;
+            }
+            for sample in samples {
+                *sample *= self.value as f32;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn native_reference_sequence() -> (Sequence, ParameterId) {
+    let mut sequence = sequence_with_audio_clip();
+    let id = ParameterId::new("clap.param.1").expect("native ID");
+    let schema =
+        mondrian_core::ParameterSchema::v1(id.clone(), mondrian_core::PropertyValue::Double(0.25));
+    let mut parameter = mondrian_timeline::audio::AudioProcessorParameter::from_schema(schema)
+        .expect("captured definition");
+    parameter.automation = None;
+    let mut processor = AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.native.references".into(),
+            schema_version: 1,
+            binary_sha256: Some([3; 32]),
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    };
+    processor.parameters.insert(id.clone(), parameter);
+    sequence.audio_program.processing_scopes[0]
+        .processors
+        .processors
+        .push(processor);
+    (sequence, id)
+}
+
+fn native_reference_plan(sequence: &Sequence, block: usize) -> Arc<PreparedAudioPlan> {
+    let compiled = Arc::new(
+        compile_audio_program(
+            sequence,
+            AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+        )
+        .expect("sole compiler"),
+    );
+    Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: block,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::ScalarReference,
+            &NativeReferenceResolver,
+        )
+        .expect("actual native-definition preparation"),
+    )
+}
+
+#[test]
+fn native_parameter_references_no_host_events_preserve_native_pcm_across_partitions() {
+    let (sequence, id) = native_reference_sequence();
+    let plan = native_reference_plan(&sequence, 4);
+    assert_eq!(plan.schedule_summary().processor_parameter_lane_count, 1);
+    assert_eq!(
+        plan.schedule_summary().maximum_parameter_events_per_block,
+        0
+    );
+    let mut session = AudioRenderSession::new(Arc::clone(&plan)).expect("Session");
+    let batch = session
+        .processor_parameter_events_for_test(0, AudioRenderRequest { start_sample: 0, frames: 4 })
+        .expect("real compiled batch");
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[0].0, id);
+    assert!(batch[0].1.is_empty());
+    let mut whole = [0.0; 4];
+    session
+        .render_into(
+            &mut RampSource::default(),
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut whole,
+        )
+        .expect("whole PCM");
+    assert_eq!(
+        whole,
+        [0.75, 1.5, 2.25, 3.0],
+        "schema default 0.25 must never replace native 0.75"
+    );
+    let mut session = AudioRenderSession::new(plan).expect("partitioned Session");
+    let mut split = [0.0; 4];
+    let mut source = RampSource::default();
+    for (start, frames) in [(0, 1), (1, 2), (3, 1)] {
+        session
+            .render_into(
+                &mut source,
+                AudioRenderRequest { start_sample: start, frames },
+                &mut split[start as usize..start as usize + frames],
+            )
+            .expect("partitioned PCM");
+    }
+    assert_eq!(split, whole);
+}
+
+#[test]
+fn native_parameter_references_same_contract_none_to_curve_uses_original_owner_time() {
+    let (mut sequence, id) = native_reference_sequence();
+    sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_in = tt(5, 1);
+    let plan = native_reference_plan(&sequence, 3);
+    let component = &sequence.audio_tracks[0].clips[0].audio_components[0];
+    let locator = mondrian_core::NativeAudioEditorLocator {
+        sequence: sequence.id,
+        instance: sequence.audio_program.processing_scopes[0].processors.processors[0].id,
+        owner: mondrian_core::NativeAudioEditorOccurrenceOwner::Contribution {
+            edit_id: component.id,
+            scope_id: component.processing.scope_id,
+        },
+        insertion: mondrian_core::NativeAudioEditorInsertion::Scope,
+    };
+    let mut curve = ExactAutomationCurve::new(id, 0.1).expect("host deliberately rebinds");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(tt(5, 1), 0.1))
+        .expect("first key");
+    curve
+        .set_keyframe(ExactAutomationKeyframe::linear(tt(6, 1), 0.9))
+        .expect("last key");
+    sequence.audio_program.processing_scopes[0].processors.processors[0]
+        .set_parameter_automation(curve)
+        .expect("canonical rebind");
+    let compiled = Arc::new(
+        compile_audio_program(
+            &sequence,
+            AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+        )
+        .expect("same canonical compiler"),
+    );
+    let next = Arc::new(
+        plan.prepare_native_author_parameters(compiled, locator)
+            .expect("same-contract immutable handoff"),
+    );
+    let mut session = AudioRenderSession::new(next).expect("prepared Session");
+    let lanes = session
+        .processor_parameter_events_for_test(0, AudioRenderRequest { start_sample: 0, frames: 3 })
+        .expect("original Scope clock");
+    assert_eq!(
+        lanes[0].1.iter().map(|event| event.value).collect::<Vec<_>>(),
+        vec![0.1, 0.5, 0.9]
+    );
 }

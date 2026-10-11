@@ -1963,8 +1963,22 @@ mod tests {
         }));
 
         let input = vec![[1.5, -0.25, 0.125, 0.37]; 64];
-        crate::apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &graph, 0)
-            .expect("execute Power Window graph")
+        crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(8, 8),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &graph,
+            0,
+        )
+        .expect("execute Power Window graph")
+        .into_parts()
+        .2
     }
 
     #[test]
@@ -2552,11 +2566,17 @@ mod tests {
         );
         assert!(matches!(
             crate::apply_compiled_effect_graph_rgba_f32(
-                &[[0.0, 0.0, 0.0, 1.0]; 9],
-                3,
-                3,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(3, 3),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    &[[0.0, 0.0, 0.0, 1.0]; 9]
+                ),
                 &graph,
-                0,
+                0
             ),
             Err(crate::EffectFloatExecutionError::ExecutionContract(
                 crate::EffectExecutionAdmissionError::ExecutionModeNotAdmitted {
@@ -2622,7 +2642,19 @@ mod tests {
             EffectStateModel::StatefulSequential
         );
         assert!(matches!(
-            crate::apply_compiled_effect_graph_rgba_f32(&[[0.0, 0.0, 0.0, 1.0]], 1, 1, &graph, 0,),
+            crate::apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    &[[0.0, 0.0, 0.0, 1.0]]
+                ),
+                &graph,
+                0
+            ),
             Err(crate::EffectFloatExecutionError::ExecutionContract(
                 crate::EffectExecutionAdmissionError::ContinuitySessionRequired
             ))

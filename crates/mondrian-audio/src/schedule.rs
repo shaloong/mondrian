@@ -1,5 +1,8 @@
 //! Render-contract-specific lowering from semantic audio IR to dense execution data.
 
+mod native_author;
+pub(crate) use native_author::processor;
+
 use crate::latency::{solve_prepared_latency, PreparedLatencyGraph, PreparedNodeLatency};
 use crate::plan::{
     AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
@@ -234,6 +237,7 @@ pub enum AudioResourceFootprintError {
 /// Immutable context-specific plan. Mutable buffers and processor instances do not live here.
 #[derive(Debug, Clone)]
 pub struct PreparedAudioPlan {
+    preparation_id: mondrian_core::AudioPreparedPlanId,
     program: Arc<CompiledAudioProgram>,
     contract: AudioRenderContract,
     kernel_backend: AudioKernelBackend,
@@ -241,6 +245,29 @@ pub struct PreparedAudioPlan {
 }
 
 impl PreparedAudioPlan {
+    /// Visit actual factory bindings in this local prepared Plan without DSP or
+    /// new instance creation. Shared factory Arc payloads keep one identity so
+    /// the caller can deduplicate aliases in its existing local union.
+    ///
+    /// This observes only immutable factory/binding storage; Plan, schedule,
+    /// program, Session and foreign process owners remain separate inventories.
+    /// Arc/platform coverage is not silently accepted as a complete allocation.
+    pub fn visit_factory_host_owned_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        for processor in &self.schedule.processors {
+            processor.factory.visit_host_owned_storage(visitor)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) const fn preparation_id(&self) -> mondrian_core::AudioPreparedPlanId {
+        self.preparation_id
+    }
+
     /// Prepare one semantic program for a concrete Render Contract.
     pub fn prepare(
         program: Arc<CompiledAudioProgram>,
@@ -293,7 +320,13 @@ impl PreparedAudioPlan {
             dependencies,
             processor_resolver,
         )?;
-        Ok(Self { program, contract, kernel_backend, schedule })
+        Ok(Self {
+            preparation_id: mondrian_core::AudioPreparedPlanId::new(),
+            program,
+            contract,
+            kernel_backend,
+            schedule,
+        })
     }
 
     /// Concrete Render Contract used by Sessions.
@@ -481,6 +514,76 @@ pub(crate) struct PreparedAudioSchedule {
     pub(crate) summary: PreparedAudioScheduleSummary,
 }
 
+struct PreparedAutomationSummary {
+    curve_count: usize,
+    span_count: usize,
+    parameter_lane_count: usize,
+    maximum_parameter_events: usize,
+}
+
+fn automation_summary(
+    nodes: &[PreparedNode],
+    contributions: &[PreparedContribution],
+    routes: &[PreparedRoute],
+    sidechains: &[PreparedSidechainBinding],
+    processors: &[PreparedProcessor],
+    contract: AudioRenderContract,
+) -> Result<PreparedAutomationSummary, AudioCompileError> {
+    let overflow = || {
+        AudioCompileError::InvalidPreparedGraph(
+            "prepared automation storage extent overflowed".to_owned(),
+        )
+    };
+    let mut curves = nodes
+        .iter()
+        .flat_map(|node| node.fader_automation.iter())
+        .chain(contributions.iter().flat_map(|contribution| {
+            contribution
+                .scope_input_automation
+                .iter()
+                .chain(contribution.volume_automation.iter())
+                .chain(contribution.pan_automation.iter())
+        }))
+        .chain(routes.iter().flat_map(|route| route.gain_automation.iter()))
+        .chain(sidechains.iter().flat_map(|binding| binding.gain_automation.iter()))
+        .chain(
+            processors
+                .iter()
+                .flat_map(|processor| processor.parameter_curves.iter().flatten()),
+        );
+    let (curve_count, span_count) =
+        curves.try_fold((0_usize, 0_usize), |(count, spans), curve| {
+            Ok::<_, AudioCompileError>((
+                count.checked_add(1).ok_or_else(overflow)?,
+                spans.checked_add(curve.event_span_count()).ok_or_else(overflow)?,
+            ))
+        })?;
+    let mut parameter_lane_count = 0_usize;
+    let mut maximum_parameter_events = 0;
+    for processor in processors {
+        parameter_lane_count = parameter_lane_count
+            .checked_add(processor.parameter_curves.len())
+            .ok_or_else(overflow)?;
+        let events =
+            processor.parameter_curves.iter().flatten().try_fold(0_usize, |count, curve| {
+                count
+                    .checked_add(if curve.is_constant() {
+                        1
+                    } else {
+                        contract.max_block_frames
+                    })
+                    .ok_or_else(overflow)
+            })?;
+        maximum_parameter_events = maximum_parameter_events.max(events);
+    }
+    Ok(PreparedAutomationSummary {
+        curve_count,
+        span_count,
+        parameter_lane_count,
+        maximum_parameter_events,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PreparedNodeOrigin {
     Track(TrackId),
@@ -547,7 +650,8 @@ pub(crate) struct PreparedRack {
 pub(crate) struct PreparedProcessor {
     pub(crate) occurrence: AudioProcessorOccurrence,
     pub(crate) parameter_ids: Vec<ParameterId>,
-    pub(crate) parameter_curves: Vec<PreparedAutomationCurve>,
+    pub(crate) parameter_curves: Vec<Option<PreparedAutomationCurve>>,
+    pub(crate) owner_time_offset: TimelineTime,
     pub(crate) main_compensation_delay_frames: usize,
     pub(crate) input_signal_delay_frames: usize,
     pub(crate) auxiliary_buses: Range<usize>,
@@ -1261,42 +1365,14 @@ impl PreparedAudioSchedule {
         last_consumer[output_slot] = execution_order.len();
         let scratch_slot_count =
             assign_liveness_scratch(&mut nodes, &last_consumer, &execution_order);
-        let automation_curves = nodes
-            .iter()
-            .flat_map(|node| node.fader_automation.iter())
-            .chain(contributions.iter().flat_map(|contribution| {
-                contribution
-                    .scope_input_automation
-                    .iter()
-                    .chain(contribution.volume_automation.iter())
-                    .chain(contribution.pan_automation.iter())
-            }))
-            .chain(routes.iter().flat_map(|route| route.gain_automation.iter()))
-            .chain(sidechain_bindings.iter().flat_map(|binding| binding.gain_automation.iter()))
-            .chain(processors.iter().flat_map(|processor| processor.parameter_curves.iter()))
-            .collect::<Vec<_>>();
-        let processor_parameter_lane_count =
-            processors.iter().map(|processor| processor.parameter_curves.len()).sum();
-        let maximum_parameter_events_per_block = processors
-            .iter()
-            .map(|processor| {
-                processor.parameter_curves.iter().try_fold(0_usize, |count, parameter| {
-                    count.checked_add(if parameter.is_constant() {
-                        1
-                    } else {
-                        contract.max_block_frames
-                    })
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| {
-                AudioCompileError::InvalidPreparedGraph(
-                    "processor parameter event capacity overflowed".to_owned(),
-                )
-            })?
-            .into_iter()
-            .max()
-            .unwrap_or(0);
+        let automation = automation_summary(
+            &nodes,
+            &contributions,
+            &routes,
+            &sidechain_bindings,
+            &processors,
+            contract,
+        )?;
         let processor_session_scratch_bytes = processors
             .iter()
             .try_fold(0_usize, |bytes, processor| {
@@ -1393,14 +1469,11 @@ impl PreparedAudioSchedule {
             sidechain_binding_count: sidechain_bindings.len(),
             sidechain_source_count: sidechain_sources.len(),
             transition_binding_count: transitions.len(),
-            automation_curve_count: automation_curves.len(),
-            automation_event_span_count: automation_curves
-                .iter()
-                .map(|curve| curve.event_span_count())
-                .sum(),
+            automation_curve_count: automation.curve_count,
+            automation_event_span_count: automation.span_count,
             processor_occurrence_count: processors.len(),
-            processor_parameter_lane_count,
-            maximum_parameter_events_per_block,
+            processor_parameter_lane_count: automation.parameter_lane_count,
+            maximum_parameter_events_per_block: automation.maximum_parameter_events,
             processor_session_scratch_bytes,
             scratch_slot_count,
             compensation_delay_samples,
@@ -1699,7 +1772,10 @@ fn prepare_rack(
         let mut parameter_curves = Vec::with_capacity(processor.parameters.len());
         for (parameter_id, parameter) in &processor.parameters {
             if parameter_id != &parameter.schema.parameter_id
-                || parameter_id != &parameter.automation.parameter_id
+                || parameter
+                    .automation
+                    .as_ref()
+                    .is_some_and(|curve| parameter_id != &curve.parameter_id)
             {
                 return Err(AudioCompileError::InvalidPreparedGraph(format!(
                     "processor {} parameter identity drifted during preparation",
@@ -1707,16 +1783,21 @@ fn prepare_rack(
                 )));
             }
             parameter_ids.push(parameter_id.clone());
-            parameter_curves.push(PreparedAutomationCurve::build(
-                &parameter.automation,
-                owner_time_offset,
-                sample_rate,
-            )?);
+            parameter_curves.push(
+                parameter
+                    .automation
+                    .as_ref()
+                    .map(|curve| {
+                        PreparedAutomationCurve::build(curve, owner_time_offset, sample_rate)
+                    })
+                    .transpose()?,
+            );
         }
         destination.push(PreparedProcessor {
             occurrence,
             parameter_ids,
             parameter_curves,
+            owner_time_offset,
             main_compensation_delay_frames: 0,
             input_signal_delay_frames: 0,
             auxiliary_buses: 0..0,

@@ -43,6 +43,7 @@ pub struct Button {
     state: ButtonState,
     enabled: bool,
     pub on_click: Option<Action>,
+    local_activation: Option<Box<dyn Fn()>>,
     focused: bool,
     focus_visible: bool,
     visual: Cell<ButtonVisualTokens>,
@@ -98,6 +99,7 @@ impl Button {
             state: ButtonState::Normal,
             enabled: true,
             on_click: None,
+            local_activation: None,
             focused: false,
             focus_visible: false,
             visual: Cell::new(ButtonVisualTokens::default()),
@@ -115,6 +117,18 @@ impl Button {
 
     pub fn on_click(mut self, action: impl Into<Option<Action>>) -> Self {
         self.on_click = action.into();
+        self.local_activation = None;
+        self
+    }
+
+    /// React to real button activation with a local, nonserialized callback.
+    ///
+    /// This replaces the action binding. The same enabled, matching pointer
+    /// release and focused keyboard-activation rules apply as ordinary buttons.
+    /// A local callback cannot be invoked by dispatching an application action.
+    pub fn on_local_activate(mut self, callback: impl Fn() + 'static) -> Self {
+        self.on_click = None;
+        self.local_activation = Some(Box::new(callback));
         self
     }
 
@@ -178,7 +192,9 @@ impl Button {
     }
 
     fn activate(&self, ctx: &mut EventContext) {
-        if let Some(action) = &self.on_click {
+        if let Some(callback) = &self.local_activation {
+            callback();
+        } else if let Some(action) = &self.on_click {
             (ctx.dispatch)(action.clone());
         }
     }

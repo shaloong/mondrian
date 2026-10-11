@@ -247,7 +247,7 @@ static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect)
 static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
                      size_t frameBytes, const MondrianOpenFxFrameInfo& info)
 {
-  if (!input || info.width <= 0 || info.height <= 0 ||
+  if (!input || info.source_alpha < 0 || info.source_alpha > 2 || info.width <= 0 || info.height <= 0 ||
       info.width > 8192 || info.height > 8192 ||
       !std::isfinite(info.frame) || !std::isfinite(info.frame_rate) ||
       !std::isfinite(info.first_frame) || !std::isfinite(info.last_frame) ||
@@ -263,7 +263,7 @@ static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
   for (size_t index = 0; index < pixels; ++index) {
     const auto& pixel = data[index];
     if (!std::isfinite(pixel.r) || !std::isfinite(pixel.g) ||
-        !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { return 2; }
+        !std::isfinite(pixel.b) || !std::isfinite(pixel.a) || (info.source_alpha == 2 && pixel.a != 1.0f)) { return 2; }
   }
   state.input = data;
   state.pixelCount = pixels;
@@ -547,6 +547,8 @@ struct MondrianOpenFxSession {
     frame.input = initial.input;
     frame.pixelCount = initial.pixelCount;
     frame.info = initial.info;
+    frame.imageNamespace = initial.imageNamespace;
+    if (!frame.beginImageBinding()) { return 2; }
     bootstrap = std::make_unique<SelectedBinaryBootstrap>(path);
     const int bootstrapped = bootstrap->initialize(host);
     if (bootstrapped != 0) { return bootstrapped; }
@@ -565,13 +567,15 @@ struct MondrianOpenFxSession {
     return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
   }
 
+  template<class Probe>
   int render(const void* input, void* output, size_t bytes,
              const MondrianOpenFxFrameInfo& info,
-             const MondrianOpenFxParameter* parameters, int count, int& outputAlpha) {
+             const MondrianOpenFxParameter* parameters, int count, MondrianOpenFxRenderReport& report, Probe& probe) {
+    auto phase = probe.start();
     if (failed) { return 2; }
     // A prepared session has a fixed image-storage contract. Violating it is
     // a transport fault, unlike an author snapshot rejected before assignment.
-    if (!output || info.width != frame.info.width || info.height != frame.info.height ||
+    if (!output || info.width != frame.info.width || info.height != frame.info.height || info.source_alpha != frame.info.source_alpha ||
         reinterpret_cast<uintptr_t>(output) % alignof(OfxRGBAColourF) != 0 || output == input) {
       failed = true;
       return 2;
@@ -580,9 +584,25 @@ struct MondrianOpenFxSession {
     MondrianOpenFx::FrameBorrow borrowed(frame);
     const int loaded = loadFrame(frame, input, bytes, info);
     if (loaded != 0) { failed = true; return loaded; }
+    if (!frame.beginImageBinding()) { failed = true; return 2; }
     frame.output = static_cast<OfxRGBAColourF*>(output);
     auto* outputClip = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
     if (!outputClip) { failed = true; return 5; }
+    probe.finish(MONDRIAN_OPENFX_SESSION_ADMISSION, phase);
+    phase = probe.start();
+    if (host.auxiliary().beginInvocation(instance->getHandle(), info.frame, info.first_frame, info.last_frame) != kOfxStatOK) { failed = true; return 6; }
+    auto* filter = dynamic_cast<MondrianOpenFx::FilterEffectInstance*>(instance.get());
+    if (!filter) { failed = true; return 5; }
+    const OfxStatus guiStatus = filter->setInterfaceOpen(host.auxiliary().hasInteractiveControl());
+    // Failed means plugin-private GUI setup/cleanup failed, not that Render
+    // failed. The real host generic editor remains authoritative. Only a
+    // fatal or invalid GUI action reply crosses the native failure boundary.
+    if (!accepted(guiStatus) && guiStatus != kOfxStatFailed) {
+      failed = true;
+      return 5;
+    }
+    probe.finish(MONDRIAN_OPENFX_INVOCATION_SETUP, phase);
+    phase = probe.start();
     const bool clipsChanged = previous.frame_rate != info.frame_rate ||
         previous.first_frame != info.first_frame || previous.last_frame != info.last_frame ||
         previous.pixel_aspect_ratio != info.pixel_aspect_ratio;
@@ -594,7 +614,21 @@ struct MondrianOpenFxSession {
       if (!failed) { frame.info = previous; }
       return applied;
     }
+    probe.finish(MONDRIAN_OPENFX_PARAMETER_ACTIONS, phase);
+    if (host.auxiliary().fatal()) { failed = true; return 6; }
+    if (host.auxiliary().blocked(instance->getHandle())) {
+      failed = false; // Authored-change lifecycle completed; Error is recoverable.
+      report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
+      return 0;
+    }
+    phase = probe.start();
     if (!instance->getClipPreferences()) { return 4; }
+    if (host.auxiliary().fatal()) { failed = true; return 6; }
+    if (host.auxiliary().blocked(instance->getHandle())) {
+      failed = false;
+      report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
+      return 0;
+    }
     if (!admitsCpu(*instance) || !admitsIndependentFrames(*instance)) { return 7; }
     for (const char* name : {"Source", "Output"}) {
       auto* clip = instance->getClip(name);
@@ -607,6 +641,8 @@ struct MondrianOpenFxSession {
     else if (premultiplication == kOfxImagePreMultiplied) { representation = MONDRIAN_OPENFX_ALPHA_PREMULTIPLIED; }
     else if (premultiplication == kOfxImageOpaque) { representation = MONDRIAN_OPENFX_ALPHA_OPAQUE; }
     else { return 7; }
+    probe.finish(MONDRIAN_OPENFX_CLIP_PREFERENCES, phase);
+    phase = probe.start();
     // Clear the retained allocation and require a new fetch for this render.
     // Change/preference callbacks cannot make an old output appear completed.
     outputClip->beginFrame();
@@ -614,16 +650,26 @@ struct MondrianOpenFxSession {
     const OfxRectI window{0, 0, info.width, info.height};
     const OfxRectD region{0.0, 0.0, info.width * info.pixel_aspect_ratio,
                          static_cast<double>(info.height)};
+    const bool guiOpen = host.auxiliary().hasInteractiveControl();
+    const bool userEdited = host.auxiliary().hasUserEditedControl();
+    probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+    phase = probe.start();
     OfxStatus status = instance->beginRenderAction(info.frame, info.frame, 1.0,
-                                                  false, scale, false, false);
+                                                  guiOpen, scale, false, userEdited);
     if (!accepted(status)) { return 5; }
+    probe.finish(MONDRIAN_OPENFX_BEGIN_SEQUENCE, phase);
+    phase = probe.start();
     std::map<OFX::Host::ImageEffect::ClipInstance*, OfxRectD> rois;
     status = instance->getRegionOfInterestAction(info.frame, scale, region, rois);
+    probe.finish(MONDRIAN_OPENFX_REGION_OF_INTEREST, phase);
     if (accepted(status)) {
+      phase = probe.start();
       MondrianOpenFx::ImageAccess images(frame, true, true);
       status = instance->renderAction(info.frame, kOfxImageFieldNone, window,
-                                     scale, false, false, false);
+                                     scale, false, userEdited, false);
+      probe.finish(MONDRIAN_OPENFX_PLUGIN_RENDER, phase);
     }
+    phase = probe.start();
     bool written = status == kOfxStatOK && !frame.invalidImageLifetime && outputClip->outputFetched();
     if (written) {
       for (size_t index = 0; index < frame.pixelCount; ++index) {
@@ -632,10 +678,23 @@ struct MondrianOpenFxSession {
             !std::isfinite(pixel.b) || !std::isfinite(pixel.a)) { written = false; break; }
       }
     }
+    probe.finish(MONDRIAN_OPENFX_OUTPUT_VALIDATION, phase);
+    phase = probe.start();
     const auto endStatus = instance->endRenderAction(info.frame, info.frame, 1.0,
-                                                    false, scale, false, false);
+                                                    guiOpen, scale, false, userEdited);
+    probe.finish(MONDRIAN_OPENFX_END_SEQUENCE, phase);
+    phase = probe.start();
     const bool completed = status == kOfxStatOK && written && accepted(endStatus);
-    if (completed) { failed = false; outputAlpha = representation; }
+    if (frame.invalidImageLifetime) { failed = true; return 5; }
+    if (host.auxiliary().fatal()) { failed = true; return 6; }
+    if (host.auxiliary().blocked(instance->getHandle())) {
+      // EndSequenceRender has finished, but staged pixels are unpublished.
+      report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
+      failed = false;
+      return 0;
+    }
+    if (completed) { failed = false; report.output_alpha = representation; report.completion = MONDRIAN_OPENFX_RENDER_FRAME; }
+    probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
     return completed ? 0 : 5;
   }
 };
@@ -815,16 +874,22 @@ extern "C" int mondrian_openfx_describe(
 
 extern "C" int mondrian_openfx_session_create(
     const char* binary, const char* bundle, const char* identifier,
+    const uint8_t* image_namespace,
     const void* input, size_t bytes, const MondrianOpenFxFrameInfo* info,
     const MondrianOpenFxParameter* parameters, int count,
     MondrianOpenFxSession** output) noexcept
 {
   if (!output) { return 2; }
   *output = nullptr;
+  if (!image_namespace) { return 2; }
+  std::array<uint8_t, 16> namespaceCopy{};
+  std::copy_n(image_namespace, namespaceCopy.size(), namespaceCopy.begin());
+  if (std::all_of(namespaceCopy.begin(), namespaceCopy.end(), [](uint8_t byte) { return byte == 0; })) { return 2; }
   try {
     if (!binary || !bundle || !identifier || !info || count < 0 || count > 4096 ||
         (count != 0 && !parameters)) { return 2; }
     MondrianOpenFx::FrameState initial;
+    initial.imageNamespace = namespaceCopy;
     const int loaded = loadFrame(initial, input, bytes, *info);
     if (loaded != 0) { return loaded; }
     auto session = std::make_unique<MondrianOpenFxSession>();
@@ -839,17 +904,39 @@ extern "C" int mondrian_openfx_session_create(
   } catch (...) { return 6; }
 }
 
-extern "C" int mondrian_openfx_session_render(
+template<class Probe>
+static int renderSessionEntry(
     MondrianOpenFxSession* session, const void* input, void* output, size_t bytes,
     const MondrianOpenFxFrameInfo* info, const MondrianOpenFxParameter* parameters,
-    int count, int* outputAlpha) noexcept
+    int count, MondrianOpenFxRenderReport* report,
+    const MondrianOpenFxInvocationControl* control,
+    MondrianOpenFxNativeDiagnostic* diagnostic, Probe& probe) noexcept
 {
-  if (outputAlpha) { *outputAlpha = MONDRIAN_OPENFX_ALPHA_INVALID; }
+  if (report) { report->completion = MONDRIAN_OPENFX_RENDER_UNSET; report->output_alpha = MONDRIAN_OPENFX_ALPHA_INVALID; }
   if (!session) { return 2; }
   try {
-    if (!outputAlpha) { session->failed = true; return 2; }
+    if (!report) { session->failed = true; return 2; }
     if (!info) { session->failed = true; return 2; }
-    return session->render(input, output, bytes, *info, parameters, count, *outputAlpha);
+    struct ControlBorrow final {
+      MondrianOpenFx::AuxSuite& suite;
+      ControlBorrow(MondrianOpenFx::AuxSuite& value,
+                    const MondrianOpenFxInvocationControl* borrowed) : suite(value) {
+        suite.bindControl(borrowed);
+      }
+      ~ControlBorrow() { suite.bindControl(nullptr); }
+    } borrowed(session->host.auxiliary(), control);
+    struct DiagnosticBorrow final {
+      MondrianOpenFx::FrameState& frame;
+      DiagnosticBorrow(MondrianOpenFx::FrameState& value, MondrianOpenFxNativeDiagnostic* diagnostic) : frame(value) {
+        frame.renderDiagnostic = diagnostic;
+      }
+      ~DiagnosticBorrow() { frame.renderDiagnostic = nullptr; }
+    } diagnosticBorrow(session->frame, diagnostic);
+    const int status = session->render(input, output, bytes, *info, parameters, count, *report, probe);
+    const auto phase = probe.start();
+    session->host.auxiliary().report(report->feedback);
+    probe.finish(MONDRIAN_OPENFX_AUXILIARY_REPORT, phase);
+    return status;
   } catch (const std::exception& error) {
     session->failed = true;
     std::cerr << "OpenFX session render failed: " << error.what() << std::endl;
@@ -857,7 +944,49 @@ extern "C" int mondrian_openfx_session_render(
   } catch (...) { session->failed = true; return 6; }
 }
 
+extern "C" int mondrian_openfx_session_render(
+    MondrianOpenFxSession* session, const void* input, void* output, size_t bytes,
+    const MondrianOpenFxFrameInfo* info, const MondrianOpenFxParameter* parameters,
+    int count, MondrianOpenFxRenderReport* report,
+    const MondrianOpenFxInvocationControl* control,
+    MondrianOpenFxNativeDiagnostic* diagnostic) noexcept
+{
+  if (diagnostic) {
+    MondrianOpenFx::TimedRenderProbe probe(*diagnostic);
+    return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, diagnostic, probe);
+  }
+  MondrianOpenFx::NoRenderProbe probe;
+  return renderSessionEntry(session, input, output, bytes, info, parameters, count, report, control, nullptr, probe);
+}
+
+extern "C" int mondrian_openfx_session_close_gui(MondrianOpenFxSession* session,
+    MondrianOpenFxFeedback* feedback, int* invoked) noexcept {
+  if (!session || session->failed || !feedback || !invoked) { return 2; }
+  *invoked = 0;
+  try {
+    auto* filter = dynamic_cast<MondrianOpenFx::FilterEffectInstance*>(session->instance.get());
+    if (!filter) { session->failed = true; return 6; }
+    const bool wasOpen = filter->isInterfaceOpen();
+    const OfxStatus status = filter->setInterfaceOpen(false);
+    if (wasOpen) {
+      // This action did not begin another Render invocation. Drain its notices
+      // now so neither a later frame nor destruction can relabel/lose them.
+      session->host.auxiliary().report(*feedback);
+      *invoked = 1;
+    }
+    // A failed plugin-private UI teardown is a legal action reply. The real
+    // generic GUI has nevertheless closed and End has been paired once.
+    if (status == kOfxStatOK || status == kOfxStatReplyDefault || status == kOfxStatFailed) { return 0; }
+    session->failed = true;
+    return 5;
+  } catch (...) { session->failed = true; return 6; }
+}
+
 extern "C" void mondrian_openfx_session_destroy(MondrianOpenFxSession* session) noexcept
 {
   delete session;
+}
+
+extern "C" size_t mondrian_openfx_aux_resident_bytes(void) noexcept {
+  return MondrianOpenFx::AuxSuite::residentBytes();
 }

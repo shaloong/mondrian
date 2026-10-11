@@ -52,7 +52,8 @@ pub struct TimelineMediaLayer<'a> {
 pub struct TimelineAdjustmentLayer {
     pub effect_graph: Arc<CompiledEffectGraph>,
     pub opacity: f32,
-    pub blend_mode: Option<BlendMode>,
+    /// Exact Effect-pass policy already lowered by the canonical plan.
+    pub blend_policy: mondrian_core::EffectPassBlendPolicy,
     pub frame_seed: i64,
 }
 
@@ -199,7 +200,6 @@ pub struct TimelineCompositeScratch {
     adjustment: Vec<u8>,
     solid_fill: Vec<u8>,
     solid_fill_f32: Vec<[f32; 4]>,
-    solid_effect_f32: Vec<[f32; 4]>,
     transition_left_f32: Vec<[f32; 4]>,
     transition_right_f32: Vec<[f32; 4]>,
     cpu_visual_execution: CpuVisualExecutionSession,
@@ -345,6 +345,20 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Close disappeared actual native GUIs on the existing execution owner.
+    pub fn reconcile_processor_guis(&mut self) -> usize {
+        self.effect_execution.reconcile_processor_guis()
+    }
+
+    /// Bind the current task's bounded observational sink/deadline. This keeps
+    /// one Effect Session and does not expose or replace its native instances.
+    pub fn bind_processor_observation(
+        &mut self,
+        observation: mondrian_effects::EffectProcessorObservation,
+    ) {
+        self.effect_execution.bind_processor_observation(observation);
+    }
+
     /// Execute only one prepared heterogeneous CPU prefix through this
     /// Preview/Export owner's Effect Session.
     ///
@@ -356,7 +370,7 @@ impl TimelineCompositeScratch {
         &mut self,
         prepared: &PreparedHeterogeneousEffectWork,
         generation: u64,
-        input: &[[f32; 4]],
+        input: mondrian_effects::EffectFloatFrameView<'_>,
         frame_seed: i64,
         working_color_space: WorkingColorSpace,
         checkpoint: impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
@@ -406,7 +420,11 @@ impl TimelineCompositeScratch {
         prepared.execute_cpu_prefix_with_checkpoint(
             &mut self.effect_execution,
             generation,
-            &self.solid_fill_f32,
+            mondrian_effects::EffectFloatFrameView::new(
+                extent,
+                scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                &self.solid_fill_f32,
+            ),
             frame_seed,
             working_color_space,
             checkpoint,
@@ -446,7 +464,7 @@ impl TimelineCompositeScratch {
         self.retained_scratch_capacities().into_iter().fold(0_u64, u64::saturating_add)
     }
 
-    fn retained_scratch_capacities(&self) -> [u64; 8] {
+    fn retained_scratch_capacities(&self) -> [u64; 7] {
         let float_pixel_bytes = std::mem::size_of::<[f32; 4]>();
         [
             u64::try_from(self.media_source.capacity()).unwrap_or(u64::MAX),
@@ -454,8 +472,6 @@ impl TimelineCompositeScratch {
             u64::try_from(self.adjustment.capacity()).unwrap_or(u64::MAX),
             u64::try_from(self.solid_fill.capacity()).unwrap_or(u64::MAX),
             u64::try_from(self.solid_fill_f32.capacity().saturating_mul(float_pixel_bytes))
-                .unwrap_or(u64::MAX),
-            u64::try_from(self.solid_effect_f32.capacity().saturating_mul(float_pixel_bytes))
                 .unwrap_or(u64::MAX),
             u64::try_from(self.transition_left_f32.capacity().saturating_mul(float_pixel_bytes))
                 .unwrap_or(u64::MAX),
@@ -470,7 +486,6 @@ impl TimelineCompositeScratch {
         self.adjustment = Vec::new();
         self.solid_fill = Vec::new();
         self.solid_fill_f32 = Vec::new();
-        self.solid_effect_f32 = Vec::new();
         self.transition_left_f32 = Vec::new();
         self.transition_right_f32 = Vec::new();
     }
@@ -937,7 +952,8 @@ pub fn estimate_timeline_cpu_working_set(
                     TimelineCompositeElement::Adjustment(layer) => {
                         if has_composited_layer
                             && has_positive_coverage(layer.opacity.clamp(0.0, 1.0))
-                            && !layer.effect_graph.graph().is_identity()
+                            && (layer.blend_policy != mondrian_core::EffectPassBlendPolicy::Mix
+                                || !layer.effect_graph.graph().is_identity())
                         {
                             peak = peak.max(
                                 output_float_bytes
@@ -1000,7 +1016,8 @@ pub fn estimate_timeline_cpu_working_set(
                     TimelineCompositeElement::Adjustment(layer) => {
                         if has_composited_layer
                             && has_positive_coverage(layer.opacity.clamp(0.0, 1.0))
-                            && !layer.effect_graph.graph().is_identity()
+                            && (layer.blend_policy != mondrian_core::EffectPassBlendPolicy::Mix
+                                || !layer.effect_graph.graph().is_identity())
                         {
                             retained.bytes[2] = retained.bytes[2].max(output_rgba8_bytes);
                         }
@@ -1359,7 +1376,38 @@ fn composite_color_frame_inner(
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<TimelineCompositeFrame, TimelineCompositeError> {
     timeline_processor_checkpoint(control)?;
-    validate_timeline_media_frame_contracts(elements, runtime.working_color_space)?;
+    validate_timeline_media_frame_contracts(elements, runtime.working_color_space, control)?;
+    // Count the whole immutable operation before any effect advances state.
+    let mut feedback = mondrian_effects::EffectProcessorFeedbackRequirements::default();
+    let mut admit_graph = |graph: &CompiledEffectGraph| {
+        feedback
+            .merge(mondrian_effects::EffectProcessorFeedbackRequirements::for_compiled_graph(graph))
+    };
+    for element in elements {
+        match element {
+            TimelineCompositeElement::Media(layer) => admit_graph(&layer.effect_graph),
+            TimelineCompositeElement::SolidColor(layer) => admit_graph(&layer.effect_graph),
+            TimelineCompositeElement::Adjustment(layer) => admit_graph(&layer.effect_graph),
+            TimelineCompositeElement::CrossDissolve(layer) => {
+                for input in [&layer.left, &layer.right] {
+                    match input {
+                        TimelineTransitionInput::Transparent => {}
+                        TimelineTransitionInput::Media(layer) => admit_graph(&layer.effect_graph),
+                        TimelineTransitionInput::SolidColor(layer) => {
+                            admit_graph(&layer.effect_graph)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    control.admit_feedback_route(feedback).map_err(|_| {
+        EffectFloatExecutionError::CustomProcessor(
+            EffectExecutionError::ProcessorFeedbackCapacityExceeded {
+                limit: mondrian_effects::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+            },
+        )
+    })?;
     let diagnostics =
         composite_path_diagnostics_with_session(elements, &mut scratch.effect_execution);
     if diagnostics.is_color_domain_blocked() {
@@ -1426,10 +1474,12 @@ fn composite_color_frame_inner(
 fn validate_timeline_media_frame_contracts(
     elements: &[TimelineCompositeElement<'_>],
     working_color_space: WorkingColorSpace,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
 ) -> Result<(), TimelineCompositeError> {
     fn validate_layer(
         layer: &TimelineMediaLayer<'_>,
         working_color_space: WorkingColorSpace,
+        control: &mut mondrian_effects::EffectProcessorControl<'_>,
     ) -> Result<(), TimelineCompositeError> {
         let actual = layer.frame.descriptor();
         let expected = ColorFrameDescriptor {
@@ -1439,7 +1489,10 @@ fn validate_timeline_media_frame_contracts(
             domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
-            alpha: ColorFrameAlpha::StraightCoverage,
+            // Association belongs to the actual complete frame. Storage
+            // admission below validates this declaration; consumers separately
+            // admit or refuse it without relabeling nested/native image signal.
+            alpha: actual.alpha,
         };
         if actual != expected {
             return Err(TimelineCompositeError::MediaFrameContractMismatch { expected, actual });
@@ -1454,18 +1507,20 @@ fn validate_timeline_media_frame_contracts(
                 actual_pixels,
             });
         }
+        working_float_view(layer.frame.rgba_f32())
+            .validate_controlled(&mut || timeline_processor_checkpoint(control))?;
         Ok(())
     }
 
     for element in elements {
         match element {
             TimelineCompositeElement::Media(layer) => {
-                validate_layer(layer, working_color_space)?;
+                validate_layer(layer, working_color_space, control)?;
             }
             TimelineCompositeElement::CrossDissolve(transition) => {
                 for input in [&transition.left, &transition.right] {
                     if let TimelineTransitionInput::Media(layer) = input {
-                        validate_layer(layer, working_color_space)?;
+                        validate_layer(layer, working_color_space, control)?;
                     }
                 }
             }
@@ -1498,7 +1553,6 @@ fn exact_zero_copy_identity_passthrough<'frame>(
         && descriptor.domain == ColorFrameDomain::Working
         && descriptor.encoding == ColorFrameEncoding::LinearFloat
         && descriptor.residency == ColorFrameResidency::Cpu
-        && descriptor.alpha == ColorFrameAlpha::StraightCoverage
         && layer.frame.rgba_f32().data.len() == pixel_count)
         .then_some(layer.frame)
 }
@@ -1525,30 +1579,121 @@ fn composite_supported_elements_to_working_frame(
     timeline_processor_checkpoint(control)?;
     admit_composite_element_effect_graphs(elements, TimelineCpuCompositePrecision::Float32)
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
-    let pixel_count = width as usize * height as usize;
-    if pixel_count == 0 {
-        return Ok(WorkingRgbaF32Frame {
-            width,
-            height,
-            data: Vec::new(),
-            color_space: working_color_space,
-        });
-    }
-
-    let initial_pixel = match options.background {
-        TimelineCompositeBackground::Transparent => [0.0, 0.0, 0.0, 0.0],
-        TimelineCompositeBackground::OpaqueBlack => [0.0, 0.0, 0.0, 1.0],
+    let extent = mondrian_effects::EffectFrameExtent::new(width, height);
+    let pixel_count = (width as usize).checked_mul(height as usize).ok_or(
+        EffectFloatExecutionError::FrameContract(
+            mondrian_effects::EffectFloatFrameError::ExtentOverflow,
+        ),
+    )?;
+    let (initial_pixel, initial_alpha) = match options.background {
+        TimelineCompositeBackground::Transparent => ([0.0; 4], ColorFrameAlpha::StraightCoverage),
+        TimelineCompositeBackground::OpaqueBlack => ([0.0, 0.0, 0.0, 1.0], ColorFrameAlpha::Opaque),
     };
-    let (mut canvas, mut has_composited_layer, consumed_elements) = if let Some(canvas) =
+    let format = scene_linear_float_format(initial_alpha);
+    let (mut canvas, mut has_composited_layer, consumed_elements) = if let Some(pixels) =
         initialize_from_two_full_frame_normal_media_layers(width, height, elements, options)
     {
         execution.direct_first_layer_initializations =
             execution.direct_first_layer_initializations.saturating_add(1);
         execution.fused_first_two_full_frame_normal_blends =
             execution.fused_first_two_full_frame_normal_blends.saturating_add(1);
-        (canvas, true, 2)
+        (
+            mondrian_effects::EffectFloatFrame::from_pixels(extent, format, pixels)
+                .map_err(EffectFloatExecutionError::FrameContract)?,
+            true,
+            2,
+        )
+    } else if let Some(layer) = elements.first().and_then(|element| match element {
+        TimelineCompositeElement::Media(layer)
+            if options.background == TimelineCompositeBackground::Transparent
+                && layer.blend_mode == BlendMode::Normal
+                && layer.opacity > 0.0
+                && is_identity_transform(layer.transform)
+                && layer.frame.rgba_f32().width == width
+                && layer.frame.rgba_f32().height == height =>
+        {
+            Some(layer)
+        }
+        _ => None,
+    }) {
+        // Evaluate exactly once and reuse the completed graph allocation when
+        // available. The first layer never allocates/fills an extra zero canvas.
+        let input = working_float_view(layer.frame.rgba_f32());
+        let owned = if layer.effect_graph.graph().is_identity() {
+            input.to_owned().map_err(EffectFloatExecutionError::FrameContract)?
+        } else {
+            apply_effect_graph_f32(
+                &mut scratch.effect_execution,
+                &mut scratch.color_execution,
+                input,
+                &layer.effect_graph,
+                layer.frame_seed,
+                runtime,
+                control,
+            )?
+        };
+        if owned.extent() != extent {
+            return Err(EffectFloatExecutionError::FrameContract(
+                mondrian_effects::EffectFloatFrameError::ExtentMismatch {
+                    expected: pixel_count,
+                    actual: owned.pixels().len(),
+                },
+            ));
+        }
+        if owned.format().domain() != EffectColorDomain::SceneLinearRgb {
+            return Err(EffectFloatExecutionError::FrameContract(
+                mondrian_effects::EffectFloatFrameError::FormatMismatch {
+                    expected: scene_linear_float_format(owned.alpha()),
+                    actual: owned.format(),
+                },
+            ));
+        }
+        let output_alpha = mondrian_effects::normal_over_output_alpha(
+            ColorFrameAlpha::StraightCoverage,
+            owned.alpha(),
+            layer.opacity,
+        )?;
+        let source_alpha = owned.alpha();
+        let (_, format, mut pixels) = owned.into_parts();
+        for (index, pixel) in pixels.iter_mut().enumerate() {
+            if index % 4096 == 0 {
+                timeline_processor_checkpoint(control)?;
+            }
+            let associated = mondrian_effects::over_float_sample(
+                [0.0; 4],
+                ColorFrameAlpha::StraightCoverage,
+                *pixel,
+                source_alpha,
+                layer.opacity,
+            )?;
+            *pixel = mondrian_effects::convert_alpha_sample(
+                associated,
+                ColorFrameAlpha::PremultipliedFloat,
+                output_alpha,
+            )?;
+        }
+        execution.direct_first_layer_initializations =
+            execution.direct_first_layer_initializations.saturating_add(1);
+        (
+            mondrian_effects::EffectFloatFrame::from_pixels(
+                extent,
+                format.with_alpha(output_alpha),
+                pixels,
+            )?,
+            true,
+            1,
+        )
     } else {
-        (Vec::new(), false, 0)
+        (
+            mondrian_effects::EffectFloatFrame::from_pixels(
+                extent,
+                format,
+                vec![initial_pixel; pixel_count],
+            )
+            .map_err(EffectFloatExecutionError::FrameContract)?,
+            false,
+            0,
+        )
     };
 
     for element in &elements[consumed_elements..] {
@@ -1556,127 +1701,133 @@ fn composite_supported_elements_to_working_frame(
         match element {
             TimelineCompositeElement::Media(layer) => {
                 let frame = layer.frame.rgba_f32();
+                let input = working_float_view(frame);
                 let effect_output;
-                let (src_data, src_width, src_height) = if layer.effect_graph.graph().is_identity()
-                {
-                    (&frame.data, frame.width, frame.height)
+                let source = if layer.effect_graph.graph().is_identity() {
+                    input
                 } else {
                     effect_output = apply_effect_graph_f32(
                         &mut scratch.effect_execution,
                         &mut scratch.color_execution,
-                        &frame.data,
-                        frame.width,
-                        frame.height,
+                        input,
                         &layer.effect_graph,
                         layer.frame_seed,
                         runtime,
                         control,
                     )?;
-                    (&effect_output, frame.width, frame.height)
+                    effect_output.view()
                 };
-                if !has_composited_layer
+                let first_layer = !has_composited_layer
                     && options.background == TimelineCompositeBackground::Transparent
-                    && has_positive_coverage(layer.opacity.clamp(0.0, 1.0))
+                    && layer.opacity > 0.0
                     && layer.blend_mode == BlendMode::Normal
                     && is_identity_transform(layer.transform)
-                    && src_width == width
-                    && src_height == height
-                    && src_data.len() == pixel_count
-                {
-                    let opacity = layer.opacity.clamp(0.0, 1.0);
-                    canvas.extend(
-                        src_data
-                            .iter()
-                            .copied()
-                            .map(|pixel| initialize_normal_rgba_f32_pixel(pixel, opacity)),
-                    );
+                    && source.extent() == extent;
+                let (next_canvas, kernel) = alpha_blend_typed_float_layer(
+                    canvas,
+                    source,
+                    layer.opacity,
+                    layer.blend_mode,
+                    layer.transform,
+                    layer.frame_seed,
+                    &mut scratch.cpu_visual_execution,
+                    control,
+                )?;
+                canvas = next_canvas;
+                execution.observe_kernel(kernel);
+                if first_layer {
                     execution.direct_first_layer_initializations =
                         execution.direct_first_layer_initializations.saturating_add(1);
-                } else {
-                    ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
-                    let kernel = alpha_blend_f32_layer(
-                        &mut canvas,
-                        width as usize,
-                        height as usize,
-                        src_data,
-                        src_width as usize,
-                        src_height as usize,
-                        layer.opacity,
-                        layer.blend_mode,
-                        layer.transform,
-                        layer.frame_seed,
-                        &mut scratch.cpu_visual_execution,
-                    );
-                    execution.observe_kernel(kernel);
                 }
                 has_composited_layer = true;
             }
             TimelineCompositeElement::SolidColor(layer) => {
-                ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
                 let color = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
                 if layer.effect_graph.graph().is_identity()
                     && is_identity_transform(layer.transform)
+                    && canvas.alpha().is_coverage()
+                    && canvas.alpha().is_straight_compatible()
+                    && layer.blend_mode == BlendMode::Normal
                 {
+                    if !layer.opacity.is_finite() || !(0.0..=1.0).contains(&layer.opacity) {
+                        return Err(EffectFloatExecutionError::FrameContract(
+                            mondrian_effects::EffectFloatFrameError::InvalidOpacity,
+                        ));
+                    }
+                    if !color.iter().all(|channel| channel.is_finite())
+                        || !ColorFrameAlpha::StraightCoverage.admits_alpha(color[3])
+                    {
+                        return Err(EffectFloatExecutionError::FrameContract(
+                            mondrian_effects::EffectFloatFrameError::InvalidSample {
+                                index: 0,
+                                alpha: ColorFrameAlpha::StraightCoverage,
+                            },
+                        ));
+                    }
+                    // Existing solid broadcast reads one color; it does not
+                    // allocate an otherwise unused full-frame source raster.
                     alpha_blend_f32_solid(
-                        &mut canvas,
+                        canvas.pixels_mut(),
                         color,
                         layer.opacity,
                         layer.blend_mode,
                         layer.frame_seed,
                     );
-                } else {
-                    scratch.solid_fill_f32.resize(pixel_count, color);
-                    scratch.solid_fill_f32.fill(color);
-                    let source = if layer.effect_graph.graph().is_identity() {
-                        scratch.solid_fill_f32.as_slice()
-                    } else {
-                        scratch.solid_effect_f32 = apply_effect_graph_f32(
-                            &mut scratch.effect_execution,
-                            &mut scratch.color_execution,
-                            &scratch.solid_fill_f32,
-                            width,
-                            height,
-                            &layer.effect_graph,
-                            layer.frame_seed,
-                            runtime,
-                            control,
-                        )?;
-                        scratch.solid_effect_f32.as_slice()
-                    };
-                    let kernel = alpha_blend_f32_layer(
-                        &mut canvas,
-                        width as usize,
-                        height as usize,
-                        source,
-                        width as usize,
-                        height as usize,
-                        layer.opacity,
-                        layer.blend_mode,
-                        layer.transform,
-                        layer.frame_seed,
-                        &mut scratch.cpu_visual_execution,
-                    );
-                    execution.observe_kernel(kernel);
+                    canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+                    has_composited_layer = true;
+                    continue;
                 }
+                scratch.solid_fill_f32.resize(pixel_count, color);
+                scratch.solid_fill_f32.fill(color);
+                let input = mondrian_effects::EffectFloatFrameView::new(
+                    extent,
+                    scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                    &scratch.solid_fill_f32,
+                );
+                let effect_output;
+                let source = if layer.effect_graph.graph().is_identity() {
+                    input
+                } else {
+                    effect_output = apply_effect_graph_f32(
+                        &mut scratch.effect_execution,
+                        &mut scratch.color_execution,
+                        input,
+                        &layer.effect_graph,
+                        layer.frame_seed,
+                        runtime,
+                        control,
+                    )?;
+                    effect_output.view()
+                };
+                let (next_canvas, kernel) = alpha_blend_typed_float_layer(
+                    canvas,
+                    source,
+                    layer.opacity,
+                    layer.blend_mode,
+                    layer.transform,
+                    layer.frame_seed,
+                    &mut scratch.cpu_visual_execution,
+                    control,
+                )?;
+                canvas = next_canvas;
+                execution.observe_kernel(kernel);
                 has_composited_layer = true;
             }
             TimelineCompositeElement::Adjustment(layer) => {
                 if !has_composited_layer
-                    || !has_positive_coverage(layer.opacity.clamp(0.0, 1.0))
-                    || layer.effect_graph.graph().is_identity()
+                    || layer.opacity == 0.0
+                    || (layer.blend_policy == mondrian_core::EffectPassBlendPolicy::Mix
+                        && layer.effect_graph.graph().is_identity())
                 {
                     continue;
                 }
-                ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
                 canvas = apply_effect_graph_pass_f32(
                     &mut scratch.effect_execution,
                     &mut scratch.color_execution,
                     canvas,
-                    width,
-                    height,
                     &layer.effect_graph,
                     layer.opacity,
-                    layer.blend_mode,
+                    layer.blend_policy,
                     layer.frame_seed,
                     runtime,
                     control,
@@ -1685,61 +1836,186 @@ fn composite_supported_elements_to_working_frame(
                     execution.owned_adjustment_base_reuses.saturating_add(1);
             }
             TimelineCompositeElement::CrossDissolve(transition) => {
-                ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
-                let mut left = std::mem::take(&mut scratch.transition_left_f32);
-                let mut right = std::mem::take(&mut scratch.transition_right_f32);
+                // The current transition kernels declare normalized straight
+                // inputs. A lossless materialization is explicit and occurs
+                // after every endpoint graph has returned its canonical value.
+                canvas = mondrian_effects::materialize_straight_coverage(
+                    canvas,
+                    mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let mut left_pixels = std::mem::take(&mut scratch.transition_left_f32);
+                let mut right_pixels = std::mem::take(&mut scratch.transition_right_f32);
                 execution.reused_transition_scratch_buffers = execution
                     .reused_transition_scratch_buffers
-                    .saturating_add(u64::from(left.capacity() >= pixel_count))
-                    .saturating_add(u64::from(right.capacity() >= pixel_count));
-                left.clear();
-                left.extend_from_slice(&canvas);
-                right.clear();
-                right.extend_from_slice(&canvas);
-                let transition_result = (|| {
-                    composite_transition_input_f32(
-                        &mut left,
-                        width,
-                        height,
-                        &transition.left,
-                        runtime,
-                        scratch,
-                        control,
-                    )?;
-                    composite_transition_input_f32(
-                        &mut right,
-                        width,
-                        height,
-                        &transition.right,
-                        runtime,
-                        scratch,
-                        control,
-                    )?;
-                    Ok::<_, EffectFloatExecutionError>(scratch.cpu_visual_execution.cross_dissolve(
-                        &mut canvas,
-                        &left,
-                        &right,
-                        transition.progress,
-                    ))
-                })();
-                left.clear();
-                right.clear();
-                scratch.transition_left_f32 = left;
-                scratch.transition_right_f32 = right;
-                execution.observe_kernel(transition_result?);
+                    .saturating_add(u64::from(left_pixels.capacity() >= pixel_count))
+                    .saturating_add(u64::from(right_pixels.capacity() >= pixel_count));
+                left_pixels.clear();
+                left_pixels.extend_from_slice(canvas.pixels());
+                right_pixels.clear();
+                right_pixels.extend_from_slice(canvas.pixels());
+                let mut left = mondrian_effects::EffectFloatFrame::from_pixels(
+                    extent,
+                    canvas.format(),
+                    left_pixels,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                let mut right = mondrian_effects::EffectFloatFrame::from_pixels(
+                    extent,
+                    canvas.format(),
+                    right_pixels,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                left = composite_transition_input_f32(
+                    left,
+                    &transition.left,
+                    runtime,
+                    scratch,
+                    control,
+                )?;
+                right = composite_transition_input_f32(
+                    right,
+                    &transition.right,
+                    runtime,
+                    scratch,
+                    control,
+                )?;
+                left = mondrian_effects::materialize_straight_coverage(
+                    left,
+                    mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                right = mondrian_effects::materialize_straight_coverage(
+                    right,
+                    mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+                )
+                .map_err(EffectFloatExecutionError::FrameContract)?;
+                execution.observe_kernel(scratch.cpu_visual_execution.cross_dissolve(
+                    canvas.pixels_mut(),
+                    left.pixels(),
+                    right.pixels(),
+                    transition.progress,
+                ));
+                scratch.transition_left_f32 = left.into_parts().2;
+                scratch.transition_right_f32 = right.into_parts().2;
+                canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
                 has_composited_layer = true;
             }
         }
     }
-    ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
-
     timeline_processor_checkpoint(control)?;
+    let (extent, format, data) = canvas.into_parts();
     Ok(WorkingRgbaF32Frame {
-        width,
-        height,
-        data: canvas,
+        width: extent.width(),
+        height: extent.height(),
+        alpha: format.alpha(),
+        data,
         color_space: working_color_space,
     })
+}
+
+fn scene_linear_float_format(alpha: ColorFrameAlpha) -> mondrian_effects::EffectValueFormat {
+    mondrian_effects::EffectValueFormat::new(
+        EffectWorkingPrecision::Float32,
+        EffectColorDomain::SceneLinearRgb,
+        alpha,
+    )
+}
+
+fn working_float_view(frame: &WorkingRgbaF32Frame) -> mondrian_effects::EffectFloatFrameView<'_> {
+    mondrian_effects::EffectFloatFrameView::new(
+        mondrian_effects::EffectFrameExtent::new(frame.width, frame.height),
+        scene_linear_float_format(frame.alpha),
+        &frame.data,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn alpha_blend_typed_float_layer(
+    mut canvas: mondrian_effects::EffectFloatFrame,
+    source: mondrian_effects::EffectFloatFrameView<'_>,
+    opacity: f32,
+    blend_mode: BlendMode,
+    transform: [f32; 6],
+    frame_seed: i64,
+    cpu_execution: &mut CpuVisualExecutionSession,
+    control: &mut mondrian_effects::EffectProcessorControl<'_>,
+) -> Result<(mondrian_effects::EffectFloatFrame, CpuVisualKernelEvidence), EffectFloatExecutionError>
+{
+    source.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+    canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+    if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+        return Err(EffectFloatExecutionError::FrameContract(
+            mondrian_effects::EffectFloatFrameError::InvalidOpacity,
+        ));
+    }
+    if opacity == 0.0 {
+        return Ok((canvas, CpuVisualKernelEvidence::default()));
+    }
+    let normalized_straight = canvas.alpha().is_coverage()
+        && canvas.alpha().is_straight_compatible()
+        && source.format().alpha().is_coverage()
+        && source.format().alpha().is_straight_compatible();
+    if normalized_straight {
+        let width = canvas.width();
+        let height = canvas.height();
+        let evidence = alpha_blend_f32_layer(
+            canvas.pixels_mut(),
+            width as usize,
+            height as usize,
+            source.pixels(),
+            source.extent().width() as usize,
+            source.extent().height() as usize,
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+            cpu_execution,
+        );
+        canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+        return Ok((canvas, evidence));
+    }
+    if is_identity_transform(transform) && canvas.extent() == source.extent() {
+        mondrian_effects::blend_float_frames_controlled(
+            &mut canvas,
+            source,
+            opacity,
+            blend_mode,
+            frame_seed,
+            &mut || timeline_processor_checkpoint(control),
+        )?;
+        return Ok((canvas, CpuVisualKernelEvidence::default()));
+    }
+    // Resampling/artistic consumers have an explicit coverage contract in
+    // this slice. They may materialize a representable finite Float value;
+    // associated emission and extended alpha return typed route refusal.
+    let source = mondrian_effects::materialize_straight_coverage(
+        source.to_owned().map_err(EffectFloatExecutionError::FrameContract)?,
+        mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+    )
+    .map_err(EffectFloatExecutionError::FrameContract)?;
+    canvas = mondrian_effects::materialize_straight_coverage(
+        canvas,
+        mondrian_effects::EffectAlphaConsumer::StraightCoverageOperation,
+    )
+    .map_err(EffectFloatExecutionError::FrameContract)?;
+    let width = canvas.width();
+    let height = canvas.height();
+    let evidence = alpha_blend_f32_layer(
+        canvas.pixels_mut(),
+        width as usize,
+        height as usize,
+        source.pixels(),
+        source.width() as usize,
+        source.height() as usize,
+        opacity,
+        blend_mode,
+        transform,
+        frame_seed,
+        cpu_execution,
+    );
+    canvas.validate().map_err(EffectFloatExecutionError::FrameContract)?;
+    Ok((canvas, evidence))
 }
 
 fn initialize_from_two_full_frame_normal_media_layers(
@@ -1792,34 +2068,21 @@ fn is_exact_full_frame_identity_normal_media(
         && frame.width == width
         && frame.height == height
         && frame.data.len() == pixel_count
-}
-
-fn ensure_float_canvas_initialized(
-    canvas: &mut Vec<[f32; 4]>,
-    pixel_count: usize,
-    initial_pixel: [f32; 4],
-) {
-    if canvas.is_empty() {
-        canvas.resize(pixel_count, initial_pixel);
-    }
+        && frame.alpha == ColorFrameAlpha::StraightCoverage
 }
 
 fn apply_effect_graph_f32(
     session: &mut EffectExecutionSession,
     color_session: &mut crate::RenderCpuColorExecutionSession,
-    input: &[[f32; 4]],
-    width: u32,
-    height: u32,
+    input: mondrian_effects::EffectFloatFrameView<'_>,
     graph: &CompiledEffectGraph,
     frame_seed: i64,
     runtime: TimelineEffectColorRuntime<'_>,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     if graph.domain_plan().requires_conversion() {
         session.apply_compiled_rgba_f32_with_domain_processor(
             input,
-            width,
-            height,
             graph,
             frame_seed,
             runtime.cache_key(),
@@ -1827,7 +2090,7 @@ fn apply_effect_graph_f32(
             control,
         )
     } else {
-        session.apply_compiled_rgba_f32(input, width, height, graph, frame_seed, control)
+        session.apply_compiled_rgba_f32(input, graph, frame_seed, control)
     }
 }
 
@@ -1835,24 +2098,20 @@ fn apply_effect_graph_f32(
 fn apply_effect_graph_pass_f32(
     session: &mut EffectExecutionSession,
     color_session: &mut crate::RenderCpuColorExecutionSession,
-    input: Vec<[f32; 4]>,
-    width: u32,
-    height: u32,
+    input: mondrian_effects::EffectFloatFrame,
     graph: &CompiledEffectGraph,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
     runtime: TimelineEffectColorRuntime<'_>,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
-) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     if graph.domain_plan().requires_conversion() {
         session.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
             input,
-            width,
-            height,
             graph,
             opacity,
-            blend_mode,
+            blend_policy,
             frame_seed,
             runtime.cache_key(),
             |pixels, transition| runtime.process_transition(pixels, transition, color_session),
@@ -1860,7 +2119,12 @@ fn apply_effect_graph_pass_f32(
         )
     } else {
         session.apply_compiled_pass_rgba_f32_owned(
-            input, width, height, graph, opacity, blend_mode, frame_seed, control,
+            input,
+            graph,
+            opacity,
+            blend_policy,
+            frame_seed,
+            control,
         )
     }
 }
@@ -2518,7 +2782,8 @@ pub fn composite_timeline_elements_into(
             TimelineCompositeElement::Adjustment(layer) => {
                 if !has_composited_media
                     || !has_positive_coverage(layer.opacity.clamp(0.0, 1.0))
-                    || layer.effect_graph.graph().is_identity()
+                    || (layer.blend_policy == mondrian_core::EffectPassBlendPolicy::Mix
+                        && layer.effect_graph.graph().is_identity())
                 {
                     continue;
                 }
@@ -2528,7 +2793,7 @@ pub fn composite_timeline_elements_into(
                     height,
                     &layer.effect_graph,
                     layer.opacity,
-                    layer.blend_mode,
+                    layer.blend_policy,
                     layer.frame_seed,
                     &mut scratch.adjustment,
                 )?;
@@ -2578,7 +2843,13 @@ fn working_frame_from_normalized_rgba8(
             ]
         })
         .collect();
-    WorkingRgbaF32Frame { width, height, data, color_space }
+    WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+        width,
+        height,
+        data,
+        color_space,
+    }
 }
 
 fn fill_solid_rgba(buf: &mut Vec<u8>, width: usize, height: usize, color: Color) {
@@ -3079,7 +3350,7 @@ mod tests {
             TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: Arc::clone(&forbidden),
                 opacity: 1.0,
-                blend_mode: None,
+                blend_policy: mondrian_core::EffectPassBlendPolicy::Mix,
                 frame_seed: 0,
             }),
         ]);
@@ -3136,6 +3407,7 @@ mod tests {
     #[test]
     fn typed_identity_passthrough_is_zero_copy_and_requires_no_compositor_working_set() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
             data: vec![[-0.25, 1.5, 0.4, 0.5], [3.0, -1.0, 0.75, 0.0]],
@@ -3169,6 +3441,7 @@ mod tests {
     #[test]
     fn first_two_full_frame_normal_media_layers_fuse_without_color_drift() {
         let first = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 5,
             height: 1,
             data: vec![
@@ -3181,6 +3454,7 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
         });
         let second = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 5,
             height: 1,
             data: vec![
@@ -3264,6 +3538,7 @@ mod tests {
     #[test]
     fn direct_first_layer_initialization_discards_hidden_rgb_like_canonical_source_over() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 1,
             data: vec![[8.0, -4.0, 2.0, 0.0], [0.25, 0.5, 1.25, 0.5]],
@@ -3357,6 +3632,7 @@ mod tests {
     #[test]
     fn identity_passthrough_rejects_any_operation_or_output_contract_change() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[0.25, 0.5, 1.25, 0.5]],
@@ -3450,6 +3726,7 @@ mod tests {
     #[test]
     fn compositor_rejects_mislabeled_working_frames_before_pixel_execution() {
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[0.25, 0.5, 1.25, 1.0]],
@@ -3691,7 +3968,7 @@ mod tests {
             TimelineAdjustmentLayer {
                 effect_graph: encoded_identity,
                 opacity: 1.0,
-                blend_mode: None,
+                blend_policy: mondrian_core::EffectPassBlendPolicy::Mix,
                 frame_seed: 0,
             },
         )];
@@ -3887,7 +4164,7 @@ mod tests {
                     })
                     .expect("compile adjustment graph"),
                     opacity: 1.0,
-                    blend_mode: Some(BlendMode::Normal),
+                    blend_policy: mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                     frame_seed: 0,
                 }),
                 identity_media(&upper),
@@ -4031,6 +4308,7 @@ mod tests {
     fn float_linear_compositor_runs_color_adjust_effect_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[1.25, 0.25, 0.125, 1.0]],
@@ -4075,6 +4353,7 @@ mod tests {
     fn float_linear_compositor_runs_normal_adjustment_without_rgba8_scratch() {
         let mut scratch = TimelineCompositeScratch::default();
         let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 1,
             height: 1,
             data: vec![[1.25, 0.25, 0.125, 1.0]],
@@ -4096,7 +4375,7 @@ mod tests {
                     })
                     .expect("compile adjustment"),
                     opacity: 0.5,
-                    blend_mode: Some(BlendMode::Normal),
+                    blend_policy: mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                     frame_seed: 0,
                 }),
             ],
@@ -4180,7 +4459,7 @@ mod tests {
                 })
                 .expect("compile adjustment"),
                 opacity: 1.0,
-                blend_mode: Some(BlendMode::Multiply),
+                blend_policy: mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Multiply),
                 frame_seed: 0,
             }),
         ];
@@ -4877,6 +5156,386 @@ mod tests {
                     precision: TimelineCpuCompositePrecision::Float32,
                 }
             )
+        ));
+    }
+    #[test]
+    fn nested_transparent_associated_float_composites_to_real_opaque_delivery() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("stock OCIO configuration");
+        let raw = [
+            [7.0_f32, -3.0, 11.0, 0.0],
+            [-2.0, 4.0, 0.25, -0.5],
+            [0.5, -1.0, 8.0, 1.5],
+            [0.001, -0.002, 0.004, f32::MIN_POSITIVE],
+        ];
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 1,
+            alpha: ColorFrameAlpha::PremultipliedFloat,
+            data: raw.to_vec(),
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let mut scratch = TimelineCompositeScratch::default();
+        let nested = composite_timeline_elements_color_frame_with_diagnostics(
+            4,
+            1,
+            &[identity_media(&source)],
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect("transparent nested program retains complete Float image");
+        assert_eq!(
+            nested.frame.descriptor().alpha,
+            ColorFrameAlpha::PremultipliedFloat
+        );
+        for (actual, expected) in nested.frame.rgba_f32().data.iter().zip(raw) {
+            assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+        }
+        let mut nested_layer = match identity_media(&nested.frame) {
+            TimelineCompositeElement::Media(layer) => layer,
+            _ => unreachable!("owned media fixture"),
+        };
+        nested_layer.opacity = 0.25;
+        let delivered = composite_timeline_elements_color_frame_with_diagnostics(
+            4,
+            1,
+            &[TimelineCompositeElement::Media(nested_layer)],
+            TimelineCompositeOptions {
+                background: TimelineCompositeBackground::OpaqueBlack,
+            },
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect("explicit opaque delivery closes association");
+        assert_eq!(delivered.frame.descriptor().alpha, ColorFrameAlpha::Opaque);
+        let expected =
+            raw.map(|sample| [sample[0] * 0.25, sample[1] * 0.25, sample[2] * 0.25, 1.0]);
+        assert_eq!(delivered.frame.rgba_f32().data, expected);
+        let transform = crate::RenderColorTransform::export(
+            mondrian_core::ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let encoded = crate::CpuColorTransformExecutor::transform(&delivered.frame, &transform)
+            .expect("actual stock OCIO and encoded output consume Opaque");
+        let reference = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 1,
+            alpha: ColorFrameAlpha::Opaque,
+            data: expected.to_vec(),
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let expected_output = crate::CpuColorTransformExecutor::transform(&reference, &transform)
+            .expect("independent f64-law scene oracle to output processor");
+        assert_eq!(encoded.frame.descriptor().alpha, ColorFrameAlpha::Opaque);
+        assert_eq!(encoded.frame.rgba(), expected_output.frame.rgba());
+        assert!(encoded.frame.rgba().chunks_exact(4).all(|sample| sample[3] == 255));
+    }
+
+    #[test]
+    fn huge_signed_straight_alpha_keeps_equal_opaque_color_through_real_delivery() {
+        use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
+        let background = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 1,
+            alpha: ColorFrameAlpha::Opaque,
+            data: vec![[1.0, 1.0, 1.0, 1.0]; 4],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let raw = [
+            f32::from_bits(0x5a80_0000),
+            -f32::from_bits(0x5a80_0000),
+            f32::MAX,
+            -f32::MAX,
+        ]
+        .map(|alpha| [1.0, 1.0, 1.0, alpha]);
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 1,
+            alpha: ColorFrameAlpha::StraightFloat,
+            data: raw.to_vec(),
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let mut scratch = TimelineCompositeScratch::default();
+        let delivered = composite_timeline_elements_color_frame_with_diagnostics(
+            4,
+            1,
+            &[identity_media(&background), identity_media(&source)],
+            TimelineCompositeOptions {
+                background: TimelineCompositeBackground::OpaqueBlack,
+            },
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect("stable Over preserves the representable unit background");
+        assert_eq!(delivered.frame.descriptor().alpha, ColorFrameAlpha::Opaque);
+        assert_eq!(delivered.frame.rgba_f32().data, background.rgba_f32().data);
+        let boundary = ProgramOutputBoundary::export(
+            mondrian_core::ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let actual = ProgramOutputModule::execute_cpu_rgba8(
+            &delivered.frame,
+            &boundary,
+            &mut crate::RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("real encoded output accepts the closed Opaque value");
+        let expected = ProgramOutputModule::execute_cpu_rgba8(
+            &background,
+            &boundary,
+            &mut crate::RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("independent exact white output oracle");
+        assert_eq!(actual.rgba, expected.rgba);
+        assert!(actual.rgba.chunks_exact(4).all(|sample| sample[3] == 255));
+    }
+
+    #[test]
+    fn huge_rgb_products_cancel_before_nontrivial_opacity_and_real_linear_float_delivery() {
+        use crate::color::program_output::{ProgramOutputBoundary, ProgramOutputModule};
+        let background = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            alpha: ColorFrameAlpha::Opaque,
+            data: vec![[f32::MAX, -f32::MAX, f32::MAX, 1.0]; 2],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 1,
+            alpha: ColorFrameAlpha::StraightFloat,
+            data: [f32::MAX, -f32::MAX]
+                .map(|alpha| [f32::MAX, -f32::MAX, f32::MAX, alpha])
+                .to_vec(),
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let mut layer = match identity_media(&source) {
+            TimelineCompositeElement::Media(layer) => layer,
+            _ => unreachable!("owned media fixture"),
+        };
+        layer.opacity = f32::from_bits(0x3f7f_ffff);
+        let mut scratch = TimelineCompositeScratch::default();
+        let delivered = composite_timeline_elements_color_frame_with_diagnostics(
+            2,
+            1,
+            &[
+                identity_media(&background),
+                TimelineCompositeElement::Media(layer),
+            ],
+            TimelineCompositeOptions {
+                background: TimelineCompositeBackground::OpaqueBlack,
+            },
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut scratch,
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect("exact finite cancellation leaves the opaque HDR background");
+        assert_eq!(delivered.frame.descriptor().alpha, ColorFrameAlpha::Opaque);
+        assert_eq!(delivered.frame.rgba_f32().data, background.rgba_f32().data);
+        let boundary = ProgramOutputBoundary::export(
+            mondrian_core::ColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let actual = ProgramOutputModule::execute_cpu_float(
+            &delivered.frame,
+            &boundary,
+            &mut crate::RenderCpuColorExecutionSession::new(0),
+        )
+        .expect("real linear Float delivery preserves representable maximum HDR");
+        assert_eq!(actual.frame.rgba_f32().data, background.rgba_f32().data);
+        assert_eq!(actual.output_descriptor.alpha, ColorFrameAlpha::Opaque);
+    }
+
+    #[test]
+    fn timeline_media_identity_preserves_every_actual_finite_alpha_representation() {
+        for (alpha, samples) in [
+            (
+                ColorFrameAlpha::Opaque,
+                [[8.0, -0.0, -f32::from_bits(1), 1.0]; 2],
+            ),
+            (
+                ColorFrameAlpha::StraightCoverage,
+                [[8.0, -0.0, -f32::from_bits(1), 0.0]; 2],
+            ),
+            (
+                ColorFrameAlpha::PremultipliedCoverage,
+                [[8.0, -0.0, -f32::from_bits(1), 0.0]; 2],
+            ),
+            (
+                ColorFrameAlpha::StraightFloat,
+                [[8.0, -0.0, -f32::from_bits(1), -2.0]; 2],
+            ),
+            (
+                ColorFrameAlpha::PremultipliedFloat,
+                [[8.0, -0.0, -f32::from_bits(1), 2.0]; 2],
+            ),
+        ] {
+            let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: 2,
+                height: 1,
+                alpha,
+                data: samples.to_vec(),
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            let mut scratch = TimelineCompositeScratch::default();
+            scratch.reconfigure_cpu_working_set(TimelineCpuWorkingSetGrant {
+                max_active_bytes: 0,
+                max_retained_scratch_bytes: 0,
+            });
+            let result = composite_timeline_elements_color_frame_with_diagnostics(
+                2,
+                1,
+                &[identity_media(&media)],
+                TimelineCompositeOptions::default(),
+                test_color_runtime(WorkingColorSpace::LinearRec709),
+                &mut scratch,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+            )
+            .expect(
+                "identity delivery must admit the actual finite association without conversion",
+            );
+            assert!(result.frame.shares_storage_with(&media));
+            assert_eq!(result.frame.descriptor().alpha, alpha);
+            assert_eq!(result.execution.zero_copy_identity_passthroughs, 1);
+            assert_eq!(result.execution.direct_first_layer_initializations, 0);
+            for (actual, expected) in result.frame.rgba_f32().data.iter().zip(samples) {
+                assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_media_identity_rejects_invalid_samples_before_shared_storage_publication() {
+        for (alpha, sample) in [
+            (ColorFrameAlpha::StraightCoverage, [f32::NAN, 0.0, 0.0, 0.5]),
+            (
+                ColorFrameAlpha::StraightCoverage,
+                [0.0, f32::INFINITY, 0.0, 0.5],
+            ),
+            (
+                ColorFrameAlpha::StraightCoverage,
+                [0.0, 0.0, f32::NEG_INFINITY, 0.5],
+            ),
+            (ColorFrameAlpha::StraightCoverage, [0.0, 0.0, 0.0, -0.5]),
+            (ColorFrameAlpha::StraightCoverage, [0.0, 0.0, 0.0, 1.5]),
+            (ColorFrameAlpha::Opaque, [0.0, 0.0, 0.0, 0.5]),
+            (
+                ColorFrameAlpha::PremultipliedCoverage,
+                [0.0, 0.0, 0.0, -0.5],
+            ),
+            (ColorFrameAlpha::StraightFloat, [0.0, 0.0, 0.0, f32::NAN]),
+            (
+                ColorFrameAlpha::PremultipliedFloat,
+                [f32::INFINITY, 0.0, 0.0, -2.0],
+            ),
+        ] {
+            let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: 1,
+                height: 1,
+                alpha,
+                data: vec![sample],
+                color_space: WorkingColorSpace::LinearRec709,
+            });
+            let error = composite_timeline_elements_color_frame_with_diagnostics(
+                1,
+                1,
+                &[identity_media(&media)],
+                TimelineCompositeOptions::default(),
+                test_color_runtime(WorkingColorSpace::LinearRec709),
+                &mut TimelineCompositeScratch::default(),
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+            )
+            .expect_err("an invalid public working-frame sample cannot bypass complete admission");
+            assert!(matches!(
+                error,
+                TimelineCompositeError::FloatEffect {
+                    reason: EffectFloatExecutionError::FrameContract(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample {
+                            index: 0,
+                            alpha: actual,
+                        }
+                    )
+                } if actual == alpha
+            ));
+        }
+    }
+
+    #[test]
+    fn timeline_media_identity_admission_observes_owner_stop_inside_borrowed_raster() {
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 65_537,
+            height: 1,
+            alpha: ColorFrameAlpha::StraightCoverage,
+            data: vec![[0.25, -2.0, 8.0, 0.5]; 65_537],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let mut calls = 0;
+        let mut checkpoint = || {
+            calls += 1;
+            (calls == 3).then_some(mondrian_effects::EffectProcessorStopReason::DeadlineExpired)
+        };
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
+            65_537,
+            1,
+            &[identity_media(&media)],
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut TimelineCompositeScratch::default(),
+            &mut mondrian_effects::EffectProcessorControl::new(&mut checkpoint),
+        )
+        .expect_err("bounded borrowed-raster admission must observe the owning deadline");
+        assert!(matches!(
+            error,
+            TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::Stopped {
+                    reason: mondrian_effects::EffectProcessorStopReason::DeadlineExpired,
+                }
+            }
+        ));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn timeline_media_full_float_admission_does_not_expand_artistic_coverage_consumers() {
+        let media = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 1,
+            height: 1,
+            alpha: ColorFrameAlpha::PremultipliedFloat,
+            data: vec![[1.0, 0.0, 0.0, 0.0]],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let mut layer = match identity_media(&media) {
+            TimelineCompositeElement::Media(layer) => layer,
+            _ => unreachable!("owned media fixture"),
+        };
+        layer.blend_mode = BlendMode::Multiply;
+        let error = composite_timeline_elements_color_frame_with_diagnostics(
+            1,
+            1,
+            &[TimelineCompositeElement::Media(layer)],
+            TimelineCompositeOptions::default(),
+            test_color_runtime(WorkingColorSpace::LinearRec709),
+            &mut TimelineCompositeScratch::default(),
+            &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+        )
+        .expect_err("finite zero-alpha emission has no artistic straight-coverage interpretation");
+        assert!(matches!(
+            error,
+            TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::ConsumerNotAdmitted {
+                        consumer: mondrian_effects::EffectAlphaConsumer::ArtisticBlend(
+                            BlendMode::Multiply,
+                        ),
+                        alpha: ColorFrameAlpha::PremultipliedFloat,
+                    }
+                )
+            }
         ));
     }
 }

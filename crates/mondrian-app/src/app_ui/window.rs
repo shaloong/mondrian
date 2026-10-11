@@ -124,6 +124,13 @@ use sha2::{Digest, Sha256};
 
 const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 
+// The external surface-reopen deadline is a caller-owned consuming budget.
+// A Question's operation deadline is not a consuming-shutdown deadline.
+fn window_consuming_shutdown_deadline(external: Option<Instant>, now: Instant) -> Instant {
+    external
+        .unwrap_or_else(|| now.checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT).unwrap_or(now))
+}
+
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
     deadline: Instant,
@@ -358,6 +365,9 @@ enum AppUiValidationWindowShutdown {
 struct AppUiValidationReturnedState {
     app_state: AppState,
     shutdown: AppUiValidationWindowShutdown,
+    // Actual budget already used by the consuming Window owners. The returned
+    // App consumes the remainder, never a renewed per-component budget.
+    shutdown_deadline: Instant,
 }
 
 #[cfg(feature = "validation")]
@@ -417,6 +427,7 @@ impl AppUiHostSessionOwner {
         if let Some(return_slot) = self.validation_return.take() {
             *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: deadline,
                 shutdown: AppUiValidationWindowShutdown::PendingHostActive {
                     host: ui_shutdown,
                     gpu: gpu_shutdown,
@@ -464,13 +475,10 @@ impl Drop for AppUiHostSessionOwner {
                 tracing::error!("validation Window lost its App UI host before state return");
                 return;
             };
-            let Some(deadline) = self.validation_shutdown_deadline.take() else {
-                tracing::error!(
-                    "validation Window Host fallback had no caller-owned shutdown deadline; retaining Host authority"
-                );
-                std::mem::forget(host);
-                return;
-            };
+            let deadline = window_consuming_shutdown_deadline(
+                self.validation_shutdown_deadline.take(),
+                Instant::now(),
+            );
             let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
             let mut returned = return_slot.borrow_mut();
             if returned.is_some() {
@@ -482,6 +490,7 @@ impl Drop for AppUiHostSessionOwner {
             }
             *returned = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: deadline,
                 shutdown: AppUiValidationWindowShutdown::IncompleteHostFallback {
                     host: ui_shutdown,
                 },
@@ -2700,6 +2709,175 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     run_app_ui_with_initial_state(AppState::new())
 }
 
+/// Run the real product Window/modal/router/native Question qualification.
+///
+/// The request names existing author data, not an editor capability. The ordinary
+/// Inspector/Preview/bank paths must issue all actual service ownership. This
+/// command prints one bounded JSON report and consumes Window/App/EventLoop
+/// owners. Float pixel acceptance and physical OS termination are separate gates.
+#[cfg(feature = "validation")]
+pub fn run_app_ui_native_question_validation_file(
+    request_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use super::native_question_validation::{
+        NativeQuestionWindowPump, NativeQuestionWindowReport, NativeQuestionWindowRequest,
+    };
+    let mut bytes = Vec::new();
+    File::open(request_path)?.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 {
+        return Err("Question validation request exceeds 16 KiB".into());
+    }
+    let request: NativeQuestionWindowRequest = serde_json::from_slice(&bytes)?;
+    let _ = request.deadline(Instant::now())?;
+    let mut app = AppState::new();
+    let setup = (|| -> anyhow::Result<()> {
+        use crate::app::product_action::{
+            ProductAction, VisualEffectInstallOpenFxBundlePayload, VisualEffectProductAction,
+            VisualEffectTargetPayload,
+        };
+        anyhow::ensure!(
+            request.project.is_absolute() && request.bundle.is_absolute(),
+            "validation project and bundle must be explicit absolute paths"
+        );
+        app.open_project_file(request.project.clone())?;
+        anyhow::ensure!(
+            app.active_sequence_id() == Some(request.sequence),
+            "request Sequence must be the actual active project Sequence"
+        );
+        app.dispatch_action(
+            ProductAction::VisualEffect(VisualEffectProductAction::InstallOpenFxBundle(
+                VisualEffectInstallOpenFxBundlePayload { path: request.bundle.clone() },
+            ))
+            .into_external_action(),
+        )?;
+        if !app.primary_selected_effect().is_some_and(|selected| {
+            selected.clip.clip_id == request.clip && selected.effect_id == request.effect
+        }) {
+            app.dispatch_action(
+                ProductAction::VisualEffect(VisualEffectProductAction::Select(
+                    VisualEffectTargetPayload { clip_id: request.clip, effect_id: request.effect },
+                ))
+                .into_external_action(),
+            )?;
+        }
+        Ok(())
+    })();
+    let pump = match setup
+        .map_err(|error| error.to_string())
+        .and_then(|()| NativeQuestionWindowPump::new(request, &app))
+    {
+        Ok(pump) => pump,
+        Err(error) => {
+            let shutdown_deadline = window_consuming_shutdown_deadline(None, Instant::now());
+            let shutdown = app.shutdown_for_endurance(shutdown_deadline);
+            let report = NativeQuestionWindowReport {
+                app_owners_released: shutdown.all_resources_released(),
+                app_shutdown: Some(format!("{shutdown:?}")),
+                failures: vec![error],
+                ..Default::default()
+            };
+            println!("{}", serde_json::to_string(&report)?);
+            return Err(
+                "Question validation setup failed; report contains actual App cleanup".into(),
+            );
+        }
+    };
+    let mut event_loop = match AppUiReusableEventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            let shutdown_deadline = window_consuming_shutdown_deadline(None, Instant::now());
+            let shutdown = app.shutdown_for_endurance(shutdown_deadline);
+            let report = NativeQuestionWindowReport {
+                app_owners_released: shutdown.all_resources_released(),
+                app_shutdown: Some(format!("{shutdown:?}")),
+                failures: vec![error.to_string()],
+                ..Default::default()
+            };
+            println!("{}", serde_json::to_string(&report)?);
+            return Err("Question validation could not construct the actual EventLoop".into());
+        }
+    };
+    let validation = Rc::new(RefCell::new(pump));
+    let returned_state: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+    let run = run_app_ui_with_initial_state_on_event_loop(
+        event_loop.event_loop_mut(),
+        app,
+        None,
+        Some(Rc::clone(&validation)),
+        Some(Rc::clone(&returned_state)),
+    );
+    let mut report = std::mem::take(&mut validation.borrow_mut().report);
+    if let Err(error) = run {
+        report.failures.push(error.to_string());
+    }
+    let returned = returned_state.borrow_mut().take();
+    if let Some(AppUiValidationReturnedState { app_state, shutdown, shutdown_deadline }) = returned
+    {
+        let native = AppUiWindowNativeReturnEvidence::after_window_function_return();
+        let outer = match shutdown {
+            AppUiValidationWindowShutdown::PendingActive { runtime, host, gpu } => Some(
+                AppUiWindowOuterShutdownEvidence::active_exited(runtime, host, gpu, native),
+            ),
+            AppUiValidationWindowShutdown::PendingActivePublicationFailure {
+                runtime,
+                host,
+                gpu,
+            } => Some(AppUiWindowOuterShutdownEvidence::active_publication_failed(
+                runtime, host, gpu, native,
+            )),
+            AppUiValidationWindowShutdown::Complete(evidence) => Some(evidence),
+            AppUiValidationWindowShutdown::PendingHostActive { .. } => {
+                report.failures.push(
+                    "actual Window returned before background Runtime shutdown evidence".to_owned(),
+                );
+                None
+            }
+            AppUiValidationWindowShutdown::IncompleteHostFallback { host } => {
+                report.failures.push(format!(
+                    "incomplete actual Window consuming Host shutdown: {host:?}"
+                ));
+                None
+            }
+        };
+        report.window_owners_released =
+            outer.as_ref().is_some_and(|evidence| evidence.all_owned_authority_released());
+        report.window_shutdown = outer.map(|evidence| format!("{evidence:?}"));
+        let app_shutdown = app_state.shutdown_for_endurance(shutdown_deadline);
+        report.app_owners_released = app_shutdown.all_resources_released();
+        report.app_shutdown = Some(format!("{app_shutdown:?}"));
+    } else {
+        report
+            .failures
+            .push("actual Window returned without its consuming App owner handback".to_owned());
+    }
+    report.event_loop_owner_released = event_loop.shutdown().rust_owner_released();
+    if report.completed.is_none() {
+        report.failures.push(
+            "original native invocation did not publish matching current feedback".to_owned(),
+        );
+    }
+    if report.reply.is_none() {
+        report
+            .failures
+            .push("no real routed reply was accepted for the original service".to_owned());
+    }
+    if !report.window_owners_released
+        || !report.app_owners_released
+        || !report.event_loop_owner_released
+    {
+        report
+            .failures
+            .push("actual owner-consuming shutdown did not qualify".to_owned());
+    }
+    report.passed = report.failures.is_empty();
+    println!("{}", serde_json::to_string(&report)?);
+    if report.passed {
+        Ok(())
+    } else {
+        Err("real Question Window qualification failed; see JSON report".into())
+    }
+}
+
 /// Process-local reusable desktop event-loop owner for endurance validation.
 ///
 /// Winit permits only one event-loop owner per process on the supported
@@ -3464,11 +3642,12 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_with_deadline(
         event_loop,
         initial_state,
         Some(validation),
+        None,
         Some(Rc::clone(&returned_state)),
     );
     let returned = returned_state.borrow_mut().take();
     let recovery_pump = recovery_pump_return.borrow_mut().take();
-    let AppUiValidationReturnedState { app_state, shutdown } = returned
+    let AppUiValidationReturnedState { app_state, shutdown, .. } = returned
         .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
     let native = AppUiWindowNativeReturnEvidence::after_window_function_return();
     let (shutdown, outer_failure) = match shutdown {
@@ -3667,6 +3846,8 @@ fn run_app_ui_with_initial_state(
         #[cfg(feature = "validation")]
         surface_reopen_validation,
         #[cfg(feature = "validation")]
+        None,
+        #[cfg(feature = "validation")]
         validation_return,
     )
 }
@@ -3676,6 +3857,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
     initial_state: AppState,
     #[cfg(feature = "validation")] mut surface_reopen_validation: Option<
         AppUiSurfaceDeviceReopenValidation,
+    >,
+    #[cfg(feature = "validation")] question_validation: Option<
+        Rc<RefCell<super::native_question_validation::NativeQuestionWindowPump>>,
     >,
     #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3687,8 +3871,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let product_startup_deadline =
         || Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now);
     #[cfg(feature = "validation")]
-    let host_startup_deadline =
-        validation_shutdown_deadline.unwrap_or_else(product_startup_deadline);
+    let host_startup_deadline = validation_shutdown_deadline
+        .or_else(|| question_validation.as_ref().map(|validation| validation.borrow().deadline))
+        .unwrap_or_else(product_startup_deadline);
     #[cfg(not(feature = "validation"))]
     let host_startup_deadline = product_startup_deadline();
     #[cfg(feature = "validation")]
@@ -3701,6 +3886,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: initial_state,
+                    shutdown_deadline: host_startup_deadline,
                     shutdown: AppUiValidationWindowShutdown::Complete(
                         AppUiWindowOuterShutdownEvidence::runtime_startup_failed(
                             runtime_shutdown.clone(),
@@ -3745,6 +3931,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: closed.app_state,
+                    shutdown_deadline: host_startup_deadline,
                     shutdown: AppUiValidationWindowShutdown::Complete(
                         AppUiWindowOuterShutdownEvidence::host_startup_failed(
                             runtime_shutdown.clone(),
@@ -3786,6 +3973,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state,
+                    shutdown_deadline: host_startup_deadline,
                     shutdown: AppUiValidationWindowShutdown::Complete(
                         AppUiWindowOuterShutdownEvidence::pre_active_failed(
                             runtime_shutdown,
@@ -3825,6 +4013,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let (device, queue) = (initial_device, initial_queue);
     let pending_actions = PendingUiActions::default();
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "validation")]
+        if question_validation.is_some() {
+            host.root_mut().focus_panel(PanelKind::Inspector);
+            host.mark_dirty();
+            host.refresh_if_dirty(session_bounds);
+        }
         publish_active_window_session(&mut host, &session, session_bounds);
         let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
         tracing::info!(
@@ -3858,6 +4052,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         if let Some(return_slot) = validation_return.as_ref() {
             *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                 app_state,
+                shutdown_deadline: host_startup_deadline,
                 shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
                     runtime: runtime_shutdown,
                     host: ui_shutdown,
@@ -4094,6 +4289,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             session.last_cursor,
                             &session.router,
                         );
+                        let painted_native_question = host.painted_native_visual_question();
                         let frame_result = session.frame_renderer.render_draw_commands(
                             &device,
                             &queue,
@@ -4101,6 +4297,20 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &session.config,
                             encoder.finish(),
                         );
+                        #[cfg(feature = "validation")]
+                        let question_validation_painted = painted_native_question.clone();
+                        #[cfg(feature = "validation")]
+                        let question_validation_before = question_validation_painted
+                            .as_ref().map(|question| question.validation_state());
+                        host.finish_native_visual_question_surface(painted_native_question, frame_result);
+                        #[cfg(feature = "validation")]
+                        if let Some(validation) = question_validation.as_ref() {
+                            validation.borrow_mut().observe_surface(
+                                &host, question_validation_painted, super::native_question_validation::NativeQuestionSurfaceFrame { state_before: question_validation_before, result: frame_result },
+                                format!("{:?}", session.window.id()), session.surface_generation_id.get(),
+                                format!("{:?}", session.renderer_adapter),
+                            );
+                        }
                         if let Some(diagnostics) =
                             session.render_diagnostic_reporter.changed_failure(frame_result)
                         {
@@ -4469,7 +4679,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 let playback_clock_started = Instant::now();
                 #[cfg(feature = "validation")]
                 let playback_changed = if !validation_window_advances_playback(
-                    surface_reopen_validation.is_some(),
+                    surface_reopen_validation.is_some() || question_validation.is_some(),
                 ) {
                     false
                 } else {
@@ -4512,6 +4722,25 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 }
                 if background_tasks.needs_follow_up_poll {
                     elwt.set_control_flow(ControlFlow::Poll);
+                }
+                #[cfg(feature = "validation")]
+                if let Some(validation) = question_validation.as_ref() {
+                    let event = validation.borrow_mut().next_event(&host, session.router.focused());
+                    if let Some(event) = event {
+                        let _ = session.ui_runtime.route_window_event(
+                            &session.window, &mut session.router, host.active_root_mut(), event, &dispatch_action,
+                        );
+                        drain_actions_and_sync_window_session(
+                            &mut host, &pending_actions, &platform, elwt, &adapter, &device, &mut session,
+                        );
+                        validation.borrow_mut().after_event(&host, session.router.focused());
+                        update_window_cursor_icon(&host, &mut session);
+                        session.window.request_redraw();
+                    }
+                    if validation.borrow().finished() { elwt.exit(); }
+                    else {
+                        elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), validation.borrow().wake()));
+                    }
                 }
                 let heterogeneous_completion = drive_viewer_heterogeneous_completion(
                     &device,
@@ -4590,15 +4819,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
     });
     let event_loop_result =
         merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
-    let product_shutdown_deadline = || {
-        Instant::now()
-            .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
-            .unwrap_or_else(Instant::now)
-    };
     #[cfg(feature = "validation")]
-    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(product_shutdown_deadline);
+    let external_shutdown_deadline = validation_shutdown_deadline;
     #[cfg(not(feature = "validation"))]
-    let shutdown_deadline = product_shutdown_deadline();
+    let external_shutdown_deadline = None;
+    let shutdown_deadline =
+        window_consuming_shutdown_deadline(external_shutdown_deadline, Instant::now());
+    #[cfg(feature = "validation")]
+    {
+        // A fallback during this consuming pass shares its already-frozen budget.
+        host.validation_shutdown_deadline = Some(shutdown_deadline);
+    }
     let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
@@ -6571,6 +6802,7 @@ fn prepare_viewer_gpu_preview(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
 ) {
+    host.sync_native_visual_gui_presence();
     let prepare_started = Instant::now();
     let mut renderer_record_us = None;
     let mut renderer_cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings> = None;
@@ -9179,6 +9411,64 @@ mod tests {
         assert!(
             result.is_err(),
             "ordinary Window accepted an unclosed App owner: {result:?}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_handback_keeps_one_consuming_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let returned: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+        let deadline = window_consuming_shutdown_deadline(None, Instant::now());
+        let mut owner = AppUiHostSessionOwner::new(host, Some(Rc::clone(&returned)), None);
+        let result = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(
+            result.as_ref().is_ok_and(|ui| ui.all_resources_released()),
+            "{result:?}"
+        );
+        assert!(owner.host.is_none());
+        let handback = returned.borrow_mut().take().expect("actual consuming Host handback");
+        assert_eq!(
+            handback.shutdown_deadline, deadline,
+            "App must receive the exact remaining budget"
+        );
+        let closed = handback.app_state.shutdown_for_endurance(handback.shutdown_deadline);
+        assert!(closed.all_resources_released(), "{closed:?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_expired_handback_does_not_renew_app_budget() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let returned: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+        let deadline = Instant::now();
+        let mut owner =
+            AppUiHostSessionOwner::new(host, Some(Rc::clone(&returned)), Some(deadline));
+        let _ = owner.shutdown_until(deadline, clean_final_window_gpu_shutdown());
+        assert!(owner.host.is_none());
+        let handback = returned.borrow_mut().take().expect("actual expired Host handback");
+        assert_eq!(handback.shutdown_deadline, deadline);
+        let closed = handback.app_state.shutdown_for_endurance(handback.shutdown_deadline);
+        assert!(
+            !closed.all_resources_released(),
+            "expired shared budget was silently renewed: {closed:?}"
+        );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn ordinary_window_shutdown_budget_preserves_surface_external_deadline() {
+        let now = Instant::now();
+        let expired_external = now.checked_sub(Duration::from_secs(1)).expect("past Instant");
+        assert_eq!(
+            window_consuming_shutdown_deadline(Some(expired_external), now),
+            expired_external
+        );
+        assert_eq!(
+            window_consuming_shutdown_deadline(None, now),
+            now + APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT
         );
     }
 

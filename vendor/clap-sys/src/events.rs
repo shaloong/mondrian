@@ -1,0 +1,21 @@
+//! Reexports of declarations from official `clap/events.h`.
+pub use crate::raw::{
+    clap_beattime, clap_event_flags, clap_event_header, clap_event_header_t, clap_event_midi,
+    clap_event_midi2, clap_event_midi2_t, clap_event_midi_sysex, clap_event_midi_sysex_t,
+    clap_event_midi_t, clap_event_note, clap_event_note_expression, clap_event_note_expression_t,
+    clap_event_note_t, clap_event_param_gesture, clap_event_param_gesture_t, clap_event_param_mod,
+    clap_event_param_mod_t, clap_event_param_value, clap_event_param_value_t, clap_event_transport,
+    clap_event_transport_t, clap_host_event_registry, clap_id, clap_input_events,
+    clap_input_events_t, clap_note_expression, clap_output_events, clap_output_events_t,
+    clap_param_info, clap_process, clap_sectime, clap_transport_flags, CLAP_CORE_EVENT_SPACE_ID,
+    CLAP_EVENT_DONT_RECORD, CLAP_EVENT_IS_LIVE, CLAP_EVENT_MIDI, CLAP_EVENT_MIDI2,
+    CLAP_EVENT_MIDI_SYSEX, CLAP_EVENT_NOTE_CHOKE, CLAP_EVENT_NOTE_END, CLAP_EVENT_NOTE_EXPRESSION,
+    CLAP_EVENT_NOTE_OFF, CLAP_EVENT_NOTE_ON, CLAP_EVENT_PARAM_GESTURE_BEGIN,
+    CLAP_EVENT_PARAM_GESTURE_END, CLAP_EVENT_PARAM_MOD, CLAP_EVENT_PARAM_VALUE,
+    CLAP_EVENT_TRANSPORT, CLAP_NOTE_EXPRESSION_BRIGHTNESS, CLAP_NOTE_EXPRESSION_EXPRESSION,
+    CLAP_NOTE_EXPRESSION_PAN, CLAP_NOTE_EXPRESSION_PRESSURE, CLAP_NOTE_EXPRESSION_TUNING,
+    CLAP_NOTE_EXPRESSION_VIBRATO, CLAP_NOTE_EXPRESSION_VOLUME, CLAP_TRANSPORT_HAS_BEATS_TIMELINE,
+    CLAP_TRANSPORT_HAS_SECONDS_TIMELINE, CLAP_TRANSPORT_HAS_TEMPO,
+    CLAP_TRANSPORT_HAS_TIME_SIGNATURE, CLAP_TRANSPORT_IS_LOOP_ACTIVE, CLAP_TRANSPORT_IS_PLAYING,
+    CLAP_TRANSPORT_IS_RECORDING, CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL,
+};

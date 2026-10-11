@@ -8,7 +8,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 2;
+pub(super) const PROTOCOL_VERSION: u32 = 8;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_WORKER_DETAIL_BYTES: usize = 4096;
 const COMMAND_MAGIC: u32 = u32::from_le_bytes(*b"MAPC");
@@ -88,6 +88,7 @@ pub(super) struct AuxiliaryBusWire {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct PrepareWire {
     pub schema_version: u32,
+    pub native_lane: super::native_worker_lane_wire::NativeWorkerLaneWire,
     pub nonce: String,
     pub payload: Vec<u8>,
     pub execution_contract: ExecutionContractWire,
@@ -190,6 +191,16 @@ pub(super) enum CommandKind {
     EnterState,
     Process,
     Shutdown,
+    PollPending,
+    ServiceConfiguration,
+    PollConfigurationCohort,
+    StageConfigurationSeed,
+    CommitConfigurationSeed,
+    PollNativeObservations,
+    BindNativeObject,
+    EditorOpen,
+    EditorClose,
+    PrepareAuthorStateEntry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +217,16 @@ impl WorkerCommand {
             CommandKind::EnterState => 1_u32,
             CommandKind::Process => 2,
             CommandKind::Shutdown => 3,
+            CommandKind::PollPending => 4,
+            CommandKind::ServiceConfiguration => 5,
+            CommandKind::PollConfigurationCohort => 6,
+            CommandKind::StageConfigurationSeed => 7,
+            CommandKind::CommitConfigurationSeed => 8,
+            CommandKind::PollNativeObservations => 9,
+            CommandKind::BindNativeObject => 10,
+            CommandKind::EditorOpen => 11,
+            CommandKind::EditorClose => 12,
+            CommandKind::PrepareAuthorStateEntry => 13,
         };
         let mut bytes = [0_u8; 32];
         bytes[0..4].copy_from_slice(&COMMAND_MAGIC.to_le_bytes());
@@ -234,6 +255,16 @@ impl WorkerCommand {
             1 => CommandKind::EnterState,
             2 => CommandKind::Process,
             3 => CommandKind::Shutdown,
+            4 => CommandKind::PollPending,
+            5 => CommandKind::ServiceConfiguration,
+            6 => CommandKind::PollConfigurationCohort,
+            7 => CommandKind::StageConfigurationSeed,
+            8 => CommandKind::CommitConfigurationSeed,
+            9 => CommandKind::PollNativeObservations,
+            10 => CommandKind::BindNativeObject,
+            11 => CommandKind::EditorOpen,
+            12 => CommandKind::EditorClose,
+            13 => CommandKind::PrepareAuthorStateEntry,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -241,37 +272,96 @@ impl WorkerCommand {
                 ));
             }
         };
-        Ok(Self {
+        let command = Self {
             kind,
             frames: u32::from_le_bytes(bytes[12..16].try_into().map_err(invalid_slice)?),
             start_sample: i64::from_le_bytes(bytes[16..24].try_into().map_err(invalid_slice)?),
             event_count: u32::from_le_bytes(bytes[24..28].try_into().map_err(invalid_slice)?),
-        })
+        };
+        if matches!(
+            command.kind,
+            CommandKind::PollPending
+                | CommandKind::ServiceConfiguration
+                | CommandKind::PollConfigurationCohort
+                | CommandKind::PollNativeObservations
+                | CommandKind::BindNativeObject
+                | CommandKind::EditorOpen
+                | CommandKind::EditorClose
+                | CommandKind::PrepareAuthorStateEntry
+        ) && (command.start_sample != 0 || command.frames != 0 || command.event_count != 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pending query has no sample/block payload",
+            ));
+        }
+        Ok(command)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkerResponse {
     Completed,
+    CompletedWithPending(mondrian_core::NativeAudioReprepareRequest),
+    DeferredForConfiguration(mondrian_core::NativeAudioReprepareRequest),
     Failed(String),
 }
 
 impl WorkerResponse {
     pub(super) fn write_to(self, writer: &mut impl Write) -> io::Result<()> {
-        let (status, detail) = match self {
-            Self::Completed => (0_u32, String::new()),
-            Self::Failed(detail) => (1_u32, bounded_detail(detail)),
+        let (status, payload) = match &self {
+            Self::Completed => (0_u32, None),
+            Self::Failed(_) => (1, None),
+            Self::CompletedWithPending(request) | Self::DeferredForConfiguration(request) => {
+                let (kind, flags) = match request {
+                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags }
+                        if *flags != 0 =>
+                    {
+                        (1_u32, *flags)
+                    }
+                    mondrian_core::NativeAudioReprepareRequest::ClapRestart => (2, 0),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid pending VST3 flags",
+                        ))
+                    }
+                };
+                let mut bytes = [0_u8; 8];
+                bytes[..4].copy_from_slice(&kind.to_le_bytes());
+                bytes[4..].copy_from_slice(&flags.to_le_bytes());
+                (
+                    if matches!(self, Self::DeferredForConfiguration(_)) {
+                        3
+                    } else {
+                        2
+                    },
+                    Some(bytes),
+                )
+            }
         };
-        let detail = detail.as_bytes();
-        let detail_len = u32::try_from(detail.len())
+        let detail = match self {
+            Self::Failed(detail) => Some(bounded_detail(detail)),
+            _ => None,
+        };
+        let length = payload.as_ref().map_or_else(
+            || detail.as_ref().map_or(0, String::len),
+            |bytes| bytes.len(),
+        );
+        let response_len = u32::try_from(length)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Worker detail too large"))?;
         let mut header = [0_u8; 16];
         header[0..4].copy_from_slice(&RESPONSE_MAGIC.to_le_bytes());
         header[4..8].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         header[8..12].copy_from_slice(&status.to_le_bytes());
-        header[12..16].copy_from_slice(&detail_len.to_le_bytes());
+        header[12..16].copy_from_slice(&response_len.to_le_bytes());
         writer.write_all(&header)?;
-        writer.write_all(detail)?;
+        if let Some(bytes) = payload {
+            writer.write_all(&bytes)?;
+        }
+        if let Some(detail) = detail {
+            writer.write_all(detail.as_bytes())?;
+        }
         writer.flush()
     }
 
@@ -297,6 +387,35 @@ impl WorkerResponse {
                 io::ErrorKind::InvalidData,
                 "audio Worker detail exceeds the protocol bound",
             ));
+        }
+        if status == 2 || status == 3 {
+            if detail_len != 8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid pending response extent",
+                ));
+            }
+            let mut bytes = [0_u8; 8];
+            reader.read_exact(&mut bytes)?;
+            let kind = u32::from_le_bytes(bytes[..4].try_into().map_err(invalid_slice)?);
+            let flags = u32::from_le_bytes(bytes[4..].try_into().map_err(invalid_slice)?);
+            let request = match (kind, flags) {
+                (1, flags) if flags != 0 => {
+                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags }
+                }
+                (2, 0) => mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid pending response kind/flags",
+                    ))
+                }
+            };
+            return Ok(if status == 3 {
+                Self::DeferredForConfiguration(request)
+            } else {
+                Self::CompletedWithPending(request)
+            });
         }
         let mut detail = vec![0_u8; detail_len];
         reader.read_exact(&mut detail)?;
@@ -474,8 +593,8 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v2 wire bytes: MAPR, version=2, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v5 wire bytes: MAPR, version=5, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
@@ -496,7 +615,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 2, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 8, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -513,7 +632,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 2, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 8, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -574,5 +693,67 @@ mod response_write_qualification {
         assert!(matches!(result, Err(error) if error.kind() == io::ErrorKind::ConnectionReset));
         assert_eq!(writer.written(), COMPLETED_WIRE);
         assert_eq!(writer.flushes, 1);
+    }
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+    use mondrian_core::NativeAudioReprepareRequest;
+
+    #[test]
+    fn native_pending_wire_round_trips_fixed_payload() {
+        for request in [
+            NativeAudioReprepareRequest::ClapRestart,
+            NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0008 },
+        ] {
+            let response = WorkerResponse::CompletedWithPending(request);
+            let mut encoded = Vec::new();
+            response.clone().write_to(&mut encoded).expect("encode native notice");
+            assert_eq!(encoded.len(), 24, "fixed header + fixed eight-byte notice");
+            assert_eq!(&encoded[8..12], &2_u32.to_le_bytes());
+            assert_eq!(&encoded[12..16], &8_u32.to_le_bytes());
+            assert_eq!(
+                WorkerResponse::read_from(&mut encoded.as_slice()).expect("decode notice"),
+                response
+            );
+        }
+        let mut encoded = Vec::new();
+        let query = WorkerCommand {
+            kind: CommandKind::PollPending,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        };
+        query.write_to(&mut encoded).expect("encode query");
+        assert_eq!(
+            WorkerCommand::read_from(&mut encoded.as_slice()).expect("decode query"),
+            query
+        );
+        encoded[12..16].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(
+            WorkerCommand::read_from(&mut encoded.as_slice()).is_err(),
+            "pending query cannot overload block fields"
+        );
+    }
+
+    #[test]
+    fn native_pending_wire_refuses_invalid_extent_kind_and_zero_vst_flags() {
+        let mut canonical = Vec::new();
+        WorkerResponse::CompletedWithPending(NativeAudioReprepareRequest::ClapRestart)
+            .write_to(&mut canonical)
+            .expect("canonical notice");
+        for (offset, value) in [(12, 0_u32), (16, 9), (20, 1)] {
+            let mut invalid = canonical.clone();
+            invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
+        }
+        assert!(
+            WorkerResponse::CompletedWithPending(NativeAudioReprepareRequest::Vst3Restart {
+                flags: 0
+            })
+            .write_to(&mut Vec::new())
+            .is_err()
+        );
     }
 }

@@ -397,6 +397,95 @@ fn cpu_fallback_rejects_non_default_display_policy_instead_of_showing_srgb() {
 }
 
 #[test]
+fn cpu_working_adjustment_reaches_gpu_candidate_with_exact_monitor_policy() {
+    let mut sequence = Sequence::new("CPU adjustment GPU output");
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_hex(0x244C7A),
+                tt(0, tb),
+                tt(24, tb),
+            )
+            .expect("solid"),
+        )
+        .expect("source track");
+    let mut adjustment =
+        Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(24, tb)).expect("adjustment");
+    let mut blur: mondrian_effects::EffectNode =
+        mondrian_effects::EffectNodeExt::with_defaults(mondrian_effects::EffectType::GaussianBlur);
+    blur.set_static_value_by_parameter(
+        &mondrian_effects::EffectType::GaussianBlur
+            .parameter_id("radius")
+            .expect("radius"),
+        mondrian_core::automation::PropertyValue::Float(1.0),
+    )
+    .expect("CPU blur radius");
+    adjustment.add_effect_node(blur);
+    let mut track = Track::new_video("Adjustment");
+    track.add_clip(adjustment).expect("adjustment track");
+    sequence.video_tracks.push(track);
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek");
+    pin_standard_execution_resources(&mut state);
+    state.set_viewer_display_management(
+        mondrian_core::DisplayManagementPolicy::default()
+            .with_monitor_output(mondrian_core::MonitorOutputIntent::ColorSpace(
+                ColorSpace::DisplayP3,
+            ))
+            .expect("P3"),
+    );
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Loading
+    ));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let frame = loop {
+        runtime.pump_cpu_fallback_results();
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Ready(frame) => break frame,
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {}
+            PreviewGpuFrameState::Unavailable(reason) => {
+                panic!("CPU adjustment unavailable: {}", reason.detail())
+            }
+            _ => panic!("CPU adjustment bypassed its GPU upload candidate"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CPU adjustment completion deadline"
+        );
+        std::thread::yield_now();
+    };
+    assert!(!runtime.viewer_cpu_fallback_active.get());
+    assert_eq!(
+        frame.monitor_adaptation.monitor_color_space(),
+        ColorSpace::DisplayP3
+    );
+    let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+    assert_eq!(layers.len(), 1);
+    let Some(ViewerGpuSourceLayer::Media { frame: Some(working), .. }) =
+        viewer_gpu_source_layer(&layers[0])
+    else {
+        panic!("expected exact post-composite Float32 upload");
+    };
+    let retained = runtime
+        .frame_store
+        .borrow_mut()
+        .viewer_working_frame(&frame.output_key)
+        .expect("bounded working residency");
+    assert!(retained.shares_storage_with(working));
+    assert_eq!(
+        runtime.diagnostics().composite_color_path_summary().legacy_rgba8_composites,
+        0
+    );
+}
+
+#[test]
 fn resource_scale_change_re_resolves_across_generation_rollover() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     state.execution_resources =
@@ -2812,7 +2901,7 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
             effect_graph,
             opacity: 0.6,
-            blend_mode: None,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
             frame_seed: 13,
         }),
     ];
@@ -2828,10 +2917,10 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         _ => panic!("expected solid layer"),
     }
     match &layers[1] {
-        ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, blend_mode, frame_seed } => {
+        ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, blend_policy, frame_seed } => {
             assert_eq!(effect_plan.operations().len(), 1);
             assert_eq!(*opacity, 0.6);
-            assert_eq!(*blend_mode, BlendMode::Normal);
+            assert_eq!(*blend_policy, mondrian_effects::EffectPassBlendPolicy::Mix);
             assert_eq!(*frame_seed, 13);
         }
         _ => panic!("expected adjustment layer"),
@@ -2849,7 +2938,7 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
             ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: Arc::clone(&effect_graph),
                 opacity: 1.0,
-                blend_mode: None,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                 frame_seed: seed,
             })
         })
@@ -16672,5 +16761,353 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
     assert!(
         store.media_frame(&key).is_some(),
         "GPU completion does not clear cached media"
+    );
+}
+
+fn uncacheable_cpu_adjustment_fixture() -> (AppState, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static NEXT_TYPE: AtomicU64 = AtomicU64::new(1);
+    let effect_type = mondrian_effects::EffectType::Plugin(format!(
+        "test.preview.cpu-working-once.{}",
+        NEXT_TYPE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let processor_calls = Arc::clone(&calls);
+    mondrian_effects::register_effect_definition(
+        mondrian_effects::EffectDefinition::new(
+            effect_type.key(),
+            "CPU working once",
+            Default::default(),
+            mondrian_effects::EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(mondrian_effects::EffectExecutionContract {
+            execution_modes: mondrian_effects::EffectExecutionModes::CPU_F32,
+            determinism: mondrian_effects::EffectDeterminism::Nondeterministic,
+            state_model: mondrian_effects::EffectStateModel::Stateless,
+            temporal_input: mondrian_effects::EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: mondrian_effects::EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: mondrian_effects::EffectResourceLifetime::Frame,
+            topology: mondrian_effects::EffectGraphTopology::LinearChain,
+        })
+        .with_custom_float_render_backend(
+            Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+            None,
+            EffectCachePolicy::Uncacheable,
+            Arc::new(move |pixels, _, _| {
+                let invocation = processor_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                for pixel in pixels {
+                    *pixel = [invocation as f32, 0.25, 0.5, 1.0];
+                }
+                Ok(())
+            }),
+        ),
+    )
+    .expect("register actual uncacheable CPU processor");
+    ensure_test_ocio_loaded();
+    let mut sequence = Sequence::new("CPU single completion");
+    sequence.settings = sequence.settings.with_resolution(4, 4);
+    sequence.settings.preview.resolution_scale = 1.0;
+    let tb = sequence.time_base();
+    sequence.video_tracks[0]
+        .add_clip(
+            Clip::new_solid_color(
+                AssetId::new(),
+                Color::from_hex(0x244C7A),
+                tt(0, tb),
+                tt(24, tb),
+            )
+            .expect("solid"),
+        )
+        .expect("solid track");
+    let mut adjustment =
+        Clip::new_adjustment_layer(AssetId::new(), tt(0, tb), tt(24, tb)).expect("adjustment");
+    adjustment.add_effect_node(mondrian_effects::EffectNode::new(effect_type));
+    let mut track = Track::new_video("CPU Adjustment");
+    track.add_clip(adjustment).expect("CPU adjustment track");
+    sequence.video_tracks.push(track);
+    let mut state = AppState::new();
+    state.test_set_sequence(Some(sequence));
+    state.seek(4).expect("seek exact frame");
+    pin_standard_execution_resources(&mut state);
+    (state, calls)
+}
+
+struct CpuWorkingCandidateObservation {
+    frame: Box<PreviewGpuFrame>,
+    completed_scope:
+        Option<super::super::preview_processor_feedback::PreviewProcessorFeedbackScope>,
+    completed_feedback:
+        Option<super::super::preview_processor_feedback::PreviewProcessorFeedbackUpdate>,
+}
+
+fn await_cpu_working_candidate(
+    runtime: &PreviewProductionRuntime<()>,
+    state: &AppState,
+) -> CpuWorkingCandidateObservation {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        runtime.pump_cpu_fallback_results();
+        let scope = runtime.current_processor_feedback_scope.get();
+        let feedback = runtime.pending_processor_feedback.borrow().clone();
+        match execute_gpu_preview_for_test_app(runtime, state) {
+            PreviewGpuFrameState::Ready(frame) => {
+                return CpuWorkingCandidateObservation {
+                    frame,
+                    completed_scope: scope,
+                    completed_feedback: feedback,
+                }
+            }
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {}
+            PreviewGpuFrameState::Unavailable(reason) => {
+                panic!("CPU working unavailable: {}", reason.detail())
+            }
+            _ => panic!("uncacheable CPU completion bypassed GPU candidate"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual CPU working completion deadline"
+        );
+        std::thread::yield_now();
+    }
+}
+
+fn cpu_candidate_red(frame: &PreviewGpuFrame) -> f32 {
+    let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+    assert_eq!(
+        layers.len(),
+        1,
+        "whole CPU compositor must supply one working upload"
+    );
+    let Some(ViewerGpuSourceLayer::Media { frame: Some(working), .. }) =
+        viewer_gpu_source_layer(&layers[0])
+    else {
+        panic!("actual working upload missing");
+    };
+    assert_eq!(
+        working.rgba_f32().data.len(),
+        frame.width as usize * frame.height as usize
+    );
+    let red = working.rgba_f32().data[0][0];
+    assert!(working.rgba_f32().data.iter().all(|pixel| pixel[0] == red));
+    red
+}
+
+#[test]
+fn cpu_working_uncacheable_completion_executes_each_exact_attempt_once() {
+    use std::sync::atomic::Ordering;
+    let (state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let first = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "first actual CPU invocation"
+    );
+    assert_eq!(cpu_candidate_red(&first), 1.0, "first actual CPU pixels");
+    let first_key = first.output_key.clone();
+    drop(first);
+    let second = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "uncacheable CPU completion must not be reused by a later execution attempt"
+    );
+    assert_eq!(cpu_candidate_red(&second), 2.0, "second actual CPU pixels");
+    assert_ne!(
+        second.output_key, first_key,
+        "independent attempts require exact output identities"
+    );
+}
+
+#[test]
+fn cpu_working_gpu_upload_preserves_exact_completed_scalar_feedback_scope() {
+    use std::sync::atomic::Ordering;
+    let (state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let CpuWorkingCandidateObservation { frame, completed_scope, completed_feedback } =
+        await_cpu_working_candidate(&runtime, &state);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "actual complete CPU callback"
+    );
+    assert_eq!(cpu_candidate_red(&frame), 1.0);
+    let scope = completed_scope.expect("actual CPU completion scope");
+    assert!(matches!(
+        scope.key,
+        Some(super::super::preview_processor_feedback::PreviewProcessorWorkKey::Scalar { .. })
+    ));
+    assert_eq!(
+        completed_feedback.as_ref().map(|update| update.scope),
+        Some(scope)
+    );
+    assert_eq!(
+        runtime.current_processor_feedback_scope.get(),
+        Some(scope),
+        "identity GPU upload must retain the actual completed scalar feedback scope"
+    );
+    assert_eq!(
+        *runtime.pending_processor_feedback.borrow(),
+        completed_feedback,
+        "GPU upload must not replace completed native feedback with a retired empty view"
+    );
+}
+
+#[test]
+fn cpu_working_candidate_owns_pixels_after_exact_single_use_detachment() {
+    let (state, _) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let frame = await_cpu_working_candidate(&runtime, &state).frame;
+    let bytes = frame.width as usize * frame.height as usize * std::mem::size_of::<[f32; 4]>();
+    assert!(
+        runtime
+            .frame_store
+            .borrow_mut()
+            .viewer_working_frame(&frame.output_key)
+            .is_none(),
+        "an uncacheable CPU result is consumed once by its exact GPU candidate"
+    );
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    runtime.frame_store.borrow_mut().clear_viewer_frames();
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes,
+        "clearing cache records cannot release candidate-owned working pixels"
+    );
+    assert_eq!(cpu_candidate_red(&frame), 1.0);
+    drop(frame);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
+    );
+}
+
+#[test]
+fn cpu_working_sequential_frames_resume_after_exact_submission_owner_retirement() {
+    use super::super::viewer_gpu_submission::{
+        ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll,
+    };
+    use std::sync::atomic::Ordering;
+    let (mut state, calls) = uncacheable_cpu_adjustment_fixture();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let bytes = 4 * 4 * std::mem::size_of::<[f32; 4]>();
+    runtime
+        .frame_store
+        .borrow_mut()
+        .reconfigure(mondrian_playback::PreviewFrameStoreConfig {
+            viewer_byte_budget: bytes,
+            ..Default::default()
+        });
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let first = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!((first.width, first.height), (4, 4));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cpu_candidate_red(&first), 1.0);
+    let first_key = first.output_key.clone();
+    let mut submissions = ViewerGpuSubmissionLifecycle::<Box<PreviewGpuFrame>, ()>::new();
+    let mut callback = None;
+    let now = Instant::now();
+    let first_submission = submissions.reserve().expect("one actual owner slot").commit(
+        first,
+        now + Duration::from_secs(10),
+        |registered| callback = Some(registered),
+        || {},
+    );
+    state.seek(5).expect("next exact Sequence frame");
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    let blocked_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        runtime.pump_cpu_fallback_results();
+        match execute_gpu_preview_for_test_app(&runtime, &state) {
+            PreviewGpuFrameState::Unavailable(reason) => {
+                assert_eq!(
+                    reason.detail(),
+                    "Viewer working pixels exceed their shared live residency grant",
+                    "only the exact current live pixel grant may reject this successor"
+                );
+                break;
+            }
+            PreviewGpuFrameState::Loading | PreviewGpuFrameState::Prepared => {
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "pending evaluation grants no second CPU callback"
+                );
+                assert_eq!(
+                    runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+                    bytes,
+                    "the actual submitted owner retains exactly one frame"
+                );
+            }
+            PreviewGpuFrameState::Ready(_) => {
+                panic!("second frame was allocated before actual submission owner retirement")
+            }
+            PreviewGpuFrameState::Current(_) => {
+                panic!("new exact frame was mistaken for current output")
+            }
+            PreviewGpuFrameState::Transparent(_) => {
+                panic!("live pixel admission produced substitute transparency")
+            }
+        }
+        assert!(
+            Instant::now() < blocked_deadline,
+            "next exact attempt never reached its real live residency refusal; loading={:?}",
+            runtime.last_gpu_loading_reason.get()
+        );
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "no unadmitted CPU callback"
+    );
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    assert!(matches!(
+        submissions.poll(now),
+        ViewerGpuSubmissionPoll::Pending { .. }
+    ));
+    callback.take().expect("same submission completion channel")(());
+    let completed = match submissions.poll(Instant::now()) {
+        ViewerGpuSubmissionPoll::Completed(completed) => completed,
+        _ => panic!("exact completion must return its retained owner"),
+    };
+    assert_eq!(completed.submission_id, first_submission);
+    assert!(completed.quarantine_reason.is_none());
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes,
+        "polling completion is not the retirement of the returned owner"
+    );
+    drop(completed);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
+    );
+    let second = await_cpu_working_candidate(&runtime, &state).frame;
+    assert_eq!(second.frame, 5);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the next frame executes after exact retirement"
+    );
+    assert_eq!(cpu_candidate_red(&second), 2.0);
+    assert_ne!(second.output_key, first_key);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        bytes
+    );
+    drop(second);
+    assert_eq!(
+        runtime.frame_store.borrow().diagnostics().viewer_aggregate_reserved_bytes,
+        0
     );
 }

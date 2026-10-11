@@ -1,5 +1,7 @@
+use std::alloc::Layout;
+use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use super::{ComPtr, ComRef, Guid, Interface};
 
@@ -172,6 +174,30 @@ struct ComWrapperInner<C: Class> {
     data: C,
 }
 
+/// A borrowed view of a COM wrapper's actual owned Arc payload.
+///
+/// This includes the generated COM header plus Rust class data. It is not an
+/// interface pointer, the class data address alone, or the complete Arc
+/// allocation: the std reference-count prefix must be qualified separately for
+/// the actual compiler/target. Nested class storage requires separate views.
+#[derive(Debug, Clone, Copy)]
+pub struct ComWrapperPayloadStorage<'a> {
+    address: usize,
+    layout: Layout,
+    _owner: PhantomData<&'a ()>,
+}
+
+impl ComWrapperPayloadStorage<'_> {
+    /// Actual owned payload identity, shared by clones; never dereferenced here.
+    pub const fn address(self) -> usize {
+        self.address
+    }
+    /// Exact layout of the header plus class data, including alignment padding.
+    pub const fn layout(self) -> Layout {
+        self.layout
+    }
+}
+
 /// A wrapper for constructing a reference-counted COM object from a Rust value.
 ///
 /// `ComWrapper` represents an owning reference to the COM object, i.e. it will decrement the
@@ -242,7 +268,70 @@ impl<C: Class> Wrapper<C> for ComWrapper<C> {
     }
 }
 
+/// A weak reference to the same canonical COM wrapper allocation.
+///
+/// It never keeps the Rust class or a plugin-owned interface alive. While any
+/// weak handle exists, std retains its Arc allocation; payload storage metadata
+/// is therefore available even after the last strong COM reference is released.
+/// The payload may be uninitialized then and must never be dereferenced.
+pub struct ComWeak<C: Class> {
+    inner: Weak<ComWrapperInner<C>>,
+}
+
+impl<C: Class> Clone for ComWeak<C> {
+    fn clone(&self) -> Self {
+        Self { inner: self.inner.clone() }
+    }
+}
+
+// Same class concurrency contract as the canonical strong ComWrapper.
+unsafe impl<C: Class> Send for ComWeak<C> where C: Send + Sync {}
+unsafe impl<C: Class> Sync for ComWeak<C> where C: Send + Sync {}
+
+impl<C: Class> ComWeak<C> {
+    /// Acquire a strong reference only if the exact class is still alive.
+    pub fn upgrade(&self) -> Option<ComWrapper<C>> {
+        self.inner.upgrade().map(|inner| ComWrapper { inner })
+    }
+
+    /// Whether any strong owner remains; zero cannot be resurrected.
+    pub fn is_alive(&self) -> bool {
+        self.inner.strong_count() != 0
+    }
+
+    /// Borrow the retained Arc payload's identity and exact requested layout.
+    ///
+    /// This reads no class value and no std private prefix. Complete allocation
+    /// accounting requires the same separately qualified std Arc profile used
+    /// for strong wrapper payloads. Nested class storage exists only if upgrade
+    /// succeeds and must then be observed through that strong owner.
+    pub fn payload_storage(&self) -> ComWrapperPayloadStorage<'_> {
+        ComWrapperPayloadStorage {
+            address: self.inner.as_ptr().cast::<()>() as usize,
+            layout: Layout::new::<ComWrapperInner<C>>(),
+            _owner: PhantomData,
+        }
+    }
+}
+
 impl<C: Class> ComWrapper<C> {
+    /// Register an allocation lifetime without retaining the live COM class.
+    pub fn downgrade(&self) -> ComWeak<C> {
+        ComWeak { inner: Arc::downgrade(&self.inner) }
+    }
+    /// Borrow the actual COM Arc payload without cloning or allocating.
+    ///
+    /// The borrow ties the view to this live wrapper. No interface or class
+    /// pointer is reinterpreted, and std private reference-count fields are not
+    /// accessed. Full allocation accounting requires its separate std profile.
+    pub fn payload_storage(&self) -> ComWrapperPayloadStorage<'_> {
+        ComWrapperPayloadStorage {
+            address: Arc::as_ptr(&self.inner).cast::<()>() as usize,
+            layout: Layout::for_value(self.inner.as_ref()),
+            _owner: PhantomData,
+        }
+    }
+
     /// Allocates memory for an object and its header and places `data` into it.
     #[inline]
     pub fn new(data: C) -> ComWrapper<C>

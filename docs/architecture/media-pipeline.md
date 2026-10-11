@@ -4252,3 +4252,298 @@ as strings, not fabricated local paths. The App projects only lossless Unicode
 manifest coordinates and rejects collisions between platform namespaces. Only
 the verified bundled target is canonicalized and opened; replacement occurs in
 the private Library transaction without changing Asset IDs or probe facts.
+
+## Canonical Float association boundary
+
+WorkingRgbaF32Frame has mandatory canonical Core alpha metadata. Existing normalized media producers explicitly declare StraightCoverage; Native Float effects can resolve other representations downstream through the sole Effects/Renderer graph. Author media alpha interpretation remains an input adapter responsibility and is not inferred from arbitrary channel values.
+
+## Installed native audio bindings on the existing render worker
+
+AudioPlayback installs valid DSP renderer slots independently of native editor
+readiness. It reserves current-slot identity before output preflight, publishes
+the opaque claim beside the actual slot exchange, then submits typed binding
+work to its existing RenderWork queue/serial worker/result channel. No second
+editor queue or foreign native call is introduced on the UI install path.
+Paused Idle polling can settle binding readiness without admitting PCM. A
+refusal marks EditorUnavailable while the valid DSP graph remains installed;
+stale/canceled generation completions cannot publish current readiness.
+
+Prepared renderer wrappers retain a capability flag and query the actual
+Runtime verifier again, including same-Arc replacement. They never cache a
+previous Runtime's registration. Source clearing, fatal execution loss and
+shutdown revoke installed permission. The App readiness event is diagnostic,
+not an author lease. Physical output, native editor GUI and realtime costs are
+separate qualification boundaries.
+
+
+### Serial native diagnostic observation
+
+AudioPcmRenderer exposes a read-only capability and a bounded diagnostic
+operation. NativeDiagnostics shares the existing RenderWork queue and render
+worker with PCM, binding and later editor work. No second worker, controller,
+EventBus request lane or diagnostic store is created. PCM admission has
+priority; at most one diagnostic work is outstanding, and successful admission
+is paced at 250 ms. A single item drains one exact native occurrence, not an
+unbounded root-wide batch.
+
+Enqueue reads the private Media installation Source and actual renderer slot;
+it does not acquire the Timeline Runtime mutex on the UI thread. The worker
+queries the actual owned Runtime. Completion requires matching renderer
+materialization, Media generation **and** Source claim generation. The last
+check also rejects old records across a same-Arc Runtime installation. An
+already-drained superseded batch is not shown as a current-source report;
+`native_diagnostic_discarded_records` counts its exact retained record loss.
+Producer queue loss remains separately explicit in the immutable native batch.
+
+Cancelled work is refused before Drain. Pending retired diagnostic work clears
+its outstanding marker, and its renderer/error owners use the existing foreign
+retirement path. Diagnostic refusal does not substitute silence, invalidate a
+render generation, reset DSP, grant an editor lease or resume transport.
+Adapter panic keeps the existing supervised fail-closed worker policy.
+
+## Native audio editor control lifecycle (Windows VST3 source slice)
+
+The same actual isolated VST3 component/controller owns its native parent and
+IPlugView. Main remains its recorded OLE/COM and window/message owner. DSP borrows
+disjoint processing storage on a real scoped thread; reader owns exactly one
+decoded command until the correlated main response is acknowledged. Enter,
+configuration, seed, binding, editor mutation and termination wait for DSP join.
+Inline CLAP retains its existing one-thread execution; no empty GUI reader lane
+or claimed CLAP GUI/multithread qualification is introduced by this slice.
+
+Current protocol V6 has one decoder and one observation response: Poll9 uses
+Preserve or Drain, Bind10, Open11, Close12. Preserve observes the same live object
+without joining/restarting DSP or capturing opaque state. Drain/control uses the
+joined full owner. Cleanup stage comes only from the canonical attachment model.
+No V5 compatibility reader, separate EditorPoll, controller or owner registry is
+retained. HostLog records remain in the same Poll9 response and consumption path.
+
+Public Core editor targets are read-only addresses. The sole Runtime rechecks its
+opaque installed lease, actual current Media claim, exact root/local Plan/Session,
+occurrence, continuity epoch, binding and child load serial before native calls.
+Media enqueues typed editor work through its existing serial RenderWork; metadata
+and queued readiness do not install an object or authorize author edits. Completion
+again checks actual renderer identity, Media generation and current Source claim.
+
+Removal failure retires the isolated child without another removed call. A
+successful removal followed by failed frame clear retains the same object in
+control-only cleanup. Explicit ClosePending immediately holds Media even while
+paused; root preflight also detects native window-origin cleanup before any DSP.
+Normal parent PCM does not send illegal Process or map cleanup to configuration,
+silence, success or a device fault. The held renderer claim and original complete
+PCM journal remain valid for exact Close retry. Open/seek cannot supersede pending
+cleanup. Close plus exact output quiescence/final anchor reaches completed-paused;
+only explicit fresh continuity releases it. PlaybackEngine uses the single
+NativeAudioControlHold for configuration and editor cleanup, without old aliases.
+
+Known resource requests use actual concrete reader/processing slots and adapter/
+SDK Box Layouts, plus separately declared 2 MiB reader/8 MiB DSP stack reservations.
+Parent/child preparation compares the same profile before foreign load. Actual
+decoded Vec/Box capacities/alignments, staged seed and configuration reply overlap
+are checked against canonical dynamic ceilings. This known subset is not a whole
+candidate grant or measured RSS: thread runtime/TLS, allocator/kernel bookkeeping,
+error Strings, native HWND/platform storage and private plugin allocations remain
+explicit frontiers. RT DSP admission invokes the canonical native scheduling
+adapter before Ready and explicitly restores on the same DSP thread before join;
+no parent-visible native scheduling evidence or deadline/performance acceptance
+is claimed from source inspection alone.
+
+The production and portable contract source is uncompiled/unexecuted until its
+recorded qualification commands run. Owned IPlugView/vendor tests and current
+product-helper native tests separately exercise real platform messages, same
+object DSP, native user Close and failure retirement. They do not establish
+physical GUI, full plugin interoperability, RT timing, native editor author Undo,
+automation or save/reopen. Ordered author/state Poll9 ingress, coherent opaque
+state and the canonical AuthoringSession execution fence/install handoff remain
+required next stages. Opening a real view alone is not complete native authoring.
+
+### Owned realtime output platform boundary
+
+`AudioPlayback::with_output` accepts the same owned `AudioOutputAdapter` used by
+the native-device constructors. The public boundary lets platform adapters
+participate in the canonical serial renderer, generation cancellation, atomic
+PCM admission and bounded lifetime closure; it introduces no alternate factory
+or playback authority. Whole-buffer enqueue and checked prefix activation must
+not partially mutate the queue on failure.
+
+The adapter owns stream identity and callback-control revisions. The opaque
+`RealtimeAudioOutputQuiescenceToken` can be issued by its owner and inspected by
+typed getters. Issuance/inactive status is not acknowledgement: `is_quiescent`
+must verify the exact stream/revision and completion of all old active software
+callbacks before new PCM admission/discard/reactivation. A generation retirement
+may clear the concurrent-safe queue while an old callback still owns its output
+block; queue clear neither acknowledges that callback nor erases submitted PCM.
+This is software callback evidence,
+not proof of physical DAC drain. Adapters with workers must override the default
+no-worker shutdown receipt with actual synchronous owner closure.
+
+### Native pending output retirement and final anchor
+
+A typed native deferral retains the same renderer owner, cancels the old render
+generation, deactivates physical callback admission and clears queued PCM.
+`NativeReprepareRequired` reports provisional pre-deactivation clock facts; it
+is not callback-quiescence proof. `NativeReprepareOutputQuiesced` is published
+once only after the exact retained deactivation token is acknowledged, and
+carries a freshly captured snapshot of the same retired stream plus its old
+activation media anchor. This closes software callback execution, not estimated
+hardware output latency or DAC drain.
+
+`finalize_native_reprepare_anchor` accepts only the still-pending generation
+after that retirement. It updates the next exact sample/Enter anchor while
+keeping PCM blocked and the native owner retained; no fresh Enter, silence,
+failure-count increment or automatic playback activation is introduced. User
+seek/reprime rotates the pending generation and retirement record; retired
+callback coordinates are no longer paired with the new explicit user anchor.
+Device loss retires its old proof and leaves the pending new generation at its
+accepted authority. App's typed Engine ticket controls the exact frozen phase.
+
+The serial-render-worker/output-adapter regression oracle can advance a last
+in-flight callback between deactivation and acknowledgement and proves that
+the final snapshot follows the acknowledgement. This is adapter protocol
+coverage; real device/hardware and full native candidate installation remain
+separate qualification gates.
+
+### Complete PCM retained across a native configuration hold
+
+Audio Playback assigns a typed exclusive renderer materialization identity and
+carries it through its sole serial work/completion queue. A fixed-slot complete
+PCM journal moves the existing successful AudioBuffer after queue enqueue; it
+does not clone PCM or render a second interpretation. Slot capacity and retained
+f32 Vec capacities are reported in bytes, with a fixed sample-capacity grant.
+The admitted window geometry covers the canonical output queue plus bounded
+in-flight work and one window; it does not promise arbitrary driver latency.
+
+Native hold preserves the original renderer/generation journal after queue clear.
+Canceled-but-popped old completions are accounted exactly: complete PCM is moved
+into the old journal, zero-DSP deferred outcomes settle without an invented head,
+and failed/invalid work removes its unprovable suffix. The one final Quiesced
+event waits for callback token ACK and these old serial completions to settle.
+Explicit seek/source retirement discards old continuous PCM; device loss/reopen
+keeps the same native journal while advancing only the pending generation.
+
+Read-only visitation requires exact current materialization/pending generation,
+matching rate and a covered suffix. Stale owners, gaps, excessive Vec capacity,
+unsettled old work and anchors outside retained coverage are explicit refusals.
+The borrowed original windows and capacity receipt are not a DAC position,
+private DSP checkpoint, whole-host memory proof, PDC migration or resume ticket.
+Private history preservation after standards-legal reactivation and complete
+candidate/resource/Clock Master installation remain separate required gates.
+
+## Dedicated PCM producer scheduling
+
+Audio Playback's actual producer admits its Windows native `Audio` scheduling
+role on its owned execution thread before construction/readiness succeeds. A
+refused Windows request returns a typed creation error before render work. The
+same producer explicitly restores after its final render work; a failed restore
+cannot publish normal terminal closure. Ordinary non-Windows execution remains
+explicitly `OrdinaryPlatform`, without a realtime qualification claim. Its 2 MiB
+stack reservation and startup/control owning allocation frontiers are separate
+from the physical output callback and each plugin DSP lane.
+See [native audio scheduling](audio-scheduling.md). Queued PCM/preroll/device
+admission and the canonical hold/journal authority retain their own proof.
+
+
+### Cold native control payloads in the audio work queue
+
+The sole audio work/completion queue keeps ordinary PCM payloads inline. Native
+editor work and its completion own separate boxes, and a diagnostic completion
+boxes only a nonempty or loss-bearing native batch. A complete empty observation
+creates no diagnostic box and publishes no event. Exact renderer, generation,
+installation and cancellation checks remain unchanged. Retirement still leaves
+foreign owners outside queue and publication guards.
+
+This avoids making every PCM queue slot and Playback event carry the roughly
+17 KiB native diagnostic carrier. Native control box bodies and diagnostic
+bodies belong to their bounded cold-control peak separately from queue slots;
+queue element size alone is not whole-root allocation evidence.
+
+A retained native reprepare or editor-cleanup hold takes precedence over the
+generic Idle playback snapshot. Pausing audio does not hide an outstanding
+frame-detach obligation or a completed cleanup waiting for explicit continuity.
+The normal-PCM close qualification polls Consume; switching to Idle is a separate
+transport operation that can retire the original scheduling/installation claim.
+
+### Native editor control lifetime during PCM holds
+
+Native Open/Close work is admitted by the actual renderer identity and current
+installation claim. Its cancellation lifetime follows replacement/revocation of
+that owner and shutdown, rather than the PCM scheduling generation. A canonical
+same-owner cleanup hold may rotate PCM work while retaining both in-flight and
+queued editor controls in FIFO order. Completions recheck the actual claim and
+renderer before publication; a real source replacement or fresh installation
+still discards stale controls. This does not reset DSP, accept substitute PCM,
+resume transport or fabricate continuity. Cold control retirement storage is
+separate from PCM sample buffers; these controls create no PCM allocation.
+
+Native reprepare output-quiescence tests retain the actual playback owner,
+output adapter observation, render-request log and weak renderer identity in
+one named fixture. They verify exact-token final callback capture, user seek
+superseding the pending anchor and device loss retaining the frozen authority.
+These software adapter contracts do not assert physical DAC continuity.
+
+### Native author handoff on the existing render queue
+
+Native author proposals and their handoff use the same RenderWork/RenderCompletion queue as PCM, native diagnostics and editor controls. Media defines the erased typed handoff port; App supplies its immutable implementation and captured exact renderer Arc. Media has no App, EditorState or CompiledAudioProgram dependency and does not infer author time.
+
+The author hold retains the actual Session, epoch and first unrendered root coordinate. Already queued work settles in queue order; deferred work contributes no PCM, history, output journal or entered progress. After all earlier work completes, exact Ack resumes scheduling at that held coordinate with Continue. There is no second App sample cursor, Enter, automatic underrun reprime, substitute PCM, PCM box or successful PCM allocation. InstalledAwaitingAcknowledgement changes the hold target to the actually installed binding and retries Ack only.
+
+A queued Close for the actual original attachment can finish across a same-object parameter registration change. Native control cancellation identity and the captured actual renderer remain independent of PCM scheduling generation. Runtime validates the current installed proof and constant-size attachment ancestry before the SDK call; replacement/reload revokes it. A renderer/source replacement still discards stale work and cannot revive old author authority. Normal diagnostics and author callbacks share the one Poll9 result rather than independent draining consumers.
+
+The same completion now carries read-only original/current native attachment
+metadata. Media validates its generation, actual renderer and current Source
+claim before publishing attachment facts, parameter values and author proposals,
+in that order. A pending local processor keeps its genuine independent local
+epoch; observation/control binding does not manufacture a DSP position or enter
+the signal lifecycle. Its first actual signal performs cold Enter then Bind on
+the retained object before Process. Attachment facts repeat until Close so the
+existing single-flight Poll can deliver a same-view target refresh after an
+outstanding author handoff is acknowledged.
+
+Audio's known-owner ledger measures the enlarged Hosted instance allocation by
+its actual layout and capacity. Cold observation/event Boxes, event Vec capacity
+and Media channel storage remain outside that Hosted allocation ledger; this
+contract does not establish a whole control-memory or realtime performance grant.
+
+Only cold nonempty observation batches, native control/handoff work and large cold targets are boxed. Their owned body/storage peak is separately reported from fixed queue slots; PCM storage/lifetime remains unchanged. The source-only media contracts check deferred-window Ack/Continue and queued old-attachment Close after actual Core claim publication. Native and physical output acceptance are separate root-run qualifications.
+
+
+### Native parameter observations on the serial completion
+
+Native parameter presentation is a field of the same bounded observation result
+as diagnostics/author delivery. The serial Media worker remains the sole foreign
+control consumer; no extra Poll or EventBus request channel is introduced. It
+checks actual renderer, Media generation and current installation before
+publishing facts, then the existing author proposal is delivered for Session
+admission. Presentation never acknowledges an author prefix or recreates PCM.
+
+## Shared native author state and output retirement
+
+The existing boxed native author work and serial RenderWork queue also carry a
+typed StateEntryRequired continuity fact. Media retains that same cold work while
+the real output quiescence token, outstanding issued PCM and exact ClockMaster
+anchor settle. No substitute PCM, second queue or extra PCM Box is introduced.
+Only the private output-quiescent projection allows destructive preparation.
+
+The actual Source claim and captured renderer Arc are revalidated by the worker.
+A same-Arc user seek retains this work and updates the current anchor. A genuine
+renderer/Source replacement cancels and retires it. Installation and native Ack
+remain separate states; a failed Ack never repeats canonical author publication.
+Successful explicit state entry uses fresh continuity/preroll on the retained
+renderer. No new factory/children or implicit frame-zero source is built.
+
+
+### Reserved serial control frontier and retained Close admission
+
+The single RenderWork FIFO reserves two pending native editor controls and one
+slot each for observations, author handoff and binding, independently of the
+configured pending PCM bound. PCM cannot exhaust Close/retry admission. All work
+still executes on the original serial worker in FIFO order. The total reserved
+frontier plus the retired renderer must fit the existing 256-owner retirement
+handoff; policy validation checks that combined bound before construction.
+
+Media retains one attachment address only after actual worker Opened or
+ClosePending evidence. That metadata allows exact original Close after a
+same-object author claim rebind; it is not native or author permission. The
+Runtime checks the actual retained native attachment before execution. Replacing
+the actual renderer materialization clears this metadata and refuses an old
+address before queuing. Actual Closed evidence clears the retained address.

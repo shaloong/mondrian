@@ -141,6 +141,10 @@ impl ModuleInfo {
 
 /// Read and validate the standard `moduleinfo.json` from a VST3 bundle.
 ///
+/// The document is parsed as JSON5, including single quotes, unquoted keys,
+/// hexadecimal numbers, escapes, comments and trailing commas. Recursive input
+/// is bounded to 128 container levels, including unknown extension fields.
+///
 /// Current bundles place it in `Contents/Resources`; the SDK 3.7.5
 /// `Contents/moduleinfo.json` location is accepted as a fallback. Returns `Ok(None)` when
 /// neither file exists. File size, collection counts, string sizes, integer ranges, class ids,
@@ -1210,14 +1214,13 @@ mod report_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod scan_tests {
     use super::*;
 
     /// A symlink pointing back at an ancestor makes the recursive scan unbounded, because
     /// `Path::is_dir` follows symlinks. It hung and grew `plugins` forever with textually distinct
     /// duplicates of the same file — which `dedup` cannot collapse, since the paths differ.
-    #[cfg(unix)]
     #[test]
     fn scan_terminates_on_a_symlink_cycle_and_does_not_duplicate() {
         use std::os::unix::fs::symlink;

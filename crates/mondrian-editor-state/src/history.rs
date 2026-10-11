@@ -1180,6 +1180,17 @@ pub(crate) struct PreparedAuthoringHistoryRecord {
     pending_install: PendingHistoryInstall,
 }
 
+impl PreparedAuthoringHistoryRecord {
+    pub(crate) fn retains_pending_group(
+        &self,
+        group: crate::session::AuthoringHistoryGroup,
+    ) -> bool {
+        self.outcome.retained
+            && matches!(&self.pending_install,
+            PendingHistoryInstall::Stage(pending) if pending.command.entry.group == Some(group))
+    }
+}
+
 #[derive(Debug)]
 struct PendingHistoryCommand {
     entry: Arc<AuthoringHistoryEntry>,
@@ -1196,6 +1207,50 @@ struct PreparedPendingHistoryCommand {
 enum PendingHistoryInstall {
     Stage(Box<PreparedPendingHistoryCommand>),
     Clear,
+}
+
+/// Cache/index preparation is private bookkeeping. The Session remains
+/// exclusively borrowed until this infallible canonical state replacement.
+pub(crate) struct ReadyAuthoringHistoryRecord {
+    candidate: AuthoringHistoryState,
+    pending: Option<PendingHistoryCommand>,
+    outcome: AuthoringHistoryRecordOutcome,
+    unretained_command: Option<UnretainedHistoryCommand>,
+}
+
+/// Keep old authored roots alive until the final publication guard has left.
+pub(crate) struct RetiredAuthoringHistoryRecord {
+    _state: AuthoringHistoryState,
+    _pending: Option<PendingHistoryCommand>,
+    outcome: AuthoringHistoryRecordOutcome,
+    unretained_command: Option<UnretainedHistoryCommand>,
+    budget: AuthoringHistoryBudget,
+}
+
+impl RetiredAuthoringHistoryRecord {
+    /// Report the committed outcome and release retired roots outside the gate.
+    pub(crate) fn finish(self) -> AuthoringHistoryRecordOutcome {
+        if let Some(unretained) = &self.unretained_command {
+            match unretained.reason {
+                UnretainedHistoryCommandReason::RetentionDisabled => {
+                    tracing::warn!(
+                        command = unretained.description.as_ref(),
+                        history_max_entries = self.budget.max_entries,
+                        "committed authoring transaction while Undo retention is disabled"
+                    );
+                }
+                UnretainedHistoryCommandReason::ExceedsRetainedBytes { command_retained_bytes } => {
+                    tracing::warn!(
+                        command = unretained.description.as_ref(),
+                        command_retained_bytes,
+                        history_budget_bytes = self.budget.max_retained_bytes,
+                        "committed authoring transaction exceeds the Undo byte budget"
+                    );
+                }
+            }
+        }
+        self.outcome
+    }
 }
 
 /// One project-wide bounded Undo/Redo history with one staged interaction.
@@ -1759,56 +1814,62 @@ impl AuthoringHistory {
         Ok(self.commit_prepared_record_exclusive(prepared))
     }
 
-    /// Install a ticket while the owning Session has held exclusive authoring
-    /// authority since preparation. No fallible work remains at this seam.
+    /// Prepare noncanonical cache/index work while the Session remains exclusive.
+    /// The resulting ticket changes no History stack or pending author command.
+    pub(crate) fn ready_record_exclusive(
+        &mut self,
+        prepared: PreparedAuthoringHistoryRecord,
+    ) -> ReadyAuthoringHistoryRecord {
+        debug_assert_eq!(self.state.revision, prepared.expected_revision);
+        prepared.footprint_plan.apply(&mut self.footprint_index, &self.descriptor_cache);
+        let pending = match prepared.pending_install {
+            PendingHistoryInstall::Stage(pending) => {
+                let PreparedPendingHistoryCommand { command, footprint_plan } = *pending;
+                footprint_plan.apply(&mut self.pending_footprint_index, &self.descriptor_cache);
+                Some(command)
+            }
+            PendingHistoryInstall::Clear => {
+                self.pending_footprint_index = RetainedFootprintIndex::empty();
+                None
+            }
+        };
+        debug_assert_eq!(
+            self.pending_footprint_index.total_bytes().ok(),
+            Some(pending.as_ref().map_or(0, |pending| pending.retained_bytes))
+        );
+        debug_assert_eq!(
+            self.footprint_index.total_bytes().ok(),
+            Some(prepared.candidate.retained_bytes)
+        );
+        ReadyAuthoringHistoryRecord {
+            candidate: prepared.candidate,
+            pending,
+            outcome: prepared.outcome,
+            unretained_command: prepared.unretained_command,
+        }
+    }
+
+    /// Only move prepared canonical owners; no allocation, callback, log or Drop.
+    pub(crate) fn install_ready_record_exclusive(
+        &mut self,
+        ready: ReadyAuthoringHistoryRecord,
+    ) -> RetiredAuthoringHistoryRecord {
+        RetiredAuthoringHistoryRecord {
+            _state: std::mem::replace(&mut self.state, ready.candidate),
+            _pending: std::mem::replace(&mut self.pending, ready.pending),
+            outcome: ready.outcome,
+            unretained_command: ready.unretained_command,
+            budget: self.budget,
+        }
+    }
+
+    /// Install a ticket while the owning Session has retained exclusive authority.
     pub(crate) fn commit_prepared_record_exclusive(
         &mut self,
         prepared: PreparedAuthoringHistoryRecord,
     ) -> AuthoringHistoryRecordOutcome {
-        debug_assert_eq!(self.state.revision, prepared.expected_revision);
-        if let Some(unretained) = &prepared.unretained_command {
-            match unretained.reason {
-                UnretainedHistoryCommandReason::RetentionDisabled => {
-                    tracing::warn!(
-                        command = unretained.description.as_ref(),
-                        history_max_entries = self.budget.max_entries,
-                        "committed authoring transaction while Undo retention is disabled"
-                    );
-                }
-                UnretainedHistoryCommandReason::ExceedsRetainedBytes { command_retained_bytes } => {
-                    tracing::warn!(
-                        command = unretained.description.as_ref(),
-                        command_retained_bytes,
-                        history_budget_bytes = self.budget.max_retained_bytes,
-                        "committed authoring transaction exceeds the Undo byte budget"
-                    );
-                }
-            }
-        }
-        let outcome = prepared.outcome;
-        prepared.footprint_plan.apply(&mut self.footprint_index, &self.descriptor_cache);
-        self.state = prepared.candidate;
-        match prepared.pending_install {
-            PendingHistoryInstall::Stage(pending) => {
-                pending
-                    .footprint_plan
-                    .apply(&mut self.pending_footprint_index, &self.descriptor_cache);
-                self.pending = Some(pending.command);
-            }
-            PendingHistoryInstall::Clear => {
-                self.pending = None;
-                self.pending_footprint_index = RetainedFootprintIndex::empty();
-            }
-        }
-        debug_assert_eq!(
-            self.pending_footprint_index.total_bytes().ok(),
-            Some(self.pending.as_ref().map_or(0, |pending| pending.retained_bytes))
-        );
-        debug_assert_eq!(
-            self.footprint_index.total_bytes().ok(),
-            Some(self.state.retained_bytes)
-        );
-        outcome
+        let ready = self.ready_record_exclusive(prepared);
+        self.install_ready_record_exclusive(ready).finish()
     }
 
     /// Prepare the next Undo payload without moving History.
@@ -1837,7 +1898,7 @@ impl AuthoringHistory {
     }
 
     /// Move the detached validated restore point with one atomic history install.
-    pub(crate) fn commit_prepared_undo(&mut self) -> Result<()> {
+    pub(crate) fn prepare_undo_record(&mut self) -> Result<PreparedAuthoringHistoryRecord> {
         let mut prepared = if let Some(pending) =
             self.pending.as_ref().filter(|pending| !pending.entry.net_zero)
         {
@@ -1864,12 +1925,18 @@ impl AuthoringHistory {
             )
         })?;
         prepared.candidate.redo_stack.push_back(entry);
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_prepared_undo(&mut self) -> Result<()> {
+        let prepared = self.prepare_undo_record()?;
         self.commit_prepared_record(prepared)?;
         Ok(())
     }
 
     /// Move the validated Redo entry and release a zero interaction atomically.
-    pub(crate) fn commit_prepared_redo(&mut self) -> Result<()> {
+    pub(crate) fn prepare_redo_record(&mut self) -> Result<PreparedAuthoringHistoryRecord> {
         if !self.can_redo() {
             return Err(authoring_error(
                 "commit_prepared_authoring_redo",
@@ -1890,6 +1957,12 @@ impl AuthoringHistory {
             )
         })?;
         prepared.candidate.undo_stack.push_back(entry);
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_prepared_redo(&mut self) -> Result<()> {
+        let prepared = self.prepare_redo_record()?;
         self.commit_prepared_record(prepared)?;
         Ok(())
     }

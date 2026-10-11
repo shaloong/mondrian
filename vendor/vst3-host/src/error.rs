@@ -2,6 +2,15 @@
 
 use thiserror::Error;
 
+/// Native editor teardown step whose ABI callback failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorDetachStage {
+    /// The attached view did not confirm removal from its platform parent.
+    Removal,
+    /// View removal completed, but clearing its host frame did not.
+    FrameClear,
+}
+
 /// Main error type for vst3-host operations.
 ///
 /// Marked `#[non_exhaustive]`: match with a wildcard arm, as new variants may be added in
@@ -58,6 +67,38 @@ pub enum Error {
     /// [`Self::ProcessFailed`] — this is rejected on the audio path once per block while stopped.
     #[error("Plugin is not processing")]
     NotProcessing,
+
+    /// The actual controller does not provide a native editor view.
+    #[error("native editor view is unavailable")]
+    EditorUnavailable,
+
+    /// The actual view does not support this host platform's parent type.
+    #[error("native editor view does not support this platform")]
+    EditorPlatformUnsupported,
+
+    /// The actual view refused a required teardown step. Its native owner must
+    /// remain alive; a later close cannot pretend this failure removed the view.
+    #[error("native editor {stage:?} failed with {result:#x}")]
+    EditorDetachFailed {
+        /// Exact failed native lifecycle step.
+        stage: EditorDetachStage,
+        /// Actual native tresult returned by that callback.
+        result: i32,
+    },
+
+    /// Failed teardown prohibits live UI actions or a fresh attachment.
+    #[error("native editor lifecycle is unresolved")]
+    EditorLifecycleBlocked,
+
+    /// A native parent was given a different actual object attachment owner.
+    #[error(
+        "native editor parent and temporary controller role belong to different native objects"
+    )]
+    EditorAttachmentOwnerMismatch,
+
+    /// A host-owned storage family could not be accounted or admitted.
+    #[error(transparent)]
+    HostStorage(#[from] crate::host_storage::HostStorageError),
 
     /// Other errors
     #[error("{0}")]

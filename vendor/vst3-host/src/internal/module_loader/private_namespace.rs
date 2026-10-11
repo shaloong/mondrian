@@ -296,6 +296,13 @@ impl PrivateNamespaceModule {
 unsafe impl Send for PrivateNamespaceModule {}
 
 impl VstModule for PrivateNamespaceModule {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::path(&self.path)?)
+    }
+
     fn get_factory(&self) -> Result<*mut IPluginFactory> {
         if let Some(get_factory_fn) = self.get_factory_fn {
             let factory = unsafe { get_factory_fn() };

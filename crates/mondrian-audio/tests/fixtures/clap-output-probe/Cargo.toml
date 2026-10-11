@@ -1,0 +1,16 @@
+[package]
+name = "mondrian-clap-output-probe-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["Shalom Wang"]
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clack-plugin = { path = "../../../../../vendor/clack/plugin" }
+clack-extensions = { path = "../../../../../vendor/clack/extensions", features = ["clack-plugin", "audio-ports", "note-ports"] }
+
+[workspace]

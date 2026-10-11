@@ -213,7 +213,7 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
             ResolvedPreviewElement::Adjustment(adjustment) => {
                 1u8.hash(&mut builder);
                 adjustment.opacity.to_bits().hash(&mut builder);
-                adjustment.blend_mode.hash(&mut builder);
+                adjustment.blend_policy.hash(&mut builder);
                 hash_effect_graph_identity(
                     &adjustment.effect_graph,
                     adjustment.frame_seed,
@@ -401,18 +401,19 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
                     || !opacity_has_contribution(layer.opacity)
-                    || layer.effect_graph.graph().is_identity()
+                    || (layer.effect_graph.graph().is_identity()
+                        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
                 {
                     continue;
                 }
-                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
+                let blend_policy = layer.blend_policy;
                 let effect_plan = scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
                 layers.push(ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
-                    blend_mode,
+                    blend_policy,
                     frame_seed: layer.frame_seed,
                 });
             }
@@ -537,11 +538,12 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
                     || !opacity_has_contribution(layer.opacity)
-                    || layer.effect_graph.graph().is_identity()
+                    || (layer.effect_graph.graph().is_identity()
+                        && layer.blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
                 {
                     continue;
                 }
-                let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
+                let blend_policy = layer.blend_policy;
                 let effect_plan = builder
                     .scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
@@ -551,7 +553,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                 layers.push(ViewerGpuExecutionLayer::Adjustment {
                     effect_plan,
                     opacity: layer.opacity,
-                    blend_mode,
+                    blend_policy,
                     frame_seed: layer.frame_seed,
                 });
             }
@@ -1076,8 +1078,47 @@ mod heterogeneous_tests {
     }
 
     #[test]
+    fn viewer_adjustment_identity_keeps_explicit_blend_and_skips_only_mix() {
+        use mondrian_effects::EffectPassBlendPolicy::{Blend, Mix};
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        for (policy, expected_layers) in [(Mix, 1), (Blend(BlendMode::Normal), 2)] {
+            let resolved = [
+                ordinary_solid(Arc::clone(&graph), 3),
+                ResolvedPreviewElement::Adjustment(TimelineAdjustmentLayer {
+                    effect_graph: Arc::clone(&graph),
+                    opacity: 0.5,
+                    blend_policy: policy,
+                    frame_seed: 4,
+                }),
+            ];
+            let ordinary = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+                .expect("ordinary Viewer lowering");
+            assert_eq!(ordinary.len(), expected_layers);
+            let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
+                &resolved,
+                WORKING_SPACE,
+                &mut TimelineCompositeScratch::default(),
+                cpu_grant(),
+            )
+            .expect("same canonical Viewer preparation");
+            let PreparedPreviewViewerGpuLayers::Ordinary { layers } = prepared else {
+                panic!("identity Adjustment needs no heterogeneous processor");
+            };
+            assert_eq!(layers.len(), expected_layers);
+            if let Blend(_) = policy {
+                assert!(matches!(
+                    layers.last(),
+                    Some(ViewerGpuExecutionLayer::Adjustment { blend_policy, frame_seed: 4, .. })
+                        if *blend_policy == policy
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn verified_render_cache_frame_lowers_as_one_identity_working_layer() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             data: vec![[0.25, 0.5, 1.0, 1.0]; (WIDTH * HEIGHT) as usize],
@@ -1117,6 +1158,7 @@ mod heterogeneous_tests {
         identity_salt.hash(&mut identity);
         MediaPreviewFrame::from_working(
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: WIDTH,
                 height: HEIGHT,
                 color_space: WORKING_SPACE,
@@ -1134,6 +1176,7 @@ mod heterogeneous_tests {
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.data-texture-plan-test.v1");
         identity_salt.hash(&mut identity);
         let numeric = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             color_space: WORKING_SPACE,

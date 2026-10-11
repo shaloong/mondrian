@@ -1529,3 +1529,101 @@ timeline-invalid-display = Invalid sequence time display settings
     { $reason }
 inspector-empty-selection = No clip selected
     Select a clip, layer or effect to adjust its parameters here.
+notification-native-processor = Processor: { $message }
+
+# Authenticated native audio diagnostics, never lifecycle/author authority.
+notification-native-audio-warning = Native audio plugin warning ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-error = Native audio plugin error ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-fatal = Native audio plugin fatal diagnostic ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-host-misbehavior = Native audio plugin reports host misbehavior ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-plugin-misbehavior = Native audio plugin reports plugin misbehavior ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-unknown-severity = Native audio plugin reports unknown severity { $severity } ({ $instance }, { $process }): { $encoding ->
+        [hex] Native bytes (hex): { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (Message truncated)
+       *[no] { "" }
+    } { $null ->
+        [yes] (Invalid null native message)
+       *[no] { "" }
+    }
+notification-native-audio-log-incomplete = Native audio diagnostics are incomplete ({ $instance }, { $process }). { $capacity ->
+        [yes] Queue capacity reached.
+       *[no] { "" }
+    } { $contention ->
+        [yes] Concurrent producers exhausted their bounded attempts.
+       *[no] { "" }
+    } { $exhausted ->
+        [yes] Native message sequence exhausted.
+       *[no] { "" }
+    }
+
+viewer-native-progress = { $message } · { $percent }%
+
+# Native replies are opaque local Widget callbacks, never authoring actions.
+native-visual-question-title = Plug-in question
+native-visual-question-yes = Yes
+native-visual-question-no = No
+native-visual-question-dismiss = Dismiss
+
+# Product-owned native editor status; plugin labels remain native metadata.
+native-editor-row = Native editor
+native-editor-open = Open editor
+native-editor-close = Close editor
+native-editor-opening = Native editor request queued
+native-editor-opened = Native editor opened
+native-editor-closed = Native editor closed
+native-editor-unavailable = Native editor is unavailable for this adapter
+native-editor-no-view = This processor has no native editor
+native-editor-control-pending = Native editor changes are pending
+native-editor-owner-changed = The native editor owner changed; reopen the editor
+native-editor-close-current = Close the current native editor first
+native-editor-cleanup-pending = Native editor cleanup is pending
+native-editor-failed = The native editor request failed
+
+audio-rack-native-controlled-parameter = Controlled by plugin

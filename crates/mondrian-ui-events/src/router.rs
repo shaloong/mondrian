@@ -455,9 +455,12 @@ impl EventRouter {
                 }
 
                 if let Some(target_id) = target {
-                    if self.allows_ancestor_pointer_event(tree)
-                        && !is_keyboard
-                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    let offer_ancestors = if is_keyboard {
+                        matches!(&event, UiEvent::KeyDown { .. })
+                    } else {
+                        self.allows_ancestor_pointer_event(tree)
+                    };
+                    if offer_ancestors && self.before_child_event(tree, target_id, &event, dispatch)
                     {
                         return EventResult::Handled;
                     }
@@ -1072,6 +1075,14 @@ impl EventRouter {
             .is_some_and(|owner| tree.get(owner).is_some_and(Widget::is_command_menu));
         let mut current = tree.parent_id(child_id);
         while let Some(id) = current {
+            // Focused keyboard ancestors cannot escape the current modal scope.
+            if matches!(event, UiEvent::KeyDown { .. })
+                && self
+                    .active_focus_scope
+                    .is_some_and(|scope| !self.is_ancestor_or_self(tree, scope, id))
+            {
+                break;
+            }
             let parent_id = tree.parent_id(id);
             if let Some(widget) = tree.get_mut(id)
                 && (!captured_command_menu || widget.is_command_menu())
@@ -3978,5 +3989,84 @@ mod tests {
         let ime = router.take_ime_request().expect("focus loss must disable IME");
         assert!(!ime.enabled);
         assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn focused_keyboard_ancestor_admission_stops_at_modal_scope_and_skips_text_events() {
+        for modal in [false, true] {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let root_widget = RecordingWidget::with_focusable_flag(
+                Rect::new(0.0, 0.0, 400.0, 100.0),
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::new(Cell::new(false)),
+            );
+            let root = root_widget.id;
+            let scope_flag = Rc::clone(&root_widget.scope);
+            let leaf = RecordingWidget::new(
+                Rect::new(0.0, 0.0, 100.0, 30.0),
+                Rc::new(RefCell::new(Vec::new())),
+            );
+            let leaf_id = leaf.id;
+            let scope = RecordingWidget::with_focusable_flag(
+                Rect::new(0.0, 0.0, 200.0, 60.0),
+                Rc::new(RefCell::new(Vec::new())),
+                Rc::new(Cell::new(false)),
+            );
+            let scope_id = scope.id;
+            let outer = ParentPostWidget {
+                id: WidgetId::new(),
+                bounds: Rect::new(0.0, 0.0, 300.0, 80.0),
+                child_id: scope_id,
+                handle_before: true,
+                log: Rc::clone(&log),
+            };
+            let outer_id = outer.id;
+            let mut tree = TestTree {
+                root,
+                nodes: HashMap::from([
+                    (root, Box::new(root_widget) as Box<dyn Widget>),
+                    (outer_id, Box::new(outer)),
+                    (scope_id, Box::new(scope)),
+                    (leaf_id, Box::new(leaf)),
+                ]),
+                parents: HashMap::from([
+                    (outer_id, root),
+                    (scope_id, outer_id),
+                    (leaf_id, scope_id),
+                ]),
+                children: HashMap::from([
+                    (root, vec![outer_id]),
+                    (outer_id, vec![scope_id]),
+                    (scope_id, vec![leaf_id]),
+                ]),
+            };
+            scope_flag.set(modal.then_some(scope_id));
+            let mut router = EventRouter::new(root);
+            router.focus_manager_mut().set_focused_widget(Some(leaf_id), None);
+            for event in [
+                UiEvent::TextInput("x".to_owned()),
+                UiEvent::KeyUp { key: KeyCode::Right, modifiers: Modifiers::none() },
+            ] {
+                router.route(event, &mut tree, &|_| {});
+                assert!(
+                    log.borrow().is_empty(),
+                    "text and key releases retain leaf ownership"
+                );
+            }
+            assert_eq!(
+                router.route(
+                    UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                    &mut tree,
+                    &|_| {}
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(
+                log.borrow().len(),
+                usize::from(!modal),
+                "an ancestor beyond the modal boundary cannot intercept the focused key"
+            );
+            assert_eq!(router.focused(), Some(leaf_id));
+        }
     }
 }

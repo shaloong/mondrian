@@ -1,0 +1,137 @@
+//! Tests that host callbacks can be called re-entrantly during init via get_extension
+
+use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, PluginTimerImpl, TimerId};
+use clack_host::prelude::*;
+use clack_plugin::prelude::*;
+use std::cell::Cell;
+use std::sync::OnceLock;
+
+struct MyPlugin;
+
+impl Plugin for MyPlugin {
+    type AudioProcessor<'a> = ();
+    type Shared<'a> = ();
+    type MainThread<'a> = MyPluginMainThread;
+
+    fn declare_extensions(builder: &mut PluginExtensions<Self>, shared: Option<&Self::Shared<'_>>) {
+        assert!(shared.is_none()); // Host will only query extensions from within.
+        builder.register::<PluginTimer>();
+    }
+}
+
+struct MyPluginMainThread;
+
+impl PluginMainThread<'_, ()> for MyPluginMainThread {}
+
+impl PluginTimerImpl for MyPluginMainThread {
+    fn on_timer(&self, timer_id: TimerId) {
+        assert_eq!(timer_id, TimerId(5));
+    }
+}
+
+impl DefaultPluginFactory for MyPlugin {
+    fn get_descriptor() -> PluginDescriptor {
+        PluginDescriptor::new("my.plugin", "My plugin")
+    }
+
+    fn new_shared(_host: HostSharedHandle<'_>) -> Result<Self::Shared<'_>, PluginError> {
+        Ok(())
+    }
+
+    fn new_main_thread(
+        host: HostMainThreadHandle,
+        _shared: &(),
+    ) -> Result<MyPluginMainThread, PluginError> {
+        let timer: HostTimer = host.get_extension().unwrap();
+        let timer_id = timer.register_timer(&host, 1_000)?;
+        assert_eq!(timer_id, TimerId(5));
+        Ok(MyPluginMainThread)
+    }
+}
+
+struct MyHost;
+
+impl HostHandlers for MyHost {
+    type Shared<'a> = MyHostShared<'a>;
+    type MainThread<'a> = MyHostMainThread<'a>;
+    type AudioProcessor<'a> = ();
+
+    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+        builder.register::<HostTimer>();
+    }
+}
+
+struct MyHostShared<'a> {
+    init: OnceLock<InitializingPluginHandle<'a>>,
+}
+
+impl<'a> SharedHandler<'a> for MyHostShared<'a> {
+    fn initializing(&self, instance: InitializingPluginHandle<'a>) {
+        let _ = self.init.set(instance);
+    }
+
+    fn request_restart(&self) {
+        unimplemented!()
+    }
+    fn request_process(&self) {
+        unimplemented!()
+    }
+    fn request_callback(&self) {
+        unimplemented!()
+    }
+}
+
+struct MyHostMainThread<'a> {
+    shared: &'a MyHostShared<'a>,
+    timer_registered: Cell<bool>,
+}
+
+impl<'a> MainThreadHandler<'a> for MyHostMainThread<'a> {
+    fn initialized(&self, _instance: InitializedPluginHandle<'a>) {}
+}
+
+impl HostTimerImpl for MyHostMainThread<'_> {
+    fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        assert_eq!(period_ms, 1000);
+
+        let handle = self
+            .shared
+            .init
+            .get()
+            .expect("Initializing should have been called already!");
+
+        handle
+            .get_extension::<PluginTimer>()
+            .expect("Plugin should implement Timer extension!");
+
+        self.timer_registered.set(true);
+        Ok(TimerId(5))
+    }
+
+    fn unregister_timer(&self, _timer_id: TimerId) -> Result<(), HostError> {
+        unimplemented!()
+    }
+}
+
+#[test]
+fn can_call_host_methods_during_init() {
+    let host = HostInfo::new("host", "host", "host", "1.0").unwrap();
+
+    let entry = PluginEntry::load_from_clack::<SinglePluginEntry<MyPlugin>>(c"/my/plugin").unwrap();
+    let instance = PluginInstance::<MyHost>::new(
+        |_| MyHostShared {
+            init: OnceLock::new(),
+        },
+        |shared| MyHostMainThread {
+            shared,
+            timer_registered: false.into(),
+        },
+        &entry,
+        c"my.plugin",
+        &host,
+    )
+    .unwrap();
+
+    // Timer should have already been registered by the plugin during init().
+    assert!(instance.access_handler(|h| h.timer_registered.get()));
+}

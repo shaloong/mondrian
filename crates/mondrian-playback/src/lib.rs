@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
 
+mod native_audio_control_hold;
+use native_audio_control_hold::NativeAudioControlHold;
+pub use native_audio_control_hold::NativeAudioControlHoldTicket;
 mod evidence;
 pub use evidence::*;
 mod cancellation_evidence;
@@ -306,6 +309,8 @@ pub enum PlaybackWakeReason {
     FrameBoundary,
     /// Bounded fallback poll for a newly published Audio Device observation.
     AudioDevicePoll,
+    /// Bounded observation of the exact retired native-audio callback token.
+    NativeAudioOutputQuiescence,
 }
 
 /// Exact next-wake obligation emitted by the Playback Engine.
@@ -391,6 +396,9 @@ pub enum TransportState {
     /// The clock continues while speculative work is suppressed and temporary
     /// preview-resolution recovery may be active.
     Recovering,
+    /// Play intent is retained at an exact frozen phase while native audio is blocked.
+    /// No startup deadline, tick or ordinary device observation releases this wait.
+    HoldingForNativeAudioControl,
     /// The final content frame was reached.
     Ended,
     /// A correctness or required-capability condition forbids playback.
@@ -775,6 +783,9 @@ pub struct PlaybackSnapshot {
 /// Playback state-machine error. Invalid observations never mutate the Engine.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackError {
+    /// A native configuration wait did not name current active play intent.
+    #[error("native audio configuration hold identity or transport state is invalid")]
+    InvalidNativeAudioControlHold,
     /// Runtime timestamp moved backwards.
     #[error("playback timestamp must be monotonic")]
     NonMonotonicTimestamp,
@@ -876,6 +887,8 @@ pub struct PlaybackEngine {
     last_audio_handoff: Option<AudioClockHandoffEvidence>,
     last_audio_clock_fallback: Option<AudioClockFallbackReason>,
     audio_uncertain_since: Option<MonotonicTimestamp>,
+    native_audio_control_hold: Option<NativeAudioControlHold>,
+    next_native_audio_control_hold_serial: u64,
 }
 
 impl PlaybackEngine {
@@ -928,6 +941,8 @@ impl PlaybackEngine {
             last_audio_handoff: None,
             last_audio_clock_fallback: None,
             audio_uncertain_since: None,
+            native_audio_control_hold: None,
+            next_native_audio_control_hold_serial: 1,
         }
     }
 
@@ -1123,7 +1138,10 @@ impl PlaybackEngine {
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         if !matches!(
             self.state,
-            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            TransportState::Priming
+                | TransportState::Playing
+                | TransportState::Recovering
+                | TransportState::HoldingForNativeAudioControl
         ) {
             // Pause is an idempotent transport command, not an escape hatch
             // from a correctness blocker or natural end. Still accept the
@@ -1138,6 +1156,7 @@ impl PlaybackEngine {
         self.advance_position(now)?;
         if self.state != TransportState::Ended {
             self.state = TransportState::Paused;
+            self.native_audio_control_hold = None;
             self.clock_master = None;
             self.reanchor(now)?;
         }
@@ -1258,6 +1277,16 @@ impl PlaybackEngine {
         &self,
         now: MonotonicTimestamp,
     ) -> Result<Option<PlaybackWake>, PlaybackError> {
+        if self.state == TransportState::HoldingForNativeAudioControl {
+            return Ok(
+                self.native_audio_control_hold.filter(|hold| !hold.finalized).map(|_| {
+                    PlaybackWake {
+                        after: Duration::from_millis(2),
+                        reason: PlaybackWakeReason::NativeAudioOutputQuiescence,
+                    }
+                }),
+            );
+        }
         if self.state == TransportState::Priming {
             let Some(deadline) = self.active_demand.and_then(|demand| demand.deadline) else {
                 return Ok(None);
@@ -1425,6 +1454,10 @@ impl PlaybackEngine {
         observation: AudioDeviceClockObservation,
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         if observation.epoch != self.epoch {
+            return Ok(self.snapshot());
+        }
+        if self.state == TransportState::HoldingForNativeAudioControl {
+            // Matching quiesced final evidence uses the explicit ticket API.
             return Ok(self.snapshot());
         }
         let observation_rate = AudioSampleRate::new(observation.sample_rate)
@@ -2022,7 +2055,10 @@ impl PlaybackEngine {
             candidate.accept_timestamp(now)?;
             if !matches!(
                 candidate.state,
-                TransportState::Stopped | TransportState::Paused | TransportState::Ended
+                TransportState::Stopped
+                    | TransportState::Paused
+                    | TransportState::Ended
+                    | TransportState::HoldingForNativeAudioControl
             ) || demand.epoch != candidate.epoch
                 || demand.quality_revision != candidate.quality_revision
                 || demand.target != candidate.position
@@ -2168,6 +2204,17 @@ impl PlaybackEngine {
     }
 
     fn clock_phase_reference_ns(&self, now: MonotonicTimestamp) -> Result<i128, PlaybackError> {
+        if self.state == TransportState::HoldingForNativeAudioControl {
+            return self
+                .native_audio_control_hold
+                .map(|hold| hold.phase_ns)
+                .ok_or(PlaybackError::InvalidNativeAudioControlHold);
+        }
+        // Paused has no running clock. Its accepted anchor can still carry an
+        // exact subframe phase that the published video coordinate cannot.
+        if self.state == TransportState::Paused {
+            return Ok(self.clock_anchor.phase_ns);
+        }
         if self.clock_master == Some(ClockMaster::AudioDevice) {
             return self.audio_phase_ns_at(now)?.ok_or(PlaybackError::InvalidAudioClockPosition);
         }
@@ -2298,11 +2345,15 @@ impl PlaybackEngine {
     fn transport_intends_playback(&self) -> bool {
         matches!(
             self.state,
-            TransportState::Priming | TransportState::Playing | TransportState::Recovering
+            TransportState::Priming
+                | TransportState::Playing
+                | TransportState::Recovering
+                | TransportState::HoldingForNativeAudioControl
         )
     }
 
     fn bump_epoch(&mut self) -> Result<(), PlaybackError> {
+        self.native_audio_control_hold = None;
         self.epoch = PlaybackEpoch(
             self.epoch.0.checked_add(1).ok_or(PlaybackError::TransportArithmeticOverflow)?,
         );

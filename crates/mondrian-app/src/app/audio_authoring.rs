@@ -67,6 +67,9 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::NativeEditor(payload) => {
+                self.control_native_audio_editor_product(payload)
+            }
             AudioProductAction::RewireProcessorInput(payload) => {
                 self.rewire_observed_processor_input(payload)
             }
@@ -945,6 +948,8 @@ mod tests {
         assert_eq!(
             gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             0.0
         );
@@ -965,6 +970,8 @@ mod tests {
         assert_eq!(
             gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             -6.0
         );

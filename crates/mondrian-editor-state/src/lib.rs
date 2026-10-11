@@ -6,7 +6,10 @@
 
 pub mod action;
 pub mod animation_groups;
+pub mod author_execution_snapshot;
 pub mod history;
+pub mod native_audio_authoring;
+mod native_visual_view;
 pub mod session;
 pub mod state;
 
@@ -19,7 +22,16 @@ pub use history::{
     AuthoringHistory, AuthoringHistoryBudget, AuthoringHistoryDiagnostics,
     AuthoringHistoryRecordOutcome,
 };
+pub use native_visual_view::NativeVisualAuthorView;
 pub use session::{
     AuthorGeneration, AuthoringCommit, AuthoringSession, AuthoringSessionId, AuthoringSnapshot,
     SequenceNavigationIntent,
+};
+
+/// Canonical native author gestures; execution/window origin remains a separate proof.
+pub use native_audio_authoring::{NativeAudioAuthorGesture, NativeAudioAuthorOwner};
+
+/// Canonical author-generation commit fence; native source closure is separate.
+pub use author_execution_snapshot::{
+    AuthorExecutionAdmissionError, AuthorExecutionCommit, AuthorExecutionSnapshot,
 };

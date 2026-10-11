@@ -19,6 +19,7 @@ static COLOR_ENGINE: ColorEngine = ColorEngine::mondrian_standard();
 
 fn working_frame(color: [f32; 4]) -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: WIDTH,
         height: HEIGHT,
         data: vec![color; WIDTH as usize * HEIGHT as usize],
@@ -136,7 +137,7 @@ fn preview_export_cpu_seam_proves_parallel_simd_reuse_and_owned_adjustment() {
             TimelineCompositeElement::Adjustment(TimelineAdjustmentLayer {
                 effect_graph: adjustment_graph(),
                 opacity: 0.75,
-                blend_mode: Some(BlendMode::Normal),
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 frame_seed: 7,
             }),
         ],

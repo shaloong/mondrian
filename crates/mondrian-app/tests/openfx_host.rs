@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use mondrian_app::openfx_adapter::inspect_openfx_binary;
 use mondrian_app::openfx_effect::register_selected_openfx_filter;
 use mondrian_app::openfx_host::{
-    describe_openfx_filter, render_openfx_filter_frame, OpenFxDoubleType, OpenFxFilterSession,
-    OpenFxFloatFrame, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
+    describe_openfx_filter, render_openfx_filter_frame, EffectFloatFrame, OpenFxDoubleType,
+    OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
     OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 use mondrian_core::automation::PropertyValue;
@@ -122,18 +122,28 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
         );
     }
     assert_eq!(bindings.len(), 7);
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    )
+    .expect("owned Float fixture");
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     let mut session = OpenFxFilterSession::prepare(
         product_executable(),
         &inspection,
         identifier,
-        input.width,
-        input.height,
+        input.width(),
+        input.height(),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare");
@@ -154,9 +164,9 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
         let step = if frame >= 24.0 { 1.0 } else { 0.0 };
         let gain = (1.0 + (20.0 * smooth + 22.0 * step) / 128.0) as f32;
         assert_eq!(
-            output.pixels,
+            output.pixels(),
             input
-                .pixels
+                .pixels()
                 .iter()
                 .map(|pixel| pixel.map(|value| (value * (1.0 + smooth) as f32) * gain))
                 .collect::<Vec<_>>(),
@@ -193,21 +203,15 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
         let graph = program
             .evaluate(TimelineTime::new(frame, 24).expect("exact owner time"))
             .expect("production author evaluation");
-        let output = apply_compiled_effect_graph_rgba_f32(
-            &input.pixels,
-            input.width,
-            input.height,
-            &graph,
-            0,
-        )
-        .expect("canonical queries through the production compiled graph");
+        let output = apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 0)
+            .expect("canonical queries through the production compiled graph");
         let t = frame as f64 / 24.0;
         let smooth = 3.0 * t * t - 2.0 * t * t * t;
         let gain = (1.0 + 20.0 * smooth / 128.0) as f32;
         assert_eq!(
-            output,
+            output.pixels(),
             input
-                .pixels
+                .pixels()
                 .iter()
                 .map(|pixel| pixel.map(|value| (value * (1.0 + smooth) as f32) * gain))
                 .collect::<Vec<_>>()
@@ -266,11 +270,16 @@ fn product_worker_preserves_curve_source_lifecycle_at_equal_current_values() {
     let changed = curve(3.0);
     let constant = OpenFxParameterBinding::constant(OpenFxParameterValue::Double(1.0));
     let sampled = OpenFxParameterBinding::current_frame(OpenFxParameterValue::Double(1.0));
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    )
+    .expect("owned Float fixture");
     let timing = OpenFxRenderTiming {
         frame: 0.0,
         frame_rate: 24.0,
@@ -285,6 +294,11 @@ fn product_worker_preserves_curve_source_lifecycle_at_equal_current_values() {
         identifier,
         2,
         2,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare");
@@ -308,9 +322,9 @@ fn product_worker_preserves_curve_source_lifecycle_at_equal_current_values() {
             .render(&timing, &bindings, &input, &mut checkpoint(&cancellation))
             .expect("SDK queries and change notification counts");
         assert_eq!(
-            output.pixels,
+            output.pixels(),
             input
-                .pixels
+                .pixels()
                 .iter()
                 .map(|pixel| pixel.map(|value| value * gain))
                 .collect::<Vec<_>>(),
@@ -375,11 +389,16 @@ fn qualify_product_compound_query_authority(sampled: bool) {
         })
         .collect::<BTreeMap<_, _>>();
     assert_eq!(parameters.len(), 6);
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[-0.25, 0.5, 2.0, 0.25]; 4],
+    )
+    .expect("owned Float fixture");
     let timing = OpenFxRenderTiming {
         frame: 0.0,
         frame_rate: 24.0,
@@ -392,8 +411,13 @@ fn qualify_product_compound_query_authority(sampled: bool) {
         product_executable(),
         &inspection,
         identifier,
-        input.width,
-        input.height,
+        input.width(),
+        input.height(),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare actual product worker");
@@ -454,11 +478,16 @@ fn string_filter_description_preserves_all_native_modes() {
     }
     assert_eq!(defaults["single"], "汉字🙂");
     assert_eq!(defaults["multi"], "first\n第二行\r\nlast\tvalue");
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    )
+    .expect("owned Float fixture");
     let timing = OpenFxRenderTiming {
         frame: 1.0,
         frame_rate: 24.0,
@@ -472,6 +501,11 @@ fn string_filter_description_preserves_all_native_modes() {
         "uk.co.thefoundry.BasicGainPlugin",
         2,
         2,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut || Ok(()),
     )
     .expect("String worker");
@@ -517,7 +551,7 @@ fn string_filter_description_preserves_all_native_modes() {
             )
             .sum();
         let gain = 1.0 + (bytes % 11) as f32 / 10.0;
-        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, original) in output.pixels().iter().zip(input.pixels()) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
             }
@@ -593,8 +627,20 @@ fn string_text_modes_execute_through_authored_compiled_graph() {
     .expect("compile");
     let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
     let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
-    let pixels =
-        apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1192).expect("native graph");
+    let pixels = apply_compiled_effect_graph_rgba_f32(
+        mondrian_effects::EffectFloatFrameView::new(
+            mondrian_effects::EffectFrameExtent::new(2, 2),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            &input,
+        ),
+        &graph,
+        1192,
+    )
+    .expect("native graph");
     let gain =
         1.0 + (values.iter().map(|(_, _, value)| value.len()).sum::<usize>() % 11) as f32 / 10.0;
     for (actual, original) in pixels.iter().zip(&input) {
@@ -649,11 +695,16 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         ),
         Err(OpenFxHostError::Invalid(_))
     ));
-    let input = OpenFxFloatFrame {
-        width: 4,
-        height: 4,
-        pixels: (0..16).map(|index| [index as f32 / 16.0, 0.2, 0.3, 0.4]).collect(),
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(4, 4),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        (0..16).map(|index| [index as f32 / 16.0, 0.2, 0.3, 0.4]).collect(),
+    )
+    .expect("owned Float fixture");
     let parameters = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(1.5)),
         (
@@ -677,17 +728,21 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &input,
     )
     .expect("render actual native plugin in isolated child");
-    assert_eq!((output.width, output.height), (4, 4));
-    for (actual, source) in output.pixels.iter().zip(&input.pixels) {
+    assert_eq!((output.width(), output.height()), (4, 4));
+    for (actual, source) in output.pixels().iter().zip(input.pixels()) {
         for (channel, expected) in actual.iter().zip(source.iter().map(|value| value * 1.5)) {
             assert!((channel - expected).abs() < 1e-6, "{channel} != {expected}");
         }
     }
 
-    let component_input = OpenFxFloatFrame {
-        width: 3,
-        height: 5,
-        pixels: (0..15)
+    let component_input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(3, 5),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        (0..15)
             .map(|index| {
                 let index = index as f32;
                 [
@@ -698,7 +753,8 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
                 ]
             })
             .collect(),
-    };
+    )
+    .expect("owned Float fixture");
     let component_parameters = constant_parameters([
         ("scale".to_owned(), OpenFxParameterValue::Double(0.5)),
         (
@@ -724,7 +780,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
         &component_input,
     )
     .expect("render per-component authored gains without clipping HDR or alpha");
-    for (actual, source) in component_output.pixels.iter().zip(&component_input.pixels) {
+    for (actual, source) in component_output.pixels().iter().zip(component_input.pixels()) {
         for (actual, expected) in actual
             .iter()
             .zip(source.iter().zip([1.0, 0.25, 0.5, 1.5]).map(|(value, gain)| value * gain))
@@ -734,7 +790,7 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     }
 
     let mut invalid = input.clone();
-    invalid.pixels[7][2] = f32::NAN;
+    invalid.pixels_mut()[7][2] = f32::NAN;
     let rejected = render_openfx_filter_frame(
         product_executable(),
         &inspection,
@@ -806,10 +862,9 @@ fn official_basic_filter_renders_authored_float32_pixels_in_child() {
     let graph = program
         .evaluate(TimelineTime::new(1, 24).expect("frame time"))
         .expect("evaluate the authored Filter");
-    let integrated =
-        apply_compiled_effect_graph_rgba_f32(&input.pixels, input.width, input.height, &graph, 991)
-            .expect("render the native Filter through the shared graph");
-    for (actual, expected) in integrated.iter().zip(&output.pixels) {
+    let integrated = apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 991)
+        .expect("render the native Filter through the shared graph");
+    for (actual, expected) in integrated.iter().zip(output.pixels()) {
         for (actual, expected) in actual.iter().zip(expected) {
             assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
         }
@@ -831,6 +886,11 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         "uk.co.thefoundry.BasicGainPlugin",
         2,
         3,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("preview worker");
@@ -840,6 +900,11 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         "uk.co.thefoundry.BasicGainPlugin",
         2,
         3,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("export worker");
@@ -853,11 +918,16 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         last_frame: 100.0,
         pixel_aspect_ratio: 1.0,
     };
-    let mut input = OpenFxFloatFrame {
-        width: 2,
-        height: 3,
-        pixels: vec![[-0.25, 0.5, 2.0, 0.25]; 6],
-    };
+    let mut input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 3),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[-0.25, 0.5, 2.0, 0.25]; 6],
+    )
+    .expect("owned Float fixture");
     for (frame, gain, aspect) in [
         (0.0, 1.5, 1.0),
         (0.0, 2.0, 1.0),
@@ -872,7 +942,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
             .render(&timing, &values, &input, &mut checkpoint(&cancellation))
             .expect("resident render");
         assert_eq!(preview.worker_process_id(), preview_id);
-        for (actual, source) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, source) in output.pixels().iter().zip(input.pixels()) {
             for (actual, source) in actual.iter().zip(source) {
                 assert_eq!(*actual, *source * gain as f32);
             }
@@ -888,7 +958,7 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
         assert_eq!(unmodified, input);
         assert_eq!(export.worker_process_id(), export_id);
     }
-    input.pixels.fill([0.5, -1.0, 3.0, 0.75]);
+    input.pixels_mut().fill([0.5, -1.0, 3.0, 0.75]);
     assert_eq!(
         preview
             .render(
@@ -929,10 +999,8 @@ fn official_basic_resident_sessions_reuse_workers_and_isolate_frames() {
 #[test]
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
 fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
-    assert_eq!(
-        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("hang fixture mode"),
-        "hang"
-    );
+    let mode = std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("hang fixture mode");
+    assert!(mode == "hang" || mode == "thread_hang");
     let binary = PathBuf::from(
         std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe binary"),
     );
@@ -945,6 +1013,11 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         "uk.co.thefoundry.BasicGainPlugin",
         1,
         1,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("resident worker");
@@ -960,7 +1033,16 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         last_frame: 10.0,
         pixel_aspect_ratio: 1.0,
     };
-    let input = OpenFxFloatFrame { width: 1, height: 1, pixels: vec![[0.25; 4]] };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(1, 1),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[0.25; 4]],
+    )
+    .expect("owned Float fixture");
     let started = std::time::Instant::now();
     assert!(matches!(
         session.render(
@@ -981,7 +1063,7 @@ fn resident_worker_cancellation_retires_and_reaps_a_hung_native_render() {
         Err(OpenFxHostError::Unavailable(_))
     ));
     session.shutdown().expect("failed worker already reaped");
-    assert_eq!(input.pixels, [[0.25; 4]]);
+    assert_eq!(input.pixels(), [[0.25; 4]]);
 }
 
 fn checkpoint(
@@ -1015,6 +1097,11 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
         "uk.co.thefoundry.BasicGainPlugin",
         1,
         1,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut || Ok(()),
     )
     .expect("prepare worker");
@@ -1025,7 +1112,16 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
         last_frame: 10.0,
         pixel_aspect_ratio: 1.0,
     };
-    let input = OpenFxFloatFrame { width: 1, height: 1, pixels: vec![[0.25; 4]] };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(1, 1),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[0.25; 4]],
+    )
+    .expect("owned Float fixture");
     let started = Instant::now();
     let mut scheduler = || {
         (started.elapsed() >= Duration::from_millis(150))
@@ -1046,7 +1142,7 @@ fn execution_owner_deadline_interrupts_native_render_without_a_mirror_token() {
         Err(OpenFxHostError::Unavailable(_))
     ));
     session.shutdown().expect("failed worker reaped");
-    assert_eq!(input.pixels, [[0.25; 4]]);
+    assert_eq!(input.pixels(), [[0.25; 4]]);
 }
 
 #[test]
@@ -1063,6 +1159,11 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
         "uk.co.thefoundry.BasicGainPlugin",
         257,
         257,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut || Ok(()),
     )
     .expect("resident worker");
@@ -1073,10 +1174,14 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
         last_frame: 100.0,
         pixel_aspect_ratio: 1.0,
     };
-    let mut input = OpenFxFloatFrame {
-        width: 257,
-        height: 257,
-        pixels: (0..257 * 257)
+    let mut input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(257, 257),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        (0..257 * 257)
             .map(|index| {
                 [
                     (index % 257) as f32 / 128.0 - 0.5,
@@ -1086,18 +1191,19 @@ fn official_basic_resident_transfer_preserves_partial_blocks_and_changed_rasters
                 ]
             })
             .collect(),
-    };
+    )
+    .expect("owned Float fixture");
     let gain = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(1.5))]);
     let output = session
         .render(&timing, &gain, &input, &mut || Ok(()))
         .expect("complete transfer");
-    assert_eq!(output.pixels.len(), input.pixels.len());
-    for (actual, source) in output.pixels.iter().zip(&input.pixels) {
+    assert_eq!(output.pixels().len(), input.pixels().len());
+    for (actual, source) in output.pixels().iter().zip(input.pixels()) {
         for (actual, source) in actual.iter().zip(source) {
             assert_eq!(*actual, *source * 1.5);
         }
     }
-    input.pixels.reverse();
+    input.pixels_mut().reverse();
     timing.frame = 41.0;
     assert_eq!(
         session
@@ -1173,39 +1279,64 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     // Two executor rasters plus three controlled host rasters must fit before
     // any native session is constructed. The one-byte shortfall stays retryable.
     let mut config = EffectExecutionSessionConfig {
-        max_working_bytes: 79,
+        max_working_bytes: OpenFxFilterSession::storage(1, 1)
+            .expect("native owner charge")
+            .active_peak_bytes()
+            + 2 * 16
+            - 1,
         ..EffectExecutionSessionConfig::default()
     };
     let mut session = EffectExecutionSession::new(config);
     session.bind_generation(1);
     assert!(session
         .apply_compiled_rgba_f32(
-            &input,
-            1,
-            1,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(1, 1),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat
+                ),
+                &input
+            ),
             &graph,
             0,
             &mut mondrian_effects::EffectProcessorControl::uncancelled()
         )
         .is_err());
     assert_eq!(session.diagnostics().processor_instances, 0);
-    config.max_working_bytes = 80;
+    config.max_working_bytes = OpenFxFilterSession::storage(1, 1)
+        .expect("native owner charge")
+        .active_peak_bytes()
+        + 2 * 16;
     session.reconfigure(config);
     assert_eq!(
-        session
+        (session
             .apply_compiled_rgba_f32(
-                &input,
-                1,
-                1,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightFloat
+                    ),
+                    &input
+                ),
                 &graph,
                 0,
                 &mut mondrian_effects::EffectProcessorControl::uncancelled()
             )
-            .expect("first native frame"),
-        input
+            .expect("first native frame"))
+        .pixels(),
+        input.as_slice()
     );
     assert_eq!(session.diagnostics().processor_instances, 1);
-    assert_eq!(session.diagnostics().processor_bytes, 48);
+    assert_eq!(
+        session.diagnostics().processor_bytes,
+        OpenFxFilterSession::storage(1, 1)
+            .expect("complete retained owner charge")
+            .retained_bytes()
+    );
     // The probe only omits Output on its second render in the same native
     // instance. A fresh process per frame would incorrectly succeed here.
     // A new frame generation must preserve that same worker; pixel residency
@@ -1213,29 +1344,42 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     session.bind_generation(2);
     assert!(session
         .apply_compiled_rgba_f32(
-            &input,
-            1,
-            1,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(1, 1),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat
+                ),
+                &input
+            ),
             &graph,
             1,
             &mut mondrian_effects::EffectProcessorControl::uncancelled()
         )
         .is_err());
-    assert_eq!(input, [[-0.25, 1.5, 0.75, 0.5]]);
+    assert_eq!(input.as_slice(), [[-0.25, 1.5, 0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
     session.bind_generation(3);
     assert_eq!(
-        session
+        (session
             .apply_compiled_rgba_f32(
-                &input,
-                1,
-                1,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightFloat
+                    ),
+                    &input
+                ),
                 &graph,
                 0,
                 &mut mondrian_effects::EffectProcessorControl::uncancelled()
             )
-            .expect("fresh generation"),
-        input
+            .expect("fresh generation"))
+        .pixels(),
+        input.as_slice()
     );
 }
 
@@ -1299,6 +1443,7 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
     let format = EffectValueFormat::new(
         EffectWorkingPrecision::Float32,
         EffectColorDomain::SceneLinearRgb,
+        mondrian_core::ColorFrameAlpha::StraightCoverage,
     );
     let work = PreparedHeterogeneousEffectWork::prepare(
         graph,
@@ -1318,7 +1463,7 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
     let result = work.execute_cpu_prefix_with_checkpoint(
         &mut session,
         42,
-        &input,
+        mondrian_effects::EffectFloatFrameView::new(EffectFrameExtent::new(1, 1), format, &input),
         0,
         WorkingColorSpace::LinearRec709,
         &mut || {
@@ -1340,7 +1485,7 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
         started.elapsed() < Duration::from_secs(3),
         "native five-second wait must honor the execution owner"
     );
-    assert_eq!(input, [[0.25, 1.5, -0.75, 0.5]]);
+    assert_eq!(input.as_slice(), [[0.25, 1.5, -0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
     let status = effect_plugin_runtime_status(&key).expect("plugin status");
     assert!(!status.disabled);
@@ -1373,9 +1518,15 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
             .then_some(EffectProcessorStopReason::DeadlineExpired)
     };
     let result = session.apply_compiled_rgba_f32(
-        &input,
-        1,
-        1,
+        mondrian_effects::EffectFloatFrameView::new(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            &input,
+        ),
         &graph,
         0,
         &mut EffectProcessorControl::new(&mut checkpoint),
@@ -1391,7 +1542,7 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
     );
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_eq!(session.diagnostics().processor_instances, 0);
-    assert_eq!(input, [[0.25, 1.5, -0.75, 0.5]]);
+    assert_eq!(input.as_slice(), [[0.25, 1.5, -0.75, 0.5]]);
 
     let cancellation = mondrian_core::ExecutionCancellationToken::new();
     let cancel_owner = cancellation.clone();
@@ -1464,7 +1615,10 @@ fn authored_uhd_filter_fits_professional_working_grant() {
     let width = 3840;
     let height = 2160;
     let count = width as usize * height as usize;
-    let required = count * 16 * 5; // Two executor rasters and three host rasters.
+    let host_required = OpenFxFilterSession::storage(width, height)
+        .expect("admitted native owner storage")
+        .active_peak_bytes();
+    let required = count * 16 * 2 + host_required; // Executor rasters and complete controlled native owner.
     assert!(required < 768 * 1024 * 1024);
     let mut input = vec![[1.5, -0.25, 0.75, 0.5]; count];
     input[0] = [0.125, 2.5, 0.25, 0.75];
@@ -1478,47 +1632,83 @@ fn authored_uhd_filter_fits_professional_working_grant() {
     let mut session = EffectExecutionSession::new(config);
     assert!(session
         .apply_compiled_rgba_f32(
-            &input,
-            width,
-            height,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat
+                ),
+                &input
+            ),
             &graph,
             0,
             &mut EffectProcessorControl::uncancelled()
         )
         .is_err());
     assert_eq!(session.diagnostics().processor_instances, 0);
+    assert!(
+        host_required > config.max_processor_bytes,
+        "active peak includes output storage even when retained backing fits optional residency"
+    );
     config.max_working_bytes = 768 * 1024 * 1024;
     session.reconfigure(config);
     let output = session
         .apply_compiled_rgba_f32(
-            &input,
-            width,
-            height,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat,
+                ),
+                &input,
+            ),
             &graph,
             0,
             &mut EffectProcessorControl::uncancelled(),
         )
         .expect("UHD native Filter within Professional grant");
-    assert_eq!(output, input);
+    assert_eq!((output).pixels(), input.as_slice());
     drop(output);
-    assert_eq!(session.diagnostics().processor_instances, 1);
-    assert_eq!(session.diagnostics().processor_bytes, count * 16 * 3);
-    // Seek with changed Source content; only pixel residency is generation-bound.
+    assert_eq!(
+        session.diagnostics().processor_instances,
+        1,
+        "the native instance retains backing but hands its output owner to Effects"
+    );
+    assert_eq!(
+        session.diagnostics().processor_bytes,
+        OpenFxFilterSession::storage(width, height)
+            .expect("retained backing")
+            .retained_bytes()
+    );
+    // Seek with changed Source content. Pixel residency is cleared, while the
+    // same frame-independent processor backing remains within the optional cap.
     session.bind_generation(2);
     input.reverse();
     let output = session
         .apply_compiled_rgba_f32(
-            &input,
-            width,
-            height,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(width, height),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat,
+                ),
+                &input,
+            ),
             &graph,
             7,
             &mut EffectProcessorControl::uncancelled(),
         )
-        .expect("changed UHD frame in retained bank");
-    assert_eq!(output, input);
+        .expect("changed UHD frame through the retained admitted owner");
+    assert_eq!((output).pixels(), input.as_slice());
     drop(output);
-    assert_eq!(session.diagnostics().processor_instances, 1);
+    assert_eq!(
+        session.diagnostics().processor_instances,
+        1,
+        "seek reuses the same fully charged retained native backing"
+    );
     config.max_processor_bytes = 0;
     session.reconfigure(config);
     assert_eq!(session.diagnostics().processor_instances, 0);
@@ -1543,11 +1733,16 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
     assert_eq!(count.numeric_channels[0].minimum, 0.0);
     assert_eq!(count.numeric_channels[0].maximum, 9.0);
     assert!(count.can_animate);
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    )
+    .expect("owned Float fixture");
     let timing = OpenFxRenderTiming {
         frame: 1.0,
         frame_rate: 24.0,
@@ -1565,7 +1760,7 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
             &input,
         )
         .expect("native integer");
-        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, original) in output.pixels().iter().zip(input.pixels()) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * value as f32).abs() < 1e-6);
             }
@@ -1642,9 +1837,9 @@ fn integer_filter_preserves_typed_authoring_and_native_pixels() {
     )
     .expect("compile");
     let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
-    let pixels = apply_compiled_effect_graph_rgba_f32(&input.pixels, 2, 2, &graph, 1191)
-        .expect("native graph");
-    for (actual, original) in pixels.iter().zip(&input.pixels) {
+    let pixels =
+        apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 1191).expect("native graph");
+    for (actual, original) in pixels.iter().zip(input.pixels()) {
         for channel in 0..4 {
             assert!((actual[channel] - original[channel] * 4.0).abs() < 1e-6);
         }
@@ -1729,11 +1924,16 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         vec![Some(i32::MAX), Some(i32::MIN), Some(0)]
     );
     assert!(!count.can_animate);
-    let input = OpenFxFloatFrame {
-        width: 2,
-        height: 2,
-        pixels: vec![[0.1, 0.2, 0.3, 0.05]; 4],
-    };
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![[0.1, 0.2, 0.3, 0.05]; 4],
+    )
+    .expect("owned Float fixture");
     let timing = OpenFxRenderTiming {
         frame: 1.0,
         frame_rate: 24.0,
@@ -1747,6 +1947,11 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         identifier,
         2,
         2,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut || Ok(()),
     )
     .expect("resident choice worker");
@@ -1760,7 +1965,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             .expect("resident choice edit");
         assert_eq!(resident.worker_process_id(), worker);
         let gain = (index.unwrap_or(default_index) + 1) as f32;
-        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, original) in output.pixels().iter().zip(input.pixels()) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
             }
@@ -1787,7 +1992,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             .expect("static native derivative and integral contract");
         assert_eq!(resident.worker_process_id(), worker);
         let gain = (default_index + 1) as f32;
-        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, original) in output.pixels().iter().zip(input.pixels()) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * gain).abs() < 1e-6);
             }
@@ -1803,7 +2008,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             &input,
         )
         .expect("native choice");
-        for (actual, original) in output.pixels.iter().zip(&input.pixels) {
+        for (actual, original) in output.pixels().iter().zip(input.pixels()) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * (value + 1) as f32).abs() < 1e-6);
             }
@@ -1866,9 +2071,9 @@ fn qualify_native_discrete_filter(string_choice: bool) {
     )
     .expect("compile");
     let graph = program.evaluate(TimelineTime::new(1, 24).expect("frame")).expect("evaluate");
-    let pixels = apply_compiled_effect_graph_rgba_f32(&input.pixels, 2, 2, &graph, 1191)
-        .expect("native graph");
-    for (actual, original) in pixels.iter().zip(&input.pixels) {
+    let pixels =
+        apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 1191).expect("native graph");
+    for (actual, original) in pixels.iter().zip(input.pixels()) {
         for channel in 0..4 {
             assert!((actual[channel] - original[channel] * 3.0).abs() < 1e-6);
         }
@@ -1957,8 +2162,20 @@ fn plugin_interpolation_metadata_controls_new_author_keys_and_readonly_instances
     for (frame, multiplier) in [(1, 2.0), (2, 6.0)] {
         let graph =
             program.evaluate(TimelineTime::new(frame, 24).expect("time")).expect("evaluate");
-        let output = apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1291)
-            .expect("render readonly instance");
+        let output = apply_compiled_effect_graph_rgba_f32(
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(2, 2),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightFloat,
+                ),
+                &input,
+            ),
+            &graph,
+            1291,
+        )
+        .expect("render readonly instance");
         for (actual, original) in output.iter().zip(&input) {
             for channel in 0..4 {
                 assert!((actual[channel] - original[channel] * multiplier).abs() < 1e-6);
@@ -2000,11 +2217,15 @@ fn cpu_contract_probe(mode: &str) -> mondrian_app::openfx_adapter::OpenFxBinaryI
     inspect_openfx_binary(product_executable(), &binary).expect("inspect CPU contract probe")
 }
 
-fn cpu_contract_input() -> OpenFxFloatFrame {
-    OpenFxFloatFrame {
-        width: 3,
-        height: 5,
-        pixels: (0..15)
+fn cpu_contract_input() -> EffectFloatFrame {
+    mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(3, 5),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        (0..15)
             .map(|index| {
                 let value = index as f32;
                 [
@@ -2015,7 +2236,8 @@ fn cpu_contract_input() -> OpenFxFloatFrame {
                 ]
             })
             .collect(),
-    }
+    )
+    .expect("owned Float fixture")
 }
 
 fn cpu_contract_timing(par: f64) -> OpenFxRenderTiming {
@@ -2030,14 +2252,14 @@ fn cpu_contract_timing(par: f64) -> OpenFxRenderTiming {
 
 fn assert_cpu_contract_pixels(
     actual: &[[f32; 4]],
-    input: &OpenFxFloatFrame,
+    input: &EffectFloatFrame,
     gain: f32,
     par: Option<f64>,
 ) {
-    assert_eq!(actual.len(), input.pixels.len());
-    for (index, (actual, source)) in actual.iter().zip(&input.pixels).enumerate() {
-        let x = index % input.width as usize;
-        let y = input.height as usize - 1 - index / input.width as usize;
+    assert_eq!(actual.len(), input.pixels().len());
+    for (index, (actual, source)) in actual.iter().zip(input.pixels()).enumerate() {
+        let x = index % input.width() as usize;
+        let y = input.height() as usize - 1 - index / input.width() as usize;
         let offsets = par.map_or([0.0; 4], |par| {
             [
                 ((x as f64 + 0.5) * par / 32.0) as f32,
@@ -2075,8 +2297,13 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
             product_executable(),
             &inspection,
             identifier,
-            input.width,
-            input.height,
+            input.width(),
+            input.height(),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
             &mut checkpoint(&cancellation),
         )
         .expect("exclusive native session");
@@ -2097,7 +2324,7 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
                 .expect("progressive exact-PAR native output");
             assert_eq!(session.worker_process_id(), worker);
             assert_cpu_contract_pixels(
-                &output.pixels,
+                output.pixels(),
                 &input,
                 gain,
                 coordinate_output.then_some(par),
@@ -2121,7 +2348,7 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
             .expect("invalid geometry did not mutate or retire the valid session");
         assert_eq!(session.worker_process_id(), worker);
         assert_cpu_contract_pixels(
-            &output.pixels,
+            output.pixels(),
             &input,
             0.5,
             coordinate_output.then_some(2.0),
@@ -2168,9 +2395,8 @@ fn qualify_cpu_contract_resident_and_graph(mode: &str, coordinate_output: bool) 
     let graph = program
         .evaluate(TimelineTime::new(42, 24).expect("seek time"))
         .expect("exact native graph frame");
-    let output =
-        apply_compiled_effect_graph_rgba_f32(&input.pixels, input.width, input.height, &graph, 991)
-            .expect("canonical compiled graph output");
+    let output = apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 991)
+        .expect("canonical compiled graph output");
     assert_cpu_contract_pixels(&output, &input, 0.5, coordinate_output.then_some(2.0));
 }
 
@@ -2279,8 +2505,13 @@ fn product_worker_refuses_cpu_disabled_changed_instance_without_stale_output() {
         product_executable(),
         &inspection,
         "uk.co.thefoundry.BasicGainPlugin",
-        input.width,
-        input.height,
+        input.width(),
+        input.height(),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut checkpoint(&cancellation),
     )
     .expect("prepare CPU session");
@@ -2289,7 +2520,7 @@ fn product_worker_refuses_cpu_disabled_changed_instance_without_stale_output() {
     let output = session
         .render(&timing, &initial, &input, &mut checkpoint(&cancellation))
         .expect("first frame supports CPU");
-    assert_cpu_contract_pixels(&output.pixels, &input, 0.5, None);
+    assert_cpu_contract_pixels(output.pixels(), &input, 0.5, None);
     let changed = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.75))]);
     assert!(
         matches!(session.render(&timing, &changed, &input, &mut checkpoint(&cancellation)),
@@ -2325,11 +2556,15 @@ fn product_discovery_admits_an_empty_supported_api_intersection() {
     .is_err());
 }
 
-fn output_alpha_input() -> OpenFxFloatFrame {
-    OpenFxFloatFrame {
-        width: 2,
-        height: 4,
-        pixels: vec![
+fn output_alpha_input() -> EffectFloatFrame {
+    mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 4),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        vec![
             [-0.25, 0.5, 2.0, 0.0],
             [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
             [-0.5, 0.75, 4.0, 0.25],
@@ -2339,24 +2574,25 @@ fn output_alpha_input() -> OpenFxFloatFrame {
             [0.125, -0.25, 2.0, 1.0 / 65536.0],
             [0.5, 4.0, -8.0, 0.75],
         ],
-    }
+    )
+    .expect("owned Float fixture")
 }
 
 fn assert_negotiated_alpha_pixels(
     actual: &[[f32; 4]],
-    input: &OpenFxFloatFrame,
+    input: &EffectFloatFrame,
     mode: i32,
     gain: f32,
 ) {
-    assert_eq!(actual.len(), input.pixels.len());
-    for (index, (actual, source)) in actual.iter().zip(&input.pixels).enumerate() {
+    assert_eq!(actual.len(), input.pixels().len());
+    for (index, (actual, source)) in actual.iter().zip(input.pixels()).enumerate() {
         let expected = if mode == 1 && source[3] == 0.0 {
             [0.0; 4]
         } else {
             [
-                source[0] * gain,
-                source[1] * gain,
-                source[2] * gain,
+                source[0] * gain * if mode == 1 { source[3] * gain } else { 1.0 },
+                source[1] * gain * if mode == 1 { source[3] * gain } else { 1.0 },
+                source[2] * gain * if mode == 1 { source[3] * gain } else { 1.0 },
                 if mode == 2 { 1.0 } else { source[3] * gain },
             ]
         };
@@ -2391,8 +2627,13 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
             product_executable(),
             &inspection,
             identifier,
-            input.width,
-            input.height,
+            input.width(),
+            input.height(),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
             &mut || Ok(()),
         )
         .expect("resident alpha host");
@@ -2414,15 +2655,15 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
             ]);
             let output = session
                 .render(&timing, &parameters, &input, &mut || Ok(()))
-                .expect("native output normalized at adapter boundary");
+                .expect("raw native output retains actual association");
             assert_eq!(session.worker_process_id(), worker);
-            assert_negotiated_alpha_pixels(&output.pixels, &input, mode, gain);
+            assert_negotiated_alpha_pixels(output.pixels(), &input, mode, gain);
         }
         // Float Straight output remains raw finite OFX data, including signed
         // and over-one alpha. This is not premultiplied coverage normalization.
         let mut raw = input.clone();
-        raw.pixels[2][3] = -0.5;
-        raw.pixels[3][3] = 2.5;
+        raw.pixels_mut()[2][3] = -0.5;
+        raw.pixels_mut()[3][3] = 2.5;
         let output = session
             .render(
                 &cpu_contract_timing(2.0),
@@ -2434,7 +2675,7 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
                 &mut || Ok(()),
             )
             .expect("raw Straight alpha range");
-        assert_negotiated_alpha_pixels(&output.pixels, &raw, 0, 0.5);
+        assert_negotiated_alpha_pixels(output.pixels(), &raw, 0, 0.5);
         session.shutdown().expect("alpha session teardown");
     }
     let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
@@ -2497,30 +2738,29 @@ fn product_negotiates_native_output_alpha_for_resident_and_compiled_graph() {
         let graph = program
             .evaluate(TimelineTime::new(42, 24).expect("seek"))
             .expect("evaluate graph");
-        let output = apply_compiled_effect_graph_rgba_f32(
-            &input.pixels,
-            input.width,
-            input.height,
-            &graph,
-            977,
-        )
-        .expect("one canonical graph execution");
+        let output = apply_compiled_effect_graph_rgba_f32(input.view(), &graph, 977)
+            .expect("one canonical graph execution");
         assert_negotiated_alpha_pixels(&output, &input, mode as i32, 0.5);
     }
 }
 
 #[test]
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=output_alpha"]
-fn product_rejects_invalid_or_unrepresentable_native_alpha_without_publishing_output() {
+fn product_rejects_unknown_representation_or_nonfinite_native_pixels_without_publication() {
     let inspection = cpu_contract_probe("output_alpha");
     let input = output_alpha_input();
-    for mode in 3..9 {
+    for mode in 3..5 {
         let mut session = OpenFxFilterSession::prepare(
             product_executable(),
             &inspection,
             "uk.co.thefoundry.BasicGainPlugin",
-            input.width,
-            input.height,
+            input.width(),
+            input.height(),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
             &mut || Ok(()),
         )
         .expect("resident failure probe");
@@ -2567,8 +2807,9 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
     let integer = |name: &str| -> u32 { std::env::var(name).expect(name).parse().expect(name) };
     let width = integer("MONDRIAN_OPENFX_PERF_WIDTH");
     let height = integer("MONDRIAN_OPENFX_PERF_HEIGHT");
-    OpenFxFilterSession::required_frame_storage(width, height)
-        .expect("dimensions must be admitted before source allocation");
+    OpenFxFilterSession::storage(width, height)
+        .expect("dimensions must be admitted before source allocation")
+        .active_peak_bytes();
     let rate_num = integer("MONDRIAN_OPENFX_PERF_FPS_NUM");
     let rate_den = integer("MONDRIAN_OPENFX_PERF_FPS_DEN");
     let stage_percent = integer("MONDRIAN_OPENFX_PERF_STAGE_BUDGET_PERCENT");
@@ -2680,23 +2921,33 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
     let inspection = inspect_openfx_binary(product_executable(), &binary).expect("inspect Basic");
     let gain = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
     let pixels = usize::try_from(u64::from(width) * u64::from(height)).expect("pixel count");
-    let mut input = OpenFxFloatFrame {
-        width,
-        height,
-        pixels: (0..pixels)
+    let mut input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(width, height),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        (0..pixels)
             .map(|index| {
                 let x = (index % width as usize) as f32 / width as f32;
                 let y = (index / width as usize) as f32 / height as f32;
                 [-0.25 + x, 0.5 + y, 2.0 - x, 0.25 + y / 4.0]
             })
             .collect(),
-    };
+    )
+    .expect("owned Float fixture");
     let mut session = OpenFxFilterSession::prepare(
         product_executable(),
         &inspection,
         "uk.co.thefoundry.BasicGainPlugin",
         width,
         height,
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
         &mut || Ok(()),
     )
     .expect("prepare real production resident worker");
@@ -2715,7 +2966,7 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
         timing.frame = f64::from(index);
         // Vary a deterministic source pixel so retained output cannot masquerade
         // as completed native work. Correctness is checked outside the timer.
-        input.pixels[0][0] = -0.25 + index as f32 / 65536.0;
+        input.pixels_mut()[0][0] = -0.25 + index as f32 / 65536.0;
         let begin = Instant::now();
         let result = session.render(&timing, &gain, &input, &mut || Ok(()));
         let elapsed = u64::try_from(begin.elapsed().as_nanos()).expect("render duration");
@@ -2728,8 +2979,8 @@ fn official_basic_production_resident_steady_frame_performance_gate() {
                     errors.push("steady execution respawned a worker".into());
                     break;
                 }
-                let correct = output.pixels.len() == input.pixels.len()
-                    && output.pixels.iter().zip(&input.pixels).all(|(actual, source)| {
+                let correct = output.pixels().len() == input.pixels().len()
+                    && output.pixels().iter().zip(input.pixels()).all(|(actual, source)| {
                         (0..4).all(|channel| {
                             actual[channel].is_finite()
                                 && (actual[channel] - source[channel] * 0.5).abs() < 1e-6
@@ -2804,4 +3055,1033 @@ fn product_skips_long_unsupported_api_names_and_preserves_original_selected_inde
 #[ignore = "requires SessionProbe mode bootstrap_memory and current product"]
 fn product_bootstrap_image_memory_uses_a_live_host_in_discovery_and_resident_execution() {
     qualify_cpu_contract_resident_and_graph("bootstrap_memory", false);
+}
+
+// This test intentionally uses only the current public API. The typed-frame
+// production migration updates its caller/field access after genuine RED.
+#[test]
+#[ignore = "requires current product and SessionProbe mode output_alpha"]
+fn product_preserves_complete_finite_associated_output_without_retiring_valid_worker() {
+    let inspection = cpu_contract_probe("output_alpha");
+    let input = output_alpha_input();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        ),
+        &mut || Ok(()),
+    )
+    .expect("owned native Float session");
+    let worker = session.worker_process_id();
+    for mode in [1, 5, 6, 7, 8, 2, 0] {
+        let output = session
+            .render(
+                &cpu_contract_timing(1.0),
+                &constant_parameters([
+                    ("scale".into(), OpenFxParameterValue::Double(1.0)),
+                    ("alphaMode".into(), OpenFxParameterValue::Choice(mode)),
+                ]),
+                &input,
+                &mut || Ok(()),
+            )
+            .expect("finite associated output is a valid complete image value");
+        assert_eq!(
+            session.worker_process_id(),
+            worker,
+            "association admission must not retire valid native state"
+        );
+        let modified_native_first = (input.height() as usize - 1) * input.width() as usize;
+        // Begin with positive alpha so RED proves association semantics before
+        // any signed-zero bit distinction is inspected.
+        for index in (1..input.pixels().len()).chain(std::iter::once(0)) {
+            let actual = output.pixels()[index];
+            let input = input.pixels()[index];
+            let mut expected = input;
+            if mode == 2 {
+                expected[3] = 1.0;
+            } else if mode != 0 {
+                for channel in expected.iter_mut().take(3) {
+                    *channel *= input[3];
+                }
+                if mode == 8 && input[3] == 0.0 {
+                    expected = [7.0, -3.0, 11.0, 0.0];
+                }
+            }
+            if index == modified_native_first {
+                match mode {
+                    5 => {
+                        expected[0] = f32::MAX;
+                        expected[3] = f32::MIN_POSITIVE;
+                    }
+                    6 => expected[3] = -0.5,
+                    7 => expected[3] = 1.5,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                actual.map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "raw associated image changed at mode {mode}, pixel {index}"
+            );
+        }
+    }
+    session.shutdown().expect("normal native teardown");
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe source_alpha mode"]
+fn native_source_reports_actual_association_and_refuses_rebinding_before_dsp() {
+    use mondrian_core::ColorFrameAlpha;
+    let inspection = cpu_contract_probe("source_alpha");
+    for (alpha, mode, expected_alpha, sample) in [
+        (
+            ColorFrameAlpha::StraightCoverage,
+            0,
+            ColorFrameAlpha::StraightFloat,
+            [2.0, -1.0, 4.0, 0.5],
+        ),
+        (
+            ColorFrameAlpha::StraightFloat,
+            0,
+            ColorFrameAlpha::StraightFloat,
+            [2.0, -1.0, 4.0, -0.5],
+        ),
+        (
+            ColorFrameAlpha::PremultipliedCoverage,
+            1,
+            ColorFrameAlpha::PremultipliedFloat,
+            [7.0, -3.0, 11.0, 0.0],
+        ),
+        (
+            ColorFrameAlpha::PremultipliedFloat,
+            1,
+            ColorFrameAlpha::PremultipliedFloat,
+            [-2.0, 4.0, 8.0, 1.5],
+        ),
+        (
+            ColorFrameAlpha::Opaque,
+            2,
+            ColorFrameAlpha::Opaque,
+            [2.0, -1.0, 4.0, 1.0],
+        ),
+    ] {
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            alpha,
+        );
+        let input = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            vec![sample],
+        )
+        .expect("exact complete input");
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("typed session");
+        let parameters = constant_parameters([
+            ("scale".into(), OpenFxParameterValue::Double(1.0)),
+            ("alphaMode".into(), OpenFxParameterValue::Choice(mode)),
+        ]);
+        let worker = session.worker_process_id();
+        let output = session
+            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
+                Ok(())
+            })
+            .expect("independent plugin checked Source clip and image association");
+        assert_eq!(output.alpha(), expected_alpha);
+        assert_eq!(
+            output.pixels()[0].map(f32::to_bits),
+            sample.map(f32::to_bits),
+            "associated emission must never be divided through straight storage"
+        );
+        let changed_alpha = if alpha == ColorFrameAlpha::StraightFloat {
+            ColorFrameAlpha::PremultipliedFloat
+        } else {
+            ColorFrameAlpha::StraightFloat
+        };
+        let rebound = EffectFloatFrame::from_pixels(
+            input.extent(),
+            format.with_alpha(changed_alpha),
+            vec![sample],
+        )
+        .expect("same bytes with a different declaration");
+        assert!(matches!(
+            session.render(
+                &cpu_contract_timing(1.0),
+                &parameters,
+                &rebound,
+                &mut || Ok(())
+            ),
+            Err(OpenFxHostError::Invalid(_))
+        ));
+        assert_eq!(
+            session.worker_process_id(),
+            worker,
+            "caller format mismatch is not a plugin fault"
+        );
+        session
+            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
+                Ok(())
+            })
+            .expect("unchanged valid session remains reusable");
+        session.shutdown().expect("complete native lifecycle");
+    }
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe output_alpha mode"]
+fn raw_native_float_survives_disk_cache_nested_over_and_real_opaque_output() {
+    use mondrian_core::{ColorFrameAlpha, ColorFrameAlphaFormats, WorkingRgbaF32Frame};
+    use mondrian_render_cache::{
+        TimelineRenderCacheConfig, TimelineRenderCacheFormat, TimelineRenderCacheFrame,
+        TimelineRenderCacheIdentity, TimelineRenderCacheLookup, TimelineRenderCacheResult,
+        TimelineRenderCacheService, TimelineRenderCacheSubmission,
+    };
+    use mondrian_renderer::{
+        CpuColorFrame, TimelineCompositeBackground, TimelineCompositeElement,
+        TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
+        TimelineMediaLayer,
+    };
+    fn wait(service: &TimelineRenderCacheService) -> TimelineRenderCacheResult {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(result) = service.try_poll() {
+                return result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bounded cache worker did not return its terminal"
+            );
+            std::thread::yield_now();
+        }
+    }
+    mondrian_core::ensure_mondrian_default_ocio_loaded().expect("stock OCIO");
+    let inspection = cpu_contract_probe("output_alpha");
+    let input = output_alpha_input();
+    let mut native = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        input.format(),
+        &mut || Ok(()),
+    )
+    .expect("native Float session");
+    let raw = native
+        .render(
+            &cpu_contract_timing(1.0),
+            &constant_parameters([
+                ("scale".into(), OpenFxParameterValue::Double(1.0)),
+                ("alphaMode".into(), OpenFxParameterValue::Choice(8)),
+            ]),
+            &input,
+            &mut || Ok(()),
+        )
+        .expect("finite native zero-alpha emission");
+    assert_eq!(raw.alpha(), ColorFrameAlpha::PremultipliedFloat);
+    let raw_pixels = raw.pixels().to_vec();
+    let mut canonical = vec![raw.alpha().identity_code()];
+    for sample in &raw_pixels {
+        for component in sample {
+            canonical.extend_from_slice(&component.to_bits().to_le_bytes());
+        }
+    }
+    let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+        mondrian_core::ResolvedVisualFrameIdentity::from_materialization(
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                &canonical,
+            ),
+        ),
+        raw.width(),
+        raw.height(),
+        TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+        ColorFrameAlphaFormats::ALL,
+    );
+    // This explicit fixture identity is exhaustive over actual raster bytes;
+    // it does not grant production caching to an uncacheable native graph.
+    let temp = tempfile::tempdir().expect("cache owner");
+    let config = TimelineRenderCacheConfig::new(temp.path().to_path_buf(), 1_048_576, 1_048_576, 2)
+        .expect("bounded cache policy");
+    let cache = TimelineRenderCacheService::start(config.clone()).expect("cache worker");
+    let cached = TimelineRenderCacheFrame::new(
+        identity,
+        WorkingRgbaF32Frame {
+            width: raw.width(),
+            height: raw.height(),
+            alpha: raw.alpha(),
+            data: raw_pixels.clone(),
+            color_space: WorkingColorSpace::LinearRec709,
+        },
+    )
+    .expect("complete artifact");
+    assert_eq!(
+        cache.publish(cached),
+        TimelineRenderCacheSubmission::Scheduled
+    );
+    assert!(
+        matches!(wait(&cache), TimelineRenderCacheResult::Published { identity: published, .. } if published == identity)
+    );
+    cache.shutdown_and_wait();
+    let reopened = TimelineRenderCacheService::start(config).expect("independent disk reader");
+    assert_eq!(
+        reopened.lookup(identity, WorkingColorSpace::LinearRec709),
+        TimelineRenderCacheSubmission::Scheduled
+    );
+    let TimelineRenderCacheResult::Lookup { result: TimelineRenderCacheLookup::Hit(read), .. } =
+        wait(&reopened)
+    else {
+        panic!("current artifact must be read from disk");
+    };
+    assert_eq!(read.frame().alpha, ColorFrameAlpha::PremultipliedFloat);
+    for (actual, expected) in read.frame().data.iter().zip(&raw_pixels) {
+        assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+    }
+    reopened.shutdown_and_wait();
+    let source = CpuColorFrame::working(read.frame().clone());
+    let identity_graph = PreparedEffectProgram::prepare(&[], &[], WorkingColorSpace::LinearRec709)
+        .expect("identity definition")
+        .evaluate(TimelineTime::ZERO)
+        .expect("sole compiled identity");
+    let engine = mondrian_core::ColorEngine::mondrian_standard();
+    let runtime = TimelineEffectColorRuntime::new(&engine, WorkingColorSpace::LinearRec709);
+    let mut scratch = TimelineCompositeScratch::default();
+    let nested_layer = TimelineMediaLayer {
+        frame: &source,
+        opacity: 1.0,
+        blend_mode: mondrian_core::types::BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_graph: identity_graph.clone(),
+        frame_seed: 0,
+    };
+    let nested = mondrian_renderer::composite_timeline_elements_color_frame(
+        raw.width(),
+        raw.height(),
+        &[TimelineCompositeElement::Media(nested_layer)],
+        TimelineCompositeOptions::default(),
+        runtime,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("transparent nested working value");
+    assert_eq!(
+        nested.descriptor().alpha,
+        ColorFrameAlpha::PremultipliedFloat
+    );
+    assert_eq!(nested.rgba_f32().data, raw_pixels);
+    let parent = TimelineMediaLayer {
+        frame: &nested,
+        opacity: 0.25,
+        blend_mode: mondrian_core::types::BlendMode::Normal,
+        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        effect_graph: identity_graph,
+        frame_seed: 0,
+    };
+    let delivered = mondrian_renderer::composite_timeline_elements_color_frame(
+        raw.width(),
+        raw.height(),
+        &[TimelineCompositeElement::Media(parent)],
+        TimelineCompositeOptions {
+            background: TimelineCompositeBackground::OpaqueBlack,
+        },
+        runtime,
+        &mut scratch,
+        &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+    )
+    .expect("explicit opaque delivery");
+    let expected = raw_pixels
+        .iter()
+        .map(|sample| {
+            [
+                (f64::from(sample[0]) * 0.25) as f32,
+                (f64::from(sample[1]) * 0.25) as f32,
+                (f64::from(sample[2]) * 0.25) as f32,
+                1.0,
+            ]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(delivered.descriptor().alpha, ColorFrameAlpha::Opaque);
+    assert_eq!(delivered.rgba_f32().data, expected);
+    let transform = mondrian_renderer::RenderColorTransform::export(
+        mondrian_core::ColorSpace::Rec709,
+        false,
+        engine,
+    );
+    let actual = mondrian_renderer::CpuColorTransformExecutor::transform(&delivered, &transform)
+        .expect("actual stock OCIO encoder");
+    let oracle = CpuColorFrame::working(WorkingRgbaF32Frame {
+        width: raw.width(),
+        height: raw.height(),
+        alpha: ColorFrameAlpha::Opaque,
+        data: expected,
+        color_space: WorkingColorSpace::LinearRec709,
+    });
+    let expected_output =
+        mondrian_renderer::CpuColorTransformExecutor::transform(&oracle, &transform)
+            .expect("independent f64-law raster to delivery");
+    assert_eq!(actual.frame.rgba(), expected_output.frame.rgba());
+    assert!(actual.frame.rgba().chunks_exact(4).all(|pixel| pixel[3] == 255));
+    native.shutdown().expect("native teardown after complete chain");
+}
+
+#[test]
+#[ignore = "set SessionProbe binary and MONDRIAN_OPENFX_SESSION_PROBE_MODE=image_uid"]
+fn product_actual_image_identifiers_invalidate_cached_analysis_across_equal_time_and_seeks() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("UID probe mode"),
+        "image_uid"
+    );
+    product_actual_image_metadata_frames();
+}
+
+#[test]
+#[ignore = "set SessionProbe binary and MONDRIAN_OPENFX_SESSION_PROBE_MODE=image_field"]
+fn product_actual_progressive_image_metadata_reports_field_none() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("field probe mode"),
+        "image_field"
+    );
+    product_actual_image_metadata_frames();
+}
+
+fn product_actual_image_metadata_frames() {
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned actual-image probe"),
+    );
+    let inspection = inspect_openfx_binary(product_executable(), &binary)
+        .expect("inspect actual probe through supervised product");
+    let cancellation = mondrian_core::ExecutionCancellationToken::new();
+    let format = mondrian_effects::EffectValueFormat::new(
+        mondrian_effects::EffectWorkingPrecision::Float32,
+        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+        mondrian_core::ColorFrameAlpha::StraightCoverage,
+    );
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        1,
+        1,
+        format,
+        &mut checkpoint(&cancellation),
+    )
+    .expect("prepare bounded actual-image worker");
+    let worker = session.worker_process_id();
+    let mut timing = OpenFxRenderTiming {
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 2.0,
+    };
+    for (time, pixel) in [
+        (0.0, [0.25, -0.5, 1.5, 0.75]),
+        (0.0, [0.5, -0.25, 2.0, 0.75]),
+        (42.0, [0.125, -1.0, 4.0, 0.75]),
+        (0.0, [0.75, -0.125, 8.0, 0.75]),
+    ] {
+        timing.frame = time;
+        let frame = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            vec![pixel],
+        )
+        .expect("actual finite source frame");
+        let output = session
+            .render(
+                &timing,
+                &constant_parameters([("scale".into(), OpenFxParameterValue::Double(1.0))]),
+                &frame,
+                &mut checkpoint(&cancellation),
+            )
+            .expect("native actual-image metadata and cached analysis are valid");
+        assert_eq!(
+            output.pixels()[0].map(f32::to_bits),
+            pixel.map(f32::to_bits),
+            "independent raster oracle across changed input and seek"
+        );
+        assert_eq!(
+            output.alpha(),
+            mondrian_core::ColorFrameAlpha::StraightFloat
+        );
+        assert_eq!(
+            session.worker_process_id(),
+            worker,
+            "valid metadata never retires the worker"
+        );
+    }
+    session.shutdown().expect("destroy native image owner and reap worker");
+}
+
+#[test]
+#[ignore = "set owned SessionProbe mode mutex_contract"]
+fn product_native_mutex_suite_retains_worker_and_correct_pixels() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mutex probe mode"),
+        "mutex_contract"
+    );
+    product_actual_image_metadata_frames();
+}
+#[test]
+#[ignore = "set owned SessionProbe mode thread_contract"]
+fn product_native_thread_suite_retains_worker_and_correct_pixels() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("thread probe mode"),
+        "thread_contract"
+    );
+    product_actual_image_metadata_frames();
+}
+#[test]
+#[ignore = "set owned SessionProbe mode thread_concurrent"]
+fn product_native_thread_suite_preserves_concurrent_completion_ownership() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("concurrent thread probe mode"),
+        "thread_concurrent"
+    );
+    product_actual_image_metadata_frames();
+}
+#[test]
+#[ignore = "set owned SessionProbe mode thread_hang"]
+fn product_cancellation_reaps_stuck_owned_callback_thread() {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("thread hang mode"),
+        "thread_hang"
+    );
+    resident_worker_cancellation_retires_and_reaps_a_hung_native_render();
+}
+
+#[test]
+#[ignore = "requires current product, SessionProbe image_uid_persisted and a fresh MONDRIAN_OPENFX_IMAGE_ANALYSIS_FILE"]
+fn product_workers_bind_parent_namespace_and_restore_plugin_private_analysis_correctly() {
+    let inspection = cpu_contract_probe("image_uid_persisted");
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_IMAGE_ANALYSIS_FILE")
+            .expect("fresh owned private cache file"),
+    );
+    assert!(
+        !path.exists(),
+        "qualification owns a fresh plugin-private analysis record"
+    );
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(2.0))]);
+    let mut previous = None;
+    for pixel in [
+        [0.25, -0.5, 1.5, 0.25],
+        [5.0, -7.0, 11.0, 0.75],
+        [0.25, -0.5, 1.5, 0.25],
+    ] {
+        let input = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            vec![pixel],
+        )
+        .expect("owned source");
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            input.format(),
+            &mut || Ok(()),
+        )
+        .expect("fresh parent lifetime");
+        let owner = session.processor_owner();
+        let output = session
+            .render(&cpu_contract_timing(1.0), &parameters, &input, &mut || {
+                Ok(())
+            })
+            .expect("correct analysis after real process/cache reopen");
+        assert_eq!(output.pixels(), [pixel.map(|channel| channel * 2.0)]);
+        let record = std::fs::read(&path).expect("actual plugin-private persisted analysis");
+        let length = u32::from_ne_bytes(record[..4].try_into().expect("record length")) as usize;
+        let uid = std::str::from_utf8(&record[4..4 + length]).expect("actual UID").to_owned();
+        assert!(
+            uid.starts_with(&format!("mondrian-ofx:{}:", owner.0.simple())),
+            "the parent Prepare owner reaches the actual native image: {uid}"
+        );
+        if let Some((old_owner, old_uid)) = previous {
+            assert_ne!(owner, old_owner);
+            assert_ne!(uid, old_uid);
+        }
+        previous = Some((owner, uid));
+        session.shutdown().expect("actual owner teardown before reprepare/reopen");
+    }
+}
+#[test]
+#[ignore = "requires current product and owned SessionProbe aux_error bundle"]
+fn native_persistent_error_repairs_through_real_effects_residency_without_owner_replacement() {
+    use mondrian_effects::{
+        EffectExecutionError, EffectExecutionSession, EffectExecutionSessionConfig,
+        EffectFloatExecutionError, EffectProcessorControl, EffectProcessorExecutionOrigin,
+        EffectProcessorRetention,
+    };
+    let inspection = cpu_contract_probe("aux_error");
+    let kind = register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("native definition");
+    let mondrian_effects::EffectType::Plugin(ref provider_key) = kind else {
+        panic!("native provider key");
+    };
+    let mut effect = instantiate_effect_node(kind.clone()).expect("actual authored occurrence");
+    let description = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("actual native author schema");
+    let scale_label = &description
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "scale")
+        .expect("official Basic scale")
+        .label;
+    let scale = effect
+        .properties
+        .iter()
+        .find(|(_, property)| &property.descriptor.display_name == scale_label)
+        .map(|(_, property)| property.descriptor.parameter_id().clone())
+        .expect("actual parameter id");
+    // One author occurrence survives a genuine parameter revision; it is not
+    // re-instantiated from the new graph or replaced by an App-held instance.
+    effect
+        .set_static_value_by_parameter(&scale, PropertyValue::Double(1.0))
+        .expect("blocked author state");
+    let compile = |node: &mondrian_effects::EffectNode| {
+        let frame_context = EffectFrameContext::new(
+            Rational::FPS_24,
+            SampleAspectRatio::SQUARE,
+            TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(10, 24).expect("canonical available duration"),
+            )
+            .expect("canonical nonempty owner range"),
+        )
+        .expect("canonical sequence frame context");
+        PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+            std::slice::from_ref(node),
+            &[],
+            &[],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            frame_context,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("author program")
+        .evaluate(TimelineTime::ZERO)
+        .expect("canonical graph")
+    };
+    let input = EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(1, 1),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        ),
+        vec![[0.25, -0.5, 1.5, 0.25]],
+    )
+    .expect("complete frame");
+    for optional_count in [1, 0] {
+        let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+            max_processor_instances: optional_count,
+            max_processor_bytes: 64 * 1024 * 1024,
+            max_working_bytes: 128 * 1024 * 1024,
+            max_cache_bytes: 0,
+            max_cache_entries: 0,
+            ..Default::default()
+        });
+        session.bind_generation(7);
+        let mut control = EffectProcessorControl::uncancelled();
+        let Err(EffectFloatExecutionError::CustomProcessor(
+            EffectExecutionError::ProcessorUserBlocked { receipt: blocked, .. },
+        )) = session.apply_compiled_rgba_f32(input.view(), &compile(&effect), 0, &mut control)
+        else {
+            panic!("actual persistent Error must return recoverable typed receipt");
+        };
+        assert!(blocked.feedback.snapshot.is_blocked());
+        assert_eq!(blocked.preparation.effect_id, blocked.effect_id);
+        assert_eq!(blocked.feedback.snapshot.invocation(), 1);
+        assert_eq!(
+            blocked.retention,
+            if optional_count == 1 {
+                EffectProcessorRetention::Retained
+            } else {
+                EffectProcessorRetention::Evicted
+            }
+        );
+        assert_eq!(session.diagnostics().processor_instances, optional_count);
+        assert_eq!(
+            input.pixels(),
+            [[0.25, -0.5, 1.5, 0.25]],
+            "no staged pixels published on blocked work"
+        );
+        let EffectProcessorExecutionOrigin::SupervisedChild { process_id: blocked_pid } =
+            blocked.feedback.origin
+        else {
+            panic!("actual child PID required");
+        };
+        let owner = blocked.feedback.owner;
+        let revision = blocked.provider_revision;
+        let mut repaired = effect.clone();
+        repaired
+            .set_static_value_by_parameter(&scale, PropertyValue::Double(2.0))
+            .expect("genuine authored repair");
+        session.bind_generation(8);
+        let mut control = EffectProcessorControl::uncancelled();
+        let output = session
+            .apply_compiled_rgba_f32(input.view(), &compile(&repaired), 1, &mut control)
+            .expect("InstanceChanged cleared Error before exactly one Render");
+        assert_eq!(
+            output.pixels(),
+            [[0.5, -1.0, 3.0, 0.5]],
+            "official Basic analytic output; no advanced-DSP replay"
+        );
+        let reports = control.take_feedback().expect("pre-admitted feedback slots");
+        assert_eq!(reports.len(), 1);
+        let recovered = reports.iter().next().expect("actual recovered feedback");
+        assert!(!recovered.feedback.snapshot.is_blocked());
+        assert!(recovered.feedback.snapshot.persistent().is_none());
+        assert_eq!(recovered.effect_id, blocked.effect_id);
+        assert_eq!(
+            recovered.provider_revision, revision,
+            "author parameters are not immutable provider replacement"
+        );
+        let EffectProcessorExecutionOrigin::SupervisedChild { process_id: recovered_pid } =
+            recovered.feedback.origin
+        else {
+            panic!("actual child PID required");
+        };
+        if optional_count == 1 {
+            assert_eq!(recovered.feedback.owner, owner);
+            assert_eq!(
+                recovered_pid, blocked_pid,
+                "same actual valid resident child, not UI inference"
+            );
+            assert_eq!(recovered.feedback.snapshot.invocation(), 2);
+            assert!(
+                recovered.feedback.snapshot.persistent_revision()
+                    > blocked.feedback.snapshot.persistent_revision()
+            );
+        } else {
+            assert_ne!(
+                recovered.feedback.owner, owner,
+                "an evicted owner cannot be resurrected"
+            );
+            // OS may legally recycle a reaped PID. Parent-owned UUID is the
+            // unambiguous new processor lifetime identity, not PID inequality.
+            assert_eq!(recovered.feedback.snapshot.invocation(), 1);
+            assert_eq!(
+                recovered.feedback.snapshot.persistent_revision(),
+                0,
+                "new valid author state did not clear another owner's private Error"
+            );
+            assert_eq!(recovered.retention, EffectProcessorRetention::Evicted);
+        }
+        assert_eq!(session.diagnostics().processor_instances, optional_count);
+        let status =
+            mondrian_effects::effect_plugin_runtime_status(provider_key).expect("registry state");
+        assert!(
+            !status.disabled,
+            "persistent user error is not plugin quarantine"
+        );
+        assert!(status.last_error.is_none());
+        session.retire_processor_resources();
+        assert_eq!(session.diagnostics().processor_instances, 0);
+    }
+}
+
+#[test]
+#[ignore = "requires current product and owned SessionProbe aux_transient_instance bundle"]
+fn native_log_messages_reach_product_tracing_with_exact_supervised_owner() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+    struct Fields(BTreeMap<String, String>);
+    impl tracing::field::Visit for Fields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+            if event.metadata().target() == "mondrian.openfx.plugin" {
+                let mut fields = Fields(BTreeMap::new());
+                event.record(&mut fields);
+                self.0.lock().expect("test capture").push(fields.0);
+            }
+        }
+    }
+
+    let inspection = cpu_contract_probe("aux_transient_instance");
+    let input = EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(1, 1),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        ),
+        vec![[0.25, -0.5, 1.5, 0.25]],
+    )
+    .expect("complete independent frame");
+    let mut session = mondrian_app::openfx_host::OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        1,
+        1,
+        input.format(),
+        &mut || Ok(()),
+    )
+    .expect("actual supervised owner");
+    let owner = session.processor_owner().to_string();
+    let process_id = session.worker_process_id().to_string();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&records)));
+    tracing::subscriber::with_default(subscriber, || {
+        for invocation in [1_u64, 2] {
+            let timing = OpenFxRenderTiming {
+                frame: (invocation - 1) as f64,
+                frame_rate: 24.0,
+                first_frame: 0.0,
+                last_frame: 100.0,
+                pixel_aspect_ratio: 2.0,
+            };
+            let output = session
+                .render(&timing, &BTreeMap::new(), &input, &mut || Ok(()))
+                .expect("real official Basic gain render");
+            assert_eq!(
+                output.pixels(),
+                input.pixels(),
+                "independent unit-gain native output"
+            );
+            let feedback = session.take_feedback().expect("actual complete typed report");
+            assert_eq!(feedback.owner.to_string(), owner);
+            assert_eq!(feedback.snapshot.invocation(), invocation);
+            assert_eq!(feedback.snapshot.notices().len(), 6);
+        }
+    });
+    let records = records.lock().expect("captured parent diagnostics");
+    assert_eq!(records.len(), 4, "exactly the two genuine Log notices per invocation; information/warning are not log duplicates");
+    for (index, fields) in records.iter().enumerate() {
+        assert_eq!(fields.get("processor_owner"), Some(&owner));
+        assert_eq!(fields.get("worker_process_id"), Some(&process_id));
+        assert_eq!(
+            fields.get("native_invocation"),
+            Some(&(index / 2 + 1).to_string())
+        );
+        assert_eq!(fields.get("notice_id").map(String::as_str), Some(""));
+        assert_eq!(
+            fields.get("plugin_message").map(String::as_str),
+            Some(if index % 2 == 0 {
+                "说明🙂 7 1.250"
+            } else {
+                "第二条通知✓"
+            })
+        );
+    }
+    drop(records);
+    session.shutdown().expect("same actual owner gracefully destroyed");
+}
+
+#[test]
+#[ignore = "requires current product and owned cooperative_progress fixture"]
+fn native_live_progress_flows_through_real_effects_residency_before_frame_completion() {
+    use mondrian_effects::{
+        EffectExecutionSession, EffectExecutionSessionConfig, EffectProcessorControl,
+        EffectProcessorExecutionOrigin, EffectProcessorObservation, EffectProcessorObserver,
+        EffectProcessorProgressReceipt,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug)]
+    struct ActualConsumer {
+        thread: std::thread::ThreadId,
+        started: PathBuf,
+        release: PathBuf,
+        observed: Mutex<Option<EffectProcessorProgressReceipt>>,
+    }
+    impl EffectProcessorObserver for ActualConsumer {
+        fn question_service(
+            &self,
+        ) -> Option<&dyn mondrian_effects::EffectProcessorQuestionService> {
+            None
+        }
+        fn maximum_storage_bytes(&self) -> usize {
+            // One receipt, plus the exact owned fixture paths/test state.
+            EffectProcessorProgressReceipt::maximum_retained_bytes()
+                + std::mem::size_of::<Self>()
+                + self.started.as_os_str().len() * 2
+                + self.release.as_os_str().len() * 2
+        }
+        fn observe(&self, receipt: &EffectProcessorProgressReceipt) {
+            assert_eq!(
+                std::thread::current().id(),
+                self.thread,
+                "product owner callback remains on the Effects execution thread"
+            );
+            if receipt.progress.progress.active() && receipt.progress.progress.fraction() == 0.375 {
+                let started = std::fs::read_to_string(&self.started)
+                    .expect("native Render already reached its independent receipt");
+                assert_eq!(started.lines().count(), 1, "one stateful native action");
+                let mut observed = self.observed.lock().expect("one bounded receipt");
+                assert!(observed.is_none(), "the .375 observation is not replayed");
+                *observed = Some(receipt.clone());
+                std::fs::write(&self.release, b"continue this actual owner")
+                    .expect("actual live consumer releases the fixture");
+            }
+        }
+    }
+    let inspection = cpu_contract_probe("cooperative_progress");
+    let kind = register_selected_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("actual immutable App factory");
+    let mondrian_effects::EffectType::Plugin(ref key) = kind else {
+        panic!("actual provider");
+    };
+    let provider = key.clone();
+    let effect = instantiate_effect_node(kind).expect("real authored occurrence");
+    let frame_context = EffectFrameContext::new(
+        Rational::FPS_24,
+        SampleAspectRatio::SQUARE,
+        TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(10, 24).expect("canonical available duration"),
+        )
+        .expect("canonical nonempty owner range"),
+    )
+    .expect("canonical sequence frame context");
+    let graph = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        std::slice::from_ref(&effect),
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        frame_context,
+        &LutPreparationCache::uncached(),
+    )
+    .expect("one canonical author program")
+    .evaluate(TimelineTime::ZERO)
+    .expect("one compiled execution contract");
+    let pixels = [[0.25_f32, -0.5, 1.5, 0.25]];
+    let input = EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(1, 1),
+        mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        ),
+        pixels.to_vec(),
+    )
+    .expect("actual finite authored input");
+    let sink = Arc::new(ActualConsumer {
+        thread: std::thread::current().id(),
+        started: PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_COOPERATIVE_STARTED")
+                .expect("root-owned exact native receipt path"),
+        ),
+        release: PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_COOPERATIVE_RELEASE")
+                .expect("root-owned exact continuation path"),
+        ),
+        observed: Mutex::new(None),
+    });
+    let mut control = EffectProcessorControl::uncancelled();
+    control.bind_observation(EffectProcessorObservation {
+        sink: Some(sink.clone()),
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(5)),
+    });
+    let mut session = EffectExecutionSession::new(EffectExecutionSessionConfig {
+        max_processor_instances: 1,
+        max_processor_bytes: 64 * 1024 * 1024,
+        max_working_bytes: 128 * 1024 * 1024,
+        max_cache_bytes: 0,
+        max_cache_entries: 0,
+        ..Default::default()
+    });
+    let output = session
+        .apply_compiled_rgba_f32(input.view(), &graph, 0, &mut control)
+        .expect("live native consumer permits the sole real output");
+    assert_eq!(
+        output.pixels(),
+        pixels,
+        "independent unit-gain Basic oracle"
+    );
+    assert_eq!(
+        input.pixels(),
+        pixels,
+        "no second author/raster interpretation"
+    );
+    let observed = sink.observed.lock().expect("bounded current fact");
+    let live = observed.as_ref().expect("terminal-only receipt cannot release Render");
+    let terminal = control.take_feedback().expect("canonical completed owner facts");
+    assert_eq!(terminal.len(), 1);
+    let terminal = terminal.iter().next().expect("one actual invocation");
+    assert_eq!(live.preparation, terminal.preparation);
+    assert_eq!(live.preparation.effect_id, effect.id);
+    assert_eq!(live.provider_revision, terminal.provider_revision);
+    assert_eq!(live.progress.owner, terminal.feedback.owner);
+    assert_eq!(live.progress.origin, terminal.feedback.origin);
+    assert_eq!(
+        live.progress.invocation,
+        terminal.feedback.snapshot.invocation()
+    );
+    assert_eq!(
+        live.progress.native_owner,
+        terminal.feedback.snapshot.native_owner()
+    );
+    let EffectProcessorExecutionOrigin::SupervisedChild { process_id } = live.progress.origin
+    else {
+        panic!("real child origin");
+    };
+    let started = std::fs::read_to_string(&sink.started).expect("independent native receipt");
+    assert_eq!(started.lines().count(), 1);
+    let (pid, uid) = started.trim_end().split_once('\t').expect("actual PID and Source UID");
+    assert_eq!(
+        pid.parse::<u32>().expect("actual receipt PID"),
+        process_id.get()
+    );
+    assert!(uid.starts_with(&format!("mondrian-ofx:{}:", live.progress.owner.0.simple())));
+    assert_eq!(
+        session.diagnostics().processor_instances,
+        1,
+        "the sole bank retained its actual valid owner, not an App-held clone"
+    );
+    let status =
+        mondrian_effects::effect_plugin_runtime_status(&provider).expect("actual provider");
+    assert!(!status.disabled);
+    assert!(status.last_error.is_none());
+    session.retire_processor_resources();
+    assert_eq!(session.diagnostics().processor_instances, 0);
 }

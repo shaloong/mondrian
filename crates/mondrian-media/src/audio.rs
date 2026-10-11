@@ -179,9 +179,31 @@ pub(crate) struct RealtimeAudioOutputObserver {
 
 /// Identity of one callback-quiescence obligation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RealtimeAudioOutputQuiescenceToken {
+pub struct RealtimeAudioOutputQuiescenceToken {
     pub(crate) stream_generation: u64,
     pub(crate) revision: u64,
+}
+
+impl RealtimeAudioOutputQuiescenceToken {
+    /// Issue one opaque obligation from the owning output adapter's stream/revision.
+    ///
+    /// The adapter must use a nonzero stream identity and must not reuse a revision
+    /// for distinct outstanding obligations. Construction is not acknowledgement:
+    /// only the owning adapter can prove that all old software callbacks completed.
+    /// This token provides no physical DAC-drain proof.
+    pub const fn new(stream_generation: u64, revision: u64) -> Self {
+        Self { stream_generation, revision }
+    }
+
+    /// Concrete stream identity whose callbacks are being retired.
+    pub const fn stream_generation(self) -> u64 {
+        self.stream_generation
+    }
+
+    /// Owning adapter's exact callback-control revision.
+    pub const fn revision(self) -> u64 {
+        self.revision
+    }
 }
 
 /// Checked failures at the realtime output control/queue boundary.
@@ -223,7 +245,7 @@ pub enum RealtimeAudioOutputControlError {
 
 /// Rejection of one complete interleaved PCM buffer at the device queue seam.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub(crate) enum RealtimeAudioOutputEnqueueError {
+pub enum RealtimeAudioOutputEnqueueError {
     /// No concrete output stream is bound to the Manager.
     #[error("no concrete realtime audio output stream is available")]
     OutputUnavailable,

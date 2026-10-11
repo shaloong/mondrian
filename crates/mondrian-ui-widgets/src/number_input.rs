@@ -14,7 +14,7 @@ use crate::TextInput;
 mod model;
 
 use model::NumberInputModel;
-pub use model::NumberInputValue;
+pub use model::{NumberInputValue, NumericInputAdjustment};
 
 /// Adapter that maps the current numeric value to an editor [`Action`].
 pub type NumberInputChangeAction<T = f64> = dyn Fn(T) -> Option<Action>;
@@ -160,9 +160,32 @@ impl<T: NumberInputValue> NumberInput<T> {
         EventResult::Handled
     }
 
-    fn nudge(&mut self, step: T, increase: bool, ctx: &mut EventContext) -> EventResult {
-        let value = self.value().unwrap_or_else(|| self.model.committed_value());
-        self.set_value_from_keyboard(value.offset(step, increase), ctx)
+    fn apply_keyboard_adjustment(
+        &mut self,
+        source: T,
+        adjustment: NumericInputAdjustment,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let value = self.model.adjusted_value(source, adjustment);
+        self.set_value_from_keyboard(value, ctx)
+    }
+
+    /// Adjust this idle numeric baseline for its paired numeric control.
+    ///
+    /// The exact NumberInput model owns the increment and hard bounds. This
+    /// never parses a draft, replaces a focused text/IME session or uses pointer
+    /// coordinates. A recognized hard-bound no-op remains owned without a
+    /// callback; a change uses the same fresh on_change adapter as text entry.
+    pub fn adjust_unfocused_from_keyboard(
+        &mut self,
+        adjustment: NumericInputAdjustment,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if self.focused || !self.input.can_focus() || self.input.is_composing() {
+            return EventResult::Ignored;
+        }
+        self.apply_keyboard_adjustment(self.model.committed_value(), adjustment, ctx);
+        EventResult::Handled
     }
 
     fn dispatch_if_valid(&mut self, ctx: &mut EventContext) -> bool {
@@ -218,13 +241,15 @@ impl<T: NumberInputValue> Widget for NumberInput<T> {
             && !modifiers.alt
             && !modifiers.meta
         {
-            let step = self.model.keyboard_step(*modifiers);
-            match key {
-                KeyCode::Up => return self.nudge(step, true, ctx),
-                KeyCode::Down => return self.nudge(step, false, ctx),
-                KeyCode::PageUp => return self.nudge(self.model.page_step(), true, ctx),
-                KeyCode::PageDown => return self.nudge(self.model.page_step(), false, ctx),
-                _ => {}
+            // Left/Right and Home/End remain text navigation. Numeric entry
+            // and its paired Slider reuse the same typed adjustment/model.
+            if matches!(
+                key,
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+            ) && let Some(adjustment) = NumericInputAdjustment::from_key(*key, *modifiers)
+            {
+                let source = self.value().unwrap_or_else(|| self.model.committed_value());
+                return self.apply_keyboard_adjustment(source, adjustment, ctx);
             }
         }
         if self.focused
@@ -1766,5 +1791,94 @@ mod tests {
             node.value,
             Some(mondrian_ui_core::AccessibilityValue::Text("12".to_owned()))
         );
+    }
+
+    #[test]
+    fn numeric_unfocused_keyboard_adapter_keeps_exact_storage_and_owns_boundary_noop() {
+        let values = Rc::new(RefCell::new(Vec::<i64>::new()));
+        let observed = Rc::clone(&values);
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let initial = 9_007_199_254_740_993_i64;
+        let mut input =
+            NumberInput::new(initial, i64::MIN, i64::MAX)
+                .with_step(1)
+                .on_change(move |value| {
+                    observed.borrow_mut().push(value);
+                    None::<Action>
+                });
+        assert_eq!(
+            input.adjust_unfocused_from_keyboard(
+                NumericInputAdjustment::Step { increase: true, coarse: false },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(input.committed_value(), initial + 1);
+        assert_eq!(
+            input.text().parse::<i64>().expect("exact text"),
+            initial + 1
+        );
+        assert_eq!(values.borrow().as_slice(), &[initial + 1]);
+        assert!(input.set_unfocused_value(i64::MAX));
+        assert_eq!(
+            input.adjust_unfocused_from_keyboard(
+                NumericInputAdjustment::Step { increase: true, coarse: false },
+                &mut ctx
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(input.committed_value(), i64::MAX);
+        assert_eq!(
+            values.borrow().as_slice(),
+            &[initial + 1],
+            "hard-bound ownership is a no-op, not duplicate author feedback"
+        );
+    }
+
+    #[test]
+    fn numeric_unfocused_keyboard_adapter_refuses_focused_draft_and_disabled_input() {
+        let values = Rc::new(RefCell::new(Vec::new()));
+        let dispatch = |_: Action| {};
+        let mut focus = DummyFocus;
+        let mut shortcuts = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcuts, &mut tooltip, &dispatch);
+        let mut input = NumberInput::new(-100.0_f64, -120.0, 24.0)
+            .with_step(0.1)
+            .on_change(record_value(Rc::clone(&values)));
+        layout(&mut input);
+        click(&mut input, &mut ctx);
+        input.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: crate::test_utils::primary_text_modifiers(),
+            },
+            &mut ctx,
+        );
+        input.event(&UiEvent::TextInput("-101.25".to_owned()), &mut ctx);
+        let draft = input.text().to_owned();
+        assert_eq!(
+            input.adjust_unfocused_from_keyboard(
+                NumericInputAdjustment::Step { increase: true, coarse: false },
+                &mut ctx
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(input.text(), draft);
+        assert_eq!(input.committed_value(), -100.0);
+        assert!(values.borrow().is_empty());
+        let mut disabled = NumberInput::new(-100.0_f64, -120.0, 24.0)
+            .disabled()
+            .on_change(record_value(Rc::clone(&values)));
+        assert_eq!(
+            disabled.adjust_unfocused_from_keyboard(NumericInputAdjustment::Maximum, &mut ctx),
+            EventResult::Ignored
+        );
+        assert_eq!(disabled.committed_value(), -100.0);
+        assert!(values.borrow().is_empty());
     }
 }

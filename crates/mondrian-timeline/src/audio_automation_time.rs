@@ -35,6 +35,9 @@ pub enum AudioAutomationTimeError {
     /// Invalid author state cannot produce an owner-local coordinate.
     #[error("Audio Component {0} has a negative author origin")]
     NegativeOwnerOrigin(AudioComponentEditId),
+    /// An execution callback falls outside its exact half-open occurrence.
+    #[error("Audio execution callback is outside Component {0}")]
+    OutsideOccurrence(AudioComponentEditId),
     /// This interface does not interpret another authoring domain.
     #[error("Unsupported audio automation author domain: {0:?}")]
     UnsupportedDomain(AuthoringTimeDomain),
@@ -56,6 +59,29 @@ pub fn audio_automation_author_time(
     target: &AudioAutomationTarget,
     sequence_time: DomainTime,
     scope_occurrence: Option<AudioComponentAddress>,
+) -> Result<DomainTime, AudioAutomationTimeError> {
+    project_audio_automation_time(sequence, target, sequence_time, scope_occurrence, true)
+}
+
+/// Resolve a native Process callback in the exact addressed execution owner.
+///
+/// Unlike UI playhead projection, an execution observation is refused outside
+/// its actual half-open occurrence. No boundary key or default value is made.
+pub fn audio_automation_execution_time(
+    sequence: &Sequence,
+    target: &AudioAutomationTarget,
+    sequence_time: DomainTime,
+    scope_occurrence: Option<AudioComponentAddress>,
+) -> Result<DomainTime, AudioAutomationTimeError> {
+    project_audio_automation_time(sequence, target, sequence_time, scope_occurrence, false)
+}
+
+fn project_audio_automation_time(
+    sequence: &Sequence,
+    target: &AudioAutomationTarget,
+    sequence_time: DomainTime,
+    scope_occurrence: Option<AudioComponentAddress>,
+    clamp_playhead: bool,
 ) -> Result<DomainTime, AudioAutomationTimeError> {
     if sequence_time.domain != AuthoringTimeDomain::Sequence(sequence.id) {
         return Err(AudioAutomationTimeError::SequenceDomainMismatch);
@@ -105,10 +131,16 @@ pub fn audio_automation_author_time(
     }
     let clip = occurrence.owning_clip();
     let placement = TimelineTimeRange::new(clip.position, clip.duration)?;
-    let elapsed = sequence_time
-        .time
-        .clamp(placement.start, placement.end()?)
-        .checked_sub(placement.start)?;
+    let end = placement.end()?;
+    let projected = if clamp_playhead {
+        sequence_time.time.clamp(placement.start, end)
+    } else {
+        if sequence_time.time < placement.start || sequence_time.time >= end {
+            return Err(AudioAutomationTimeError::OutsideOccurrence(address.edit_id));
+        }
+        sequence_time.time
+    };
+    let elapsed = projected.checked_sub(placement.start)?;
     Ok(DomainTime::new(domain, origin.checked_add(elapsed)?))
 }
 
@@ -282,6 +314,62 @@ mod tests {
             Err(AudioAutomationTimeError::NegativeOwnerOrigin(
                 address.edit_id
             ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_execution_time_contracts {
+    use super::*;
+    use mondrian_core::{AssetId, AudioSourceComponentId, TimelineTime};
+    fn tt(n: i64, d: i64) -> TimelineTime {
+        TimelineTime::new(n, d).expect("exact time")
+    }
+    #[test]
+    fn audio_execution_time_refuses_outside_occurrence_without_clamping_keys() {
+        let mut sequence = Sequence::new("Native exact callback");
+        let track = sequence.audio_tracks[0].id;
+        let clip = crate::Clip::new(AssetId::new(), tt(10, 1), tt(2, 1)).expect("clip");
+        sequence
+            .add_media_audio_clip(track, clip, AudioSourceComponentId::primary())
+            .expect("native occurrence");
+        let clip = &mut sequence.audio_tracks[0].clips[0];
+        clip.audio_components[0].processing.scope_in = tt(7, 5);
+        let occurrence = AudioComponentAddress {
+            track_id: track,
+            clip_id: clip.id,
+            edit_id: clip.audio_components[0].id,
+        };
+        let scope = clip.audio_components[0].processing.scope_id;
+        let target = AudioAutomationTarget::ProcessingScopeInputGain { scope_id: scope };
+        let position = |time| DomainTime::new(AuthoringTimeDomain::Sequence(sequence.id), time);
+        for time in [tt(9, 1), tt(12, 1), tt(13, 1)] {
+            assert_eq!(
+                audio_automation_execution_time(
+                    &sequence,
+                    &target,
+                    position(time),
+                    Some(occurrence)
+                ),
+                Err(AudioAutomationTimeError::OutsideOccurrence(
+                    occurrence.edit_id
+                ))
+            );
+        }
+        assert_eq!(
+            audio_automation_execution_time(
+                &sequence,
+                &target,
+                position(tt(41, 4)),
+                Some(occurrence)
+            )
+            .expect("inside"),
+            DomainTime::new(AuthoringTimeDomain::AudioProcessingScope(scope), tt(33, 20))
+        );
+        assert_eq!(
+            audio_automation_author_time(&sequence, &target, position(tt(13, 1)), Some(occurrence))
+                .expect("UI clamp remains valid"),
+            DomainTime::new(AuthoringTimeDomain::AudioProcessingScope(scope), tt(17, 5))
         );
     }
 }

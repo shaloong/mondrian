@@ -484,7 +484,10 @@ impl AppState {
                             |parameter| {
                                 parameter.schema == **parameter_schema
                                     && parameter.schema.numeric.is_some()
-                                    && parameter.automation.keyframes.is_empty()
+                                    && parameter
+                                        .automation
+                                        .as_ref()
+                                        .is_some_and(|curve| curve.keyframes.is_empty())
                             },
                         )
                     })

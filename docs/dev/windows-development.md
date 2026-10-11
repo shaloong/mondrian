@@ -1,7 +1,13 @@
 # Windows development dependencies
 
 Use PowerShell 7 and the repository-pinned Rust toolchain. Install Visual Studio
-2022 with Desktop development with C++, an x64 MSVC toolset, C++ CMake tools (CMake and Ninja), and Windows SDK.
+2022 version 17.11 or later with Desktop development with C++, an x64 MSVC
+toolset, C++ CMake tools (CMake and Ninja), Windows SDK, and **C++ ATL for latest
+v143 build tools (x86 & x64)**. ATL is an optional Visual Studio component;
+installing the Desktop C++ workload alone does not establish its availability.
+Its installer ID is `Microsoft.VisualStudio.Component.VC.ATL`. If a specific
+older toolset is deliberately selected, install its matching ATL component;
+for v14.44 this is `Microsoft.VisualStudio.Component.VC.14.44.17.14.ATL`.
 LLVM supplies `libclang.dll` for bindgen; MSVC remains the native C/C++ compiler.
 The Vulkan SDK supplies validation/development tools; its installation does not
 qualify the display, GPU driver, or HDR output.
@@ -47,3 +53,34 @@ including when sources are on an SMB checkout. Existing `CARGO_TARGET_DIR` or
 `-TargetDirectory` overrides that default. Do not share this directory with
 simultaneous builds. Logs, package caches, native tool installations, machine
 paths and build outputs must not be committed.
+
+## Windows x64 shader compiler prerequisite
+
+The Windows MSVC x64 renderer enables wgpu's `static-dxc` feature. The pinned
+native compiler archive contains explicit `/DEFAULTLIB:atls.lib` directives;
+the actual active MSVC toolset must supply that library. Visual Studio Installer
+**Modify → Individual components** installs ATL into that toolset. Reactivate the
+environment afterwards. A C++ redistributable runtime does not supply this
+development library, and an unrelated toolset's copy is not a substitute.
+
+The existing activation script checks
+`VCToolsInstallDir/atlmfc/lib/x64/atls.lib`, the exact activated x64 `cl.exe`, and
+the ATL directory in `LIB` before reporting readiness. It rejects Visual Studio
+older than 17.11 and an activated toolset older than v14.41. Windows CI and packaging
+use the same entry point in its MSVC-only mode:
+
+```powershell
+. ./scripts/enter-windows-development.ps1 -MsvcOnly
+```
+
+This mode activates and validates the compiler environment without requiring
+FFmpeg or LLVM to be installed first. It imports only the named MSVC/SDK variables,
+preserving the caller's existing vcpkg, FFmpeg and LLVM selections. It changes only the current process;
+workflow steps explicitly persist its finite set of required variables through
+`GITHUB_ENV`. Missing ATL is a build prerequisite failure. It is not a renderer
+pixel, performance, or hardware qualification result. The dependency's own
+build script separately checks its minimum MSVC compiler version.
+
+Sources: [Visual Studio 2022 component IDs](https://learn.microsoft.com/en-us/visualstudio/install/workload-component-id-vs-build-tools?view=vs-2022#desktop-development-with-c),
+[wgpu compiler selection](https://docs.rs/wgpu/30.0.0/wgpu/enum.Dx12Compiler.html),
+and [pinned native compiler provenance](static-dxc-provenance.md).

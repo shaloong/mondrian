@@ -1,0 +1,247 @@
+use super::*;
+use crate::{audio_ports::AudioPortInfoWriter, utils::write_to_array_buf};
+use clack_plugin::extensions::prelude::*;
+use clap_sys::{ext::audio_ports::clap_audio_port_info, id::CLAP_INVALID_ID};
+use std::mem::MaybeUninit;
+
+/// Implementation of the Plugin-side of the Audio Ports Configuration extension.
+pub trait PluginAudioPortsConfigImpl {
+    /// Returns the number of available [`AudioPortsConfiguration`]s.
+    fn count(&self) -> u32;
+
+    /// Retrieves a specific [`AudioPortsConfiguration`] from its index.
+    ///
+    /// The plugin gets passed a host-provided mutable buffer to write the configuration into, to
+    /// avoid any unnecessary allocations.
+    fn get(&self, index: u32, writer: &mut AudioPortConfigWriter);
+
+    /// Requests the plugin to change its Audio Ports Configuration to the one with the given ID.
+    ///
+    /// The plugin *must* be deactivated to call this method.
+    ///
+    /// # Error
+    ///
+    /// This method may return an error if the given ID is out of bounds,
+    /// or if the plugin declined or failed to change its Audio Ports Configuration.
+    fn select(&self, config_id: ClapId) -> Result<(), PluginError>;
+}
+
+/// Implementation of the Plugin-side of the Audio Ports Configuration Info extension.
+pub trait PluginAudioPortsConfigInfoImpl {
+    /// Gets the id of the currently selected config, or [`None`] if the current port
+    /// layout isn't part of the config list.
+    fn current_config(&self) -> Option<ClapId>;
+
+    /// Get info about an audio port, for a given `config_id`.
+    /// This is analogous to [`PluginAudioPortsImpl::get`](crate::audio_ports::PluginAudioPortsImpl::get).
+    fn get(&self, config_id: ClapId, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter);
+}
+
+// SAFETY: The given struct is the CLAP extension struct for the matching side of this extension.
+unsafe impl<P> ExtensionImplementation<P> for PluginAudioPortsConfig
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigImpl>,
+{
+    #[doc(hidden)]
+    const IMPLEMENTATION: RawExtensionImplementation =
+        RawExtensionImplementation::new(&clap_plugin_audio_ports_config {
+            count: Some(count::<P>),
+            get: Some(get::<P>),
+            select: Some(select::<P>),
+        });
+}
+
+// SAFETY: The given struct is the CLAP extension struct for the matching side of this extension.
+unsafe impl<P> ExtensionImplementation<P> for PluginAudioPortsConfigInfo
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigInfoImpl>,
+{
+    #[doc(hidden)]
+    const IMPLEMENTATION: RawExtensionImplementation =
+        RawExtensionImplementation::new(&clap_plugin_audio_ports_config_info {
+            current_config: Some(info_current_config::<P>),
+            get: Some(info_get::<P>),
+        });
+}
+
+#[allow(clippy::missing_safety_doc)]
+unsafe extern "C" fn count<P>(plugin: *const clap_plugin) -> u32
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigImpl>,
+{
+    PluginWrapper::<P>::handle(plugin, |p| Ok(p.main_thread().count())).unwrap_or(0)
+}
+
+#[allow(clippy::missing_safety_doc)]
+unsafe extern "C" fn get<P>(
+    plugin: *const clap_plugin,
+    index: u32,
+    config: *mut clap_audio_ports_config,
+) -> bool
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigImpl>,
+{
+    PluginWrapper::<P>::handle(plugin, |p| {
+        if config.is_null() {
+            return Err(PluginWrapperError::NulPtr("clap_audio_ports_config"));
+        };
+
+        let mut writer = AudioPortConfigWriter::from_raw(config);
+        p.main_thread().get(index, &mut writer);
+        Ok(writer.is_set)
+    })
+    .unwrap_or(false)
+}
+
+#[allow(clippy::missing_safety_doc)]
+unsafe extern "C" fn select<P>(plugin: *const clap_plugin, config_id: u32) -> bool
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigImpl>,
+{
+    PluginWrapper::<P>::handle(plugin, |p| {
+        if p.is_active() {
+            return Err(PluginWrapperError::DeactivationRequiredForFunction(
+                "clap_plugin_audio_ports_config.select",
+            ));
+        }
+
+        let config_id = ClapId::from_raw(config_id)
+            .ok_or(PluginWrapperError::InvalidParameter("Invalid config_id"))?;
+
+        Ok(p.main_thread().select(config_id)?)
+    })
+    .is_some()
+}
+
+#[allow(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
+unsafe extern "C" fn info_current_config<P>(plugin: *const clap_plugin) -> u32
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigInfoImpl>,
+{
+    unsafe {
+        PluginWrapper::<P>::handle(plugin, |p| {
+            Ok(match p.main_thread().current_config() {
+                Some(id) => id.get(),
+                None => CLAP_INVALID_ID,
+            })
+        })
+        .unwrap_or(CLAP_INVALID_ID)
+    }
+}
+
+#[allow(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
+unsafe extern "C" fn info_get<P>(
+    plugin: *const clap_plugin,
+    config_id: u32,
+    index: u32,
+    is_input: bool,
+    info: *mut clap_audio_port_info,
+) -> bool
+where
+    for<'a> P: Plugin<MainThread<'a>: PluginAudioPortsConfigInfoImpl>,
+{
+    unsafe {
+        PluginWrapper::<P>::handle(plugin, |p| {
+            if info.is_null() {
+                return Err(PluginWrapperError::NulPtr("clap_audio_port_info"));
+            };
+
+            let mut writer = AudioPortInfoWriter::from_raw(info);
+
+            p.main_thread().get(
+                ClapId::from_raw(config_id)
+                    .ok_or(PluginWrapperError::InvalidParameter("config_id"))?,
+                index,
+                is_input,
+                &mut writer,
+            );
+
+            Ok(writer.is_set())
+        })
+        .unwrap_or(false)
+    }
+}
+
+/// A helper struct to write an [`AudioPortsConfiguration`] into the host's provided buffer.
+pub struct AudioPortConfigWriter<'a> {
+    buf: &'a mut MaybeUninit<clap_audio_ports_config>,
+    is_set: bool,
+}
+
+impl AudioPortConfigWriter<'_> {
+    /// # Safety
+    ///
+    /// The user must ensure the provided pointer is aligned and points to a valid allocation.
+    /// However, it doesn't have to be initialized.
+    #[inline]
+    unsafe fn from_raw(raw: *mut clap_audio_ports_config) -> Self {
+        Self {
+            buf: &mut *raw.cast(),
+            is_set: false,
+        }
+    }
+
+    /// Writes the given [`AudioPortsConfiguration`] into the host's buffer.
+    #[inline]
+    pub fn write(&mut self, data: &AudioPortsConfiguration) {
+        use core::ptr::write;
+
+        let buf = self.buf.as_mut_ptr();
+
+        // SAFETY: all pointers come from `buf`, which is valid for writes and well-aligned
+        unsafe {
+            write(&raw mut (*buf).id, data.id.get());
+            write_to_array_buf(&raw mut (*buf).name, data.name);
+
+            write(&raw mut (*buf).input_port_count, data.input_port_count);
+            write(&raw mut (*buf).output_port_count, data.output_port_count);
+
+            if let Some(info) = data.main_input {
+                write(&raw mut (*buf).has_main_input, true);
+                write(&raw mut (*buf).main_input_channel_count, info.channel_count);
+                write(
+                    &raw mut (*buf).main_input_port_type,
+                    info.port_type
+                        .map(|t| t.0.as_ptr())
+                        .unwrap_or(core::ptr::null()),
+                );
+            } else {
+                write(&raw mut (*buf).has_main_input, false);
+                write(&raw mut (*buf).main_input_channel_count, 0);
+                write(&raw mut (*buf).main_input_port_type, core::ptr::null());
+            }
+
+            if let Some(info) = data.main_output {
+                write(&raw mut (*buf).has_main_output, true);
+                write(
+                    &raw mut (*buf).main_output_channel_count,
+                    info.channel_count,
+                );
+                write(
+                    &raw mut (*buf).main_output_port_type,
+                    info.port_type
+                        .map(|t| t.0.as_ptr())
+                        .unwrap_or(core::ptr::null()),
+                );
+            } else {
+                write(&raw mut (*buf).has_main_output, false);
+                write(&raw mut (*buf).main_output_channel_count, 0);
+                write(&raw mut (*buf).main_output_port_type, core::ptr::null());
+            }
+        }
+
+        self.is_set = true;
+    }
+}
+
+impl HostAudioPortsConfig {
+    /// Informs the host that the available Audio Ports Configuration list has changed and needs to
+    /// be rescanned.
+    #[inline]
+    pub fn rescan(&self, host: &HostMainThreadHandle) {
+        if let Some(rescan) = host.use_extension(&self.0).rescan {
+            // SAFETY: This type ensures the function pointer is valid.
+            unsafe { rescan(host.as_raw()) }
+        }
+    }
+}

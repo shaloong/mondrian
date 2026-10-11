@@ -745,9 +745,9 @@ pub enum HostCommand {
         /// MIDI controller number (0-127, or a VST3 special such as aftertouch/pitch-bend).
         cc: u16,
     },
-    /// Drain the ordered parameter-edit gesture log (begin/change/end) the helper's plugin has
-    /// accumulated from its editor since the last poll.
-    TakeParameterEdits,
+    /// Drain the complete ordered parameter/group/dirty author source or its
+    /// sticky failure from the helper's actual native instance.
+    TakeEditorEvents,
     /// Drain processor- and controller-originated parameter value feedback.
     TakeParameterChanges,
     /// Drain ordered `IComponentHandler2` requests from the helper.
@@ -885,11 +885,11 @@ pub enum HostResponse {
         /// The advertised note-expression dimensions.
         expressions: Vec<crate::midi::NoteExpressionInfo>,
     },
-    /// The ordered parameter-edit gestures drained from the helper (reply to
-    /// `TakeParameterEdits`).
-    ParameterEdits {
-        /// The gesture events, in the order the plugin's editor reported them.
-        edits: Vec<crate::plugin::ParameterEdit>,
+    /// Native author source reply to TakeEditorEvents; never a truncated
+    /// vector disguised as a successful completed gesture.
+    EditorEvents {
+        /// Complete ordered callbacks or the source's sticky failure.
+        drain: crate::plugin::NativeEditorEventDrain,
     },
     /// Processor- and controller-originated parameter feedback drained from the helper.
     ParameterChanges {
@@ -2075,43 +2075,45 @@ mod wire_tests {
     }
 
     #[test]
-    fn parameter_edits_round_trip_across_the_wire() {
+    fn editor_author_events_round_trip_across_the_wire() {
         // The ordered gesture log must survive the JSON transport host and helper share, both
         // the empty command and the populated reply.
-        use crate::plugin::{ParameterEdit, ParameterEditKind};
+        use crate::plugin::{
+            NativeEditorEvent, NativeEditorEventDrain, ParameterEdit, ParameterEditKind,
+        };
 
-        let cmd = serde_json::to_string(&HostCommand::TakeParameterEdits)
-            .expect("serialize TakeParameterEdits");
+        let cmd = serde_json::to_string(&HostCommand::TakeEditorEvents)
+            .expect("serialize TakeEditorEvents");
         assert!(matches!(
-            serde_json::from_str::<HostCommand>(&cmd).expect("deserialize TakeParameterEdits"),
-            HostCommand::TakeParameterEdits
+            serde_json::from_str::<HostCommand>(&cmd).expect("deserialize TakeEditorEvents"),
+            HostCommand::TakeEditorEvents
         ));
 
-        let edits = vec![
-            ParameterEdit {
+        let events = vec![
+            NativeEditorEvent::Parameter(ParameterEdit {
                 id: 9,
                 kind: ParameterEditKind::BeginGesture,
                 value: None,
-            },
-            ParameterEdit {
+            }),
+            NativeEditorEvent::Parameter(ParameterEdit {
                 id: 9,
                 kind: ParameterEditKind::ValueChange,
                 value: Some(0.3),
-            },
-            ParameterEdit {
+            }),
+            NativeEditorEvent::Parameter(ParameterEdit {
                 id: 9,
                 kind: ParameterEditKind::EndGesture,
                 value: None,
-            },
+            }),
         ];
-        let resp = HostResponse::ParameterEdits {
-            edits: edits.clone(),
+        let drain = NativeEditorEventDrain::Complete { events };
+        let resp = HostResponse::EditorEvents {
+            drain: drain.clone(),
         };
-        let resp_json = serde_json::to_string(&resp).expect("serialize ParameterEdits");
-        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize ParameterEdits")
-        {
-            HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
-            other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
+        let resp_json = serde_json::to_string(&resp).expect("serialize EditorEvents");
+        match serde_json::from_str::<HostResponse>(&resp_json).expect("deserialize EditorEvents") {
+            HostResponse::EditorEvents { drain: back } => assert_eq!(back, drain),
+            other => panic!("EditorEvents round-trip changed the variant: {other:?}"),
         }
     }
 
@@ -2194,12 +2196,9 @@ mod wire_tests {
         }
 
         let notifications = vec![
-            HostNotification::DirtyChanged(true),
             HostNotification::OpenEditorRequested {
                 name: Some("editor".to_string()),
             },
-            HostNotification::GroupEditStarted,
-            HostNotification::GroupEditFinished,
             HostNotification::ContextMenuRequested {
                 menu_id: 19,
                 parameter_id: Some(44),
@@ -2827,6 +2826,74 @@ mod canonical_timeline_wire_tests {
                 }
                 _ => panic!("wrong timeline command"),
             }
+        }
+    }
+
+    #[test]
+    fn editor_author_event_wire_keeps_group_dirty_order_and_signed_zero() {
+        use crate::plugin::{
+            NativeEditorEvent, NativeEditorEventDrain, ParameterEdit, ParameterEditKind,
+        };
+        let events = vec![
+            NativeEditorEvent::GroupEditStarted,
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 7,
+                kind: ParameterEditKind::BeginGesture,
+                value: None,
+            }),
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 7,
+                kind: ParameterEditKind::ValueChange,
+                value: Some(-0.0),
+            }),
+            NativeEditorEvent::DirtyChanged(true),
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 7,
+                kind: ParameterEditKind::EndGesture,
+                value: None,
+            }),
+            NativeEditorEvent::GroupEditFinished,
+        ];
+        let response = HostResponse::EditorEvents {
+            drain: NativeEditorEventDrain::Complete {
+                events: events.clone(),
+            },
+        };
+        let wire = serde_json::to_vec(&response).expect("complete author event wire");
+        let HostResponse::EditorEvents {
+            drain: NativeEditorEventDrain::Complete { events: actual },
+        } = serde_json::from_slice(&wire).expect("complete author event reply")
+        else {
+            panic!("complete ordered author source")
+        };
+        assert_eq!(actual, events);
+        let NativeEditorEvent::Parameter(ParameterEdit {
+            value: Some(value), ..
+        }) = &actual[2]
+        else {
+            panic!("native value event")
+        };
+        assert_eq!(value.to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn editor_author_event_wire_keeps_incomplete_separate_from_complete_empty() {
+        use crate::plugin::{NativeEditorEventDrain, NativeEditorEventFailure};
+        for failure in [
+            NativeEditorEventFailure::Overflow,
+            NativeEditorEventFailure::InvalidValue,
+        ] {
+            let response = HostResponse::EditorEvents {
+                drain: NativeEditorEventDrain::Incomplete { failure },
+            };
+            let wire = serde_json::to_vec(&response).expect("incomplete source wire");
+            assert!(
+                matches!(serde_json::from_slice::<HostResponse>(&wire).expect("incomplete source reply"), HostResponse::EditorEvents { drain: NativeEditorEventDrain::Incomplete { failure: actual } } if actual == failure)
+            );
+            assert!(
+                !wire.windows(b"events".len()).any(|part| part == b"events"),
+                "incomplete cannot carry a truncated successful event vector"
+            );
         }
     }
 }

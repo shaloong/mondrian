@@ -314,6 +314,11 @@ impl PersistentReferenceOutputPump {
             .map_err(|error| {
                 self.latch_fault(format!("render Reference Audio Program: {error}"))
             })?;
+        let mondrian_media::AudioPcmRenderOutcome::Rendered(audio) = audio else {
+            return Err(self.latch_fault(format!(
+                "Reference Audio Program did not produce PCM: {audio:?}"
+            )));
+        };
         self.audio_entered = true;
         let program_frame = match &self.ancillary_program {
             Some(owner) => owner

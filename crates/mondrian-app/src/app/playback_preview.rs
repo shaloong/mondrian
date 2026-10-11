@@ -27,6 +27,14 @@ pub(crate) struct PreviewWorkPoll {
     /// The App consumption seam binds the real completion timestamp for the
     /// whole bounded poll batch before applying any candidate to Playback.
     pub(crate) frame_delivery_candidates: Vec<FrameDeliveryCandidate>,
+    /// Exact current-work processor state sampled by the production adapter.
+    /// Executing metadata in the same bounded task-result transports.
+    pub(crate) processor_progress:
+        Option<super::preview_processor_feedback::PreviewProcessorProgressUpdate>,
+    pub(crate) processor_feedback:
+        Option<super::preview_processor_feedback::PreviewProcessorFeedbackUpdate>,
+    /// Bank-bound idle GUI action metadata, never a frame-delivery claim.
+    pub(crate) native_gui_actions: super::preview_native_gui::NativeVisualGuiActionBatch,
 }
 
 impl PreviewWorkPoll {
@@ -37,6 +45,13 @@ impl PreviewWorkPoll {
         self.candidate_retry_required |= other.candidate_retry_required;
         self.needs_follow_up_poll |= other.needs_follow_up_poll;
         self.frame_delivery_candidates.append(&mut other.frame_delivery_candidates);
+        self.native_gui_actions.append(other.native_gui_actions);
+        if other.processor_progress.is_some() {
+            self.processor_progress = other.processor_progress;
+        }
+        if other.processor_feedback.is_some() {
+            self.processor_feedback = other.processor_feedback;
+        }
     }
 }
 
@@ -142,7 +157,23 @@ pub(crate) fn pump_playback_preview(
 ) -> PlaybackPreviewPumpOutcome {
     let pending_demand = state.pending_playback_frame_demand_identity();
     let transport_intent = state.preview_transport_intent();
-    let poll = adapter.poll_playback_work(pending_demand, transport_intent);
+    let mut poll = adapter.poll_playback_work(pending_demand, transport_intent);
+    let processor_progress_changed = poll.processor_progress.take().is_some_and(|update| {
+        state.processor_feedback.observe_progress(update, transport_intent.epoch())
+    });
+    let processor_feedback_changed = poll.processor_feedback.take().is_some_and(|update| {
+        state
+            .processor_feedback
+            .observe(update, transport_intent.epoch(), &mut state.notifications)
+    });
+    let mut native_gui_actions_changed = false;
+    for delivery in std::mem::take(&mut poll.native_gui_actions) {
+        if state.native_visual_author_view_is_current(&delivery.view) {
+            native_gui_actions_changed |= state
+                .processor_feedback
+                .observe_gui_action(delivery.action, &mut state.notifications);
+        }
+    }
     let observed_at = std::time::Instant::now();
     let mut delivery_changed = false;
     let mut accepted_delivery = None;
@@ -164,7 +195,10 @@ pub(crate) fn pump_playback_preview(
     let preroll_changed = observe_playback_video_preroll(state, adapter);
 
     PlaybackPreviewPumpOutcome {
-        visible_change: poll.visible_change,
+        visible_change: poll.visible_change
+            || processor_feedback_changed
+            || processor_progress_changed
+            || native_gui_actions_changed,
         transport_change: poll.transport_change || delivery_changed || preroll_changed,
         candidate_retry_required: poll.candidate_retry_required,
         needs_follow_up_poll: poll.needs_follow_up_poll,
@@ -268,6 +302,9 @@ mod tests {
                 candidate_retry_required: false,
                 needs_follow_up_poll: true,
                 frame_delivery_candidates: Vec::new(),
+                processor_progress: None,
+                processor_feedback: None,
+                native_gui_actions: Default::default(),
             })),
             preroll: Cell::new(None),
             transport_intent: Cell::new(None),

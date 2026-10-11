@@ -456,6 +456,7 @@ fn prepare_data_texture_frame(
         }
     };
     Ok(CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: decoded.width,
         height: decoded.height,
         data,

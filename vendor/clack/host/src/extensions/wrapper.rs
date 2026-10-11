@@ -1,0 +1,478 @@
+//! Helper utilities to help implementing the host side of custom CLAP extensions.
+
+use crate::plugin::DestroyLock;
+use crate::prelude::*;
+use crate::util::UnsafeOptionCell;
+use clap_sys::ext::log::{
+    CLAP_LOG_ERROR, CLAP_LOG_HOST_MISBEHAVING, CLAP_LOG_PLUGIN_MISBEHAVING, clap_log_severity,
+};
+use clap_sys::host::clap_host;
+use clap_sys::plugin::clap_plugin;
+use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::error::Error;
+use std::ffi::{CStr, CString};
+use std::fmt::{Display, Formatter};
+use std::io::Write;
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once, OnceLock};
+
+#[cfg(not(test))]
+#[allow(unused)]
+use std::panic::catch_unwind as handle_panic;
+
+#[cfg(test)]
+#[inline]
+#[allow(unused)]
+fn handle_panic<F: FnOnce() -> R, R>(f: F) -> std::thread::Result<R> {
+    Ok(f())
+}
+
+pub(crate) mod descriptor;
+mod logging;
+
+/// A wrapper around a `clack` host implementation of a given type.
+///
+/// This wrapper allows access to a host's [`Shared`](HostHandlers::Shared),
+/// [`MainThread`](HostHandlers::MainThread), and [`AudioProcessor`](HostHandlers::AudioProcessor) handler structs, while
+/// also handling common FFI issues, such as error management and unwind safety.
+///
+/// The only way to access an instance of `HostWrapper` is through the
+/// [`handle`](HostWrapper::handle) function.
+// Safety note: once this type is constructed, a pointer to it will be given to the plugin instance,
+// which means we can never move this again. This must always exist in a Pin.
+pub struct HostWrapper<H: HostHandlers> {
+    audio_processor: UnsafeOptionCell<<H as HostHandlers>::AudioProcessor<'static>>,
+    main_thread: OnceCell<<H as HostHandlers>::MainThread<'static>>,
+    shared: <H as HostHandlers>::Shared<'static>,
+
+    // Init stuff
+    init_guard: Once,
+    init_started: AtomicBool,
+    plugin_ptr: OnceLock<NonNull<clap_plugin>>,
+
+    // Drop stuff
+    destroy_lock: Arc<DestroyLock>,
+}
+
+// SAFETY: The only non-thread-safe methods on this type are unsafe
+unsafe impl<H: HostHandlers> Send for HostWrapper<H> {}
+// SAFETY: The only non-thread-safe methods on this type are unsafe
+unsafe impl<H: HostHandlers> Sync for HostWrapper<H> {}
+
+impl<H: HostHandlers> HostWrapper<H> {
+    pub(crate) fn destroy_lock_storage(&self) -> crate::storage::HostStorageRef<'_> {
+        crate::storage::HostStorageRef::from_arc(&self.destroy_lock)
+    }
+
+    /// Provides a shared reference to a host wrapper of a given type, to the given handler
+    /// closure.
+    ///
+    /// Besides providing a reference, this function does a few extra safety checks:
+    ///
+    /// * The given `clap_host` pointer is null-checked, as well as some other host-provided
+    ///   pointers;
+    /// * The handler is wrapped in [`std::panic::catch_unwind`];
+    /// * Any [`HostWrapperError`] returned by the handler is caught.
+    ///
+    /// If any of the above safety check fails, an error message is logged (using the standard CLAP
+    /// logging extension). If logging is unavailable or fails for any reason, the error message is
+    /// written to `stderr` as a fallback.
+    ///
+    /// Note that some safety checks (e.g. the `clap_host` pointer null-checks) may result in the
+    /// closure never being called, and an error being returned only. Users of this function must
+    /// not rely on the completion of this closure for safety, and must handle this function
+    /// returning `None` gracefully.
+    ///
+    /// If all goes well, the return value of the handler closure is forwarded and returned by this
+    /// function.
+    ///
+    /// # Errors
+    ///
+    /// If any safety check failed, or any error or panic occurred inside the handler closure, this
+    /// function returns `None`, and the error message is logged.
+    ///
+    /// # Safety
+    ///
+    /// The given host wrapper type `H` **must** be the correct type for the received pointer. Otherwise,
+    /// incorrect casts will occur, which will lead to Undefined Behavior.
+    ///
+    /// The `host` pointer must also point to a valid instance of `clap_host`, as created by
+    /// the CLAP Host. While this function does a couple of simple safety checks, only a few common
+    /// cases are actually covered (i.e. null checks), and those **must not** be relied upon for safety: those
+    /// checks only exist to help debugging.
+    pub unsafe fn handle<T, F>(host: *const clap_host, handler: F) -> Option<T>
+    where
+        F: FnOnce(&HostWrapper<H>) -> Result<T, HostWrapperError>,
+    {
+        let result = Self::from_raw(host).and_then(|h| {
+            Self::handle_panic(h, |h| {
+                h.ensure_initializing_called();
+                handler(h)
+            })
+        });
+
+        match result {
+            Ok(value) => Some(value),
+            Err(e) => {
+                logging::host_log(host, &e);
+
+                None
+            }
+        }
+    }
+
+    /// Invoke an immutable thread-safe observer without fallback logging or I/O.
+    ///
+    /// This checks the same host pointers and catches panics as `handle`, but
+    /// returns the error directly. It does not recursively invoke Host Log,
+    /// format a message, write stderr, or run the initializing handler. The
+    /// already constructed shared handler is available even during native
+    /// factory/init callbacks. An observer requiring initialized plugin
+    /// extensions must be initialized explicitly before audio-role admission.
+    ///
+    /// A realtime observer must itself avoid allocation, waits and locks.
+    /// Rust panic hooks remain process policy, not a realtime recovery promise.
+    ///
+    /// # Safety
+    ///
+    /// `host` must point to the matching live H wrapper (or be null for a typed
+    /// refusal). Null checks do not make an invalid nonnull pointer safe.
+    pub unsafe fn handle_observation<T, F>(
+        host: *const clap_host,
+        handler: F,
+    ) -> Result<T, HostWrapperError>
+    where
+        F: FnOnce(&HostWrapper<H>) -> Result<T, HostWrapperError>,
+    {
+        // SAFETY: Matching live host ownership is required by this API.
+        let host = unsafe { Self::from_raw(host)? };
+        Self::handle_panic(host, handler)
+    }
+
+    /// # Safety
+    /// TODO
+    pub unsafe fn handle_main_thread<T, F>(host: *const clap_host, handler: F) -> Option<T>
+    where
+        F: for<'a> FnOnce(&<H as HostHandlers>::MainThread<'a>) -> Result<T, HostWrapperError>,
+    {
+        Self::handle(host, |host| host.on_main_thread(handler).transpose()).flatten()
+    }
+
+    /// # Safety
+    /// The caller must ensure this method is only called on the main thread.
+    pub(crate) unsafe fn on_main_thread<T>(
+        &self,
+        handler: impl for<'a> FnOnce(&<H as HostHandlers>::MainThread<'a>) -> T,
+    ) -> Option<T> {
+        Some(handler(self.main_thread.get().as_ref()?))
+    }
+
+    /// Returns a raw, non-null pointer to the host's [`AudioProcessor`](HostHandlers::AudioProcessor)
+    /// struct.
+    ///
+    /// # Errors
+    ///
+    /// This will return [`HostWrapperError::DeactivatedPlugin`] if the plugin was not actually
+    /// activated.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure this method is only called on the audio thread.
+    ///
+    /// The pointer is safe to mutably dereference, as long as the caller ensures it is not being
+    /// aliased, as per usual safety rules.
+    #[inline]
+    pub unsafe fn audio_processor(
+        &self,
+    ) -> Result<NonNull<<H as HostHandlers>::AudioProcessor<'_>>, HostWrapperError> {
+        let ptr = self
+            .audio_processor
+            .as_ptr()
+            .ok_or(HostWrapperError::DeactivatedPlugin)?;
+
+        Ok(ptr.cast())
+    }
+
+    /// Returns a shared reference to the host's [`Shared`](HostHandlers::Shared) struct.
+    #[inline]
+    pub fn shared(&self) -> &<H as HostHandlers>::Shared<'_> {
+        // SAFETY: This type guarantees shared is never used mutably
+        unsafe { shrink_shared_ref::<H>(&self.shared) }
+    }
+
+    pub(crate) fn new<FS, FH>(shared: FS, main_thread: FH) -> Pin<Arc<Self>>
+    where
+        FS: for<'s> FnOnce(&'s ()) -> <H as HostHandlers>::Shared<'s>,
+        FH: for<'s> FnOnce(
+            &'s <H as HostHandlers>::Shared<'s>,
+        ) -> <H as HostHandlers>::MainThread<'s>,
+    {
+        // We use Arc only because Box<T> implies Unique<T>, which is not the case since the plugin
+        // will effectively hold a shared pointer to this.
+        let wrapper = Arc::new(Self {
+            audio_processor: UnsafeOptionCell::new(),
+            main_thread: OnceCell::new(),
+            shared: shared(&()),
+            init_guard: Once::new(),
+            init_started: AtomicBool::new(false),
+            plugin_ptr: OnceLock::new(),
+            destroy_lock: Arc::new(DestroyLock::new()),
+        });
+
+        // SAFETY: this type guarantees shared lives long enough
+        let main_thread = main_thread(unsafe { extend_shared_ref(&wrapper.shared) });
+
+        let Ok(()) = wrapper.main_thread.set(main_thread) else {
+            unreachable!()
+        };
+
+        // SAFETY: wrapper is the only reference to the data, we can guarantee it will remain pinned
+        // until drop happens.
+        unsafe { Pin::new_unchecked(wrapper) }
+    }
+
+    /// # Safety
+    /// The pointer and the plugin instance it points to must remain valid for the lifetime of this
+    /// wrapper.
+    pub(crate) unsafe fn created(&self, instance: NonNull<clap_plugin>) {
+        let _ = self.plugin_ptr.set(instance);
+    }
+
+    /// # Safety
+    /// This must only be called on the main thread. User must ensure the provided instance pointer
+    /// is valid.
+    pub(crate) unsafe fn instantiated(&self) {
+        self.ensure_initializing_called();
+        let instance = *self.plugin_ptr.get().unwrap();
+
+        self.main_thread
+            .get()
+            .unwrap()
+            .initialized(InitializedPluginHandle::new(
+                self.destroy_lock.clone(),
+                instance,
+            ));
+    }
+
+    pub(crate) fn start_instance_destroy(&self) {
+        self.destroy_lock.start_destroying();
+    }
+
+    /// # Safety
+    /// The user must ensure this is only called on the main thread, and not concurrently
+    /// to any other main-thread OR audio-thread method.
+    #[inline]
+    pub(crate) unsafe fn setup_audio_processor<FA>(
+        &self,
+        audio_processor: FA,
+    ) -> Result<(), PluginInstanceError>
+    where
+        FA: for<'a> FnOnce(
+            &'a <H as HostHandlers>::Shared<'a>,
+            &<H as HostHandlers>::MainThread<'a>,
+        ) -> <H as HostHandlers>::AudioProcessor<'a>,
+    {
+        if self.audio_processor.is_some() {
+            return Err(PluginInstanceError::AlreadyActivatedPlugin);
+        }
+
+        self.audio_processor.put(audio_processor(
+            // SAFETY: Shared lives at least as long as the audio processor does.
+            unsafe { extend_shared_ref(&self.shared) },
+            // SAFETY: The user enforces that this is only called on the main thread, and
+            // non-concurrently to any other main-thread method.
+            self.main_thread.get().unwrap(),
+        ));
+        Ok(())
+    }
+
+    /// # Safety
+    /// The user must ensure this is only called on the main thread, and not concurrently
+    /// to any other main-thread OR audio-thread method.
+    #[inline]
+    pub(crate) unsafe fn teardown_audio_processor<T>(
+        &self,
+        drop: impl for<'s> FnOnce(
+            <H as HostHandlers>::AudioProcessor<'s>,
+            &<H as HostHandlers>::MainThread<'s>,
+        ) -> T,
+    ) -> Result<T, PluginInstanceError> {
+        // SAFETY: The user enforces that this is called and non-concurrently to any other audio-thread method.
+        match self.audio_processor.take() {
+            None => Err(PluginInstanceError::DeactivatedPlugin),
+            Some(audio_processor) => Ok(drop(
+                audio_processor,
+                // SAFETY: The user enforces that this is only called on the main thread, and
+                // non-concurrently to any other main-thread method.
+                self.main_thread.get().unwrap(),
+            )),
+        }
+    }
+
+    /// # Safety
+    /// the user must ensure this is not called concurrently
+    /// to [`Self::setup_audio_processor`] or [`Self::teardown_audio_processor`]
+    #[inline]
+    pub(crate) fn is_active(&self) -> bool {
+        self.audio_processor.is_some()
+    }
+
+    pub(crate) fn handle_panic<T, F, Pa>(param: Pa, handler: F) -> Result<T, HostWrapperError>
+    where
+        F: FnOnce(Pa) -> Result<T, HostWrapperError>,
+    {
+        handle_panic(AssertUnwindSafe(|| handler(param))).map_err(|_| HostWrapperError::Panic)?
+    }
+
+    /// # Safety
+    /// The host pointer must be valid (but can be null)
+    unsafe fn from_raw<'a>(raw: *const clap_host) -> Result<&'a Self, HostWrapperError> {
+        raw.as_ref()
+            .ok_or(HostWrapperError::NullHostInstance)?
+            .host_data
+            .cast::<HostWrapper<H>>()
+            .as_ref()
+            .ok_or(HostWrapperError::NullHostData)
+    }
+
+    fn ensure_initializing_called(&self) {
+        // This can only happen if the plugin tried to call a host method before init().
+        let Some(ptr) = self.plugin_ptr.get().copied() else {
+            return;
+        };
+
+        self.init_guard.call_once_force(|_| {
+            let result =
+                self.init_started
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
+
+            // The comparison succeeded, and false was indeed the bool's value
+            if result == Ok(false) {
+                // SAFETY: The pointer is guaranteed to be valid by the caller of created()
+                let handle =
+                    unsafe { InitializingPluginHandle::new(self.destroy_lock.clone(), ptr) };
+                self.shared().initializing(handle);
+            }
+        })
+    }
+}
+
+/// Errors raised by a [`HostWrapper`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum HostWrapperError {
+    /// An invalid parameter value was encountered.
+    ///
+    /// The given string may contain more information about which parameter was found to be invalid.
+    InvalidParameter(&'static str),
+    /// The raw `clap_host` pointer was NULL.
+    NullHostInstance,
+    /// The raw `clap_host.host_data` field was NULL.
+    NullHostData,
+    /// A wrapped implementation panicked.
+    Panic,
+    /// Tried to call a method that requires the plugin to be activated, but it wasn't.
+    DeactivatedPlugin,
+    /// Encountered an error while trying to format another [`HostWrapperError`]
+    ErrorFormatError(std::io::Error),
+    /// A generic, type-erased error.
+    Error(Box<dyn Error + 'static>),
+    /// A constant string message to be displayed.
+    Message(&'static str),
+}
+
+impl HostWrapperError {
+    fn severity(&self) -> clap_log_severity {
+        match self {
+            HostWrapperError::NullHostInstance => CLAP_LOG_PLUGIN_MISBEHAVING,
+            HostWrapperError::InvalidParameter(_) => CLAP_LOG_PLUGIN_MISBEHAVING,
+            HostWrapperError::NullHostData => CLAP_LOG_HOST_MISBEHAVING,
+            HostWrapperError::Panic => CLAP_LOG_HOST_MISBEHAVING,
+            HostWrapperError::DeactivatedPlugin => CLAP_LOG_PLUGIN_MISBEHAVING,
+            HostWrapperError::ErrorFormatError(_) => CLAP_LOG_HOST_MISBEHAVING,
+            _ => CLAP_LOG_ERROR,
+        }
+    }
+
+    /// Formats this error into either a [`CStr`] or [`CString`].
+    ///
+    /// This will handle formatting failures and return an appropriate message in that case, so
+    /// unlike the [`Display`] implementation, this will always return a displayable error message.
+    pub fn format_cstr(&self) -> Cow<'static, CStr> {
+        let mut buf = Vec::new();
+        match buf.write_fmt(format_args!("{}", self)) {
+            Ok(()) => {}
+            Err(e) => {
+                // Stop this here to avoid infinitely failing to format the failing error message
+                if matches!(self, HostWrapperError::ErrorFormatError(_)) {
+                    return c"Failed to format error".into();
+                }
+
+                return HostWrapperError::ErrorFormatError(e).format_cstr();
+            }
+        };
+
+        // Truncate until the first NULL byte just in case. This is better than returning no error message.
+        if let Some(idx) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(idx);
+        }
+
+        // This should not be able to happen thanks to the above check, but let's put it here just in case
+        let Ok(str) = CString::new(buf) else {
+            return c"Error format failure: NulError".into();
+        };
+
+        str.into()
+    }
+}
+
+impl Display for HostWrapperError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        use HostWrapperError::*;
+        match self {
+            NullHostInstance => f.write_str("Host instance pointer is NULL"),
+            NullHostData => f.write_str("Host data pointer is NULL"),
+            InvalidParameter(s) => write!(f, "Invalid parameter: {s}"),
+            Panic => f.write_str("Host callback panicked"),
+            DeactivatedPlugin => {
+                f.write_str("Tried to call an audio-thread method while the plugin was deactivated")
+            }
+            Message(s) => f.write_str(s),
+            Error(e) => Display::fmt(e, f),
+            ErrorFormatError(e) => {
+                write!(f, "Error while formatting host error: '{e}'")
+            }
+        }
+    }
+}
+
+impl From<HostError> for HostWrapperError {
+    #[inline]
+    fn from(value: HostError) -> Self {
+        match value {
+            HostError::Error(e) => Self::Error(e),
+            HostError::Message(e) => Self::Message(e),
+        }
+    }
+}
+
+/// # Safety
+/// The user MUST ensure the Shared ref lives long enough
+unsafe fn extend_shared_ref<'a, H: SharedHandler<'a>>(shared: &H) -> &'a H {
+    &*(shared as *const _)
+}
+
+/// # Safety
+/// The user MUST prevent this reference to be written anywhere
+unsafe fn shrink_shared_ref<'a, 'instance, H: HostHandlers>(
+    shared: &'a H::Shared<'instance>,
+) -> &'a H::Shared<'a> {
+    let original_ptr = shared as *const H::Shared<'instance>;
+    let transmuted_ptr: *const H::Shared<'a> = original_ptr.cast();
+
+    &*transmuted_ptr
+}

@@ -1,3 +1,10 @@
+#include <fstream>
+#include <filesystem>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 // Copyright Mondrian contributors.
 // SPDX-License-Identifier: BSD-3-Clause
 // Test-only contract probe around the externally checked-out official example.
@@ -7,6 +14,9 @@
 #undef OfxGetPlugin
 #undef OfxGetNumberOfPlugins
 #include <cstdlib>
+#include <atomic>
+#include "ofxMultiThread.h"
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <map>
@@ -16,6 +26,8 @@
 #include <array>
 #include <type_traits>
 #include "ofxGPURender.h"
+#include "ofxProgress.h"
+#include "ofxMessage.h"
 #include "ofxTimeLine.h"
 
 namespace {
@@ -972,10 +984,677 @@ bool negotiatedAlphaOutput(const void* handle, OfxPropertySetHandle in, bool wri
   return true;
 }
 
+bool sourceAssociationMatches(const void* handle, OfxPropertySetHandle in) {
+  const int choice = outputAlphaMode(handle, in);
+  const char* expected = choice == 0 ? kOfxImageUnPreMultiplied : choice == 1 ? kOfxImagePreMultiplied : choice == 2 ? kOfxImageOpaque : nullptr;
+  OfxImageClipHandle clip = nullptr;
+  OfxPropertySetHandle props = nullptr, image = nullptr;
+  double time = 0.0;
+  char* clipAlpha = nullptr;
+  char* imageAlpha = nullptr;
+  if (!expected || gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &clip, &props) != kOfxStatOK ||
+      gPropHost->propGetString(props, kOfxImageEffectPropPreMultiplication, 0, &clipAlpha) != kOfxStatOK ||
+      gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK) { return false; }
+  const bool valid = clipAlpha && std::string(clipAlpha) == expected &&
+      gPropHost->propGetString(image, kOfxImageEffectPropPreMultiplication, 0, &imageAlpha) == kOfxStatOK &&
+      imageAlpha && std::string(imageAlpha) == expected;
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+
+// Owned fixture metadata/analysis oracle; it never hashes image pixels.
+std::string capturedSourceIdentifier, capturedOutputIdentifier;
+std::map<std::string, std::array<float, 3>> imageAnalysis;
+
+bool imageMetadata(const void* handle, OfxPropertySetHandle in, bool identifier) {
+  double time = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  std::string labels[2];
+  for (int index = 0; index < 2; ++index) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle first = nullptr, second = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, index == 0 ? "Source" : "Output", &clip, nullptr) != kOfxStatOK ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &first) != kOfxStatOK) { return false; }
+    bool valid = gEffectHost->clipGetImage(clip, time, nullptr, &second) == kOfxStatOK;
+    for (auto image : {first, second}) {
+      if (!image) { valid = false; continue; }
+      char* text = nullptr;
+      valid = valid && gPropHost->propGetString(image, identifier ? kOfxImagePropUniqueIdentifier : kOfxImagePropField, 0, &text) == kOfxStatOK && text;
+      if (valid) {
+        const std::string actual(text);
+        if (identifier) {
+          valid = !actual.empty() && std::all_of(actual.begin(), actual.end(), [](unsigned char byte) { return byte >= 0x20 && byte <= 0x7e; });
+          if (labels[index].empty()) { labels[index] = actual; }
+          else { valid = valid && labels[index] == actual; }
+        } else { valid = actual == kOfxImageFieldNone; }
+      }
+    }
+    if (valid && identifier && index == 0) {
+      void* data = nullptr;
+      if (gPropHost->propGetPointer(first, kOfxImagePropData, 0, &data) != kOfxStatOK || !data) { valid = false; }
+      else {
+        const auto& pixel = *static_cast<const OfxRGBAColourF*>(data);
+        imageAnalysis.try_emplace(labels[index], std::array<float, 3>{pixel.r, pixel.g, pixel.b});
+      }
+    }
+    const bool releasedSecond = !second || gEffectHost->clipReleaseImage(second) == kOfxStatOK;
+    const bool releasedFirst = gEffectHost->clipReleaseImage(first) == kOfxStatOK;
+    if (!valid || !releasedFirst || !releasedSecond) { return false; }
+  }
+  if (identifier) {
+    if (labels[0] == labels[1]) { return false; }
+    capturedSourceIdentifier = labels[0];
+    capturedOutputIdentifier = labels[1];
+  }
+  return true;
+}
+
+// Legal plugin-private analysis cache keyed solely by the host image UID.
+// The exact small binary record survives host child/process replacement.
+bool restoreImageAnalysis() {
+  const char* path = std::getenv("MONDRIAN_OPENFX_IMAGE_ANALYSIS_FILE");
+  if (!path || !*path) { return false; }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) { return true; }
+  uint32_t length = 0;
+  file.read(reinterpret_cast<char*>(&length), sizeof(length));
+  if (!file || length == 0 || length > 256) { return false; }
+  std::string identifier(length, '\0');
+  std::array<float,3> rgb{};
+  file.read(identifier.data(), length);
+  file.read(reinterpret_cast<char*>(rgb.data()), sizeof(rgb));
+  if (!file || file.peek() != std::char_traits<char>::eof()) { return false; }
+  imageAnalysis.try_emplace(identifier, rgb);
+  return true;
+}
+bool saveImageAnalysis() {
+  const char* path = std::getenv("MONDRIAN_OPENFX_IMAGE_ANALYSIS_FILE");
+  const auto found = imageAnalysis.find(capturedSourceIdentifier);
+  if (!path || !*path || found == imageAnalysis.end() || capturedSourceIdentifier.size() > 256) { return false; }
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  const auto length = static_cast<uint32_t>(capturedSourceIdentifier.size());
+  file.write(reinterpret_cast<const char*>(&length), sizeof(length));
+  file.write(capturedSourceIdentifier.data(), length);
+  file.write(reinterpret_cast<const char*>(found->second.data()), sizeof(found->second));
+  file.flush();
+  return static_cast<bool>(file);
+}
+
+bool imageAnalysisOutput(const void* handle, OfxPropertySetHandle in) {
+  const auto cached = imageAnalysis.find(capturedSourceIdentifier);
+  if (cached == imageAnalysis.end()) { return false; }
+  OfxImageClipHandle output = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle scale = nullptr;
+  double time = 0.0, gain = 0.0;
+  if (gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "scale", &scale, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(scale, time, &gain) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Output", &output, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(output, time, nullptr, &image) != kOfxStatOK) { return false; }
+  void* data = nullptr;
+  bool valid = gPropHost->propGetPointer(image, kOfxImagePropData, 0, &data) == kOfxStatOK && data;
+  if (valid) {
+    auto& pixel = *static_cast<OfxRGBAColourF*>(data);
+    pixel.r = cached->second[0] * static_cast<float>(gain);
+    pixel.g = cached->second[1] * static_cast<float>(gain);
+    pixel.b = cached->second[2] * static_cast<float>(gain);
+  }
+  return gEffectHost->clipReleaseImage(image) == kOfxStatOK && valid;
+}
+
+// Independent suite oracle: no production implementation is included here.
+const OfxMultiThreadSuiteV1* threadSuite() {
+  return static_cast<const OfxMultiThreadSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxMultiThreadSuite, 1));
+}
+
+bool mutexContract() {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  OfxMutexHandle first = nullptr, second = nullptr;
+  if (suite->mutexCreate(&first, 2) != kOfxStatOK || !first ||
+      suite->mutexCreate(&second, 0) != kOfxStatOK || !second || first == second) { return false; }
+  auto foreignTry = [&](OfxMutexHandle mutex) {
+    OfxStatus result = kOfxStatErrUnknown;
+    std::thread thread([&] {
+      result = suite->mutexTryLock(mutex);
+      if (result == kOfxStatOK && suite->mutexUnLock(mutex) != kOfxStatOK) { result = kOfxStatFailed; }
+    });
+    thread.join();
+    return result;
+  };
+  if (foreignTry(first) != kOfxStatFailed || foreignTry(second) != kOfxStatOK ||
+      suite->mutexLock(first) != kOfxStatOK || suite->mutexTryLock(first) != kOfxStatOK) { return false; }
+  // The creator started with two locks; successful recursive lock and trylock
+  // add two. Failed foreign trylock cannot change that depth.
+  for (int remaining = 3; remaining > 0; --remaining) {
+    if (suite->mutexUnLock(first) != kOfxStatOK || foreignTry(first) != kOfxStatFailed) { return false; }
+  }
+  if (suite->mutexUnLock(first) != kOfxStatOK || foreignTry(first) != kOfxStatOK) { return false; }
+
+  // Self-created plugin threads require real exclusion even when NumCPUs=1.
+  std::atomic<int> counter{0};
+  std::atomic<bool> valid{true};
+  auto increments = [&] {
+    for (int index = 0; index < 1000; ++index) {
+      if (suite->mutexLock(second) != kOfxStatOK) { valid = false; return; }
+      const int before = counter.load(std::memory_order_relaxed);
+      std::this_thread::yield();
+      counter.store(before + 1, std::memory_order_relaxed);
+      if (suite->mutexUnLock(second) != kOfxStatOK) { valid = false; return; }
+    }
+  };
+  std::thread one(increments), two(increments);
+  one.join(); two.join();
+  if (!valid || counter.load(std::memory_order_relaxed) != 2000) { return false; }
+  const auto retired = first;
+  if (suite->mutexDestroy(first) != kOfxStatOK || suite->mutexDestroy(second) != kOfxStatOK ||
+      suite->mutexDestroy(retired) != kOfxStatErrBadHandle ||
+      suite->mutexLock(retired) != kOfxStatErrBadHandle ||
+      suite->mutexTryLock(retired) != kOfxStatErrBadHandle ||
+      suite->mutexUnLock(retired) != kOfxStatErrBadHandle) { return false; }
+  // Reuse all slot positions repeatedly; a stale generation must never bind to
+  // a replacement, and no tombstone heap can grow per create/destroy cycle.
+  for (int iteration = 0; iteration < 2048; ++iteration) {
+    OfxMutexHandle replacement = nullptr;
+    if (suite->mutexCreate(&replacement, 0) != kOfxStatOK || !replacement || replacement == retired ||
+        suite->mutexTryLock(retired) != kOfxStatErrBadHandle ||
+        suite->mutexDestroy(replacement) != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+
+bool negativeMutexContract() {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  for (int initial : {-3, std::numeric_limits<int>::min()}) {
+    OfxMutexHandle mutex = nullptr;
+    if (suite->mutexCreate(&mutex, initial) != kOfxStatOK || !mutex ||
+        suite->mutexLock(mutex) != kOfxStatOK) { return false; }
+    OfxStatus competing = kOfxStatErrUnknown;
+    std::thread thread([&] { competing = suite->mutexTryLock(mutex); });
+    thread.join();
+    if (competing != kOfxStatFailed || suite->mutexUnLock(mutex) != kOfxStatOK ||
+        suite->mutexTryLock(mutex) != kOfxStatOK || suite->mutexUnLock(mutex) != kOfxStatOK ||
+        suite->mutexDestroy(mutex) != kOfxStatOK) { return false; }
+  }
+  // Large positive initial counts must not cause INT_MAX repeated native lock
+  // operations or an unbounded allocation before the mutex is usable.
+  OfxMutexHandle large = nullptr;
+  if (suite->mutexCreate(&large, std::numeric_limits<int>::max()) != kOfxStatOK || !large) { return false; }
+  OfxStatus competing = kOfxStatErrUnknown;
+  std::thread thread([&] { competing = suite->mutexTryLock(large); });
+  thread.join();
+  return competing == kOfxStatFailed && suite->mutexDestroy(large) == kOfxStatOK;
+}
+
+bool mutexLifecycleContract() {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  OfxMutexHandle mutex = nullptr;
+  if (suite->mutexCreate(&mutex, 1) != kOfxStatOK || !mutex) { return false; }
+  std::atomic<bool> submitted{false};
+  OfxStatus result = kOfxStatErrUnknown;
+  std::thread waiter([&] {
+    submitted = true;
+    result = suite->mutexLock(mutex);
+    if (result == kOfxStatOK) { suite->mutexUnLock(mutex); }
+  });
+  while (!submitted) { std::this_thread::yield(); }
+  const auto destroyed = suite->mutexDestroy(mutex);
+  waiter.join();
+  return destroyed == kOfxStatOK && result == kOfxStatErrBadHandle;
+}
+
+struct ThreadProbe {
+  const OfxMultiThreadSuiteV1* suite;
+  std::thread::id caller;
+  OfxParamHandle parameter;
+  double time, value;
+  std::atomic<unsigned> calls{0};
+  std::atomic<bool> valid{true};
+  unsigned expected;
+};
+void nestedNoop(unsigned, unsigned, void*) {}
+void suiteCallback(unsigned index, unsigned maximum, void* opaque) {
+  auto& probe = *static_cast<ThreadProbe*>(opaque);
+  unsigned reported = std::numeric_limits<unsigned>::max();
+  double value = 0.0;
+  if (index >= maximum || maximum != probe.expected || std::this_thread::get_id() == probe.caller ||
+      probe.suite->multiThreadIndex(&reported) != kOfxStatOK || reported != index ||
+      probe.suite->multiThreadIsSpawnedThread() != 1 ||
+      gParamHost->paramGetValueAtTime(probe.parameter, probe.time, &value) != kOfxStatOK || value != probe.value ||
+      probe.suite->multiThread(nestedNoop, 1, nullptr) != kOfxStatErrExists) { probe.valid = false; }
+  // A plugin-created thread is not mislabeled as a suite-spawned thread, even
+  // while the callback is active. Thread-local context cannot leak across it.
+  std::thread foreign([&] {
+    unsigned foreignIndex = 999;
+    if (probe.suite->multiThreadIsSpawnedThread() != 0 ||
+        probe.suite->multiThreadIndex(&foreignIndex) != kOfxStatOK || foreignIndex != 0) { probe.valid = false; }
+  });
+  foreign.join();
+  ++probe.calls;
+}
+bool threadContract(const void* handle, OfxPropertySetHandle arguments) {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle parameter = nullptr;
+  double time = 0.0, value = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "scale", &parameter, nullptr) != kOfxStatOK ||
+      gPropHost->propGetDouble(arguments, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK) { return false; }
+  unsigned cpus = 0, index = 999;
+  if (suite->multiThreadNumCPUs(&cpus) != kOfxStatOK || cpus != 1 ||
+      suite->multiThreadIndex(&index) != kOfxStatOK || index != 0 ||
+      suite->multiThreadIsSpawnedThread() != 0) { return false; }
+  for (unsigned request : {1U, std::numeric_limits<unsigned>::max()}) {
+    ThreadProbe probe{suite, std::this_thread::get_id(), parameter, time, value, 0, true, cpus};
+    if (suite->multiThread(suiteCallback, request, &probe) != kOfxStatOK || !probe.valid ||
+        probe.calls != cpus || suite->multiThreadIsSpawnedThread() != 0) { return false; }
+  }
+  return true;
+}
+
+struct ConcurrentThreadProbe {
+  std::atomic<bool> firstCallbackEnded{false}, firstCallerReturned{false}, abort{false};
+  std::atomic<unsigned> secondCalls{0};
+};
+void firstConcurrentCallback(unsigned, unsigned, void* opaque) {
+  auto& probe = *static_cast<ConcurrentThreadProbe*>(opaque);
+  probe.firstCallbackEnded.store(true, std::memory_order_release);
+}
+void secondConcurrentCallback(unsigned, unsigned, void* opaque) {
+  auto& probe = *static_cast<ConcurrentThreadProbe*>(opaque);
+  // This dependency is legal once the first accepted batch has completed. Its
+  // caller must consume its own completion before another accepted batch can
+  // overwrite that result. No callback throws and no sleep widens a threshold.
+  while (!probe.firstCallerReturned.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+  ++probe.secondCalls;
+}
+bool concurrentThreadContract() {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  // Scheduling determines whether the old result-publication race triggers in
+  // one round. Repetition is a stress control, not a deterministic RED claim.
+  for (int round = 0; round < 64; ++round) {
+    ConcurrentThreadProbe probe;
+    OfxStatus secondResult = kOfxStatErrUnknown;
+    std::thread second([&] {
+      while (!probe.firstCallbackEnded.load(std::memory_order_acquire) &&
+             !probe.abort.load(std::memory_order_acquire)) { std::this_thread::yield(); }
+      if (probe.abort.load(std::memory_order_acquire)) { return; }
+      do {
+        secondResult = suite->multiThread(secondConcurrentCallback, 1, &probe);
+        if (secondResult == kOfxStatFailed) { std::this_thread::yield(); }
+      } while (secondResult == kOfxStatFailed && !probe.abort.load(std::memory_order_acquire));
+    });
+    const auto firstResult = suite->multiThread(firstConcurrentCallback, 1, &probe);
+    if (firstResult != kOfxStatOK) { probe.abort.store(true, std::memory_order_release); }
+    probe.firstCallerReturned.store(true, std::memory_order_release);
+    second.join();
+    if (firstResult != kOfxStatOK || secondResult != kOfxStatOK || probe.secondCalls != 1) { return false; }
+  }
+  return true;
+}
+
+bool mutexCapacityContract() {
+  const auto* suite = threadSuite();
+  if (!suite) { return false; }
+  std::array<OfxMutexHandle, 1024> handles{};
+  for (auto& handle : handles) {
+    if (suite->mutexCreate(&handle, 0) != kOfxStatOK || !handle) { return false; }
+  }
+  OfxMutexHandle overflow = nullptr;
+  if (suite->mutexCreate(&overflow, 0) != kOfxStatErrMemory || overflow != nullptr) { return false; }
+  for (auto handle : handles) { if (suite->mutexDestroy(handle) != kOfxStatOK) { return false; } }
+  return true;
+}
+
+// Independent test-only observation of the actual plugin worker and Source image.
+bool appendResidentOwnerReceipt(const void* handle, OfxPropertySetHandle in) {
+  const char* path = std::getenv("MONDRIAN_OPENFX_PROCESSOR_OWNER_RECEIPT");
+  double time = 0.0;
+  OfxImageClipHandle source = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  if (!path || !*path ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(source, time, nullptr, &image) != kOfxStatOK) { return false; }
+  char* identifier = nullptr;
+  bool valid = gPropHost->propGetString(image, kOfxImagePropUniqueIdentifier, 0, &identifier) == kOfxStatOK &&
+      identifier && *identifier;
+  if (valid) {
+    // u8path supplies the actual UTF-8 fixture path on Windows as well as POSIX.
+    std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
+#ifdef _WIN32
+    const auto process = _getpid();
+#else
+    const auto process = getpid();
+#endif
+    file << process << '\t' << identifier << '\n';
+    file.flush();
+    valid = process > 0 && file.good();
+  }
+  const auto released = gEffectHost->clipReleaseImage(image);
+  return released == kOfxStatOK && valid;
+}
+
+// Independent legal suite/status oracles, called by the owned SessionProbe.
+// All callback handles are SDK handles supplied by the actual host.
+const OfxMessageSuiteV2* auxMessageSuite() {
+  return static_cast<const OfxMessageSuiteV2*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 2));
+}
+const OfxProgressSuiteV2* auxProgressSuite() {
+  return static_cast<const OfxProgressSuiteV2*>(gHost->fetchSuite(gHost->host, kOfxProgressSuite, 2));
+}
+const OfxTimeLineSuiteV1* auxTimelineSuite() {
+  return static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
+}
+bool auxTransientMessages(void* handle) {
+  const auto* v1 = static_cast<const OfxMessageSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 1));
+  const auto* v2 = auxMessageSuite();
+  if (!v1 || !v2) { return false; }
+  for (const char* type : {kOfxMessageMessage, kOfxMessageWarning, kOfxMessageLog}) {
+    if (v1->message(handle, type, nullptr, "%s %d %.3f", u8"说明🙂", 7, 1.25) != kOfxStatOK ||
+        v2->message(handle, type, "", "%s", u8"第二条通知✓") != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+bool auxQuestionRefusal(void* handle) {
+  const auto* messages = auxMessageSuite();
+  OfxPropertySetHandle properties = nullptr;
+  int interactive = 1;
+  return messages && gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) == kOfxStatOK &&
+      gPropHost->propGetInt(properties, kOfxPropIsInteractive, 0, &interactive) == kOfxStatOK && interactive == 0 &&
+      messages->message(handle, kOfxMessageQuestion, "noninteractive.question", "%s", "Continue?") == kOfxStatFailed;
+}
+bool auxInvalidHandles(void* descriptor) {
+  const auto* messages = auxMessageSuite();
+  const auto* progress = auxProgressSuite();
+  const auto* timeline = auxTimelineSuite();
+  if (!messages || !progress || !timeline) { return false; }
+  OfxParamSetHandle parameters = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)descriptor, &parameters) != kOfxStatOK || !parameters) { return false; }
+  // A real descriptor is a valid transient target and an invalid persistent,
+  // Progress/Timeline instance target. A real ParameterSet is another live
+  // object; neither it nor a rubbish token may be dereferenced as an Instance.
+  for (void* handle : std::array<void*, 4>{nullptr, descriptor, static_cast<void*>(parameters), reinterpret_cast<void*>(uintptr_t(1))}) {
+    double time = 31.0, first = 41.0, last = 59.0;
+    if (messages->setPersistentMessage(handle, kOfxMessageWarning, nullptr, "%s", "not an instance") != kOfxStatErrBadHandle ||
+        messages->clearPersistentMessage(handle) != kOfxStatErrBadHandle ||
+        progress->progressStart(handle, "not an instance", nullptr) != kOfxStatErrBadHandle ||
+        progress->progressUpdate(handle, 0.5) != kOfxStatErrBadHandle ||
+        progress->progressEnd(handle) != kOfxStatErrBadHandle ||
+        timeline->getTime(handle, &time) != kOfxStatErrBadHandle || time != 31.0 ||
+        timeline->getTimeBounds(handle, &first, &last) != kOfxStatErrBadHandle || first != 41.0 || last != 59.0 ||
+        timeline->gotoTime(handle, 0.0) != kOfxStatErrBadHandle) { return false; }
+  }
+  return true;
+}
+
+bool auxPersistentWarning(void* handle) {
+  const auto* messages = auxMessageSuite();
+  return messages &&
+      messages->setPersistentMessage(handle, kOfxMessageWarning, nullptr, "%s", u8"可继续的警告🙂") == kOfxStatOK &&
+      messages->clearPersistentMessage(handle) == kOfxStatOK &&
+      messages->setPersistentMessage(handle, kOfxMessageMessage, "information", "%s", "Information continues") == kOfxStatOK &&
+      messages->clearPersistentMessage(handle) == kOfxStatOK;
+}
+bool auxDestroyTarget(void* handle) {
+  const auto* messages = auxMessageSuite();
+  if (!messages) { return false; }
+  // DestroyInstance is a legal actual instance action. A bounded consumer may
+  // refuse posting during teardown; it may not treat the still-live handle as
+  // rubbish or call a destroyed Filter virtual object.
+  const auto status = messages->message(handle, kOfxMessageMessage, nullptr, "%s", "DestroyInstance callback");
+  return status == kOfxStatOK || status == kOfxStatFailed;
+}
+bool auxiliaryErrorPending = false;
+int auxiliaryErrorRenderCount = 0;
+bool auxiliaryScale(void* handle, double& value) {
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle scale = nullptr;
+  return gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) == kOfxStatOK &&
+      gParamHost->paramGetHandle(parameters, "scale", &scale, nullptr) == kOfxStatOK &&
+      gParamHost->paramGetValue(scale, &value) == kOfxStatOK;
+}
+bool auxPersistentError(void* handle, const std::string& action, OfxPropertySetHandle arguments) {
+  const auto* messages = auxMessageSuite();
+  if (!messages) { return false; }
+  if (action == kOfxActionCreateInstance) {
+    auxiliaryErrorRenderCount = 0;
+    double value = 0.0;
+    if (!auxiliaryScale(handle, value)) { return false; }
+    // A genuinely new owner prepared from repaired author state is already
+    // valid. It does not fabricate a clear of an evicted owner's private Error.
+    if (value == 2.0) { auxiliaryErrorPending = false; return true; }
+    auxiliaryErrorPending = true;
+    return messages->setPersistentMessage(handle, kOfxMessageError, "user.repair", "%s", "Change scale to recover") == kOfxStatOK;
+  }
+  if (action == kOfxActionInstanceChanged) {
+    char* name = nullptr;
+    char* type = nullptr;
+    if (gPropHost->propGetString(arguments, kOfxPropType, 0, &type) != kOfxStatOK || !type ||
+        std::string(type) != kOfxTypeParameter) { return true; }
+    if (gPropHost->propGetString(arguments, kOfxPropName, 0, &name) != kOfxStatOK || !name ||
+        std::string(name) != "scale") { return true; }
+    double value = 0.0;
+    if (!auxiliaryScale(handle, value)) { return false; }
+    if (value == 2.0) {
+      if (messages->clearPersistentMessage(handle) != kOfxStatOK) { return false; }
+      auxiliaryErrorPending = false;
+    }
+  }
+  return true;
+}
+bool auxProgressLifetime(void* handle) {
+  const auto* v1 = static_cast<const OfxProgressSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxProgressSuite, 1));
+  const auto* v2 = auxProgressSuite();
+  if (!v1 || !v2) { return false; }
+  if (v2->progressUpdate(handle, 0.0) != kOfxStatErrBadHandle ||
+      v2->progressEnd(handle) != kOfxStatErrBadHandle ||
+      v1->progressStart(handle, u8"分析🙂") != kOfxStatOK ||
+      v2->progressStart(handle, "already active", nullptr) != kOfxStatFailed) { return false; }
+  for (double value : {0.0, 0.5, 1.0}) {
+    if (v2->progressUpdate(handle, value) != kOfxStatOK) { return false; }
+  }
+  for (double value : {-0.125, 1.125, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+    if (v1->progressUpdate(handle, value) != kOfxStatErrValue) { return false; }
+  }
+  return v1->progressEnd(handle) == kOfxStatOK &&
+      v2->progressUpdate(handle, 0.5) == kOfxStatErrBadHandle &&
+      v2->progressEnd(handle) == kOfxStatErrBadHandle &&
+      v2->progressStart(handle, "second task", "optional.progress.id") == kOfxStatOK &&
+      v2->progressEnd(handle) == kOfxStatOK;
+}
+bool auxTimelineReadAndRefusal(void* handle, OfxPropertySetHandle arguments) {
+  const auto* timeline = auxTimelineSuite();
+  double time = 0.0, expected = 0.0, first = 0.0, last = 0.0;
+  if (!timeline || gPropHost->propGetDouble(arguments, kOfxPropTime, 0, &expected) != kOfxStatOK ||
+      timeline->getTime(handle, &time) != kOfxStatOK || time != expected ||
+      timeline->getTimeBounds(handle, &first, &last) != kOfxStatOK || first != 0.0 || last != 100.0 ||
+      timeline->gotoTime(handle, std::numeric_limits<double>::quiet_NaN()) != kOfxStatErrValue ||
+      timeline->gotoTime(handle, std::numeric_limits<double>::infinity()) != kOfxStatErrValue ||
+      timeline->gotoTime(handle, time + 1.0) != kOfxStatFailed) { return false; }
+  double unchanged = 0.0;
+  return timeline->getTime(handle, &unchanged) == kOfxStatOK && unchanged == expected &&
+      timeline->getTime(handle, nullptr) == kOfxStatErrValue &&
+      timeline->getTimeBounds(handle, nullptr, &last) == kOfxStatErrValue &&
+      timeline->getTimeBounds(handle, &first, nullptr) == kOfxStatErrValue;
+}
+
+// Independent observation of a real in-flight native abort callback. The
+// supervisor requests cancellation only after the first complete receipt.
+bool cooperativeReceipt(const void* handle, OfxPropertySetHandle in, const char* environment) {
+  const char* path = std::getenv(environment);
+  double time = 0.0;
+  OfxImageClipHandle source = nullptr;
+  OfxPropertySetHandle image = nullptr;
+  if (!path || !*path ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "Source", &source, nullptr) != kOfxStatOK ||
+      gEffectHost->clipGetImage(source, time, nullptr, &image) != kOfxStatOK) { return false; }
+  char* identifier = nullptr;
+  bool valid = gPropHost->propGetString(image, kOfxImagePropUniqueIdentifier, 0, &identifier) == kOfxStatOK && identifier;
+  if (valid) {
+    std::ofstream output(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
+#ifdef _WIN32
+    const auto process = _getpid();
+#else
+    const auto process = getpid();
+#endif
+    output << process << '\t' << identifier << '\n';
+    output.flush();
+    valid = process > 0 && output.good();
+  }
+  const auto released = gEffectHost->clipReleaseImage(image);
+  return released == kOfxStatOK && valid;
+}
+OfxStatus cooperativeProgressRender(const void* handle, OfxPropertySetHandle in) {
+  const auto* progress = static_cast<const OfxProgressSuiteV2*>(gHost->fetchSuite(gHost->host, kOfxProgressSuite, 2));
+  const char* release = std::getenv("MONDRIAN_OPENFX_COOPERATIVE_RELEASE");
+  if (!progress || !release || !*release ||
+      !cooperativeReceipt(handle, in, "MONDRIAN_OPENFX_COOPERATIVE_STARTED") ||
+      progress->progressStart(const_cast<void*>(handle), "Live native render", "live-native") != kOfxStatOK ||
+      progress->progressUpdate(const_cast<void*>(handle), 0.375) != kOfxStatOK) { return kOfxStatFailed; }
+  while (!std::filesystem::exists(std::filesystem::u8path(release))) {
+    if (gEffectHost->abort((OfxImageEffectHandle)handle)) { return kOfxStatFailed; }
+    std::this_thread::yield();
+  }
+  // Only the actual parent live observation releases this in-flight action.
+  // No timeout/sleep automatically completes it, and no output is fabricated.
+  return progress->progressEnd(const_cast<void*>(handle));
+}
+
+OfxStatus cooperativeAbortRender(const void* handle, OfxPropertySetHandle in) {
+  if (!gEffectHost->abort ||
+      !cooperativeReceipt(handle, in, "MONDRIAN_OPENFX_COOPERATIVE_STARTED")) { return kOfxStatFailed; }
+  const auto* progress = auxProgressSuite();
+  if (!progress || progress->progressStart(const_cast<void*>(handle), "Cancelable native render", "cancel-native") != kOfxStatOK) { return kOfxStatFailed; }
+  while (gEffectHost->abort((OfxImageEffectHandle)handle) == 0) {
+    const auto status = progress->progressUpdate(const_cast<void*>(handle), 0.25);
+    if (status != kOfxStatOK && status != kOfxStatReplyNo) { return kOfxStatFailed; }
+    std::this_thread::yield();
+  }
+  if (progress->progressUpdate(const_cast<void*>(handle), 0.25) != kOfxStatReplyNo ||
+      progress->progressEnd(const_cast<void*>(handle)) != kOfxStatOK) { return kOfxStatFailed; }
+  if (!cooperativeReceipt(handle, in, "MONDRIAN_OPENFX_COOPERATIVE_ABORTED")) { return kOfxStatFailed; }
+  // Rendering genuinely stopped, so no output is supplied. The supervisor's
+  // exact current cancellation has precedence over this native failed status.
+  return kOfxStatFailed;
+}
+
+
+// Independent actual native action receipts, not host-derived render counts.
+bool constructorActionReceipt(const char* environment) {
+  const char* path = std::getenv(environment);
+  if (!path || !*path) { return false; }
+  std::ofstream file(std::filesystem::u8path(path), std::ios::binary | std::ios::app);
+#ifdef _WIN32
+  const auto process = _getpid();
+#else
+  const auto process = getpid();
+#endif
+  file << process << '\n';
+  file.flush();
+  return process > 0 && file.good();
+}
+
+struct GenericGuiReceipt { int begun = 0, ended = 0, rendered = 0; bool open = false; };
+GenericGuiReceipt genericGuiReceipt;
+OfxStatus genericGuiProbe(const std::string& action, const void* handle,
+                          OfxPropertySetHandle in, const std::string& selected) {
+  if (action == kOfxActionCreateInstance) { genericGuiReceipt = {}; return kOfxStatOK; }
+  if (action != kOfxActionBeginInstanceEdit && action != kOfxActionEndInstanceEdit &&
+      action != kOfxImageEffectActionRender) { return kOfxStatOK; }
+  OfxPropertySetHandle properties = nullptr;
+  int interactive = -1;
+  if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK ||
+      gPropHost->propGetInt(properties, kOfxPropIsInteractive, 0, &interactive) != kOfxStatOK) { return kOfxStatFailed; }
+  if (action == kOfxActionBeginInstanceEdit) {
+    if (interactive != 1 || genericGuiReceipt.open) { return kOfxStatErrValue; }
+    genericGuiReceipt.open = true;
+    ++genericGuiReceipt.begun;
+    return selected == "gui_failed_begin" ? kOfxStatFailed : kOfxStatOK;
+  }
+  if (action == kOfxActionEndInstanceEdit) {
+    if (interactive != 0 || !genericGuiReceipt.open) { return kOfxStatErrValue; }
+    genericGuiReceipt.open = false;
+    ++genericGuiReceipt.ended;
+    if (selected == "gui_cycle") {
+      const auto* messages = static_cast<const OfxMessageSuiteV2*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 2));
+      if (!messages || messages->message(const_cast<void*>(handle), kOfxMessageWarning,
+          "generic.gui.end", "Actual End %d", genericGuiReceipt.ended) != kOfxStatOK) { return kOfxStatErrValue; }
+    }
+    return kOfxStatFailed; // Legal private UI teardown failure still pairs End.
+  }
+  if (interactive != 1 || !genericGuiReceipt.open || genericGuiReceipt.begun != genericGuiReceipt.ended + 1) {
+    return kOfxStatErrValue;
+  }
+  int interactiveRender = -1;
+  if (gPropHost->propGetInt(in, kOfxImageEffectPropInteractiveRenderStatus, 0, &interactiveRender) != kOfxStatOK ||
+      interactiveRender != 0) { return kOfxStatErrValue; }
+  ++genericGuiReceipt.rendered;
+  const auto* messages = static_cast<const OfxMessageSuiteV2*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 2));
+  if (!messages) { return kOfxStatFailed; }
+  OfxStatus response = kOfxStatFailed;
+  const auto ask = [&]() { response = messages->message(const_cast<void*>(handle), kOfxMessageQuestion,
+      "generic.gui.question", "%s", "Original plugin Question: continue?"); };
+  if (selected == "gui_question_foreign") { std::thread foreign(ask); foreign.join(); }
+  else { ask(); }
+  const OfxStatus expected = selected == "gui_question_no" ? kOfxStatReplyNo :
+      (selected == "gui_failed_begin" || selected == "gui_question_unavailable" || selected == "gui_cycle" ? kOfxStatFailed : kOfxStatReplyYes);
+  return response == expected ? kOfxStatOK : kOfxStatErrValue;
+}
+
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (selected.find("gui_") == 0) {
+    const OfxStatus gui = genericGuiProbe(operation, handle, in, selected);
+    if (operation == kOfxActionBeginInstanceEdit || operation == kOfxActionEndInstanceEdit || gui != kOfxStatOK) { return gui; }
+  }
+  if (selected == "cancel_after_create" && operation == kOfxImageEffectActionRender &&
+      !constructorActionReceipt("MONDRIAN_OPENFX_ACTUAL_RENDER_ENTERED")) { return kOfxStatFailed; }
+  if (selected == "cooperative_abort" && operation == kOfxImageEffectActionRender) { return cooperativeAbortRender(handle, in); }
+  if (selected == "cooperative_progress" && operation == kOfxImageEffectActionRender &&
+      cooperativeProgressRender(handle, in) != kOfxStatOK) { return kOfxStatFailed; }
+  if (operation == kOfxImageEffectActionRender &&
+      ((selected == "aux_transient_instance" && !auxTransientMessages(const_cast<void*>(handle))) ||
+       (selected == "aux_question" && !auxQuestionRefusal(const_cast<void*>(handle))) ||
+       (selected == "aux_progress" && !auxProgressLifetime(const_cast<void*>(handle))) ||
+       (selected == "aux_timeline" && !auxTimelineReadAndRefusal(const_cast<void*>(handle), in)) ||
+       (selected == "aux_warning" && !auxPersistentWarning(const_cast<void*>(handle))))) { return kOfxStatFailed; }
+  if (selected == "aux_error" && operation == kOfxImageEffectActionRender) {
+    // A persistent Error blocks processing until authored InstanceChanged
+    // explicitly clears it. Entering Render while it remains is behavioral RED.
+    if (auxiliaryErrorPending) { std::abort(); }
+    ++auxiliaryErrorRenderCount;
+  }
+  if (selected == "aux_transient_destroy" && operation == kOfxActionDestroyInstance &&
+      !auxDestroyTarget(const_cast<void*>(handle))) { return kOfxStatFailed; }
+  if (selected == "source_alpha" && operation == kOfxImageEffectActionRender && !sourceAssociationMatches(handle, in)) { return kOfxStatFailed; }
+  if (selected == "image_uid_persisted" && operation == kOfxImageEffectActionRender && !restoreImageAnalysis()) { return kOfxStatFailed; }
+  if ((selected == "image_uid" || selected == "image_uid_persisted" || selected == "image_field") && operation == kOfxImageEffectActionRender &&
+      !imageMetadata(handle, in, selected != "image_field")) { return kOfxStatFailed; }
+  if (operation == kOfxImageEffectActionRender &&
+      ((selected == "mutex_contract" && !mutexContract()) ||
+       (selected == "mutex_negative" && !negativeMutexContract()) ||
+       (selected == "mutex_lifecycle" && !mutexLifecycleContract()) ||
+       (selected == "thread_contract" && !threadContract(handle, in)) ||
+       (selected == "thread_concurrent" && !concurrentThreadContract()) ||
+       (selected == "mutex_capacity" && !mutexCapacityContract()))) { return kOfxStatFailed; }
+  if (selected == "thread_hang" && operation == kOfxImageEffectActionRender) {
+    const auto* suite = threadSuite();
+    if (!suite || suite->multiThread([](unsigned, unsigned, void*) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+      }, 1, nullptr) != kOfxStatOK) { return kOfxStatFailed; }
+  }
   if (selected == "output_alpha" && operation == kOfxImageEffectActionRender &&
       !negotiatedAlphaOutput(handle, in, false)) { return kOfxStatFailed; }
   if (selected == "bootstrap_skip") { std::abort(); }
@@ -1140,7 +1819,13 @@ OfxStatus probe(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
-  const OfxStatus result = pluginMain(action, handle, in, out);
+  const OfxStatus result = pluginMain(action, handle, in, out);  if ((result == kOfxStatOK || result == kOfxStatReplyDefault) &&
+      ((selected == "aux_transient_null" && operation == kOfxActionLoad && !auxTransientMessages(nullptr)) ||
+       (selected == "aux_transient_descriptor" && operation == kOfxActionDescribe && !auxTransientMessages(const_cast<void*>(handle))) ||
+       (selected == "aux_invalid_handles" && operation == kOfxActionDescribe && !auxInvalidHandles(const_cast<void*>(handle))) ||
+       (selected == "aux_error" && !auxPersistentError(const_cast<void*>(handle), operation, in)))) { return kOfxStatFailed; }
+
+  if (selected == "source_alpha" && operation == kOfxImageEffectActionDescribeInContext && result == kOfxStatOK && !defineOutputAlpha(handle)) { return kOfxStatFailed; }
   if (selected == "output_alpha") {
     if (operation == kOfxImageEffectActionDescribeInContext && result == kOfxStatOK &&
         !defineOutputAlpha(handle)) { return kOfxStatFailed; }
@@ -1166,6 +1851,10 @@ OfxStatus probe(const char* action, const void* handle,
     }
     cpuDisabled = true;
   }
+  if (selected == "resident_owner_receipt" && operation == kOfxImageEffectActionRender && result == kOfxStatOK &&
+      !appendResidentOwnerReceipt(handle, in)) { return kOfxStatFailed; }
+  if ((selected == "image_uid" || selected == "image_uid_persisted") && operation == kOfxImageEffectActionRender && result == kOfxStatOK &&
+      (!imageAnalysisOutput(handle, in) || (selected == "image_uid_persisted" && !saveImageAnalysis()))) { return kOfxStatFailed; }
   if (selected == "canonical_progressive" && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "curve_lifecycle" || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
@@ -1207,6 +1896,8 @@ OfxStatus probe(const char* action, const void* handle,
     }
   }
   if (operation == kOfxActionCreateInstance && result == kOfxStatOK) {
+    if (selected == "cancel_after_create" &&
+        !constructorActionReceipt("MONDRIAN_OPENFX_ACTUAL_CONSTRUCTOR_COMPLETE")) { return kOfxStatFailed; }
     actions.emplace(handle, ActionState{});
     if (selected == "instance_required") {
       property(handle, kOfxImageEffectInstancePropSequentialRender, 1);
@@ -1365,6 +2056,15 @@ OfxPlugin newerImageApiPlugin = {kOfxImageEffectPluginApi, 2,
     "org.mondrian.test.UnsupportedImageVersion", 1, 0, ignoredApiSetHost, ignoredApiAction};
 }
 extern "C" {
+OfxExport int SessionProbeImageIdentifier(int output, char* buffer, size_t capacity, size_t* length) {
+  if (!buffer || !length || (output != 0 && output != 1)) { return 2; }
+  const auto& value = output == 0 ? capturedSourceIdentifier : capturedOutputIdentifier;
+  if (value.size() > capacity) { return 2; }
+  std::copy(value.begin(), value.end(), buffer);
+  *length = value.size();
+  return 0;
+}
+
 OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
   if (mode() == "bootstrap_skip") { return kOfxStatFailed; }
   if (mode() == "bootstrap_error") { return kOfxStatErrMissingHostFeature; }
@@ -1402,4 +2102,10 @@ OfxExport int OfxGetNumberOfPlugins() {
   if (mode() == "unsupported_api") { return 2; }
   return 1;
 }
+// Inside the existing extern "C" block: Windows OfxExport already contains extern.
+OfxExport int SessionProbeGuiReceipt(int coordinate) {
+  switch (coordinate) { case 0: return genericGuiReceipt.begun; case 1: return genericGuiReceipt.ended;
+    case 2: return genericGuiReceipt.rendered; case 3: return genericGuiReceipt.open ? 1 : 0; default: return -1; }
+}
+OfxExport int SessionProbeAuxRenderCount() { return auxiliaryErrorRenderCount; }
 }

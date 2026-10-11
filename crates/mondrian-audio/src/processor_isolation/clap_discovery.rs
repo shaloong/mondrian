@@ -42,7 +42,7 @@ const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
-const MAX_PARAMETERS: u32 = 1024;
+pub(super) const MAX_PARAMETERS: u32 = 1024;
 const MAX_INPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -522,9 +522,10 @@ pub(super) fn probe_loaded(
     )
     .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
     let shared = ClapHostShared::new();
+    let native_shared = shared.clone().with_native_logs()?;
     let mut instance = PluginInstance::<ClapHost>::new(
-        |_| shared.clone(),
-        |_| (),
+        |_| native_shared,
+        |shared| super::clap_main_services::ClapHostMainThread::new(shared),
         entry,
         plugin_c_id.as_c_str(),
         &info,

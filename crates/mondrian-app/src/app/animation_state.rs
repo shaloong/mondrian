@@ -429,32 +429,6 @@ impl AppState {
         Ok(true)
     }
 
-    /// Directly set clip anchor and adjust position to keep visual unchanged.
-    pub fn set_clip_anchor_direct(
-        &mut self,
-        selection: SelectedClipRef,
-        new_anchor: glam::Vec2,
-    ) -> mondrian_core::Result<bool> {
-        let _sequence_id = self.commit_active_sequence_edit("move anchor", |seq| {
-            let clip = find_clip_mut_by_selection(seq, selection).ok_or_else(|| {
-                mondrian_core::MondrianError::ClipNotFound {
-                    clip_id: selection.clip_id.to_string(),
-                }
-            })?;
-            let old_anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
-            let scale = clip.transform.get_scale(TimelineTime::ZERO);
-            let old_pos = clip.transform.get_position(TimelineTime::ZERO);
-            // Adjust position to keep visual position unchanged:
-            // pos_new + S*(-anchor_new) = pos_old + S*(-anchor_old)
-            // pos_new = pos_old + S*(anchor_new - anchor_old)
-            let new_pos = old_pos + scale * (new_anchor - old_anchor);
-            clip.transform.set_anchor_point(new_anchor);
-            clip.transform.set_position(new_pos);
-            Ok(seq.id)
-        })?;
-        Ok(true)
-    }
-
     /// Directly set clip scale for canvas drag.
     pub fn set_clip_scale_direct(
         &mut self,

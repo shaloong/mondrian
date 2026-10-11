@@ -830,6 +830,7 @@ impl std::fmt::Debug for EffectRenderOp {
 /// Immutable in-process processor implementation retained by executable IR.
 #[derive(Clone)]
 pub struct CustomEffectProcessorBinding {
+    alpha_contract: crate::EffectAlphaContract,
     revision: u64,
     processor: CustomEffectProcessor,
     runtime_owner: Option<CustomEffectRuntimeOwner>,
@@ -855,6 +856,7 @@ struct CustomEffectRuntimeOwner {
 impl CustomEffectProcessorBinding {
     pub(crate) fn new(processor: CustomEffectRenderProcessor) -> Self {
         Self {
+            alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Rgba8(processor),
             runtime_owner: None,
@@ -864,11 +866,17 @@ impl CustomEffectProcessorBinding {
 
     pub(crate) fn new_f32(processor: CustomEffectFloatRenderProcessor) -> Self {
         Self {
+            alpha_contract: crate::EffectAlphaContract::COVERAGE_OPERATION,
             revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
             processor: CustomEffectProcessor::Float32(processor),
             runtime_owner: None,
             occurrence_id: None,
         }
+    }
+
+    /// Immutable alpha declaration retained by the compiled provider binding.
+    pub const fn alpha_contract(&self) -> crate::EffectAlphaContract {
+        self.alpha_contract
     }
 
     /// Process-local implementation revision used by graph/cache identity.
@@ -924,6 +932,7 @@ impl CustomEffectProcessorBinding {
         contract: Option<&EffectPluginContract>,
     ) -> Self {
         Self {
+            alpha_contract: self.alpha_contract,
             revision: self.revision,
             processor: self.processor.clone(),
             occurrence_id: Some(occurrence_id),
@@ -960,6 +969,7 @@ impl std::fmt::Debug for CustomEffectProcessorBinding {
         formatter
             .debug_struct("CustomEffectProcessorBinding")
             .field("revision", &self.revision)
+            .field("alpha_contract", &self.alpha_contract)
             .field("runtime_owner_revision", &self.runtime_owner_revision())
             .finish_non_exhaustive()
     }
@@ -1117,6 +1127,7 @@ impl EffectRenderOp {
                 7u8.hash(state);
                 key.hash(state);
                 processor.as_ref().map(CustomEffectProcessorBinding::revision).hash(state);
+                processor.as_ref().map(CustomEffectProcessorBinding::alpha_contract).hash(state);
                 processor
                     .as_ref()
                     .and_then(CustomEffectProcessorBinding::runtime_owner_revision)
@@ -1398,6 +1409,7 @@ impl EffectDefinition {
             cache_policy,
             CustomEffectProcessorBinding {
                 revision: NEXT_CUSTOM_PROCESSOR_REVISION.fetch_add(1, Ordering::AcqRel),
+                alpha_contract: factory.alpha_contract(),
                 processor: CustomEffectProcessor::Float32Factory(factory),
                 runtime_owner: None,
                 occurrence_id: None,
@@ -3631,7 +3643,7 @@ mod tests {
                 Arc::new(|_, _| Ok(Some(serde_json::json!({ "gain": 0.25 })))),
                 None,
                 EffectCachePolicy::Deterministic,
-                Arc::new(|pixels, _, _, params, _| {
+                Arc::new(|pixels, params, _| {
                     pixels[0][0] += params["gain"].as_f64().unwrap_or_default() as f32;
                     Ok(())
                 }),
@@ -3644,13 +3656,20 @@ mod tests {
         assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
         assert_eq!(
             crate::apply_compiled_effect_graph_rgba_f32(
-                &[[2.0, -0.25, 0.5, 1.0]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    &[[2.0, -0.25, 0.5, 1.0]]
+                ),
                 &compiled,
-                0,
+                0
             )
-            .expect("execute float custom effect"),
+            .expect("execute float custom effect")
+            .pixels(),
             vec![[2.25, -0.25, 0.5, 1.0]]
         );
     }
@@ -3845,8 +3864,20 @@ mod tests {
         let compiled = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile Luma Key");
         assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
-            .expect("execute Luma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("execute Luma Key");
         assert!(output[0][3] <= 1.0e-6);
         assert!((output[1][3] - 0.5).abs() <= 1.0e-6);
 
@@ -3858,8 +3889,20 @@ mod tests {
             .expect("retain dark pixels");
         let inverted = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile inverted Luma Key");
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &inverted, 0)
-            .expect("execute inverted Luma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &inverted,
+            0,
+        )
+        .expect("execute inverted Luma Key");
         assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
         assert!(output[1][3] <= 1.0e-6);
     }
@@ -3884,8 +3927,20 @@ mod tests {
                 crate::EffectWorkingPrecision::Float32,
             )
             .is_err());
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &compiled, 0)
-            .expect("execute Chroma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("execute Chroma Key");
         assert!(output[0][3] <= 1.0e-6);
         assert!(output[1][3] <= 1.0e-6);
         assert!((output[2][3] - 0.5).abs() <= 1.0e-6);
@@ -3896,8 +3951,20 @@ mod tests {
         let reopened_graph = compile_clip_effect_graph(&[reopened], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile reopened Chroma Key");
         assert_eq!(
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &reopened_graph, 0)
-                .expect("execute reopened Chroma Key"),
+            crate::apply_compiled_effect_graph_rgba_f32(
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(4, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    &input
+                ),
+                &reopened_graph,
+                0
+            )
+            .expect("execute reopened Chroma Key"),
             output,
         );
 
@@ -3909,8 +3976,20 @@ mod tests {
             .expect("keep key color");
         let inverted = compile_clip_effect_graph(&[effect.clone()], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile inverted Chroma Key");
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 4, 1, &inverted, 0)
-            .expect("execute inverted Chroma Key");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(4, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &inverted,
+            0,
+        )
+        .expect("execute inverted Chroma Key");
         assert!((output[0][3] - 0.5).abs() <= 1.0e-6);
         assert!(output[2][3] <= 1.0e-6);
 
@@ -3948,13 +4027,20 @@ mod tests {
             .is_err());
         assert_eq!(
             crate::apply_compiled_effect_graph_rgba_f32(
-                &[[2.0, -1.0, -1.0, 0.4]],
-                1,
-                1,
+                crate::EffectFloatFrameView::new(
+                    crate::EffectFrameExtent::new(1, 1),
+                    crate::EffectValueFormat::new(
+                        crate::EffectWorkingPrecision::Float32,
+                        crate::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage
+                    ),
+                    &[[2.0, -1.0, -1.0, 0.4]]
+                ),
                 &compiled,
-                0,
+                0
             )
-            .expect("execute HSL"),
+            .expect("execute HSL")
+            .pixels(),
             vec![[-1.0, 2.0, 2.0, 0.4]],
         );
     }
@@ -4185,14 +4271,36 @@ mod tests {
             [1.0, 0.0, 0.0, 1.0],
             [-0.25, 4.0, 0.15, 0.5],
         ];
-        let normal_output =
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &normal_compiled, 0)
-                .expect("CPU Mask output");
+        let normal_output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &normal_compiled,
+            0,
+        )
+        .expect("CPU Mask output");
         assert!(normal_output[0][3] > normal_output[1][3]);
         assert!(normal_output.iter().flatten().all(|channel| channel.is_finite()));
-        let preview_output =
-            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &preview_compiled, 0)
-                .expect("CPU Matte preview");
+        let preview_output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(3, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &preview_compiled,
+            0,
+        )
+        .expect("CPU Matte preview");
         assert!(preview_output
             .iter()
             .all(|pixel| { pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 1.0 }));
@@ -4346,8 +4454,20 @@ mod tests {
             .expect("gamut/highlight graph");
         let compiled = crate::compile_reference_render_graph(graph).expect("compiled graph");
         let input = [[3.0, -0.4, 0.2, 0.35], [0.5, 0.25, 0.1, 0.8]];
-        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
-            .expect("float32 execution");
+        let output = crate::apply_compiled_effect_graph_rgba_f32(
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(2, 1),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &input,
+            ),
+            &compiled,
+            0,
+        )
+        .expect("float32 execution");
         assert_eq!(output[0][3], input[0][3]);
         assert_eq!(output[1][3], input[1][3]);
         assert_ne!(output[0][..3], input[0][..3]);

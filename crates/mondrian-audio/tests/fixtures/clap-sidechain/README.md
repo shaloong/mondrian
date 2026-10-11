@@ -40,3 +40,48 @@ stays silent and the finite tail remains valid. It requires seconds timeline val
 and zero unavailable musical, loop and transport fields. It independently
 decodes CLAP's 2^31 seconds factor to the prepared integer sample grid; no
 product converter is linked. Other states 0–5 retain their original meaning.
+
+
+## Deferred core restart (state mode 7)
+
+Modes 0 through 6 retain their existing binary state and DSP meanings. Mode 7
+adds one validated zero/one byte recording that a core restart has been
+requested. During process, the first block covering canonical input-signal
+sample nine requests restart on the audio role. The entire completed block
+still uses its active three-frame delay and exact existing sidechain PCM.
+Only a subsequent activation installs seven-frame delay/tail; the latency
+query does not prematurely advertise the requested future value. The persisted
+fixture flag is a known test control state, never a claim that generic opaque
+plugin state is an exact DSP-history checkpoint.
+
+`installed_clap_process_restart_preserves_completed_trigger_window` uses the
+current production isolated worker and existing host API. Its real RED is
+loss of the completed trigger block when the worker turns a valid core request
+into a fatal service_callbacks error before copying output. The next window
+must instead defer before DSP. `installed_clap_restart_activation_profile_pcm`
+independently checks actual native mode/state activation profiles and exact
+three/seven-frame PCM in realtime and offline modes. It does not qualify the
+future canonical reprepare/continuity implementation.
+
+
+## Retained configuration control edge cases (modes 8/9)
+
+Modes 0 through 7 retain their previous state and PCM meaning. Modes 8/9 use the
+same three-to-seven-frame activation profile and persisted desired flag as mode
+7. Mode 8 issues another legal core restart during actual getState after the
+new profile is active. The original request cohort cannot consume this same-bit
+new generation. Mode 9 deliberately ignores a failed 70 KiB output-stream write
+and returns success; the host writer must independently refuse the truncated
+configuration and retain a blocked live child. Neither control automatically
+retries or installs a new plan. Scalar fixtures and PCM references remain
+independent of the host's conversion and lifecycle implementation.
+
+## Standard host-log producer (state mode 10)
+
+Modes 0–9 retain their exact state/DSP meanings. Mode10 requires the standard
+Host Log extension during actual activation and emits all seven official
+severities, in order, from activation, one joined background thread, and each
+process callback. The independent original sidechain PCM and latency3 remain
+unchanged. The process callback allocates, waits and spawns no threads.
+These are legal log callbacks; separate defensive controls for invalid UTF-8,
+null strings and unknown signed severities are not conforming-vendor evidence.

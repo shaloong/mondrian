@@ -76,6 +76,7 @@ fn presentation_moves_float_raster_unless_the_selected_signal_tap_needs_it() -> 
         width,
         height,
         color_space: WorkingColorSpace::LinearRec2020,
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         data: (0..width * height)
             .map(|index| {
                 let x = (index % width) as f32 / width as f32;

@@ -916,18 +916,16 @@ impl PluginInternal for IsolatedPluginImpl {
         .unwrap_or_default()
     }
 
-    fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
-        // Pulled on demand across the boundary, like the value-change drain: the helper's
-        // in-process plugin accumulates gestures from its editor and hands them back here.
-        self.poll(
-            HostCommand::TakeParameterEdits,
-            "TakeParameterEdits",
-            |response| match response {
-                HostResponse::ParameterEdits { edits } => Some(edits),
-                _ => None,
-            },
-        )
-        .unwrap_or_default()
+    fn take_editor_events(&mut self) -> Result<crate::plugin::NativeEditorEventDrain> {
+        match self.send_command(HostCommand::TakeEditorEvents)? {
+            HostResponse::EditorEvents { drain } => Ok(drain),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("TakeEditorEvents: {message}")))
+            }
+            _ => Err(Error::Other(
+                "unexpected response from TakeEditorEvents".to_string(),
+            )),
+        }
     }
 
     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {

@@ -15,9 +15,7 @@ pub use artifact::{
     TimelineRenderCacheArtifactError, TimelineRenderCacheFrame,
     TimelineRenderCacheFrameValidationError,
 };
-pub use identity::{
-    TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
-};
+pub use identity::{TimelineRenderCacheFormat, TimelineRenderCacheIdentity};
 pub use service::{
     TimelineRenderCacheConfig, TimelineRenderCacheDiagnostics, TimelineRenderCacheLookup,
     TimelineRenderCacheResult, TimelineRenderCacheService, TimelineRenderCacheShutdownEvidence,

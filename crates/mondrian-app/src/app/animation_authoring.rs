@@ -1322,11 +1322,22 @@ mod tests {
             .expect("production graph");
             let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
             let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
-            let pixels =
-                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 0)
-                    .expect("actual native queries/output");
+            let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    &input,
+                ),
+                &graph,
+                0,
+            )
+            .expect("actual native queries/output");
             assert_eq!(
-                pixels,
+                pixels.pixels(),
                 input.iter().map(|pixel| pixel.map(|value| value * gain)).collect::<Vec<_>>()
             );
             pixels
@@ -1626,11 +1637,22 @@ mod tests {
                 .expect("shared production graph");
                 let graph = program.evaluate(TimelineTime::ZERO).expect("author evaluation");
                 let input = vec![[-0.25, 0.5, 2.0, 0.25]; 4];
-                let pixels =
-                    mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 0)
-                        .expect("native group queries/output");
+                let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                    mondrian_effects::EffectFloatFrameView::new(
+                        mondrian_effects::EffectFrameExtent::new(2, 2),
+                        mondrian_effects::EffectValueFormat::new(
+                            mondrian_effects::EffectWorkingPrecision::Float32,
+                            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                        ),
+                        &input,
+                    ),
+                    &graph,
+                    0,
+                )
+                .expect("native group queries/output");
                 assert_eq!(
-                    pixels,
+                    pixels.pixels(),
                     input
                         .iter()
                         .map(|pixel| pixel.map(|value| value * sampled_gain))

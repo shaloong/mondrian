@@ -1,0 +1,297 @@
+use crate::extensions::wrapper::HostWrapper;
+use crate::extensions::wrapper::descriptor::RawHostDescriptor;
+use crate::prelude::*;
+use clack_common::factory::plugin::PluginFactory;
+use clap_sys::host::clap_host;
+use clap_sys::plugin::clap_plugin;
+use std::ffi::CStr;
+use std::pin::Pin;
+use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) struct PluginInstanceInner<H: HostHandlers> {
+    host_wrapper: Pin<Arc<HostWrapper<H>>>,
+    host_descriptor: Pin<Box<RawHostDescriptor>>,
+    plugin_ptr: Option<NonNull<clap_plugin>>,
+
+    is_started: AtomicBool,
+
+    plugin_entry: PluginEntry, // SAFETY: Keep the DLL/.SO alive while plugin is instantiated
+}
+
+impl<H: HostHandlers> PluginInstanceInner<H> {
+    pub(crate) fn instantiate<FH, FS>(
+        shared: FS,
+        main_thread: FH,
+        plugin_entry: &PluginEntry,
+        plugin_id: &CStr,
+        host_info: HostInfo,
+    ) -> Result<Arc<Self>, PluginInstanceError>
+    where
+        FS: for<'s> FnOnce(&'s ()) -> <H as HostHandlers>::Shared<'s>,
+        FH: for<'s> FnOnce(
+            &'s <H as HostHandlers>::Shared<'s>,
+        ) -> <H as HostHandlers>::MainThread<'s>,
+    {
+        let plugin_factory = plugin_entry
+            .get_plugin_factory()
+            .ok_or(PluginInstanceError::MissingPluginFactory)?;
+
+        let host_wrapper = HostWrapper::new(shared, main_thread);
+        let host_descriptor = Box::pin(RawHostDescriptor::new::<H>(host_info));
+
+        let mut instance = Arc::new(Self {
+            host_wrapper,
+            host_descriptor,
+            plugin_ptr: None,
+            plugin_entry: plugin_entry.clone(),
+            is_started: AtomicBool::new(false),
+        });
+
+        {
+            let instance = Arc::get_mut(&mut instance).unwrap();
+            instance.host_descriptor.set_wrapper(&instance.host_wrapper);
+
+            let raw_descriptor = instance.host_descriptor.raw();
+
+            // SAFETY: the host pointer comes from a valid allocation that is pinned for the
+            // lifetime of the instance
+            let plugin_instance_ptr =
+                unsafe { create_plugin(plugin_factory, raw_descriptor, plugin_id)? };
+
+            // SAFETY: The pointer comes from the plugin factory
+            unsafe {
+                instance.host_wrapper.created(plugin_instance_ptr);
+            }
+
+            // Now instantiate the plugin
+            // SAFETY: The CLAP spec requires those function pointers to be valid to call
+            unsafe {
+                if let Some(init) = plugin_instance_ptr.as_ref().init {
+                    if !init(plugin_instance_ptr.as_ptr()) {
+                        instance.host_wrapper.start_instance_destroy();
+                        if let Some(destroy) = plugin_instance_ptr.as_ref().destroy {
+                            destroy(plugin_instance_ptr.as_ptr());
+                        }
+
+                        return Err(PluginInstanceError::InstantiationFailed);
+                    }
+                }
+            }
+
+            // SAFETY: The pointer comes from the plugin factory
+            unsafe { instance.host_wrapper.instantiated() };
+            instance.plugin_ptr = Some(plugin_instance_ptr);
+        }
+
+        Ok(instance)
+    }
+
+    pub(crate) fn sdk_owned_storage(&self) -> [crate::storage::HostStorageRef<'_>; 8] {
+        use crate::storage::HostStorageRef;
+        let [info, name, vendor, url, version] =
+            self.host_descriptor.host_info().sdk_owned_storage();
+        [
+            HostStorageRef::arc_payload(self.host_wrapper.as_ref().get_ref()),
+            HostStorageRef::boxed_value(self.host_descriptor.as_ref().get_ref()),
+            self.host_wrapper.destroy_lock_storage(),
+            info,
+            name,
+            vendor,
+            url,
+            version,
+        ]
+    }
+
+    #[inline]
+    pub fn wrapper(&self) -> &HostWrapper<H> {
+        &self.host_wrapper
+    }
+
+    #[inline]
+    pub fn entry(&self) -> &PluginEntry {
+        &self.plugin_entry
+    }
+
+    #[inline]
+    pub fn raw_instance(&self) -> &clap_plugin {
+        // SAFETY: This can only be None in the middle of instantiate()
+        unsafe { self.plugin_ptr.unwrap_unchecked().as_ref() }
+    }
+
+    #[inline]
+    pub fn plugin_shared(&self) -> PluginSharedHandle<'_> {
+        // SAFETY: the raw instance is guaranteed to be valid
+        unsafe { PluginSharedHandle::new(self.raw_instance().into()) }
+    }
+
+    pub fn activate<FA>(
+        &mut self,
+        audio_processor: FA,
+        configuration: PluginAudioConfiguration,
+    ) -> Result<(), PluginInstanceError>
+    where
+        FA: for<'a> FnOnce(
+            &'a <H as HostHandlers>::Shared<'a>,
+            &<H as HostHandlers>::MainThread<'a>,
+        ) -> <H as HostHandlers>::AudioProcessor<'a>,
+    {
+        let activate = self
+            .raw_instance()
+            .activate
+            .ok_or(PluginInstanceError::NullActivateFunction)?;
+
+        // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
+        unsafe {
+            self.host_wrapper.setup_audio_processor(audio_processor)?;
+        }
+
+        // SAFETY: this type ensures the function pointer is valid
+        let success = unsafe {
+            activate(
+                self.raw_instance(),
+                configuration.sample_rate,
+                configuration.min_frames_count,
+                configuration.max_frames_count,
+            )
+        };
+
+        if !success {
+            // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
+            let _ = unsafe { self.host_wrapper.teardown_audio_processor(|_, _| ()) };
+            return Err(PluginInstanceError::ActivationFailed);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        self.wrapper().is_active()
+    }
+
+    #[inline]
+    pub fn deactivate_with<T>(
+        &mut self,
+        drop: impl for<'s> FnOnce(
+            <H as HostHandlers>::AudioProcessor<'s>,
+            &<H as HostHandlers>::MainThread<'s>,
+        ) -> T,
+    ) -> Result<T, PluginInstanceError> {
+        if !self.is_active() {
+            return Err(PluginInstanceError::DeactivatedPlugin);
+        }
+
+        if self.is_started.load(Ordering::Acquire) {
+            // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
+            unsafe { self.stop_processing() }
+        }
+
+        if let Some(deactivate) = self.raw_instance().deactivate {
+            // SAFETY: this type ensures the function pointer is valid.
+            // We just checked the instance is in an active state.
+            unsafe { deactivate(self.raw_instance()) };
+        }
+
+        // SAFETY: this method being &mut guarantees nothing can call any other main-thread method
+        unsafe { self.host_wrapper.teardown_audio_processor(drop) }
+    }
+
+    /// # Safety
+    /// User must ensure the instance is not in a processing state, and that this is only called
+    /// on the audio thread.
+    #[inline]
+    pub unsafe fn start_processing(&self) -> Result<(), PluginInstanceError> {
+        if let Some(start_processing) = self.raw_instance().start_processing {
+            if start_processing(self.raw_instance()) {
+                self.is_started.store(true, Ordering::Release);
+                return Ok(());
+            }
+
+            Err(PluginInstanceError::StartProcessingFailed)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// # Safety
+    /// User must ensure that this is only called on the audio thread.
+    #[inline]
+    pub unsafe fn reset(&self) {
+        if let Some(reset) = self.raw_instance().reset {
+            reset(self.raw_instance())
+        }
+    }
+
+    /// # Safety
+    /// User must ensure the instance is in a processing state, and that this is only called
+    /// on the audio thread.
+    #[inline]
+    pub unsafe fn stop_processing(&self) {
+        if let Some(stop_processing) = self.raw_instance().stop_processing {
+            stop_processing(self.raw_instance());
+            self.is_started.store(false, Ordering::Release);
+        }
+    }
+
+    /// # Safety
+    /// User must ensure this is only called on the main thread.
+    #[inline]
+    pub unsafe fn on_main_thread(&self) {
+        if let Some(on_main_thread) = self.raw_instance().on_main_thread {
+            on_main_thread(self.raw_instance())
+        }
+    }
+}
+
+impl<H: HostHandlers> Drop for PluginInstanceInner<H> {
+    #[inline]
+    fn drop(&mut self) {
+        // Happens only if instantiate didn't complete
+        let Some(plugin_ptr) = self.plugin_ptr else {
+            return;
+        };
+
+        // Check if instance hasn't been properly deactivated
+        if self.is_active() {
+            let _ = self.deactivate_with(|_, _| ());
+        }
+
+        self.host_wrapper.start_instance_destroy();
+        // SAFETY: we are in the drop impl, so this can only be called once and without any
+        // other concurrent calls.
+        // This type also ensures the function pointer type is valid.
+        unsafe {
+            if let Some(destroy) = plugin_ptr.as_ref().destroy {
+                destroy(plugin_ptr.as_ptr())
+            }
+        }
+    }
+}
+
+// SAFETY: The only non-thread-safe methods on this type are unsafe
+unsafe impl<H: HostHandlers> Send for PluginInstanceInner<H> {}
+// SAFETY: The only non-thread-safe methods on this type are unsafe
+unsafe impl<H: HostHandlers> Sync for PluginInstanceInner<H> {}
+
+/// # Safety
+///
+/// User must pass a valid clap_host pointer, which has to stay valid for the lifetime of the
+/// plugin.
+pub(crate) unsafe fn create_plugin(
+    plugin_factory: PluginFactory<'_>,
+    host: *const clap_host,
+    plugin_id: &CStr,
+) -> Result<NonNull<clap_plugin>, PluginInstanceError> {
+    let Some(create_plugin) = plugin_factory.raw().get().create_plugin else {
+        return Err(PluginInstanceError::NullFactoryCreatePluginFunction);
+    };
+
+    // SAFETY: the host pointer comes from a valid allocation that is pinned for the
+    // lifetime of the instance
+    let plugin_instance_ptr =
+        unsafe { create_plugin(plugin_factory.raw().as_ptr(), host, plugin_id.as_ptr()) };
+
+    NonNull::new(plugin_instance_ptr.cast_mut()).ok_or(PluginInstanceError::PluginNotFound)
+}

@@ -3,7 +3,13 @@
 mod curves;
 mod resident;
 pub use resident::{
-    run_openfx_resident_worker, OpenFxFilterSession, OPENFX_RESIDENT_WORKER_ARGUMENT,
+    run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,
+    OPENFX_RESIDENT_WORKER_ARGUMENT,
+};
+#[cfg(any(test, feature = "validation"))]
+pub use resident::{
+    OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase, OpenFxNativeRenderPhase,
+    OpenFxRenderDiagnostic, OpenFxRenderPhase,
 };
 
 use std::collections::BTreeMap;
@@ -284,16 +290,8 @@ pub struct OpenFxFilterDescription {
     pub parameters: Vec<OpenFxParameterDescription>,
 }
 
-/// One straight-alpha, tightly packed RGBA Float32 image.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OpenFxFloatFrame {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Row-major pixels in the caller's declared working color domain.
-    pub pixels: Vec<[f32; 4]>,
-}
+/// Canonical complete image value owned by Effects, including association.
+pub use mondrian_effects::EffectFloatFrame;
 
 /// Exact sequence facts lowered to the OpenFX double-valued frame contract.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -313,6 +311,16 @@ pub struct OpenFxRenderTiming {
 /// Native host failure that leaves the caller's input frame unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenFxHostError {
+    /// A valid instance awaits authored repair; its worker is not a fault.
+    #[error("OpenFX effect is blocked by a persistent user error")]
+    UserBlocked(Box<mondrian_effects::EffectProcessorFeedback>),
+    /// A parent-owned output allocation was refused before any native action.
+    /// The same live instance can be retained only by the Effects resource bank.
+    #[error(transparent)]
+    HostResourceRefused(mondrian_effects::EffectProcessorHostResourceRefusal),
+    /// The complete Float image cannot satisfy its declared representation.
+    #[error(transparent)]
+    Frame(#[from] mondrian_effects::EffectFloatFrameError),
     /// The request cannot be represented by the admitted filter contract.
     #[error("invalid OpenFX host request: {0}")]
     Invalid(String),
@@ -377,6 +385,7 @@ struct NativeParameter {
 
 #[repr(C)]
 struct NativeFrameInfo {
+    source_alpha: c_int,
     width: c_int,
     height: c_int,
     frame: f64,
@@ -429,7 +438,195 @@ struct ParameterSink {
     error: Option<String>,
 }
 
+/// Controlled owned CPU-suite storage, without loading a native plugin.
+pub(crate) fn native_thread_resident_bytes() -> Result<usize, OpenFxHostError> {
+    // SAFETY: this linked host getter computes owned storage only. It does not
+    // load a plugin, create a thread or retain pointers from the application.
+    let bytes = unsafe { mondrian_openfx_thread_resident_bytes() };
+    if bytes == 0 {
+        return Err(unavailable("native callback stack cannot be configured"));
+    }
+    Ok(bytes)
+}
+
+/// Known fixed auxiliary report storage, without creating/loading a plugin.
+pub(crate) fn native_auxiliary_resident_bytes() -> Result<usize, OpenFxHostError> {
+    // SAFETY: the linked getter reads only the host's static sizing policy.
+    let native = unsafe { mondrian_openfx_aux_resident_bytes() };
+    native
+        .checked_add(std::mem::size_of::<NativeRenderReport>())
+        .and_then(|value| {
+            value.checked_add(
+                mondrian_effects::EffectProcessorFeedbackSnapshot::maximum_retained_bytes() * 3,
+            )
+        })
+        // One bounded serialization/parse packet per parent and child. The
+        // existing transport permits 2 MiB; count its known controlled buffers.
+        .and_then(|value| value.checked_add(MAX_WORKER_REQUEST_BYTES * 4))
+        .and_then(|value| value.checked_add(resident::pump::storage_bytes()?))
+        .and_then(|value| value.checked_add(resident::child_diagnostic::storage_bytes()?))
+        .ok_or_else(|| unavailable("OpenFX auxiliary storage charge overflows"))
+}
+
+const NATIVE_NOTICE_SLOTS: usize = 32;
+const NATIVE_NOTICE_TEXT_BYTES: usize = 4096;
+const NATIVE_NOTICE_ID_BYTES: usize = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NativeNotice {
+    kind: c_int,
+    text_length: usize,
+    id_length: usize,
+    text: [c_char; NATIVE_NOTICE_TEXT_BYTES + 1],
+    id: [c_char; NATIVE_NOTICE_ID_BYTES + 1],
+}
+// These callbacks lend only bounded POD. No borrowed scheduler closure or
+// SDK/session handle runs on the control thread or a plugin callback thread.
+#[repr(C)]
+struct NativeInvocationControl {
+    context: *const c_void,
+    abort: Option<unsafe extern "C" fn(*const c_void) -> c_int>,
+    progress: Option<unsafe extern "C" fn(*const c_void, *const NativeLiveProgress) -> c_int>,
+    gui_open: c_int,
+    interactive_render: c_int,
+    question_work: c_int,
+    question: Option<unsafe extern "C" fn(*const c_void, *const NativeLiveQuestion) -> c_int>,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NativeLiveQuestion {
+    owner: u64,
+    invocation: u64,
+    text: NativeNotice,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NativeLiveProgress {
+    owner: u64,
+    invocation: u64,
+    generation: u64,
+    active: c_int,
+    fraction: f64,
+    label: NativeNotice,
+}
+impl NativeLiveProgress {
+    fn decode(&self) -> Result<mondrian_effects::EffectProcessorProgress, c_int> {
+        if !matches!(self.active, 0 | 1) || self.owner == 0 || self.invocation == 0 {
+            return Err(6);
+        }
+        let label = self.label.decode()?.ok_or(6)?;
+        mondrian_effects::EffectProcessorProgress::new(
+            self.generation,
+            self.active == 1,
+            self.fraction,
+            label,
+        )
+        .map_err(|_| 6)
+    }
+}
+
+#[repr(C)]
+struct NativeFeedback {
+    owner: u64,
+    invocation: u64,
+    persistent_revision: u64,
+    persistent: NativeNotice,
+    progress_generation: u64,
+    progress_active: c_int,
+    progress_fraction: f64,
+    progress: NativeNotice,
+    notice_count: usize,
+    notices: [NativeNotice; NATIVE_NOTICE_SLOTS],
+}
+#[repr(C)]
+struct NativeRenderReport {
+    completion: c_int,
+    output_alpha: c_int,
+    feedback: NativeFeedback,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NativeRenderError {
+    Rejected(c_int),
+    UserBlocked(Box<mondrian_effects::EffectProcessorFeedbackSnapshot>),
+}
+
+impl NativeNotice {
+    fn decode(&self) -> Result<Option<mondrian_effects::EffectProcessorNotice>, c_int> {
+        use mondrian_effects::EffectProcessorNoticeKind as Kind;
+        let kind = match self.kind {
+            0 if self.text_length == 0 && self.id_length == 0 => return Ok(None),
+            1 => Kind::Information,
+            2 => Kind::Warning,
+            3 => Kind::Error,
+            4 => Kind::Log,
+            5 => Kind::Fatal,
+            _ => return Err(6),
+        };
+        let text = decode_native_notice_text(&self.text, self.text_length)?;
+        let id = decode_native_notice_text(&self.id, self.id_length)?;
+        mondrian_effects::EffectProcessorNotice::new(kind, text, id)
+            .map(Some)
+            .map_err(|_| 6)
+    }
+}
+
+fn decode_native_notice_text<const N: usize>(
+    data: &[c_char; N],
+    length: usize,
+) -> Result<String, c_int> {
+    if length >= N || data[length] != 0 {
+        return Err(6);
+    }
+    let bytes = data[..length].iter().map(|value| *value as u8).collect::<Vec<_>>();
+    String::from_utf8(bytes).map_err(|_| 6)
+}
+
+impl NativeFeedback {
+    fn decode(&self) -> Result<mondrian_effects::EffectProcessorFeedbackSnapshot, c_int> {
+        if self.notice_count > NATIVE_NOTICE_SLOTS || !matches!(self.progress_active, 0 | 1) {
+            return Err(6);
+        }
+        let progress = if self.progress_generation == 0 {
+            if self.progress_active != 0
+                || self.progress_fraction != 0.0
+                || self.progress.decode()?.is_some()
+            {
+                return Err(6);
+            }
+            None
+        } else {
+            let label = self.progress.decode()?.ok_or(6)?;
+            Some(
+                mondrian_effects::EffectProcessorProgress::new(
+                    self.progress_generation,
+                    self.progress_active == 1,
+                    self.progress_fraction,
+                    label,
+                )
+                .map_err(|_| 6)?,
+            )
+        };
+        let notices = self.notices[..self.notice_count]
+            .iter()
+            .map(|notice| notice.decode()?.ok_or(6))
+            .collect::<Result<Vec<_>, c_int>>()?;
+        mondrian_effects::EffectProcessorFeedbackSnapshot::new(
+            self.owner,
+            self.invocation,
+            self.persistent_revision,
+            self.persistent.decode()?,
+            progress,
+            notices,
+        )
+        .map_err(|_| 6)
+    }
+}
+
 unsafe extern "C" {
+    fn mondrian_openfx_aux_resident_bytes() -> usize;
+    fn mondrian_openfx_thread_resident_bytes() -> usize;
     fn mondrian_openfx_describe(
         binary: *const c_char,
         bundle: *const c_char,
@@ -444,6 +641,7 @@ unsafe extern "C" {
         binary: *const c_char,
         bundle: *const c_char,
         identifier: *const c_char,
+        image_namespace: *const u8,
         input: *const c_void,
         frame_bytes: usize,
         frame_info: *const NativeFrameInfo,
@@ -459,7 +657,14 @@ unsafe extern "C" {
         frame_info: *const NativeFrameInfo,
         parameters: *const NativeParameter,
         parameter_count: c_int,
-        output_alpha: *mut c_int,
+        report: *mut NativeRenderReport,
+        control: *const NativeInvocationControl,
+        diagnostic: *mut resident::child_diagnostic::NativeRenderDiagnostic,
+    ) -> c_int;
+    fn mondrian_openfx_session_close_gui(
+        session: *mut c_void,
+        feedback: *mut NativeFeedback,
+        invoked: *mut c_int,
     ) -> c_int;
     fn mondrian_openfx_session_destroy(session: *mut c_void);
 
@@ -467,10 +672,15 @@ unsafe extern "C" {
 
 // A native handle stays in the isolated child and is neither Send nor Sync.
 // Its owner destroys the instance before unloading its selected plugin binary.
-struct NativeSession(std::ptr::NonNull<c_void>);
+struct NativeSession {
+    handle: std::ptr::NonNull<c_void>,
+    report: Box<NativeRenderReport>,
+    feedback: Option<mondrian_effects::EffectProcessorFeedbackSnapshot>,
+}
 
 impl NativeSession {
     fn create(
+        owner: mondrian_core::EffectProcessorOwnerId,
         binary: &CString,
         bundle: &CString,
         identifier: &CString,
@@ -478,6 +688,13 @@ impl NativeSession {
         info: &NativeFrameInfo,
         parameters: &[NativeParameter],
     ) -> Result<Self, c_int> {
+        if owner.0.is_nil() {
+            return Err(2);
+        }
+        // SAFETY: every field is an integer, float or fixed integer array;
+        // all-zero has a valid representation. Allocate once, off the hot frame
+        // path, without constructing a 150 KiB temporary on the Rust stack.
+        let report = unsafe { Box::<NativeRenderReport>::new_zeroed().assume_init() };
         let mut pointer = std::ptr::null_mut();
         // SAFETY: C strings, frame bytes and parameter names stay live throughout
         // this call. The native host copies frame data and parameter values.
@@ -486,6 +703,7 @@ impl NativeSession {
                 binary.as_ptr(),
                 bundle.as_ptr(),
                 identifier.as_ptr(),
+                owner.0.as_bytes().as_ptr(),
                 input.as_ptr().cast(),
                 input.len(),
                 info,
@@ -497,44 +715,109 @@ impl NativeSession {
         if status != 0 {
             return Err(status);
         }
-        std::ptr::NonNull::new(pointer).map(Self).ok_or(6)
+        std::ptr::NonNull::new(pointer)
+            .map(|handle| Self { handle, report, feedback: None })
+            .ok_or(6)
     }
 
+    #[cfg(test)]
     fn render(
         &mut self,
         input: &[u8],
         output: &mut [u8],
         info: &NativeFrameInfo,
         parameters: &[NativeParameter],
-    ) -> Result<mondrian_renderer::ColorFrameAlpha, c_int> {
+    ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
+        self.render_controlled(input, output, info, parameters, None)
+    }
+
+    #[cfg(test)]
+    fn render_controlled(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+        control: Option<&NativeInvocationControl>,
+    ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
+        self.render_with_native_diagnostic(input, output, info, parameters, control, None)
+    }
+
+    fn render_with_native_diagnostic(
+        &mut self,
+        input: &[u8],
+        output: &mut [u8],
+        info: &NativeFrameInfo,
+        parameters: &[NativeParameter],
+        control: Option<&NativeInvocationControl>,
+        diagnostic: Option<&mut resident::child_diagnostic::NativeRenderDiagnostic>,
+    ) -> Result<mondrian_core::ColorFrameAlpha, NativeRenderError> {
+        self.feedback = None;
         if output.len() != input.len() {
-            return Err(2);
+            return Err(NativeRenderError::Rejected(2));
         }
-        let mut alpha = -1;
         // SAFETY: The exclusive live handle serializes native actions. Disjoint
         // input/output slices and output metadata remain live for this call.
         // Native validation checks exact extents before reading or writing.
         let status = unsafe {
             mondrian_openfx_session_render(
-                self.0.as_ptr(),
+                self.handle.as_ptr(),
                 input.as_ptr().cast(),
                 output.as_mut_ptr().cast(),
                 input.len(),
                 info,
                 parameters.as_ptr(),
                 parameters.len() as c_int,
-                &mut alpha,
+                self.report.as_mut(),
+                control.map_or(std::ptr::null(), std::ptr::from_ref),
+                diagnostic.map_or(std::ptr::null_mut(), std::ptr::from_mut),
+            )
+        };
+        if status != 0 {
+            return Err(NativeRenderError::Rejected(status));
+        }
+        let feedback = self.report.feedback.decode().map_err(NativeRenderError::Rejected)?;
+        match self.report.completion {
+            2 if feedback.is_blocked() => {
+                return Err(NativeRenderError::UserBlocked(Box::new(feedback)))
+            }
+            1 if !feedback.is_blocked() => {}
+            _ => return Err(NativeRenderError::Rejected(6)),
+        }
+        self.feedback = Some(feedback);
+        match self.report.output_alpha {
+            0 => Ok(mondrian_core::ColorFrameAlpha::StraightFloat),
+            1 => Ok(mondrian_core::ColorFrameAlpha::PremultipliedFloat),
+            2 => Ok(mondrian_core::ColorFrameAlpha::Opaque),
+            _ => Err(NativeRenderError::Rejected(6)),
+        }
+    }
+
+    fn close_gui(
+        &mut self,
+    ) -> Result<Option<mondrian_effects::EffectProcessorFeedbackSnapshot>, c_int> {
+        let mut invoked = 0;
+        // SAFETY: the exclusive owner and its already allocated report stay
+        // live for this action. The SDK writes a complete bounded POD only.
+        let status = unsafe {
+            mondrian_openfx_session_close_gui(
+                self.handle.as_ptr(),
+                &raw mut self.report.feedback,
+                &raw mut invoked,
             )
         };
         if status != 0 {
             return Err(status);
         }
-        match alpha {
-            0 => Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage),
-            1 => Ok(mondrian_renderer::ColorFrameAlpha::PremultipliedCoverage),
-            2 => Ok(mondrian_renderer::ColorFrameAlpha::Opaque),
+        match invoked {
+            0 => Ok(None),
+            1 => self.report.feedback.decode().map(Some),
             _ => Err(6),
         }
+    }
+
+    fn take_feedback(&mut self) -> Option<mondrian_effects::EffectProcessorFeedbackSnapshot> {
+        self.feedback.take()
     }
 }
 
@@ -542,7 +825,7 @@ impl Drop for NativeSession {
     fn drop(&mut self) {
         // SAFETY: This handle was created once, has no aliases and is retired once.
         unsafe {
-            mondrian_openfx_session_destroy(self.0.as_ptr());
+            mondrian_openfx_session_destroy(self.handle.as_ptr());
         }
     }
 }
@@ -583,7 +866,7 @@ pub fn describe_openfx_filter(
 }
 
 /// Execute one installed OFX filter in a supervised child. The caller must
-/// supply the working color domain and straight-alpha interpretation; this
+/// supply the working color domain and exact alpha interpretation; this
 /// adapter does not perform implicit color or alpha conversion.
 pub fn render_openfx_filter_frame(
     helper_executable: &Path,
@@ -591,16 +874,17 @@ pub fn render_openfx_filter_frame(
     plugin_identifier: &str,
     timing: &OpenFxRenderTiming,
     parameters: &BTreeMap<String, OpenFxParameterBinding>,
-    frame: &OpenFxFloatFrame,
-) -> Result<OpenFxFloatFrame, OpenFxHostError> {
-    validate_render_request(timing, parameters, frame)?;
+    frame: &EffectFloatFrame,
+) -> Result<EffectFloatFrame, OpenFxHostError> {
     let mut checkpoint = || Ok(());
+    validate_render_request(timing, parameters, frame, &mut checkpoint)?;
     let mut session = OpenFxFilterSession::prepare(
         helper_executable,
         inspection,
         plugin_identifier,
-        frame.width,
-        frame.height,
+        frame.width(),
+        frame.height(),
+        frame.format(),
         &mut checkpoint,
     )?;
     let output = session.render(timing, parameters, frame, &mut checkpoint)?;
@@ -963,19 +1247,19 @@ fn write_worker_response<T: Serialize>(
 fn validate_render_request(
     timing: &OpenFxRenderTiming,
     parameters: &BTreeMap<String, OpenFxParameterBinding>,
-    frame: &OpenFxFloatFrame,
+    frame: &EffectFloatFrame,
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
 ) -> Result<(), OpenFxHostError> {
-    validate_frame(frame.width, frame.height, frame.pixels.len())?;
-    if frame.pixels.iter().flatten().any(|channel| !channel.is_finite()) {
-        return Err(invalid("OpenFX input contains a nonfinite channel"));
-    }
+    checkpoint()?;
+    validate_frame(frame.width(), frame.height(), frame.pixels().len())?;
     validate_timing(timing)?;
-    if !(f64::from(frame.width) * timing.pixel_aspect_ratio).is_finite() {
+    if !(f64::from(frame.width()) * timing.pixel_aspect_ratio).is_finite() {
         return Err(invalid(
             "OpenFX canonical frame extent is not representable",
         ));
     }
-    validate_parameters(parameters)
+    validate_parameters(parameters)?;
+    frame.view().validate_controlled(&mut || checkpoint())
 }
 
 fn validate_frame(width: u32, height: u32, pixels: usize) -> Result<usize, OpenFxHostError> {
@@ -1289,7 +1573,16 @@ pub(crate) mod shared_frame_tests {
 
     #[test]
     fn canonical_geometry_overflow_is_rejected_before_worker_admission() {
-        let frame = OpenFxFloatFrame { width: 3, height: 2, pixels: vec![[0.0; 4]; 6] };
+        let frame = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(3, 2),
+            mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            vec![[0.0; 4]; 6],
+        )
+        .expect("owned Float fixture");
         let timing = OpenFxRenderTiming {
             frame: 0.0,
             frame_rate: 24.0,
@@ -1298,11 +1591,11 @@ pub(crate) mod shared_frame_tests {
             pixel_aspect_ratio: f64::MAX,
         };
         assert!(matches!(
-            validate_render_request(&timing, &BTreeMap::new(), &frame),
+            validate_render_request(&timing, &BTreeMap::new(), &frame, &mut || Ok(())),
             Err(OpenFxHostError::Invalid(_))
         ));
         let finite = OpenFxRenderTiming { pixel_aspect_ratio: f64::MAX / 4.0, ..timing };
-        validate_render_request(&finite, &BTreeMap::new(), &frame)
+        validate_render_request(&finite, &BTreeMap::new(), &frame, &mut || Ok(()))
             .expect("very large finite geometry has no arbitrary PAR cutoff");
     }
 
@@ -1319,6 +1612,7 @@ pub(crate) mod shared_frame_tests {
             std::slice::from_raw_parts(input.as_ptr().cast(), std::mem::size_of_val(&input))
         };
         let info = NativeFrameInfo {
+            source_alpha: 0,
             width: 3,
             height: 2,
             frame: 0.0,
@@ -1328,7 +1622,16 @@ pub(crate) mod shared_frame_tests {
             pixel_aspect_ratio: f64::MAX,
         };
         assert_eq!(
-            NativeSession::create(&binary, &bundle, &identifier, bytes, &info, &[]).err(),
+            NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
+                &binary,
+                &bundle,
+                &identifier,
+                bytes,
+                &info,
+                &[]
+            )
+            .err(),
             Some(2)
         );
     }
@@ -1689,7 +1992,11 @@ pub(crate) mod shared_frame_tests {
     pub(crate) fn qualification_child(test: &str, environment: &[(&str, &str)]) -> bool {
         const CHILD: &str = "MONDRIAN_OPENFX_QUALIFICATION_CHILD";
         if std::env::var(CHILD).ok().as_deref() == Some(test) {
-            return true;
+            // A test may supervise several fixture modes. Each child executes
+            // only its selected mode, retaining process-local native state.
+            return environment
+                .iter()
+                .all(|(key, value)| std::env::var(key).ok().as_deref() == Some(*value));
         }
         let mut command = Command::new(std::env::current_exe().expect("test executable"));
         command
@@ -1772,6 +2079,7 @@ pub(crate) mod shared_frame_tests {
         let bundle = native_string(bundle).expect("native bundle");
         let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
         let info = NativeFrameInfo {
+            source_alpha: 0,
             width: 1,
             height: 1,
             frame: 0.0,
@@ -1873,13 +2181,20 @@ pub(crate) mod shared_frame_tests {
                 }
             })
             .collect::<Vec<_>>();
-        let mut session =
-            NativeSession::create(&binary, &bundle, &identifier, &input, &info, &parameters)
-                .expect("complete native tuple instance");
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters,
+        )
+        .expect("complete native tuple instance");
         let mut output = vec![0xa5; input.len()];
         assert_eq!(
             session.render(&input, &mut output, &info, &parameters),
-            Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+            Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
         );
         assert_eq!(output, input);
         let mut invalid = parameters;
@@ -1893,7 +2208,7 @@ pub(crate) mod shared_frame_tests {
         invalid[5].value[1] = 0.0;
         assert_eq!(
             session.render(&input, &mut recovered, &info, &invalid),
-            Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+            Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
         );
         assert_eq!(recovered, input);
     }
@@ -1948,6 +2263,7 @@ pub(crate) mod shared_frame_tests {
             let identifier = CString::new(identifier).expect("identifier");
             let name = CString::new("scale").expect("parameter");
             let info = NativeFrameInfo {
+                source_alpha: 0,
                 width: 1,
                 height: 1,
                 frame: 0.0,
@@ -1972,6 +2288,7 @@ pub(crate) mod shared_frame_tests {
                 }]
             };
             let created = NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
                 &binary,
                 &bundle,
                 &identifier,
@@ -1989,19 +2306,19 @@ pub(crate) mod shared_frame_tests {
                 let source_before = input.clone();
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.5)),
-                    Err(5)
+                    Err(NativeRenderError::Rejected(5))
                 );
                 assert_eq!(input, source_before);
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.5)),
-                    Err(2)
+                    Err(NativeRenderError::Rejected(2))
                 );
                 return;
             }
 
             assert_eq!(
                 session.render(&input, &mut output, &info, &parameters(1.5)),
-                Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+                Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
             );
             assert_eq!(
                 output,
@@ -2010,17 +2327,21 @@ pub(crate) mod shared_frame_tests {
             output.fill(0xa5);
             let status = session.render(&input, &mut output, &info, &parameters(2.0));
             if matches!(mode.as_str(), "unfetched" | "become_required") {
-                assert_eq!(status, Err(if mode == "unfetched" { 5 } else { 7 }));
+                assert_eq!(
+                    status,
+                    Err(NativeRenderError::Rejected(if mode == "unfetched" {
+                        5
+                    } else {
+                        7
+                    }))
+                );
                 assert_eq!(output, vec![0xa5; input.len()]);
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(1.0)),
-                    Err(2)
+                    Err(NativeRenderError::Rejected(2))
                 );
             } else {
-                assert_eq!(
-                    status,
-                    Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
-                );
+                assert_eq!(status, Ok(mondrian_core::ColorFrameAlpha::StraightFloat));
                 assert_eq!(
                     output,
                     [0.5_f32; 4].iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
@@ -2050,6 +2371,7 @@ pub(crate) mod shared_frame_tests {
         let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
         let name = CString::new("scale").expect("parameter name");
         let mut info = NativeFrameInfo {
+            source_alpha: 0,
             width: 2,
             height: 3,
             frame: 1.0,
@@ -2082,6 +2404,7 @@ pub(crate) mod shared_frame_tests {
         // Repeated destruction/recreation also checks cache handler ownership.
         for _ in 0..3 {
             let mut session = NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
                 &binary,
                 &bundle,
                 &identifier,
@@ -2101,7 +2424,7 @@ pub(crate) mod shared_frame_tests {
                 let mut output = vec![0xa5; input.len()];
                 assert_eq!(
                     session.render(&input, &mut output, &info, &parameters(gain)),
-                    Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+                    Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
                 );
                 let expected = original.map(|mut pixel| {
                     for channel in &mut pixel {
@@ -2117,7 +2440,7 @@ pub(crate) mod shared_frame_tests {
             let mut output = vec![0xa5; changed_input.len()];
             assert_eq!(
                 session.render(&changed_input, &mut output, &info, &[]),
-                Ok(mondrian_renderer::ColorFrameAlpha::StraightCoverage)
+                Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
             );
             assert_eq!(output, changed_input);
             info.width = 3;
@@ -2133,6 +2456,7 @@ pub(crate) mod shared_frame_tests {
         // Nonfinite input cannot produce or retain a usable native instance.
         input[..4].copy_from_slice(&f32::NAN.to_ne_bytes());
         assert!(NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
             &binary,
             &bundle,
             &identifier,
@@ -2206,6 +2530,7 @@ pub(crate) mod shared_frame_tests {
             ]
         };
         let mut info = NativeFrameInfo {
+            source_alpha: 0,
             width: 2,
             height: 2,
             frame: 0.0,
@@ -2216,6 +2541,7 @@ pub(crate) mod shared_frame_tests {
         };
         for _ in 0..2 {
             let mut session = NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
                 &binary,
                 &bundle,
                 &identifier,
@@ -2235,9 +2561,9 @@ pub(crate) mod shared_frame_tests {
                 info.frame = frame;
                 let mut output = vec![0xa5; input.len()];
                 assert_eq!(session.render(&input, &mut output, &info, &parameters(choice, gain)), Ok(match choice {
-                        0 => mondrian_renderer::ColorFrameAlpha::StraightCoverage,
-                        2 => mondrian_renderer::ColorFrameAlpha::Opaque,
-                        _ => mondrian_renderer::ColorFrameAlpha::PremultipliedCoverage,
+                        0 => mondrian_core::ColorFrameAlpha::StraightFloat,
+                        2 => mondrian_core::ColorFrameAlpha::Opaque,
+                        _ => mondrian_core::ColorFrameAlpha::PremultipliedFloat,
                     }),
                     "probe independently checks Source Straight and negotiated Output clip/image metadata");
                 let expected = original.map(|source| {
@@ -2300,6 +2626,7 @@ pub(crate) mod shared_frame_tests {
             string_length: 0,
         }];
         let info = NativeFrameInfo {
+            source_alpha: 0,
             width: 1,
             height: 1,
             frame: 0.0,
@@ -2312,14 +2639,21 @@ pub(crate) mod shared_frame_tests {
             .iter()
             .flat_map(|channel| channel.to_ne_bytes())
             .collect::<Vec<_>>();
-        let mut session =
-            NativeSession::create(&binary, &bundle, &identifier, &input, &info, &parameters)
-                .expect("preference negotiation is deferred until render");
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters,
+        )
+        .expect("preference negotiation is deferred until render");
         let mut output = vec![0xa5; input.len()];
         // The owned fixture aborts if Render is called for this invalid request.
         assert_eq!(
             session.render(&input, &mut output, &info, &parameters),
-            Err(7)
+            Err(NativeRenderError::Rejected(7))
         );
         assert_eq!(
             output,
@@ -2328,8 +2662,1003 @@ pub(crate) mod shared_frame_tests {
         );
         assert_eq!(
             session.render(&input, &mut output, &info, &parameters),
-            Err(2),
+            Err(NativeRenderError::Rejected(2)),
             "unsupported negotiated instance remains poisoned"
         );
     }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe image_uid native bundle"]
+    fn native_actual_image_identifiers_are_stable_distinct_and_invalidate_analysis() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_actual_image_identifiers_are_stable_distinct_and_invalidate_analysis";
+        if !qualification_child(TEST, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_uid")]) {
+            return;
+        }
+        native_actual_image_metadata_cases(true);
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe image_field native bundle"]
+    fn native_actual_progressive_images_report_field_none() {
+        const TEST: &str =
+            "openfx_host::shared_frame_tests::native_actual_progressive_images_report_field_none";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_field")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+
+    fn native_actual_image_metadata_cases(identifiers: bool) {
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned image probe binary"),
+        ))
+        .expect("probe binary");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("probe bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle_path).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("scale").expect("scale");
+        let parameters = [NativeParameter {
+            name: name.as_ptr(),
+            query_mode: 0,
+            kind: 1,
+            value: [1.0, 0.0, 0.0, 0.0],
+            string_value: std::ptr::null(),
+            string_length: 0,
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        }];
+        // The fixture analysis cache deliberately stays loaded across native
+        // session teardown. This independent handle invokes no host callback.
+        let library = unsafe { libloading::Library::new(&path) }
+            .expect("retain owned fixture analysis module");
+        type Identifier = unsafe extern "C" fn(c_int, *mut c_char, usize, *mut usize) -> c_int;
+        let get_identifier: libloading::Symbol<'_, Identifier> =
+            unsafe { library.get(b"SessionProbeImageIdentifier\0") }
+                .expect("fixture-only metadata export");
+        let read_identifier = |output| {
+            let mut buffer = [0_u8; 128];
+            let mut length = 0;
+            assert_eq!(
+                unsafe {
+                    get_identifier(
+                        output,
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            assert!(length <= buffer.len());
+            String::from_utf8(buffer[..length].to_vec()).expect("host image UID is ASCII")
+        };
+        let encode = |pixel: [f32; 4]| {
+            pixel.iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
+        };
+        let mut info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 2.0,
+        };
+        let mut previous = None;
+        for owner in 0..2 {
+            let initial = encode([0.25, -0.5, 1.5, 0.75]);
+            let mut session = NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
+                &binary,
+                &bundle,
+                &identifier,
+                &initial,
+                &info,
+                &parameters,
+            )
+            .expect("create supervised actual-image session");
+            for (frame, pixel) in [
+                (0.0, [0.25, -0.5, 1.5, 0.75]),
+                (0.0, [0.5, -0.25, 2.0, 0.75]),
+                (42.0, [0.125, -1.0, 4.0, 0.75]),
+                (0.0, [0.75, -0.125, 8.0, 0.75]),
+            ] {
+                info.frame = frame;
+                let input = encode(pixel);
+                let mut output = vec![0xa5; input.len()];
+                session.render(&input, &mut output, &info, &parameters).expect(
+                    "actual Source and Output metadata satisfy their independent fixture oracle",
+                );
+                assert_eq!(output, input, "analysis cache must use the changed raster, equal time, seek and new owner ({owner})");
+                if identifiers {
+                    let source = read_identifier(0);
+                    let output = read_identifier(1);
+                    assert!(!source.is_empty() && source.is_ascii());
+                    assert!(!output.is_empty() && output.is_ascii());
+                    assert_ne!(source, output);
+                    if let Some((prior_source, prior_output)) = previous.as_ref() {
+                        assert_ne!(
+                            &source, prior_source,
+                            "changed binding/new owner invalidates Source analysis"
+                        );
+                        assert_ne!(
+                            &output, prior_output,
+                            "Output has an independent binding identity"
+                        );
+                    }
+                    previous = Some((source, output));
+                }
+            }
+            drop(session);
+        }
+    }
+
+    // The existing NativeSession supervision and independent pixel/rebind
+    // oracle are reused. Only SessionProbe's suite-contract mode changes.
+    #[test]
+    fn native_curve_query_snapshot_is_safe_for_shared_callback_reads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::curves::CurveContext>();
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe mutex_contract native bundle"]
+    fn native_mutex_suite_protects_foreign_threads_and_recursive_initial_count() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_mutex_suite_protects_foreign_threads_and_recursive_initial_count";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mutex_contract")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe mutex_negative native bundle"]
+    fn native_mutex_suite_accepts_signed_initial_counts_without_fake_credits() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_mutex_suite_accepts_signed_initial_counts_without_fake_credits";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mutex_negative")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe mutex_lifecycle native bundle"]
+    fn native_mutex_destruction_invalidates_waiters_without_dangling_state() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_mutex_destruction_invalidates_waiters_without_dangling_state";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mutex_lifecycle")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe thread_contract native bundle"]
+    fn native_thread_suite_reports_real_spawned_callback_and_rejects_nesting() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_thread_suite_reports_real_spawned_callback_and_rejects_nesting";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "thread_contract")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe thread_concurrent native bundle"]
+    fn native_thread_suite_keeps_completion_owned_until_accepted_caller_returns() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_thread_suite_keeps_completion_owned_until_accepted_caller_returns";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "thread_concurrent")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe mutex_capacity native bundle"]
+    fn native_mutex_suite_releases_bounded_owner_slots_after_admission_refusal() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_mutex_suite_releases_bounded_owner_slots_after_admission_refusal";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "mutex_capacity")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+
+    #[test]
+    fn callback_thread_and_mutex_storage_are_charged_before_native_loading() {
+        let suite = native_thread_resident_bytes().expect("supported platform reservation");
+        assert!(
+            suite > 8 * 1024 * 1024,
+            "stack, guard and fixed owner state are charged"
+        );
+        let auxiliary = native_auxiliary_resident_bytes().expect("known auxiliary policy");
+        let small = OpenFxFilterSession::storage(1, 1).expect("small charge").active_peak_bytes();
+        let large = OpenFxFilterSession::storage(2, 3).expect("large charge").active_peak_bytes();
+        assert_eq!(
+            small,
+            suite
+                + auxiliary
+                + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>()
+                + 3 * 16
+        );
+        assert_eq!(
+            large - small,
+            (6 - 1) * 3 * 16,
+            "owner reservation is charged once, independent of raster extent"
+        );
+    }
+    #[test]
+    #[ignore = "requires owned SessionProbe persisted image-analysis fixture"]
+    fn native_image_identifiers_invalidate_persisted_analysis_across_fresh_children() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_image_identifiers_invalidate_persisted_analysis_across_fresh_children";
+        const CACHE: &str = "MONDRIAN_OPENFX_IMAGE_ANALYSIS_FILE";
+        const PHASE: &str = "MONDRIAN_OPENFX_IMAGE_ANALYSIS_PHASE";
+        if std::env::var("MONDRIAN_OPENFX_QUALIFICATION_CHILD").ok().as_deref() != Some(TEST) {
+            let directory = tempfile::tempdir().expect("owned plugin-private analysis directory");
+            let cache = directory.path().join("image-analysis.bin");
+            let cache = cache.to_str().expect("test fixture analysis pathname");
+            for phase in ["first", "replacement", "reopen"] {
+                assert!(!qualification_child(
+                    TEST,
+                    &[
+                        ("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_uid_persisted"),
+                        (CACHE, cache),
+                        (PHASE, phase)
+                    ]
+                ));
+            }
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned probe binary"),
+        ))
+        .expect("fixture selection");
+        let bundle = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("scale").expect("scale");
+        let parameters = [NativeParameter {
+            name: name.as_ptr(),
+            query_mode: 0,
+            kind: 1,
+            value: [2.0, 0.0, 0.0, 0.0],
+            string_value: std::ptr::null(),
+            string_length: 0,
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        }];
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let phase = std::env::var(PHASE).expect("actual process lifecycle phase");
+        let pixel = if phase == "replacement" {
+            [5.0, -7.0, 11.0, 0.75]
+        } else {
+            [0.25, -0.5, 1.5, 0.25]
+        };
+        let encode =
+            |pixel: [f32; 4]| pixel.into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
+        let input = encode(pixel);
+        let mut output = vec![0xa5; input.len()];
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters,
+        )
+        .expect("fresh native owner");
+        session
+            .render(&input, &mut output, &info, &parameters)
+            .expect("valid plugin analysis survives a fresh process");
+        assert_eq!(
+            output,
+            encode(pixel.map(|channel| channel * 2.0)),
+            "same raster/time in a fresh child must not reuse different-image analysis"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires owned SessionProbe image_uid fixture"]
+    fn native_namespace_is_parent_issued_copied_once_and_nil_rejected_before_host() {
+        const TEST:&str="openfx_host::shared_frame_tests::native_namespace_is_parent_issued_copied_once_and_nil_rejected_before_host";
+        if !qualification_child(TEST, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "image_uid")]) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("fixture"),
+        ))
+        .expect("binary");
+        let bundle = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 10.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let input = [0.25f32, -0.5, 1.5, 0.25]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil()),
+                &binary,
+                &bundle,
+                &identifier,
+                &input,
+                &info,
+                &[]
+            )
+            .err(),
+            Some(2)
+        );
+        let nil = [0u8; 16];
+        for namespace in [std::ptr::null(), nil.as_ptr()] {
+            let mut handle = std::ptr::null_mut();
+            // SAFETY: all non-null ranges are complete borrowed initialization
+            // facts; namespace is either explicitly null or sixteen bytes.
+            let status = unsafe {
+                mondrian_openfx_session_create(
+                    binary.as_ptr(),
+                    bundle.as_ptr(),
+                    identifier.as_ptr(),
+                    namespace,
+                    input.as_ptr().cast(),
+                    input.len(),
+                    &info,
+                    std::ptr::null(),
+                    0,
+                    &mut handle,
+                )
+            };
+            assert_eq!(status, 2);
+            assert!(handle.is_null(), "invalid identity acquires no SDK owner");
+        }
+        let owner = mondrian_core::EffectProcessorOwnerId::new();
+        let mut copied_owner = owner;
+        let mut session = NativeSession::create(
+            copied_owner,
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &[],
+        )
+        .expect("exact parent-owned namespace");
+        copied_owner = mondrian_core::EffectProcessorOwnerId::new();
+        assert_ne!(copied_owner, owner);
+        let mut output = vec![0; input.len()];
+        session
+            .render(&input, &mut output, &info, &[])
+            .expect("actual native image fetch");
+        let library =
+            unsafe { libloading::Library::new(&path) }.expect("read owned image-oracle export");
+        type Identifier = unsafe extern "C" fn(c_int, *mut c_char, usize, *mut usize) -> c_int;
+        let identifier: libloading::Symbol<'_, Identifier> =
+            unsafe { library.get(b"SessionProbeImageIdentifier\0") }.expect("actual UID export");
+        let mut text = [0u8; 256];
+        let mut length = 0;
+        assert_eq!(
+            unsafe { identifier(0, text.as_mut_ptr().cast(), text.len(), &mut length) },
+            0
+        );
+        let actual = std::str::from_utf8(&text[..length]).expect("ASCII UID");
+        assert!(
+            actual.starts_with(&format!("mondrian-ofx:{}:", owner.0.simple())),
+            "namespace is the copied parent identity: {actual}"
+        );
+        assert!(!actual.contains(&copied_owner.0.simple().to_string()));
+    }
+
+    // S02 controls use the existing NativeSession API and owned pixel oracle.
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_transient_null native bundle"]
+    fn native_message_suite_accepts_null_transient_target() {
+        const TEST: &str =
+            "openfx_host::shared_frame_tests::native_message_suite_accepts_null_transient_target";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_transient_null")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_transient_descriptor native bundle"]
+    fn native_message_suite_accepts_descriptor_transient_target() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_message_suite_accepts_descriptor_transient_target";
+        if !qualification_child(
+            TEST,
+            &[(
+                "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                "aux_transient_descriptor",
+            )],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_transient_instance native bundle"]
+    fn native_message_suite_formats_utf8_instance_notices() {
+        const TEST: &str =
+            "openfx_host::shared_frame_tests::native_message_suite_formats_utf8_instance_notices";
+        if !qualification_child(
+            TEST,
+            &[(
+                "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                "aux_transient_instance",
+            )],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_transient_destroy native bundle"]
+    fn native_message_suite_preserves_live_target_through_sdk_base_destruction() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_message_suite_preserves_live_target_through_sdk_base_destruction";
+        if !qualification_child(
+            TEST,
+            &[(
+                "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                "aux_transient_destroy",
+            )],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_question native bundle"]
+    fn native_message_suite_refuses_questions_in_noninteractive_worker() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_message_suite_refuses_questions_in_noninteractive_worker";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_question")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_invalid_handles native bundle"]
+    fn native_auxiliary_suites_reject_wrong_object_and_rubbish_handles() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_auxiliary_suites_reject_wrong_object_and_rubbish_handles";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_invalid_handles")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_progress native bundle"]
+    fn native_progress_suite_owns_begin_update_end_lifecycle() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_progress_suite_owns_begin_update_end_lifecycle";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_progress")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_timeline native bundle"]
+    fn native_timeline_suite_reads_snapshot_and_refuses_unsatisfied_navigation() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_timeline_suite_reads_snapshot_and_refuses_unsatisfied_navigation";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_timeline")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_warning native bundle"]
+    fn native_persistent_warning_and_information_allow_actual_output() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_persistent_warning_and_information_allow_actual_output";
+        if !qualification_child(
+            TEST,
+            &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_warning")],
+        ) {
+            return;
+        }
+        native_actual_image_metadata_cases(false);
+    }
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_error native bundle"]
+    fn native_persistent_error_blocks_render_and_recovers_same_owner_after_author_change() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_persistent_error_blocks_render_and_recovers_same_owner_after_author_change";
+        if !qualification_child(TEST, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "aux_error")]) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned auxiliary suite probe binary"),
+        ))
+        .expect("probe binary");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("probe bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle_path).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("scale").expect("scale");
+        let mut parameters = [NativeParameter {
+            name: name.as_ptr(),
+            query_mode: 0,
+            kind: 1,
+            value: [1.0, 0.0, 0.0, 0.0],
+            string_value: std::ptr::null(),
+            string_length: 0,
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        }];
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 2.0,
+        };
+        let encode = |pixel: [f32; 4]| {
+            pixel.iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>()
+        };
+        let input = encode([0.25, -0.5, 1.5, 0.25]);
+        let library =
+            unsafe { libloading::Library::new(&path) }.expect("retain fixture counter module");
+        type RenderCount = unsafe extern "C" fn() -> c_int;
+        let count: libloading::Symbol<'_, RenderCount> =
+            unsafe { library.get(b"SessionProbeAuxRenderCount\0") }
+                .expect("fixture-only render counter");
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters,
+        )
+        .expect("persistent Error leaves a valid native instance");
+        let mut output = vec![0xa5; input.len()];
+        let Err(NativeRenderError::UserBlocked(blocked)) =
+            session.render(&input, &mut output, &info, &parameters)
+        else {
+            panic!("actual persistent Error is a recoverable typed disposition");
+        };
+        assert_eq!(blocked.invocation(), 1);
+        assert_eq!(blocked.persistent_revision(), 1);
+        let persistent = blocked.persistent().expect("actual persistent Error");
+        assert_eq!(
+            persistent.kind(),
+            mondrian_effects::EffectProcessorNoticeKind::Error
+        );
+        assert_eq!(persistent.text(), "Change scale to recover");
+        assert_eq!(persistent.id(), "user.repair");
+        assert_eq!(
+            unsafe { count() },
+            0,
+            "Render must not run while the persistent Error remains"
+        );
+        assert_eq!(
+            output,
+            vec![0xa5; input.len()],
+            "no blocked frame bytes are published"
+        );
+        parameters[0].value[0] = 2.0;
+        session
+            .render(&input, &mut output, &info, &parameters)
+            .expect("same instance recovers after authored InstanceChanged clears Error");
+        assert_eq!(
+            unsafe { count() },
+            1,
+            "recovery processes once without replay or owner replacement"
+        );
+        assert_eq!(
+            output,
+            encode([0.5, -1.0, 3.0, 0.5]),
+            "independent official Basic analytic output"
+        );
+        let recovered = session.take_feedback().expect("actual same-owner clear");
+        assert_eq!(recovered.native_owner(), blocked.native_owner());
+        assert_eq!(recovered.invocation(), 2);
+        assert!(recovered.persistent_revision() > blocked.persistent_revision());
+        assert!(recovered.persistent().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires the owned SessionProbe aux_transient_instance bundle"]
+    fn native_report_carries_exact_bounded_utf8_and_current_invocation() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_report_carries_exact_bounded_utf8_and_current_invocation";
+        if !qualification_child(
+            TEST,
+            &[(
+                "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+                "aux_transient_instance",
+            )],
+        ) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned fixture"),
+        ))
+        .expect("binary");
+        let bundle = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("bundle");
+        let binary = native_string(&path).expect("binary");
+        let bundle = native_string(bundle).expect("bundle");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let name = CString::new("scale").expect("scale");
+        let parameters = [NativeParameter {
+            name: name.as_ptr(),
+            query_mode: 0,
+            kind: 1,
+            value: [2.0, 0.0, 0.0, 0.0],
+            string_value: std::ptr::null(),
+            string_length: 0,
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        }];
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 1,
+            height: 1,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 2.0,
+        };
+        let encode =
+            |pixel: [f32; 4]| pixel.into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
+        let input = encode([0.25, -0.5, 1.5, 0.25]);
+        let mut output = vec![0xa5; input.len()];
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            &input,
+            &info,
+            &parameters,
+        )
+        .expect("actual owner");
+        let mut native_owner = None;
+        for invocation in 1..=2 {
+            assert_eq!(
+                session.render(&input, &mut output, &info, &parameters),
+                Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+            );
+            assert_eq!(output, encode([0.5, -1.0, 3.0, 0.5]));
+            let snapshot = session.take_feedback().expect("actual matching report");
+            assert_eq!(snapshot.invocation(), invocation);
+            assert_eq!(snapshot.notices().len(), 6);
+            assert!(!snapshot.is_blocked());
+            for pair in snapshot.notices().chunks_exact(2) {
+                assert_eq!(pair[0].text(), "说明🙂 7 1.250");
+                assert_eq!(pair[0].id(), "");
+                assert_eq!(pair[1].text(), "第二条通知✓");
+                assert_eq!(pair[1].id(), "");
+            }
+            let kinds: Vec<_> = snapshot.notices().iter().map(|notice| notice.kind()).collect();
+            use mondrian_effects::EffectProcessorNoticeKind as Kind;
+            assert_eq!(
+                kinds,
+                [
+                    Kind::Information,
+                    Kind::Information,
+                    Kind::Warning,
+                    Kind::Warning,
+                    Kind::Log,
+                    Kind::Log
+                ]
+            );
+            if let Some(owner) = native_owner {
+                assert_eq!(snapshot.native_owner(), owner);
+            } else {
+                native_owner = Some(snapshot.native_owner());
+            }
+            assert!(
+                session.take_feedback().is_none(),
+                "one report is consumed once"
+            );
+        }
+    }
+    #[test]
+    #[ignore = "requires current product and owned SessionProbe cooperative_abort mode"]
+    fn native_public_owner_cancellation_reaches_live_abort_before_worker_retirement() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_public_owner_cancellation_reaches_live_abort_before_worker_retirement";
+        const STARTED: &str = "MONDRIAN_OPENFX_COOPERATIVE_STARTED";
+        const ABORTED: &str = "MONDRIAN_OPENFX_COOPERATIVE_ABORTED";
+        let directory = tempfile::tempdir().expect("owned cooperative receipts");
+        let started = directory.path().join("started.tsv");
+        let aborted = directory.path().join("aborted.tsv");
+        if !qualification_child(
+            TEST,
+            &[
+                ("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "cooperative_abort"),
+                (STARTED, started.to_str().expect("UTF-8 started path")),
+                (ABORTED, aborted.to_str().expect("UTF-8 aborted path")),
+            ],
+        ) {
+            return;
+        }
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned current product"),
+        );
+        let probe = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned live-control probe"),
+        );
+        let started = PathBuf::from(std::env::var_os(STARTED).expect("actual receipt path"));
+        let aborted = PathBuf::from(std::env::var_os(ABORTED).expect("actual receipt path"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &probe)
+            .expect("actual isolated discovery");
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let frame = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            vec![[0.25, -0.5, 1.5, 0.25]],
+        )
+        .expect("complete finite input");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("same supervised native owner");
+        let process = session.worker_process_id();
+        let owner = session.processor_owner();
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let mut canceled_after_started = false;
+        let result = session.render(&timing, &BTreeMap::new(), &frame, &mut || {
+            if started.is_file() {
+                let receipt =
+                    std::fs::read_to_string(&started).expect("actual callback started record");
+                if receipt.ends_with('\n') {
+                    canceled_after_started = true;
+                    return Err(OpenFxHostError::Canceled);
+                }
+            }
+            Ok(())
+        });
+        assert!(
+            canceled_after_started,
+            "actual Render reached the fixture before owner cancellation"
+        );
+        assert!(
+            matches!(result, Err(OpenFxHostError::Canceled)),
+            "exact owner cancel, no frame/native fault: {result:?}"
+        );
+        assert_eq!(
+            frame.pixels(),
+            [[0.25, -0.5, 1.5, 0.25]],
+            "no canceled pixels are published"
+        );
+        session.shutdown().expect("same bounded retirement authority");
+        let started = std::fs::read_to_string(&started).expect("actual Render observation");
+        let aborted = std::fs::read_to_string(&aborted)
+            .expect("cooperative native abort must be observed before supervisor retirement");
+        assert_eq!(
+            started, aborted,
+            "same live request/image/worker observed the signal, no DSP replay"
+        );
+        let (pid, uid) = aborted.trim_end().split_once('\t').expect("actual PID and Source UID");
+        assert_eq!(pid.parse::<u32>().expect("actual PID"), process);
+        let parts: Vec<_> = uid.split(':').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "mondrian-ofx");
+        assert_eq!(parts[1], owner.0.simple().to_string());
+        assert_eq!(parts[3], "Source");
+        assert!(
+            parts[2].parse::<std::num::NonZeroU64>().is_ok(),
+            "actual image generation"
+        );
+        assert_eq!(started.lines().count(), 1, "one actual Render, no replay");
+    }
+    #[test]
+    #[ignore = "requires current Stage B product and owned cooperative_progress fixture"]
+    fn native_live_progress_precedes_completion_on_the_public_owner_thread() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_live_progress_precedes_completion_on_the_public_owner_thread";
+        const STARTED: &str = "MONDRIAN_OPENFX_COOPERATIVE_STARTED";
+        const RELEASE: &str = "MONDRIAN_OPENFX_COOPERATIVE_RELEASE";
+        let directory = tempfile::tempdir().expect("owned progress receipts");
+        let started = directory.path().join("started.tsv");
+        let release = directory.path().join("release");
+        if !qualification_child(
+            TEST,
+            &[
+                ("MONDRIAN_OPENFX_SESSION_PROBE_MODE", "cooperative_progress"),
+                (STARTED, started.to_str().expect("UTF-8 started path")),
+                (RELEASE, release.to_str().expect("UTF-8 release path")),
+            ],
+        ) {
+            return;
+        }
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned current product"),
+        );
+        let probe = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned live-control probe"),
+        );
+        let started = PathBuf::from(std::env::var_os(STARTED).expect("actual started path"));
+        let release = PathBuf::from(std::env::var_os(RELEASE).expect("actual release path"));
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &probe)
+            .expect("real isolated discovery");
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightCoverage,
+        );
+        let pixels = [[0.25_f32, -0.5, 1.5, 0.25]];
+        let frame = mondrian_effects::EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            pixels.to_vec(),
+        )
+        .expect("independent finite HDR input");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("same supervised owner");
+        let parent_thread = std::thread::current().id();
+        let owner = session.processor_owner();
+        let process_id = session.worker_process_id();
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let mut saw_live = false;
+        let mut last_revision = 0;
+        let output = session
+            .render_observed(
+                &timing,
+                &BTreeMap::new(),
+                &frame,
+                Some(Instant::now() + Duration::from_secs(5)),
+                mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                &mut |observation| {
+                    assert_eq!(
+                        std::thread::current().id(),
+                        parent_thread,
+                        "borrowed owner control never runs on a foreign callback thread"
+                    );
+                    if let OpenFxRenderObservation::Progress(progress) = observation {
+                        assert_eq!(progress.owner, owner);
+                        assert_eq!(progress.invocation, 1);
+                        assert_eq!(
+                            progress.origin,
+                            mondrian_effects::EffectProcessorExecutionOrigin::SupervisedChild {
+                                process_id: std::num::NonZeroU32::new(process_id)
+                                    .expect("actual PID"),
+                            }
+                        );
+                        assert!(progress.revision > last_revision);
+                        last_revision = progress.revision;
+                        if progress.progress.active() && progress.progress.fraction() == 0.375 {
+                            assert_eq!(progress.progress.label().text(), "Live native render");
+                            assert!(
+                                !release.exists(),
+                                "fixture remains inside Render until this observation"
+                            );
+                            let receipt =
+                                std::fs::read_to_string(&started).expect("actual Render receipt");
+                            assert_eq!(
+                                receipt.lines().count(),
+                                1,
+                                "one stateful action, no replay"
+                            );
+                            saw_live = true;
+                            std::fs::write(&release, b"release this actual render")
+                                .expect("independent continuation");
+                        }
+                    }
+                    Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                },
+            )
+            .expect("one completed real output");
+        assert!(
+            saw_live,
+            "terminal-only snapshots cannot satisfy this oracle"
+        );
+        assert_eq!(
+            output.pixels(),
+            pixels,
+            "independent Basic unit-gain pixel oracle"
+        );
+        assert_eq!(
+            output.alpha(),
+            mondrian_core::ColorFrameAlpha::StraightFloat
+        );
+        let feedback = session.take_feedback().expect("same terminal receipt");
+        assert_eq!(feedback.owner, owner);
+        assert!(!feedback.snapshot.progress().expect("actual end generation").active());
+        session.shutdown().expect("joined same-owner teardown");
+    }
 }
+
+#[cfg(test)]
+mod native_gui_qualification;

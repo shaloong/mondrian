@@ -124,6 +124,7 @@ fn item(address: u32) -> HeterogeneousCpuPrefixBatchItem {
         address,
         route,
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 2,
             height: 2,
             data: vec![

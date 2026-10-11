@@ -770,8 +770,10 @@ pub trait Widget {
     /// Called on ancestors before a descendant receives an event.
     ///
     /// This is for parent-owned chrome that must win over child hit targets,
-    /// such as dock splitter handles. It must not re-dispatch the event to
-    /// children.
+    /// such as dock splitter handles, or a numeric pair that owns domain keyboard
+    /// adjustments for its exactly focused Slider. Keyboard admission stays
+    /// within the Router's active modal scope. It must not re-dispatch the event
+    /// to children or create another focus authority.
     fn before_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
         EventResult::Ignored
     }

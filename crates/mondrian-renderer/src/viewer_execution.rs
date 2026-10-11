@@ -124,8 +124,8 @@ pub enum ViewerGpuExecutionLayer {
         effect_plan: Arc<CompiledEffectGpuPlan>,
         /// Adjustment opacity.
         opacity: f32,
-        /// Adjustment blend mode.
-        blend_mode: BlendMode,
+        /// Adjustment pass policy.
+        blend_policy: mondrian_effects::EffectPassBlendPolicy,
         /// Timeline seed for temporal effects.
         frame_seed: i64,
     },

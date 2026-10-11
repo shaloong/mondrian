@@ -201,7 +201,7 @@ pub(crate) struct StateSnapshot {
 
 const STATE_SNAPSHOT_MAGIC: &[u8; 16] = b"VST3HOST_STATE\0\0";
 const STATE_SNAPSHOT_VERSION: u32 = 1;
-const STATE_SNAPSHOT_HEADER_SIZE: usize = 16 + 4 + 4 + 4;
+pub(crate) const STATE_SNAPSHOT_HEADER_SIZE: usize = 16 + 4 + 4 + 4;
 const NO_CONTROLLER_STATE: u32 = u32::MAX;
 /// Preserve the pre-envelope state capacity: component and controller payloads may together use
 /// the same 64 MiB that a host-provided `MemoryStream` permits.
@@ -243,6 +243,44 @@ pub(crate) fn encode_state_snapshot(snapshot: &StateSnapshot) -> Result<Vec<u8>>
         out.extend_from_slice(controller);
     }
     Ok(out)
+}
+
+pub(crate) fn encode_configuration_capture_into(
+    output: &mut Vec<u8>,
+    component: &crate::internal::bounded_configuration_stream::ConfigurationCaptureStream,
+    component_len: usize,
+    controller: Option<(
+        &crate::internal::bounded_configuration_stream::ConfigurationCaptureStream,
+        usize,
+    )>,
+) -> std::result::Result<(), crate::configuration_capture::ConfigurationCaptureError> {
+    use crate::configuration_capture::ConfigurationCaptureError as CaptureError;
+    let controller_len = controller.map_or(0, |(_, len)| len);
+    let total = STATE_SNAPSHOT_HEADER_SIZE
+        .checked_add(component_len)
+        .and_then(|total| total.checked_add(controller_len))
+        .ok_or(CaptureError::ExtentOverflow)?;
+    if !output.is_empty() || total > output.capacity() {
+        return Err(CaptureError::InvalidCaptureState);
+    }
+    let native_component_len =
+        u32::try_from(component_len).map_err(|_| CaptureError::ExtentOverflow)?;
+    let native_controller_len = match controller {
+        Some((_, len)) => u32::try_from(len).map_err(|_| CaptureError::ExtentOverflow)?,
+        None => NO_CONTROLLER_STATE,
+    };
+    output.extend_from_slice(STATE_SNAPSHOT_MAGIC);
+    output.extend_from_slice(&STATE_SNAPSHOT_VERSION.to_le_bytes());
+    output.extend_from_slice(&native_component_len.to_le_bytes());
+    output.extend_from_slice(&native_controller_len.to_le_bytes());
+    component.append_to(output)?;
+    if let Some((controller, _)) = controller {
+        controller.append_to(output)?;
+    }
+    if output.len() != total {
+        return Err(CaptureError::InvalidCaptureState);
+    }
+    Ok(())
 }
 
 pub(crate) fn decode_state_snapshot(data: &[u8]) -> Result<StateSnapshot> {
@@ -358,9 +396,9 @@ pub enum ParameterEditKind {
 
 /// A single parameter-edit gesture event reported by a plugin's own editor.
 ///
-/// Drained in order via [`Plugin::take_parameter_edits`]. This is the richer superset of
-/// [`Plugin::get_parameter_changes`]: where that drains only the value changes, this preserves
-/// the begin/change/end ordering so a host can reconstruct each gesture.
+/// Carried in [`NativeEditorEvent`] and drained together with group and dirty
+/// boundaries by [`Plugin::take_editor_events`]. DSP value feedback remains a
+/// separate execution sink and is not an author gesture log.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParameterEdit {
     /// Parameter id the gesture targets.
@@ -370,6 +408,110 @@ pub struct ParameterEdit {
     /// The new normalized value (`0.0..=1.0`), present only for
     /// [`ParameterEditKind::ValueChange`]; `None` for begin/end brackets.
     pub value: Option<f64>,
+}
+
+/// One native author event, preserving callback order across all author kinds.
+/// This is source data, not author admission or proof of a canonical Undo commit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum NativeEditorEvent {
+    /// One parameter's Begin/Value/End callback.
+    Parameter(ParameterEdit),
+    /// The plugin changed whether its authored configuration needs saving.
+    DirtyChanged(bool),
+
+    /// Begin a shared-timestamp scope for the following parameter callbacks.
+    GroupEditStarted,
+
+    /// End that timestamp scope; individual parameter gestures may remain open.
+    GroupEditFinished,
+}
+
+/// Reason the current native author event source can no longer prove completeness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NativeEditorEventFailure {
+    /// An author callback arrived outside the recorded initializing UI thread.
+    WrongThread,
+    /// An event or DSP feedback sink reached its fixed capacity.
+    Overflow,
+    /// A native edit supplied a non-finite or out-of-range normalized value.
+    InvalidValue,
+
+    /// Begin/End or grouped boundaries cannot describe a complete source.
+    InvalidBoundary,
+    /// The non-wrapping native source revision was exhausted.
+    SequenceExhausted,
+}
+
+/// Non-consuming lifecycle facts from the same ordered native event source.
+///
+/// A closed empty source is necessary for configuration service, but cannot
+/// prove that an earlier drained delivery was accepted by an author Session.
+/// The canonical Runtime separately retains that outstanding delivery barrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeEditorEventSourceStatus {
+    pub(crate) revision: u64,
+    pub(crate) pending_events: usize,
+    pub(crate) pending_dsp_feedback_values: usize,
+    pub(crate) open_parameter_edits: usize,
+    pub(crate) group_depth: u32,
+    pub(crate) failure: Option<NativeEditorEventFailure>,
+}
+
+impl NativeEditorEventSourceStatus {
+    /// Non-wrapping revision of successfully retained author callbacks.
+    pub const fn revision(self) -> u64 {
+        self.revision
+    }
+    /// Events not yet drained from this exact source.
+    pub const fn pending_events(self) -> usize {
+        self.pending_events
+    }
+    /// Actual values still queued in the existing GUI-to-DSP feedback sink.
+    /// Zero does not prove that an author plan or opaque configuration was accepted.
+    pub const fn pending_dsp_feedback_values(self) -> usize {
+        self.pending_dsp_feedback_values
+    }
+    /// Exact BeginEdit calls not yet matched by EndEdit, including repeated IDs.
+    pub const fn open_parameter_edits(self) -> usize {
+        self.open_parameter_edits
+    }
+    /// Exact still-open shared-timestamp group nesting depth.
+    pub const fn group_depth(self) -> u32 {
+        self.group_depth
+    }
+    /// Lifetime-sticky refusal, independently of the current queue length.
+    pub const fn failure(self) -> Option<NativeEditorEventFailure> {
+        self.failure
+    }
+    /// Source-only emptiness, never a DSP delivery or author-acceptance receipt.
+    /// Consumers additionally check pending DSP feedback and Runtime outstanding
+    /// delivery before configuration service, save or a fresh native Enter.
+    pub const fn closed_empty(self) -> bool {
+        self.pending_events == 0
+            && self.open_parameter_edits == 0
+            && self.group_depth == 0
+            && self.failure.is_none()
+    }
+}
+
+/// A drain of the same native instance's complete ordered author source.
+///
+/// Failure is sticky for that ComponentHandler lifetime. Incomplete never
+/// returns a truncated event vector or invents an End. A consumer must refuse
+/// author publication and restore/reinstall configuration using its exact native
+/// owner before admitting a new source; this API does not perform that recovery.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum NativeEditorEventDrain {
+    /// Every admitted author callback since the previous complete drain.
+    Complete {
+        /// Parameter, group and dirty callbacks in their single source order.
+        events: Vec<NativeEditorEvent>,
+    },
+    /// The current source is unusable for author transactions.
+    Incomplete {
+        /// The first source failure, retained across every subsequent drain.
+        failure: NativeEditorEventFailure,
+    },
 }
 
 /// A control-plane action requested by a plugin through `IComponentHandler2`.
@@ -468,27 +610,16 @@ pub struct DataExchangeBlock {
 
 /// A control-plane action requested by a plugin through its host callbacks.
 ///
-/// # Ordering
-///
-/// Notifications keep their order relative to each other, and so do the
-/// [`ParameterEdit`]s from [`Plugin::take_parameter_edits`] — but the two streams are buffered
-/// independently, so their relative order is not preserved. In particular, the
-/// [`GroupEditStarted`](Self::GroupEditStarted) / [`GroupEditFinished`](Self::GroupEditFinished)
-/// bracket cannot be correlated with the edits that fell inside it: treat it as "the plugin is
-/// currently in a grouped gesture", not as a delimiter around specific parameter edits.
+/// These are control-plane requests, not an author gesture log. Parameter,
+/// group and dirty author boundaries belong exclusively to [`NativeEditorEvent`].
+/// No cross-ordering with that author source or progress producers is promised.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HostNotification {
-    /// The plugin changed whether its state needs saving.
-    DirtyChanged(bool),
     /// The plugin asked the host to open an editor, optionally by view name.
     OpenEditorRequested {
         /// Requested view name, or `None` for the default editor.
         name: Option<String>,
     },
-    /// The plugin began a grouped edit.
-    GroupEditStarted,
-    /// The plugin finished a grouped edit.
-    GroupEditFinished,
     /// The plugin selected a different unit in its own UI.
     UnitSelectionChanged {
         /// Newly selected unit id.
@@ -552,12 +683,48 @@ impl HostNotification {
     }
 }
 
+/// Exact generation of the coalesced native restart requests.
+///
+/// Every nonempty callback advances the serial, including an already pending bit.
+/// The maximum serial is sticky exhaustion and cannot be acknowledged or wrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RestartCohort(u64);
+
+impl RestartCohort {
+    pub(crate) const fn from_word(word: u64) -> Self {
+        Self(word)
+    }
+    pub(crate) const fn word(self) -> u64 {
+        self.0
+    }
+
+    /// Monotonic callback serial; zero denotes that no request has been recorded.
+    pub const fn serial(self) -> u32 {
+        (self.0 >> 32) as u32
+    }
+
+    /// Coalesced raw flags, preserving bits the host has not named.
+    pub const fn flags(self) -> RestartFlags {
+        RestartFlags(self.0 as u32 as i32)
+    }
+
+    /// Whether the bounded serial space has been exhausted permanently.
+    pub const fn exhausted(self) -> bool {
+        self.serial() == u32::MAX
+    }
+
+    /// Whether flags or sticky exhaustion require host attention.
+    pub const fn pending(self) -> bool {
+        self.0 as u32 != 0 || self.exhausted()
+    }
+}
+
 /// What a plugin asked the host to re-read, reported through `IComponentHandler::restartComponent`
 /// and drained with [`Plugin::take_restart_flags`].
 ///
 /// A plugin raises these when something about it changed behind the host's back — a preset load
 /// that renamed its parameters, a mode switch that changed its latency, an oversampling toggle
-/// that changed its bus layout. Poll this alongside [`Plugin::take_parameter_edits`] and respond
+/// that changed its bus layout. Poll this alongside [`Plugin::take_editor_events`] and respond
 /// directly, or use [`Plugin::service_host_requests`] for lifecycle-sensitive changes:
 ///
 /// - [`param_values_changed`](Self::param_values_changed) — re-read values with
@@ -723,8 +890,242 @@ pub struct Plugin {
     pub(crate) internal: Option<Box<dyn PluginInternal>>,
 }
 
+/// Scoped roles borrowing the same loaded native component/controller.
+///
+/// The processing role can move to a scoped audio thread while the editor role
+/// remains on its initializing main thread. Both borrow the original Plugin,
+/// so it and its native module cannot be replaced or dropped until both end.
+/// Neither role can activate, set up, restore state, terminate, or reload the
+/// component. Finish the split and quiesce processing before those transitions.
+/// Dropping a temporary editor role does not remove the native owner's view.
+/// A same-owner HWND may stay open across DSP join and coherent control capture;
+/// before replacing/dropping the native owner, explicitly close its view/parent.
+#[must_use]
+pub struct PluginEditorProcessingSplit<'a> {
+    /// Main-thread editor and controller operations for this exact instance.
+    pub editor: PluginEditorControl<'a>,
+    /// Disjoint DSP storage and processor operations for this exact instance.
+    pub processor: PluginAudioProcessing<'a>,
+}
+
+impl<'a> PluginEditorProcessingSplit<'a> {
+    /// Preparation layouts of this host's concrete main and processing Box owners.
+    /// The consumer must also compare actual created roles before thread entry.
+    /// These two requests are not a complete Plugin/native allocation grant.
+    pub fn allocation_layouts() -> [std::alloc::Layout; 2] {
+        crate::internal::plugin_impl::native_editor_processing_layouts()
+    }
+
+    pub(crate) fn from_roles(
+        editor: Box<dyn PluginEditorRole + 'a>,
+        processor: Box<dyn PluginProcessingRole + Send + 'a>,
+    ) -> Self {
+        Self {
+            editor: PluginEditorControl {
+                internal: editor,
+                _main_thread: std::marker::PhantomData,
+            },
+            processor: PluginAudioProcessing {
+                internal: processor,
+            },
+        }
+    }
+}
+
+/// Exact child-local identity of one actually loaded native plugin object.
+///
+/// This unforgeable token distinguishes a live native attachment from another
+/// load of the same class or a reused COM address. It is a lifetime fact only:
+/// it does not authorize author edits, install a plan, or replace a runtime lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeEditorAttachmentOwner(std::num::NonZeroU64);
+
+impl NativeEditorAttachmentOwner {
+    pub(crate) fn issue() -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = NEXT
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |next| next.checked_add(1),
+            )
+            .map_err(|_| Error::Other("native object attachment identity exhausted".to_string()))?;
+        let serial = std::num::NonZeroU64::new(serial).ok_or_else(|| {
+            Error::Other("native object attachment identity was zero".to_string())
+        })?;
+        Ok(Self(serial))
+    }
+
+    /// Exact process-local load serial, never a persistent author or install ID.
+    pub const fn serial(self) -> std::num::NonZeroU64 {
+        self.0
+    }
+}
+
+/// The sole live editor/controller role, confined to its initializing thread.
+/// No DSP storage or component lifecycle API is available through this handle.
+pub struct PluginEditorControl<'a> {
+    internal: Box<dyn PluginEditorRole + 'a>,
+    _main_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl PluginEditorControl<'_> {
+    /// Actual loaded native object's lifetime identity, read without state callbacks.
+    /// This observation cannot issue an installed Runtime or authoring lease.
+    pub fn attachment_owner(&self) -> Result<NativeEditorAttachmentOwner> {
+        self.internal.attachment_owner()
+    }
+    /// Requested layout of this complete concrete SDK main-role Box.
+    /// This excludes nested/shared owners and OS/native/plugin-private allocations.
+    pub fn allocation_layout(&self) -> std::alloc::Layout {
+        std::alloc::Layout::for_value(self.internal.as_ref())
+    }
+    /// Attach the same controller's IPlugView to a valid native parent.
+    pub fn open_editor(&mut self, parent: WindowHandle) -> Result<()> {
+        self.internal.open_editor(parent.0)
+    }
+    /// Remove the attached IPlugView before its parent or owner is destroyed.
+    pub fn close_editor(&mut self) -> Result<()> {
+        self.internal.close_editor()
+    }
+    /// Query the same view/controller's preferred editor dimensions.
+    pub fn editor_size(&self) -> Result<(i32, i32)> {
+        self.internal.editor_size()
+    }
+    /// Query whether the same view accepts host resize requests.
+    pub fn editor_can_resize(&self) -> Result<bool> {
+        self.internal.editor_can_resize()
+    }
+    /// Ask the same view to accept a host resize, including its constraints.
+    pub fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
+        self.internal.resize_editor(width, height)
+    }
+    /// Set the same editor's finite positive content scale.
+    pub fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
+        self.internal.set_editor_scale_factor(factor)
+    }
+    /// Drain the complete ordered author source of this same component handler.
+    /// This is source data, never an author transaction or installed-runtime lease.
+    pub fn take_editor_events(&mut self) -> Result<NativeEditorEventDrain> {
+        self.internal.take_editor_events()
+    }
+
+    /// Observe this same source without draining events or invoking native state.
+    pub fn editor_event_source_status(&self) -> Result<NativeEditorEventSourceStatus> {
+        self.internal.editor_event_source_status()
+    }
+    /// Observe the exact same native request cohort without retiring any flags.
+    /// The sole Runtime admits a hold at its next complete root-window boundary.
+    pub fn pending_restart_cohort(&self) -> Result<Option<RestartCohort>> {
+        self.internal.pending_restart_cohort()
+    }
+    /// Take actual component restart flags without configuring the live processor.
+    /// The owner must quiesce/end the split and use its canonical configuration service.
+    pub fn take_restart_flags(&mut self) -> Result<RestartFlags> {
+        self.internal.take_restart_flags()
+    }
+    /// Apply processor-to-controller display updates on the actual control thread.
+    /// This does not turn processor output or host-authored automation into an edit.
+    pub fn service_controller(&mut self) -> Result<()> {
+        self.internal.service_controller()
+    }
+    /// Read the controller's current normalized parameter on its control thread.
+    pub fn parameter(&self, id: u32) -> Result<f64> {
+        self.internal.parameter(id)
+    }
+    /// Take a native IPlugFrame request for the current editor's parent size.
+    pub fn take_editor_resize_request(&self) -> Result<Option<(i32, i32)>> {
+        self.internal.take_editor_resize_request()
+    }
+    /// Service platform editor registrations on the same main thread.
+    /// Windows uses its native message pump; this services Linux IRunLoop registrations.
+    pub fn service_run_loop(&mut self) -> Result<()> {
+        self.internal.service_run_loop()
+    }
+}
+
+/// Disjoint processing storage for the same component as a scoped editor role.
+/// This role cannot reach IEditController, IPlugView or component lifecycle calls.
+pub struct PluginAudioProcessing<'a> {
+    internal: Box<dyn PluginProcessingRole + Send + 'a>,
+}
+
+impl PluginAudioProcessing<'_> {
+    /// Requested layout of this complete concrete SDK processing-role Box.
+    /// This excludes borrowed/shared storage already owned by the Plugin.
+    pub fn allocation_layout(&self) -> std::alloc::Layout {
+        std::alloc::Layout::for_value(self.internal.as_ref())
+    }
+    /// Publish the existing signal timeline contract for the next DSP block.
+    pub fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()> {
+        self.internal.set_process_timeline_context(context)
+    }
+    /// Queue one finite normalized parameter at a valid nonnegative sample offset.
+    /// Controller presentation is deferred to the main role; this never calls it.
+    pub fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
+        self.internal.queue_parameter_at(id, value, sample_offset)
+    }
+
+    /// Replay values from the same unconsumed ordered editor source into the
+    /// existing DSP parameter queue. No event is drained or controller called.
+    /// The caller must execute the same processor's zero-sample parameter flush.
+    pub fn queue_unconsumed_editor_values(&mut self) -> Result<bool> {
+        self.internal.queue_unconsumed_editor_values()
+    }
+    /// Process existing per-bus buffers using the same canonical DSP implementation.
+    pub fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
+        self.internal.process_bus_audio(buffers)
+    }
+}
+
+pub(crate) trait PluginEditorRole {
+    fn attachment_owner(&self) -> Result<NativeEditorAttachmentOwner>;
+    fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
+    fn close_editor(&mut self) -> Result<()>;
+    fn editor_size(&self) -> Result<(i32, i32)>;
+    fn editor_can_resize(&self) -> Result<bool>;
+    fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)>;
+    fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool>;
+    fn take_editor_events(&mut self) -> Result<NativeEditorEventDrain>;
+    fn editor_event_source_status(&self) -> Result<NativeEditorEventSourceStatus>;
+    fn pending_restart_cohort(&self) -> Result<Option<RestartCohort>>;
+    fn take_restart_flags(&mut self) -> Result<RestartFlags>;
+    fn service_controller(&mut self) -> Result<()>;
+    fn parameter(&self, id: u32) -> Result<f64>;
+    fn take_editor_resize_request(&self) -> Result<Option<(i32, i32)>>;
+    fn service_run_loop(&mut self) -> Result<()>;
+}
+
+pub(crate) trait PluginProcessingRole: Send {
+    fn set_process_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+    ) -> Result<()>;
+    fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
+    fn queue_unconsumed_editor_values(&mut self) -> Result<bool>;
+    fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()>;
+}
+
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
+    fn visit_retained_host_created_storage(
+        &mut self,
+        _visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        Err(crate::host_storage::HostStorageError::UnavailableOwner)
+    }
+    fn native_editor_attachment_owner(&self) -> Option<NativeEditorAttachmentOwner> {
+        None
+    }
+    fn split_editor_processing(&mut self) -> Result<PluginEditorProcessingSplit<'_>> {
+        Err(Error::Other(
+            "this backend cannot split the live native component/controller".to_string(),
+        ))
+    }
+
     fn set_process_timeline_context(
         &mut self,
         context: crate::audio::ProcessTimelineContext,
@@ -904,6 +1305,10 @@ pub(crate) trait PluginInternal: Send {
     }
     fn start_processing(&mut self) -> Result<()>;
     fn stop_processing(&mut self) -> Result<()>;
+    /// Derive unresolved teardown from the sole actual view attachment.
+    fn native_editor_pending_detach(&self) -> Option<crate::error::EditorDetachStage> {
+        None
+    }
     fn has_editor(&self) -> bool;
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
     fn close_editor(&mut self) -> Result<()>;
@@ -927,13 +1332,33 @@ pub(crate) trait PluginInternal: Send {
     /// (non-Linux, or process isolation where the editor isn't bridged).
     fn service_run_loop(&mut self) {}
     fn get_parameter_changes(&self) -> Vec<(u32, f64)>;
-    /// Drain the ordered parameter-edit gesture log (begin/change/end) the plugin's editor
-    /// reported since the last call. Defaults to empty for implementations that don't capture
-    /// gestures.
-    fn take_parameter_edits(&mut self) -> Vec<ParameterEdit> {
-        Vec::new()
+    /// Drain the complete ordered native author source; unsupported adapters
+    /// must refuse rather than fabricate an empty successful gesture stream.
+    fn take_editor_events(&mut self) -> Result<NativeEditorEventDrain> {
+        Err(Error::Other(
+            "native editor feedback is unsupported by this adapter".to_string(),
+        ))
     }
-    /// Drain ordered requests reported through `IComponentHandler2`.
+
+    /// Observe the existing source without consuming it. Unsupported backends
+    /// cannot fabricate closed-empty author state.
+    fn editor_event_source_status(&self) -> Result<NativeEditorEventSourceStatus> {
+        Err(Error::Other(
+            "native editor source status is unsupported by this adapter".to_string(),
+        ))
+    }
+    /// Observe exact post-capture source facts. Only newly emitted dirty=false
+    /// notices may accompany a coherent getState; values, dirty=true or any
+    /// edit/group boundary require a fresh coherent capture.
+    fn editor_capture_source_status_since(
+        &self,
+        _revision: u64,
+    ) -> Result<Option<NativeEditorEventSourceStatus>> {
+        Err(Error::Other(
+            "native capture source coherence is unsupported by this adapter".to_string(),
+        ))
+    }
+    /// Drain control-only host requests, without author group/dirty boundaries.
     fn take_host_notifications(&mut self) -> Vec<HostNotification> {
         Vec::new()
     }
@@ -954,6 +1379,31 @@ pub(crate) trait PluginInternal: Send {
             "plugin context menus are not supported".to_string(),
         ))
     }
+    /// Pure in-process pending read; implementations must not query native metadata.
+    fn pending_restart_flags(&self) -> RestartFlags {
+        self.pending_restart_cohort()
+            .map_or_else(RestartFlags::default, RestartCohort::flags)
+    }
+
+    /// A non-consuming local callback snapshot; remote adapters may be unavailable.
+    fn pending_restart_cohort(&self) -> Option<RestartCohort> {
+        None
+    }
+
+    /// Retire only an exact cohort after the control owner completed native service.
+    fn retire_restart_cohort(&mut self, _expected: RestartCohort) -> Result<bool> {
+        Err(Error::Other(
+            "native restart cohort service is unavailable".to_string(),
+        ))
+    }
+
+    /// Claim an unchanged retired callback serial on the native control owner.
+    fn claim_retired_restart_serial(&mut self, _serial: u32) -> Result<bool> {
+        Err(Error::Other(
+            "native retired restart serial claim is unavailable".to_string(),
+        ))
+    }
+
     /// Take the `restartComponent` flags the plugin has raised since the last call. Defaults to
     /// empty for implementations that don't record them.
     fn take_restart_flags(&mut self) -> RestartFlags {
@@ -1072,6 +1522,40 @@ pub(crate) trait PluginInternal: Send {
             "state save/restore is not supported".to_string(),
         ))
     }
+    /// Reactivate the retained component at the unchanged setup without starting DSP.
+    fn reactivate_configuration_stopped(
+        &mut self,
+    ) -> std::result::Result<(), crate::configuration_capture::ConfigurationCaptureError> {
+        Err(crate::configuration_capture::ConfigurationCaptureError::Unavailable)
+    }
+
+    /// Capture configuration through fixed buffers while processing is stopped.
+    fn save_state_bounded(
+        &mut self,
+        _state_limit: usize,
+        _buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        Err(crate::configuration_capture::ConfigurationCaptureError::Unavailable)
+    }
+
+    /// Capture authored component/controller configuration on the owning main
+    /// thread while the complete processor is exclusively borrowed. Scoped DSP
+    /// must have joined first; this neither stops/restarts DSP nor claims a DSP
+    /// checkpoint. The fixed streams/envelope share the configuration allocator.
+    fn capture_author_state_bounded(
+        &mut self,
+        _state_limit: usize,
+        _buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        Err(crate::configuration_capture::ConfigurationCaptureError::Unavailable)
+    }
+
     /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
     /// telling the plugin what kind of restore this is via the stream's attributes.
     ///
@@ -1114,6 +1598,60 @@ pub(crate) trait PluginInternal: Send {
 }
 
 impl Plugin {
+    /// Inspect host-created COM objects retained by this actual plugin context.
+    ///
+    /// This requires exclusive full-owner access on the component control
+    /// thread. It includes dead weak-retained wrapper payloads and all live
+    /// nested message/attribute/stream allocations. It is ONLY this owner
+    /// family: process buffers, controller caches, callbacks, module/OS and
+    /// DataExchange storage need the separate complete Plugin inventory.
+    /// An isolated backend without local owning views refuses explicitly.
+    pub fn visit_retained_host_created_storage(
+        &mut self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::{HostStorageError, HostStorageRef};
+        visitor.visit(HostStorageRef::path(&self.info.path)?)?;
+        for text in [
+            &self.info.name,
+            &self.info.vendor,
+            &self.info.version,
+            &self.info.category,
+            &self.info.uid,
+        ] {
+            visitor.visit(HostStorageRef::string(text)?)?;
+        }
+        visitor.visit(HostStorageRef::vector(&self.compatibility)?)?;
+        for entry in &self.compatibility {
+            visitor.visit(HostStorageRef::string(&entry.new_class_id)?)?;
+            visitor.visit(HostStorageRef::vector(&entry.old_class_ids)?)?;
+            for class in &entry.old_class_ids {
+                visitor.visit(HostStorageRef::string(class)?)?;
+            }
+        }
+        visitor.visit(HostStorageRef::arc(&self.audio_levels))?;
+        {
+            let levels = self
+                .audio_levels
+                .lock()
+                .map_err(|_| HostStorageError::PoisonedOwner)?;
+            visitor.visit(HostStorageRef::vector(&levels.channels)?)?;
+        }
+        if let Some(callback) = &self.parameter_change_callback {
+            visitor.visit(HostStorageRef::boxed(callback))?;
+            return Err(HostStorageError::OpaqueCallbackOwner);
+        }
+        if let Some(callback) = &self.audio_callback {
+            visitor.visit(HostStorageRef::boxed(callback))?;
+            return Err(HostStorageError::OpaqueCallbackOwner);
+        }
+        let internal = self
+            .internal
+            .as_mut()
+            .ok_or(HostStorageError::UnavailableOwner)?;
+        visitor.visit(HostStorageRef::boxed(internal))?;
+        internal.visit_retained_host_created_storage(visitor)
+    }
     /// Get plugin information
     pub fn info(&self) -> &PluginInfo {
         &self.info
@@ -2014,6 +2552,28 @@ impl Plugin {
         self.audio_callback = Some(Box::new(callback));
     }
 
+    /// Borrow disjoint native editor/control and DSP roles of this same loaded instance.
+    ///
+    /// The editor role stays on the initializing thread. The processing role may move
+    /// to a scoped audio thread, which must finish before either the Plugin or module
+    /// can be replaced/dropped. Setup, state capture/restore and Enter require the
+    /// split to end first. No second component/controller or shared Plugin mutex is
+    /// created; inline and split DSP use the same process implementation.
+    pub fn split_editor_processing(&mut self) -> Result<PluginEditorProcessingSplit<'_>> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .split_editor_processing()
+    }
+
+    /// Observe the sole attachment's exact unresolved native teardown step.
+    /// It grants neither editor actions nor permission to reuse a failed view.
+    pub fn native_editor_pending_detach(&self) -> Option<crate::error::EditorDetachStage> {
+        self.internal
+            .as_ref()
+            .and_then(|internal| internal.native_editor_pending_detach())
+    }
+
     /// Check if the plugin has an editor GUI
     pub fn has_editor(&self) -> bool {
         self.internal
@@ -2131,25 +2691,43 @@ impl Plugin {
             .unwrap_or_default()
     }
 
-    /// Drain the ordered log of parameter-edit gestures the plugin's editor has reported since
-    /// the last call.
+    /// Drain parameter, group and dirty callbacks from one ordered native source.
     ///
-    /// This is the richer superset of [`Self::get_parameter_changes`]: rather than just the
-    /// value changes, it preserves the begin/change/end ordering of each gesture, so the host
-    /// can tell a deliberate, completed edit (`BeginGesture` … `ValueChange`* … `EndGesture`)
-    /// from a stream of intermediate drag values. Poll it regularly (e.g. each UI frame) while
-    /// the editor is open; an empty vector means nothing was reported. Works across process
-    /// isolation — gestures are marshalled back from the helper.
-    ///
-    /// See [`ParameterEdit`] / [`ParameterEditKind`].
-    pub fn take_parameter_edits(&mut self) -> Vec<ParameterEdit> {
+    /// A complete empty batch means no author callback was reported. Overflow or
+    /// invalid values produce sticky Incomplete; transport/unavailable errors
+    /// remain explicit Result errors. Neither condition may become successful
+    /// author history. Native owner/session admission and configuration recovery
+    /// belong to the consumer, not to this source drain. Poll on the plugin's
+    /// control thread; callbacks never perform a synchronous host author edit.
+    pub fn take_editor_events(&mut self) -> Result<NativeEditorEventDrain> {
         self.internal
             .as_mut()
-            .map(|i| i.take_parameter_edits())
-            .unwrap_or_default()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .take_editor_events()
     }
 
-    /// Drain ordered requests the plugin reported through `IComponentHandler2`.
+    /// Non-consuming status from this same initializing-thread event source.
+    /// No controller state callback or author acceptance is performed here.
+    pub fn editor_event_source_status(&self) -> Result<NativeEditorEventSourceStatus> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .editor_event_source_status()
+    }
+
+    /// Non-consuming post-getState coherence from the same ordered source.
+    /// Dirty=false merely clears the native dirty notice and does not grant
+    /// permission to mark the project saved or to acknowledge an author batch.
+    pub fn editor_capture_source_status_since(
+        &self,
+        revision: u64,
+    ) -> Result<Option<NativeEditorEventSourceStatus>> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .editor_capture_source_status_since(revision)
+    }
+    /// Drain control-only host requests; author boundaries use take_editor_events.
     pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
         self.internal
             .as_mut()
@@ -2191,10 +2769,64 @@ impl Plugin {
             .dismiss_context_menu(menu_id)
     }
 
+    /// Inspect pending in-process flags without consuming or servicing them.
+    ///
+    /// This is a bounded atomic observation, not a remote-isolation control RPC.
+    /// Lifecycle-sensitive service belongs on the native control thread after
+    /// the canonical owner quiesces processing and invalidates its prepared plan.
+    pub fn pending_restart_flags(&self) -> RestartFlags {
+        self.internal
+            .as_ref()
+            .map(|inner| inner.pending_restart_flags())
+            .unwrap_or_default()
+    }
+
+    /// Child-local identity of the actual loaded native object, when this backend
+    /// owns one directly. This fact is not a parent author/install permission.
+    pub fn native_editor_attachment_owner(&self) -> Option<NativeEditorAttachmentOwner> {
+        self.internal
+            .as_ref()
+            .and_then(|inner| inner.native_editor_attachment_owner())
+    }
+
+    /// Observe the exact local callback cohort without servicing plugin code.
+    ///
+    /// `None` means this adapter has no local native cohort authority. The result
+    /// preserves repeated callbacks and unknown bits; it is not a state checkpoint.
+    pub fn pending_restart_cohort(&self) -> Option<RestartCohort> {
+        self.internal
+            .as_ref()
+            .and_then(|inner| inner.pending_restart_cohort())
+    }
+
+    /// Retire an exact callback cohort after successful native control service.
+    ///
+    /// Runs only on the component's control thread. A newer callback, including
+    /// the same flag, returns false and remains pending. Exhaustion never retires.
+    /// This method does not itself change lifecycle, PDC or host plan state.
+    pub fn retire_restart_cohort(&mut self, expected: RestartCohort) -> Result<bool> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .retire_restart_cohort(expected)
+    }
+
+    /// Linearize an unchanged serviced callback serial without invoking plugin code.
+    ///
+    /// A newer callback remains pending, including the same flag. A callback
+    /// after a successful claim is a later generation, queried before new DSP.
+    /// This control-side claim never inhibits callbacks or supplies a DSP checkpoint.
+    pub fn claim_retired_restart_serial(&mut self, serial: u32) -> Result<bool> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("plugin is closed".to_string()))?
+            .claim_retired_restart_serial(serial)
+    }
+
     /// Take the flags the plugin raised via `IComponentHandler::restartComponent` since the
     /// last call — its way of saying "something about me changed, re-read it".
     ///
-    /// Poll this next to [`Self::take_parameter_edits`] (e.g. each UI frame). See
+    /// Poll this next to [`Self::take_editor_events`] (e.g. each UI frame). See
     /// [`RestartFlags`] for what each one asks of the host. Returns an empty set for a plugin
     /// that hasn't raised anything. Works across process isolation.
     pub fn take_restart_flags(&mut self) -> RestartFlags {
@@ -2258,6 +2890,63 @@ impl Plugin {
     /// Get a lock-free handle for draining all emitted VST3 events.
     pub fn output_event_handle(&self) -> Option<OutputEventConsumer> {
         self.internal.as_ref().and_then(|i| i.output_event_handle())
+    }
+
+    /// Apply the retained component's desired configuration at a legal activation boundary.
+    ///
+    /// The component control owner checks every lifecycle result. This operation
+    /// preserves the applied ProcessSetup and returns activated but stopped.
+    /// It does not consume restart callbacks, resume DSP, update a host contract,
+    /// or preserve sample history. Read activated facts and capture configuration
+    /// before the caller acknowledges an exact native request cohort.
+    pub fn reactivate_configuration_stopped(
+        &mut self,
+    ) -> std::result::Result<(), crate::configuration_capture::ConfigurationCaptureError> {
+        self.internal
+            .as_mut()
+            .ok_or(crate::configuration_capture::ConfigurationCaptureError::Unavailable)?
+            .reactivate_configuration_stopped()
+    }
+
+    /// Capture stopped native configuration within a state and byte-buffer grant.
+    ///
+    /// The grant covers overlapping capture/envelope byte buffers. It does not
+    /// replace complete host bridge/COM/payload/PCM or candidate-plan accounting.
+    /// This operation runs on the component control thread, exposes bounded
+    /// IBStream only, and returns configuration rather than a DSP checkpoint.
+    pub fn save_state_bounded(
+        &mut self,
+        state_limit: usize,
+        buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        self.internal
+            .as_mut()
+            .ok_or(crate::configuration_capture::ConfigurationCaptureError::Unavailable)?
+            .save_state_bounded(state_limit, buffer_grant)
+    }
+
+    /// Capture bounded authored configuration from this same component/controller.
+    ///
+    /// The exclusive complete-object borrow prevents a live scoped DSP borrow.
+    /// Call on the recorded main thread after DSP join. VST3 permits getState in
+    /// Processing state; this operation performs no lifecycle transition and is
+    /// not a sample-history checkpoint or an author Session commit. Native
+    /// ordered source revision must still be checked by the product consumer.
+    pub fn capture_author_state_bounded(
+        &mut self,
+        state_limit: usize,
+        buffer_grant: usize,
+    ) -> std::result::Result<
+        crate::configuration_capture::BoundedConfigurationState,
+        crate::configuration_capture::ConfigurationCaptureError,
+    > {
+        self.internal
+            .as_mut()
+            .ok_or(crate::configuration_capture::ConfigurationCaptureError::Unavailable)?
+            .capture_author_state_bounded(state_limit, buffer_grant)
     }
 
     /// Save the plugin's current state (parameters, internal settings, loaded preset) to

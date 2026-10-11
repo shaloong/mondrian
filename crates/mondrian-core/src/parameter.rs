@@ -44,6 +44,14 @@ impl ParameterId {
             .unwrap_or_else(|error| panic!("invalid static parameter ID `{value}`: {error}"))
     }
 
+    /// Borrow the complete immutable String owner for exact storage observation.
+    /// Its actual capacity/identity can be inspected without exposing a mutation
+    /// path or changing canonical serialized identity. The caller must preserve
+    /// this owner borrow through its local allocation observation.
+    pub fn storage_owner(&self) -> &String {
+        &self.0
+    }
+
     /// Canonical serialized identifier.
     pub fn as_str(&self) -> &str {
         &self.0

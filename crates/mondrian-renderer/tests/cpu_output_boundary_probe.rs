@@ -56,6 +56,7 @@ fn cpu_output_boundary_cold_and_owner_warm_probe() -> anyhow::Result<()> {
         })
         .collect();
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width,
         height,
         data,

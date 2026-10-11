@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <stdexcept>
 
 // ofx
 #include "ofxCore.h"
@@ -33,14 +34,67 @@ namespace MondrianOpenFx {
 
   FilterEffectInstance::FilterEffectInstance(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
                                      OFX::Host::ImageEffect::Descriptor& desc,
-                                     const std::string& context, FrameState& frameState)
-                                     : OFX::Host::ImageEffect::Instance(plugin,desc,context,false), _frameState(frameState)
+                                     const std::string& context, FrameState& frameState, AuxSuite& auxiliary)
+                                     : AuxRegistrationGuard(auxiliary, true), OFX::Host::ImageEffect::Instance(plugin,desc,context,false), _frameState(frameState)
   {
+    bindAuxiliary(getHandle());
+    if (auxiliary.bindTimeline(getHandle(), frameState.info.frame, frameState.info.first_frame, frameState.info.last_frame) != kOfxStatOK) {
+      throw std::runtime_error("OpenFX auxiliary initial timeline could not be bound");
+    }
     // An instance starts with its descriptor's capability. Plugin changes must
     // remain instance-local rather than changing the chained descriptor.
     const auto& cpu = desc.getProps().getStringProperty(kOfxImageEffectPropCPURenderSupported);
     getProps().createProperty({kOfxImageEffectPropCPURenderSupported,
                               OFX::Host::Property::eString, 1, false, cpu.c_str()});
+  }
+
+  FilterEffectInstance::~FilterEffectInstance() {
+    closeInterface();
+  }
+
+  OfxStatus FilterEffectInstance::setInterfaceOpen(bool open) {
+    if (!open) { return closeInterface(); }
+    if (_interfaceOpen) { return kOfxStatOK; }
+    // The caller has already bound the current parent-controlled invocation.
+    // This does not grant local-only author mutation: C2 must own that bridge.
+    if (!auxiliary().hasInteractiveControl()) { return kOfxStatFailed; }
+    _frameState.readOnlyInteractive = true;
+    OFX::Host::ImageEffect::Instance::_interactive = true;
+    getProps().setIntProperty(kOfxPropIsInteractive, 1);
+    if (auxiliary().bindInteractive(getHandle(), true) != kOfxStatOK) {
+      OFX::Host::ImageEffect::Instance::_interactive = false;
+      _frameState.readOnlyInteractive = false;
+      getProps().setIntProperty(kOfxPropIsInteractive, 0);
+      return kOfxStatFailed;
+    }
+    // The host generic editor is genuinely open before Begin. This records
+    // the host lifecycle, not success of the plugin-private UI setup. The
+    // published Begin postcondition and End precondition depend on Begin
+    // being called, not on an OK reply; Failed keeps this host editor open.
+    _interfaceOpen = true;
+    const OfxStatus status = beginInstanceEditAction();
+    return status;
+  }
+
+  OfxStatus FilterEffectInstance::closeInterface() noexcept {
+    if (!_interfaceOpen) { return kOfxStatOK; }
+    _interfaceOpen = false;
+    try {
+      // The last real GUI has closed before End enters plugin code. Questions
+      // during End may fail honestly; they cannot keep a closed view alive.
+      OFX::Host::ImageEffect::Instance::_interactive = false;
+      getProps().setIntProperty(kOfxPropIsInteractive, 0);
+      if (auxiliary().bindInteractive(getHandle(), false) != kOfxStatOK) {
+        std::terminate();
+      }
+      const OfxStatus status = endInstanceEditAction();
+      _frameState.readOnlyInteractive = false;
+      return status;
+    } catch (...) {
+      // No C++ exception can escape a destruction callback, leaving lifetime
+      // bookkeeping live after this supervised native owner has gone away.
+      std::terminate();
+    }
   }
 
   // class member function implementation
@@ -68,9 +122,7 @@ namespace MondrianOpenFx {
                                        const char* format,
                                        va_list args)
   {
-    printf("%s %s ",type,id);
-    vprintf(format,args);
-    return kOfxStatOK;
+    return auxiliary().message(getHandle(), type, id, format, args);
   }
 
   OfxStatus FilterEffectInstance::setPersistentMessage(const char* type,
@@ -78,12 +130,12 @@ namespace MondrianOpenFx {
                                                    const char* format,
                                                    va_list args)
   {
-    return vmessage(type, id, format, args);
+    return auxiliary().persistent(getHandle(), type, id, format, args);
   }
 
   OfxStatus FilterEffectInstance::clearPersistentMessage()
   {
-    return kOfxStatOK;
+    return auxiliary().clear(getHandle());
   }
 
   void FilterEffectInstance::getProjectSize(double& xSize, double& ySize) const
@@ -185,18 +237,20 @@ namespace MondrianOpenFx {
   /// Start doing progress.
   void  FilterEffectInstance::progressStart(const std::string &message, const std::string &messageid)
   {
+    auxiliary().progressStart(getHandle(), message.c_str(), messageid.c_str());
   }
 
   /// finish yer progress
   void  FilterEffectInstance::progressEnd()
   {
+    auxiliary().progressEnd(getHandle());
   }
 
   /// set the progress to some level of completion, returns
   /// false if you should abandon processing, true to continue
   bool  FilterEffectInstance::progressUpdate(double t)
   {
-    return true;
+    return auxiliary().progressUpdate(getHandle(), t) == kOfxStatOK;
   }
 
 
@@ -204,19 +258,21 @@ namespace MondrianOpenFx {
   /// time as being passed to an action (eg render)
   double  FilterEffectInstance::timeLineGetTime()
   {
-    return _frameState.info.frame;
+    double time = 0.0;
+    auxiliary().timelineTime(getHandle(), &time);
+    return time;
   }
 
   /// set the timeline to a specific time
   void  FilterEffectInstance::timeLineGotoTime(double t)
   {
+    auxiliary().timelineGoto(getHandle(), t);
   }
 
   /// get the first and last times available on the effect's timeline
   void  FilterEffectInstance::timeLineGetBounds(double &t1, double &t2)
   {
-    t1 = _frameState.info.first_frame;
-    t2 = _frameState.info.last_frame;
+    auxiliary().timelineBounds(getHandle(), &t1, &t2);
   }
 
 }

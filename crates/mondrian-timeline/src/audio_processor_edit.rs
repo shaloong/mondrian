@@ -10,8 +10,8 @@ use crate::audio_channel_strip_edit::{
 };
 use crate::sequence::Sequence;
 use mondrian_core::{
-    AudioProcessingScopeId, AudioProcessorInstanceId, MixBusId, ParameterId, ProgramOutputId,
-    TrackId,
+    AudioProcessingScopeId, AudioProcessorInstanceId, AuthoringTimeDomain, DomainTime,
+    ExactAutomationCurve, MixBusId, ParameterId, ProgramOutputId, TrackId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,75 @@ pub enum AudioProcessorRackPlacement {
     },
 }
 
+/// Explicit author policy for one native parameter value.
+/// No later active frame, sample position or UI selection is inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeAudioParameterWriteMode {
+    /// Write only an unkeyed parameter, retaining its lack of automation.
+    Unkeyed,
+    /// Preserve the exact curve and write a key at this qualified author time.
+    AtOwnerTime {
+        /// Exact Sequence or Processing Scope domain resolved by authoring.
+        position: DomainTime,
+    },
+}
+
+/// One exact schema-bound scalar observed from a native editor author gesture.
+/// Native normalized coordinates must already be lowered by the format adapter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAudioParameterWrite {
+    /// Complete current parameter contract, independent of labels and ordering.
+    pub schema: Box<mondrian_core::automation::ParameterSchema>,
+    /// Exact definition-domain value; Timeline performs its usual admission.
+    pub value: f64,
+    /// Chosen canonical author-time policy; never inferred from native state.
+    pub mode: NativeAudioParameterWriteMode,
+}
+
+/// One ordered operation on the host references to a native parameter.
+///
+/// Clear removes the entire host curve, including its unkeyed value. It never
+/// resets the native value or substitutes the definition default. Later Value
+/// operations may explicitly establish a new host reference in the same batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeAudioParameterOperation {
+    /// Definition-admitted author value and explicit owner-time write policy.
+    Value {
+        /// Complete schema, scalar and chosen write policy.
+        write: NativeAudioParameterWrite,
+    },
+    /// Remove all host automation references; native state retains its value.
+    ClearAutomation {
+        /// Stable native parameter identity, including a removed parameter ID.
+        parameter_id: ParameterId,
+    },
+}
+
+impl From<NativeAudioParameterWrite> for NativeAudioParameterOperation {
+    fn from(write: NativeAudioParameterWrite) -> Self {
+        Self::Value { write }
+    }
+}
+
+/// A targeted native author update, not a Processor or Rack replacement.
+///
+/// `None` preserves opaque state; `Some`, including empty bytes, replaces it.
+/// Opaque bytes must be captured at a quiescent native author boundary by the
+/// exact owner adapter. This value does not prove native origin or install a
+/// runtime configuration. Native callback and storage admission budgets remain
+/// adapter and Session responsibilities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeAudioAuthorUpdate {
+    /// Exact source-order operations. Repeated IDs are interpreted in this order.
+    /// A malformed operation refuses the entire batch before author publication.
+    pub parameters: Vec<NativeAudioParameterOperation>,
+    /// Optional authored state replacement, structurally shared in history.
+    pub opaque_state: Option<mondrian_core::AuthoringList<u8>>,
+}
 /// One atomic edit against an addressed Audio Processor Rack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -108,6 +177,17 @@ pub enum AudioProcessorRackEdit {
         /// Current definition parameter identity.
         parameter_id: ParameterId,
     },
+
+    /// Atomically publish parameters and opaque state from a native author edit.
+    /// Native/runtime origin must be admitted by the product adapter separately.
+    SetNativeAuthorState {
+        /// Exact authored Processor; neighboring Rack state is preserved.
+        processor_id: AudioProcessorInstanceId,
+        /// Definition revision observed by the exact native instance adapter.
+        expected_definition: AudioProcessorDefinitionRef,
+        /// Complete targeted update, with no implicit native coordinate mapping.
+        update: NativeAudioAuthorUpdate,
+    },
     /// Replace one parameter's unkeyed value by stable definition identity.
     SetParameterStaticValue {
         /// Processor identity to edit.
@@ -127,6 +207,7 @@ impl AudioProcessorRackEdit {
             | Self::Move { processor_id, .. }
             | Self::SetBypassed { processor_id, .. }
             | Self::RebindNative { processor_id, .. }
+            | Self::SetNativeAuthorState { processor_id, .. }
             | Self::SetParameterStaticValue { processor_id, .. }
             | Self::ResetParameterToDefault { processor_id, .. } => *processor_id,
         }
@@ -198,6 +279,34 @@ pub enum AudioProcessorRackEditError {
     /// A rebind raced with another edit or changed plugin identity/schema version.
     #[error("CLAP Processor definition changed or rebind identity is incompatible")]
     IncompatibleRebind,
+    /// Native author state names a different or unpinned native definition.
+    #[error("native audio author definition is unavailable or changed")]
+    NativeDefinitionMismatch,
+    /// The current parameter schema differs from the observed native binding.
+    #[error("native audio author parameter schema changed: {0}")]
+    NativeParameterSchemaChanged(ParameterId),
+    /// Native scalar callbacks cannot silently replace an existing author curve.
+    #[error("native audio author parameter needs a chosen automation write policy: {0}")]
+    NativeAutomationConflict(ParameterId),
+    /// A qualified native write belongs to a different exact author-time owner.
+    #[error(
+        "native audio parameter {parameter_id} has owner domain {actual:?}, expected {expected:?}"
+    )]
+    NativeTimeDomainMismatch {
+        /// Stable parameter whose time was refused.
+        parameter_id: ParameterId,
+        /// Domain resolved from the addressed canonical curve.
+        expected: AuthoringTimeDomain,
+        /// Explicit domain supplied with the write.
+        actual: AuthoringTimeDomain,
+    },
+    /// Existing canonical automation preparation refused this complete write.
+    #[error(transparent)]
+    NativeAutomation(#[from] crate::AudioAutomationEditError),
+    /// Internal addressed edit did not carry its prepared native curve token.
+    #[error("native audio author update lacks its prepared curves")]
+    NativePreparationMissing,
+
     /// Complete resulting audio author state is invalid.
     #[error("Audio Processor Rack edit produced invalid author state: {0}")]
     AuthorState(AudioAuthoringError),
@@ -286,6 +395,162 @@ pub fn inspect_audio_processor_rack<'a>(
     Ok(AudioProcessorRackInspection { rack, processing_scope_binding_count, edit_blocker })
 }
 
+/// Resolve the editable author owner and its exact pinned native definition.
+///
+/// This is author admission only. It cannot prove an executing processor object,
+/// native callback origin, continuity epoch, or runtime installation lease.
+pub fn inspect_native_audio_authoring<'a>(
+    sequence: &'a Sequence,
+    address: &AudioProcessorRackAddress,
+    processor_id: AudioProcessorInstanceId,
+    expected_definition: &AudioProcessorDefinitionRef,
+) -> Result<&'a AudioProcessorInstance, AudioProcessorRackEditError> {
+    let inspection = inspect_audio_processor_rack(sequence, address)?;
+    if let Some(blocker) = inspection.edit_blocker() {
+        return Err(blocker.clone());
+    }
+    let processor = inspection
+        .rack()
+        .processors
+        .iter()
+        .find(|processor| processor.id == processor_id)
+        .ok_or(AudioProcessorRackEditError::UnknownProcessor(processor_id))?;
+    admit_native_author_definition(processor, expected_definition)?;
+    Ok(processor)
+}
+
+fn admit_native_author_definition(
+    processor: &AudioProcessorInstance,
+    expected_definition: &AudioProcessorDefinitionRef,
+) -> Result<(), AudioProcessorRackEditError> {
+    let pinned = match &processor.definition {
+        AudioProcessorDefinitionRef::Vst3 { binary_sha256: Some(hash), .. }
+        | AudioProcessorDefinitionRef::Clap { binary_sha256: Some(hash), .. } => *hash != [0; 32],
+        _ => false,
+    };
+    if !pinned || &processor.definition != expected_definition {
+        return Err(AudioProcessorRackEditError::NativeDefinitionMismatch);
+    }
+    Ok(())
+}
+
+struct PreparedNativeAudioAuthorUpdate {
+    curves: std::collections::BTreeMap<ParameterId, Option<ExactAutomationCurve>>,
+    opaque_state: Option<mondrian_core::AuthoringList<u8>>,
+}
+
+fn prepare_native_author_update(
+    sequence: &Sequence,
+    address: &AudioProcessorRackAddress,
+    processor_id: AudioProcessorInstanceId,
+    expected_definition: &AudioProcessorDefinitionRef,
+    update: &NativeAudioAuthorUpdate,
+) -> Result<PreparedNativeAudioAuthorUpdate, AudioProcessorRackEditError> {
+    let processor =
+        inspect_native_audio_authoring(sequence, address, processor_id, expected_definition)?;
+    let mut curves = std::collections::BTreeMap::new();
+    for operation in &update.parameters {
+        let write = match operation {
+            NativeAudioParameterOperation::ClearAutomation { parameter_id } => {
+                // A plugin may remove an ID before clearing its references. An
+                // absent schema has no references; do not create a phantom one.
+                if processor.parameters.contains_key(parameter_id) {
+                    curves.insert(parameter_id.clone(), None);
+                }
+                continue;
+            }
+            NativeAudioParameterOperation::Value { write } => write,
+        };
+        let parameter_id = &write.schema.parameter_id;
+        let parameter = processor.parameters.get(parameter_id).ok_or_else(|| {
+            AudioProcessorRackEditError::UnknownParameter {
+                processor_id,
+                parameter_id: parameter_id.clone(),
+            }
+        })?;
+        if parameter.schema != *write.schema {
+            return Err(AudioProcessorRackEditError::NativeParameterSchemaChanged(
+                parameter_id.clone(),
+            ));
+        }
+        let previous = curves.get(parameter_id).unwrap_or(&parameter.automation);
+        let mut base = match previous {
+            Some(curve) => curve.clone(),
+            None => {
+                ExactAutomationCurve::new(parameter_id.clone(), write.value).map_err(|error| {
+                    AudioProcessorRackEditError::AuthorState(
+                        AudioAuthoringError::InvalidAutomation { reason: error.to_string() },
+                    )
+                })?
+            }
+        };
+        let curve = match write.mode {
+            NativeAudioParameterWriteMode::Unkeyed => {
+                if !base.keyframes.is_empty() {
+                    return Err(AudioProcessorRackEditError::NativeAutomationConflict(
+                        parameter_id.clone(),
+                    ));
+                }
+                base.default_value = write.value;
+                crate::audio::validate_numeric_automation(&parameter.schema, &base)
+                    .map_err(AudioProcessorRackEditError::AuthorState)?;
+                base
+            }
+            NativeAudioParameterWriteMode::AtOwnerTime { position } => {
+                let target = crate::AudioAutomationTarget::ProcessorParameter {
+                    rack: *address,
+                    processor_id,
+                    parameter_id: parameter_id.clone(),
+                };
+                let inspection = crate::inspect_audio_automation(sequence, &target)
+                    .map_err(crate::AudioAutomationEditError::from)?;
+                if position.domain != inspection.time_domain() {
+                    return Err(AudioProcessorRackEditError::NativeTimeDomainMismatch {
+                        parameter_id: parameter_id.clone(),
+                        expected: inspection.time_domain(),
+                        actual: position.domain,
+                    });
+                }
+                inspection.curve_contract().preview_value_at_time(
+                    &base,
+                    position.time,
+                    write.value,
+                )?
+            }
+        };
+        curves.insert(parameter_id.clone(), Some(curve));
+    }
+    Ok(PreparedNativeAudioAuthorUpdate { curves, opaque_state: update.opaque_state.clone() })
+}
+
+fn apply_native_author_update(
+    processor: &mut AudioProcessorInstance,
+    expected_definition: &AudioProcessorDefinitionRef,
+    prepared: PreparedNativeAudioAuthorUpdate,
+) -> Result<bool, AudioProcessorRackEditError> {
+    admit_native_author_definition(processor, expected_definition)?;
+    let mut changed = false;
+    for (parameter_id, curve) in prepared.curves {
+        let parameter = processor.parameters.get_mut(&parameter_id).ok_or_else(|| {
+            AudioProcessorRackEditError::UnknownParameter {
+                processor_id: processor.id,
+                parameter_id: parameter_id.clone(),
+            }
+        })?;
+        if parameter.automation != curve {
+            parameter.automation = curve;
+            changed = true;
+        }
+    }
+    if let Some(state) = prepared.opaque_state
+        && processor.opaque_state.as_ref() != Some(&state)
+    {
+        processor.opaque_state = Some(state);
+        changed = true;
+    }
+    Ok(changed)
+}
+
 /// Resolve one Rack for read-only projection by stable typed address.
 pub fn audio_processor_rack<'a>(
     sequence: &'a Sequence,
@@ -366,10 +631,25 @@ pub fn apply_audio_processor_rack_edit(
         ));
     }
 
+    let prepared_native = match &request.edit {
+        AudioProcessorRackEdit::SetNativeAuthorState {
+            processor_id,
+            expected_definition,
+            update,
+        } => Some(prepare_native_author_update(
+            sequence,
+            &request.address,
+            *processor_id,
+            expected_definition,
+            update,
+        )?),
+        _ => None,
+    };
     let mut candidate = sequence.clone();
     let changed = apply_to_rack(
         resolve_rack_mut(&mut candidate, &request.address)?,
         &request.edit,
+        prepared_native,
     )?;
     if !changed {
         return Ok(AudioProcessorRackEditOutcome { processor_id, changed: false });
@@ -452,6 +732,7 @@ fn resolve_rack_mut<'a>(
 fn apply_to_rack(
     rack: &mut AudioProcessorRack,
     edit: &AudioProcessorRackEdit,
+    prepared_native: Option<PreparedNativeAudioAuthorUpdate>,
 ) -> Result<bool, AudioProcessorRackEditError> {
     match edit {
         AudioProcessorRackEdit::Insert { processor, placement } => {
@@ -549,13 +830,21 @@ fn apply_to_rack(
             })?;
             let curve = crate::audio::default_numeric_automation(&parameter.schema)
                 .map_err(AudioProcessorRackEditError::AuthorState)?;
-            if curve == parameter.automation {
+            if parameter.automation.as_ref() == Some(&curve) {
                 return Ok(false);
             }
             processor
                 .set_parameter_automation(curve)
                 .map_err(AudioProcessorRackEditError::AuthorState)?;
             Ok(true)
+        }
+        AudioProcessorRackEdit::SetNativeAuthorState {
+            processor_id, expected_definition, ..
+        } => {
+            let index = processor_index(rack, *processor_id)?;
+            let prepared =
+                prepared_native.ok_or(AudioProcessorRackEditError::NativePreparationMissing)?;
+            apply_native_author_update(&mut rack.processors[index], expected_definition, prepared)
         }
         AudioProcessorRackEdit::SetParameterStaticValue { processor_id, parameter_id, value } => {
             let index = processor_index(rack, *processor_id)?;
@@ -575,9 +864,13 @@ fn set_parameter_static_value(
             parameter_id: parameter_id.clone(),
         }
     })?;
-    let mut curve = parameter.automation.clone();
+    let mut curve = match &parameter.automation {
+        Some(curve) => curve.clone(),
+        None => crate::audio::default_numeric_automation(&parameter.schema)
+            .map_err(AudioProcessorRackEditError::AuthorState)?,
+    };
     curve.default_value = value;
-    if curve == parameter.automation {
+    if parameter.automation.as_ref() == Some(&curve) {
         return Ok(false);
     }
     processor
@@ -843,8 +1136,11 @@ mod tests {
             let processor = &audio_processor_rack(&sequence, &address).expect("rack").processors[0];
             assert_eq!(processor.id, processor_id);
             let parameter = &processor.parameters[&parameter_id];
-            assert_eq!(parameter.automation.default_value, 0.0);
-            assert!(parameter.automation.keyframes.is_empty());
+            assert_eq!(
+                parameter.automation.as_ref().expect("bound host curve").default_value,
+                0.0
+            );
+            assert!(parameter.automation.as_ref().expect("bound host curve").keyframes.is_empty());
             let before = sequence.clone();
             assert!(
                 !apply_audio_processor_rack_edit(&mut sequence, &reset).expect("no-op").changed
@@ -943,10 +1239,19 @@ mod tests {
             .find(|processor| processor.id == first)
             .expect("Gain");
         assert_eq!(
-            gain.parameters[&parameter_id].automation.default_value,
+            gain.parameters[&parameter_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             -6.0
         );
-        assert!(gain.parameters[&parameter_id].automation.keyframes.is_empty());
+        assert!(gain.parameters[&parameter_id]
+            .automation
+            .as_ref()
+            .expect("bound host curve")
+            .keyframes
+            .is_empty());
     }
 
     #[test]

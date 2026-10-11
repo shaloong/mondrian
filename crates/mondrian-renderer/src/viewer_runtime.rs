@@ -1716,7 +1716,7 @@ struct PreparedComposite<'a> {
 struct PreparedCompositeLayer<'a> {
     source: PreparedCompositeLayerSource<'a>,
     opacity: f32,
-    blend_mode: BlendMode,
+    blend_policy: mondrian_effects::EffectPassBlendPolicy,
     transform: [f32; 6],
     effect_plan: Option<&'a mondrian_effects::CompiledEffectGpuPlan>,
     frame_seed: i64,
@@ -1787,7 +1787,7 @@ fn prepare_composite<'a>(
             ViewerGpuExecutionLayer::Adjustment {
                 effect_plan,
                 opacity,
-                blend_mode,
+                blend_policy,
                 frame_seed,
             } => {
                 if opacity.clamp(0.0, 1.0) == 0.0 {
@@ -1798,7 +1798,7 @@ fn prepare_composite<'a>(
                 prepared.nodes.push(PreparedCompositeNode::Layer(PreparedCompositeLayer {
                     source: PreparedCompositeLayerSource::Adjustment,
                     opacity: *opacity,
-                    blend_mode: *blend_mode,
+                    blend_policy: *blend_policy,
                     transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                     effect_plan: Some(effect_plan),
                     frame_seed: *frame_seed,
@@ -2003,7 +2003,7 @@ fn prepare_source_layer<'a>(
                 return Ok(PreparedCompositeLayer {
                     source: PreparedCompositeLayerSource::GpuFrame(index),
                     opacity: *opacity,
-                    blend_mode: *blend_mode,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                     transform: *transform,
                     effect_plan: None,
                     frame_seed: *frame_seed,
@@ -2154,7 +2154,9 @@ fn prepare_source_layer<'a>(
                         let layer = GpuCompositeLayer {
                             source: GpuCompositeLayerSource::CpuDataTexture(frame),
                             opacity: 1.0,
-                            blend_mode: BlendMode::Normal,
+                            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(
+                                BlendMode::Normal,
+                            ),
                             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                             effect_plan: None,
                             frame_seed: *frame_seed,
@@ -2205,7 +2207,7 @@ fn prepare_source_layer<'a>(
             Ok(PreparedCompositeLayer {
                 source,
                 opacity: *opacity,
-                blend_mode: *blend_mode,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(*blend_mode),
                 transform: *transform,
                 effect_plan,
                 frame_seed: *frame_seed,
@@ -2219,7 +2221,7 @@ fn prepare_source_layer<'a>(
                 Ok(PreparedCompositeLayer {
                     source: PreparedCompositeLayerSource::SolidColor(layer.color),
                     opacity: layer.opacity,
-                    blend_mode: layer.blend_mode,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
                     transform: layer.transform,
                     effect_plan: Some(effect_plan),
                     frame_seed: layer.frame_seed,
@@ -2256,7 +2258,7 @@ fn prepare_source_layer<'a>(
                 Ok(PreparedCompositeLayer {
                     source: PreparedCompositeLayerSource::GpuFrame(index),
                     opacity: layer.opacity,
-                    blend_mode: layer.blend_mode,
+                    blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(layer.blend_mode),
                     transform: layer.transform,
                     effect_plan: None,
                     frame_seed: layer.frame_seed,
@@ -2481,7 +2483,7 @@ fn push_prepared_gpu_layer<'a>(
     PreparedCompositeLayer {
         source: PreparedCompositeLayerSource::GpuFrame(index),
         opacity,
-        blend_mode: BlendMode::Normal,
+        blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
         effect_plan: None,
         frame_seed: 0,
@@ -2651,7 +2653,7 @@ fn composite_layer<'a>(
             PreparedCompositeLayerSource::Adjustment => GpuCompositeLayerSource::Adjustment,
         },
         opacity: layer.opacity,
-        blend_mode: layer.blend_mode,
+        blend_policy: layer.blend_policy,
         transform: layer.transform,
         effect_plan: layer.effect_plan,
         frame_seed: layer.frame_seed,
@@ -3906,6 +3908,7 @@ mod tests {
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -3999,6 +4002,7 @@ mod tests {
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 4,
             height: 4,
             color_space: WorkingColorSpace::LinearRec709,
@@ -4360,6 +4364,7 @@ mod tests {
             16 << 20,
         );
         let cpu_input = CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: WIDTH,
             height: HEIGHT,
             color_space: WORKING_SPACE,
@@ -4699,7 +4704,7 @@ mod tests {
             ViewerGpuExecutionLayer::Adjustment {
                 effect_plan: adjustment_plan,
                 opacity: 0.6,
-                blend_mode: BlendMode::Normal,
+                blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(BlendMode::Normal),
                 frame_seed: 13,
             },
         ];

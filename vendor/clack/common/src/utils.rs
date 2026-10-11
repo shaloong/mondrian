@@ -1,0 +1,142 @@
+//! Various CLAP-related utilities.
+
+#[cfg(not(test))]
+#[allow(unused)]
+pub(crate) use std::panic::catch_unwind as handle_panic;
+
+#[cfg(test)]
+#[inline]
+#[allow(unused)]
+pub(crate) fn handle_panic<F: FnOnce() -> R, R>(f: F) -> std::thread::Result<R> {
+    Ok(f())
+}
+
+mod fixed_point;
+mod id;
+mod timestamp;
+mod universal_plugin_id;
+mod version;
+
+pub use fixed_point::*;
+pub use id::ClapId;
+pub use timestamp::Timestamp;
+pub use universal_plugin_id::{UniversalPluginAbi, UniversalPluginId};
+pub use version::ClapVersion;
+
+/// A color, in the ARGB format.
+pub type Color = clap_color;
+
+/// The transparent color. It is also fully black.
+pub const TRANSPARENT_COLOR: Color = Color {
+    alpha: 0,
+    red: 0,
+    green: 0,
+    blue: 0,
+};
+
+use clap_sys::color::clap_color;
+use std::ffi::c_void;
+
+/// An opaque pointer for use in e.g. parameter definitions and parameter-related events.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct Cookie(*mut c_void);
+
+impl Cookie {
+    /// Creates a default "empty" cookie, i.e. a Cookie with a `null` pointer.
+    #[inline]
+    pub const fn empty() -> Self {
+        Self(core::ptr::null_mut())
+    }
+
+    /// Creates a [`Cookie`] from the given pointer.
+    #[inline]
+    pub const fn from_raw(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
+    /// Returns the pointer value contains in this [`Cookie`].
+    #[inline]
+    pub const fn as_raw(&self) -> *mut c_void {
+        self.0
+    }
+}
+
+/// Creates a default "empty" cookie, i.e. a Cookie with a `null` pointer.
+///
+/// This is the same as using [`Cookie::empty`].
+impl Default for Cookie {
+    #[inline]
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+// SAFETY: Cookies themselves are just pointers, which plugins have to consider as Send + Sync
+unsafe impl Send for Cookie {}
+// SAFETY: Cookies themselves are just pointers, which plugins have to consider as Send + Sync
+unsafe impl Sync for Cookie {}
+
+/// A safer form of [`core::slice::from_raw_parts`] that returns a properly aligned slice in case
+/// the length is 0.
+///
+/// In C it is common for empty slices to be represented using a null pointer, but this is UB in
+/// Rust, as all references must be aligned and non-null.
+///
+/// This helper avoids that pitfall by ignoring the pointer if the length is zero.
+///
+/// # Safety
+///
+/// Same as [`core::slice::from_raw_parts`], except the provided pointer *can* be null or
+/// dangling for zero-length slices.
+#[inline]
+pub(crate) const unsafe fn slice_from_external_parts<'a, T>(data: *const T, len: usize) -> &'a [T] {
+    if len == 0 {
+        return &[];
+    }
+
+    core::slice::from_raw_parts(data, len)
+}
+
+/// Same as [`slice_from_external_parts`] but for mut slices.
+///
+/// # Safety
+///
+/// Same as [`core::slice::from_raw_parts_mut`], except the provided pointer *can* be null or
+/// dangling for zero-length slices.
+#[inline]
+pub(crate) const unsafe fn slice_from_external_parts_mut<'a, T>(
+    data: *mut T,
+    len: usize,
+) -> &'a mut [T] {
+    if len == 0 {
+        return &mut [];
+    }
+
+    core::slice::from_raw_parts_mut(data, len)
+}
+
+#[inline]
+pub(crate) const fn check_clap_size_overflow(value: usize) {
+    #[cold]
+    #[inline(never)]
+    const fn too_big() -> ! {
+        panic!("CLAP size (u32) overflowed")
+    }
+
+    if value > u32::MAX as usize {
+        too_big()
+    }
+}
+
+#[inline]
+pub(crate) const fn usize_to_clap_size(value: usize) -> u32 {
+    check_clap_size_overflow(value);
+
+    #[allow(clippy::cast_possible_truncation)] // We just checked above, it cannot truncate
+    {
+        value as u32
+    }
+}
+
+/// Checked official enum values in their prescribed field carriers.
+pub mod abi_field_values;

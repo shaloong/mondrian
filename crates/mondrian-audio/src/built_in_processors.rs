@@ -75,7 +75,10 @@ fn prepare_gain(
     };
     if request.parameters().len() != 1
         || parameter.schema != gain_parameter_schema()
-        || parameter.automation.parameter_id != parameter_id
+        || parameter
+            .automation
+            .as_ref()
+            .is_none_or(|curve| curve.parameter_id != parameter_id)
         || request.opaque_state().is_some()
     {
         return Err(AudioProcessorHostError::InvalidContract(
@@ -133,11 +136,19 @@ fn prepare_sample_delay(
             "built-in Sample Delay is missing its canonical parameter".to_owned(),
         ));
     };
-    let value = parameter.automation.default_value;
+    let curve = parameter.automation.as_ref().ok_or_else(|| {
+        AudioProcessorHostError::InvalidContract(
+            "built-in Sample Delay requires a host value".to_owned(),
+        )
+    })?;
+    let value = curve.default_value;
     if request.parameters().len() != 1
         || parameter.schema != sample_delay_frames_parameter_schema()
-        || parameter.automation.parameter_id != parameter_id
-        || !parameter.automation.keyframes.is_empty()
+        || parameter
+            .automation
+            .as_ref()
+            .is_none_or(|curve| curve.parameter_id != parameter_id)
+        || !curve.keyframes.is_empty()
         || !value.is_finite()
         || value.fract() != 0.0
         || !(0.0..=SAMPLE_DELAY_MAX_FRAMES as f64).contains(&value)
@@ -197,6 +208,17 @@ struct BuiltInGainFactory {
 }
 
 impl AudioProcessorFactory for BuiltInGainFactory {
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        _visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        // All concrete factory fields are inline scalars. The caller reports
+        // the owning factory Arc payload; mutable DSP buffers are elsewhere.
+        Ok(())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
@@ -297,6 +319,17 @@ struct BuiltInSampleDelayFactory {
 }
 
 impl AudioProcessorFactory for BuiltInSampleDelayFactory {
+    fn visit_host_owned_storage<'a>(
+        &'a self,
+        _visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        // All concrete factory fields are inline scalars. The caller reports
+        // the owning factory Arc payload; mutable DSP buffers are elsewhere.
+        Ok(())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }

@@ -1,10 +1,15 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
+use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
 use super::clap_discovery::{
     fingerprint_clap_binary, inspect_audio_inputs, list_parameters,
     probe_clap_plugin_registration_with_state, validate_parameters,
 };
+use super::clap_main_services::{ClapHostMainThread, ClapNativeServicesShared};
+use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
 use super::clap_parameter_events::ClapParameterEvents;
+use super::clap_signal_fields::ClapSignalFields;
+use super::native_request_cohort::{NativeRequestMarker, RecordedRequestCohort};
 use super::{
     probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -16,6 +21,7 @@ use crate::{
     AudioProcessorPrepareRequest,
 };
 use clack_extensions::latency::PluginLatency;
+use clack_extensions::log::{HostLog, HostLogImpl, HostLogMessage};
 use clack_extensions::render::{PluginRender, RenderMode};
 use clack_extensions::state::PluginState;
 use clack_extensions::tail::{PluginTail, TailLength};
@@ -23,9 +29,8 @@ use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
 use clack_host::events::event_types::{ParamValueEvent, TransportEvent, TransportFlags};
 use clack_host::events::{EventFlags, EventHeader};
 use clack_host::prelude::{
-    AudioPortBuffer, AudioPortBufferType, AudioPorts, ClapId, HostExtensions, HostHandlers,
-    HostInfo, InputChannel, OutputEvents, Pckn, PluginAudioConfiguration, PluginAudioProcessor,
-    PluginEntry, PluginInstance, SharedHandler,
+    AudioPorts, ClapId, HostExtensions, HostHandlers, HostInfo, Pckn, PluginAudioConfiguration,
+    PluginAudioProcessor, PluginEntry, PluginInstance, SharedHandler,
 };
 use clack_host::utils::{BeatTime, SecondsTime};
 use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve};
@@ -36,30 +41,35 @@ use mondrian_timeline::audio::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
-use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, ThreadId};
+
+#[path = "clap_worker/native_author.rs"]
+mod native_author;
+#[path = "clap_worker/parameter_observations.rs"]
+mod parameter_observations;
 
 pub(super) struct ClapHost;
 
 #[derive(Clone)]
 pub(super) struct ClapHostShared {
-    restart_requested: Arc<AtomicBool>,
+    restart_requested: Arc<NativeRequestMarker>,
     callback_requested: Arc<AtomicBool>,
     main_thread: ThreadId,
-    audio_thread: Arc<AtomicBool>,
+    audio_thread: Arc<ClapAudioRole>,
+    pub(super) parameter_source: Arc<super::clap_parameter_source::ClapParameterSource>,
 }
 
 impl ClapHostShared {
     pub(super) fn new() -> Self {
         Self {
-            restart_requested: Arc::new(AtomicBool::new(false)),
+            restart_requested: Arc::new(NativeRequestMarker::new()),
             callback_requested: Arc::new(AtomicBool::new(false)),
             main_thread: thread::current().id(),
-            audio_thread: Arc::new(AtomicBool::new(false)),
+            audio_thread: Arc::new(ClapAudioRole::new()),
+            parameter_source: Arc::new(super::clap_parameter_source::ClapParameterSource::new()),
         }
     }
 
@@ -69,13 +79,7 @@ impl ClapHostShared {
     /// the previous mark. Nested markers preserve the enclosing role; they do
     /// not detect native processor reentry.
     pub(super) fn enter_audio_thread(&self) -> ClapAudioThreadGuard<'_> {
-        debug_assert_eq!(thread::current().id(), self.main_thread);
-        let previous = self.audio_thread.swap(true, Ordering::AcqRel);
-        ClapAudioThreadGuard {
-            active: &self.audio_thread,
-            previous,
-            owner_thread: PhantomData,
-        }
+        self.audio_thread.enter(self.main_thread)
     }
 
     pub(super) fn service_callbacks(
@@ -84,37 +88,30 @@ impl ClapHostShared {
     ) -> Result<(), AudioProcessorHostError> {
         for _ in 0..16 {
             if !self.callback_requested.swap(false, Ordering::AcqRel) {
-                return if self.restart_requested.load(Ordering::Acquire) {
-                    Err(invalid("CLAP plugin requested a host restart"))
-                } else {
-                    Ok(())
-                };
+                return Ok(());
             }
             instance.call_on_main_thread_callback();
         }
-        Err(invalid(
-            "CLAP plugin requested unbounded main-thread callbacks",
-        ))
+        // A request made by the last callback remains pending for the next
+        // bounded main-thread tick. Continuous requests are legal; yielding
+        // must neither consume that request nor classify it as a plugin fault.
+        Ok(())
     }
 
     pub(super) fn restart_requested(&self) -> bool {
-        self.restart_requested.load(Ordering::Acquire)
+        self.restart_requested.snapshot().pending()
     }
-}
 
-/// An owner-thread-only audio-role marker that restores its previous mark.
-///
-/// The zero-sized `Rc` marker makes this guard neither Send nor Sync, so its
-/// release cannot migrate to another thread. It does not detect processor reentry.
-pub(super) struct ClapAudioThreadGuard<'a> {
-    active: &'a AtomicBool,
-    previous: bool,
-    owner_thread: PhantomData<Rc<()>>,
-}
+    pub(super) fn restart_cohort(&self) -> RecordedRequestCohort {
+        self.restart_requested.snapshot()
+    }
 
-impl Drop for ClapAudioThreadGuard<'_> {
-    fn drop(&mut self) {
-        self.active.store(self.previous, Ordering::Release);
+    pub(super) fn claim_retired_restart_serial(&self, serial: u32) -> bool {
+        self.restart_requested.claim_retired_serial(serial)
+    }
+
+    pub(super) fn retire_restart_cohort(&self, expected: RecordedRequestCohort) -> bool {
+        self.restart_requested.retire(expected)
     }
 }
 
@@ -124,7 +121,7 @@ impl HostThreadCheckImpl for ClapHostShared {
     }
 
     fn is_audio_thread(&self) -> bool {
-        self.is_main_thread() && self.audio_thread.load(Ordering::Acquire)
+        self.audio_thread.is_current(self.is_main_thread())
     }
 }
 
@@ -153,7 +150,7 @@ pub(super) fn configure_render_mode(
 
 impl SharedHandler<'_> for ClapHostShared {
     fn request_restart(&self) {
-        self.restart_requested.store(true, Ordering::Release);
+        self.restart_requested.record(1);
     }
 
     fn request_process(&self) {}
@@ -164,12 +161,69 @@ impl SharedHandler<'_> for ClapHostShared {
 }
 
 impl HostHandlers for ClapHost {
-    type Shared<'a> = ClapHostShared;
-    type MainThread<'a> = ();
+    type Shared<'a> = ClapNativeHostShared;
+    type MainThread<'a> = ClapHostMainThread<'a>;
     type AudioProcessor<'a> = ();
 
     fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
-        builder.register::<HostThreadCheck>();
+        builder.register::<HostThreadCheck>().register::<HostLog>();
+        #[cfg(windows)]
+        builder
+            .register::<clack_extensions::gui::HostGui>()
+            .register::<clack_extensions::timer::HostTimer>()
+            .register::<clack_extensions::params::HostParams>()
+            .register::<clack_extensions::state::HostState>();
+        // Parameters/state are exposed on the Windows main/DSP lane: void
+        // requests retain one ordered source until canonical Plan/Ack acceptance.
+        // Other platforms need their actual idle audio/main service integration.
+    }
+}
+
+/// The actual SDK shared owner contains its bounded log ingress inline.
+/// It is pinned by the existing HostWrapper allocation, not a second log Arc.
+pub(super) struct ClapNativeHostShared {
+    pub(super) control: ClapHostShared,
+    pub(super) services: ClapNativeServicesShared,
+    pub(super) logs: super::native_audio_log::NativeAudioLogIngress,
+}
+
+impl ClapHostShared {
+    pub(super) fn with_native_logs(self) -> Result<ClapNativeHostShared, AudioProcessorHostError> {
+        Ok(ClapNativeHostShared {
+            control: self,
+            services: ClapNativeServicesShared::new(),
+            logs: super::native_audio_log::NativeAudioLogIngress::new()?,
+        })
+    }
+}
+impl<'a> SharedHandler<'a> for ClapNativeHostShared {
+    fn initializing(&self, handle: clack_host::prelude::InitializingPluginHandle<'a>) {
+        self.services.timer_available.store(
+            handle.get_extension::<clack_extensions::timer::PluginTimer>().is_some(),
+            Ordering::Release,
+        );
+    }
+    fn request_restart(&self) {
+        self.control.request_restart();
+    }
+    fn request_process(&self) {
+        self.control.request_process();
+    }
+    fn request_callback(&self) {
+        self.control.request_callback();
+    }
+}
+impl HostThreadCheckImpl for ClapNativeHostShared {
+    fn is_main_thread(&self) -> bool {
+        self.control.is_main_thread()
+    }
+    fn is_audio_thread(&self) -> bool {
+        self.control.is_audio_thread()
+    }
+}
+impl HostLogImpl for ClapNativeHostShared {
+    fn log(&self, message: HostLogMessage<'_>) {
+        self.logs.observe(message);
     }
 }
 
@@ -546,17 +600,46 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             parameter_ids: clap_parameter_ids,
         })
         .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
-        IsolatedAudioProcessorWorkerSpec::new(
+        Ok(IsolatedAudioProcessorWorkerSpec::new(
             self.helper_executable.clone(),
             payload,
-            plugin.execution_contract,
+            plugin.execution_contract.with_additional_session_scratch_bytes(
+                output_source_reservation_bytes(plugin.parameters.len())?,
+            )?,
             plugin.auxiliary_inputs.clone(),
             parameter_ids,
             request.render_contract(),
-        )
+        )?
+        .with_native_worker_lane_resources(clap_native_worker_lane_profile()?))
     }
 }
 
+// The concrete preparation codec remains the only interpreter for this format.
+// This non-RT helper neither loads a plugin nor grants author/install authority.
+pub(super) fn payload_with_configuration_seed(
+    payload: &[u8],
+    configuration: &[u8],
+) -> Result<Vec<u8>, AudioProcessorHostError> {
+    if configuration.len() > super::MAX_CONTROL_FRAME_BYTES / 2 {
+        return Err(invalid(
+            "native configuration seed exceeds the existing state limit",
+        ));
+    }
+    let mut decoded: ClapPayload = serde_json::from_slice(payload)
+        .map_err(|error| invalid(format!("invalid concrete payload for native seed: {error}")))?;
+    // Retire the decoded old seed outside publication/SDK guards before
+    // allocating its replacement; preserve all other concrete metadata.
+    decoded.state = None;
+    let mut seed = Vec::new();
+    seed.try_reserve_exact(configuration.len()).map_err(|error| {
+        invalid(format!(
+            "native configuration seed allocation refused: {error}"
+        ))
+    })?;
+    seed.extend_from_slice(configuration);
+    decoded.state = Some(seed);
+    super::encode_native_configuration_payload(&decoded)
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClapPayload {
@@ -570,10 +653,20 @@ struct ClapPayload {
 }
 
 impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
+    fn native_worker_lane_resources(
+        &self,
+    ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+        clap_native_worker_lane_profile()
+    }
     fn prepare(
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+        if request.native_worker_lane_resources() != clap_native_worker_lane_profile()? {
+            return Err(invalid(
+                "CLAP prepared native lane profile differs from the actual adapter",
+            ));
+        }
         let payload: ClapPayload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid CLAP worker payload: {error}")))?;
         if !payload.library_path.is_absolute() || payload.plugin_id.is_empty() {
@@ -602,9 +695,17 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         }
         let plugin_id = CString::new(payload.plugin_id)
             .map_err(|_| invalid("CLAP plugin ID contains a NUL byte"))?;
+        #[cfg(windows)]
+        let native_main = std::rc::Rc::new(
+            vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
+                unavailable(format!("CLAP native main initialization failed: {error}"))
+            })?,
+        );
         let entry = unsafe { PluginEntry::load(payload.library_path.as_os_str()) }
             .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
-        prepare_loaded(
+        prepare_loaded_on_main(
+            #[cfg(windows)]
+            native_main,
             request,
             entry,
             plugin_id.as_c_str(),
@@ -615,6 +716,31 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
     }
 }
 
+// Additional known owner subset, not a claim about complete SDK/plugin/OS heaps.
+fn output_source_reservation_bytes(
+    parameter_count: usize,
+) -> Result<usize, AudioProcessorHostError> {
+    let signatures =
+        std::alloc::Layout::array::<parameter_observations::ParameterSignature>(parameter_count)
+            .map_err(|_| invalid("CLAP parameter signature reservation overflowed"))?
+            .size();
+    std::mem::size_of::<ClapWorker>()
+        .checked_add(ClapOutputEvents::reservation_bytes(parameter_count)?)
+        .and_then(|bytes| bytes.checked_add(signatures))
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<
+                super::clap_parameter_source::ClapParameterSource,
+            >())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<
+                super::clap_parameter_source::ClapParameterControlSource<'static>,
+            >())
+        })
+        .ok_or_else(|| invalid("CLAP output source reservation overflowed"))
+}
+
+#[cfg(test)]
 fn prepare_loaded(
     request: IsolatedAudioProcessorWorkerPrepareRequest,
     entry: PluginEntry,
@@ -623,6 +749,42 @@ fn prepare_loaded(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+    #[cfg(windows)]
+    let native_main = std::rc::Rc::new(
+        vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
+            unavailable(format!(
+                "CLAP owned native main initialization failed: {error}"
+            ))
+        })?,
+    );
+    prepare_loaded_on_main(
+        #[cfg(windows)]
+        native_main,
+        request,
+        entry,
+        plugin_id,
+        state,
+        expected_parameters,
+        parameter_ids,
+    )
+}
+
+fn prepare_loaded_on_main(
+    #[cfg(windows)] native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    request: IsolatedAudioProcessorWorkerPrepareRequest,
+    entry: PluginEntry,
+    plugin_id: &CStr,
+    state: Option<&[u8]>,
+    expected_parameters: &[super::ClapParameterDescriptor],
+    parameter_ids: &[u32],
+) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+    if output_source_reservation_bytes(expected_parameters.len())?
+        > request.render_contract().processor_session_scratch_budget_bytes
+    {
+        return Err(invalid(
+            "CLAP output owner exceeds the current Session scratch ceiling",
+        ));
+    }
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
@@ -645,9 +807,20 @@ fn prepare_loaded(
     )
     .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
     let shared = ClapHostShared::new();
-    let mut instance =
-        PluginInstance::<ClapHost>::new(|_| shared.clone(), |_| (), &entry, plugin_id, &info)
-            .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
+    let output_events =
+        ClapOutputEvents::new(expected_parameters, Arc::clone(&shared.parameter_source))?;
+    let native_shared = shared.clone().with_native_logs()?;
+    let mut instance = PluginInstance::<ClapHost>::new(
+        |_| native_shared,
+        |shared| ClapHostMainThread::new(shared),
+        &entry,
+        plugin_id,
+        &info,
+    )
+    .map_err(|error| unavailable(format!("CLAP instance creation failed: {error}")))?;
+    let log_receiver = instance
+        .access_shared_handler(|host| host.logs.claim_receiver())
+        .ok_or_else(|| invalid("CLAP native log receiver already claimed"))?;
     shared.service_callbacks(&mut instance)?;
     if let Some(state) = state {
         let handle = instance.plugin_handle();
@@ -668,9 +841,37 @@ fn prepare_loaded(
     shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
-    if list_parameters(&handle)? != expected_parameters {
+    if !same_clap_parameter_structure(&list_parameters(&handle)?, expected_parameters) {
         return Err(invalid(
             "CLAP parameter metadata changed since contract probe",
+        ));
+    }
+    let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
+    let signature_bytes = std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
+        parameter_signatures.capacity(),
+    )
+    .map_err(|_| invalid("CLAP actual parameter signature allocation overflow"))?
+    .size();
+    if output_events
+        .allocated_bytes()?
+        .checked_add(signature_bytes)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<
+                super::clap_parameter_source::ClapParameterSource,
+            >())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<
+                super::clap_parameter_source::ClapParameterControlSource<'static>,
+            >())
+        })
+        .is_none_or(|bytes| {
+            bytes > request.render_contract().processor_session_scratch_budget_bytes
+        })
+    {
+        return Err(invalid(
+            "CLAP source/signature owners exceed current Session scratch ceiling",
         ));
     }
     let input_metadata = inspect_audio_inputs(&handle, request.render_contract().channel_layout)?;
@@ -690,6 +891,7 @@ fn prepare_loaded(
         .activate(|_, _| (), configuration)
         .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
         .into();
+    instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
     let handle = instance.plugin_handle();
     let latency = handle
         .get_extension::<PluginLatency>()
@@ -750,7 +952,23 @@ fn prepare_loaded(
     let input_port_count = 1 + auxiliary_inputs.buses.len();
     let input = vec![vec![vec![0.0; frames]; channel_count]; input_port_count];
     let output = vec![vec![0.0; frames]; channel_count];
+    let native_object = next_clap_native_object()?;
     Ok(Box::new(ClapWorker {
+        native_lane: request.native_worker_lane_resources(),
+        native_object,
+        native_binding: None,
+        native_author_delivery: None,
+        parameter_signatures,
+        parameter_observation_revision: None,
+        #[cfg(windows)]
+        gui: super::clap_gui_owner::ClapGuiOwner::new(std::rc::Rc::clone(&native_main)),
+        #[cfg(windows)]
+        _native_main: native_main,
+        render,
+        expected_parameters: expected_parameters.to_vec(),
+        configuration_phase:
+            super::native_configuration_control::NativeConfigurationPhase::Admitted,
+        configuration_seed: None,
         processor: Some(processor),
         instance,
         contract: request.plugin_execution_contract(),
@@ -762,12 +980,28 @@ fn prepare_loaded(
         output_ports: AudioPorts::with_capacity(channel_count, 1),
         parameter_lanes,
         input_events: ClapParameterEvents::with_capacity(event_capacity),
+        output_events,
         last_end: None,
+        initial_signal_available: true,
+        log_receiver,
         shared,
     }))
 }
 
 struct ClapWorker {
+    #[cfg(windows)]
+    gui: super::clap_gui_owner::ClapGuiOwner,
+    native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
+    native_object: crate::NativeAudioObjectObservation,
+    native_binding: Option<crate::NativeAudioObjectBindReceipt>,
+    native_author_delivery: Option<native_author::PendingDelivery>,
+    parameter_signatures: Vec<parameter_observations::ParameterSignature>,
+    // Observation freshness only, never author acceptance or ClosedEmpty proof.
+    parameter_observation_revision: Option<u64>,
+    render: crate::AudioRenderContract,
+    expected_parameters: Vec<super::ClapParameterDescriptor>,
+    configuration_phase: super::native_configuration_control::NativeConfigurationPhase,
+    configuration_seed: Option<Vec<u8>>,
     processor: Option<PluginAudioProcessor<ClapHost>>,
     instance: PluginInstance<ClapHost>,
     contract: AudioProcessorExecutionContract,
@@ -779,11 +1013,436 @@ struct ClapWorker {
     output_ports: AudioPorts,
     parameter_lanes: Vec<(ClapId, f64, f64, bool)>,
     input_events: ClapParameterEvents,
+    output_events: ClapOutputEvents,
     last_end: Option<i64>,
+    // Actual accepted activation, consumed once by the first signal entry.
+    initial_signal_available: bool,
+    log_receiver: super::native_audio_log::NativeAudioLogReceiver,
     shared: ClapHostShared,
+    // Last: OLE/main lifetime outlives every native GUI/processor/instance drop.
+    #[cfg(windows)]
+    _native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+}
+
+impl ClapWorker {
+    #[cfg(windows)]
+    fn native_editor_binding_matches(&self, request: crate::NativeAudioObjectBindRequest) -> bool {
+        self.native_binding.is_some_and(|receipt| {
+            receipt.binding() == request.binding
+                && receipt.object() == self.native_object
+                && request.expected_object == self.native_object
+        })
+    }
 }
 
 impl IsolatedAudioProcessorWorker for ClapWorker {
+    fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
+        self.native_lane
+    }
+
+    fn native_staged_seed_layout(&self) -> crate::NativeHostBufferLayout {
+        let bytes = match &self.configuration_phase {
+            super::native_configuration_control::NativeConfigurationPhase::ReadyForInstall {
+                candidate,
+                ..
+            } => candidate
+                .staged_receipt()
+                .map_or(0, |receipt| receipt.child_seed_capacity_bytes),
+            _ => 0,
+        };
+        crate::NativeHostBufferLayout { bytes, alignment: align_of::<u8>() }
+    }
+
+    fn uses_native_processing_split(&self) -> bool {
+        cfg!(windows)
+    }
+
+    #[cfg(windows)]
+    fn split_native_processing(
+        &mut self,
+    ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
+        let native =
+            self.processor.as_mut().ok_or_else(|| unavailable("CLAP processor is closed"))?;
+        let signal = ClapSignalFields {
+            configuration_phase: &self.configuration_phase,
+            input: &mut self.input,
+            output: &mut self.output,
+            auxiliary_inputs: &self.auxiliary_inputs,
+            input_ports: &mut self.input_ports,
+            output_ports: &mut self.output_ports,
+            parameter_lanes: &self.parameter_lanes,
+            input_events: &mut self.input_events,
+            output_events: &mut self.output_events,
+            last_end: &mut self.last_end,
+            shared: &self.shared,
+        };
+        Ok(super::IsolatedAudioProcessorWorkerSplit {
+            main: Box::new(ClapMainRole {
+                instance: &mut self.instance,
+                gui: &mut self.gui,
+                shared: &self.shared,
+                phase: &self.configuration_phase,
+                object: self.native_object,
+                receiver: std::cell::RefCell::new(&mut self.log_receiver),
+                binding: self.native_binding,
+                author_delivery: &self.native_author_delivery,
+            }),
+            processing: Box::new(ClapDspRole { native, signal }),
+        })
+    }
+
+    fn native_audio_object_observation(
+        &self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        Ok(Some(self.native_object))
+    }
+
+    fn bind_native_audio_object(
+        &mut self,
+        request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        match crate::NativeAudioObjectBindReceipt::acknowledge(request, self.native_object) {
+            Ok(receipt) => {
+                self.native_binding = Some(receipt);
+                Ok(crate::NativeAudioObjectBindOutcome::Bound(receipt))
+            }
+            Err(reason) => Ok(crate::NativeAudioObjectBindOutcome::Refused(reason)),
+        }
+    }
+
+    #[cfg(windows)]
+    fn open_native_audio_editor(
+        &mut self,
+        request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+        let binding = request.binding();
+        if !self.native_editor_binding_matches(binding) {
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        if self.pending_reprepare().is_some()
+            || self.configuration_phase.ready_token().is_some()
+            || self.gui.close_requested()?
+            || self.instance.access_shared_handler(|host| host.services.close_requested())
+        {
+            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+        }
+        let Some(size) = self.gui.open(&mut self.instance, request.title())? else {
+            return Ok(Outcome::Refused(Refusal::NoEditor));
+        };
+        // A newly opened surface gets one actual presentation query even when
+        // no native source callbacks were needed to create its view.
+        self.parameter_observation_revision = None;
+        Ok(Outcome::Opened { binding, width: size.width, height: size.height })
+    }
+
+    #[cfg(windows)]
+    fn close_native_audio_editor(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+        if !self.native_editor_binding_matches(binding) {
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        self.gui.close(&mut self.instance)?;
+        Ok(Outcome::Closed { binding })
+    }
+
+    #[cfg(windows)]
+    fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.gui.close(&mut self.instance)
+    }
+
+    #[cfg(windows)]
+    fn service_native_editor_close_request(
+        &mut self,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        let Some(receipt) = self.native_binding else {
+            self.close_native_editor_owner()?;
+            return Ok(crate::NativeAudioEditorOutcome::Refused(
+                crate::NativeAudioEditorRefusal::OwnerChanged,
+            ));
+        };
+        self.close_native_audio_editor(crate::NativeAudioObjectBindRequest {
+            binding: receipt.binding(),
+            expected_object: receipt.object(),
+        })
+    }
+
+    fn poll_native_observations(
+        &mut self,
+        consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        // Only the actual child main/control path drains the one receiver.
+        let logs = self.instance.access_shared_handler(|host| {
+            self.log_receiver.observations(&host.logs, consumption)
+        })?;
+        let (author, parameter_revision, parameters) = self.observe_native_author(consumption)?;
+        Ok(crate::NativeAudioObservations {
+            object: Some(self.native_object),
+            logs,
+            author: Some(author),
+            parameter_revision,
+            parameters,
+            ..Default::default()
+        })
+    }
+
+    fn native_configuration_cohort(&self) -> Option<super::NativeRequestCohort> {
+        clap_native_cohort(&self.shared)
+    }
+
+    fn service_native_configuration(
+        &mut self,
+        request: super::NativeConfigurationControlRequest<'_>,
+    ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        use super::native_configuration_control::{
+            observed_contract, FixedConfigurationWriter, NativeConfigurationPhase as Phase,
+        };
+        use super::{
+            NativeConfigurationCandidate as Candidate,
+            NativeConfigurationControlOutcome as Outcome, NativeConfigurationFormat as Format,
+            NativeConfigurationRefusal as Refusal, NativeControlBufferReceipt as Buffers,
+        };
+        use clack_extensions::params::PluginParams;
+        if self.configuration_phase.ready_token().is_some() {
+            return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
+        }
+        let expected_native = self.shared.restart_cohort();
+        let actual = expected_native.pending().then_some(super::NativeRequestCohort {
+            serial: expected_native.serial(),
+            request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+        });
+        if actual != Some(request.expected_cohort) {
+            return Ok(Outcome::StillPending(actual));
+        }
+        self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
+        if request.expected_cohort.exhausted() {
+            return Ok(Outcome::CapabilityRefused(Refusal::SerialExhausted));
+        }
+        if request.expected_cohort.request
+            != mondrian_core::NativeAudioReprepareRequest::ClapRestart
+        {
+            return Err(invalid(
+                "CLAP configuration control received a different ABI cohort",
+            ));
+        }
+        if request.configuration_limit_bytes == 0 || request.configuration_limit_bytes > 64 * 1024 {
+            return Ok(Outcome::CapabilityRefused(Refusal::ConfigurationTooLarge));
+        }
+        if request.canonical_constant_values.len() != self.parameter_lanes.len()
+            || self.parameter_lanes.iter().zip(request.canonical_constant_values).any(
+                |(&(_, min, max, stepped), value)| {
+                    !value.is_finite()
+                        || *value < min
+                        || *value > max
+                        || (stepped && value.fract() != 0.0)
+                },
+            )
+        {
+            return Ok(Outcome::CapabilityRefused(
+                Refusal::UnsupportedConstantProfile,
+            ));
+        }
+        // Grant every state byte before entering the native lifecycle/state code.
+        let mut writer = match FixedConfigurationWriter::new(
+            request.configuration_limit_bytes,
+            request.control_buffer_grant_bytes,
+        ) {
+            Ok(writer) => writer,
+            Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
+        };
+        if let Some(mut processor) = self.processor.take() {
+            {
+                let _audio_role = self.shared.enter_audio_thread();
+                processor.ensure_processing_stopped();
+            }
+            drop(processor);
+        }
+        self.instance.try_deactivate().map_err(|error| {
+            unavailable(format!("CLAP configuration deactivation failed: {error}"))
+        })?;
+        self.instance
+            .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+        self.shared.service_callbacks(&mut self.instance)?;
+        self.input_events.clear();
+        for (&(id, _, _, _), &value) in
+            self.parameter_lanes.iter().zip(request.canonical_constant_values)
+        {
+            if !self
+                .input_events
+                .try_push(ParamValueEvent::new(0, id, Pckn::match_all(), value))
+            {
+                return Err(invalid(
+                    "CLAP configuration values exceed already admitted parameter storage",
+                ));
+            }
+        }
+        {
+            let mut handle = self
+                .instance
+                .inactive_plugin_handle()
+                .ok_or_else(|| invalid("CLAP service still active before parameter flush"))?;
+            if !self.parameter_lanes.is_empty() {
+                let params = handle
+                    .get_extension::<PluginParams>()
+                    .ok_or_else(|| invalid("CLAP admitted parameters lost their extension"))?;
+                let mut output = self
+                    .output_events
+                    .writer(ClapOutputOrigin::InactiveFlush)
+                    .map_err(|_| AudioProcessorHostError::NativeParameterSourceUnavailable)?;
+                params.flush(
+                    &mut handle,
+                    &self.input_events.as_input(),
+                    &mut output.as_output(),
+                );
+            }
+        }
+        self.shared.service_callbacks(&mut self.instance)?;
+        configure_render_mode(&self.instance.plugin_handle(), self.render.processing_mode)?;
+        self.shared.service_callbacks(&mut self.instance)?;
+        let handle = self.instance.plugin_handle();
+        let parameters = list_parameters(&handle)?;
+        // Current values change after a valid flush; structural metadata must not.
+        if !same_clap_parameter_structure(&parameters, &self.expected_parameters) {
+            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+        }
+        let metadata = inspect_audio_inputs(&handle, self.render.channel_layout)?;
+        if metadata.contract != self.auxiliary_inputs {
+            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+        }
+        let configuration = PluginAudioConfiguration {
+            sample_rate: f64::from(self.render.sample_rate),
+            min_frames_count: 1,
+            max_frames_count: u32::try_from(self.render.max_block_frames)
+                .map_err(|_| invalid("CLAP retained frame extent exceeds u32"))?,
+        };
+        let mut processor: PluginAudioProcessor<ClapHost> = self
+            .instance
+            .activate(|_, _| (), configuration)
+            .map_err(|error| unavailable(format!("CLAP configuration activation failed: {error}")))?
+            .into();
+        self.instance
+            .access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
+        let latency = {
+            let handle = self.instance.plugin_handle();
+            handle
+                .get_extension::<PluginLatency>()
+                .map(|extension| extension.get(&handle) as usize)
+                .unwrap_or(0)
+        };
+        let tail = {
+            let _audio_role = self.shared.enter_audio_thread();
+            processor
+                .plugin_handle()
+                .get_extension::<PluginTail>()
+                .map(|extension| extension.get(&processor.plugin_handle()))
+                .unwrap_or(TailLength::Finite(0))
+        };
+        self.processor = Some(processor);
+        let tail = match tail {
+            TailLength::Finite(0) => crate::AudioProcessorTail::None,
+            TailLength::Finite(frames) => crate::AudioProcessorTail::Finite(frames as usize),
+            TailLength::Infinite => crate::AudioProcessorTail::Infinite,
+        };
+        let observed = observed_contract(self.contract, latency, tail)?;
+        self.shared.service_callbacks(&mut self.instance)?;
+        let handle = self.instance.plugin_handle();
+        if !same_clap_parameter_structure(&list_parameters(&handle)?, &self.expected_parameters)
+            || inspect_audio_inputs(&handle, self.render.channel_layout)?.contract
+                != self.auxiliary_inputs
+        {
+            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+        }
+        let Some(state) = handle.get_extension::<PluginState>() else {
+            return Ok(Outcome::CapabilityRefused(
+                Refusal::ConfigurationUnavailable,
+            ));
+        };
+        let result = state.save(&handle, &mut writer);
+        let capacity = writer.capacity();
+        // Inspect the host writer first: native getState may ignore write failure.
+        let configuration = match writer.finish() {
+            Ok(bytes) => bytes,
+            Err(refusal) => return Ok(Outcome::CapabilityRefused(refusal)),
+        };
+        if result.is_err() {
+            return Ok(Outcome::CapabilityRefused(
+                Refusal::ConfigurationUnavailable,
+            ));
+        }
+        self.shared.service_callbacks(&mut self.instance)?;
+        if !self.shared.retire_restart_cohort(expected_native) {
+            return Ok(Outcome::StillPending(self.native_configuration_cohort()));
+        }
+        let candidate = Candidate {
+            serviced_cohort: request.expected_cohort,
+            control_token: request.control_token,
+            observed_contract: observed,
+            format: Format::ClapState,
+            configuration,
+            buffers: Buffers {
+                request_value_capacity_bytes: 0,
+                capture_payload_bytes: 0,
+                configuration_capacity_bytes: capacity,
+            },
+            parent_configuration_capacity_bytes: 0,
+        };
+        self.configuration_phase = Phase::issued(&candidate);
+        Ok(Outcome::ReadyForInstall(candidate))
+    }
+    fn stage_native_configuration_seed(
+        &mut self,
+        seed: super::NativeConfigurationOwnedSeed,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        let current = self.shared.restart_cohort();
+        if current.pending()
+            || current.serial() != seed.ticket.serviced_cohort.serial
+            || self.configuration_phase.seed_ticket() != Some(seed.ticket)
+        {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(
+                super::NativeConfigurationSeedRefusal::StaleTicket,
+            ));
+        }
+        Ok(self.configuration_phase.stage_seed(seed))
+    }
+
+    fn commit_native_configuration_seed(
+        &mut self,
+        ticket: super::NativeConfigurationSeedTicket,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        if let Err(refusal) = self.configuration_phase.seed_receipt(ticket) {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(refusal));
+        }
+        if !self.shared.claim_retired_restart_serial(ticket.serviced_cohort.serial) {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(
+                super::NativeConfigurationSeedRefusal::StaleTicket,
+            ));
+        }
+        let (seed, receipt) = match self.configuration_phase.take_seed(ticket) {
+            Ok(value) => value,
+            Err(refusal) => return Ok(super::NativeConfigurationSeedOutcome::Refused(refusal)),
+        };
+        // The legally activated stopped component already has this configuration.
+        // Retain the seed owner for this installed candidate without reloading or
+        // pretending it is private DSP history. Explicit Enter resets processing.
+        let previous = self.configuration_seed.replace(seed);
+        self.contract = ticket.observed_contract;
+        self.last_end = None;
+        self.configuration_phase =
+            super::native_configuration_control::NativeConfigurationPhase::Admitted;
+        drop(previous);
+        Ok(super::NativeConfigurationSeedOutcome::Accepted(receipt))
+    }
+
+    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
+        self.shared
+            .restart_requested()
+            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart)
+            .or(self.configuration_phase.blocked_request())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.contract
     }
@@ -797,6 +1456,15 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        if let Some(request) = self.pending_reprepare() {
+            return Err(AudioProcessorHostError::ReprepareRequired(request));
+        }
+        self.native_binding = None;
+        if self.initial_signal_available {
+            self.initial_signal_available = false;
+            self.last_end = Some(start_sample);
+            return Ok(());
+        }
         let _audio_role = self.shared.enter_audio_thread();
         self.processor
             .as_mut()
@@ -810,145 +1478,55 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
 
     fn process(
         &mut self,
-        mut block: IsolatedAudioProcessorWorkerBlock<'_>,
+        block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
-        let frames = block.frames();
-        let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
-            AudioProcessorHostError::Process("CLAP sample position overflowed".to_owned())
+        let processor = self.processor.as_mut().ok_or_else(|| {
+            AudioProcessorHostError::Process("CLAP processor is closed".to_owned())
         })?;
-        let channels = self.output.len();
-        if self.last_end != Some(block.start_sample())
-            || frames == 0
-            || frames > self.input[0][0].len()
-            || block.main_interleaved().len() != frames * channels
-        {
-            return Err(AudioProcessorHostError::Process(
-                "CLAP block violates prepared continuity or extent".to_owned(),
-            ));
-        }
-        if self.shared.restart_requested() {
-            return Err(AudioProcessorHostError::Process(
-                "CLAP plugin requested a host restart; prepare a new instance".to_owned(),
-            ));
-        }
-        if block.parameter_lane_count() != self.parameter_lanes.len() {
-            return Err(AudioProcessorHostError::Process(
-                "CLAP parameter lane count changed during processing".to_owned(),
-            ));
-        }
-        self.input_events.clear();
-        for (lane, &(clap_id, min, max, stepped)) in self.parameter_lanes.iter().enumerate() {
-            let events = block.parameter_events(lane).ok_or_else(|| {
-                AudioProcessorHostError::Process("CLAP parameter lane is missing".to_owned())
-            })?;
-            for event in events {
-                if event.sample_offset as usize >= frames
-                    || !event.value.is_finite()
-                    || event.value < min
-                    || event.value > max
-                    || (stepped && event.value.fract() != 0.0)
-                {
-                    return Err(AudioProcessorHostError::Process(
-                        "CLAP parameter event violates its admitted contract".to_owned(),
-                    ));
-                }
-                if !self.input_events.try_push(ParamValueEvent::new(
-                    event.sample_offset,
-                    clap_id,
-                    Pckn::match_all(),
-                    event.value,
-                )) {
-                    return Err(AudioProcessorHostError::Process(
-                        "CLAP parameter events exceed the prepared storage".to_owned(),
-                    ));
-                }
-            }
-        }
-        self.input_events.sort();
-        for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
-            for (channel, sample) in samples.iter().copied().enumerate() {
-                self.input[0][channel][frame] = sample;
-            }
-        }
-        for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
-            let samples = block.auxiliary_input(&bus.bus_key).ok_or_else(|| {
-                AudioProcessorHostError::Process("CLAP auxiliary PCM is missing".to_owned())
-            })?;
-            if samples.len() != frames * channels {
-                return Err(AudioProcessorHostError::Process(
-                    "CLAP auxiliary extent changed".to_owned(),
-                ));
-            }
-            for (frame, samples) in samples.chunks_exact(channels).enumerate() {
-                for (channel, sample) in samples.iter().copied().enumerate() {
-                    self.input[index + 1][channel][frame] = sample;
-                }
-            }
-        }
-        for channel in &mut self.output {
-            channel[..frames].fill(0.0);
-        }
-        let transport = clap_transport(block.start_sample(), block.sample_rate())?;
-        let input_audio = self.input_ports.with_input_buffers(self.input.iter_mut().map(|port| {
-            AudioPortBuffer {
-                latency: 0,
-                channels: AudioPortBufferType::f32_input_only(
-                    port.iter_mut().map(|channel| InputChannel::variable(&mut channel[..frames])),
-                ),
-            }
-        }));
-        let mut output_audio = self.output_ports.with_output_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_output_only(
-                self.output.iter_mut().map(|channel| &mut channel[..frames]),
-            ),
-        }]);
-        {
-            let _audio_role = self.shared.enter_audio_thread();
-            let processor = self
-                .processor
-                .as_mut()
-                .ok_or_else(|| {
-                    AudioProcessorHostError::Process("CLAP processor is closed".to_owned())
-                })?
-                .ensure_processing_started()
-                .map_err(|error| {
-                    AudioProcessorHostError::Process(format!("CLAP start failed: {error}"))
-                })?;
-            processor
-                .process(
-                    &input_audio,
-                    &mut output_audio,
-                    &self.input_events.as_input(),
-                    &mut OutputEvents::void(),
-                    None,
-                    Some(&transport),
-                )
-                .map_err(|error| {
-                    AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
-                })?;
-        }
-        self.shared
-            .service_callbacks(&mut self.instance)
-            .map_err(|error| AudioProcessorHostError::Process(error.to_string()))?;
-        for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
-            for (channel, sample) in samples.iter_mut().enumerate() {
-                let value = self.output[channel][frame];
-                if !value.is_finite() {
-                    return Err(AudioProcessorHostError::Process(
-                        "CLAP produced nonfinite PCM".to_owned(),
-                    ));
-                }
-                *sample = value;
-            }
-        }
-        self.last_end = Some(end_sample);
-        Ok(())
+        let mut signal = ClapSignalFields {
+            configuration_phase: &self.configuration_phase,
+            input: &mut self.input,
+            output: &mut self.output,
+            auxiliary_inputs: &self.auxiliary_inputs,
+            input_ports: &mut self.input_ports,
+            output_ports: &mut self.output_ports,
+            parameter_lanes: &self.parameter_lanes,
+            input_events: &mut self.input_events,
+            output_events: &mut self.output_events,
+            last_end: &mut self.last_end,
+            shared: &self.shared,
+        };
+        signal.process(processor, block)?;
+        super::clap_main_services::service_main_tick(&self.shared, &mut self.instance)
     }
+}
+
+/// Compare definition facts, excluding current values changed by a legal flush.
+fn same_clap_parameter_structure(
+    actual: &[super::ClapParameterDescriptor],
+    expected: &[super::ClapParameterDescriptor],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(a, e)| {
+            a.id == e.id
+                && a.min_value == e.min_value
+                && a.max_value == e.max_value
+                && a.default_value == e.default_value
+                && a.automatable == e.automatable
+                && a.stepped == e.stepped
+                && a.enumeration == e.enumeration
+                && a.read_only == e.read_only
+        })
 }
 
 impl Drop for ClapWorker {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.gui.close(&mut self.instance).is_err() {
+            // An attached/indeterminate foreign GUI must not outlive its DLL.
+            // The parent supervised connection observes this isolated retirement.
+            std::process::abort();
+        }
         if let Some(mut processor) = self.processor.take() {
             {
                 let _audio_role = self.shared.enter_audio_thread();
@@ -989,7 +1567,7 @@ fn clap_seconds_position(
     Ok(SecondsTime::from_bits(bits))
 }
 
-fn clap_transport(
+pub(super) fn clap_transport(
     start_sample: i64,
     sample_rate: u32,
 ) -> Result<TransportEvent, AudioProcessorHostError> {
@@ -1011,7 +1589,7 @@ fn clap_transport(
     })
 }
 
-fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
+pub(super) fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(detail.into())
 }
 
@@ -1039,9 +1617,9 @@ mod tests {
     use clack_plugin::events::spaces::CoreEventSpace;
     use clack_plugin::prelude::{
         Audio, ChannelPair, ClapId, DefaultPluginFactory, Events, HostAudioProcessorHandle,
-        HostMainThreadHandle, HostSharedHandle, Plugin, PluginAudioConfiguration as PluginConfig,
-        PluginDescriptor, PluginError, PluginExtensions, PluginMainThread, PluginShared, Process,
-        ProcessStatus, SinglePluginEntry,
+        HostMainThreadHandle, HostSharedHandle, OutputEvents, Plugin,
+        PluginAudioConfiguration as PluginConfig, PluginDescriptor, PluginError, PluginExtensions,
+        PluginMainThread, PluginShared, Process, ProcessStatus, SinglePluginEntry,
     };
     use clack_plugin::stream::{InputStream, OutputStream};
     use mondrian_core::AudioChannelLayout;
@@ -1478,6 +2056,7 @@ mod tests {
 
     fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
         IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract {
@@ -1751,7 +2330,10 @@ mod tests {
             [&mondrian_core::ParameterId::new("clap.param.1").expect("visible ID")];
         assert_eq!(visible.ui.display_name.as_deref(), Some("Output Gain"));
         assert!(!visible.ui.hidden);
-        assert_eq!(visible.automation.default_value, 0.25);
+        assert_eq!(
+            visible.automation.as_ref().expect("bound host curve").default_value,
+            0.25
+        );
         let hidden = &instance.parameters
             [&mondrian_core::ParameterId::new("clap.param.2").expect("hidden ID")];
         assert!(hidden.ui.hidden);
@@ -1906,6 +2488,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: b"not json".to_vec(),
             plugin_execution_contract: contract(),
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -1933,6 +2516,7 @@ mod tests {
         })
         .expect("payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: clap_native_worker_lane_profile().expect("actual native lane profile"),
             payload,
             plugin_execution_contract: contract(),
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -2015,6 +2599,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -2120,6 +2705,8 @@ mod tests {
         assert_eq!(
             parameters[&mondrian_core::ParameterId::new("clap.param.1").expect("volume ID")]
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             0.5
         );
@@ -2193,6 +2780,7 @@ mod tests {
         })
         .expect("encode worker payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload,
             plugin_execution_contract: registration.execution_contract,
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -2243,6 +2831,7 @@ mod tests {
         };
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("parameter identity")];
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -2322,7 +2911,8 @@ mod tests {
             self.failures.store(0, TestOrdering::SeqCst);
         }
     }
-    static LIFECYCLE_AUDITS: [LifecycleAudit; 6] = [const { LifecycleAudit::new() }; 6];
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 8] = [const { LifecycleAudit::new() }; 8];
+    static CALLBACK_COUNTS: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
     const INIT: u32 = 1;
     const CALLBACK: u32 = 2;
     const RENDER: u32 = 4;
@@ -2427,6 +3017,13 @@ mod tests {
     impl<'a> PluginMainThread<'a, LifecycleShared<'a>> for LifecycleMain<'a> {
         fn on_main_thread(&self) {
             self.0.check(CALLBACK, false);
+            if self.0.case >= 6 {
+                let count = CALLBACK_COUNTS[self.0.case - 6].fetch_add(1, TestOrdering::SeqCst) + 1;
+                let limit = if self.0.case == 6 { 40 } else { 16 };
+                if count < limit {
+                    self.0.host.request_callback();
+                }
+            }
         }
     }
     impl PluginAudioPortsImpl for LifecycleMain<'_> {
@@ -2593,6 +3190,7 @@ mod tests {
             )
             .expect("mode facts");
             let request = IsolatedAudioProcessorWorkerPrepareRequest {
+                native_lane: None,
                 payload: Vec::new(),
                 plugin_execution_contract: contract,
                 auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
@@ -2663,6 +3261,84 @@ mod tests {
     }
 
     #[test]
+    fn clap_main_callback_continuous_requests_yield_without_fault_or_loss() {
+        let audit = &LIFECYCLE_AUDITS[6];
+        audit.clear();
+        CALLBACK_COUNTS[0].store(0, TestOrdering::SeqCst);
+        let (shared, mut instance) = callback_instance::<6>();
+        assert!(shared.callback_requested.load(Ordering::Acquire));
+        for expected in [16, 32, 40] {
+            shared
+                .service_callbacks(&mut instance)
+                .expect("legal repeating callback is not a plugin fault");
+            assert_eq!(
+                CALLBACK_COUNTS[0].load(TestOrdering::SeqCst),
+                expected,
+                "a tick is bounded to sixteen real ABI calls"
+            );
+            assert_eq!(
+                shared.callback_requested.load(Ordering::Acquire),
+                expected < 40,
+                "request made inside native callback survives the yield"
+            );
+        }
+        shared.service_callbacks(&mut instance).expect("idle tick");
+        assert_eq!(
+            CALLBACK_COUNTS[0].load(TestOrdering::SeqCst),
+            40,
+            "no unsolicited callback"
+        );
+        assert_eq!(
+            audit.failures.load(TestOrdering::SeqCst),
+            0,
+            "all actual callbacks were on the main role"
+        );
+        drop(instance);
+        assert_eq!(audit.failures.load(TestOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn clap_main_callback_exact_tick_limit_is_success_when_no_request_remains() {
+        let audit = &LIFECYCLE_AUDITS[7];
+        audit.clear();
+        CALLBACK_COUNTS[1].store(0, TestOrdering::SeqCst);
+        let (shared, mut instance) = callback_instance::<7>();
+        shared
+            .service_callbacks(&mut instance)
+            .expect("sixteen finite callbacks are valid");
+        assert_eq!(CALLBACK_COUNTS[1].load(TestOrdering::SeqCst), 16);
+        assert!(!shared.callback_requested.load(Ordering::Acquire));
+        shared.service_callbacks(&mut instance).expect("next idle tick");
+        assert_eq!(CALLBACK_COUNTS[1].load(TestOrdering::SeqCst), 16);
+        assert_eq!(audit.failures.load(TestOrdering::SeqCst), 0);
+    }
+
+    fn callback_instance<const CASE: usize>() -> (ClapHostShared, PluginInstance<ClapHost>) {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<CASE>>>(
+            c"/test/main-callback",
+        )
+        .expect("real in-process CLAP ABI entry");
+        let info = HostInfo::new(
+            "Mondrian",
+            "Mondrian",
+            "https://github.com/shaloong/mondrian",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("host identity");
+        let shared = ClapHostShared::new();
+        let native = shared.clone().with_native_logs().expect("actual declared host extensions");
+        let instance = PluginInstance::<ClapHost>::new(
+            |_| native,
+            |shared| ClapHostMainThread::new(shared),
+            &entry,
+            c"org.mondrian.test.render-lifecycle",
+            &info,
+        )
+        .expect("instantiate owned callback fixture");
+        (shared, instance)
+    }
+
+    #[test]
     fn clap_render_mode_rejects_hard_realtime_and_declined_offline() {
         lifecycle_offline_rejection::<1>();
         lifecycle_offline_rejection::<2>();
@@ -2683,6 +3359,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(
                 3,
@@ -2728,6 +3405,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(
                 3,
@@ -2751,7 +3429,13 @@ mod tests {
             &[],
         )
         .expect("host thread extension and lifecycle preparation");
-        worker.enter_state(71).expect("audio reset role");
+        worker.enter_state(71).expect("first accepted cold entry");
+        assert_eq!(
+            audit.visited.load(TestOrdering::SeqCst) & RESET,
+            0,
+            "first entry preserves the accepted native initial state"
+        );
+        worker.enter_state(71).expect("later explicit audio reset role");
         let auxiliary = AudioProcessorAuxiliaryInputContract::default();
         let mut pcm = [0.25; 16];
         assert_eq!(
@@ -2852,3 +3536,230 @@ mod canonical_transport_tests {
 #[cfg(test)]
 #[path = "tests/clap_parameter_allocations.rs"]
 mod parameter_allocation_tests;
+
+#[cfg(test)]
+#[path = "clap_output_owning_tests.rs"]
+mod clap_output_owning_tests;
+
+#[cfg(test)]
+#[path = "clap_output_owner_contracts.rs"]
+mod clap_output_owner_contracts;
+
+#[cfg(windows)]
+struct ClapMainRole<'a> {
+    instance: &'a mut PluginInstance<ClapHost>,
+    gui: &'a mut super::clap_gui_owner::ClapGuiOwner,
+    shared: &'a ClapHostShared,
+    phase: &'a super::native_configuration_control::NativeConfigurationPhase,
+    object: crate::NativeAudioObjectObservation,
+    receiver: std::cell::RefCell<&'a mut super::native_audio_log::NativeAudioLogReceiver>,
+    binding: Option<crate::NativeAudioObjectBindReceipt>,
+    author_delivery: &'a Option<native_author::PendingDelivery>,
+}
+
+#[cfg(windows)]
+impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        // Clack's existing PluginInstance/PluginAudioProcessor are borrowed
+        // directly. It allocates no additional SDK role Box for this split.
+        Some([
+            clap_native_layout(std::alloc::Layout::for_value(self)),
+            clap_empty_layout(),
+        ])
+    }
+
+    fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.gui.service(self.instance)?;
+        super::clap_main_services::service_main_tick(self.shared, self.instance)
+    }
+
+    fn finish_processing_scope(&mut self) -> Result<(), AudioProcessorHostError> {
+        // Temporary DSP scope completion preserves GUI attachment and object.
+        // Only the full owner closes after join, before actual replacement/drop.
+        self.service_native_main_thread()
+    }
+
+    fn native_configuration_cohort(
+        &self,
+    ) -> Result<Option<super::NativeRequestCohort>, AudioProcessorHostError> {
+        Ok(clap_native_cohort(self.shared))
+    }
+
+    fn pending_reprepare(
+        &self,
+    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+        Ok(self
+            .shared
+            .restart_requested()
+            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart)
+            .or(self.phase.blocked_request()))
+    }
+
+    fn preserve_native_observations(
+        &self,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        // Only the actual main role can borrow its one receiver. Preserve checks
+        // the same ingress incarnation and observes loss; it never drains logs.
+        let logs = self.instance.access_shared_handler(|host| {
+            self.receiver.borrow_mut().observations(
+                &host.logs,
+                crate::NativeAudioObservationConsumption::Preserve,
+            )
+        })?;
+        let source = native_author::source_status(
+            self.shared.parameter_source.snapshot(),
+            self.instance.access_shared_handler(|host| {
+                host.services.flush_requested.load(Ordering::Acquire)
+            }),
+        );
+        Ok(crate::NativeAudioObservations {
+            object: Some(self.object),
+            logs,
+            author: Some(crate::NativeAudioAuthorObservation {
+                source,
+                delivery: self.author_delivery.as_ref().map_or(
+                    crate::NativeAudioAuthorDeliveryState::Preserved,
+                    native_author::PendingDelivery::projection,
+                ),
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn native_author_binding_matches(
+        &self,
+        request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<bool, AudioProcessorHostError> {
+        Ok(self.binding.is_some_and(|receipt| {
+            receipt.binding() == request.binding
+                && receipt.object() == request.expected_object
+                && request.expected_object == self.object
+        }))
+    }
+
+    fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
+        Ok(self.gui.close_requested()?
+            || self.instance.access_shared_handler(|host| host.services.close_requested()))
+    }
+}
+
+#[cfg(windows)]
+struct ClapDspRole<'a> {
+    native: &'a mut PluginAudioProcessor<ClapHost>,
+    signal: ClapSignalFields<'a>,
+}
+
+#[cfg(windows)]
+impl super::IsolatedAudioProcessorProcessingRole for ClapDspRole<'_> {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        Some([
+            clap_native_layout(std::alloc::Layout::for_value(self)),
+            clap_empty_layout(),
+        ])
+    }
+
+    fn process(
+        &mut self,
+        block: IsolatedAudioProcessorWorkerBlock<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        self.signal.process(self.native, block)
+    }
+
+    fn idle_service_interval(&self) -> Option<std::time::Duration> {
+        Some(super::native_worker_ingress::NATIVE_MAIN_SERVICE_INTERVAL)
+    }
+
+    fn service_native_idle(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.signal.flush_parameters(self.native, false).map(|_| ())
+    }
+
+    fn flush_native_author_parameters(
+        &mut self,
+    ) -> Result<crate::NativeAudioAuthorParameterFlushOutcome, AudioProcessorHostError> {
+        self.signal.flush_parameters(self.native, true)
+    }
+}
+
+fn clap_native_cohort(shared: &ClapHostShared) -> Option<super::NativeRequestCohort> {
+    let cohort = shared.restart_cohort();
+    cohort.pending().then_some(super::NativeRequestCohort {
+        serial: cohort.serial(),
+        request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+    })
+}
+
+#[cfg(windows)]
+fn clap_native_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
+    crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
+}
+
+#[cfg(windows)]
+const fn clap_empty_layout() -> crate::NativeHostBufferLayout {
+    crate::NativeHostBufferLayout { bytes: 0, alignment: 1 }
+}
+
+/// One actual successful CLAP object load, not a class ID or address guess.
+/// Same-object reset/deactivate/reactivate does not invent a fresh load serial.
+fn next_clap_native_object() -> Result<crate::NativeAudioObjectObservation, AudioProcessorHostError>
+{
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let serial = NEXT
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| invalid("CLAP native object load serial exhausted"))?;
+    let serial = std::num::NonZeroU64::new(serial)
+        .ok_or_else(|| invalid("CLAP native load serial is zero"))?;
+    let pid = std::num::NonZeroU32::new(std::process::id())
+        .ok_or_else(|| invalid("CLAP native process ID is zero"))?;
+    Ok(crate::NativeAudioObjectObservation::new(pid, serial))
+}
+
+pub(super) fn clap_native_worker_lane_profile(
+) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+    #[cfg(windows)]
+    {
+        let owners = crate::NativeWorkerLaneOwnedLayouts {
+            reader_slots: clap_native_layout(std::alloc::Layout::new::<
+                super::native_worker_ingress::NativeReaderSlots,
+            >()),
+            processing_slots: clap_native_layout(std::alloc::Layout::new::<
+                super::native_worker_processing::NativeProcessingSlots,
+            >()),
+            main_inline: clap_native_layout(std::alloc::Layout::new::<(
+                super::native_worker_ingress::NativeCommandIngress<'static>,
+                super::worker::WorkerProcessContext<'static>,
+                super::native_worker_processing::NativeDspDispatch<'static>,
+                crate::NativeAudioObservations,
+            )>()),
+            runtime_main_role: clap_native_layout(
+                std::alloc::Layout::new::<ClapMainRole<'static>>(),
+            ),
+            runtime_dsp_role: clap_native_layout(std::alloc::Layout::new::<ClapDspRole<'static>>()),
+            sdk_main_role: clap_empty_layout(),
+            sdk_dsp_role: clap_empty_layout(),
+        };
+        let bytes = super::MAX_CONTROL_FRAME_BYTES;
+        let control = crate::NativeWorkerControlOverlapLayout {
+            decoded_input: crate::NativeHostBufferLayout { bytes, alignment: align_of::<f64>() },
+            reply_storage: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+            staged_seed: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+        };
+        Ok(Some(
+            crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
+                .map_err(AudioProcessorHostError::from)?,
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+#[cfg(all(test, windows))]
+#[path = "clap_native_gui_contracts.rs"]
+mod native_gui_contract_tests;
+
+#[cfg(all(test, windows))]
+#[path = "clap_paused_params_contracts.rs"]
+mod paused_parameter_contract_tests;

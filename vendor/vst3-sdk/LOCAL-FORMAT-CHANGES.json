@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "status": "REPLAYED_LOCAL_FORMAT_AND_DECLARED_SOURCE_CORRECTIONS_NOT_RUNTIME_QUALIFICATION",
+  "rustfmt_sha256_raw": "84abd1fa0d8e9e0dd4c2bce3544e650b4137ee87ec8179e8e16dbb974af11db0",
+  "files": [
+    {
+      "path": "com-scrape-types/src/class.rs",
+      "preimage_sha256_raw": "299a9cfc14c057fb9597f753fe051fa93b5770b1d28b039348c23f8150b94d8f",
+      "shipped_sha256_raw": "ca4fba5c4764b1b17530b71cd23ed5732d01e89cdd5dd2b7fe02d5483841807c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "com-scrape-types/src/lib.rs",
+      "preimage_sha256_raw": "1adaf82a755307d46ab829a6f8c8531cc8b3cb037331eab5eb7041d84bb58e19",
+      "shipped_sha256_raw": "4ce5d166dc7001922789cffd9dd3d823f8c52131478a927804c31403dcf2fdcd",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    }
+  ],
+  "official_inputs_unchanged": true,
+  "generated_raw_unchanged": true
+}

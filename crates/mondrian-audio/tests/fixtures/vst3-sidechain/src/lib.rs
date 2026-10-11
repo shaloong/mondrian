@@ -4,13 +4,14 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
-use std::ffi::{c_char, c_void, CString};
+use std::cell::{Cell, RefCell};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::{ptr, slice};
 
-use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
+use vst3::{uid, Class, ComPtr, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
+use std::thread::{self, ThreadId};
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c_string = CString::new(src).unwrap_or_else(|_| CString::default());
@@ -72,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 3).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 6).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -101,14 +102,17 @@ unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresu
 struct GainProcessor {
     mode: AtomicU32,
     active_buses: AtomicU32,
-    delay: [AtomicU32; 6],
+    delay: [AtomicU32; 14],
+    configured_latency: AtomicUsize,
+    connection: RefCell<Option<ComPtr<IConnectionPoint>>>,
+    control_thread: Cell<Option<ThreadId>>,
     position: AtomicUsize,
     gain: AtomicU64,
     sample_rate: AtomicU64,
 }
 
 impl Class for GainProcessor {
-    type Interfaces = (IComponent, IAudioProcessor, IProcessContextRequirements);
+    type Interfaces = (IComponent, IAudioProcessor, IProcessContextRequirements, IConnectionPoint);
 }
 
 impl GainProcessor {
@@ -122,16 +126,67 @@ impl GainProcessor {
             active_buses: AtomicU32::new(0),
             delay: std::array::from_fn(|_| AtomicU32::new(0)),
             position: AtomicUsize::new(0),
+            configured_latency: AtomicUsize::new(3),
+            connection: RefCell::new(None),
+            control_thread: Cell::new(None),
         }
     }
 }
 
 impl IPluginBaseTrait for GainProcessor {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+        self.control_thread.set(Some(thread::current().id()));
         kResultOk
     }
 
     unsafe fn terminate(&self) -> tresult {
+        self.connection.borrow_mut().take();
+        self.control_thread.set(None);
+        kResultOk
+    }
+}
+
+impl IConnectionPointTrait for GainProcessor {
+    unsafe fn connect(&self, other: *mut IConnectionPoint) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+        let Some(other) = ComRef::from_raw(other) else { return kInvalidArgument; };
+        let mut connection = self.connection.borrow_mut();
+        if connection.is_some() { return kResultFalse; }
+        *connection = Some(other.to_com_ptr());
+        kResultOk
+    }
+
+    unsafe fn disconnect(&self, other: *mut IConnectionPoint) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+        let mut connection = self.connection.borrow_mut();
+        if !connection.as_ref().is_some_and(|peer| peer.as_ptr() == other) { return kInvalidArgument; }
+        connection.take();
+        kResultOk
+    }
+
+    unsafe fn notify(&self, message: *mut IMessage) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+        let Some(message) = ComRef::from_raw(message) else { return kInvalidArgument; };
+        let id = message.getMessageID();
+        if id.is_null() { return kResultFalse; }
+        let id = CStr::from_ptr(id);
+        let Some(attributes) = ComRef::from_raw(message.getAttributes()) else { return kInvalidArgument; };
+        if id.to_bytes() == b"mondrian.fixture.profile" {
+            let profile = self.mode.load(Ordering::Acquire);
+            if !matches!(profile, 5 | 6) { return kResultFalse; }
+            // A main/control query observes the component configuration that an
+            // earlier real DSP call recorded. The controller does not create it.
+            return attributes.setInt(c"profile".as_ptr(), i64::from(profile));
+        }
+        if id.to_bytes() != b"mondrian.fixture.quality" { return kResultFalse; }
+        let mut quality = 0.0;
+        if attributes.getFloat(c"quality".as_ptr(), &mut quality) != kResultOk
+            || self.mode.load(Ordering::Relaxed) != 4
+            || !quality.is_finite() || !(0.0..=1.0).contains(&quality)
+        { return kInvalidArgument; }
+        // Retain the currently active DSP latency until the host legally deactivates
+        // and reactivates. A host that ignores the request still receives valid PCM.
+        self.gain.store(quality.to_bits(), Ordering::Release);
         kResultOk
     }
 }
@@ -233,7 +288,15 @@ impl IComponentTrait for GainProcessor {
         kResultOk
     }
 
-    unsafe fn setActive(&self, _state: TBool) -> tresult {
+    unsafe fn setActive(&self, state: TBool) -> tresult {
+        let mode = self.mode.load(Ordering::Acquire);
+        if matches!(mode, 4 | 5 | 6) && state != 0 {
+            let gain = f64::from_bits(self.gain.load(Ordering::Acquire));
+            let latency = if mode == 6 || (mode == 4 && gain >= 0.75) { 7 } else { 3 };
+            self.configured_latency.store(latency, Ordering::Release);
+            for sample in &self.delay { sample.store(0, Ordering::Relaxed); }
+            self.position.store(0, Ordering::Relaxed);
+        }
         kResultOk
     }
 
@@ -314,7 +377,7 @@ impl IAudioProcessorTrait for GainProcessor {
     }
 
     unsafe fn getLatencySamples(&self) -> u32 {
-        3
+        self.configured_latency.load(Ordering::Acquire) as u32
     }
 
     unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
@@ -401,7 +464,7 @@ impl IAudioProcessorTrait for GainProcessor {
                 }, Ordering::Relaxed),
                 );
             }
-            position = (position + 1) % 3;
+            position = (position + 1) % self.configured_latency.load(Ordering::Relaxed);
         };
         let mut previous_offset = -1_i32;
         if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
@@ -440,11 +503,17 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         self.gain.store(gain.to_bits(), Ordering::Relaxed);
         self.position.store(position, Ordering::Relaxed);
+        if mode == 5 && data.numSamples > 0 {
+            // Configuration changes after actual DSP. Active delay remains three
+            // until the host's later deactivate/reactivate. No main-thread SDK
+            // interface or restartComponent is called from process().
+            self.mode.store(6, Ordering::Release);
+        }
         kResultOk
     }
 
     unsafe fn getTailSamples(&self) -> u32 {
-        3
+        self.configured_latency.load(Ordering::Acquire) as u32
     }
 }
 
@@ -463,28 +532,66 @@ impl IProcessContextRequirementsTrait for GainProcessor {
 struct GainController {
     mode: Cell<u32>,
     gain: Cell<f64>,
+    handler: RefCell<Option<ComPtr<IComponentHandler>>>,
+    host: RefCell<Option<ComPtr<IHostApplication>>>,
+    connection: RefCell<Option<ComPtr<IConnectionPoint>>>,
+    control_thread: Cell<Option<ThreadId>>,
 }
 
 impl Class for GainController {
-    type Interfaces = (IEditController,);
+    type Interfaces = (IEditController, IConnectionPoint);
 }
 
 impl GainController {
     const CID: TUID = uid(0x681E57F2, 0x2DB047A8, 0xB94A35C1, 0xA070213D);
 
     fn new() -> GainController {
-        GainController { gain: Cell::new(0.5), mode: Cell::new(0) }
+        GainController {
+            gain: Cell::new(0.5), mode: Cell::new(0),
+            handler: RefCell::new(None), host: RefCell::new(None),
+            connection: RefCell::new(None), control_thread: Cell::new(None),
+        }
     }
 }
 
 impl IPluginBaseTrait for GainController {
-    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
+        let Some(host) = ComRef::from_raw(context).and_then(|host| host.cast::<IHostApplication>()) else {
+            return kInvalidArgument;
+        };
+        *self.host.borrow_mut() = Some(host);
+        self.control_thread.set(Some(thread::current().id()));
         kResultOk
     }
 
     unsafe fn terminate(&self) -> tresult {
+        self.connection.borrow_mut().take();
+        self.handler.borrow_mut().take();
+        self.host.borrow_mut().take();
+        self.control_thread.set(None);
         kResultOk
     }
+}
+
+impl IConnectionPointTrait for GainController {
+    unsafe fn connect(&self, other: *mut IConnectionPoint) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+        let Some(other) = ComRef::from_raw(other) else { return kInvalidArgument; };
+        let mut connection = self.connection.borrow_mut();
+        if connection.is_some() { return kResultFalse; }
+        *connection = Some(other.to_com_ptr());
+        kResultOk
+    }
+
+    unsafe fn disconnect(&self, other: *mut IConnectionPoint) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+        let mut connection = self.connection.borrow_mut();
+        if !connection.as_ref().is_some_and(|peer| peer.as_ptr() == other) { return kInvalidArgument; }
+        connection.take();
+        kResultOk
+    }
+
+    unsafe fn notify(&self, _message: *mut IMessage) -> tresult { kResultFalse }
 }
 
 impl IEditControllerTrait for GainController {
@@ -599,6 +706,56 @@ impl IEditControllerTrait for GainController {
     unsafe fn setParamNormalized(&self, id: u32, value: f64) -> tresult {
         match id {
             0 => {
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) { return kInvalidArgument; }
+                if self.mode.get() == 5 {
+                    if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+                    let Some(host) = self.host.borrow().clone() else { return kResultFalse; };
+                    let Some(peer) = self.connection.borrow().clone() else { return kResultFalse; };
+                    let Some(handler) = self.handler.borrow().clone() else { return kResultFalse; };
+                    let mut cid = IMessage_iid;
+                    let mut iid = IMessage_iid;
+                    let mut raw = ptr::null_mut();
+                    let result = host.createInstance(&mut cid, &mut iid, &mut raw);
+                    if result != kResultOk && result != kResultTrue { return result; }
+                    let Some(message) = ComPtr::<IMessage>::from_raw(raw.cast()) else { return kResultFalse; };
+                    message.setMessageID(c"mondrian.fixture.profile".as_ptr());
+                    let delivered = peer.notify(message.as_ptr());
+                    if delivered != kResultOk && delivered != kResultTrue { return delivered; }
+                    let Some(attributes) = ComRef::from_raw(message.getAttributes()) else { return kResultFalse; };
+                    let mut profile = 0_i64;
+                    if attributes.getInt(c"profile".as_ptr(), &mut profile) != kResultOk
+                        || !matches!(profile, 5 | 6) { return kResultFalse; }
+                    if profile == 6 {
+                        // This is evidence from the component, not a promise that
+                        // setParamNormalized mutates its activation configuration.
+                        self.mode.set(6);
+                        self.gain.set(value);
+                        return handler.restartComponent(RestartFlags_::kLatencyChanged);
+                    }
+                }
+                if self.mode.get() == 4 && (self.gain.get() >= 0.75) != (value >= 0.75) {
+                    if self.control_thread.get() != Some(thread::current().id()) { return kInvalidArgument; }
+                    // Clone owning references before calling foreign code so callback
+                    // reentry cannot encounter a live RefCell borrow or dangling pointer.
+                    let Some(host) = self.host.borrow().clone() else { return kResultFalse; };
+                    let Some(peer) = self.connection.borrow().clone() else { return kResultFalse; };
+                    let Some(handler) = self.handler.borrow().clone() else { return kResultFalse; };
+                    let mut cid = IMessage_iid;
+                    let mut iid = IMessage_iid;
+                    let mut raw = ptr::null_mut();
+                    let result = host.createInstance(&mut cid, &mut iid, &mut raw);
+                    if result != kResultOk && result != kResultTrue { return result; }
+                    let Some(message) = ComPtr::<IMessage>::from_raw(raw.cast()) else { return kResultFalse; };
+                    message.setMessageID(c"mondrian.fixture.quality".as_ptr());
+                    let Some(attributes) = ComRef::from_raw(message.getAttributes()) else { return kResultFalse; };
+                    if attributes.setFloat(c"quality".as_ptr(), value) != kResultOk { return kResultFalse; }
+                    let delivered = peer.notify(message.as_ptr());
+                    if delivered != kResultOk && delivered != kResultTrue { return delivered; }
+                    self.gain.set(value);
+                    // SDK kLatencyChanged requires deactivate/reactivate, after which
+                    // getLatencySamples reports the new value. Never send this from process.
+                    return handler.restartComponent(RestartFlags_::kLatencyChanged);
+                }
                 self.gain.set(value);
                 kResultOk
             }
@@ -606,7 +763,8 @@ impl IEditControllerTrait for GainController {
         }
     }
 
-    unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
+    unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
+        *self.handler.borrow_mut() = ComRef::from_raw(handler).map(|handler| handler.to_com_ptr());
         kResultOk
     }
 

@@ -121,11 +121,18 @@ pub(crate) struct AuthoringHistoryGroup {
     pub(crate) started_generation: AuthorGeneration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SequenceGestureKind {
+    Interactive,
+    NativeStatePending,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SequenceGesture {
     group: AuthoringHistoryGroup,
     sequence: SequenceId,
     expected_generation: AuthorGeneration,
+    kind: SequenceGestureKind,
 }
 
 /// Sole mutable authority for one open project's authored state.
@@ -143,13 +150,99 @@ pub struct AuthoringSession {
     authoring_validation_fixture_dirty: bool,
     sequence_revision_high_water: std::collections::BTreeMap<SequenceId, SequenceRevision>,
     author_generation: AuthorGeneration,
+
+    execution_snapshot_owner: crate::author_execution_snapshot::AuthorExecutionSnapshotOwner,
     saved_generation: Option<AuthorGeneration>,
     saved_asset_library_revision: Option<u64>,
     autosaved_generation: Option<AuthorGeneration>,
     autosaved_asset_library_revision: Option<u64>,
 }
 
+impl Drop for AuthoringSession {
+    fn drop(&mut self) {
+        // Revoke before document/history/asset owners begin field teardown.
+        // Merely relying on the gate field's late Drop would leave permission
+        // visible while an actual Session was already partially destroyed.
+        self.execution_snapshot_owner.revoke();
+    }
+}
+
 impl AuthoringSession {
+    /// Whether a native gesture still lacks a coherent final control-side state.
+    /// Persistence and ordinary authoring must settle or explicitly cancel it.
+    pub fn has_pending_native_authoring(&self) -> bool {
+        self.sequence_gesture
+            .is_some_and(|gesture| gesture.kind == SequenceGestureKind::NativeStatePending)
+    }
+
+    fn require_native_authoring_settled(&self, step: &str) -> Result<()> {
+        if self.has_pending_native_authoring() {
+            return Err(session_error(step, "native author state is incomplete; settle its control-side boundary or explicitly cancel it"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn native_sequence_gesture_is_current(
+        &self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+    ) -> bool {
+        self.sequence_gesture_is_current(gesture, sequence)
+            && self
+                .sequence_gesture
+                .is_some_and(|active| active.kind == SequenceGestureKind::NativeStatePending)
+    }
+
+    pub(crate) fn begin_native_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+    ) -> Result<()> {
+        self.begin_sequence_gesture(gesture, sequence)?;
+        let active = self.sequence_gesture.as_mut().ok_or_else(|| {
+            session_error(
+                "begin_native_sequence_gesture",
+                "new native author group is absent",
+            )
+        })?;
+        active.kind = SequenceGestureKind::NativeStatePending;
+        Ok(())
+    }
+
+    pub(crate) fn edit_native_sequence_gesture<T>(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+        description: impl Into<String>,
+        edit: impl FnOnce(&mut Sequence) -> Result<T>,
+    ) -> Result<(T, Option<AuthoringCommit>)> {
+        if self.sequence_gesture.is_none_or(|active| {
+            active.group.gesture != gesture
+                || active.kind != SequenceGestureKind::NativeStatePending
+        }) {
+            return Err(session_error(
+                "edit_native_sequence_gesture",
+                "native author group is stale or has a different kind",
+            ));
+        }
+        self.edit_sequence_gesture_candidate(gesture, sequence, description, edit, false)
+    }
+
+    pub(crate) fn finish_native_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+    ) -> Result<bool> {
+        if self.sequence_gesture.is_none_or(|active| {
+            active.group.gesture != gesture
+                || active.kind != SequenceGestureKind::NativeStatePending
+        }) {
+            return Err(session_error(
+                "finish_native_sequence_gesture",
+                "native author group is stale or has a different kind",
+            ));
+        }
+        self.finish_admitted_sequence_gesture(gesture)
+    }
     /// Open a validated document whose current generation is already durably saved.
     pub fn open_saved(
         document: ProjectDocument,
@@ -204,6 +297,8 @@ impl AuthoringSession {
             authoring_validation_fixture_dirty: false,
             sequence_revision_high_water,
             author_generation: generation,
+            execution_snapshot_owner:
+                crate::author_execution_snapshot::AuthorExecutionSnapshotOwner::new(generation),
             saved_generation: saved.then_some(generation),
             saved_asset_library_revision: saved.then_some(asset_library_revision),
             autosaved_generation: None,
@@ -280,6 +375,7 @@ impl AuthoringSession {
         id: SequenceId,
         intent: SequenceNavigationIntent,
     ) -> Result<()> {
+        self.require_native_authoring_settled("switch_active_sequence")?;
         let current = self.document.sequences.active_sequence_id;
         if self.document.sequences.sequence(id).is_none() {
             return self.document.sequences.set_active(id);
@@ -306,6 +402,7 @@ impl AuthoringSession {
 
     /// Return to the previously visited parent Sequence.
     pub fn return_to_parent_sequence(&mut self) -> Result<bool> {
+        self.require_native_authoring_settled("return_to_parent_sequence")?;
         let Some(parent) = self.navigation_stack.last().copied() else {
             return Ok(false);
         };
@@ -316,12 +413,13 @@ impl AuthoringSession {
 
     /// Replace navigation state after structural operations remove Sequences.
     pub fn retain_navigation_sequences(&mut self) {
-        self.navigation_stack
-            .retain(|id| self.document.sequences.sequence(*id).is_some());
-        let active = self.document.sequences.active_sequence_id;
-        while self.navigation_stack.last().copied() == Some(active) {
-            self.navigation_stack.pop();
-        }
+        retain_navigation_sequences(&mut self.navigation_stack, &self.document);
+    }
+
+    /// Read-only execution admission for this actual canonical generation.
+    /// No execution adapter can mint or advance an AuthorGeneration.
+    pub fn execution_snapshot(&self) -> crate::AuthorExecutionSnapshot {
+        self.execution_snapshot_owner.snapshot(self.author_generation)
     }
 
     /// Current author generation.
@@ -384,6 +482,7 @@ impl AuthoringSession {
 
     /// Snapshot the current state for background persistence.
     pub fn snapshot(&self) -> Result<AuthoringSnapshot> {
+        self.require_native_authoring_settled("snapshot")?;
         Ok(AuthoringSnapshot {
             session_id: self.session_id,
             generation: self.author_generation,
@@ -456,6 +555,9 @@ impl AuthoringSession {
         mut after: Sequence,
         group: Option<AuthoringHistoryGroup>,
     ) -> Result<Option<PreparedSequenceEdit>> {
+        if group.is_none() {
+            self.require_native_authoring_settled("prepare_sequence_candidate")?;
+        }
         self.refresh_test_fixture_authoring_validation()?;
         if before.id != after.id {
             return Err(session_error(
@@ -512,6 +614,17 @@ impl AuthoringSession {
                 prepared_replacement.replacement(),
             )?
         };
+
+        if let Some(active) = self.sequence_gesture
+            && active.kind == SequenceGestureKind::NativeStatePending
+            && Some(active.group) == group
+            && !prepared_history.retains_pending_group(active.group)
+        {
+            return Err(session_error(
+                "prepare_native_author_edit",
+                "native group cannot retain its bounded reversible origin",
+            ));
+        }
         Ok(Some(PreparedSequenceEdit {
             session_id: self.session_id,
             expected_generation: self.author_generation,
@@ -532,13 +645,18 @@ impl AuthoringSession {
     ) -> AuthoringCommit {
         debug_assert_eq!(self.session_id, prepared.session_id);
         debug_assert_eq!(self.author_generation, prepared.expected_generation);
-        let outcome = self.history.commit_prepared_record_exclusive(prepared.history);
+        let ready_history = self.history.ready_record_exclusive(prepared.history);
         let (document, authoring_validation) = prepared.replacement.into_installation();
-        self.document = document;
-        self.authoring_validation = authoring_validation;
+        #[cfg(test)]
+        observe_author_publication_attempt(self);
+        let mut publication = self.execution_snapshot_owner.begin_publication();
+        let retired_history = self.history.install_ready_record_exclusive(ready_history);
+        let retired_document = std::mem::replace(&mut self.document, document);
+        let retired_validation =
+            std::mem::replace(&mut self.authoring_validation, authoring_validation);
         self.sequence_revision_high_water
             .insert(prepared.sequence_id, prepared.installed_revision);
-        self.author_generation = prepared.next_generation;
+        publication.publish(&mut self.author_generation, prepared.next_generation);
         if let Some(gesture) = self.sequence_gesture.as_mut()
             && Some(gesture.group) == prepared.group
             && self.history.pending_group_is(gesture.group)
@@ -547,6 +665,9 @@ impl AuthoringSession {
         } else {
             self.sequence_gesture = None;
         }
+        drop(publication);
+        drop((retired_document, retired_validation));
+        let outcome = retired_history.finish();
         sequence_commit(self.author_generation, prepared.sequence_id, outcome)
     }
 
@@ -557,6 +678,7 @@ impl AuthoringSession {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> Result<T>,
     ) -> Result<(T, Option<PreparedSequenceEdit>)> {
+        self.require_native_authoring_settled("prepare_sequence_edit")?;
         let before = self.sequence(sequence_id).cloned().ok_or_else(|| {
             session_error(
                 "prepare_sequence_edit",
@@ -576,6 +698,7 @@ impl AuthoringSession {
         before: ProjectDocument,
         mut after: ProjectDocument,
     ) -> Result<Option<AuthoringCommit>> {
+        self.require_native_authoring_settled("commit_project_snapshot")?;
         self.refresh_test_fixture_authoring_validation()?;
         if before.project_id != self.document.project_id || after.project_id != before.project_id {
             return Err(session_error(
@@ -644,12 +767,23 @@ impl AuthoringSession {
             &before,
             &after,
         )?;
-        let outcome = self.history.commit_prepared_record(prepared)?;
-        self.document = after;
-        self.authoring_validation = next_authoring_validation;
-        self.sequence_revision_high_water = next_revision_high_water;
-        self.retain_navigation_sequences();
-        self.author_generation = next_generation;
+        let ready_history = self.history.ready_record_exclusive(prepared);
+        #[cfg(test)]
+        observe_author_publication_attempt(self);
+        let mut publication = self.execution_snapshot_owner.begin_publication();
+        let retired_history = self.history.install_ready_record_exclusive(ready_history);
+        let retired_document = std::mem::replace(&mut self.document, after);
+        let retired_validation =
+            std::mem::replace(&mut self.authoring_validation, next_authoring_validation);
+        let retired_high_water = std::mem::replace(
+            &mut self.sequence_revision_high_water,
+            next_revision_high_water,
+        );
+        retain_navigation_sequences(&mut self.navigation_stack, &self.document);
+        publication.publish(&mut self.author_generation, next_generation);
+        drop(publication);
+        drop((retired_document, retired_validation, retired_high_water));
+        let outcome = retired_history.finish();
         Ok(Some(AuthoringCommit {
             generation: self.author_generation,
             changed_sequence_ids,
@@ -669,6 +803,7 @@ impl AuthoringSession {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> Result<T>,
     ) -> Result<(T, Option<AuthoringCommit>)> {
+        self.require_native_authoring_settled("edit_sequence")?;
         let before = self.sequence(sequence_id).cloned().ok_or_else(|| {
             session_error(
                 "edit_sequence",
@@ -688,6 +823,7 @@ impl AuthoringSession {
         gesture: mondrian_core::AuthoringGestureId,
         sequence: SequenceId,
     ) -> Result<()> {
+        self.require_native_authoring_settled("begin_sequence_gesture")?;
         if self.sequence(sequence).is_none() {
             return Err(session_error(
                 "begin_sequence_gesture",
@@ -704,6 +840,8 @@ impl AuthoringSession {
             },
             sequence,
             expected_generation: self.author_generation,
+
+            kind: SequenceGestureKind::Interactive,
         });
         Ok(())
     }
@@ -723,6 +861,14 @@ impl AuthoringSession {
 
     /// Seal an interaction; delayed finishes cannot terminate a newer interaction.
     pub fn end_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+    ) -> Result<bool> {
+        self.require_native_authoring_settled("end_sequence_gesture")?;
+        self.finish_admitted_sequence_gesture(gesture)
+    }
+
+    fn finish_admitted_sequence_gesture(
         &mut self,
         gesture: mondrian_core::AuthoringGestureId,
     ) -> Result<bool> {
@@ -784,13 +930,20 @@ impl AuthoringSession {
             .authoring_validation
             .prepare_sequence_replacement(&self.document, sequence)
             .map_err(|error| session_context_error("validate_gesture_cancellation", error))?;
-        self.history.commit_prepared_record(history)?;
+        let ready_history = self.history.ready_record_exclusive(history);
         let (document, validation) = replacement.into_installation();
-        self.document = document;
-        self.authoring_validation = validation;
+        #[cfg(test)]
+        observe_author_publication_attempt(self);
+        let mut publication = self.execution_snapshot_owner.begin_publication();
+        let retired_history = self.history.install_ready_record_exclusive(ready_history);
+        let retired_document = std::mem::replace(&mut self.document, document);
+        let retired_validation = std::mem::replace(&mut self.authoring_validation, validation);
         self.sequence_revision_high_water.insert(active.sequence, revision);
-        self.author_generation = next_generation;
+        publication.publish(&mut self.author_generation, next_generation);
         self.sequence_gesture = None;
+        drop(publication);
+        drop((retired_document, retired_validation));
+        retired_history.finish();
         Ok(Some(AuthoringCommit {
             generation: next_generation,
             changed_sequence_ids: vec![active.sequence],
@@ -808,6 +961,7 @@ impl AuthoringSession {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> Result<T>,
     ) -> Result<(T, Option<AuthoringCommit>)> {
+        self.require_native_authoring_settled("edit_sequence_in_gesture")?;
         self.edit_sequence_gesture_candidate(gesture, sequence_id, description, edit, false)
     }
 
@@ -823,6 +977,7 @@ impl AuthoringSession {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> Result<T>,
     ) -> Result<(T, Option<AuthoringCommit>)> {
+        self.require_native_authoring_settled("edit_sequence_from_gesture_origin")?;
         self.edit_sequence_gesture_candidate(gesture, sequence_id, description, edit, true)
     }
 
@@ -879,6 +1034,7 @@ impl AuthoringSession {
 
     /// Undo the newest project-wide authoring transaction.
     pub fn undo(&mut self) -> Result<Option<AuthoringCommit>> {
+        self.require_native_authoring_settled("undo")?;
         self.refresh_test_fixture_authoring_validation()?;
         if !self.history.can_undo() {
             return Ok(None);
@@ -887,7 +1043,7 @@ impl AuthoringSession {
         let Some(restore) = self.history.prepare_undo(&self.document)? else {
             return Ok(None);
         };
-        let (changed_sequence_ids, project_wide) = match restore {
+        let (document, validation, high_water, changed_sequence_ids, project_wide) = match restore {
             PreparedAuthoringHistoryRestore::Sequence { mut sequence, application } => {
                 let sequence_id = sequence.id;
                 let target_index = self
@@ -914,12 +1070,14 @@ impl AuthoringSession {
                     .map_err(|error| {
                         session_context_error("validate_sequence_replacement", error)
                     })?;
-                self.history.commit_prepared_undo()?;
-                let (document, authoring_validation) = prepared_replacement.into_installation();
-                self.document = document;
-                self.authoring_validation = authoring_validation;
-                self.sequence_revision_high_water.insert(sequence_id, installed_revision);
-                (application.affected_sequence_ids, application.project_wide)
+                let (document, validation) = prepared_replacement.into_installation();
+                (
+                    document,
+                    validation,
+                    PreparedRevisionPublication::Sequence(sequence_id, installed_revision),
+                    application.affected_sequence_ids,
+                    application.project_wide,
+                )
             }
             PreparedAuthoringHistoryRestore::Project { mut document, application } => {
                 preserve_editor_navigation(&self.document, &mut document);
@@ -936,15 +1094,40 @@ impl AuthoringSession {
                     .map_err(|error| {
                         session_context_error("validate_project_replacement", error)
                     })?;
-                self.history.commit_prepared_undo()?;
-                self.document = document;
-                self.authoring_validation = next_authoring_validation;
-                self.sequence_revision_high_water = next_revision_high_water;
-                self.retain_navigation_sequences();
-                (changed_sequence_ids, application.project_wide)
+                (
+                    document,
+                    next_authoring_validation,
+                    PreparedRevisionPublication::Project(next_revision_high_water),
+                    changed_sequence_ids,
+                    application.project_wide,
+                )
             }
         };
-        self.author_generation = next_generation;
+        let prepared_history = self.history.prepare_undo_record()?;
+        let ready_history = self.history.ready_record_exclusive(prepared_history);
+        #[cfg(test)]
+        observe_author_publication_attempt(self);
+        let mut publication = self.execution_snapshot_owner.begin_publication();
+        let retired_history = self.history.install_ready_record_exclusive(ready_history);
+        let retired_document = std::mem::replace(&mut self.document, document);
+        let retired_validation = std::mem::replace(&mut self.authoring_validation, validation);
+        let retired_high_water = match high_water {
+            PreparedRevisionPublication::Sequence(id, revision) => {
+                self.sequence_revision_high_water.insert(id, revision);
+                None
+            }
+            PreparedRevisionPublication::Project(next) => {
+                retain_navigation_sequences(&mut self.navigation_stack, &self.document);
+                Some(std::mem::replace(
+                    &mut self.sequence_revision_high_water,
+                    next,
+                ))
+            }
+        };
+        publication.publish(&mut self.author_generation, next_generation);
+        drop(publication);
+        drop((retired_document, retired_validation, retired_high_water));
+        retired_history.finish();
         Ok(Some(AuthoringCommit {
             generation: self.author_generation,
             changed_sequence_ids,
@@ -955,6 +1138,7 @@ impl AuthoringSession {
 
     /// Redo the newest undone project-wide authoring transaction.
     pub fn redo(&mut self) -> Result<Option<AuthoringCommit>> {
+        self.require_native_authoring_settled("redo")?;
         self.refresh_test_fixture_authoring_validation()?;
         if !self.history.can_redo() {
             return Ok(None);
@@ -963,7 +1147,7 @@ impl AuthoringSession {
         let Some(restore) = self.history.prepare_redo(&self.document)? else {
             return Ok(None);
         };
-        let (changed_sequence_ids, project_wide) = match restore {
+        let (document, validation, high_water, changed_sequence_ids, project_wide) = match restore {
             PreparedAuthoringHistoryRestore::Sequence { mut sequence, application } => {
                 let sequence_id = sequence.id;
                 let target_index = self
@@ -990,12 +1174,14 @@ impl AuthoringSession {
                     .map_err(|error| {
                         session_context_error("validate_sequence_replacement", error)
                     })?;
-                self.history.commit_prepared_redo()?;
-                let (document, authoring_validation) = prepared_replacement.into_installation();
-                self.document = document;
-                self.authoring_validation = authoring_validation;
-                self.sequence_revision_high_water.insert(sequence_id, installed_revision);
-                (application.affected_sequence_ids, application.project_wide)
+                let (document, validation) = prepared_replacement.into_installation();
+                (
+                    document,
+                    validation,
+                    PreparedRevisionPublication::Sequence(sequence_id, installed_revision),
+                    application.affected_sequence_ids,
+                    application.project_wide,
+                )
             }
             PreparedAuthoringHistoryRestore::Project { mut document, application } => {
                 preserve_editor_navigation(&self.document, &mut document);
@@ -1012,15 +1198,40 @@ impl AuthoringSession {
                     .map_err(|error| {
                         session_context_error("validate_project_replacement", error)
                     })?;
-                self.history.commit_prepared_redo()?;
-                self.document = document;
-                self.authoring_validation = next_authoring_validation;
-                self.sequence_revision_high_water = next_revision_high_water;
-                self.retain_navigation_sequences();
-                (changed_sequence_ids, application.project_wide)
+                (
+                    document,
+                    next_authoring_validation,
+                    PreparedRevisionPublication::Project(next_revision_high_water),
+                    changed_sequence_ids,
+                    application.project_wide,
+                )
             }
         };
-        self.author_generation = next_generation;
+        let prepared_history = self.history.prepare_redo_record()?;
+        let ready_history = self.history.ready_record_exclusive(prepared_history);
+        #[cfg(test)]
+        observe_author_publication_attempt(self);
+        let mut publication = self.execution_snapshot_owner.begin_publication();
+        let retired_history = self.history.install_ready_record_exclusive(ready_history);
+        let retired_document = std::mem::replace(&mut self.document, document);
+        let retired_validation = std::mem::replace(&mut self.authoring_validation, validation);
+        let retired_high_water = match high_water {
+            PreparedRevisionPublication::Sequence(id, revision) => {
+                self.sequence_revision_high_water.insert(id, revision);
+                None
+            }
+            PreparedRevisionPublication::Project(next) => {
+                retain_navigation_sequences(&mut self.navigation_stack, &self.document);
+                Some(std::mem::replace(
+                    &mut self.sequence_revision_high_water,
+                    next,
+                ))
+            }
+        };
+        publication.publish(&mut self.author_generation, next_generation);
+        drop(publication);
+        drop((retired_document, retired_validation, retired_high_water));
+        retired_history.finish();
         Ok(Some(AuthoringCommit {
             generation: self.author_generation,
             changed_sequence_ids,
@@ -1325,6 +1536,41 @@ fn session_error(step_id: &str, reason: impl Into<String>) -> MondrianError {
 fn session_context_error(step_id: &str, error: impl std::fmt::Display) -> MondrianError {
     session_error(step_id, format!("{error:#}"))
 }
+
+// Validation prepares the entire structural revision replacement before the
+// execution writer; ordinary Sequence replacement changes one existing key.
+enum PreparedRevisionPublication {
+    Sequence(SequenceId, SequenceRevision),
+    Project(std::collections::BTreeMap<SequenceId, SequenceRevision>),
+}
+
+fn retain_navigation_sequences(navigation: &mut Vec<SequenceId>, document: &ProjectDocument) {
+    navigation.retain(|id| document.sequences.sequence(*id).is_some());
+    let active = document.sequences.active_sequence_id;
+    while navigation.last().copied() == Some(active) {
+        navigation.pop();
+    }
+}
+
+// Test-only observation at the real execution gate attempt. The probe cannot
+// mutate the Session and runs before acquiring its publication write guard.
+#[cfg(test)]
+type AuthorPublicationProbe = Box<dyn FnOnce(&AuthoringSession)>;
+
+#[cfg(test)]
+std::thread_local! {
+    static AUTHOR_PUBLICATION_PROBE: std::cell::RefCell<Option<AuthorPublicationProbe>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_author_publication_attempt(session: &AuthoringSession) {
+    let probe = AUTHOR_PUBLICATION_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe(session);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1927,6 +2173,362 @@ mod tests {
         assert_eq!(session.sequence(id).expect("Sequence").name, "Primary");
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum AuthorPublicationCase {
+        PreparedSequence,
+        Project,
+        Cancel,
+        Undo,
+        Redo,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct AuthorPublicationObservation {
+        document: ProjectDocument,
+        generation: AuthorGeneration,
+        history: crate::history::AuthoringHistoryDiagnostics,
+        high_water: std::collections::BTreeMap<SequenceId, SequenceRevision>,
+        navigation: Vec<SequenceId>,
+        gesture: Option<(
+            AuthoringHistoryGroup,
+            SequenceId,
+            AuthorGeneration,
+            SequenceGestureKind,
+        )>,
+    }
+
+    impl AuthorPublicationObservation {
+        fn capture(session: &AuthoringSession) -> Self {
+            Self {
+                document: session.document().clone(),
+                generation: session.author_generation(),
+                history: session.history().diagnostics(),
+                high_water: session.sequence_revision_high_water.clone(),
+                navigation: session.navigation_stack.clone(),
+                gesture: session
+                    .sequence_gesture
+                    .map(|g| (g.group, g.sequence, g.expected_generation, g.kind)),
+            }
+        }
+    }
+
+    fn assert_author_publication_waits_before_canonical_mutation(case: AuthorPublicationCase) {
+        use std::sync::mpsc::sync_channel;
+        use std::time::Duration;
+        let (ready_tx, ready_rx) = sync_channel(0);
+        let (start_tx, start_rx) = sync_channel(0);
+        let (probe_tx, probe_rx) = sync_channel(0);
+        let (done_tx, done_rx) = sync_channel(0);
+        let (release_tx, release_rx) = sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let mut session = session_with_two_sequences(false);
+            let id = session.active_sequence().expect("actual Sequence").id;
+            let mut prepared = None;
+            let mut project = None;
+            let mut gesture = None;
+            match case {
+                AuthorPublicationCase::PreparedSequence => {
+                    prepared = session
+                        .prepare_sequence_edit(id, "prepared rename", |s| {
+                            s.name = "Published".into();
+                            Ok(())
+                        })
+                        .expect("validated real edit")
+                        .1;
+                }
+                AuthorPublicationCase::Project => {
+                    let before = session.document().clone();
+                    let mut after = before.clone();
+                    after.meta.name = "Published project".into();
+                    project = Some((before, after));
+                }
+                AuthorPublicationCase::Cancel => {
+                    let token = mondrian_core::AuthoringGestureId::new();
+                    session.begin_sequence_gesture(token, id).expect("real gesture");
+                    session
+                        .edit_sequence_in_gesture(token, id, "live", |s| {
+                            s.name = "Unconfirmed".into();
+                            Ok(())
+                        })
+                        .expect("actual live author edit");
+                    gesture = Some(token);
+                }
+                AuthorPublicationCase::Undo | AuthorPublicationCase::Redo => {
+                    session
+                        .edit_sequence(id, "rename", |s| {
+                            s.name = "Published".into();
+                            Ok(())
+                        })
+                        .expect("actual reversible edit");
+                    if matches!(case, AuthorPublicationCase::Redo) {
+                        session.undo().expect("prepare actual Redo branch").expect("restored");
+                    }
+                }
+            }
+            let before = AuthorPublicationObservation::capture(&session);
+            ready_tx
+                .send((session.execution_snapshot(), before))
+                .expect("send real author baseline");
+            start_rx.recv().expect("execution install now owns real read guard");
+            AUTHOR_PUBLICATION_PROBE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |actual| {
+                    probe_tx
+                        .send(AuthorPublicationObservation::capture(actual))
+                        .expect("report actual gate-attempt state");
+                }));
+            });
+            match case {
+                AuthorPublicationCase::PreparedSequence => {
+                    session.install_prepared_sequence_edit(prepared.expect("actual prepared edit"));
+                }
+                AuthorPublicationCase::Project => {
+                    let (before, after) = project.expect("exact Project candidate");
+                    session
+                        .commit_project_snapshot("project", before, after)
+                        .expect("canonical Project edit")
+                        .expect("changed");
+                }
+                AuthorPublicationCase::Cancel => {
+                    session
+                        .cancel_sequence_gesture(gesture.expect("exact gesture"))
+                        .expect("canonical cancellation")
+                        .expect("restored");
+                }
+                AuthorPublicationCase::Undo => {
+                    session.undo().expect("canonical Undo").expect("restored");
+                }
+                AuthorPublicationCase::Redo => {
+                    session.redo().expect("canonical Redo").expect("restored");
+                }
+            }
+            let after = AuthorPublicationObservation::capture(&session);
+            let current_admitted = session.execution_snapshot().enter_commit().is_ok();
+            done_tx
+                .send((after, current_admitted))
+                .expect("publish complete actual author outcome");
+            release_rx
+                .recv()
+                .expect("old snapshot admission checked while Session remains live");
+        });
+        let (snapshot, before) = ready_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("actual prepared Session ready");
+        let execution =
+            snapshot.enter_commit().expect("real current execution installation admitted");
+        start_tx
+            .send(())
+            .expect("start canonical publication while install is admitted");
+        let at_attempt = probe_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("reach real publication gate");
+        drop(execution);
+        let (after, current_admitted) = done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("author publication completes after execution guard leaves");
+        let old_superseded = matches!(
+            snapshot.enter_commit(),
+            Err(crate::AuthorExecutionAdmissionError::Superseded)
+        );
+        release_tx.send(()).expect("allow Session retirement");
+        worker.join().expect("actual author worker joined");
+        assert_eq!(at_attempt, before, "{case:?}: an admitted execution install must block before ANY canonical document/history/revision/gesture publication");
+        assert!(
+            current_admitted && old_superseded,
+            "complete publication must issue only the new canonical generation"
+        );
+        assert_eq!(after.generation.get(), before.generation.get() + 1);
+        let name = after
+            .document
+            .sequences
+            .sequence(after.document.sequences.active_sequence_id)
+            .expect("actual installed Sequence")
+            .name
+            .as_str();
+        match case {
+            AuthorPublicationCase::PreparedSequence => {
+                assert_eq!(name, "Published");
+                assert_eq!(
+                    (after.history.undo_entries, after.history.redo_entries),
+                    (1, 0)
+                );
+            }
+            AuthorPublicationCase::Project => {
+                assert_eq!(after.document.meta.name, "Published project");
+                assert_eq!(
+                    (after.history.undo_entries, after.history.redo_entries),
+                    (1, 0)
+                );
+            }
+            AuthorPublicationCase::Cancel => {
+                assert_eq!(name, "Primary");
+                assert_eq!(
+                    (
+                        after.history.undo_entries,
+                        after.history.redo_entries,
+                        after.history.pending_entries
+                    ),
+                    (0, 0, 0)
+                );
+            }
+            AuthorPublicationCase::Undo => {
+                assert_eq!(name, "Primary");
+                assert_eq!(
+                    (after.history.undo_entries, after.history.redo_entries),
+                    (0, 1)
+                );
+            }
+            AuthorPublicationCase::Redo => {
+                assert_eq!(name, "Published");
+                assert_eq!(
+                    (after.history.undo_entries, after.history.redo_entries),
+                    (1, 0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn author_publication_serialization_prepared_sequence_blocks_before_document_and_history() {
+        assert_author_publication_waits_before_canonical_mutation(
+            AuthorPublicationCase::PreparedSequence,
+        );
+    }
+
+    #[test]
+    fn author_publication_serialization_project_blocks_before_document_and_history() {
+        assert_author_publication_waits_before_canonical_mutation(AuthorPublicationCase::Project);
+    }
+
+    #[test]
+    fn author_publication_serialization_cancel_blocks_before_restoration_and_history() {
+        assert_author_publication_waits_before_canonical_mutation(AuthorPublicationCase::Cancel);
+    }
+
+    #[test]
+    fn author_publication_serialization_undo_blocks_before_restoration_and_cursor() {
+        assert_author_publication_waits_before_canonical_mutation(AuthorPublicationCase::Undo);
+    }
+
+    #[test]
+    fn author_publication_serialization_redo_blocks_before_restoration_and_cursor() {
+        assert_author_publication_waits_before_canonical_mutation(AuthorPublicationCase::Redo);
+    }
+
+    #[test]
+    fn author_execution_fence_all_five_real_publication_paths_revoke_prior_generation() {
+        use crate::AuthorExecutionAdmissionError::Superseded;
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("actual author Sequence").id;
+        let initial = session.execution_snapshot();
+        let (_, prepared) = session
+            .prepare_sequence_edit(id, "prepared rename", |sequence| {
+                sequence.name = "Renamed".into();
+                Ok(())
+            })
+            .expect("canonical prepared edit");
+        assert!(
+            initial.enter_commit().is_ok(),
+            "preparation itself is not publication"
+        );
+        session.install_prepared_sequence_edit(prepared.expect("real authored change"));
+        assert!(matches!(initial.enter_commit(), Err(Superseded)));
+
+        let before_project = session.execution_snapshot();
+        let before = session.document().clone();
+        let mut after = before.clone();
+        after.meta.name = "Changed project".into();
+        session
+            .commit_project_snapshot("project edit", before, after)
+            .expect("canonical project commit")
+            .expect("changed");
+        assert!(matches!(before_project.enter_commit(), Err(Superseded)));
+
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("actual author gesture");
+        session
+            .edit_sequence_in_gesture(gesture, id, "live", |sequence| {
+                sequence.name = "Live".into();
+                Ok(())
+            })
+            .expect("actual live author update");
+        let before_cancel = session.execution_snapshot();
+        session
+            .cancel_sequence_gesture(gesture)
+            .expect("canonical cancel restoration")
+            .expect("restored");
+        assert!(matches!(before_cancel.enter_commit(), Err(Superseded)));
+
+        let before_undo = session.execution_snapshot();
+        session.undo().expect("canonical Undo").expect("actual previous record");
+        assert!(matches!(before_undo.enter_commit(), Err(Superseded)));
+        let before_redo = session.execution_snapshot();
+        session.redo().expect("canonical Redo").expect("actual redo record");
+        assert!(matches!(before_redo.enter_commit(), Err(Superseded)));
+        assert_eq!(
+            session.execution_snapshot().generation(),
+            session.author_generation()
+        );
+        assert!(session.execution_snapshot().enter_commit().is_ok());
+    }
+
+    #[test]
+    fn author_execution_fence_noop_failure_and_discard_keep_current_generation() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("actual Sequence").id;
+        let snapshot = session.execution_snapshot();
+        let generation = session.author_generation();
+        session.edit_sequence(id, "noop", |_| Ok(())).expect("canonical no-op");
+        assert!(session
+            .edit_sequence::<()>(id, "invalid", |_| Err(session_error(
+                "owned_test",
+                "refused"
+            )))
+            .is_err());
+        let (_, prepared) = session
+            .prepare_sequence_edit(id, "discard", |sequence| {
+                sequence.name = "Unpublished".into();
+                Ok(())
+            })
+            .expect("canonical preparation");
+        drop(prepared);
+        assert_eq!(session.author_generation(), generation);
+        assert!(snapshot.enter_commit().is_ok());
+    }
+
+    #[test]
+    fn author_execution_fence_close_and_reopen_do_not_revalidate_same_numeric_generation() {
+        let first = session_with_two_sequences(false);
+        let snapshot = first.execution_snapshot();
+        let generation = first.author_generation();
+        drop(first);
+        assert!(matches!(
+            snapshot.enter_commit(),
+            Err(crate::AuthorExecutionAdmissionError::SessionClosed)
+        ));
+        let second = session_with_two_sequences(false);
+        assert_eq!(
+            second.author_generation(),
+            generation,
+            "same number is not the same author lifetime"
+        );
+        assert!(second.execution_snapshot().enter_commit().is_ok());
+        assert!(matches!(
+            snapshot.enter_commit(),
+            Err(crate::AuthorExecutionAdmissionError::SessionClosed)
+        ));
+    }
+
+    #[test]
+    fn author_execution_fence_save_observation_does_not_advance_author_permission() {
+        let session = session_with_two_sequences(true);
+        let execution = session.execution_snapshot();
+        let persisted = session.snapshot().expect("real immutable persistence snapshot");
+        assert_eq!(persisted.generation, execution.generation());
+        assert!(
+            execution.enter_commit().is_ok(),
+            "snapshot/save input is not an author commit"
+        );
+    }
     fn session_with_two_sequences(saved: bool) -> AuthoringSession {
         let root = tempfile::tempdir().expect("runtime tempdir").keep();
         let library = AssetLibrary::open(root.join("library")).expect("asset library");
@@ -3048,5 +3650,41 @@ mod tests {
         assert_eq!(session.history().diagnostics(), history_before);
         assert_eq!(session.sequence_revision_high_water, high_water_before);
         assert_eq!(session.navigation_stack, navigation_before);
+    }
+
+    #[test]
+    fn native_state_gesture_refuses_unretained_commit_without_losing_boundary_or_origin() {
+        for max_entries in [0, 1] {
+            let mut session = session_with_two_sequences(false);
+            session.history =
+                AuthoringHistory::with_budget(crate::history::AuthoringHistoryBudget::new(
+                    max_entries,
+                    if max_entries == 0 { 1024 * 1024 } else { 0 },
+                    1024 * 1024,
+                ));
+            let id = session.active_sequence().expect("Sequence").id;
+            let original = session.document().clone();
+            let generation = session.author_generation();
+            let history = session.history().diagnostics();
+            let gesture = mondrian_core::AuthoringGestureId::new();
+            session.begin_native_sequence_gesture(gesture, id).expect("native boundary");
+            assert!(session
+                .edit_native_sequence_gesture(gesture, id, "native author update", |sequence| {
+                    sequence.name = "Must be rejected before installation".to_owned();
+                    Ok(())
+                })
+                .is_err());
+            assert_eq!(session.document(), &original);
+            assert_eq!(session.author_generation(), generation);
+            assert_eq!(session.history().diagnostics(), history);
+            assert!(session.has_pending_native_authoring());
+            assert!(session.snapshot().is_err());
+            assert!(session
+                .cancel_sequence_gesture(gesture)
+                .expect("cancel empty native boundary")
+                .is_none());
+            assert!(!session.has_pending_native_authoring());
+            session.snapshot().expect("coherent origin can save");
+        }
     }
 }

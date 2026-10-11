@@ -393,15 +393,26 @@ pub fn estimate_viewer_gpu_active_working_set(
     let mut estimate = ViewerGpuActiveWorkingSetEstimate::default();
     let mut seen_heterogeneous = vec![false; request.heterogeneous_inputs.len()];
     let mut external_adjustments = 0_u64;
+    let mut inline_mix_adjustments = 0_u64;
 
     for layer in request.layers {
         match layer {
             ViewerGpuExecutionLayer::Source(source) => {
                 estimate_source(source, request, &mut seen_heterogeneous, &mut estimate)?;
             }
-            ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, .. } => {
+            ViewerGpuExecutionLayer::Adjustment { effect_plan, opacity, blend_policy, .. } => {
                 if opacity.clamp(0.0, 1.0) == 0.0 {
                     continue;
+                }
+                if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb
+                    && !effect_plan.is_identity()
+                    && *blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+                {
+                    inline_mix_adjustments = inline_mix_adjustments.checked_add(1).ok_or(
+                        ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: ViewerGpuActiveWorkingSetStage::WorkingComposite,
+                        },
+                    )?;
                 }
                 if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
                     external_adjustments = external_adjustments.checked_add(1).ok_or(
@@ -479,6 +490,7 @@ pub fn estimate_viewer_gpu_active_working_set(
     let composite_textures = external_adjustments
         .checked_mul(3)
         .and_then(|extra| extra.checked_add(2))
+        .and_then(|textures| textures.checked_add(inline_mix_adjustments))
         .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
             stage: ViewerGpuActiveWorkingSetStage::WorkingComposite,
         })?;
@@ -1365,6 +1377,7 @@ mod tests {
         let (_, effect_plan) = identity_effect();
         let frame = || {
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 4,
                 height: 4,
                 data: vec![[0.0, 0.0, 0.0, 1.0]; 16],
@@ -1682,5 +1695,57 @@ mod tests {
                 "failed admission must not publish a misleading aggregate estimate"
             );
         });
+    }
+
+    #[test]
+    fn inline_mix_processed_owner_is_charged_by_viewer_and_visual_admission() {
+        use mondrian_effects::{EffectPassBlendPolicy, EffectRenderOp};
+        ensure_mondrian_default_ocio_loaded().expect("stock colour configuration");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::Crop { left: 0.5, top: 0.0, right: 0.0, bottom: 0.0 });
+        let graph = compile_reference_render_graph(builder.finish()).expect("Crop graph");
+        let plan = Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("compiled point plan"));
+        for (policy, expected_textures) in [
+            (EffectPassBlendPolicy::Mix, 3_u64),
+            (EffectPassBlendPolicy::Blend(BlendMode::Normal), 2_u64),
+        ] {
+            let layers = [ViewerGpuExecutionLayer::Adjustment {
+                effect_plan: Arc::clone(&plan),
+                opacity: 0.5,
+                blend_policy: policy,
+                frame_seed: 0,
+            }];
+            with_request(4, 4, &layers, |request| {
+                let estimate =
+                    estimate_viewer_gpu_active_working_set(request).expect("Viewer admission");
+                assert_eq!(estimate.working_composite.textures, expected_textures);
+                assert_eq!(
+                    estimate.working_composite.bytes,
+                    expected_textures * 4 * 4 * working_bytes_per_pixel()
+                );
+            });
+            let elements = [crate::gpu_visual_frame::GpuVisualFrameElement::Adjustment {
+                effect_plan: Arc::clone(&plan),
+                opacity: 0.5,
+                blend_policy: policy,
+                frame_seed: 0,
+            }];
+            let estimate = crate::gpu_visual_frame::estimate_gpu_visual_frame_active_working_set(
+                &crate::gpu_visual_frame::GpuVisualFrameRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    color_engine: ColorEngine::mondrian_standard(),
+                    elements: &elements,
+                },
+                crate::gpu_visual_frame::GpuVisualFrameActiveTextureDemand::default(),
+            )
+            .expect("export visual-node admission");
+            assert_eq!(estimate.working_composite.textures, expected_textures);
+            assert_eq!(
+                estimate.working_composite.bytes,
+                expected_textures * 4 * 4 * working_bytes_per_pixel()
+            );
+        }
     }
 }

@@ -175,6 +175,7 @@ async fn run_diagnostic() -> Result<()> {
         })
         .collect();
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width: WIDTH,
         height: HEIGHT,
         data: pixels.clone(),

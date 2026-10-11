@@ -246,6 +246,21 @@ impl Slider {
         }
     }
 
+    /// Seal an active pointer edit before a distinct numeric keyboard command.
+    ///
+    /// This emits its existing Finish once, releases capture and retains focus.
+    /// It dispatches no new value and leaves an idle Slider unchanged.
+    pub fn finish_pointer_edit(&mut self, ctx: &mut EventContext) -> bool {
+        if !self.dragging {
+            return false;
+        }
+        self.finish_edit(ctx);
+        self.dragging = false;
+        ctx.release_pointer_capture(self.id);
+        ctx.request_repaint();
+        true
+    }
+
     fn finish_edit(&mut self, ctx: &mut EventContext) {
         if let Some(gesture) = self.gesture.take() {
             self.dispatch_edit(ValueEdit::Finish(gesture), ctx);

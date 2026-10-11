@@ -72,15 +72,6 @@ required-features = ["validation"]
 test = true
 bench = false
 
-# Actual-source protocol tests without integration-test companion binaries.
-[[example]]
-name = "preview_visual_protocol"
-path = "examples/preview_visual_protocol.rs"
-required-features = ["validation"]
-test = true
-harness = true
-bench = false
-
 [[example]]
 name = "window_service_protocol"
 path = "examples/window_service_protocol.rs"
@@ -123,6 +114,15 @@ name = "local_media_proxy_smoke"
 path = "examples/local_media_proxy_smoke.rs"
 required-features = ["validation"]
 test = false
+bench = false
+
+# Exact whole-public OpenFX diagnostic gate, without integration companion bins.
+[[example]]
+name = "openfx_frame_diagnostic"
+path = "examples/openfx_frame_diagnostic.rs"
+required-features = ["validation"]
+test = true
+harness = true
 bench = false
 
 [dependencies]

@@ -2,14 +2,68 @@
 
 use crate::midi::{PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES, MAX_EVENT_TEXT_UNITS};
 use crate::plugin::StateContext;
-use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
+
+pub(super) fn visit_event_payload(
+    event: &PluginEvent,
+    visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+) -> Result<(), crate::host_storage::HostStorageError> {
+    use crate::host_storage::HostStorageRef;
+    match &event.data {
+        PluginEventData::Data { bytes, .. } => visitor.visit(HostStorageRef::vector(bytes)?)?,
+        PluginEventData::NoteExpressionText { text, .. }
+        | PluginEventData::Chord { text, .. }
+        | PluginEventData::Scale { text, .. } => visitor.visit(HostStorageRef::vector(text)?)?,
+        // The remaining variants contain no heap owners. Any new heap-bearing
+        // variant must be added here before it can participate in admission.
+        PluginEventData::NoteOn { .. }
+        | PluginEventData::NoteOff { .. }
+        | PluginEventData::PolyPressure { .. }
+        | PluginEventData::NoteExpressionValue { .. }
+        | PluginEventData::NoteExpressionIntValue { .. }
+        | PluginEventData::LegacyMidiCcOut { .. } => {}
+    }
+    Ok(())
+}
+
+fn visit_notification_payload(
+    notification: &crate::plugin::HostNotification,
+    visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+) -> Result<(), crate::host_storage::HostStorageError> {
+    use crate::host_storage::HostStorageRef;
+    use crate::plugin::HostNotification;
+    match notification {
+        HostNotification::OpenEditorRequested { name: Some(name) }
+        | HostNotification::ProgressStarted {
+            description: Some(name),
+            ..
+        } => {
+            visitor.visit(HostStorageRef::string(name)?)?;
+        }
+        HostNotification::ContextMenuRequested { items, .. } => {
+            visitor.visit(HostStorageRef::vector(items)?)?;
+            for item in items {
+                visitor.visit(HostStorageRef::string(&item.name)?)?;
+            }
+        }
+        HostNotification::OpenEditorRequested { name: None }
+        | HostNotification::ProgressStarted {
+            description: None, ..
+        }
+        | HostNotification::UnitSelectionChanged { .. }
+        | HostNotification::ProgramListChanged { .. }
+        | HostNotification::UnitByBusChanged
+        | HostNotification::ProgressUpdated { .. }
+        | HostNotification::ProgressFinished { .. } => {}
+    }
+    Ok(())
+}
 
 // Host Application implementation.
 //
@@ -20,7 +74,7 @@ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Stei
 // (IMessage/IAttributeList), used to pass data between a plugin's component and controller.
 struct ProgressState {
     notifications: Vec<crate::plugin::HostNotification>,
-    active: HashSet<u64>,
+    active: Vec<u64>,
     next_id: u64,
 }
 
@@ -28,7 +82,7 @@ impl Default for ProgressState {
     fn default() -> Self {
         Self {
             notifications: Vec::with_capacity(MAX_HOST_NOTIFICATIONS),
-            active: HashSet::with_capacity(MAX_HOST_NOTIFICATIONS),
+            active: Vec::with_capacity(MAX_HOST_NOTIFICATIONS),
             next_id: 1,
         }
     }
@@ -37,6 +91,7 @@ impl Default for ProgressState {
 pub struct HostApplication {
     progress: Mutex<ProgressState>,
     data_exchange: Arc<super::data_exchange::DataExchangeState>,
+    storage: super::host_storage::RetainedComStorage,
 }
 
 impl Default for HostApplication {
@@ -44,11 +99,60 @@ impl Default for HostApplication {
         Self {
             progress: Mutex::new(ProgressState::default()),
             data_exchange: super::data_exchange::DataExchangeState::new(),
+            storage: super::host_storage::RetainedComStorage::new(),
         }
     }
 }
 
 impl HostApplication {
+    pub(crate) fn visit_progress_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        let state = self
+            .progress
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(&state.active)?)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(
+            &state.notifications,
+        )?)?;
+        for value in &state.notifications {
+            visit_notification_payload(value, visitor)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn visit_data_exchange_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::arc(
+            &self.data_exchange,
+        ))?;
+        self.data_exchange.visit_owned_storage(visitor)
+    }
+
+    pub(crate) fn register_memory_stream(
+        &self,
+        stream: &ComWrapper<MemoryStream>,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        self.storage.register_memory_stream(stream)
+    }
+
+    pub(crate) fn register_capture_stream(
+        &self,
+        stream: &ComWrapper<super::bounded_configuration_stream::ConfigurationCaptureStream>,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        self.storage.register_capture_stream(stream)
+    }
+
+    pub(crate) fn visit_retained_com_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        self.storage.visit_owned_storage(visitor)
+    }
     pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
         let mut state = self
             .progress
@@ -75,6 +179,10 @@ impl HostApplication {
 
     pub fn leave_data_exchange_process(&self) {
         self.data_exchange.leave_process();
+    }
+
+    pub fn service_main_thread_data_exchange(&self) {
+        self.data_exchange.service_main_thread();
     }
 
     pub fn flush_data_exchange(&self) {
@@ -214,12 +322,20 @@ impl IHostApplicationTrait for HostApplication {
             |expected: &[u8; 16]| cid_bytes == &expected[..] && iid_bytes == &expected[..];
 
         if matches(&IMessage::IID) {
-            if let Some(p) = create_host_message().to_com_ptr::<IMessage>() {
+            let message = create_host_message();
+            if self.storage.register_message(&message).is_err() {
+                return kOutOfMemory;
+            }
+            if let Some(p) = message.to_com_ptr::<IMessage>() {
                 *obj = p.into_raw() as *mut std::ffi::c_void;
                 return kResultTrue;
             }
         } else if matches(&IAttributeList::IID) {
-            if let Some(p) = create_host_attribute_list().to_com_ptr::<IAttributeList>() {
+            let attributes = create_host_attribute_list();
+            if self.storage.register_attributes(&attributes).is_err() {
+                return kOutOfMemory;
+            }
+            if let Some(p) = attributes.to_com_ptr::<IAttributeList>() {
                 *obj = p.into_raw() as *mut std::ffi::c_void;
                 return kResultTrue;
             }
@@ -275,8 +391,12 @@ impl IProgressTrait for HostApplication {
             return kResultFalse;
         }
         let id = state.next_id;
-        state.next_id = state.next_id.checked_add(1).unwrap_or(1);
-        state.active.insert(id);
+        let Some(next_id) = id.checked_add(1) else {
+            return kResultFalse;
+        };
+        state.next_id = next_id;
+        // Nonwrapping monotonic ids make append already sorted.
+        state.active.push(id);
         state
             .notifications
             .push(crate::plugin::HostNotification::ProgressStarted {
@@ -296,7 +416,9 @@ impl IProgressTrait for HostApplication {
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+        if state.active.binary_search(&id).is_err()
+            || state.notifications.len() >= MAX_HOST_NOTIFICATIONS
+        {
             return kResultFalse;
         }
         state
@@ -310,10 +432,14 @@ impl IProgressTrait for HostApplication {
             .progress
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+        if state.active.binary_search(&id).is_err()
+            || state.notifications.len() >= MAX_HOST_NOTIFICATIONS
+        {
             return kResultFalse;
         }
-        state.active.remove(&id);
+        if let Ok(index) = state.active.binary_search(&id) {
+            state.active.remove(index);
+        }
         state
             .notifications
             .push(crate::plugin::HostNotification::ProgressFinished { id });
@@ -454,6 +580,18 @@ pub struct ConnectionPair {
 }
 
 impl ConnectionPair {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::com(
+            &self.component_to_controller,
+        ))?;
+        visitor.visit(crate::host_storage::HostStorageRef::com(
+            &self.controller_to_component,
+        ))
+    }
+
     /// Connect both directions, rolling the first direction back if the second fails.
     pub unsafe fn connect(
         component: ComPtr<IConnectionPoint>,
@@ -565,10 +703,30 @@ enum AttrValue {
 /// Host implementation of `IAttributeList`.
 #[derive(Default)]
 pub struct HostAttributeList {
-    attrs: Mutex<HashMap<String, AttrValue>>,
+    attrs: Mutex<Vec<(String, AttrValue)>>,
 }
 
 impl HostAttributeList {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::{HostStorageError, HostStorageRef};
+        let attrs = self
+            .attrs
+            .lock()
+            .map_err(|_| HostStorageError::PoisonedOwner)?;
+        visitor.visit(HostStorageRef::vector(&attrs)?)?;
+        for (key, value) in attrs.iter() {
+            visitor.visit(HostStorageRef::string(key)?)?;
+            match value {
+                AttrValue::Str(value) => visitor.visit(HostStorageRef::vector(value)?)?,
+                AttrValue::Bin(value) => visitor.visit(HostStorageRef::vector(value)?)?,
+                AttrValue::Int(_) | AttrValue::Float(_) => {}
+            }
+        }
+        Ok(())
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -576,11 +734,18 @@ impl HostAttributeList {
     // Safe inner API (also the unit-test surface).
     fn put(&self, key: String, value: AttrValue) {
         if let Ok(mut m) = self.attrs.lock() {
-            m.insert(key, value);
+            match m.binary_search_by(|(stored, _)| stored.as_str().cmp(key.as_str())) {
+                Ok(index) => m[index].1 = value,
+                Err(index) => m.insert(index, (key, value)),
+            }
         }
     }
     fn get_value(&self, key: &str) -> Option<AttrValue> {
-        self.attrs.lock().ok().and_then(|m| m.get(key).cloned())
+        self.attrs.lock().ok().and_then(|m| {
+            m.binary_search_by(|(stored, _)| stored.as_str().cmp(key))
+                .ok()
+                .map(|index| m[index].1.clone())
+        })
     }
 }
 
@@ -681,7 +846,11 @@ impl IAttributeListTrait for HostAttributeList {
             return kResultFalse;
         }
         if let Ok(m) = self.attrs.lock() {
-            if let Some(AttrValue::Bin(v)) = m.get(&attr_key(id)) {
+            let key = attr_key(id);
+            if let Ok(index) = m.binary_search_by(|(stored, _)| stored.as_str().cmp(key.as_str())) {
+                let AttrValue::Bin(v) = &m[index].1 else {
+                    return kResultFalse;
+                };
                 *data = v.as_ptr() as *const std::ffi::c_void;
                 *size_in_bytes = v.len() as u32;
                 return kResultOk;
@@ -713,6 +882,25 @@ impl Default for HostMessage {
 }
 
 impl HostMessage {
+    pub(crate) fn host_attributes(&self) -> &ComWrapper<HostAttributeList> {
+        &self.attributes
+    }
+
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::{HostStorageError, HostStorageRef};
+        let id = self
+            .id
+            .lock()
+            .map_err(|_| HostStorageError::PoisonedOwner)?;
+        if let Some(id) = id.as_ref() {
+            visitor.visit(HostStorageRef::c_string(id)?)?;
+        }
+        visitor.visit(HostStorageRef::com(&self.attributes))?;
+        self.attributes.visit_owned_storage(visitor)
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -914,6 +1102,26 @@ pub struct MemoryStream {
 }
 
 impl MemoryStream {
+    pub(crate) fn host_attributes(&self) -> &ComWrapper<HostAttributeList> {
+        &self.attributes
+    }
+
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::{HostStorageError, HostStorageRef};
+        let buffer = self
+            .inner
+            .lock()
+            .map_err(|_| HostStorageError::PoisonedOwner)?;
+        visitor.visit(HostStorageRef::vector(&buffer.data)?)?;
+        if let Some(name) = self.file_name.as_ref() {
+            visitor.visit(HostStorageRef::vector(name)?)?;
+        }
+        visitor.visit(HostStorageRef::com(&self.attributes))?;
+        self.attributes.visit_owned_storage(visitor)
+    }
     #[cfg(test)]
     fn new(data: Vec<u8>) -> Self {
         Self::with_metadata(data, StreamMetadata::default())
@@ -1203,6 +1411,28 @@ pub struct HostPlugFrame {
 }
 
 impl HostPlugFrame {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::arc(&self.requested))?;
+        #[cfg(target_os = "linux")]
+        {
+            visitor.visit(crate::host_storage::HostStorageRef::arc(&self.run_loop))?;
+            let run_loop = self
+                .run_loop
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(
+                &run_loop.handlers,
+            )?)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(
+                &run_loop.timers,
+            )?)?;
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     pub fn new(
         requested: Arc<Mutex<Option<(i32, i32)>>>,
@@ -1343,24 +1573,19 @@ pub fn create_host_plug_frame(
     ComWrapper::new(HostPlugFrame::new(requested))
 }
 
-/// Cap on buffered editor feedback — the parameter changes and gesture events a plugin's editor
-/// reports through `IComponentHandler`. Both are drained only by an optional host poll
-/// (`Plugin::get_parameter_changes` / `Plugin::take_parameter_edits`), so a host that never polls
-/// would otherwise grow them for the plugin's whole lifetime: dragging a knob emits one
-/// `performEdit` per UI frame. Mirrors `MAX_OUTPUT_MIDI` on the outgoing side — pre-reserved so
-/// steady-state pushes never reallocate, and pushes past the cap are dropped.
+/// Cap on native author events and the separate DSP parameter-feedback sink.
+/// The ordered author source is pre-reserved and refuses capacity overflow.
+/// Either sink becoming full makes the author source sticky Incomplete; no
+/// truncated author vector or silently unaccepted DSP value can report success.
 pub const MAX_EDITOR_FEEDBACK: usize = 4096;
 
 /// Cap on the queued host-notification stream — the `IComponentHandler2` / `IUnitHandler` /
 /// `IProgress` requests a plugin raises, drained by `Plugin::take_host_notifications`.
 ///
-/// Unlike the editor-feedback caps, reaching this one is reported to the plugin: the handler
-/// returns `kResultFalse` from `setDirty` / `requestOpenEditor` / `startGroupEdit` /
-/// `finishGroupEdit` / `notifyUnitSelection` / `notifyProgramListChange` /
-/// `notifyUnitByBusChange` / `IProgress::start` rather than silently discarding the request,
-/// so a plugin that checks its result code learns the host refused it. Hosts must therefore
-/// drain `take_host_notifications` regularly (once per UI frame is plenty) or the queue fills
-/// and the plugin starts seeing refusals.
+/// Control-only request callbacks return `kResultFalse` at capacity. Group
+/// and dirty author callbacks use the separate ordered author source instead.
+/// Hosts must drain control requests regularly; progress producers and this
+/// queue do not promise a global callback order or author group membership.
 pub const MAX_HOST_NOTIFICATIONS: usize = 1024;
 const MAX_CONTEXT_MENU_ITEMS: usize = 256;
 
@@ -1372,15 +1597,30 @@ struct PendingContextMenuItem {
 
 struct ContextMenuRegistry {
     next_menu_id: AtomicU64,
-    pending: Mutex<HashMap<u64, Vec<PendingContextMenuItem>>>,
+    pending: Mutex<Vec<(u64, Vec<PendingContextMenuItem>)>>,
     owner_thread: ThreadId,
 }
 
 impl ContextMenuRegistry {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        let menus = self
+            .pending
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(&menus)?)?;
+        for (_, items) in menus.iter() {
+            visitor.visit(crate::host_storage::HostStorageRef::vector(items)?)?;
+        }
+        Ok(())
+    }
+
     fn new() -> Self {
         Self {
             next_menu_id: AtomicU64::new(1),
-            pending: Mutex::new(HashMap::with_capacity(MAX_HOST_NOTIFICATIONS)),
+            pending: Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS)),
             owner_thread: thread::current().id(),
         }
     }
@@ -1396,9 +1636,12 @@ impl ContextMenuRegistry {
                 .pending
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let items = menus.get(&menu_id).ok_or_else(|| {
-                crate::Error::Other("context menu is no longer pending".to_string())
-            })?;
+            let menu_index = menus
+                .binary_search_by_key(&menu_id, |entry| entry.0)
+                .map_err(|_| {
+                    crate::Error::Other("context menu is no longer pending".to_string())
+                })?;
+            let items = &menus[menu_index].1;
             let item = items.get(item_id as usize).ok_or_else(|| {
                 crate::Error::Other("context-menu item id is out of range".to_string())
             })?;
@@ -1416,7 +1659,7 @@ impl ContextMenuRegistry {
             }
             let tag = item.tag;
             let target = item.target.clone();
-            menus.remove(&menu_id);
+            menus.remove(menu_index);
             (tag, target)
         };
         let result = unsafe {
@@ -1440,13 +1683,12 @@ impl ContextMenuRegistry {
                 "context menus must be dismissed on the plugin control thread".to_string(),
             ));
         }
-        if self
+        let mut pending = self
             .pending
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(&menu_id)
-            .is_some()
-        {
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Ok(index) = pending.binary_search_by_key(&menu_id, |entry| entry.0) {
+            pending.remove(index);
             Ok(())
         } else {
             Err(crate::Error::Other(
@@ -1461,11 +1703,43 @@ struct StoredContextMenuItem {
     target: Option<ComPtr<IContextMenuTarget>>,
 }
 
-struct HostContextMenu {
+pub(crate) struct HostContextMenu {
     parameter_id: Option<u32>,
     items: Mutex<Vec<StoredContextMenuItem>>,
     notifications: Arc<Mutex<Vec<crate::plugin::HostNotification>>>,
     registry: Arc<ContextMenuRegistry>,
+}
+
+impl HostContextMenu {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        // Observe each mutex separately, never inverse popup's notification ->
+        // registry order. No foreign target is called or dereferenced here.
+        {
+            let items = self
+                .items
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(&items)?)?;
+        }
+        visitor.visit(crate::host_storage::HostStorageRef::arc(
+            &self.notifications,
+        ))?;
+        {
+            let notifications = self
+                .notifications
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(&notifications)?)?;
+            for value in notifications.iter() {
+                visit_notification_payload(value, visitor)?;
+            }
+        }
+        visitor.visit(crate::host_storage::HostStorageRef::arc(&self.registry))?;
+        self.registry.visit_owned_storage(visitor)
+    }
 }
 
 impl Class for HostContextMenu {
@@ -1600,8 +1874,20 @@ impl IContextMenuTrait for HostContextMenu {
         if pending.len() >= MAX_HOST_NOTIFICATIONS {
             return kResultFalse;
         }
-        let menu_id = self.registry.next_menu_id.fetch_add(1, Ordering::Relaxed);
-        pending.insert(menu_id, pending_items);
+        let Ok(menu_id) =
+            self.registry
+                .next_menu_id
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |id| id.checked_add(1))
+        else {
+            return kResultFalse;
+        };
+        // All actual popup writes own this mutex; keep lookup ordered even if
+        // callback arrival differs from serial reservation order.
+        let index = match pending.binary_search_by_key(&menu_id, |entry| entry.0) {
+            Ok(_) => return kResultFalse,
+            Err(index) => index,
+        };
+        pending.insert(index, (menu_id, pending_items));
         notifications.push(crate::plugin::HostNotification::ContextMenuRequested {
             menu_id,
             parameter_id: self.parameter_id,
@@ -1614,119 +1900,395 @@ impl IContextMenuTrait for HostContextMenu {
 }
 
 // Component Handler implementation
-//
-// # Two independently ordered streams
-//
-// Everything a plugin reports through the component handler lands in one of two queues, and
-// **the two are ordered only within themselves — there is no cross-ordering between them**:
-//
-// - `edits` — the per-parameter gesture log (`beginEdit`/`performEdit`/`endEdit`), drained by
-//   `take_parameter_edits`.
-// - `notifications` — the control-plane request log (`IComponentHandler2`, `IUnitHandler`,
-//   `IComponentHandler3` context menus, `IProgress`), drained by `take_host_notifications`.
-//
-// `startGroupEdit` / `finishGroupEdit` therefore arrive as `HostNotification::GroupEditStarted`
-// / `GroupEditFinished` in the *notification* stream while the parameter edits they are meant
-// to bracket arrive in the *edit* stream. Nothing records where the bracket fell relative to a
-// specific `ParameterEdit`, so a host cannot currently tell which edits belonged to a group —
-// only that a group was opened and closed at some point between two drains. Treat the brackets
-// as an "a multi-parameter change is in flight" hint (e.g. coalesce undo), not as a delimiter.
-// Interleaving them into one ordered stream would change the public shape of both accessors
-// and is not implemented.
-pub struct ComponentHandler {
-    // Track parameter changes from the plugin
-    pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
-    // Ordered log of begin/change/end gestures the editor reports, preserving their order so
-    // the host can reconstruct each gesture (drained via `take_parameter_edits`). This is the
-    // richer superset of `parameter_changes` (which keeps only the value changes for the DSP).
-    // Ordered against itself only — see the type comment about the group-edit brackets.
-    edits: Arc<Mutex<Vec<crate::plugin::ParameterEdit>>>,
-    // Union of every `restartComponent` flag the plugin has raised since the host last drained
-    // it. A bitmask rather than a log: the flags are idempotent requests ("my latency changed",
-    // "re-read my parameters"), so accumulating them is both complete and inherently bounded —
-    // a plugin that spams restartComponent while nothing polls costs one word, not a queue.
-    restart_flags: AtomicI32,
-    // Ordered IComponentHandler2 / IUnitHandler / IProgress / context-menu requests. These are
-    // control-plane work items, never executed from inside the plugin callback. Ordered against
-    // themselves only — not against `edits`. Capped at MAX_HOST_NOTIFICATIONS, and a push past
-    // the cap is *refused* (kResultFalse to the plugin) rather than dropped, so a host that
-    // never drains makes the plugin's own requests start failing.
-    notifications: Arc<Mutex<Vec<crate::plugin::HostNotification>>>,
-    context_menus: Arc<ContextMenuRegistry>,
+// Native author callbacks share one ordered, bounded event source. Control-only
+// notifications remain separate and cannot imply author group membership.
+struct EditorEventBuffer {
+    events: Vec<crate::plugin::NativeEditorEvent>,
+    failure: Option<crate::plugin::NativeEditorEventFailure>,
+
+    revision: u64,
+    open_parameters: [u32; MAX_EDITOR_FEEDBACK],
+    open_parameter_count: usize,
+    group_depth: u32,
 }
 
-impl ComponentHandler {
-    pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
-        ComponentHandler {
-            parameter_changes,
-            edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
-            restart_flags: AtomicI32::new(0),
-            notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
-            context_menus: Arc::new(ContextMenuRegistry::new()),
+impl EditorEventBuffer {
+    fn new() -> Self {
+        Self {
+            events: Vec::with_capacity(MAX_EDITOR_FEEDBACK),
+            failure: None,
+            revision: 0,
+            open_parameters: [0; MAX_EDITOR_FEEDBACK],
+            open_parameter_count: 0,
+            group_depth: 0,
         }
     }
 
-    /// Take the accumulated `restartComponent` flags, clearing them.
+    fn refuse(&mut self, failure: crate::plugin::NativeEditorEventFailure) -> bool {
+        if self.failure.is_none() {
+            self.failure = Some(failure);
+        }
+        false
+    }
+
+    fn push(&mut self, event: crate::plugin::NativeEditorEvent) -> bool {
+        if self.failure.is_some() {
+            return false;
+        }
+        if self.events.len() >= MAX_EDITOR_FEEDBACK {
+            return self.refuse(crate::plugin::NativeEditorEventFailure::Overflow);
+        }
+
+        let Some(next_revision) = self.revision.checked_add(1) else {
+            return self.refuse(crate::plugin::NativeEditorEventFailure::SequenceExhausted);
+        };
+        use crate::plugin::{NativeEditorEvent, NativeEditorEventFailure, ParameterEditKind};
+        match &event {
+            NativeEditorEvent::Parameter(edit) => match edit.kind {
+                ParameterEditKind::BeginGesture => {
+                    if self.open_parameter_count == MAX_EDITOR_FEEDBACK {
+                        return self.refuse(NativeEditorEventFailure::Overflow);
+                    }
+                    self.open_parameters[self.open_parameter_count] = edit.id;
+                    self.open_parameter_count += 1;
+                }
+                ParameterEditKind::EndGesture => {
+                    let Some(index) = self.open_parameters[..self.open_parameter_count]
+                        .iter()
+                        .position(|id| *id == edit.id)
+                    else {
+                        return self.refuse(NativeEditorEventFailure::InvalidBoundary);
+                    };
+                    self.open_parameter_count -= 1;
+                    self.open_parameters[index] = self.open_parameters[self.open_parameter_count];
+                }
+                ParameterEditKind::ValueChange => {}
+            },
+            NativeEditorEvent::GroupEditStarted => {
+                let Some(depth) = self.group_depth.checked_add(1) else {
+                    return self.refuse(NativeEditorEventFailure::Overflow);
+                };
+                self.group_depth = depth;
+            }
+            NativeEditorEvent::GroupEditFinished => {
+                let Some(depth) = self.group_depth.checked_sub(1) else {
+                    return self.refuse(NativeEditorEventFailure::InvalidBoundary);
+                };
+                self.group_depth = depth;
+            }
+            NativeEditorEvent::DirtyChanged(_) => {}
+        }
+        self.revision = next_revision;
+        self.events.push(event);
+        true
+    }
+
+    fn status(&self) -> crate::plugin::NativeEditorEventSourceStatus {
+        crate::plugin::NativeEditorEventSourceStatus {
+            revision: self.revision,
+            pending_events: self.events.len(),
+            pending_dsp_feedback_values: 0,
+            open_parameter_edits: self.open_parameter_count,
+            group_depth: self.group_depth,
+            failure: self.failure,
+        }
+    }
+
+    fn drain(&mut self) -> crate::plugin::NativeEditorEventDrain {
+        if let Some(failure) = self.failure {
+            self.events.clear();
+            return crate::plugin::NativeEditorEventDrain::Incomplete { failure };
+        }
+        crate::plugin::NativeEditorEventDrain::Complete {
+            events: self.events.drain(..).collect(),
+        }
+    }
+}
+
+/// Native VST3 component callbacks with one bounded ordered author source.
+pub struct ComponentHandler {
+    control_thread: thread::ThreadId,
+    // Execution feedback remains a separate bounded DSP sink, not author history.
+    pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
+    editor_events: Mutex<EditorEventBuffer>,
+    // One callback authority: high 32 bits serial, low 32 bits raw flag union.
+    // Repeated flags advance the serial; u32::MAX is sticky exhaustion.
+    restart_cohort: AtomicU64,
+    notifications: Arc<Mutex<Vec<crate::plugin::HostNotification>>>,
+    context_menus: Arc<ContextMenuRegistry>,
+    retained_storage: super::host_storage::RetainedComStorage,
+}
+
+impl ComponentHandler {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        {
+            let events = self
+                .editor_events
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(&events.events)?)?;
+        }
+        visitor.visit(crate::host_storage::HostStorageRef::arc(
+            &self.parameter_changes,
+        ))?;
+        {
+            let changes = self
+                .parameter_changes
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(&changes)?)?;
+        }
+        visitor.visit(crate::host_storage::HostStorageRef::arc(
+            &self.notifications,
+        ))?;
+        {
+            let notifications = self
+                .notifications
+                .lock()
+                .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+            visitor.visit(crate::host_storage::HostStorageRef::vector(&notifications)?)?;
+            for value in notifications.iter() {
+                visit_notification_payload(value, visitor)?;
+            }
+        }
+        visitor.visit(crate::host_storage::HostStorageRef::arc(
+            &self.context_menus,
+        ))?;
+        self.context_menus.visit_owned_storage(visitor)?;
+        self.retained_storage.visit_owned_storage(visitor)
+    }
+
+    /// Create a bounded native source sharing the existing DSP feedback sink.
+    pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
+        ComponentHandler {
+            control_thread: thread::current().id(),
+            parameter_changes,
+            editor_events: Mutex::new(EditorEventBuffer::new()),
+            restart_cohort: AtomicU64::new(0),
+            notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
+            context_menus: Arc::new(ContextMenuRegistry::new()),
+            retained_storage: super::host_storage::RetainedComStorage::new(),
+        }
+    }
+
+    /// Read pending flags without consuming them or calling plugin/controller code.
+    pub fn pending_restart_flags(&self) -> crate::plugin::RestartFlags {
+        self.pending_restart_cohort().flags()
+    }
+
+    /// Exact recorded callback generation; no native metadata calls.
+    pub fn pending_restart_cohort(&self) -> crate::plugin::RestartCohort {
+        crate::plugin::RestartCohort::from_word(self.restart_cohort.load(Ordering::Acquire))
+    }
+
+    /// Clear only an exact completed service cohort, retaining its serial.
+    pub fn retire_restart_cohort(&self, expected: crate::plugin::RestartCohort) -> bool {
+        if !expected.pending() || expected.exhausted() {
+            return false;
+        }
+        self.restart_cohort
+            .compare_exchange(
+                expected.word(),
+                u64::from(expected.serial()) << 32,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Claim a still-current serviced serial; do not clear any pending callback.
+    pub fn claim_retired_restart_serial(&self, serial: u32) -> bool {
+        if serial == 0 || serial == u32::MAX {
+            return false;
+        }
+        let expected = u64::from(serial) << 32;
+        self.restart_cohort
+            .compare_exchange(expected, expected, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Observe and attempt one bounded drain; concurrent newer flags remain pending.
     pub fn take_restart_flags(&self) -> crate::plugin::RestartFlags {
-        crate::plugin::RestartFlags::from_bits(self.restart_flags.swap(0, Ordering::AcqRel))
+        let current = self.pending_restart_cohort();
+        self.retire_restart_cohort(current);
+        current.flags()
     }
 
-    /// Drain the ordered parameter-edit gesture log accumulated since the last call.
-    ///
-    /// Ordered relative to other parameter edits only. The `startGroupEdit`/`finishGroupEdit`
-    /// brackets live in the separate [`Self::take_host_notifications`] stream with no recorded
-    /// interleaving, so the edits that a group covered cannot be identified — see the type
-    /// comment on [`ComponentHandler`].
-    ///
-    /// Capped at [`MAX_EDITOR_FEEDBACK`]; gestures past the cap are dropped (the plugin is not
-    /// told, because `IComponentHandler` has no result code a plugin acts on here).
-    pub fn take_parameter_edits(&self) -> Vec<crate::plugin::ParameterEdit> {
-        // A COM FFI callback could be mid-push when a previous one panicked; recover the lock
-        // rather than propagating a poison panic across the boundary.
-        let mut edits = self.edits.lock().unwrap_or_else(|p| p.into_inner());
-        // Drain in place rather than `mem::take`: taking the `Vec` would leave a zero-capacity
-        // buffer behind, so the next editor gesture would reallocate on the COM callback path.
-        edits.drain(..).collect()
+    fn record_restart_flags(&self, flags: u32) {
+        if flags == 0 {
+            return;
+        }
+        let mut previous = self.restart_cohort.load(Ordering::Acquire);
+        loop {
+            let serial = (previous >> 32) as u32;
+            let next =
+                (u64::from(serial.saturating_add(1)) << 32) | u64::from(previous as u32 | flags);
+            match self.restart_cohort.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => previous = observed,
+            }
+        }
     }
 
-    /// Drain ordered host requests raised through `IComponentHandler2`, `IUnitHandler`,
-    /// `IComponentHandler3` and `IProgress`.
-    ///
-    /// Ordered relative to other notifications only — never against
-    /// [`Self::take_parameter_edits`]. In particular `GroupEditStarted`/`GroupEditFinished`
-    /// cannot be correlated with the parameter edits they bracket; see the type comment on
-    /// [`ComponentHandler`].
-    ///
-    /// **Drain this regularly.** The queue is capped at [`MAX_HOST_NOTIFICATIONS`] and a push
-    /// past the cap returns `kResultFalse` to the plugin, so a host that never drains starts
-    /// making the plugin's own `setDirty` / `requestOpenEditor` / group-edit /
-    /// progress-reporting calls fail.
-    pub fn take_host_notifications(&self) -> Vec<crate::plugin::HostNotification> {
-        let mut notifications = self
-            .notifications
+    /// Drain one complete ordered author batch or the sticky source failure.
+    /// Incomplete never publishes a truncated vector and drain cannot clear it.
+    pub fn take_editor_events(&self) -> crate::plugin::NativeEditorEventDrain {
+        self.editor_events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain()
+    }
+
+    /// Read immutable facts without clearing the same source or its open bounds.
+    /// Runtime outstanding-delivery admission remains a separate required gate.
+    pub fn editor_event_source_status(&self) -> crate::plugin::NativeEditorEventSourceStatus {
+        // Same lock order as performEdit: author source then existing DSP sink.
+        // The DSP never acquires these two locks in the opposite order.
+        let events = self
+            .editor_events
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        notifications.drain(..).collect()
+        let feedback = self
+            .parameter_changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut status = events.status();
+        status.pending_dsp_feedback_values = feedback.len();
+        status
     }
 
+    /// The exact appended source suffix during bounded main getState.
+    /// Clearing the native dirty flag may be part of save-state capture;
+    /// any value/author boundary/dirty=true mutation remains a typed retry.
+    pub fn editor_capture_source_status_since(
+        &self,
+        revision: u64,
+    ) -> Option<crate::plugin::NativeEditorEventSourceStatus> {
+        let events = self
+            .editor_events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let feedback = self
+            .parameter_changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if events.failure.is_some() || !feedback.is_empty() {
+            return None;
+        }
+        let delta = usize::try_from(events.revision.checked_sub(revision)?).ok()?;
+        let start = events.events.len().checked_sub(delta)?;
+        if !events.events[start..]
+            .iter()
+            .all(|event| matches!(event, crate::plugin::NativeEditorEvent::DirtyChanged(false)))
+        {
+            return None;
+        }
+        Some(events.status())
+    }
+
+    /// Copy no source/history payload: visit finite native Value callbacks in
+    /// their original order while retaining every Begin/End/group/dirty item.
+    /// The processing role's visitor only appends to its preallocated input
+    /// queue. No native callback is invoked while this source lock is held.
+    pub(crate) fn visit_unconsumed_editor_values(
+        &self,
+        mut queue: impl FnMut(u32, f64) -> bool,
+    ) -> bool {
+        let mut events = self
+            .editor_events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if events.failure.is_some() {
+            return false;
+        }
+        let mut feedback = self
+            .parameter_changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let value_events = events.events.iter().filter_map(|event| match event {
+            crate::plugin::NativeEditorEvent::Parameter(edit)
+                if edit.kind == crate::plugin::ParameterEditKind::ValueChange =>
+            {
+                edit.value.map(|value| (edit.id, value))
+            }
+            _ => None,
+        });
+        let value_count = value_events.clone().count();
+        // Only consume GUI-to-DSP feedback proved to be the exact unconsumed
+        // source suffix. Independent public event drains cannot silently erase
+        // an unrelated still-pending native feedback value.
+        if feedback.len() > value_count
+            || !value_events
+                .skip(value_count - feedback.len())
+                .zip(feedback.iter())
+                .all(|((id, value), (actual_id, actual_value))| {
+                    id == *actual_id && value.to_bits() == actual_value.to_bits()
+                })
+        {
+            return false;
+        }
+        let complete = events.events.iter().all(|event| match event {
+            crate::plugin::NativeEditorEvent::Parameter(edit)
+                if edit.kind == crate::plugin::ParameterEditKind::ValueChange =>
+            {
+                edit.value.is_none_or(|value| queue(edit.id, value))
+            }
+            _ => true,
+        });
+        if complete {
+            feedback.clear();
+            true
+        } else {
+            events.refuse(crate::plugin::NativeEditorEventFailure::Overflow)
+        }
+    }
+
+    /// Drain control-only host requests. These do not carry author group/dirty
+    /// boundaries and have no cross-ordering with the author event source.
+    pub fn take_host_notifications(&self) -> Vec<crate::plugin::HostNotification> {
+        self.notifications
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    /// Execute one retained control-only context-menu target.
     pub fn execute_context_menu_item(&self, menu_id: u64, item_id: u32) -> crate::Result<()> {
         self.context_menus.execute(menu_id, item_id)
     }
 
+    /// Release one retained control-only context-menu popup.
     pub fn dismiss_context_menu(&self, menu_id: u64) -> crate::Result<()> {
         self.context_menus.dismiss(menu_id)
     }
 
-    // Append a gesture event, recovering a poisoned lock (these run on the COM FFI callback
-    // path, where a panic would unwind across the C++ boundary — UB).
-    fn push_edit(&self, edit: crate::plugin::ParameterEdit) {
-        let mut edits = self.edits.lock().unwrap_or_else(|p| p.into_inner());
-        if edits.len() < MAX_EDITOR_FEEDBACK {
-            edits.push(edit);
+    fn push_editor_event(&self, event: crate::plugin::NativeEditorEvent) -> bool {
+        if thread::current().id() != self.control_thread {
+            return self
+                .editor_events
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .refuse(crate::plugin::NativeEditorEventFailure::WrongThread);
         }
+        self.editor_events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(event)
     }
 
     fn push_notification(&self, notification: crate::plugin::HostNotification) -> bool {
+        if thread::current().id() != self.control_thread {
+            return false;
+        }
         let mut notifications = self
             .notifications
             .lock()
@@ -1751,52 +2313,81 @@ impl Class for ComponentHandler {
 
 impl IComponentHandlerTrait for ComponentHandler {
     unsafe fn beginEdit(&self, id: u32) -> i32 {
-        log::debug!("Host: Begin edit for parameter {}", id);
-        self.push_edit(crate::plugin::ParameterEdit {
-            id,
-            kind: crate::plugin::ParameterEditKind::BeginGesture,
-            value: None,
-        });
-        kResultOk
+        if self.push_editor_event(crate::plugin::NativeEditorEvent::Parameter(
+            crate::plugin::ParameterEdit {
+                id,
+                kind: crate::plugin::ParameterEditKind::BeginGesture,
+                value: None,
+            },
+        )) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 
     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
-        log::debug!(
-            "Host: Perform edit for parameter {} = {}",
-            id,
-            value_normalized
-        );
-        // Store the parameter change for the DSP-feeding drain...
-        if let Ok(mut changes) = self.parameter_changes.lock() {
-            if changes.len() < MAX_EDITOR_FEEDBACK {
-                changes.push((id, value_normalized));
-            }
+        let mut events = self
+            .editor_events
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if thread::current().id() != self.control_thread {
+            events.refuse(crate::plugin::NativeEditorEventFailure::WrongThread);
+            return kResultFalse;
         }
-        // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
-        self.push_edit(crate::plugin::ParameterEdit {
-            id,
-            kind: crate::plugin::ParameterEditKind::ValueChange,
-            value: Some(value_normalized),
-        });
+        if events.failure.is_some() {
+            return kResultFalse;
+        }
+        if !value_normalized.is_finite() || !(0.0..=1.0).contains(&value_normalized) {
+            events.refuse(crate::plugin::NativeEditorEventFailure::InvalidValue);
+            return kResultFalse;
+        }
+        // Hold the event source before the execution sink. DSP readers never
+        // acquire the event lock, so there is no inverse lock order.
+        let mut changes = self
+            .parameter_changes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if changes.len() >= MAX_EDITOR_FEEDBACK {
+            events.refuse(crate::plugin::NativeEditorEventFailure::Overflow);
+            return kResultFalse;
+        }
+        if !events.push(crate::plugin::NativeEditorEvent::Parameter(
+            crate::plugin::ParameterEdit {
+                id,
+                kind: crate::plugin::ParameterEditKind::ValueChange,
+                value: Some(value_normalized),
+            },
+        )) {
+            return kResultFalse;
+        }
+        changes.push((id, value_normalized));
         kResultOk
     }
 
     unsafe fn endEdit(&self, id: u32) -> i32 {
-        log::debug!("Host: End edit for parameter {}", id);
-        self.push_edit(crate::plugin::ParameterEdit {
-            id,
-            kind: crate::plugin::ParameterEditKind::EndGesture,
-            value: None,
-        });
-        kResultOk
+        if self.push_editor_event(crate::plugin::NativeEditorEvent::Parameter(
+            crate::plugin::ParameterEdit {
+                id,
+                kind: crate::plugin::ParameterEditKind::EndGesture,
+                value: None,
+            },
+        )) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 
     unsafe fn restartComponent(&self, flags: i32) -> i32 {
+        if thread::current().id() != self.control_thread {
+            return kResultFalse;
+        }
         log::debug!("Host: Restart component requested with flags: {flags:#x}");
         // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
         // host decides what a restart means for it. See `RestartFlags` for which flags this
         // library handles on the host's behalf (none, currently) and which need host action.
-        self.restart_flags.fetch_or(flags, Ordering::AcqRel);
+        self.record_restart_flags(flags as u32);
         kResultOk
     }
 }
@@ -1807,6 +2398,9 @@ impl IComponentHandler3Trait for ComponentHandler {
         plug_view: *mut IPlugView,
         parameter_id: *const u32,
     ) -> *mut IContextMenu {
+        if thread::current().id() != self.control_thread {
+            return ptr::null_mut();
+        }
         if plug_view.is_null() {
             return ptr::null_mut();
         }
@@ -1816,6 +2410,9 @@ impl IComponentHandler3Trait for ComponentHandler {
             notifications: self.notifications.clone(),
             registry: self.context_menus.clone(),
         });
+        if self.retained_storage.register_menu(&menu).is_err() {
+            return ptr::null_mut();
+        }
         let Some(menu) = menu.to_com_ptr::<IContextMenu>() else {
             return ptr::null_mut();
         };
@@ -1828,7 +2425,7 @@ impl IComponentHandler3Trait for ComponentHandler {
 impl IComponentHandler2Trait for ComponentHandler {
     unsafe fn setDirty(&self, state: u8) -> i32 {
         log::debug!("Host: Plugin marked state as dirty (state: {})", state);
-        if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
+        if self.push_editor_event(crate::plugin::NativeEditorEvent::DirtyChanged(state != 0)) {
             kResultOk
         } else {
             kResultFalse
@@ -1836,6 +2433,9 @@ impl IComponentHandler2Trait for ComponentHandler {
     }
 
     unsafe fn requestOpenEditor(&self, name: *const std::os::raw::c_char) -> i32 {
+        if thread::current().id() != self.control_thread {
+            return kResultFalse;
+        }
         log::debug!("Host: Plugin requested editor open");
         let name = if name.is_null() {
             None
@@ -1849,12 +2449,10 @@ impl IComponentHandler2Trait for ComponentHandler {
         }
     }
 
-    // The group brackets land in the notification stream while the edits they bracket land in
-    // the gesture stream; nothing records the interleaving. See the `ComponentHandler` type
-    // comment for what a host can and cannot conclude from them.
+    // Group boundaries use the same source order as parameters and dirty state.
     unsafe fn startGroupEdit(&self) -> i32 {
         log::debug!("Host: Plugin started group edit");
-        if self.push_notification(crate::plugin::HostNotification::GroupEditStarted) {
+        if self.push_editor_event(crate::plugin::NativeEditorEvent::GroupEditStarted) {
             kResultOk
         } else {
             kResultFalse
@@ -1863,7 +2461,7 @@ impl IComponentHandler2Trait for ComponentHandler {
 
     unsafe fn finishGroupEdit(&self) -> i32 {
         log::debug!("Host: Plugin finished group edit");
-        if self.push_notification(crate::plugin::HostNotification::GroupEditFinished) {
+        if self.push_editor_event(crate::plugin::NativeEditorEvent::GroupEditFinished) {
             kResultOk
         } else {
             kResultFalse
@@ -1918,6 +2516,21 @@ pub struct HostEventList {
 }
 
 impl HostEventList {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        let events = self
+            .events
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(&events)?)?;
+        for event in events.iter() {
+            visit_event_payload(event, visitor)?;
+        }
+        Ok(())
+    }
+
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
@@ -2449,6 +3062,23 @@ impl Default for ParameterChanges {
 }
 
 impl ParameterChanges {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        let queues = self
+            .queues
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(&queues)?)?;
+        // Recycled inactive queues still own their Arc and point capacity.
+        for queue in queues.iter() {
+            visitor.visit(crate::host_storage::HostStorageRef::com(queue))?;
+            queue.visit_owned_storage(visitor)?;
+        }
+        Ok(())
+    }
+
     /// Host-side: queue a parameter change point for the next process block. The processor
     /// reads these from `inputParameterChanges` during `process()`. Points for the same id
     /// share one queue and are kept ordered by sample offset. Reuses a pooled queue object
@@ -2641,6 +3271,17 @@ pub struct ParameterValueQueue {
 }
 
 impl ParameterValueQueue {
+    pub(crate) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        let points = self
+            .points
+            .lock()
+            .map_err(|_| crate::host_storage::HostStorageError::PoisonedOwner)?;
+        visitor.visit(crate::host_storage::HostStorageRef::vector(&points)?)
+    }
+
     pub fn new(param_id: u32) -> Self {
         Self {
             param_id: AtomicU32::new(param_id),
@@ -2752,7 +3393,17 @@ mod host_attr_tests {
 #[cfg(test)]
 mod component_handler_tests {
     use super::*;
-    use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
+    use crate::plugin::{
+        ContextMenuItem, HostNotification, NativeEditorEvent, NativeEditorEventDrain,
+        NativeEditorEventFailure, ParameterEdit, ParameterEditKind,
+    };
+
+    pub(super) fn complete_author_events(handler: &ComponentHandler) -> Vec<NativeEditorEvent> {
+        let NativeEditorEventDrain::Complete { events } = handler.take_editor_events() else {
+            panic!("fixture requires a complete native author source")
+        };
+        events
+    }
 
     struct TestContextMenuTarget {
         calls: Arc<Mutex<Vec<i32>>>,
@@ -2796,35 +3447,35 @@ mod component_handler_tests {
             handler.endEdit(5);
         }
 
-        let edits = handler.take_parameter_edits();
+        let events = complete_author_events(&handler);
         assert_eq!(
-            edits,
+            events,
             vec![
-                ParameterEdit {
+                NativeEditorEvent::Parameter(ParameterEdit {
                     id: 5,
                     kind: ParameterEditKind::BeginGesture,
                     value: None,
-                },
-                ParameterEdit {
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
                     id: 5,
                     kind: ParameterEditKind::ValueChange,
                     value: Some(0.25),
-                },
-                ParameterEdit {
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
                     id: 5,
                     kind: ParameterEditKind::ValueChange,
                     value: Some(0.5),
-                },
-                ParameterEdit {
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
                     id: 5,
                     kind: ParameterEditKind::EndGesture,
                     value: None,
-                },
+                }),
             ]
         );
 
         // The drain empties the buffer; the value-change sink still mirrors the performEdits.
-        assert!(handler.take_parameter_edits().is_empty());
+        assert!(complete_author_events(&handler).is_empty());
         assert_eq!(
             *handler.parameter_changes.lock().unwrap(),
             vec![(5, 0.25), (5, 0.5)]
@@ -2850,17 +3501,22 @@ mod component_handler_tests {
             MAX_EDITOR_FEEDBACK,
             "the value-change sink must stop at the cap, not grow with the drag"
         );
-        let edits = handler.take_parameter_edits();
         assert_eq!(
-            edits.len(),
-            MAX_EDITOR_FEEDBACK,
-            "the gesture log must stop at the cap too"
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Incomplete {
+                failure: NativeEditorEventFailure::Overflow
+            }
         );
-
-        // Draining keeps the buffer's capacity, so the next gesture doesn't reallocate on the
-        // COM callback path.
-        assert!(handler.take_parameter_edits().is_empty());
-        assert!(handler.edits.lock().unwrap().capacity() >= MAX_EDITOR_FEEDBACK);
+        assert_eq!(
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Incomplete {
+                failure: NativeEditorEventFailure::Overflow
+            },
+            "drain cannot pretend a dropped gesture became complete"
+        );
+        let source = handler.editor_events.lock().unwrap();
+        assert!(source.events.is_empty());
+        assert!(source.events.capacity() >= MAX_EDITOR_FEEDBACK);
     }
 
     #[test]
@@ -2872,28 +3528,33 @@ mod component_handler_tests {
             assert_eq!(handler.startGroupEdit(), kResultOk);
             assert_eq!(handler.finishGroupEdit(), kResultOk);
         }
-        let notifications = handler.take_host_notifications();
         assert_eq!(
-            notifications,
+            handler.take_host_notifications(),
+            vec![HostNotification::OpenEditorRequested {
+                name: Some("editor".to_string())
+            }]
+        );
+        assert_eq!(
+            complete_author_events(&handler),
             vec![
-                HostNotification::DirtyChanged(true),
-                HostNotification::OpenEditorRequested {
-                    name: Some("editor".to_string())
-                },
-                HostNotification::GroupEditStarted,
-                HostNotification::GroupEditFinished,
+                NativeEditorEvent::DirtyChanged(true),
+                NativeEditorEvent::GroupEditStarted,
+                NativeEditorEvent::GroupEditFinished
             ]
         );
-
         unsafe {
             for _ in 0..MAX_HOST_NOTIFICATIONS {
-                assert_eq!(handler.setDirty(0), kResultOk);
+                assert_eq!(handler.requestOpenEditor(ptr::null()), kResultOk);
             }
-            assert_eq!(handler.setDirty(1), kResultFalse);
+            assert_eq!(handler.requestOpenEditor(ptr::null()), kResultFalse);
         }
         assert_eq!(
             handler.take_host_notifications().len(),
             MAX_HOST_NOTIFICATIONS
+        );
+        assert!(
+            complete_author_events(&handler).is_empty(),
+            "control backpressure does not fabricate a native author edit"
         );
     }
 
@@ -3078,7 +3739,12 @@ mod component_handler_tests {
 
 #[cfg(test)]
 mod host_application_tests {
+    use super::component_handler_tests::complete_author_events;
     use super::*;
+    use crate::plugin::{
+        HostNotification, NativeEditorEvent, NativeEditorEventDrain, NativeEditorEventFailure,
+        ParameterEdit, ParameterEditKind,
+    };
 
     #[test]
     fn interface_support_reports_plugin_side_interfaces_only() {
@@ -3219,6 +3885,187 @@ mod host_application_tests {
         );
         unsafe {
             assert_eq!(progress.finish(id), kResultOk);
+        }
+    }
+
+    #[test]
+    fn native_editor_author_event_saturation_refuses_callback_instead_of_silent_drop() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let wrapper = ComWrapper::new(handler);
+        let interface = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("real IComponentHandler COM interface");
+        unsafe {
+            for _ in 0..MAX_EDITOR_FEEDBACK {
+                assert_eq!(
+                    interface.beginEdit(5),
+                    kResultOk,
+                    "fixture must fill the complete event source"
+                );
+            }
+            assert_eq!(interface.endEdit(5), kResultFalse, "a full native author event source must explicitly refuse the callback rather than silently report success");
+        }
+    }
+
+    #[test]
+    fn native_editor_dsp_feedback_saturation_refuses_value_after_independent_event_drains() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            for _ in 0..MAX_EDITOR_FEEDBACK {
+                assert_eq!(
+                    handler.performEdit(5, 0.5),
+                    kResultOk,
+                    "fixture must fill the existing bounded DSP feedback sink"
+                );
+                assert_eq!(
+                    complete_author_events(&handler).len(),
+                    1,
+                    "the event log stays available while the DSP sink fills"
+                );
+            }
+            assert_eq!(handler.performEdit(5, 0.75), kResultFalse, "an unaccepted DSP feedback value cannot be reported as a complete native author edit");
+        }
+    }
+
+    #[test]
+    fn native_editor_author_events_preserve_group_parameter_and_dirty_order() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let wrapper = ComWrapper::new(handler);
+        let parameter = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("native parameter interface");
+        let group = wrapper
+            .to_com_ptr::<IComponentHandler2>()
+            .expect("native group/dirty interface");
+        unsafe {
+            assert_eq!(group.startGroupEdit(), kResultOk);
+            assert_eq!(parameter.beginEdit(5), kResultOk);
+            assert_eq!(parameter.performEdit(5, 0.25), kResultOk);
+            assert_eq!(group.setDirty(1), kResultOk);
+            assert_eq!(parameter.endEdit(5), kResultOk);
+            assert_eq!(group.requestOpenEditor(c"editor".as_ptr()), kResultOk);
+            assert_eq!(parameter.beginEdit(9), kResultOk);
+            assert_eq!(parameter.performEdit(9, 0.75), kResultOk);
+            assert_eq!(parameter.endEdit(9), kResultOk);
+            assert_eq!(group.finishGroupEdit(), kResultOk);
+        }
+        assert_eq!(
+            complete_author_events(&wrapper),
+            vec![
+                NativeEditorEvent::GroupEditStarted,
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::BeginGesture,
+                    value: None
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::ValueChange,
+                    value: Some(0.25)
+                }),
+                NativeEditorEvent::DirtyChanged(true),
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 5,
+                    kind: ParameterEditKind::EndGesture,
+                    value: None
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 9,
+                    kind: ParameterEditKind::BeginGesture,
+                    value: None
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 9,
+                    kind: ParameterEditKind::ValueChange,
+                    value: Some(0.75)
+                }),
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 9,
+                    kind: ParameterEditKind::EndGesture,
+                    value: None
+                }),
+                NativeEditorEvent::GroupEditFinished,
+            ]
+        );
+        assert_eq!(
+            wrapper.take_host_notifications(),
+            vec![HostNotification::OpenEditorRequested {
+                name: Some("editor".to_owned())
+            }],
+            "control-only requests cannot acquire author gesture membership"
+        );
+        assert!(complete_author_events(&wrapper).is_empty());
+        assert_eq!(
+            wrapper.parameter_changes.lock().unwrap().as_slice(),
+            &[(5, 0.25), (9, 0.75)]
+        );
+    }
+
+    #[test]
+    fn native_editor_source_overflow_remains_incomplete_after_drains_and_dsp_releases() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            for _ in 0..MAX_EDITOR_FEEDBACK {
+                assert_eq!(handler.performEdit(5, 0.25), kResultOk);
+                assert_eq!(complete_author_events(&handler).len(), 1);
+            }
+            assert_eq!(handler.performEdit(5, 0.5), kResultFalse);
+        }
+        let refusal = NativeEditorEventDrain::Incomplete {
+            failure: NativeEditorEventFailure::Overflow,
+        };
+        assert_eq!(handler.take_editor_events(), refusal);
+        handler.parameter_changes.lock().unwrap().clear();
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultFalse);
+            assert_eq!(handler.performEdit(5, 0.75), kResultFalse);
+            assert_eq!(handler.endEdit(5), kResultFalse);
+            assert_eq!(handler.startGroupEdit(), kResultFalse);
+            assert_eq!(handler.finishGroupEdit(), kResultFalse);
+            assert_eq!(handler.setDirty(1), kResultFalse);
+        }
+        assert_eq!(
+            handler.take_editor_events(),
+            refusal,
+            "capacity release and polling cannot complete a lost native gesture"
+        );
+        assert!(
+            handler.parameter_changes.lock().unwrap().is_empty(),
+            "a refused native author value cannot re-enter the DSP feedback sink"
+        );
+        let fresh = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(fresh.beginEdit(5), kResultOk);
+        }
+        assert_eq!(
+            complete_author_events(&fresh).len(),
+            1,
+            "only a fresh native source establishes a new complete lifetime"
+        );
+    }
+
+    #[test]
+    fn native_editor_invalid_normalized_value_refuses_entire_source_without_publication() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+            unsafe {
+                assert_eq!(handler.beginEdit(5), kResultOk);
+                assert_eq!(handler.performEdit(5, value), kResultFalse);
+                assert_eq!(handler.endEdit(5), kResultFalse);
+            }
+            assert_eq!(
+                handler.take_editor_events(),
+                NativeEditorEventDrain::Incomplete {
+                    failure: NativeEditorEventFailure::InvalidValue
+                }
+            );
+            assert!(handler.parameter_changes.lock().unwrap().is_empty());
+            assert_eq!(
+                handler.take_editor_events(),
+                NativeEditorEventDrain::Incomplete {
+                    failure: NativeEditorEventFailure::InvalidValue
+                }
+            );
         }
     }
 }
@@ -3366,7 +4213,8 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: source.len() as u32,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: u32::try_from(DataEvent_::DataTypes_::kMidiSysEx)
+                .expect("SDK SysEx type is nonnegative"),
             bytes: source_ptr,
         };
 
@@ -3397,7 +4245,8 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: 1,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: u32::try_from(DataEvent_::DataTypes_::kMidiSysEx)
+                .expect("SDK SysEx type is nonnegative"),
             bytes: ptr::null(),
         };
         assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
@@ -3956,5 +4805,609 @@ mod memory_stream_tests {
             Some("Project")
         );
         assert_eq!(read_attribute(&project, c"FilePathString"), None);
+    }
+}
+
+#[cfg(test)]
+mod native_callback_thread_tests {
+    use super::*;
+
+    #[test]
+    fn native_callback_thread_perform_rejects_other_thread_without_dsp_value() {
+        let wrapper = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let callbacks = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("actual native parameter ABI");
+        unsafe {
+            assert_eq!(callbacks.beginEdit(5), kResultOk);
+        }
+        let result = thread::spawn(move || unsafe { callbacks.performEdit(5, 0.75) })
+            .join()
+            .expect("callback thread");
+        assert_eq!(
+            result, kResultFalse,
+            "native author values must come from the initializing control thread"
+        );
+        assert!(
+            wrapper
+                .parameter_changes
+                .lock()
+                .expect("DSP feedback")
+                .is_empty(),
+            "wrong-thread callbacks cannot enter the execution sink"
+        );
+    }
+
+    #[test]
+    fn native_callback_thread_boundaries_reject_other_thread() {
+        for kind in 0..5 {
+            let wrapper = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+            let parameter = wrapper
+                .to_com_ptr::<IComponentHandler>()
+                .expect("actual native parameter ABI");
+            let group = wrapper
+                .to_com_ptr::<IComponentHandler2>()
+                .expect("actual native group ABI");
+            let result = thread::spawn(move || unsafe {
+                match kind {
+                    0 => parameter.beginEdit(5),
+                    1 => parameter.endEdit(5),
+                    2 => group.startGroupEdit(),
+                    3 => group.finishGroupEdit(),
+                    _ => group.setDirty(1),
+                }
+            })
+            .join()
+            .expect("callback thread");
+            assert_eq!(
+                result, kResultFalse,
+                "native author boundary {kind} must remain on its initializing control thread"
+            );
+        }
+    }
+
+    #[test]
+    fn native_callback_thread_control_requests_reject_other_thread_without_requests() {
+        let wrapper = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let parameter = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("actual native parameter ABI");
+        let group = wrapper
+            .to_com_ptr::<IComponentHandler2>()
+            .expect("actual native group ABI");
+        let (restart, open) = thread::spawn(move || unsafe {
+            (
+                parameter.restartComponent(1),
+                group.requestOpenEditor(c"editor".as_ptr()),
+            )
+        })
+        .join()
+        .expect("callback thread");
+        assert_eq!(
+            restart, kResultFalse,
+            "restartComponent is a control-thread callback"
+        );
+        assert_eq!(
+            open, kResultFalse,
+            "requestOpenEditor is a control-thread callback"
+        );
+        assert!(wrapper.take_restart_flags().is_empty());
+        assert!(wrapper.take_host_notifications().is_empty());
+        unsafe {
+            assert_eq!(wrapper.restartComponent(1), kResultOk);
+            assert_eq!(wrapper.requestOpenEditor(c"editor".as_ptr()), kResultOk);
+        }
+        assert_eq!(wrapper.take_restart_flags().bits(), 1);
+        assert_eq!(wrapper.take_host_notifications().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod native_callback_thread_contract_tests {
+    use super::*;
+    use crate::plugin::{NativeEditorEventDrain, NativeEditorEventFailure};
+
+    #[test]
+    fn native_wrong_thread_author_source_is_sticky_without_fake_end() {
+        let wrapper = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        unsafe {
+            assert_eq!(wrapper.beginEdit(5), kResultOk);
+        }
+        let callbacks = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("actual native parameter ABI");
+        assert_eq!(
+            thread::spawn(move || unsafe { callbacks.performEdit(5, 0.5) })
+                .join()
+                .expect("callback thread"),
+            kResultFalse
+        );
+        let incomplete = NativeEditorEventDrain::Incomplete {
+            failure: NativeEditorEventFailure::WrongThread,
+        };
+        assert_eq!(wrapper.take_editor_events(), incomplete);
+        unsafe {
+            assert_eq!(wrapper.endEdit(5), kResultFalse);
+            assert_eq!(wrapper.startGroupEdit(), kResultFalse);
+            assert_eq!(wrapper.setDirty(1), kResultFalse);
+        }
+        assert_eq!(
+            wrapper.take_editor_events(),
+            incomplete,
+            "main-thread polling cannot manufacture a complete source after an invalid producer"
+        );
+        assert!(wrapper
+            .parameter_changes
+            .lock()
+            .expect("DSP feedback")
+            .is_empty());
+        let fresh = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(fresh.beginEdit(5), kResultOk);
+        }
+        assert!(
+            matches!(fresh.take_editor_events(), NativeEditorEventDrain::Complete { events } if events.len() == 1)
+        );
+    }
+
+    #[test]
+    fn native_wrong_thread_control_refusal_does_not_corrupt_author_source() {
+        let wrapper = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+        let callbacks = wrapper
+            .to_com_ptr::<IComponentHandler>()
+            .expect("actual native parameter ABI");
+        assert_eq!(
+            thread::spawn(move || unsafe { callbacks.restartComponent(1) })
+                .join()
+                .expect("callback thread"),
+            kResultFalse
+        );
+        assert_eq!(
+            wrapper.take_editor_events(),
+            NativeEditorEventDrain::Complete { events: Vec::new() }
+        );
+        unsafe {
+            assert_eq!(wrapper.beginEdit(5), kResultOk);
+            assert_eq!(wrapper.performEdit(5, 0.5), kResultOk);
+            assert_eq!(wrapper.endEdit(5), kResultOk);
+        }
+        assert!(
+            matches!(wrapper.take_editor_events(), NativeEditorEventDrain::Complete { events } if events.len() == 3)
+        );
+    }
+}
+
+#[cfg(test)]
+mod restart_cohort_tests {
+    use super::*;
+
+    #[test]
+    fn native_vst3_restart_cohort_exact_retirement_preserves_same_bit_callback() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            handler.restartComponent(RestartFlags_::kLatencyChanged);
+        }
+        let serviced = handler.pending_restart_cohort();
+        unsafe {
+            handler.restartComponent(RestartFlags_::kLatencyChanged);
+        }
+        assert!(!handler.retire_restart_cohort(serviced));
+        let current = handler.pending_restart_cohort();
+        assert_eq!(current.serial(), 2);
+        assert_eq!(current.flags().bits(), RestartFlags_::kLatencyChanged);
+        assert!(handler.retire_restart_cohort(current));
+        assert_eq!(handler.pending_restart_cohort().serial(), 2);
+        assert!(handler.pending_restart_flags().is_empty());
+        unsafe {
+            handler.restartComponent(i32::MIN);
+        }
+        assert_eq!(handler.pending_restart_cohort().serial(), 3);
+        assert_eq!(handler.take_restart_flags().bits(), i32::MIN);
+        assert!(!handler.retire_restart_cohort(current));
+    }
+
+    #[test]
+    fn native_vst3_restart_cohort_exhaustion_never_wraps_or_drains() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        handler
+            .restart_cohort
+            .store(u64::from(u32::MAX - 1) << 32, Ordering::Release);
+        unsafe {
+            handler.restartComponent(RestartFlags_::kLatencyChanged);
+        }
+        let current = handler.pending_restart_cohort();
+        assert!(current.exhausted());
+        assert!(!handler.retire_restart_cohort(current));
+        assert!(handler.take_restart_flags().latency_changed());
+        unsafe {
+            handler.restartComponent(i32::MIN);
+        }
+        assert_eq!(handler.pending_restart_cohort().serial(), u32::MAX);
+        assert_eq!(
+            handler.pending_restart_flags().bits(),
+            RestartFlags_::kLatencyChanged | i32::MIN
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_author_boundary_old_api_tests {
+    use super::*;
+
+    #[test]
+    fn native_author_unmatched_parameter_end_explicitly_refuses_callback() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(
+                handler.endEdit(5),
+                kResultFalse,
+                "an unmatched native EndEdit cannot silently create a complete author boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn native_author_unmatched_group_end_explicitly_refuses_callback() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(
+                handler.finishGroupEdit(),
+                kResultFalse,
+                "an unmatched native group End cannot silently report a complete author source"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_author_source_status_contracts {
+    use super::*;
+    use crate::plugin::{NativeEditorEventDrain, NativeEditorEventFailure};
+
+    fn complete_count(handler: &ComponentHandler) -> usize {
+        match handler.take_editor_events() {
+            NativeEditorEventDrain::Complete { events } => events.len(),
+            NativeEditorEventDrain::Incomplete { failure } => {
+                panic!("expected complete source: {failure:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn native_author_status_tracks_exact_interleaved_parameter_owners_across_drains() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        assert!(handler.editor_event_source_status().closed_empty());
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultOk);
+            assert_eq!(handler.beginEdit(9), kResultOk);
+            assert_eq!(handler.performEdit(5, 0.25), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        assert_eq!(before.revision(), 3);
+        assert_eq!(before.pending_events(), 3);
+        assert_eq!(before.open_parameter_edits(), 2);
+        assert_eq!(complete_count(&handler), 3);
+        let drained = handler.editor_event_source_status();
+        assert_eq!(drained.pending_events(), 0);
+        assert_eq!(
+            drained.open_parameter_edits(),
+            2,
+            "Drain cannot manufacture matching native Ends"
+        );
+        assert_eq!(drained.revision(), before.revision());
+        assert!(
+            !drained.closed_empty(),
+            "empty native outbox still owns two open parameter gestures"
+        );
+        unsafe {
+            assert_eq!(handler.endEdit(9), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 1);
+        assert_eq!(
+            handler.editor_event_source_status().open_parameter_edits(),
+            1
+        );
+        unsafe {
+            assert_eq!(handler.endEdit(5), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 1);
+        assert!(handler.editor_event_source_status().closed_empty());
+        assert_eq!(handler.editor_event_source_status().revision(), 5);
+    }
+
+    #[test]
+    fn native_author_status_preserve_does_not_drain_grouped_dirty_source() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.startGroupEdit(), kResultOk);
+            assert_eq!(handler.beginEdit(5), kResultOk);
+            assert_eq!(handler.setDirty(1), kResultOk);
+            assert_eq!(handler.endEdit(5), kResultOk);
+        }
+        let first = handler.editor_event_source_status();
+        for _ in 0..8 {
+            assert_eq!(handler.editor_event_source_status(), first);
+        }
+        assert_eq!(first.pending_events(), 4);
+        assert_eq!(first.open_parameter_edits(), 0);
+        assert_eq!(first.group_depth(), 1);
+        assert_eq!(complete_count(&handler), 4);
+        assert!(
+            !handler.editor_event_source_status().closed_empty(),
+            "group still open after a parameter End"
+        );
+        unsafe {
+            assert_eq!(handler.finishGroupEdit(), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 1);
+        assert!(handler.editor_event_source_status().closed_empty());
+    }
+
+    #[test]
+    fn native_author_status_accepts_official_multi_fader_timestamp_group_pattern() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.startGroupEdit(), kResultOk);
+            assert_eq!(handler.beginEdit(1), kResultOk);
+            assert_eq!(handler.beginEdit(3), kResultOk);
+            assert_eq!(handler.finishGroupEdit(), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 4);
+        let down = handler.editor_event_source_status();
+        assert_eq!(down.open_parameter_edits(), 2);
+        assert_eq!(down.group_depth(), 0);
+        assert!(
+            !down.closed_empty(),
+            "timestamp group finish cannot synthesize parameter Ends"
+        );
+        for value in [0.25, 0.5, 0.75] {
+            unsafe {
+                assert_eq!(handler.startGroupEdit(), kResultOk);
+                assert_eq!(handler.performEdit(1, value), kResultOk);
+                assert_eq!(handler.performEdit(3, value), kResultOk);
+                assert_eq!(handler.finishGroupEdit(), kResultOk);
+            }
+            assert_eq!(complete_count(&handler), 4);
+            assert_eq!(
+                handler.editor_event_source_status().open_parameter_edits(),
+                2
+            );
+            assert!(!handler.editor_event_source_status().closed_empty());
+        }
+        unsafe {
+            assert_eq!(handler.startGroupEdit(), kResultOk);
+            assert_eq!(handler.endEdit(1), kResultOk);
+            assert_eq!(handler.endEdit(3), kResultOk);
+            assert_eq!(handler.finishGroupEdit(), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 4);
+        assert!(handler.editor_event_source_status().closed_empty());
+    }
+
+    #[test]
+    fn native_author_status_accounts_repeated_begin_same_id_without_extra_prohibition() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultOk);
+            assert_eq!(handler.beginEdit(5), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 2);
+        assert_eq!(
+            handler.editor_event_source_status().open_parameter_edits(),
+            2
+        );
+        unsafe {
+            assert_eq!(handler.endEdit(5), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 1);
+        assert_eq!(
+            handler.editor_event_source_status().open_parameter_edits(),
+            1
+        );
+        assert!(!handler.editor_event_source_status().closed_empty());
+        unsafe {
+            assert_eq!(handler.endEdit(5), kResultOk);
+        }
+        assert_eq!(complete_count(&handler), 1);
+        assert!(handler.editor_event_source_status().closed_empty());
+    }
+
+    #[test]
+    fn native_author_invalid_boundary_remains_sticky_after_drain() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.endEdit(5), kResultFalse);
+        }
+        assert_eq!(
+            handler.editor_event_source_status().failure(),
+            Some(NativeEditorEventFailure::InvalidBoundary)
+        );
+        assert!(matches!(
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Incomplete {
+                failure: NativeEditorEventFailure::InvalidBoundary
+            }
+        ));
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultFalse);
+        }
+        assert!(!handler.editor_event_source_status().closed_empty());
+    }
+
+    #[test]
+    fn native_author_revision_exhaustion_refuses_without_wrapping_or_fake_end() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        handler.editor_events.lock().expect("source").revision = u64::MAX;
+        unsafe {
+            assert_eq!(handler.beginEdit(5), kResultFalse);
+        }
+        let status = handler.editor_event_source_status();
+        assert_eq!(status.revision(), u64::MAX);
+        assert_eq!(status.open_parameter_edits(), 0);
+        assert_eq!(status.pending_events(), 0);
+        assert_eq!(
+            status.failure(),
+            Some(NativeEditorEventFailure::SequenceExhausted)
+        );
+        assert!(!status.closed_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_author_capture_catchup_contracts {
+    use super::*;
+    use crate::plugin::{NativeEditorEventDrain, NativeEditorEventFailure};
+
+    #[test]
+    fn native_author_catchup_visits_exact_value_order_without_draining_boundaries() {
+        let feedback = Arc::new(Mutex::new(Vec::new()));
+        let handler = ComponentHandler::new(feedback.clone());
+        unsafe {
+            assert_eq!(handler.beginEdit(3), kResultOk);
+            assert_eq!(handler.beginEdit(9), kResultOk);
+            assert_eq!(handler.performEdit(9, 0.25), kResultOk);
+            assert_eq!(handler.performEdit(3, 0.5), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        let mut delivered = Vec::new();
+        assert!(handler.visit_unconsumed_editor_values(|id, value| {
+            delivered.push((id, value));
+            true
+        }));
+        assert_eq!(
+            delivered,
+            [(9, 0.25), (3, 0.5)],
+            "same processor catchup retains native callback order"
+        );
+        assert!(feedback.lock().expect("feedback").is_empty());
+        let after = handler.editor_event_source_status();
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(
+            after.pending_events(),
+            4,
+            "DSP delivery never consumes author Begin/Value/End history"
+        );
+        assert_eq!(after.open_parameter_edits(), 2);
+        assert!(!after.closed_empty());
+    }
+
+    #[test]
+    fn native_author_catchup_refuses_feedback_orphaned_by_an_independent_event_drain() {
+        let feedback = Arc::new(Mutex::new(Vec::new()));
+        let handler = ComponentHandler::new(feedback.clone());
+        unsafe {
+            assert_eq!(handler.beginEdit(3), kResultOk);
+            assert_eq!(handler.performEdit(3, 0.25), kResultOk);
+        }
+        assert!(matches!(
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Complete { .. }
+        ));
+        let mut calls = 0;
+        assert!(!handler.visit_unconsumed_editor_values(|_, _| {
+            calls += 1;
+            true
+        }));
+        assert_eq!(
+            calls, 0,
+            "no foreign process receives an incomplete history interpretation"
+        );
+        assert_eq!(
+            *feedback.lock().expect("feedback"),
+            [(3, 0.25)],
+            "orphaned real native feedback cannot be silently cleared"
+        );
+    }
+
+    #[test]
+    fn native_author_catchup_capacity_failure_preserves_feedback_and_marks_whole_source_incomplete()
+    {
+        let feedback = Arc::new(Mutex::new(Vec::new()));
+        let handler = ComponentHandler::new(feedback.clone());
+        unsafe {
+            assert_eq!(handler.beginEdit(3), kResultOk);
+            assert_eq!(handler.performEdit(3, 0.25), kResultOk);
+            assert_eq!(handler.performEdit(3, 0.5), kResultOk);
+        }
+        let mut capacity = 1;
+        assert!(!handler.visit_unconsumed_editor_values(|_, _| {
+            if capacity == 0 {
+                false
+            } else {
+                capacity -= 1;
+                true
+            }
+        }));
+        assert_eq!(*feedback.lock().expect("feedback"), [(3, 0.25), (3, 0.5)]);
+        assert_eq!(
+            handler.editor_event_source_status().failure(),
+            Some(NativeEditorEventFailure::Overflow)
+        );
+        assert!(matches!(
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Incomplete {
+                failure: NativeEditorEventFailure::Overflow
+            }
+        ));
+        assert!(!handler.visit_unconsumed_editor_values(|_, _| panic!(
+            "a failed source cannot replay a prefix"
+        )));
+    }
+
+    #[test]
+    fn native_author_capture_allows_real_dirty_false_suffix_without_fabricating_a_saved_project() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.setDirty(1), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        unsafe {
+            assert_eq!(handler.setDirty(0), kResultOk);
+            assert_eq!(handler.setDirty(0), kResultOk);
+        }
+        let after = handler
+            .editor_capture_source_status_since(before.revision())
+            .expect("getState may clear native dirty");
+        assert_eq!(
+            after.pending_events(),
+            3,
+            "actual dirty false callbacks stay in the complete author delivery"
+        );
+        assert_eq!(after.revision(), before.revision() + 2);
+        assert!(
+            matches!(handler.take_editor_events(),NativeEditorEventDrain::Complete{events} if events==[
+            crate::plugin::NativeEditorEvent::DirtyChanged(true),crate::plugin::NativeEditorEvent::DirtyChanged(false),crate::plugin::NativeEditorEvent::DirtyChanged(false)])
+        );
+    }
+
+    #[test]
+    fn native_author_capture_retries_on_new_value_boundary_or_dirty_true_without_consuming_it() {
+        for kind in 0..3 {
+            let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+            let revision = handler.editor_event_source_status().revision();
+            unsafe {
+                match kind {
+                    0 => {
+                        assert_eq!(handler.setDirty(1), kResultOk);
+                    }
+                    1 => {
+                        assert_eq!(handler.beginEdit(3), kResultOk);
+                    }
+                    _ => {
+                        assert_eq!(handler.beginEdit(3), kResultOk);
+                        assert_eq!(handler.performEdit(3, 0.5), kResultOk);
+                    }
+                }
+            }
+            let before = handler.editor_event_source_status();
+            assert!(handler
+                .editor_capture_source_status_since(revision)
+                .is_none());
+            assert_eq!(
+                handler.editor_event_source_status(),
+                before,
+                "failed coherent capture preserves every actual callback"
+            );
+        }
     }
 }

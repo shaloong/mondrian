@@ -252,7 +252,7 @@ fn validate_spatial_request(
             actual: input.texture_format(),
         });
     }
-    if !descriptor.alpha.is_straight_compatible() {
+    if !descriptor.alpha.is_coverage() || !descriptor.alpha.is_straight_compatible() {
         return Err(GpuViewerSpatialPlanError::InputNotStraightCompatibleAlpha {
             actual: descriptor.alpha,
         });
@@ -1164,6 +1164,7 @@ mod tests {
             }
         }
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
             data: pixels,
@@ -1232,6 +1233,7 @@ mod tests {
 
         let reference = crate::execute_cpu_output_boundary_rgba8(
             &crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 1,
                 height: 1,
                 data: vec![[0.5, 0.5, 0.5, 1.0]],
@@ -1252,6 +1254,7 @@ mod tests {
             return;
         };
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: 8,
             height: 8,
             data: vec![[0.25, 0.5, 0.75, 1.0]; 64],
@@ -1316,6 +1319,7 @@ mod tests {
             return None;
         };
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width,
             height,
             data: data

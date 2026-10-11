@@ -58,6 +58,21 @@ pub(crate) enum PreviewCpuExecutionError {
 }
 
 impl PreviewCpuExecutionError {
+    /// Borrow the actual canonical bank disposition without parsing text.
+    pub(crate) fn processor_blocked(
+        &self,
+    ) -> Option<&Arc<mondrian_effects::EffectProcessorFeedbackReceipt>> {
+        match self {
+            Self::TimelineComposite(TimelineCompositeError::FloatEffect {
+                reason: EffectFloatExecutionError::CustomProcessor(error),
+            }) => error.processor_blocked(),
+            Self::TimelineComposite(TimelineCompositeError::EncodedEffect(error)) => {
+                error.processor_blocked()
+            }
+            _ => None,
+        }
+    }
+
     /// Project this execution error into the shared terminal Preview contract.
     pub(crate) fn unavailability(&self) -> PreviewUnavailability {
         match self {
@@ -113,6 +128,7 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
                 | EffectExecutionError::ColorDomainBlocked { .. }
                 | EffectExecutionError::InvalidColorDomainPlan
                 | EffectExecutionError::CustomProcessorUnavailable { .. }
+                | EffectExecutionError::ProcessorUserBlocked { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::UnsupportedNode { reason, .. },
@@ -128,14 +144,21 @@ fn timeline_composite_is_blocked(error: &TimelineCompositeError) -> bool {
         } => matches!(
             error,
             EffectExecutionError::CustomProcessorUnavailable { .. }
+                | EffectExecutionError::ProcessorUserBlocked { .. }
         ),
         TimelineCompositeError::FloatEffect {
             reason: EffectFloatExecutionError::MaskRasterFailed { .. },
         } => true,
         TimelineCompositeError::FloatEffect {
             reason:
-                EffectFloatExecutionError::Stopped { .. }
-                | EffectFloatExecutionError::InputSizeMismatch { .. }
+                EffectFloatExecutionError::FrameContract(
+                    mondrian_effects::EffectFloatFrameError::ConsumerNotAdmitted { .. },
+                ),
+        } => true,
+        TimelineCompositeError::FloatEffect {
+            reason:
+                EffectFloatExecutionError::FrameContract(_)
+                | EffectFloatExecutionError::Stopped { .. }
                 | EffectFloatExecutionError::MissingOutput { .. },
         } => false,
         TimelineCompositeError::MediaFrameContractMismatch { .. }

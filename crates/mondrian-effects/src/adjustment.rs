@@ -2,7 +2,10 @@ use crate::{
     coverage::{has_positive_coverage, straight_rgba_from_premultiplied},
     EffectExecutionError, EffectRenderOp,
 };
-use mondrian_core::types::{BlendMode, WorkingColorSpace};
+use mondrian_core::{
+    types::{BlendMode, WorkingColorSpace},
+    EffectPassBlendPolicy,
+};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -275,7 +278,8 @@ pub(crate) fn apply_render_op(
                 let mut staged = working.clone();
                 let result = catch_unwind(AssertUnwindSafe(|| {
                     callback(&mut staged, width, height, params, frame_seed)
-                }));
+                }))
+                .map_err(crate::processor_residency::release_known_processor_panic);
                 match result {
                     Ok(Ok(())) if staged.len() == working.len() => *working = staged,
                     Ok(Ok(())) => {
@@ -313,9 +317,7 @@ pub(crate) fn apply_render_op(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_custom_render_op_f32(
-    working: &mut Vec<[f32; 4]>,
-    width: u32,
-    height: u32,
+    working: &mut crate::EffectFloatFrame,
     op: &EffectRenderOp,
     frame_seed: i64,
     mut session: Option<&mut crate::EffectExecutionSession>,
@@ -337,7 +339,9 @@ pub(crate) fn apply_custom_render_op_f32(
     let available_working_bytes = if processor.float32_factory().is_some() {
         if let Some(owner) = session.as_deref_mut() {
             let staging_bytes = working.len().saturating_mul(std::mem::size_of::<[f32; 4]>());
-            let occupied = caller_owned_bytes.saturating_add(staging_bytes);
+            let occupied = caller_owned_bytes
+                .saturating_add(staging_bytes)
+                .saturating_add(control.feedback_retained_bytes());
             let limit = owner.max_working_bytes();
             let available = limit.checked_sub(occupied).ok_or_else(|| {
                 EffectExecutionError::CustomProcessorBudgetExceeded {
@@ -357,9 +361,25 @@ pub(crate) fn apply_custom_render_op_f32(
         usize::MAX
     };
     let mut staged = working.clone();
+    let contract = processor.alpha_contract();
+    if !contract.inputs().contains(staged.alpha()) {
+        staged = crate::materialize_straight_coverage(
+            staged,
+            crate::EffectAlphaConsumer::StraightCoverageOperation,
+        )?;
+    }
+    if !contract.inputs().contains(staged.alpha()) {
+        return Err(crate::EffectFloatFrameError::ConsumerNotAdmitted {
+            consumer: crate::EffectAlphaConsumer::StraightCoverageOperation,
+            alpha: staged.alpha(),
+        }
+        .into());
+    }
+    let input_format = staged.format();
+    let extent = staged.extent();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if let Some(callback) = processor.float32_processor() {
-            callback(&mut staged, width, height, params, frame_seed)
+        let result = if let Some(callback) = processor.float32_processor() {
+            callback(&mut staged, params, frame_seed)
                 .map(|()| 0)
                 .map_err(crate::processor_residency::FloatProcessorError::from)
         } else if let (Some(factory), Some(owner), Some(effect_id)) = (
@@ -370,7 +390,12 @@ pub(crate) fn apply_custom_render_op_f32(
             let (instances, bytes) = owner.processor_grant();
             owner.processors.process(
                 factory,
-                crate::EffectFloatProcessorPreparation { effect_id, width, height },
+                crate::EffectFloatProcessorPreparation {
+                    effect_id,
+                    width: extent.width(),
+                    height: extent.height(),
+                    format: input_format,
+                },
                 processor.revision(),
                 instances,
                 bytes,
@@ -388,8 +413,18 @@ pub(crate) fn apply_custom_render_op_f32(
                         .to_owned(),
             }
             .into())
-        }
-    }));
+        };
+        let processor_bytes = result?;
+        crate::processor_residency::validate_completed_processor_frame(
+            &staged,
+            extent,
+            input_format,
+            contract,
+            control,
+        )?;
+        Ok(processor_bytes)
+    }))
+    .map_err(crate::processor_residency::release_known_processor_panic);
     if control.check().is_err() {
         if let (Some(owner), Some(effect_id)) = (session, processor.occurrence_id()) {
             owner.processors.retire_occurrence(effect_id);
@@ -399,14 +434,17 @@ pub(crate) fn apply_custom_render_op_f32(
         });
     }
     match result {
-        Ok(Ok(processor_bytes)) if staged.len() == working.len() => {
+        Ok(Ok(processor_bytes)) => {
             *working = staged;
             Ok(processor_bytes)
         }
-        Ok(Ok(_)) => {
-            let reason = "custom render processor changed the pixel count".to_owned();
-            processor.record_runtime_failure(reason.clone());
-            Err(EffectExecutionError::CustomProcessorFailed { key: key.clone(), reason })
+        Ok(Err(crate::processor_residency::FloatProcessorError::FeedbackCapacity { limit })) => {
+            Err(EffectExecutionError::ProcessorFeedbackCapacityExceeded { limit })
+        }
+        Ok(Err(crate::processor_residency::FloatProcessorError::UserBlocked(receipt))) => {
+            // UserBlocked preserves a legal resident according to its bank's
+            // original byte/count policy. It never enters plugin quarantine.
+            Err(EffectExecutionError::ProcessorUserBlocked { key: key.clone(), receipt })
         }
         Ok(Err(crate::processor_residency::FloatProcessorError::Budget {
             required_bytes,
@@ -416,6 +454,11 @@ pub(crate) fn apply_custom_render_op_f32(
             required_bytes,
             budget_bytes,
         }),
+        Ok(Err(crate::processor_residency::FloatProcessorError::HostResourceRefused(receipt))) => {
+            // The bank has already made the only optional-residency decision.
+            // This refusal did not advance DSP or commit the staged frame.
+            Err(EffectExecutionError::ProcessorHostResourceRefused { key: key.clone(), receipt })
+        }
         Ok(Err(error)) => {
             let reason = error.to_string();
             processor.record_runtime_failure(reason.clone());
@@ -824,7 +867,7 @@ pub fn blend_adjustment_result(
     width: u32,
     height: u32,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     out: &mut Vec<u8>,
 ) {
     let required_len = width as usize * height as usize * 4;
@@ -841,25 +884,43 @@ pub fn blend_adjustment_result(
         return;
     }
 
-    let mode = blend_mode.unwrap_or(BlendMode::Normal);
+    let policy = blend_policy;
     for (i, ((base_px, processed_px), out_px)) in base
         .chunks_exact(4)
         .zip(processed.chunks_exact(4))
         .zip(out.chunks_exact_mut(4))
         .enumerate()
     {
-        let blended = blend_rgba_pixel_seeded(
-            [base_px[0], base_px[1], base_px[2], base_px[3]],
-            [
-                processed_px[0],
-                processed_px[1],
-                processed_px[2],
-                processed_px[3],
-            ],
-            opacity,
-            mode,
-            i as u32,
-        );
+        let blended = match policy {
+            EffectPassBlendPolicy::Mix => {
+                let left = std::array::from_fn(|channel| f32::from(base_px[channel]) / 255.0);
+                let right = std::array::from_fn(|channel| f32::from(processed_px[channel]) / 255.0);
+                if base_px == processed_px || opacity == 0.0 {
+                    [base_px[0], base_px[1], base_px[2], base_px[3]]
+                } else if opacity == 1.0 {
+                    [
+                        processed_px[0],
+                        processed_px[1],
+                        processed_px[2],
+                        processed_px[3],
+                    ]
+                } else {
+                    crate::coverage::mix_straight_rgba(left, right, opacity).map(unit_to_u8)
+                }
+            }
+            EffectPassBlendPolicy::Blend(mode) => blend_rgba_pixel_seeded(
+                [base_px[0], base_px[1], base_px[2], base_px[3]],
+                [
+                    processed_px[0],
+                    processed_px[1],
+                    processed_px[2],
+                    processed_px[3],
+                ],
+                opacity,
+                mode,
+                i as u32,
+            ),
+        };
         out_px.copy_from_slice(&blended);
     }
 }
@@ -1005,7 +1066,7 @@ pub fn apply_adjustment_pass(
     height: u32,
     params: AdjustmentLayerParams,
     opacity: f32,
-    blend_mode: Option<BlendMode>,
+    blend_policy: mondrian_core::EffectPassBlendPolicy,
     frame_seed: i64,
     out: &mut Vec<u8>,
 ) -> Result<(), EffectExecutionError> {
@@ -1019,13 +1080,15 @@ pub fn apply_adjustment_pass(
         return Ok(());
     }
 
-    if !has_positive_coverage(opacity) || params.is_identity() {
+    if !has_positive_coverage(opacity)
+        || (blend_policy == EffectPassBlendPolicy::Mix && params.is_identity())
+    {
         out.copy_from_slice(base);
         return Ok(());
     }
 
     let processed = apply_adjustment_layer(base, width, height, params, frame_seed)?;
-    blend_adjustment_result(base, &processed, width, height, opacity, blend_mode, out);
+    blend_adjustment_result(base, &processed, width, height, opacity, blend_policy, out);
     Ok(())
 }
 
@@ -1942,7 +2005,7 @@ mod tests {
             1,
             1,
             1.0,
-            Some(BlendMode::Normal),
+            mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             &mut out,
         );
         assert_eq!(out, processed);
@@ -1959,7 +2022,7 @@ mod tests {
             1,
             1,
             1.0,
-            Some(BlendMode::Multiply),
+            mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Multiply),
             &mut out,
         );
         assert!(out[0] < base[0]);
@@ -2098,7 +2161,7 @@ mod tests {
             1,
             AdjustmentLayerParams { exposure: -2.0, ..AdjustmentLayerParams::default() },
             0.5,
-            Some(BlendMode::Normal),
+            mondrian_core::EffectPassBlendPolicy::Blend(BlendMode::Normal),
             0,
             &mut out,
         )
@@ -2871,5 +2934,464 @@ mod tests {
             error,
             EffectExecutionError::InvalidRenderParameter { op: "crop", parameter: "insets" }
         ));
+    }
+}
+
+#[cfg(test)]
+mod panic_payload_contract_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[derive(Debug, Default)]
+    struct Counts {
+        calls: AtomicUsize,
+        prepares: AtomicUsize,
+        instance_drops: AtomicUsize,
+        payload_drops: AtomicUsize,
+        panic_enabled: AtomicBool,
+        panic_entered: AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct OpaquePanicPayload(Arc<Counts>);
+
+    impl Drop for OpaquePanicPayload {
+        fn drop(&mut self) {
+            self.0.payload_drops.fetch_add(1, Ordering::SeqCst);
+            panic!("opaque plugin panic payload destructor executed");
+        }
+    }
+
+    fn contract(modes: crate::EffectExecutionModes) -> crate::EffectExecutionContract {
+        crate::EffectExecutionContract {
+            execution_modes: modes,
+            determinism: crate::EffectDeterminism::Nondeterministic,
+            roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
+            ..crate::EffectExecutionContract::IDENTITY
+        }
+    }
+
+    fn definition(key: &str, modes: crate::EffectExecutionModes) -> crate::EffectDefinition {
+        crate::EffectDefinition::new(
+            key,
+            "Panic isolation probe",
+            Default::default(),
+            crate::EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(contract(modes))
+        .with_plugin_contract(
+            crate::EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
+                crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            ),
+        )
+    }
+
+    fn compiled_operation(definition: crate::EffectDefinition, key: &str) -> EffectRenderOp {
+        crate::register_effect_definition(definition).expect("register actual provider");
+        let graph = crate::PreparedEffectProgram::prepare(
+            &[crate::EffectNode::new(crate::EffectType::Plugin(
+                key.to_owned(),
+            ))],
+            &[],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare actual provider")
+        .evaluate(mondrian_core::TimelineTime::ZERO)
+        .expect("compile actual provider");
+        graph
+            .graph()
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                crate::EffectGraphNodeKind::UnaryEffect { op, .. }
+                | crate::EffectGraphNodeKind::DomainEffect { op, .. }
+                    if matches!(op, EffectRenderOp::Custom { .. }) =>
+                {
+                    Some(op.clone())
+                }
+                _ => None,
+            })
+            .expect("compiler-bound custom operation")
+    }
+
+    fn float_frame() -> crate::EffectFloatFrame {
+        crate::EffectFloatFrame::from_pixels(
+            crate::EffectFrameExtent::new(1, 1),
+            crate::EffectValueFormat::new(
+                crate::EffectWorkingPrecision::Float32,
+                crate::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightCoverage,
+            ),
+            vec![[2.0, -0.25, 0.5, 1.0]],
+        )
+        .expect("finite HDR coverage frame")
+    }
+
+    fn assert_fault(error: EffectExecutionError, key: &str, counts: &Counts) {
+        assert!(matches!(
+            error,
+            EffectExecutionError::CustomProcessorFailed { key: failed_key, reason }
+                if failed_key == key && reason == "custom render processor panicked"
+        ));
+        assert_eq!(counts.payload_drops.load(Ordering::SeqCst), 0);
+        let status = crate::effect_plugin_runtime_status(key).expect("actual provider status");
+        assert!(
+            status.disabled,
+            "actual provider fault must enter its quarantine"
+        );
+    }
+
+    #[test]
+    fn panic_payload_u8_callback_keeps_original_frame_and_quarantines() {
+        let key = format!("test.panic-payload.u8.{}", mondrian_core::EffectId::new());
+        let counts = Arc::new(Counts::default());
+        let callback_counts = Arc::clone(&counts);
+        let op = compiled_operation(
+            definition(&key, crate::EffectExecutionModes::CPU_U8).with_custom_render_backend(
+                Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                None,
+                crate::EffectCachePolicy::Uncacheable,
+                Arc::new(move |staged, _, _, _, _| {
+                    callback_counts.calls.fetch_add(1, Ordering::SeqCst);
+                    staged[0] = 231;
+                    std::panic::panic_any(OpaquePanicPayload(Arc::clone(&callback_counts)));
+                }),
+            ),
+            &key,
+        );
+        let original = vec![32u8, 48, 64, 255];
+        let mut frame = original.clone();
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            apply_render_op(&mut frame, 1, 1, &op, 0)
+        }));
+        let error = outer
+            .expect("opaque destructor must not escape processor isolation")
+            .expect_err("processor panic is a structured fault");
+        assert_fault(error, &key, &counts);
+        assert_eq!(frame, original, "staged mutation must never publish");
+        assert_eq!(counts.calls.load(Ordering::SeqCst), 1, "no DSP replay");
+    }
+
+    #[test]
+    fn panic_payload_float_callback_keeps_original_frame_and_quarantines() {
+        let key = format!(
+            "test.panic-payload.float.{}",
+            mondrian_core::EffectId::new()
+        );
+        let counts = Arc::new(Counts::default());
+        let callback_counts = Arc::clone(&counts);
+        let op = compiled_operation(
+            definition(&key, crate::EffectExecutionModes::CPU_F32)
+                .with_custom_float_render_backend(
+                    Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                    None,
+                    crate::EffectCachePolicy::Uncacheable,
+                    Arc::new(move |staged, _, _| {
+                        callback_counts.calls.fetch_add(1, Ordering::SeqCst);
+                        staged.pixels_mut()[0][0] = -99.0;
+                        std::panic::panic_any(OpaquePanicPayload(Arc::clone(&callback_counts)));
+                    }),
+                ),
+            &key,
+        );
+        let original = float_frame();
+        let mut frame = original.clone();
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            apply_custom_render_op_f32(
+                &mut frame,
+                &op,
+                0,
+                None,
+                16,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+        }));
+        let error = outer
+            .expect("opaque destructor must not escape processor isolation")
+            .expect_err("processor panic is a structured fault");
+        assert_fault(error, &key, &counts);
+        assert_eq!(frame, original, "staged mutation must never publish");
+        assert_eq!(counts.calls.load(Ordering::SeqCst), 1, "no DSP replay");
+    }
+
+    #[derive(Debug)]
+    struct PanicFactory(Arc<Counts>);
+
+    #[derive(Debug)]
+    struct PanicInstance(Arc<Counts>);
+
+    impl Drop for PanicInstance {
+        fn drop(&mut self) {
+            self.0.instance_drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl crate::EffectFloatProcessorFactory for PanicFactory {
+        fn alpha_contract(&self) -> crate::EffectAlphaContract {
+            crate::EffectAlphaContract::COVERAGE_OPERATION
+        }
+
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+
+        fn storage(
+            &self,
+            _: crate::EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<crate::EffectFloatProcessorStorage> {
+            crate::EffectFloatProcessorStorage::new(16, 16)
+        }
+
+        fn prepare(
+            &self,
+            _: crate::EffectFloatProcessorPreparation,
+            _: &mut crate::EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn crate::EffectFloatProcessorInstance>> {
+            self.0.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(PanicInstance(Arc::clone(&self.0))))
+        }
+    }
+
+    impl crate::EffectFloatProcessorInstance for PanicInstance {
+        fn process(
+            &mut self,
+            staged: &mut crate::EffectFloatFrame,
+            _: &serde_json::Value,
+            _: i64,
+            _: &mut crate::EffectProcessorControl<'_>,
+        ) -> Result<Option<crate::EffectProcessorFeedback>, crate::EffectProcessorInvocationError>
+        {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            if self.0.panic_enabled.load(Ordering::SeqCst) {
+                staged.pixels_mut()[0][0] = -99.0;
+                self.0.panic_entered.store(true, Ordering::SeqCst);
+                std::panic::panic_any(OpaquePanicPayload(Arc::clone(&self.0)));
+            }
+            Ok(None)
+        }
+    }
+
+    fn prime_factory(
+        key: &str,
+        counts: &Arc<Counts>,
+    ) -> (EffectRenderOp, crate::EffectExecutionSession) {
+        let op = compiled_operation(
+            definition(key, crate::EffectExecutionModes::CPU_F32)
+                .with_custom_float_processor_factory(
+                    Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                    None,
+                    crate::EffectCachePolicy::Uncacheable,
+                    Arc::new(PanicFactory(Arc::clone(counts))),
+                ),
+            key,
+        );
+        let mut session = crate::EffectExecutionSession::new(crate::EffectExecutionSessionConfig {
+            max_processor_instances: 1,
+            max_processor_bytes: 16,
+            ..crate::EffectExecutionSessionConfig::uncached(1024)
+        });
+        let original = float_frame();
+        let mut frame = original.clone();
+        apply_custom_render_op_f32(
+            &mut frame,
+            &op,
+            0,
+            Some(&mut session),
+            16,
+            &mut crate::EffectProcessorControl::uncancelled(),
+        )
+        .expect("positive control retains the real instance");
+        assert_eq!(frame, original);
+        assert_eq!(session.diagnostics().processor_instances, 1);
+        assert_eq!(counts.prepares.load(Ordering::SeqCst), 1);
+        counts.panic_enabled.store(true, Ordering::SeqCst);
+        (op, session)
+    }
+
+    #[test]
+    fn panic_payload_float_factory_retires_once_without_publishing_or_replay() {
+        let key = format!(
+            "test.panic-payload.factory.{}",
+            mondrian_core::EffectId::new()
+        );
+        let counts = Arc::new(Counts::default());
+        let (op, mut session) = prime_factory(&key, &counts);
+        let original = float_frame();
+        let mut frame = original.clone();
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            apply_custom_render_op_f32(
+                &mut frame,
+                &op,
+                1,
+                Some(&mut session),
+                16,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+        }));
+        let error = outer
+            .expect("opaque destructor must not escape processor isolation")
+            .expect_err("processor panic is a structured fault");
+        assert_fault(error, &key, &counts);
+        assert_eq!(frame, original);
+        assert_eq!(
+            counts.calls.load(Ordering::SeqCst),
+            2,
+            "one warm call and one fault"
+        );
+        assert_eq!(
+            counts.prepares.load(Ordering::SeqCst),
+            1,
+            "same actual instance"
+        );
+        assert_eq!(
+            counts.instance_drops.load(Ordering::SeqCst),
+            1,
+            "retire exactly once"
+        );
+        assert_eq!(session.diagnostics().processor_instances, 0);
+    }
+
+    #[test]
+    fn panic_payload_is_released_before_float_factory_owner_stop_checkpoint() {
+        for reason in [
+            crate::EffectProcessorStopReason::Canceled,
+            crate::EffectProcessorStopReason::DeadlineExpired,
+        ] {
+            let key = format!("test.panic-payload.stop.{}", mondrian_core::EffectId::new());
+            let counts = Arc::new(Counts::default());
+            let (op, mut session) = prime_factory(&key, &counts);
+            let original = float_frame();
+            let mut frame = original.clone();
+            let mut checkpoint = || counts.panic_entered.load(Ordering::SeqCst).then_some(reason);
+            let outer = catch_unwind(AssertUnwindSafe(|| {
+                apply_custom_render_op_f32(
+                    &mut frame,
+                    &op,
+                    1,
+                    Some(&mut session),
+                    16,
+                    &mut crate::EffectProcessorControl::new(&mut checkpoint),
+                )
+            }));
+            let error = outer
+                .expect("owner stop must not drop an opaque panic payload")
+                .expect_err("the original owner stop remains authoritative");
+            assert!(
+                matches!(error, EffectExecutionError::CustomProcessorStopped {
+                reason: actual,
+            } if actual == reason)
+            );
+            assert_eq!(frame, original);
+            assert_eq!(counts.payload_drops.load(Ordering::SeqCst), 0);
+            assert_eq!(counts.calls.load(Ordering::SeqCst), 2, "no fault replay");
+            assert_eq!(counts.prepares.load(Ordering::SeqCst), 1);
+            assert_eq!(counts.instance_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(session.diagnostics().processor_instances, 0);
+            assert!(
+                !crate::effect_plugin_runtime_status(&key)
+                    .expect("actual provider status")
+                    .disabled,
+                "owner stop is not quarantine"
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct SizingPanicFactory(Arc<Counts>);
+
+    impl crate::EffectFloatProcessorFactory for SizingPanicFactory {
+        fn alpha_contract(&self) -> crate::EffectAlphaContract {
+            crate::EffectAlphaContract::COVERAGE_OPERATION
+        }
+
+        fn feedback_budget_bytes(&self) -> usize {
+            0
+        }
+
+        fn storage(
+            &self,
+            _: crate::EffectFloatProcessorSizing,
+        ) -> mondrian_core::Result<crate::EffectFloatProcessorStorage> {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            std::panic::panic_any(OpaquePanicPayload(Arc::clone(&self.0)));
+        }
+
+        fn prepare(
+            &self,
+            _: crate::EffectFloatProcessorPreparation,
+            _: &mut crate::EffectProcessorControl<'_>,
+        ) -> mondrian_core::Result<Box<dyn crate::EffectFloatProcessorInstance>> {
+            self.0.prepares.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(PanicInstance(Arc::clone(&self.0))))
+        }
+    }
+
+    #[test]
+    fn panic_payload_factory_sizing_public_graph_refuses_before_prepare_or_dsp() {
+        let key = format!(
+            "test.panic-payload.sizing.{}",
+            mondrian_core::EffectId::new()
+        );
+        let counts = Arc::new(Counts::default());
+        let op = compiled_operation(
+            definition(&key, crate::EffectExecutionModes::CPU_F32)
+                .with_custom_float_processor_factory(
+                    Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
+                    None,
+                    crate::EffectCachePolicy::Uncacheable,
+                    Arc::new(SizingPanicFactory(Arc::clone(&counts))),
+                ),
+            &key,
+        );
+        let graph =
+            crate::compile_reference_effect_graph(&crate::EffectRenderPlan { ops: vec![op] })
+                .expect("existing compiler retains the actual provider binding");
+        let original = float_frame();
+        let original_pixels = original.pixels().to_vec();
+        let mut session =
+            crate::EffectExecutionSession::new(crate::EffectExecutionSessionConfig::uncached(1024));
+        let outer = catch_unwind(AssertUnwindSafe(|| {
+            session.apply_compiled_rgba_f32(
+                original.view(),
+                &graph,
+                0,
+                &mut crate::EffectProcessorControl::uncancelled(),
+            )
+        }));
+        let error = outer
+            .expect("sizing payload destructor must stay inside isolation")
+            .expect_err("sizing panic must be a structured public graph failure");
+        assert!(matches!(
+            error,
+            crate::EffectFloatExecutionError::CustomProcessor(
+                EffectExecutionError::CustomProcessorFailed { key: failed_key, reason },
+            ) if failed_key == key && reason == "custom processor sizing panicked"
+        ));
+        assert_eq!(original.pixels(), original_pixels);
+        assert_eq!(counts.payload_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            counts.calls.load(Ordering::SeqCst),
+            1,
+            "one admission, no replay"
+        );
+        assert_eq!(
+            counts.prepares.load(Ordering::SeqCst),
+            0,
+            "sizing precedes prepare"
+        );
+        assert_eq!(
+            counts.instance_drops.load(Ordering::SeqCst),
+            0,
+            "no instance existed"
+        );
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        assert!(
+            crate::effect_plugin_runtime_status(&key)
+                .expect("actual provider status")
+                .disabled
+        );
     }
 }

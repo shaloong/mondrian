@@ -23,9 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    describe_openfx_filter, OpenFxFilterDescription, OpenFxFilterSession, OpenFxFloatFrame,
-    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
-    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    describe_openfx_filter, OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError,
+    OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode,
+    OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -67,8 +67,7 @@ struct OpenFxProcessorFactory {
 #[derive(Debug)]
 struct OpenFxProcessorInstance {
     session: OpenFxFilterSession,
-    width: u32,
-    height: u32,
+    gui_presence: Option<std::sync::Weak<dyn mondrian_effects::EffectProcessorGuiPresence>>,
 }
 
 fn processor_checkpoint(control: &mut EffectProcessorControl<'_>) -> Result<(), OpenFxHostError> {
@@ -95,16 +94,40 @@ fn processor_host_error(
 }
 
 impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
-    fn resident_bytes(
+    fn feedback_budget_bytes(&self) -> usize {
+        mondrian_effects::EffectProcessorFeedbackSnapshot::maximum_retained_bytes()
+    }
+    fn alpha_contract(&self) -> mondrian_effects::EffectAlphaContract {
+        mondrian_effects::EffectAlphaContract::NATIVE_FLOAT
+    }
+    fn storage(
         &self,
-        request: EffectFloatProcessorPreparation,
-    ) -> mondrian_core::Result<usize> {
-        OpenFxFilterSession::required_frame_storage(request.width, request.height).map_err(
-            |error| MondrianError::WorkflowStepFailed {
+        request: mondrian_effects::EffectFloatProcessorSizing,
+    ) -> mondrian_core::Result<mondrian_effects::EffectFloatProcessorStorage> {
+        let storage =
+            OpenFxFilterSession::storage(request.width, request.height).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "openfx_filter_frame_contract".to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+        // The only retained GUI field is this weak trait-object pointer. GUI
+        // values belong to the product projection; no native owner keeps them
+        // alive. Arc/allocator administration remains an explicit frontier.
+        let pointer_bytes = std::mem::size_of::<
+            Option<std::sync::Weak<dyn mondrian_effects::EffectProcessorGuiPresence>>,
+        >();
+        let active = storage.active_peak_bytes().checked_add(pointer_bytes);
+        let retained = storage.retained_bytes().checked_add(pointer_bytes);
+        match (active, retained) {
+            (Some(active), Some(retained)) => {
+                mondrian_effects::EffectFloatProcessorStorage::new(active, retained)
+            }
+            _ => Err(MondrianError::WorkflowStepFailed {
                 step_id: "openfx_filter_frame_contract".to_owned(),
-                reason: error.to_string(),
-            },
-        )
+                reason: "GUI pointer storage overflow".to_owned(),
+            }),
+        }
     }
 
     fn prepare(
@@ -121,26 +144,73 @@ impl EffectFloatProcessorFactory for OpenFxProcessorFactory {
                 &self.identifier,
                 request.width,
                 request.height,
+                request.format,
                 &mut checkpoint,
             )
         };
         let session = result.map_err(|error| processor_host_error(error, control))?;
         Ok(Box::new(OpenFxProcessorInstance {
             session,
-            width: request.width,
-            height: request.height,
+            gui_presence: None,
         }))
     }
 }
 
 impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
+    fn gui_action_storage_bytes(&self) -> usize {
+        if self
+            .gui_presence
+            .as_ref()
+            .is_none_or(|presence| presence.upgrade().is_some_and(|presence| presence.is_open()))
+        {
+            return 0;
+        }
+        // One decoded snapshot plus its returned/bank-bound inline carriers.
+        // Weak view lifetime does not own a second native instance or raster.
+        mondrian_effects::EffectProcessorFeedbackSnapshot::maximum_retained_bytes()
+            .saturating_add(std::mem::size_of::<
+                mondrian_effects::EffectProcessorGuiActionFeedback,
+            >())
+            .saturating_add(std::mem::size_of::<
+                mondrian_effects::EffectProcessorGuiActionReceipt,
+            >())
+    }
+
+    fn reconcile_gui(
+        &mut self,
+    ) -> mondrian_core::Result<Option<mondrian_effects::EffectProcessorGuiActionFeedback>> {
+        if self
+            .gui_presence
+            .as_ref()
+            .is_some_and(|presence| presence.upgrade().is_none_or(|presence| !presence.is_open()))
+        {
+            let presence = self.gui_presence.take();
+            let feedback =
+                self.session.close_gui().map_err(|error| MondrianError::WorkflowStepFailed {
+                    step_id: "openfx_gui_lifecycle".to_owned(),
+                    reason: error.to_string(),
+                })?;
+            if let (Some(presence), Some((action_serial, feedback))) = (presence, feedback) {
+                return Ok(Some(mondrian_effects::EffectProcessorGuiActionFeedback {
+                    action_serial,
+                    feedback,
+                    presence,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
     fn process(
         &mut self,
-        pixels: &mut Vec<[f32; 4]>,
+        frame: &mut mondrian_effects::EffectFloatFrame,
         params: &serde_json::Value,
         _frame_seed: i64,
         control: &mut EffectProcessorControl<'_>,
-    ) -> mondrian_core::Result<()> {
+    ) -> Result<
+        Option<mondrian_effects::EffectProcessorFeedback>,
+        mondrian_effects::EffectProcessorInvocationError,
+    > {
         control.check()?;
         let parameters: OpenFxGraphParameters =
             serde_json::from_value(params.clone()).map_err(|error| {
@@ -149,27 +219,97 @@ impl EffectFloatProcessorInstance for OpenFxProcessorInstance {
                     reason: error.to_string(),
                 }
             })?;
-        // This vector is the executor's atomic stage. Moving it into the host
-        // envelope introduces no extra input raster or definition-global state.
-        let frame = OpenFxFloatFrame {
-            width: self.width,
-            height: self.height,
-            pixels: std::mem::take(pixels),
-        };
+        // The executor already owns an atomic typed staging frame. Native IPC
+        // borrows it directly, with no extra input raster or alpha sidecar.
         let result = {
-            let mut checkpoint = || processor_checkpoint(control);
-            self.session.render(
+            let deadline = control.deadline();
+            // Capture the weak real-view lifetime before its current admission.
+            // If the view closes between samples, no untracked open-interface
+            // claim can survive a completed frame without an idle End owner.
+            let presence = control.native_gui_presence(self.session.processor_owner());
+            let gui = if presence.as_ref().is_some_and(|presence| {
+                presence.upgrade().is_some_and(|presence| presence.is_open())
+            }) {
+                control.native_gui_admission()
+            } else {
+                mondrian_effects::EffectProcessorGuiAdmission::CLOSED
+            };
+            self.gui_presence = if gui.is_open() { presence } else { None };
+            let mut owner_control =
+                |observation: crate::openfx_host::OpenFxRenderObservation<'_>| {
+                    use crate::openfx_host::OpenFxRenderObservation;
+                    use mondrian_effects::EffectProcessorQuestionState;
+                    match observation {
+                        OpenFxRenderObservation::Question(question) => {
+                            control.observe_question(question).map_err(|error| {
+                                if control.stop_reason().is_some() {
+                                    match control.stop_reason() {
+                                        Some(EffectProcessorStopReason::DeadlineExpired) => {
+                                            OpenFxHostError::DeadlineExceeded
+                                        }
+                                        _ => OpenFxHostError::Canceled,
+                                    }
+                                } else {
+                                    OpenFxHostError::Unavailable(error.to_string())
+                                }
+                            })
+                        }
+                        OpenFxRenderObservation::QuestionEnded(question) => {
+                            control.finish_question(question);
+                            Ok(EffectProcessorQuestionState::Unavailable)
+                        }
+                        OpenFxRenderObservation::Progress(progress) => {
+                            control.observe_progress(progress).map_err(|error| {
+                                if control.stop_reason().is_some() {
+                                    match control.stop_reason() {
+                                        Some(EffectProcessorStopReason::DeadlineExpired) => {
+                                            OpenFxHostError::DeadlineExceeded
+                                        }
+                                        _ => OpenFxHostError::Canceled,
+                                    }
+                                } else {
+                                    OpenFxHostError::Unavailable(error.to_string())
+                                }
+                            })?;
+                            processor_checkpoint(control)?;
+                            Ok(EffectProcessorQuestionState::Unavailable)
+                        }
+                        OpenFxRenderObservation::Checkpoint => {
+                            processor_checkpoint(control)?;
+                            Ok(EffectProcessorQuestionState::Unavailable)
+                        }
+                    }
+                };
+            self.session.render_observed(
                 &parameters.timing,
                 &parameters.values,
-                &frame,
-                &mut checkpoint,
+                frame,
+                deadline,
+                gui,
+                &mut owner_control,
             )
         };
-        *pixels = frame.pixels;
-        let output = result.map_err(|error| processor_host_error(error, control))?;
+        let output = match result {
+            Ok(output) => output,
+            Err(OpenFxHostError::UserBlocked(feedback)) => {
+                control.check()?;
+                return Err(
+                    mondrian_effects::EffectProcessorInvocationError::UserBlocked(feedback),
+                );
+            }
+            Err(OpenFxHostError::HostResourceRefused(refusal)) => {
+                // Parent storage was refused before native processing. Do not
+                // convert it to a plugin fault or make another retention choice.
+                control.check()?;
+                return Err(
+                    mondrian_effects::EffectProcessorInvocationError::HostResourceRefused(refusal),
+                );
+            }
+            Err(error) => return Err(processor_host_error(error, control).into()),
+        };
         control.check()?;
-        *pixels = output.pixels;
-        Ok(())
+        *frame = output;
+        Ok(self.session.take_feedback())
     }
 }
 
@@ -767,18 +907,23 @@ mod tests {
 
     #[test]
     fn native_factory_sizes_controlled_frames_before_loading_a_binary() {
-        let request = EffectFloatProcessorPreparation {
+        let request = mondrian_effects::EffectFloatProcessorSizing {
+            alpha_formats: mondrian_core::ColorFrameAlphaFormats::ALL,
             effect_id: mondrian_core::EffectId::new(),
             width: 2,
             height: 3,
         };
-        assert_eq!(
-            OpenFxFilterSession::required_frame_storage(request.width, request.height)
-                .expect("frame charge"),
-            3 * 2 * 3 * 16
-        );
-        assert!(OpenFxFilterSession::required_frame_storage(0, 1).is_err());
-        assert!(OpenFxFilterSession::required_frame_storage(u32::MAX, u32::MAX).is_err());
+        let storage = OpenFxFilterSession::storage(request.width, request.height)
+            .expect("complete processor storage");
+        let fixed = crate::openfx_host::native_thread_resident_bytes()
+            .expect("native owner charge")
+            + crate::openfx_host::native_auxiliary_resident_bytes()
+                .expect("bounded auxiliary owner")
+            + 3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>();
+        assert_eq!(storage.active_peak_bytes(), 3 * 2 * 3 * 16 + fixed);
+        assert_eq!(storage.retained_bytes(), 2 * 2 * 3 * 16 + fixed);
+        assert!(OpenFxFilterSession::storage(0, 1).is_err());
+        assert!(OpenFxFilterSession::storage(u32::MAX, u32::MAX).is_err());
     }
 
     #[test]

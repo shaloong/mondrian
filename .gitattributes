@@ -12,6 +12,9 @@ tests/validation/endurance-workloads/*.json -text
 
 # Vendored package provenance binds original source/license bytes on every OS.
 vendor/vst3-sdk/** -text
+vendor/clap-sys/** -text
+vendor/clack/** -text
+vendor/crossbeam-queue/** -text
 vendor/harfrust/** -text
 
 # The exact official SDK notice includes a final blank line; preserve its hash.

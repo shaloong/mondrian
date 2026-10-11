@@ -1,3 +1,5 @@
+mod state_entry;
+
 use crate::delay::FixedDelayLine;
 use crate::dsp;
 use crate::meter::AudioMeterBank;
@@ -9,7 +11,7 @@ use crate::schedule::{
 use crate::AudioRenderContract;
 use mondrian_core::{
     AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate,
-    SourceSamplingBoundary, TimelineTime, TimelineTimeError,
+    ExecutionCancellationToken, SourceSamplingBoundary, TimelineTime, TimelineTimeError,
 };
 use mondrian_timeline::audio::{
     AudioChannelSignalStage, AudioChannelStripOutputPort, AudioTransitionCurve,
@@ -182,6 +184,8 @@ impl RenderScratch {
 
 /// Exclusive mutable execution state for one Playback, Export, or Audition run.
 pub struct AudioRenderSession {
+    session_id: mondrian_core::AudioRenderSessionId,
+    pending_reprepare_ticket: Option<crate::AudioProcessorReprepareTicket>,
     plan: Arc<PreparedAudioPlan>,
     node_buffers: Vec<NodeBuffers>,
     scratch: RenderScratch,
@@ -195,6 +199,55 @@ pub struct AudioRenderSession {
     meter_block_serial: u64,
     continuity: SessionContinuity,
     capacity: AudioRenderCapacity,
+}
+
+/// Private preparation of actual Session buffers, without processor creation.
+/// No execution or installed native permission is available from this storage.
+/// The normal constructor consumes it through the sole factory-population step;
+/// future retained transfers require their own exact whole-root admission.
+pub(crate) struct PreparedAudioSessionStorage {
+    session: AudioRenderSession,
+}
+
+impl PreparedAudioSessionStorage {
+    /// The canonical allocation envelope, derived by the same constructor body.
+    pub(crate) fn capacity(&self) -> AudioRenderCapacity {
+        self.session.capacity
+    }
+
+    /// Create actual exclusive processors only after all Session storage checks
+    /// completed. A failed population drops this unpublished preparation.
+    pub(crate) fn populate(mut self) -> Result<AudioRenderSession, AudioExecutionError> {
+        let expected_occurrences = self.capacity().processor_occurrences;
+        self.session.processor_host.populate_instances(&self.session.plan.schedule)?;
+        if self.session.processor_host.occurrence_count() != expected_occurrences {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
+        Ok(self.session)
+    }
+}
+
+/// Prepared immutable owners for one local same-contract parameter handoff.
+/// The current Session, grant, installed claim and all native bindings still
+/// require independent admission before the sole bounded ownership swap.
+pub(crate) struct PreparedNativeAudioParameterPlan {
+    current: crate::AudioSessionCursorIdentity,
+    next_plan: Arc<PreparedAudioPlan>,
+    next_parameter_events: crate::processor_parameters::ProcessorParameterEventScratch,
+}
+
+impl PreparedNativeAudioParameterPlan {
+    pub(crate) fn next_plan(&self) -> &Arc<PreparedAudioPlan> {
+        &self.next_plan
+    }
+    pub(crate) fn resource_buffers(
+        &self,
+    ) -> (
+        &Vec<crate::AudioParameterEvent>,
+        &Vec<std::ops::Range<usize>>,
+    ) {
+        self.next_parameter_events.resource_buffers()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -214,6 +267,14 @@ enum SessionContinuity {
 impl AudioRenderSession {
     /// Allocate all scratch storage before realtime execution begins.
     pub fn new(plan: Arc<PreparedAudioPlan>) -> Result<Self, AudioExecutionError> {
+        Self::allocate_storage(plan)?.populate()
+    }
+
+    /// Allocate actual buffers and validate their canonical PDC/scratch envelope
+    /// without creating, entering, replacing or observing a native processor.
+    pub(crate) fn allocate_storage(
+        plan: Arc<PreparedAudioPlan>,
+    ) -> Result<PreparedAudioSessionStorage, AudioExecutionError> {
         let contract = plan.contract();
         let samples = contract
             .max_block_frames
@@ -293,7 +354,7 @@ impl AudioRenderSession {
         {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
-        let processor_host = PreparedProcessorHost::new(&plan.schedule, contract)?;
+        let processor_host = PreparedProcessorHost::allocate_storage(&plan.schedule, contract)?;
         let meter_bank = AudioMeterBank::new(
             contract.channel_layout,
             plan.schedule.nodes.iter().map(|node| match node.origin {
@@ -331,7 +392,7 @@ impl AudioRenderSession {
             sidechain_bindings: plan.schedule.sidechain_bindings.len(),
             compensation_delay_line_count,
             compensation_delay_samples,
-            processor_occurrences: processor_host.occurrence_count(),
+            processor_occurrences: plan.schedule.processors.len(),
             maximum_processor_parameter_lanes: processor_host.maximum_parameter_lanes(),
             parameter_event_capacity: processor_host.parameter_event_capacity(),
             public_output_lookahead_frames: plan.public_output_lookahead_frames(),
@@ -339,20 +400,24 @@ impl AudioRenderSession {
             meter_channel_state_count: meter_bank.channel_state_count(),
             meter_target_count: meter_bank.target_count(),
         };
-        Ok(Self {
-            plan,
-            node_buffers,
-            scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
-            contribution_delay_lines,
-            route_delay_lines,
-            sidechain_delay_lines,
-            processor_delay_lines,
-            sidechain_source_buffers,
-            processor_host,
-            meter_bank,
-            meter_block_serial: 0,
-            continuity: SessionContinuity::Unentered,
-            capacity,
+        Ok(PreparedAudioSessionStorage {
+            session: Self {
+                plan,
+                node_buffers,
+                scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
+                contribution_delay_lines,
+                route_delay_lines,
+                sidechain_delay_lines,
+                processor_delay_lines,
+                sidechain_source_buffers,
+                processor_host,
+                meter_bank,
+                meter_block_serial: 0,
+                session_id: mondrian_core::AudioRenderSessionId::new(),
+                pending_reprepare_ticket: None,
+                continuity: SessionContinuity::Unentered,
+                capacity,
+            },
         })
     }
 
@@ -396,6 +461,15 @@ impl AudioRenderSession {
 
     /// Reset mutable execution history and enter one fresh continuity epoch.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
+        self.processor_host.set_native_entry_context(None, self.native_owner_identity());
+        self.preflight_native_control()?;
+        self.enter_state_admitted(entry, None)
+    }
+
+    pub(crate) fn validate_state_entry(
+        &self,
+        entry: AudioStateEntry,
+    ) -> Result<(), AudioExecutionError> {
         let previous_epoch = match self.continuity {
             SessionContinuity::Unentered => None,
             SessionContinuity::Active { epoch, .. } | SessionContinuity::Poisoned { epoch } => {
@@ -405,9 +479,19 @@ impl AudioRenderSession {
         if previous_epoch == Some(entry.epoch) {
             return Err(AudioExecutionError::ReusedContinuityEpoch(entry.epoch));
         }
+        Ok(())
+    }
+
+    pub(crate) fn enter_state_admitted(
+        &mut self,
+        entry: AudioStateEntry,
+        cancellation: Option<&ExecutionCancellationToken>,
+    ) -> Result<(), AudioExecutionError> {
+        self.validate_state_entry(entry)?;
         // State entry can reset several delay/processor instances before one
         // later instance fails. Consume and poison the new epoch first so a
         // partially reset Session can never resume either old or new history.
+        self.processor_host.revoke_native_bindings_for_entry();
         self.continuity = SessionContinuity::Poisoned { epoch: entry.epoch };
         for delay in self
             .contribution_delay_lines
@@ -418,7 +502,8 @@ impl AudioRenderSession {
         {
             delay.reset();
         }
-        self.processor_host.enter_state(&self.plan.schedule.processors, entry)?;
+        self.processor_host
+            .enter_state(&self.plan.schedule.processors, entry, cancellation)?;
         self.continuity = SessionContinuity::Active {
             epoch: entry.epoch,
             next_public_sample: entry.start_sample,
@@ -426,6 +511,335 @@ impl AudioRenderSession {
             alignment_primed: self.public_output_lookahead_frames() == 0,
         };
         Ok(())
+    }
+
+    /// Exact existing Plan/Session identity; not native or installation authority.
+    pub(crate) fn set_native_entry_context(
+        &mut self,
+        context: Option<crate::native_runtime_owner::NativeStateEntryBindingContext>,
+    ) {
+        let local = self.native_owner_identity();
+        self.processor_host.set_native_entry_context(context, local);
+    }
+
+    pub(crate) fn revoke_native_bindings_for_entry(&mut self) {
+        self.processor_host.revoke_native_bindings_for_entry();
+    }
+
+    pub(crate) fn bind_native_observation_owners(
+        &mut self,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.processor_host.bind_native_observation_owners(cancellation)
+    }
+
+    pub(crate) fn native_observation_sources(&self) -> usize {
+        self.processor_host.native_observation_sources()
+    }
+
+    pub(crate) fn poll_native_observation_at(
+        &mut self,
+        index: usize,
+        root: crate::AudioSessionCursorIdentity,
+        sequence: mondrian_core::SequenceId,
+        installed_serial: Option<std::num::NonZeroU64>,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<Option<mondrian_core::NativeAudioObservationBatch>, crate::AudioProcessorHostError>
+    {
+        let local = self.native_owner_identity();
+        self.processor_host.poll_native_observation_at(
+            index,
+            root,
+            local,
+            sequence,
+            installed_serial,
+            cancellation,
+        )
+    }
+
+    pub(crate) fn validate_native_author_source_closed(
+        &mut self,
+        root: crate::AudioSessionCursorIdentity,
+        installed_serial: std::num::NonZeroU64,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        let local = self.native_owner_identity();
+        self.processor_host.validate_native_author_source_closed(
+            root,
+            local,
+            installed_serial,
+            cancellation,
+        )
+    }
+
+    pub(crate) fn prepare_native_author_parameter_plan(
+        &self,
+        next_program: Arc<crate::CompiledAudioProgram>,
+        locator: mondrian_core::NativeAudioEditorLocator,
+    ) -> Result<PreparedNativeAudioParameterPlan, crate::AudioCompileError> {
+        let next_plan =
+            Arc::new(self.plan.prepare_native_author_parameters(next_program, locator)?);
+        let maximum_lanes = next_plan
+            .schedule
+            .processors
+            .iter()
+            .map(|processor| processor.parameter_ids.len())
+            .max()
+            .unwrap_or(0);
+        let events = next_plan.schedule.summary.maximum_parameter_events_per_block;
+        Ok(PreparedNativeAudioParameterPlan {
+            current: self.native_owner_identity(),
+            next_plan,
+            next_parameter_events: crate::processor_parameters::ProcessorParameterEventScratch::new(
+                maximum_lanes,
+                events,
+            ),
+        })
+    }
+
+    pub(crate) fn retain_native_author_proposal(
+        &self,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        root: crate::AudioSessionCursorIdentity,
+        serial: std::num::NonZeroU64,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.processor_host.retains_native_author_proposal(
+            proposal,
+            root,
+            self.native_owner_identity(),
+            serial,
+        )
+    }
+
+    pub(crate) fn allocate_parameter_native_bindings(
+        &self,
+    ) -> crate::processor_host::native_author::PreparedParameterNativeBindings {
+        self.processor_host
+            .allocate_parameter_native_bindings(self.native_owner_identity())
+    }
+
+    pub(crate) fn prepare_parameter_native_bindings(
+        &mut self,
+        prepared: &mut crate::processor_host::native_author::PreparedParameterNativeBindings,
+        context: crate::processor_host::native_author::ParameterNativeBindingContext<'_>,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        if context.current_local != self.native_owner_identity() {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
+        }
+        self.processor_host.prepare_parameter_native_bindings(prepared, context)
+    }
+
+    pub(crate) fn validate_parameter_native_bindings(
+        &self,
+        prepared: &crate::processor_host::native_author::PreparedParameterNativeBindings,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.processor_host
+            .validate_parameter_native_bindings(prepared, self.native_owner_identity())
+    }
+
+    pub(crate) fn publish_parameter_native_bindings(
+        &mut self,
+        prepared: &crate::processor_host::native_author::PreparedParameterNativeBindings,
+        serial: std::num::NonZeroU64,
+    ) {
+        self.processor_host.publish_parameter_native_bindings(prepared, serial)
+    }
+
+    pub(crate) fn acknowledge_parameter_native_author(
+        &mut self,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        serial: std::num::NonZeroU64,
+    ) -> Result<mondrian_core::NativeAudioEditorTarget, crate::NativeAudioAuthorAdmissionError>
+    {
+        self.processor_host.acknowledge_parameter_native_author(proposal, serial)
+    }
+
+    pub(crate) fn validate_parameter_plan_swap(
+        &self,
+        next: &PreparedNativeAudioParameterPlan,
+    ) -> Result<(), crate::AudioExecutionError> {
+        if self.native_owner_identity() != next.current
+            || self.plan.contract() != next.next_plan.contract()
+            || matches!(self.continuity, SessionContinuity::Poisoned { .. })
+            || self.pending_reprepare_ticket.is_some()
+        {
+            return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn swap_parameter_plan(&mut self, prepared: &mut PreparedNativeAudioParameterPlan) {
+        // The exclusive Runtime already validated all tree owners and capacity.
+        // Retain old immutable and scratch owners in this prepared slot, so no
+        // destructor, allocation or native call runs inside the final guards.
+        let maximum_lanes = prepared
+            .next_plan
+            .schedule
+            .processors
+            .iter()
+            .map(|processor| processor.parameter_ids.len())
+            .max()
+            .unwrap_or(0);
+        let event_capacity = prepared.next_plan.schedule.summary.maximum_parameter_events_per_block;
+        self.capacity.maximum_processor_parameter_lanes = maximum_lanes;
+        self.capacity.parameter_event_capacity = event_capacity;
+        std::mem::swap(&mut self.plan, &mut prepared.next_plan);
+        self.processor_host.swap_parameter_events(
+            &mut prepared.next_parameter_events,
+            maximum_lanes,
+            event_capacity,
+        );
+    }
+
+    pub(crate) fn shared_resource_plan(&self) -> &Arc<PreparedAudioPlan> {
+        &self.plan
+    }
+
+    pub(crate) fn resource_plan(&self) -> &PreparedAudioPlan {
+        self.plan.as_ref()
+    }
+
+    pub(crate) fn native_owner_identity(&self) -> crate::AudioSessionCursorIdentity {
+        crate::AudioSessionCursorIdentity {
+            prepared_plan_id: self.plan.preparation_id(),
+            session_id: self.session_id,
+        }
+    }
+
+    pub(crate) fn revoke_native_bindings(&mut self) {
+        self.processor_host.revoke_native_bindings();
+    }
+
+    pub(crate) fn prepare_native_bindings(
+        &mut self,
+        root: crate::AudioSessionCursorIdentity,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        if matches!(self.continuity, SessionContinuity::Poisoned { .. }) {
+            return Err(crate::AudioNativeOwnerError::ContinuityUnavailable);
+        }
+        let local = self.native_owner_identity();
+        self.processor_host.prepare_native_bindings(root, local, cancellation)
+    }
+
+    pub(crate) fn publish_native_bindings(&mut self, installed_root_serial: std::num::NonZeroU64) {
+        self.processor_host.publish_native_bindings(installed_root_serial);
+    }
+
+    pub(crate) fn validate_prepared_native_bindings(
+        &self,
+        root: crate::AudioSessionCursorIdentity,
+    ) -> Result<usize, crate::AudioNativeOwnerError> {
+        if matches!(self.continuity, SessionContinuity::Poisoned { .. }) {
+            return Err(crate::AudioNativeOwnerError::ContinuityUnavailable);
+        }
+        self.processor_host
+            .validate_prepared_native_bindings(root, self.native_owner_identity())
+    }
+
+    pub(crate) fn native_owner_lease(
+        &self,
+        address: crate::AudioNativeProcessorAddress,
+    ) -> Option<crate::AudioNativeProcessorOwnerLease> {
+        if matches!(self.continuity, SessionContinuity::Poisoned { .. }) {
+            return None;
+        }
+        self.processor_host.native_owner_lease(address)
+    }
+
+    pub(crate) fn resolve_native_editor_target(
+        &self,
+        locator: mondrian_core::NativeAudioEditorLocator,
+        root: crate::AudioSessionCursorIdentity,
+        installed_serial: std::num::NonZeroU64,
+    ) -> Result<Option<mondrian_core::NativeAudioEditorTarget>, crate::AudioNativeOwnerError> {
+        self.processor_host.resolve_native_editor_target(
+            locator,
+            root,
+            self.native_owner_identity(),
+            installed_serial,
+        )
+    }
+
+    pub(crate) fn validate_native_owner(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.processor_host.validate_native_owner(lease)
+    }
+
+    pub(crate) fn retained_native_close_lease(
+        &self,
+        previous: mondrian_core::NativeAudioEditorTarget,
+        root: crate::AudioSessionCursorIdentity,
+        serial: std::num::NonZeroU64,
+    ) -> Option<crate::AudioNativeProcessorOwnerLease> {
+        self.processor_host.retained_native_close_lease(
+            previous,
+            root,
+            self.native_owner_identity(),
+            serial,
+        )
+    }
+
+    pub(crate) fn control_native_editor(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        title: Option<mondrian_core::NativeAudioEditorTitle>,
+    ) -> Result<crate::NativeAudioEditorOutcome, crate::AudioNativeOwnerError> {
+        if self.native_owner_lease(lease.address()) != Some(lease) {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        self.processor_host.control_native_editor(lease, title)
+    }
+
+    /// Visit actual generated cursor facts without DSP, allocation or state changes.
+    ///
+    /// Public output, lookahead execution and local processor signal coordinates
+    /// remain distinct. These facts are not a DSP checkpoint or resume capability.
+    pub fn visit_continuity_evidence(
+        &self,
+        visitor: &mut impl crate::AudioContinuityEvidenceVisitor,
+    ) -> Result<(), AudioExecutionError> {
+        let sample_rate = AudioSampleRate::new(self.plan.contract().sample_rate)?;
+        let identity = crate::AudioSessionCursorIdentity {
+            prepared_plan_id: self.plan.preparation_id(),
+            session_id: self.session_id,
+        };
+        let state = if !self.requires_state_entry() {
+            crate::AudioSessionCursorState::Stateless
+        } else {
+            match self.continuity {
+                SessionContinuity::Unentered => crate::AudioSessionCursorState::Unentered,
+                SessionContinuity::Poisoned { epoch } => {
+                    crate::AudioSessionCursorState::Poisoned { epoch }
+                }
+                SessionContinuity::Active {
+                    epoch,
+                    next_public_sample,
+                    next_execution_sample,
+                    alignment_primed,
+                } => crate::AudioSessionCursorState::Active {
+                    epoch,
+                    next_public_sample: mondrian_core::AudioSamplePosition::new(
+                        next_public_sample,
+                        sample_rate,
+                    ),
+                    next_execution_sample: mondrian_core::AudioSamplePosition::new(
+                        next_execution_sample,
+                        sample_rate,
+                    ),
+                    alignment_primed,
+                },
+            }
+        };
+        visitor.session(crate::AudioSessionCursorEvidence {
+            identity,
+            sample_rate,
+            public_output_lookahead_frames: self.public_output_lookahead_frames(),
+            state,
+        })?;
+        self.processor_host.visit_continuity_evidence(identity, sample_rate, visitor)
     }
 
     /// Return the fixed allocation envelope owned by this Session.
@@ -456,6 +870,48 @@ impl AudioRenderSession {
         source: &mut impl AudioPcmSource,
         request: AudioRenderRequest,
         destination: &mut [f32],
+    ) -> Result<(), AudioExecutionError> {
+        self.preflight_native_control()?;
+        self.render_into_admitted(source, request, destination, None)
+    }
+
+    pub(crate) fn preflight_native_control(&mut self) -> Result<(), AudioExecutionError> {
+        // The exact old Session remains blocked after child request flags are
+        // consumed. Only real replacement installs a new schedule/PDC owner.
+        if let Some(ticket) = self.pending_reprepare_ticket {
+            return Err(AudioExecutionError::ReprepareRequired(ticket));
+        }
+        if let Some((occurrence, request)) = self.processor_host.preflight_native_control()? {
+            let continuity_epoch = match self.continuity {
+                SessionContinuity::Unentered => None,
+                SessionContinuity::Active { epoch, .. } | SessionContinuity::Poisoned { epoch } => {
+                    Some(epoch)
+                }
+            };
+            let ticket = crate::AudioProcessorReprepareTicket {
+                prepared_plan_id: self.plan.preparation_id(),
+                session_id: self.session_id,
+                occurrence,
+                continuity_epoch,
+                request,
+            };
+            self.pending_reprepare_ticket = Some(ticket);
+            return Err(AudioExecutionError::ReprepareRequired(ticket));
+        }
+        Ok(())
+    }
+
+    /// Retained exact local ticket; other native pending markers remain unconsumed.
+    pub fn pending_reprepare_ticket(&self) -> Option<crate::AudioProcessorReprepareTicket> {
+        self.pending_reprepare_ticket
+    }
+
+    pub(crate) fn render_into_admitted(
+        &mut self,
+        source: &mut impl AudioPcmSource,
+        request: AudioRenderRequest,
+        destination: &mut [f32],
+        cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
         let contract = self.plan.contract();
         if request.frames > contract.max_block_frames {
@@ -520,6 +976,7 @@ impl AudioRenderSession {
                     source,
                     AudioRenderRequest { start_sample: execution_start_sample, frames },
                     None,
+                    cancellation,
                 )?;
                 execution_start_sample = checked_advance_sample(execution_start_sample, frames)?;
                 remaining -= frames;
@@ -539,6 +996,7 @@ impl AudioRenderSession {
                 frames: request.frames,
             },
             Some(request.start_sample),
+            cancellation,
         )?;
         let output_scratch = self
             .plan
@@ -571,6 +1029,7 @@ impl AudioRenderSession {
         source: &mut impl AudioPcmSource,
         request: AudioRenderRequest,
         meter_start_sample: Option<i64>,
+        cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
         let contract = self.plan.contract();
         if request.frames > contract.max_block_frames {
@@ -605,6 +1064,7 @@ impl AudioRenderSession {
                         &self.sidechain_source_buffers,
                         &mut self.sidechain_delay_lines,
                         &mut self.processor_delay_lines,
+                        cancellation,
                     )?;
                 } else {
                     for route_index in node.incoming.clone() {
@@ -640,6 +1100,7 @@ impl AudioRenderSession {
                 &self.sidechain_source_buffers,
                 &mut self.sidechain_delay_lines,
                 &mut self.processor_delay_lines,
+                cancellation,
             )?;
             for source_slot in &node.sidechain_source_buffers {
                 let source = schedule
@@ -670,7 +1131,11 @@ impl AudioRenderSession {
     }
 }
 
-fn checked_advance_sample(start_sample: i64, frames: usize) -> Result<i64, AudioExecutionError> {
+/// Validate the checked end of one signed public sample window.
+pub(crate) fn checked_advance_sample(
+    start_sample: i64,
+    frames: usize,
+) -> Result<i64, AudioExecutionError> {
     start_sample
         .checked_add(i64::try_from(frames).map_err(|_| AudioExecutionError::BufferTooLarge)?)
         .ok_or(AudioExecutionError::BufferTooLarge)
@@ -714,6 +1179,7 @@ fn render_track_contributions(
     sidechain_source_buffers: &[Vec<f32>],
     sidechain_delay_lines: &mut [FixedDelayLine],
     processor_delay_lines: &mut [FixedDelayLine],
+    cancellation: Option<&ExecutionCancellationToken>,
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
     let samples = request
@@ -835,6 +1301,7 @@ fn render_track_contributions(
             sidechain_delay_lines,
             processor_delay_lines,
             execution_frames.start,
+            cancellation,
         )?;
 
         scratch.contribution_sample_gains[..execution_samples].fill(0.0);
@@ -1128,6 +1595,7 @@ fn process_strip(
     sidechain_source_buffers: &[Vec<f32>],
     sidechain_delay_lines: &mut [FixedDelayLine],
     processor_delay_lines: &mut [FixedDelayLine],
+    cancellation: Option<&ExecutionCancellationToken>,
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
     let samples = request
@@ -1156,6 +1624,7 @@ fn process_strip(
             sidechain_delay_lines,
             processor_delay_lines,
             0,
+            cancellation,
         )?;
 
         return Ok(());
@@ -1199,6 +1668,7 @@ fn process_strip(
         sidechain_delay_lines,
         processor_delay_lines,
         0,
+        cancellation,
     )?;
     if node.muted {
         buffers.post_mute[..samples].fill(0.0);
@@ -1361,6 +1831,21 @@ pub enum AudioExecutionError {
         expected_start_sample: i64,
         actual_start_sample: i64,
     },
+    /// Root preflight deferred before any source, DSP, meter or caller-PCM mutation.
+    #[error("{0}")]
+    ReprepareRequired(crate::AudioProcessorReprepareTicket),
+    /// Actual native callbacks await canonical same-live Plan installation.
+    /// Deferred before every source/DSP/meter/caller-PCM mutation; the current
+    /// Session, sample cursor and continuity epoch remain exact and unchanged.
+    #[error("native author source is pending for {0:?}")]
+    NativeAuthorPending(Box<crate::NativeAudioAuthorExecutionHold>),
+    /// The exact installed native view needs host-frame cleanup before DSP.
+    /// No source, PCM, continuity, configuration or author state has advanced.
+    #[error("native editor cleanup is pending for {0:?}")]
+    EditorCleanupRequired(Box<mondrian_core::NativeAudioEditorTarget>),
+    /// Cold native Enter/Bind lost the actual renderer slot or cancellation authority.
+    #[error(transparent)]
+    NativeOwner(Box<crate::AudioNativeOwnerError>),
     /// An execution failure may have partially advanced mutable state.
     #[error("audio continuity epoch {0:?} is poisoned and requires a fresh state entry")]
     ContinuityPoisoned(AudioContinuityEpoch),
@@ -1386,6 +1871,12 @@ pub enum AudioExecutionError {
     /// Automation authoring/evaluation failed.
     #[error("invalid audio automation: {0}")]
     Automation(String),
+}
+
+impl From<crate::AudioNativeOwnerError> for AudioExecutionError {
+    fn from(error: crate::AudioNativeOwnerError) -> Self {
+        Self::NativeOwner(Box::new(error))
+    }
 }
 
 impl From<mondrian_core::AutomationError> for AudioExecutionError {

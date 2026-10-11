@@ -152,7 +152,9 @@ fn edit_channel_strip(
 fn edit_rack(rack: &mut AudioProcessorRack, edit: SequenceTimeEdit) -> mondrian_core::Result<()> {
     for processor in &mut rack.processors {
         for parameter in processor.parameters.values_mut() {
-            edit_exact_curve(&mut parameter.automation, edit)?;
+            if let Some(curve) = &mut parameter.automation {
+                edit_exact_curve(curve, edit)?;
+            }
         }
     }
     Ok(())

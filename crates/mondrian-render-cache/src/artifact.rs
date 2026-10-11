@@ -1,10 +1,12 @@
-use crate::{TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity};
-use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
+use crate::{TimelineRenderCacheFormat, TimelineRenderCacheIdentity};
+use mondrian_core::{
+    ColorFrameAlpha, ColorFrameAlphaFormats, WorkingColorSpace, WorkingRgbaF32Frame,
+};
 use sha2::{Digest, Sha256};
 use std::io::{Cursor, Read};
 
-const MAGIC: &[u8; 8] = b"MNDRC001";
-const SCHEMA_VERSION: u16 = 1;
+const MAGIC: &[u8; 8] = b"MNDRC002";
+const SCHEMA_VERSION: u16 = 2;
 const HEADER_BYTES: usize = 101;
 const FLOATS_PER_PIXEL: u64 = 4;
 const BYTES_PER_FLOAT: u64 = 4;
@@ -43,6 +45,22 @@ impl TimelineRenderCacheFrame {
                 actual_pixels,
             });
         }
+        if !identity.alpha_admission().contains(frame.alpha) {
+            return Err(TimelineRenderCacheFrameValidationError::IdentityAlpha {
+                admitted: identity.alpha_admission(),
+                actual: frame.alpha,
+            });
+        }
+        for (index, sample) in frame.data.iter().enumerate() {
+            if !sample.iter().all(|channel| channel.is_finite())
+                || !frame.alpha.admits_alpha(sample[3])
+            {
+                return Err(TimelineRenderCacheFrameValidationError::Sample {
+                    index,
+                    alpha: frame.alpha,
+                });
+            }
+        }
         Ok(Self { identity, frame })
     }
 
@@ -65,6 +83,22 @@ impl TimelineRenderCacheFrame {
 /// Invalid working-frame shape supplied by a cache producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TimelineRenderCacheFrameValidationError {
+    /// The complete frame is outside the signature's exact alpha admission.
+    #[error("Timeline render-cache alpha {actual:?} is not admitted by {admitted:?}")]
+    IdentityAlpha {
+        /// Complete association admission bound into the immutable identity.
+        admitted: ColorFrameAlphaFormats,
+        /// Actual canonical image representation.
+        actual: ColorFrameAlpha,
+    },
+    /// A physical sample violates the finite channel or numeric alpha domain.
+    #[error("Timeline render-cache sample {index} violates {alpha:?}")]
+    Sample {
+        /// Zero-based row-major pixel.
+        index: usize,
+        /// Exact frame declaration contradicted by the sample.
+        alpha: ColorFrameAlpha,
+    },
     /// Physical payload extent differs from the identity envelope.
     #[error(
         "Timeline render-cache frame extent {actual_width}x{actual_height} differs from identity {expected_width}x{expected_height}"
@@ -147,7 +181,13 @@ pub(crate) fn encode_artifact(
             raw.extend_from_slice(&component.to_bits().to_le_bytes());
         }
     }
-    let payload_checksum: [u8; 32] = Sha256::digest(&raw).into();
+    let payload_checksum = artifact_checksum(
+        frame.alpha,
+        frame.width,
+        frame.height,
+        frame.color_space,
+        &raw,
+    );
     let compressed = zstd::stream::encode_all(Cursor::new(raw), 1)?;
     let compressed_len = u64::try_from(compressed.len())
         .map_err(|_| TimelineRenderCacheArtifactError::ExtentOverflow)?;
@@ -160,7 +200,7 @@ pub(crate) fn encode_artifact(
     bytes.extend_from_slice(MAGIC);
     bytes.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
     bytes.push(TimelineRenderCacheFormat::LosslessRgba32FloatZstd.code());
-    bytes.push(TimelineRenderCacheAlpha::StraightCoverage.code());
+    bytes.push(frame.alpha.identity_code());
     bytes.push(working_color_space_code(frame.color_space));
     bytes.extend_from_slice(&frame.width.to_le_bytes());
     bytes.extend_from_slice(&frame.height.to_le_bytes());
@@ -203,11 +243,14 @@ pub(crate) fn decode_artifact(
     {
         return Err(TimelineRenderCacheArtifactError::InvalidHeader("format"));
     }
-    let alpha = read_u8(&mut cursor)?;
-    if TimelineRenderCacheAlpha::from_code(alpha)
-        != Some(TimelineRenderCacheAlpha::StraightCoverage)
-    {
-        return Err(TimelineRenderCacheArtifactError::InvalidHeader("alpha"));
+    let alpha = ColorFrameAlpha::from_identity_code(read_u8(&mut cursor)?)
+        .ok_or(TimelineRenderCacheArtifactError::InvalidHeader("alpha"))?;
+    if !requested.alpha_admission().contains(alpha) {
+        return Err(TimelineRenderCacheFrameValidationError::IdentityAlpha {
+            admitted: requested.alpha_admission(),
+            actual: alpha,
+        }
+        .into());
     }
     let stored_working_color_space = read_u8(&mut cursor)?;
     if stored_working_color_space != working_color_space_code(color_space) {
@@ -252,7 +295,7 @@ pub(crate) fn decode_artifact(
             actual: actual_decoded_len,
         });
     }
-    let actual_checksum: [u8; 32] = Sha256::digest(&raw).into();
+    let actual_checksum = artifact_checksum(alpha, width, height, color_space, &raw);
     if actual_checksum != expected_checksum {
         return Err(TimelineRenderCacheArtifactError::ChecksumMismatch);
     }
@@ -275,9 +318,25 @@ pub(crate) fn decode_artifact(
     }
     TimelineRenderCacheFrame::new(
         requested,
-        WorkingRgbaF32Frame { width, height, data, color_space },
+        WorkingRgbaF32Frame { alpha, width, height, data, color_space },
     )
     .map_err(Into::into)
+}
+
+fn artifact_checksum(
+    alpha: ColorFrameAlpha,
+    width: u32,
+    height: u32,
+    color_space: WorkingColorSpace,
+    raw: &[u8],
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"mondrian.render-cache.working-frame.v2");
+    hash.update([alpha.identity_code(), working_color_space_code(color_space)]);
+    hash.update(width.to_le_bytes());
+    hash.update(height.to_le_bytes());
+    hash.update(raw);
+    hash.finalize().into()
 }
 
 fn decoded_frame_bytes(width: u32, height: u32) -> Result<u64, TimelineRenderCacheArtifactError> {
@@ -336,9 +395,10 @@ mod tests {
         TimelineRenderCacheFrame::new(
             TimelineRenderCacheIdentity::from_digest([7; 32]),
             WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: 2,
                 height: 1,
-                data: vec![[1.25, -0.5, 8.0, 1.0], [f32::NAN, 0.0, -1.0, 0.25]],
+                data: vec![[1.25, -0.5, 8.0, 1.0], [-0.0, 0.0, -1.0, 0.25]],
                 color_space: WorkingColorSpace::LinearRec709,
             },
         )
@@ -417,12 +477,13 @@ mod tests {
             2,
             1,
             TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-            TimelineRenderCacheAlpha::StraightCoverage,
+            ColorFrameAlphaFormats::only(ColorFrameAlpha::StraightCoverage),
         );
         assert!(matches!(
             TimelineRenderCacheFrame::new(
                 identity,
                 WorkingRgbaF32Frame {
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: 1,
                     height: 2,
                     data: vec![[0.0; 4]; 2],
@@ -430,6 +491,140 @@ mod tests {
                 },
             ),
             Err(TimelineRenderCacheFrameValidationError::IdentityExtent { .. })
+        ));
+    }
+    #[test]
+    fn current_artifact_retains_every_actual_finite_association_and_float_bit() {
+        use mondrian_core::ColorFrameAlpha;
+        for (alpha, pixels) in [
+            (
+                ColorFrameAlpha::StraightFloat,
+                vec![[7.0, -3.0, 11.0, -0.5], [0.25, -0.5, 8.0, 1.5]],
+            ),
+            (
+                ColorFrameAlpha::PremultipliedFloat,
+                vec![
+                    [7.0, -3.0, 11.0, -0.0],
+                    [f32::MAX, -f32::MAX, f32::from_bits(1), -0.5],
+                ],
+            ),
+            (
+                ColorFrameAlpha::PremultipliedCoverage,
+                vec![[7.0, -3.0, 11.0, 0.0], [0.25, -0.5, 8.0, f32::from_bits(1)]],
+            ),
+            (
+                ColorFrameAlpha::StraightCoverage,
+                vec![[7.0, -3.0, 11.0, 0.0], [0.25, -0.5, 8.0, f32::MIN_POSITIVE]],
+            ),
+            (
+                ColorFrameAlpha::Opaque,
+                vec![[7.0, -3.0, 11.0, 1.0], [0.25, -0.5, 8.0, 1.0]],
+            ),
+        ] {
+            let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+                mondrian_core::ResolvedVisualFrameIdentity::from_materialization(
+                    mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                        b"finite-alpha-artifact",
+                    ),
+                ),
+                2,
+                1,
+                TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+                ColorFrameAlphaFormats::ALL,
+            );
+            let frame = TimelineRenderCacheFrame::new(
+                identity,
+                WorkingRgbaF32Frame {
+                    alpha,
+                    width: 2,
+                    height: 1,
+                    color_space: WorkingColorSpace::LinearRec709,
+                    data: pixels.clone(),
+                },
+            )
+            .expect("valid typed working frame");
+            let encoded = encode_artifact(&frame, 1_048_576).expect("publish current artifact");
+            let decoded = decode_artifact(
+                identity,
+                WorkingColorSpace::LinearRec709,
+                &encoded,
+                1_048_576,
+            )
+            .expect("read current artifact");
+            assert_eq!(decoded.frame().alpha, alpha);
+            for (actual, expected) in decoded.frame().data.iter().zip(pixels) {
+                assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+            }
+            let mut changed_association = encoded;
+            changed_association[11] = if alpha == ColorFrameAlpha::StraightFloat {
+                ColorFrameAlpha::PremultipliedFloat.identity_code()
+            } else {
+                ColorFrameAlpha::StraightFloat.identity_code()
+            };
+            assert!(
+                matches!(
+                    decode_artifact(
+                        identity,
+                        WorkingColorSpace::LinearRec709,
+                        &changed_association,
+                        1_048_576
+                    ),
+                    Err(TimelineRenderCacheArtifactError::ChecksumMismatch)
+                ),
+                "actual association must be checksum-bound even when both tags are admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_publication_refuses_false_numeric_and_association_declarations() {
+        let identity = TimelineRenderCacheIdentity::from_digest([43; 32]);
+        for (alpha, sample) in [
+            (ColorFrameAlpha::Opaque, [1.0, 2.0, 3.0, 0.5]),
+            (ColorFrameAlpha::StraightCoverage, [1.0, 2.0, 3.0, -0.5]),
+            (ColorFrameAlpha::PremultipliedCoverage, [1.0, 2.0, 3.0, 1.5]),
+            (
+                ColorFrameAlpha::PremultipliedFloat,
+                [f32::NAN, 2.0, 3.0, 0.0],
+            ),
+        ] {
+            assert!(matches!(
+                TimelineRenderCacheFrame::new(
+                    identity,
+                    WorkingRgbaF32Frame {
+                        width: 1,
+                        height: 1,
+                        alpha,
+                        data: vec![sample],
+                        color_space: WorkingColorSpace::LinearRec709
+                    }
+                ),
+                Err(TimelineRenderCacheFrameValidationError::Sample { .. })
+            ));
+        }
+        let materialization =
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                b"exact-alpha-admission",
+            );
+        let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+            mondrian_core::ResolvedVisualFrameIdentity::from_materialization(materialization),
+            1,
+            1,
+            TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+            ColorFrameAlphaFormats::only(ColorFrameAlpha::StraightCoverage),
+        );
+        assert!(matches!(
+            TimelineRenderCacheFrame::new(
+                identity,
+                WorkingRgbaF32Frame {
+                    width: 1,
+                    height: 1,
+                    alpha: ColorFrameAlpha::PremultipliedFloat,
+                    data: vec![[7.0, -3.0, 11.0, 0.0]],
+                    color_space: WorkingColorSpace::LinearRec709
+                }
+            ),
+            Err(TimelineRenderCacheFrameValidationError::IdentityAlpha { .. })
         ));
     }
 }

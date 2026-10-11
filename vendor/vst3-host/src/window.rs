@@ -106,6 +106,25 @@ unsafe extern "system" fn plugin_window_proc(
         }
         return 0;
     }
+    if msg == winapi::um::winuser::WM_SIZE {
+        let mut client: RECT = std::mem::zeroed();
+        if winapi::um::winuser::GetClientRect(hwnd, &mut client) != 0 {
+            if let (Some(width), Some(height)) = (
+                client
+                    .right
+                    .checked_sub(client.left)
+                    .filter(|value| *value > 0),
+                client
+                    .bottom
+                    .checked_sub(client.top)
+                    .filter(|value| *value > 0),
+            ) {
+                if let Ok(mut requests) = windows_editor_client_resize_requests().lock() {
+                    requests.insert(hwnd as usize, (width, height));
+                }
+            }
+        }
+    }
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
@@ -259,92 +278,30 @@ impl PluginWindow {
 
         #[cfg(target_os = "windows")]
         {
-            unsafe {
-                use std::mem;
-                use std::ptr;
-
-                // Register window class if not already registered
-                let class_name = "VST3PluginWindow\0".encode_utf16().collect::<Vec<u16>>();
-                let mut wc: WNDCLASSEXW = mem::zeroed();
-                wc.cbSize = mem::size_of::<WNDCLASSEXW>() as UINT;
-                wc.style = CS_HREDRAW | CS_VREDRAW;
-                wc.lpfnWndProc = Some(plugin_window_proc);
-                wc.hInstance = GetModuleHandleW(ptr::null());
-                wc.hCursor = LoadCursorW(ptr::null_mut(), IDC_ARROW);
-                wc.lpszClassName = class_name.as_ptr();
-
-                // Try to register, ignore if already registered
-                RegisterClassExW(&wc);
-
-                // Create window
-                let window_title = format!("{} - VST3\0", plugin_info.name);
-                let window_name = window_title.encode_utf16().collect::<Vec<u16>>();
-
-                // Calculate window size including borders
-                let mut rect = RECT {
-                    left: 0,
-                    top: 0,
-                    right: width,
-                    bottom: height,
-                };
-
-                winapi::um::winuser::AdjustWindowRectEx(
-                    &mut rect,
-                    WS_OVERLAPPEDWINDOW,
-                    0, // No menu
-                    0, // No extended style
-                );
-
-                let window_width = rect.right - rect.left;
-                let window_height = rect.bottom - rect.top;
-
-                let hwnd = CreateWindowExW(
-                    0,
-                    class_name.as_ptr(),
-                    window_name.as_ptr(),
-                    WS_OVERLAPPEDWINDOW,
-                    CW_USEDEFAULT,
-                    CW_USEDEFAULT,
-                    window_width,
-                    window_height,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    GetModuleHandleW(ptr::null()),
-                    ptr::null_mut(),
-                );
-
-                if hwnd.is_null() {
-                    return Err(Error::Other("Failed to create native window".to_string()));
-                }
-
-                // Try to open plugin editor.
-                // SAFETY: `hwnd` was just created above and null-checked; it is destroyed only
-                // after the editor is detached (in `close()`, or the error arm below).
-                let window_handle =
-                    crate::plugin::WindowHandle::from_hwnd(hwnd as *mut std::ffi::c_void);
-                let mut plugin = self.plugin.lock().unwrap_or_else(|p| p.into_inner());
-                let dpi = winapi::um::winuser::GetDpiForWindow(hwnd);
+            let hwnd = create_windows_editor_container(
+                &format!("{} - VST3", plugin_info.name),
+                width,
+                height,
+            )?;
+            let mut plugin = self.plugin.lock().unwrap_or_else(|p| p.into_inner());
+            let opened = (|| {
+                let dpi = unsafe { winapi::um::winuser::GetDpiForWindow(hwnd) };
                 if let Some(scale_factor) = dpi_scale_factor(dpi) {
-                    if let Err(error) = plugin.set_editor_scale_factor(scale_factor) {
-                        drop(plugin);
-                        DestroyWindow(hwnd);
-                        return Err(error);
-                    }
+                    plugin.set_editor_scale_factor(scale_factor)?;
                 }
-                match plugin.open_editor(window_handle) {
-                    Ok(()) => {
-                        drop(plugin);
-                        ShowWindow(hwnd, SW_SHOW);
-                        UpdateWindow(hwnd);
-                        self.native_window = Some(hwnd);
-                    }
-                    Err(e) => {
-                        drop(plugin);
-                        DestroyWindow(hwnd);
-                        return Err(e);
-                    }
-                }
+                // SAFETY: this container remains live until the view is removed.
+                plugin.open_editor(unsafe { crate::plugin::WindowHandle::from_hwnd(hwnd.cast()) })
+            })();
+            drop(plugin);
+            if let Err(error) = opened {
+                destroy_windows_editor_container(hwnd)?;
+                return Err(error);
             }
+            unsafe {
+                ShowWindow(hwnd, SW_SHOW);
+                UpdateWindow(hwnd);
+            }
+            self.native_window = Some(hwnd);
         }
 
         #[cfg(target_os = "linux")]
@@ -516,25 +473,8 @@ impl PluginWindow {
             let Some(hwnd) = self.native_window else {
                 return;
             };
-            // The plugin sizes its *client* area; grow the frame by the window's chrome, the
-            // same way `open()` sizes the window to the editor in the first place.
-            let mut rect = RECT {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            unsafe {
-                winapi::um::winuser::AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0);
-                SetWindowPos(
-                    hwnd,
-                    std::ptr::null_mut(),
-                    0,
-                    0,
-                    rect.right - rect.left,
-                    rect.bottom - rect.top,
-                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+            if let Err(error) = resize_windows_editor_container(hwnd, width, height) {
+                log::warn!("native editor parent resize refused: {error}");
             }
         }
 
@@ -581,14 +521,8 @@ impl PluginWindow {
         #[cfg(target_os = "windows")]
         {
             if let Some(hwnd) = self.native_window.take() {
-                if let Ok(mut requests) = close_requests().lock() {
-                    requests.remove(&(hwnd as usize));
-                }
-                if let Ok(mut changes) = dpi_changes().lock() {
-                    changes.remove(&(hwnd as usize));
-                }
-                unsafe {
-                    DestroyWindow(hwnd);
+                if let Err(error) = destroy_windows_editor_container(hwnd) {
+                    log::warn!("native editor parent close refused: {error}");
                 }
             }
         }
@@ -722,3 +656,164 @@ mod tests {
         assert_eq!(super::dpi_from_wparam(0), None);
     }
 }
+
+/// Create the sole Windows native parent used by either inline or scoped editors.
+#[cfg(target_os = "windows")]
+fn create_windows_editor_container(title: &str, width: i32, height: i32) -> Result<HWND> {
+    if title.contains('\0') {
+        return Err(Error::Other("native editor title contains NUL".to_string()));
+    }
+    let (outer_width, outer_height) = windows_editor_outer_extent(width, height)?;
+    let class_name = "VST3PluginWindow\0".encode_utf16().collect::<Vec<_>>();
+    let title = title
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: all buffers stay live through each synchronous Win32 call. The
+    // class has one host window procedure and owns no plugin/interface pointer.
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        if instance.is_null() {
+            return Err(Error::Other(
+                "native editor module handle is unavailable".to_string(),
+            ));
+        }
+        let mut class: WNDCLASSEXW = std::mem::zeroed();
+        class.cbSize = std::mem::size_of::<WNDCLASSEXW>() as UINT;
+        class.style = CS_HREDRAW | CS_VREDRAW;
+        class.lpfnWndProc = Some(plugin_window_proc);
+        class.hInstance = instance;
+        class.hCursor = LoadCursorW(std::ptr::null_mut(), IDC_ARROW);
+        class.lpszClassName = class_name.as_ptr();
+        if RegisterClassExW(&class) == 0 {
+            let mut existing: WNDCLASSEXW = std::mem::zeroed();
+            existing.cbSize = std::mem::size_of::<WNDCLASSEXW>() as UINT;
+            if winapi::um::winuser::GetClassInfoExW(instance, class_name.as_ptr(), &mut existing)
+                == 0
+                || existing.lpfnWndProc.map(|procedure| procedure as usize)
+                    != Some(plugin_window_proc as *const () as usize)
+            {
+                return Err(Error::Other(
+                    "native editor window class was not admitted".to_string(),
+                ));
+            }
+        }
+        let hwnd = CreateWindowExW(
+            0,
+            class_name.as_ptr(),
+            title.as_ptr(),
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            outer_width,
+            outer_height,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut(),
+        );
+        if hwnd.is_null() {
+            return Err(Error::Other(
+                "failed to create native editor parent".to_string(),
+            ));
+        }
+        Ok(hwnd)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_editor_outer_extent(width: i32, height: i32) -> Result<(i32, i32)> {
+    if width <= 0 || height <= 0 {
+        return Err(Error::Other(
+            "native editor dimensions must be positive".to_string(),
+        ));
+    }
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+    };
+    if unsafe { winapi::um::winuser::AdjustWindowRectEx(&mut rect, WS_OVERLAPPEDWINDOW, 0, 0) } == 0
+    {
+        return Err(Error::Other(
+            "native editor frame dimensions were refused".to_string(),
+        ));
+    }
+    let outer_width = rect
+        .right
+        .checked_sub(rect.left)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| Error::Other("native editor frame width overflowed".to_string()))?;
+    let outer_height = rect
+        .bottom
+        .checked_sub(rect.top)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| Error::Other("native editor frame height overflowed".to_string()))?;
+    Ok((outer_width, outer_height))
+}
+
+#[cfg(target_os = "windows")]
+fn resize_windows_editor_container(hwnd: HWND, width: i32, height: i32) -> Result<()> {
+    let (width, height) = windows_editor_outer_extent(width, height)?;
+    // SAFETY: both callers retain this exact live HWND on its owner main thread.
+    if unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    } == 0
+    {
+        return Err(Error::Other(
+            "native editor parent resize failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn destroy_windows_editor_container(hwnd: HWND) -> Result<()> {
+    // The caller has already removed IPlugView. Destruction may synchronously
+    // dispatch native messages, so no host request mutex is held during it.
+    if unsafe { DestroyWindow(hwnd) } == 0 {
+        return Err(Error::Other(
+            "native editor parent destruction failed".to_string(),
+        ));
+    }
+    close_requests()
+        .lock()
+        .map_err(|_| Error::Other("native editor close slot is poisoned".to_string()))?
+        .remove(&(hwnd as usize));
+    dpi_changes()
+        .lock()
+        .map_err(|_| Error::Other("native editor DPI slot is poisoned".to_string()))?
+        .remove(&(hwnd as usize));
+    windows_editor_client_resize_requests()
+        .lock()
+        .map_err(|_| Error::Other("native editor client resize slot is poisoned".to_string()))?
+        .remove(&(hwnd as usize));
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_editor_client_resize_requests(
+) -> &'static Mutex<std::collections::HashMap<usize, (i32, i32)>> {
+    static REQUESTS: std::sync::OnceLock<Mutex<std::collections::HashMap<usize, (i32, i32)>>> =
+        std::sync::OnceLock::new();
+    REQUESTS.get_or_init(Mutex::default)
+}
+
+#[cfg(target_os = "windows")]
+#[path = "window/windows_scoped.rs"]
+mod windows_scoped;
+
+#[cfg(target_os = "windows")]
+pub use windows_scoped::{
+    WindowsEditorMainThread, WindowsMainThreadWake, WindowsMessageStep,
+    WindowsNativeEditorContainer, WindowsNativeEditorContainerEvents, WindowsPluginEditorParent,
+};

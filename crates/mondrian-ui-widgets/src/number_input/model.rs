@@ -1,4 +1,50 @@
-use mondrian_ui_core::types::Modifiers;
+use mondrian_ui_core::types::{KeyCode, Modifiers};
+
+/// A numeric keyboard adjustment expressed independently of pointer coordinates.
+/// The NumberInput model supplies exact storage, increments and hard bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumericInputAdjustment {
+    /// Add or subtract the declared numeric increment.
+    Step {
+        /// Whether to increase the current numeric value.
+        increase: bool,
+        /// Apply the existing Shift multiplier to the declared increment.
+        coarse: bool,
+    },
+    /// Add or subtract the model's Page increment.
+    Page {
+        /// Whether to increase the current numeric value.
+        increase: bool,
+    },
+    /// Select the admitted numeric hard minimum.
+    Minimum,
+    /// Select the admitted numeric hard maximum.
+    Maximum,
+}
+
+impl NumericInputAdjustment {
+    /// Classify unmodified or Shift numeric keys for a numeric control owner.
+    /// Text editors choose which classified keys they own; Left/Right and
+    /// Home/End still navigate text in a focused NumberInput.
+    pub fn from_key(key: KeyCode, modifiers: Modifiers) -> Option<Self> {
+        if modifiers.ctrl || modifiers.alt || modifiers.meta {
+            return None;
+        }
+        match key {
+            KeyCode::Left | KeyCode::Down => {
+                Some(Self::Step { increase: false, coarse: modifiers.shift })
+            }
+            KeyCode::Right | KeyCode::Up => {
+                Some(Self::Step { increase: true, coarse: modifiers.shift })
+            }
+            KeyCode::PageDown => Some(Self::Page { increase: false }),
+            KeyCode::PageUp => Some(Self::Page { increase: true }),
+            KeyCode::Home => Some(Self::Minimum),
+            KeyCode::End => Some(Self::Maximum),
+            _ => None,
+        }
+    }
+}
 
 mod sealed {
     pub trait Sealed {}
@@ -274,6 +320,19 @@ impl<T: NumberInputValue> NumberInputModel<T> {
     pub(super) fn page_step(&self) -> T {
         self.keyboard_step(Modifiers::none()).scale(10)
     }
+    pub(super) fn adjusted_value(&self, value: T, adjustment: NumericInputAdjustment) -> T {
+        let next = match adjustment {
+            NumericInputAdjustment::Step { increase, coarse } => value.offset(
+                self.keyboard_step(Modifiers { shift: coarse, ..Modifiers::none() }),
+                increase,
+            ),
+            NumericInputAdjustment::Page { increase } => value.offset(self.page_step(), increase),
+            NumericInputAdjustment::Minimum => self.min,
+            NumericInputAdjustment::Maximum => self.max,
+        };
+        clamp(next, self.min, self.max)
+    }
+
     pub(super) fn set_from_keyboard(
         &mut self,
         value: T,
@@ -424,6 +483,91 @@ mod tests {
         assert_eq!(
             model.commit_display_text("abc").map(|update| update.text),
             Some("42".into())
+        );
+    }
+
+    #[test]
+    fn numeric_adjustments_preserve_exact_domain_steps_and_hard_endpoints() {
+        let mut model = NumberInputModel::new(-100.0_f64, -120.0, 24.0);
+        model.set_step(0.1);
+        let next = model.adjusted_value(
+            -100.0,
+            NumericInputAdjustment::Step { increase: true, coarse: false },
+        );
+        assert!((next - (-99.9_f64)).abs() <= 1e-10);
+        assert_eq!(
+            model.adjusted_value(
+                -100.0,
+                NumericInputAdjustment::Step { increase: false, coarse: true }
+            ),
+            -101.0
+        );
+        assert_eq!(
+            model.adjusted_value(-100.0, NumericInputAdjustment::Page { increase: true }),
+            -99.0
+        );
+        assert_eq!(
+            model.adjusted_value(-100.0, NumericInputAdjustment::Minimum),
+            -120.0
+        );
+        assert_eq!(
+            model.adjusted_value(-100.0, NumericInputAdjustment::Maximum),
+            24.0
+        );
+        let mut integer = NumberInputModel::new(9_007_199_254_740_993_i64, i64::MIN, i64::MAX);
+        integer.set_step(1);
+        assert_eq!(
+            integer.adjusted_value(
+                integer.committed_value(),
+                NumericInputAdjustment::Step { increase: true, coarse: false }
+            ),
+            9_007_199_254_740_994
+        );
+        assert_eq!(
+            integer.adjusted_value(
+                i64::MAX,
+                NumericInputAdjustment::Step { increase: false, coarse: true }
+            ),
+            i64::MAX - 10
+        );
+        assert_eq!(
+            integer.adjusted_value(i64::MIN, NumericInputAdjustment::Page { increase: false }),
+            i64::MIN
+        );
+        assert_eq!(
+            integer.adjusted_value(i64::MAX, NumericInputAdjustment::Page { increase: true }),
+            i64::MAX
+        );
+    }
+
+    #[test]
+    fn numeric_adjustment_classification_refuses_text_and_primary_chords() {
+        assert_eq!(
+            NumericInputAdjustment::from_key(KeyCode::Escape, Modifiers::none()),
+            None
+        );
+        assert_eq!(
+            NumericInputAdjustment::from_key(KeyCode::Tab, Modifiers::none()),
+            None
+        );
+        for modifiers in [
+            Modifiers::ctrl(),
+            Modifiers { alt: true, ..Modifiers::none() },
+            Modifiers { meta: true, ..Modifiers::none() },
+        ] {
+            for key in [
+                KeyCode::Left,
+                KeyCode::Right,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::PageUp,
+            ] {
+                assert_eq!(NumericInputAdjustment::from_key(key, modifiers), None);
+            }
+        }
+        assert_eq!(
+            NumericInputAdjustment::from_key(KeyCode::Right, Modifiers::shift()),
+            Some(NumericInputAdjustment::Step { increase: true, coarse: true })
         );
     }
 }

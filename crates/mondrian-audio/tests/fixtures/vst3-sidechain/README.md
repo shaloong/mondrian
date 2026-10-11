@@ -25,3 +25,40 @@ component always requests all SDK context fields; only state 3 requires absolute
 projectTimeSamples and prepared sampleRate, zero optional values and zero
 optional validity flags. Requests alone cannot establish host fact availability.
 States 0–2 retain their original DSP and bus behavior.
+
+## Dynamic latency reference (state mode 4)
+
+Modes 0 through 3 retain their previous sidechain, automation and transport
+meaning. Mode 4 changes the configured delay/tail from three to seven samples
+when Gain crosses 0.75. The controller sends an owning host-created IMessage
+through the actual IConnectionPoint pair and calls
+IComponentHandler::restartComponent(kLatencyChanged) on its initialization
+thread. DSP keeps its current valid delay until the host deactivates/reactivates;
+only that lifecycle changes the reported delay and clears the delay history.
+Neither process() nor a background thread issues a restart callback.
+
+The independent `installed_vst3_legal_latency_restart_reference` test proves the
+request was acknowledged and checks exact PCM before/after the legal lifecycle
+in realtime and offline modes. The product
+`installed_vst3_latency_restart_invalidates_prepared_contract` test uses existing
+APIs and is expected to fail because the current worker ignores the request at
+the next window boundary. The complete trigger window remains legal under the
+old active contract; it must finish once, including nested cache fills and
+already advanced stateful sibling processors. The next root window must defer
+before any DSP. A post-DSP opaque getState is not an exact checkpoint and cannot
+authorize replay of the same unpublished window. An eventual production fix
+must retain the child, reprepare the sole canonical audio plan/PDC and resume;
+returning a fatal error alone is insufficient acceptance.
+
+
+## Constant component configuration service controls (modes 5/6)
+
+Mode 5 initially activates with a three-frame delay. Actual DSP records desired
+mode 6 without changing the active contract. A later main-thread ConnectionPoint
+query observes this component fact and requests latency reactivation exactly
+once; the controller does not manufacture the component profile. Legal
+deactivate/reactivate realizes seven-frame delay/tail, and the actual saved
+component/controller configuration restores that profile into independent fresh
+instances. Unchanged host parameter delivery after the controller observed mode
+6 must not generate another restart. These controls do not promise that generic
+state captures DSP history or that a candidate is already installed into PDC.

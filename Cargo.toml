@@ -1,11 +1,12 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/vst3-host", "vendor/vst3-sdk", "vendor/vst3-sdk/com-scrape-types", "vendor/harfrust"]
+exclude = ["vendor/vst3-host", "vendor/vst3-sdk", "vendor/vst3-sdk/com-scrape-types", "vendor/harfrust", "vendor/clack", "vendor/clap-sys", "vendor/clack/common", "vendor/clack/host", "vendor/clack/plugin", "vendor/clack/extensions", "vendor/crossbeam-queue"]
 members = [
     "crates/mondrian-storage",
     "crates/mondrian-validation-launcher",
     "crates/mondrian-core",
     "crates/mondrian-media",
+    "crates/mondrian-audio-scheduling",
     "crates/mondrian-timeline",
     "crates/mondrian-interchange",
     "crates/mondrian-renderer",
@@ -48,6 +49,7 @@ mondrian-storage  = { path = "crates/mondrian-storage" }
 mondrian-validation-launcher = { path = "crates/mondrian-validation-launcher" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
+mondrian-audio-scheduling = { path = "crates/mondrian-audio-scheduling" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
 mondrian-interchange = { path = "crates/mondrian-interchange" }
 mondrian-renderer = { path = "crates/mondrian-renderer" }
@@ -112,7 +114,7 @@ usvg             = { version = "0.45", default-features = false }
 
 # ---- 并发 / 消息 ----
 crossbeam-channel = "0.5"
-crossbeam-queue = "0.3"
+crossbeam-queue = { path = "vendor/crossbeam-queue" }
 parking_lot       = "0.12"
 dashmap           = "6"
 pulp              = "0.22"
@@ -171,9 +173,10 @@ walkdir          = "2"
 tempfile         = "3"
 libloading       = "0.8.9"
 memmap2          = "0.9.11"
-clack-host       = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-plugin     = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d" }
-clack-extensions = { git = "https://github.com/prokopyl/clack.git", rev = "27ca28391b57a61bad4bb5099288a7bf9247350d", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params", "render", "thread-check"] }
+clap-sys = { path = "vendor/clap-sys" }
+clack-host       = { path = "vendor/clack/host" }
+clack-plugin     = { path = "vendor/clack/plugin" }
+clack-extensions = { path = "vendor/clack/extensions", features = ["clack-host", "audio-ports", "latency", "tail", "state", "params", "render", "thread-check", "log", "gui", "timer"] }
 # Canonical ABI package; the root patch pins its immutable source.
 vst3 = { path = "vendor/vst3-sdk" }
 vst3-host = { path = "vendor/vst3-host", default-features = false }
@@ -191,7 +194,6 @@ zstd             = "0.11"
 
 [patch.crates-io]
 harfrust = { path = "vendor/harfrust" }
-clap-sys = { git = "https://github.com/micahrj/clap-sys.git", rev = "25d7f53fdb6363ad63fbd80049cb7a42a97ac156" }
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

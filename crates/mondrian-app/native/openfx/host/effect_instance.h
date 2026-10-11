@@ -5,17 +5,28 @@
 #define HOST_DEMO_EFFECT_INSTANCE_H
 
 #include "frame_state.h"
+#include "aux_suite.h"
 
 namespace MondrianOpenFx {
 
   // class definition
-  class FilterEffectInstance : public OFX::Host::ImageEffect::Instance {
+  class FilterEffectInstance : public AuxRegistrationGuard, public OFX::Host::ImageEffect::Instance {
     FrameState& _frameState;
   public:
     const FrameState& frameState() const { return _frameState; }
+    int abort() override { return auxiliary().abort(getHandle()); }
+    // A real current host editor, not Render timing metadata, opens the same
+    // native instance. Matching End precedes SDK destruction/owner eviction.
+    OfxStatus setInterfaceOpen(bool open);
+    bool isInterfaceOpen() const { return _interfaceOpen; }
+    OfxStatus closeInterface() noexcept;
+    ~FilterEffectInstance() override;
+  private:
+    bool _interfaceOpen = false;
+  public:
     FilterEffectInstance(OFX::Host::ImageEffect::ImageEffectPlugin* plugin,
                      OFX::Host::ImageEffect::Descriptor& desc,
-                     const std::string& context, FrameState& frameState);
+                     const std::string& context, FrameState& frameState, AuxSuite& auxiliary);
 
     ////////////////////////////////////////////////////////////////////////////////
     ////////////////////////////////////////////////////////////////////////////////

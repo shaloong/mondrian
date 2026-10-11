@@ -6,6 +6,13 @@ use vst3::Steinberg::IPluginFactory;
 
 /// Trait representing a loaded VST3 module
 pub trait VstModule: Send {
+    /// Observe actual Rust storage owned by the loaded module wrapper.
+    /// Native loader/module/plugin heaps are a separate supervised envelope.
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError>;
+
     /// Get the plugin factory from the module
     fn get_factory(&self) -> Result<*mut IPluginFactory>;
 

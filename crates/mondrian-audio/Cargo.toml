@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mondrian-audio-scheduling.workspace = true
 mondrian-core.workspace = true
 mondrian-timeline.workspace = true
 thiserror.workspace = true
@@ -24,9 +25,14 @@ clack-extensions.workspace = true
 vst3-host.workspace = true
 
 [dev-dependencies]
+clap-sys.workspace = true
+crossbeam-queue.workspace = true
 libloading.workspace = true
 # Test the same canonical binding selected by the native audio adapter.
 vst3.workspace = true
 clack-plugin.workspace = true
 clack-host = { workspace = true, features = ["clack-plugin"] }
-clack-extensions = { workspace = true, features = ["clack-plugin"] }
+clack-extensions = { workspace = true, features = ["clack-plugin", "note-ports", "gui", "log", "timer"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys.workspace = true

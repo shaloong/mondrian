@@ -9,13 +9,18 @@ use mondrian_audio::{
     ResolvedAudioSource,
 };
 use mondrian_core::{AudioChannelLayout, AudioSourceComponentId, ExecutionCancellationToken};
-use mondrian_media::{AudioSourceReader, AudioSourceSelection};
+use mondrian_media::{AudioPcmRenderOutcome, AudioSourceReader, AudioSourceSelection};
 use parking_lot::Mutex;
 
 pub(super) const MAX_AUDIO_RENDER_BLOCK_FRAMES: usize = 16_384;
 
 pub(super) struct TimelineAudioPcmRenderer {
     state: Mutex<TimelineAudioRenderState>,
+    author_snapshot:
+        parking_lot::RwLock<Option<Arc<mondrian_editor_state::AuthorExecutionSnapshot>>>,
+    audition: AudioAuditionOverlay,
+    meter_metadata: parking_lot::RwLock<AudioMeterObserver>,
+    delivery_metadata: AudioDeliveryEvidence,
     continuity_model: AudioPcmContinuityModel,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
@@ -24,7 +29,6 @@ pub(super) struct TimelineAudioPcmRenderer {
 struct TimelineAudioRenderState {
     delivery: AudioProgramDeliveryRuntime,
     generation: Option<AudioPcmRenderGeneration>,
-    next_sample: Option<i64>,
 }
 
 impl TimelineAudioPcmRenderer {
@@ -114,6 +118,7 @@ impl TimelineAudioPcmRenderer {
             compensation_delay_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
         };
+        let captured_audition = audition.clone();
         let resolver = PlaybackMediaResolver { library, source_cache };
         let output_id =
             sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
@@ -140,15 +145,39 @@ impl TimelineAudioPcmRenderer {
                 audio_render_error("playback_audio_delivery_mapping", error.to_string())
             })?;
         Ok(Self {
-            state: Mutex::new(TimelineAudioRenderState {
-                delivery,
-                generation: None,
-                next_sample: None,
-            }),
+            meter_metadata: parking_lot::RwLock::new(delivery.meter_observer()),
+            delivery_metadata: delivery.evidence(),
+            author_snapshot: parking_lot::RwLock::new(None),
+            audition: captured_audition,
+            state: Mutex::new(TimelineAudioRenderState { delivery, generation: None }),
             continuity_model,
             sample_rate,
             channel_layout,
         })
+    }
+
+    pub(super) fn bind_author_snapshot(
+        &mut self,
+        snapshot: mondrian_editor_state::AuthorExecutionSnapshot,
+    ) {
+        *self.author_snapshot.get_mut() = Some(Arc::new(snapshot));
+    }
+
+    pub(super) fn native_author_snapshot_current(&self) -> bool {
+        self.author_snapshot
+            .read()
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.enter_commit().is_ok())
+    }
+
+    /// Pure metadata comparison; no native/DSP or author permission is issued.
+    pub(super) fn same_presentation_execution(
+        &self,
+        audition: &AudioAuditionOverlay,
+        rate: u32,
+        layout: AudioChannelLayout,
+    ) -> bool {
+        self.audition == *audition && self.sample_rate == rate && self.channel_layout == layout
     }
 
     /// Compiler-owned evidence for replacing this Program Output with silence.
@@ -158,12 +187,12 @@ impl TimelineAudioPcmRenderer {
 
     /// Lock-free meter observation bound to this exact prepared Runtime.
     pub(super) fn meter_observer(&self) -> AudioMeterObserver {
-        self.state.lock().delivery.meter_observer()
+        self.meter_metadata.read().clone()
     }
 
     /// Exact Sequence Program Output to monitoring-target delivery evidence.
     pub(super) fn delivery_evidence(&self) -> AudioDeliveryEvidence {
-        self.state.lock().delivery.evidence()
+        self.delivery_metadata
     }
 
     /// Immutable cross-window state contract captured before trait erasure.
@@ -173,11 +202,100 @@ impl TimelineAudioPcmRenderer {
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
+    fn native_observations_supported(&self) -> bool {
+        self.state.lock().delivery.native_observations_supported()
+    }
+
+    fn poll_native_observations(
+        &self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<Option<mondrian_core::NativeAudioObservationBatch>> {
+        self.state
+            .lock()
+            .delivery
+            .poll_native_observations(cancellation)
+            .map_err(|error| audio_render_error("native_audio_diagnostics", error.to_string()))
+    }
+
+    fn owner_installation_verifier(&self) -> Option<mondrian_core::AudioOwnerInstallationVerifier> {
+        self.state.lock().delivery.native_owner_installation_verifier()
+    }
+
+    fn bind_owner_installation(
+        &self,
+        verifier: mondrian_core::AudioOwnerInstallationVerifier,
+    ) -> Result<bool, mondrian_core::AudioOwnerInstallationError> {
+        self.state.lock().delivery.bind_native_owner_installation(verifier)?;
+        Ok(true)
+    }
+
+    fn install_native_owner_bindings(
+        &self,
+        claim: &mondrian_core::AudioOwnerInstallationClaim,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<mondrian_media::AudioPcmNativeOwnerBindingStatus> {
+        use mondrian_media::{
+            AudioPcmNativeOwnerBindingRefusal as Refusal,
+            AudioPcmNativeOwnerBindingStatus as Status,
+        };
+        match self.state.lock().delivery.install_native_owner_bindings(claim, cancellation) {
+            Ok(0) => Ok(Status::Unavailable(Refusal::UnsupportedAdapter)),
+            Ok(_) => Ok(Status::Ready),
+            Err(mondrian_audio::AudioNativeOwnerError::Cancelled) => {
+                Ok(Status::Unavailable(Refusal::Cancelled))
+            }
+            Err(mondrian_audio::AudioNativeOwnerError::Installation(_)) => {
+                Ok(Status::Unavailable(Refusal::Superseded))
+            }
+            Err(error) => Err(audio_render_error(
+                "native_audio_owner_bindings",
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn control_native_editor(
+        &self,
+        intent: mondrian_core::NativeAudioEditorControlIntent,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<mondrian_core::NativeAudioEditorControlOutcome> {
+        use mondrian_core::{
+            NativeAudioEditorControlIntent as Intent, NativeAudioEditorControlOutcome as Outcome,
+            NativeAudioEditorControlRefusal as Refusal,
+        };
+        let opening = matches!(intent, Intent::Open { .. } | Intent::ResolveAndOpen { .. });
+        if opening && !self.native_author_snapshot_current() {
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        let mut state = self.state.lock();
+        let outcome =
+            state.delivery.control_native_editor(intent, cancellation).map_err(|error| {
+                audio_render_error("native_audio_editor_control", error.to_string())
+            })?;
+        // Admission guards never span SDK/window work. If canonical publication
+        // raced attach, clean up only the exact returned target on this worker.
+        if opening && !self.native_author_snapshot_current() {
+            if let Outcome::Opened { target, .. } = outcome {
+                let cleanup = state
+                    .delivery
+                    .control_native_editor(Intent::Close { target }, cancellation)
+                    .map_err(|error| {
+                        audio_render_error("native_audio_editor_control", error.to_string())
+                    })?;
+                if matches!(cleanup, Outcome::ClosePending { .. }) {
+                    return Ok(cleanup);
+                }
+            }
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        Ok(outcome)
+    }
+
     fn render(
         &self,
         request: AudioPcmRenderRequest,
         cancellation: &ExecutionCancellationToken,
-    ) -> mondrian_core::Result<AudioBuffer> {
+    ) -> mondrian_core::Result<AudioPcmRenderOutcome> {
         if request.sample_rate != self.sample_rate || request.channel_layout != self.channel_layout
         {
             return Err(audio_render_error(
@@ -206,7 +324,7 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
             .ok_or_else(|| {
                 audio_render_error("timeline_audio_sample_range", "audio window is too large")
             })?;
-        let next_sample = request
+        let _end_sample = request
             .start_sample
             .checked_add(i64::try_from(request.frame_count).map_err(|_| {
                 audio_render_error("timeline_audio_sample_range", "audio window is too large")
@@ -228,17 +346,32 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                         ),
                     ));
                 }
-                state
-                    .delivery
-                    .enter_state(
-                        AudioContinuityEpoch::new(generation.get()),
-                        request.start_sample,
-                    )
-                    .map_err(|error| {
-                        audio_render_error("timeline_audio_state_entry", error.to_string())
-                    })?;
+                if let Err(error) = state.delivery.enter_state_cancellable(
+                    AudioContinuityEpoch::new(generation.get()),
+                    request.start_sample,
+                    cancellation,
+                ) {
+                    return match error {
+                        mondrian_audio::AudioDeliveryError::ProgramExecution(
+                            mondrian_audio::AudioExecutionError::ReprepareRequired(ticket),
+                        ) => Ok(AudioPcmRenderOutcome::DeferredForReprepare(
+                            ticket.product_notice(),
+                        )),
+                        mondrian_audio::AudioDeliveryError::ProgramExecution(
+                            mondrian_audio::AudioExecutionError::NativeAuthorPending(hold),
+                        ) => Ok(AudioPcmRenderOutcome::DeferredForNativeAuthor(Box::new(
+                            hold.target,
+                        ))),
+                        mondrian_audio::AudioDeliveryError::ProgramExecution(
+                            mondrian_audio::AudioExecutionError::EditorCleanupRequired(target),
+                        ) => Ok(AudioPcmRenderOutcome::DeferredForEditorCleanup(*target)),
+                        error => Err(audio_render_error(
+                            "timeline_audio_state_entry",
+                            error.to_string(),
+                        )),
+                    };
+                }
                 state.generation = Some(generation);
-                state.next_sample = Some(request.start_sample);
             }
             AudioPcmContinuity::Continue(_) if state.generation != Some(generation) => {
                 return Err(audio_render_error(
@@ -251,34 +384,42 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
             }
             AudioPcmContinuity::Continue(_) => {}
         }
-        if state.next_sample != Some(request.start_sample) {
-            return Err(audio_render_error(
-                "timeline_audio_continuity",
-                format!(
-                    "render generation {} expected sample {:?}, got {}",
-                    generation.get(),
-                    state.next_sample,
-                    request.start_sample
-                ),
-            ));
+        // Audio Delivery checks the submitted-window sequence after the SAME
+        // whole-root native preflight, independently of private DSP history.
+        // A queued later window must retain the typed native hold.
+        if let Err(error) = state.delivery.render_into_cancellable(
+            AudioRenderRequest {
+                start_sample: request.start_sample,
+                frames: request.frame_count,
+            },
+            &mut output,
+            cancellation,
+        ) {
+            return match error {
+                mondrian_audio::AudioDeliveryError::ProgramExecution(
+                    mondrian_audio::AudioExecutionError::ReprepareRequired(ticket),
+                ) => Ok(AudioPcmRenderOutcome::DeferredForReprepare(
+                    ticket.product_notice(),
+                )),
+                mondrian_audio::AudioDeliveryError::ProgramExecution(
+                    mondrian_audio::AudioExecutionError::NativeAuthorPending(hold),
+                ) => Ok(AudioPcmRenderOutcome::DeferredForNativeAuthor(Box::new(
+                    hold.target,
+                ))),
+                mondrian_audio::AudioDeliveryError::ProgramExecution(
+                    mondrian_audio::AudioExecutionError::EditorCleanupRequired(target),
+                ) => Ok(AudioPcmRenderOutcome::DeferredForEditorCleanup(*target)),
+                error => Err(audio_render_error(
+                    "timeline_audio_execute",
+                    error.to_string(),
+                )),
+            };
         }
-        state
-            .delivery
-            .render_into_cancellable(
-                AudioRenderRequest {
-                    start_sample: request.start_sample,
-                    frames: request.frame_count,
-                },
-                &mut output,
-                cancellation,
-            )
-            .map_err(|error| audio_render_error("timeline_audio_execute", error.to_string()))?;
-        state.next_sample = Some(next_sample);
-        Ok(AudioBuffer {
+        Ok(AudioPcmRenderOutcome::Rendered(AudioBuffer {
             samples: output,
             sample_rate: self.sample_rate,
             channel_layout: self.channel_layout,
-        })
+        }))
     }
 }
 
@@ -364,6 +505,235 @@ fn audio_render_error(
     }
 }
 
+/// Immutable request on Media's one serial queue. The concrete and erased Arc
+/// alias the SAME installed renderer; neither is a second native controller.
+struct NativeAudioAuthorHandoffRequest {
+    renderer: Arc<TimelineAudioPcmRenderer>,
+    source: Arc<dyn AudioPcmRenderer>,
+    proposal: mondrian_core::NativeAudioAuthorProposal,
+    target: mondrian_core::NativeAudioEditorTarget,
+    snapshot: Arc<mondrian_editor_state::AuthorExecutionSnapshot>,
+    programs: Arc<[mondrian_audio::NativeAudioAuthorProgram]>,
+    intent: mondrian_media::AudioPcmNativeAuthorHandoffIntent,
+}
+
+impl TimelineAudioPcmRenderer {
+    pub(super) fn native_author_compile_request(
+        &self,
+        output_id: mondrian_core::ProgramOutputId,
+    ) -> AudioCompileRequest {
+        AudioCompileRequest { output_id, audition: self.audition.clone() }
+    }
+
+    pub(super) fn native_author_handoff_request(
+        self: &Arc<Self>,
+        proposal: mondrian_core::NativeAudioAuthorProposal,
+        target: mondrian_core::NativeAudioEditorTarget,
+        snapshot: Arc<mondrian_editor_state::AuthorExecutionSnapshot>,
+        programs: Arc<[mondrian_audio::NativeAudioAuthorProgram]>,
+        intent: mondrian_media::AudioPcmNativeAuthorHandoffIntent,
+    ) -> Box<dyn mondrian_media::AudioPcmNativeAuthorHandoff> {
+        let source: Arc<dyn AudioPcmRenderer> = self.clone();
+        Box::new(NativeAudioAuthorHandoffRequest {
+            renderer: self.clone(),
+            source,
+            proposal,
+            target,
+            snapshot,
+            programs,
+            intent,
+        })
+    }
+}
+
+fn native_handoff_refusal(
+    error: &mondrian_audio::NativeAudioParameterHandoffError,
+) -> mondrian_media::AudioPcmNativeAuthorHandoffRefusal {
+    use mondrian_audio::NativeAudioParameterHandoffError as Error;
+    use mondrian_media::AudioPcmNativeAuthorHandoffRefusal as Refusal;
+    match error {
+        Error::Resources(_) => Refusal::ResourceAdmission,
+        Error::Admission(mondrian_audio::NativeAudioAuthorAdmissionError::Cancelled) => {
+            Refusal::Cancelled
+        }
+        Error::Admission(mondrian_audio::NativeAudioAuthorAdmissionError::Pending { .. }) => {
+            Refusal::AuthorStatePending
+        }
+        Error::Owner(_) | Error::Installation(_) => Refusal::Superseded,
+        _ => Refusal::ProcessorRejected,
+    }
+}
+
+impl mondrian_media::AudioPcmNativeAuthorHandoff for NativeAudioAuthorHandoffRequest {
+    fn renderer(&self) -> &Arc<dyn AudioPcmRenderer> {
+        &self.source
+    }
+    fn proposal(&self) -> &mondrian_core::NativeAudioAuthorProposal {
+        &self.proposal
+    }
+    fn expected_target(&self) -> mondrian_core::NativeAudioEditorTarget {
+        self.target
+    }
+    fn intent(&self) -> mondrian_media::AudioPcmNativeAuthorHandoffIntent {
+        self.intent
+    }
+
+    fn continuity_policy(
+        &self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<
+        mondrian_media::AudioPcmNativeAuthorHandoffContinuity,
+        mondrian_media::AudioPcmNativeAuthorHandoffRefusal,
+    > {
+        use mondrian_media::{
+            AudioPcmNativeAuthorHandoffContinuity as Continuity,
+            AudioPcmNativeAuthorHandoffRefusal as Refusal,
+        };
+        if cancellation.is_canceled() {
+            return Err(Refusal::Cancelled);
+        }
+        let required = self
+            .renderer
+            .state
+            .lock()
+            .delivery
+            .native_author_state_entry_required(&self.proposal)
+            .map_err(|_| Refusal::Superseded)?;
+        Ok(if required {
+            Continuity::StateEntryRequired
+        } else {
+            Continuity::Preserved
+        })
+    }
+
+    fn apply(
+        &self,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_media::AudioPcmNativeAuthorHandoffOutcome {
+        use mondrian_media::{
+            AudioPcmNativeAuthorHandoffOutcome as Outcome,
+            AudioPcmNativeAuthorHandoffRefusal as Refusal,
+        };
+        if self.intent != mondrian_media::AudioPcmNativeAuthorHandoffIntent::Install {
+            return Outcome::Refused(Refusal::Superseded);
+        }
+        let mut state = self.renderer.state.lock();
+        let mut prepared = match state.delivery.prepare_native_author_parameter_handoff(
+            &self.programs,
+            &self.proposal,
+            destination,
+            cancellation,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return Outcome::Refused(native_handoff_refusal(&error)),
+        };
+        // Prepare Arc owners before the short final guard. Arc payload and
+        // allocation headers remain explicitly unqualified physical frontiers.
+        let next_snapshot = Some(Arc::clone(&self.snapshot));
+        let mut metadata = self.renderer.author_snapshot.write();
+        let author_guard = match self.snapshot.enter_commit() {
+            Ok(guard) => guard,
+            Err(_) => {
+                drop(metadata);
+                drop(prepared);
+                return Outcome::Refused(Refusal::Superseded);
+            }
+        };
+        let installed = state.delivery.install_native_author_parameter_handoff(
+            &mut prepared,
+            authorization,
+            cancellation,
+        );
+        let retired = if installed.is_ok() {
+            std::mem::replace(&mut *metadata, next_snapshot)
+        } else {
+            None
+        };
+        drop(author_guard);
+        drop(metadata);
+        // Actual meter publisher changes with the new Session. This private
+        // metadata slot is swapped outside all final guards and read by Main
+        // without acquiring the native/DSP Runtime mutex.
+        if installed.as_ref().is_ok_and(|receipt| {
+            receipt.continuity
+                == mondrian_audio::NativeAudioParameterHandoffContinuity::StateEntryRequired
+        }) {
+            state.generation = None;
+            let next_meter = state.delivery.meter_observer();
+            let retired_meter =
+                std::mem::replace(&mut *self.renderer.meter_metadata.write(), next_meter);
+            drop(retired_meter);
+        }
+        // No Plan, factory, payload or old Arc retirement occurs under either
+        // canonical author or Source final guards. SDK Ack also runs outside.
+        drop(retired);
+        drop(prepared);
+        let receipt = match installed {
+            Ok(receipt) => receipt,
+            Err(error) => return Outcome::Refused(native_handoff_refusal(&error)),
+        };
+        match state
+            .delivery
+            .acknowledge_native_author_parameter_handoff(&self.proposal, cancellation)
+        {
+            Ok(ack) => Outcome::Acknowledged {
+                claim: ack.claim,
+                target: Box::new(ack.target),
+                continuity: handoff_continuity(ack.continuity),
+            },
+            Err(_) => Outcome::InstalledAwaitingAcknowledgement {
+                claim: receipt.claim,
+                target: Box::new(receipt.target),
+                continuity: handoff_continuity(receipt.continuity),
+            },
+        }
+    }
+
+    fn acknowledge(
+        &self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_media::AudioPcmNativeAuthorHandoffOutcome {
+        use mondrian_media::{
+            AudioPcmNativeAuthorHandoffOutcome as Outcome,
+            AudioPcmNativeAuthorHandoffRefusal as Refusal,
+        };
+        if self.intent != mondrian_media::AudioPcmNativeAuthorHandoffIntent::Acknowledge
+            || !self.renderer.native_author_snapshot_current()
+        {
+            return Outcome::Refused(Refusal::Superseded);
+        }
+        match self
+            .renderer
+            .state
+            .lock()
+            .delivery
+            .acknowledge_native_author_parameter_handoff(&self.proposal, cancellation)
+        {
+            Ok(ack) => Outcome::Acknowledged {
+                claim: ack.claim,
+                target: Box::new(ack.target),
+                continuity: handoff_continuity(ack.continuity),
+            },
+            Err(error) => Outcome::Refused(native_handoff_refusal(&error)),
+        }
+    }
+}
+
+fn handoff_continuity(
+    value: mondrian_audio::NativeAudioParameterHandoffContinuity,
+) -> mondrian_media::AudioPcmNativeAuthorHandoffContinuity {
+    match value {
+        mondrian_audio::NativeAudioParameterHandoffContinuity::Preserved => {
+            mondrian_media::AudioPcmNativeAuthorHandoffContinuity::Preserved
+        }
+        mondrian_audio::NativeAudioParameterHandoffContinuity::StateEntryRequired => {
+            mondrian_media::AudioPcmNativeAuthorHandoffContinuity::StateEntryRequired
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,6 +813,61 @@ mod tests {
     }
 
     #[test]
+    fn timeline_pcm_adapter_invalid_extent_refuses_before_entry_and_same_generation_remains_unused()
+    {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-audio-invalid-entry-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let renderer = TimelineAudioPcmRenderer::new(
+            Sequence::new("invalid initial audio window"),
+            Vec::new(),
+            AssetLibrary::open(root.clone()).expect("asset library"),
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+            AudioAuditionOverlay::default(),
+            48_000,
+            AudioChannelLayout::Stereo,
+        )
+        .expect("actual stateless renderer");
+        let cancellation = ExecutionCancellationToken::new();
+        let generation = AudioPcmRenderGeneration::new(7);
+        let request = |continuity, start_sample| AudioPcmRenderRequest {
+            start_sample,
+            frame_count: 4,
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            continuity,
+        };
+        assert!(renderer
+            .render(
+                request(AudioPcmContinuity::Enter(generation), i64::MAX),
+                &cancellation,
+            )
+            .is_err());
+        assert!(matches!(
+            renderer
+                .render(
+                    request(AudioPcmContinuity::Enter(generation), 0),
+                    &cancellation
+                )
+                .expect("invalid extent consumed neither the generation nor actual entry"),
+            AudioPcmRenderOutcome::Rendered(_)
+        ));
+        assert!(matches!(
+            renderer
+                .render(
+                    request(AudioPcmContinuity::Continue(generation), 4),
+                    &cancellation
+                )
+                .expect("exact first continuation after actual legal entry"),
+            AudioPcmRenderOutcome::Rendered(_)
+        ));
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn timeline_pcm_adapter_maps_sequence_program_layout_at_the_delivery_boundary() {
         let root = std::env::temp_dir().join(format!(
             "mondrian-audio-delivery-layout-{}",
@@ -483,6 +908,9 @@ mod tests {
                 &ExecutionCancellationToken::new(),
             )
             .expect("delivery block");
+        let AudioPcmRenderOutcome::Rendered(output) = output else {
+            panic!("expected complete PCM");
+        };
 
         assert_eq!(output.channel_layout, AudioChannelLayout::Stereo);
         assert_eq!(output.samples, vec![0.0; 8]);
@@ -623,6 +1051,9 @@ mod tests {
                 &ExecutionCancellationToken::new(),
             )
             .expect("render through native plugin worker");
+        let AudioPcmRenderOutcome::Rendered(output) = output else {
+            panic!("expected complete PCM");
+        };
         assert_eq!(output.samples.len(), 128);
         for (frame, pair) in output.samples.chunks_exact(2).enumerate() {
             assert!(
@@ -2029,7 +2460,12 @@ mod tests {
         else {
             panic!("native normalized gain fixture must declare a Double default");
         };
-        assert!(!original_parameter.automation.keyframes.is_empty());
+        assert!(!original_parameter
+            .automation
+            .as_ref()
+            .expect("bound host curve")
+            .keyframes
+            .is_empty());
         assert!(!state.can_undo_action() && !state.can_redo_action());
         let action = |target| {
             ProductAction::Audio(AudioProductAction::EditAutomation(
@@ -2089,7 +2525,7 @@ mod tests {
         assert!(reset_curve.keyframes.is_empty());
         assert_eq!(
             reset_curve.parameter_id,
-            original_parameter.automation.parameter_id
+            original_parameter.automation.as_ref().expect("bound host curve").parameter_id
         );
         let mut unrelated = reset_sequence.clone();
         unrelated

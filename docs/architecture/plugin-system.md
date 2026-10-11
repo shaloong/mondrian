@@ -70,7 +70,7 @@ come from the canonical author evaluator; constants and current-frame samples
 retain distinct native query authority rather than pretending to be history.
 
 The parent supplies pinned binary identity, explicit time/rate/range/PAR and
-straight-alpha Float32 RGBA pixels. Resident instances reuse supervised workers
+complete Float32 RGBA values with canonical Core association metadata. Resident instances reuse supervised workers
 and exact-sized paired shared mappings, with strict sequenced control packets
 and borrowed cancellation/deadline authority. Native code borrows mapped rasters
 only during legal actions; failed/unfetched output cannot publish an old frame.
@@ -355,23 +355,45 @@ parameter/query-source snapshot; omitted controls revert to descriptor defaults.
 parameter mutation. Changed values are assigned before callbacks and bracketed
 with BeginInstanceChanged/InstanceChanged/EndInstanceChanged. Time changes use
 ChangeTime; edits at the same instant use ChangeUserEdited. Clip metadata changes
-also notify Source/Output and refresh preferences. Output clip/image metadata
-reports its negotiated Straight, Premultiplied or Opaque representation; Source
-continues to report the caller's Straight representation. Successful native C ABI
-and resident responses carry `ColorFrameAlpha` through a typed result. The Rust
-adapter alone converts output to public Straight pixels while reading staging:
-Opaque preserves RGB and forces alpha one; normalized Premultiplied coverage
-uses the existing `mondrian-effects::straight_rgba_from_premultiplied` primitive.
-Finite raw Straight channels remain unchanged, including signed/over-one alpha.
-Premultiplied alpha outside [0, 1] is explicitly unsupported by the canonical
-coverage boundary, rather than being clamped and silently changing RGB. This is
-an adapter limitation, not an OFX float-alpha requirement. Nonfinite raw/output
-channels and division overflow fail before publication and retire the worker.
-Zero-alpha output with nonzero RGB can carry emission and is explicitly refused
-at this finite Straight-coverage adapter boundary rather than silently erased.
-Zero coverage with zero RGB canonicalizes to zero; every representable positive coverage is
-unassociated without an arbitrary epsilon. Unknown negotiated metadata fails
-before Render. Unsupported negotiated pixel contracts fail. The current independently evaluable route rejects required
+also notify Source/Output and refresh preferences. Output clip/image metadata reports its negotiated Straight, Premultiplied or
+Opaque representation. Source clip/image metadata reports the prepared caller's
+actual straight, associated or opaque representation; a render cannot mutate
+that immutable association. SDK default clip preferences derive Output defaults
+from this actual Source metadata. The parent never unassociates Source through
+zero-alpha emission.
+
+Native C ABI and resident responses resolve complete `ColorFrameAlpha` values:
+StraightFloat, PremultipliedFloat or Opaque. `EffectFloatFrame` owns extent,
+precision, RGB domain, actual association and the one complete raster. Raw finite
+Straight/associated pixels retain signed alpha, alpha above one, HDR/negative RGB,
+positive subnormal alpha and zero-alpha emission. Opaque ignores its physical
+alpha component and publishes canonical alpha one with unchanged finite RGB.
+Unknown preference metadata is rejected before Render. Nonfinite RGB or required
+Float alpha fails before publication and retires the faulty native worker.
+
+`EffectAlphaContract::NATIVE_FLOAT` admits all current Core representations and
+negotiates only those three truthful native outputs. Provider declarations are
+retained in the sole compiled graph and signatures. Scalar execution, Normal
+Over, nested working frames and current persistent artifacts preserve the actual
+association. A coverage consumer materializes only representable normalized
+straight values; extended alpha or zero-alpha emission returns a typed consumer
+refusal outside native DSP. That refusal does not disable the definition or
+retire a valid processor. A failed heterogeneous frontier cannot replay a
+stateful provider through a fallback graph.
+
+CPU working-identity conversion retains actual association for an identity
+request; an actual identity change materializes its declared coverage contract
+before OCIO. CPU output conversion reuses its existing unique output raster clone for this
+explicit materialization before OCIO and validates the complete result after
+OCIO; a legal matrix may overflow finite HDR input. Ordinary Basic positive coverage remains
+usable; Opaque delivery closes full finite associated images with the sole
+Normal Over law before stock OCIO/output encoding. GPU transfer admission is
+explicit `FiniteStraightCoverage`; it is not a claim that Float division and
+reassociation are bitwise reversible. Native/cache raw preservation has a bit
+oracle; conversion/Over has independent numerical oracles. Artistic blends,
+resampling and temporal tile routes retain explicit coverage semantics in this
+slice. This does not qualify all OpenFX contexts, extensions or arbitrary vendor
+plugins. The current independently evaluable route rejects required
 sequential rendering and temporal clip access at description, creation and
 render admission; optional sequential optimization remains legal. Begin/render/
 end actions explicitly report nonsequential execution during edits and seeks.
@@ -520,8 +542,9 @@ native work to that executor. Additional format/vendor and resident pressure qua
 
 The pinned official Basic authored-UHD qualification executes a 3840x2160
 unclamped Float32 frame through the production factory. Two executor rasters
-plus three host rasters require 663,552,000 logical bytes; a one-byte-short
-working grant rejects, and a 768 MiB grant succeeds with all pixels and distinct
+plus three host rasters require 663,552,000 logical pixel bytes; the complete
+controlled native thread/mutex owner reservation is additionally charged by
+the sole native sizing getter. A one-byte-short total working grant rejects, and a 768 MiB grant succeeds with all pixels and distinct
 corner samples preserved. Decoded input, metadata and arbitrary native heaps
 remain separately owned. This is active frame/pixel qualification, not proof of realtime throughput or
 DCI/8K support. Production retention grants are described above and require
@@ -902,3 +925,473 @@ including NUL before examining identifier/callback metadata. Unknown API names
 receive no arbitrary product 64-byte/ASCII restriction, callback or owned string
 allocation. Current known-API identifier/resource limits remain unchanged.
 Original export indices are retained. Unknown-version entries remain skipped.
+
+
+### Actual progressive image identity
+
+Each fetched Source/Output image reports `OfxImagePropField=OfxFieldNone` from
+the progressive CPU image authority. Its ASCII UniqueIdentifier belongs to the
+selected worker's session owner and current frame binding. Repeated fetches in
+one binding retain the label; Source and Output differ. Rebinding, changed input
+at equal time, seeks and new native owners change the identity, allowing plugin
+analysis caches to invalidate correctly. The namespace is parent-issued per actual processor lifetime, including fresh
+children/reopen, and is not a content-addressed persistent key. The property owns its string; raster
+addresses retain the existing action-scoped borrowing rules. No raster hash or
+frame copy is needed, and exhausted counters fail rather than reuse an ID.
+
+
+### CPU thread and mutex suite ownership
+
+The exclusive resident native worker grants one active CPU to its selected host.
+NumCPUs reports that allowance, independent of hardware CPU count. A lazy owned
+callback thread executes each batch while the native caller blocks. Its TLS
+reports index zero and spawned=true only on that real callback thread; plugin
+self-created threads and the native caller report spawned=false. Recursive
+multiThread returns ErrExists before dispatch; independent overlapping batches
+fail to launch under the one-job owner capacity. Every successful call returns
+after its callback completed. That accepted caller retains the job reservation
+until it consumes its own result; another caller cannot replace the completion
+between worker publication and caller acknowledgement. The thread is reused across frames and joined after
+plugin cache/unload teardown while the selected Host remains alive. There is no
+global pool and no new host-concurrent Render or tile capability.
+
+The host owns 1024 reusable mutex state slots. Opaque handles carry a monotonic
+generation and slot, are never dereferenced, and cannot alias a later binding.
+Each successful same-thread lock/trylock increases recursive depth; competing
+trylock returns Failed without changing depth. Positive initial count belongs to
+the creator. Negative initial counts are accepted and maintained as signed
+accounting, with actual acquisition retaining mutual exclusion; they do not
+create semaphore credits. Destruction invalidates its generation and wakes
+waiters, which return BadHandle instead of acquiring a replacement. Slot capacity
+and generation exhaustion return ErrMemory. Invalid handles return BadHandle;
+unlock without ownership is rejected as ErrValue. As required by plugin lifetime,
+plugin-created threads must complete before Unload/host teardown.
+
+The native reservation getter is the sole sizing authority for the fixed suite
+state, configured 8 MiB callback stack and page guard. Windows uses CRT-aware
+_beginthreadex with reservation semantics; POSIX configures stack and guard in
+pthread attributes. Effects factory resident admission charges that maximum
+before native loading, even if the callback thread remains lazy. This is logical
+owned suite storage, not a whole-native-heap or committed process RSS limit.
+Existing SDK descriptor/cache/property allocations, OS/CRT metadata, executable
+mappings and plugin private allocations remain separate. The getter includes
+the embedded ThreadSuite owner object once; there is no separate existing Host
+sizeof charge in the raster sizing formula. Unsupported stack geometry refuses sizing.
+The existing parent deadline/cancellation authority still terminates and reaps a
+stuck native process.
+
+This closes the exposed suite under a one-CPU grant. It does not claim multi-CPU
+throughput qualification or arbitrary plugin performance. A larger allowance
+requires an explicit domain-owned CPU allocation contract and machine/build
+latency receipts.
+[Released suite contract](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxMultiThread.h),
+[thread safety](https://openfx.readthedocs.io/en/main/Reference/ofxThreadSafety.html).
+
+
+### Bounded native Float32 bit transport
+
+The parent copies the already admitted immutable typed input into its shared
+range in 1 MiB POD blocks. Both full binary identity checks remain at their
+existing pre/post invocation seams; the native C boundary still admits input
+geometry/finite values and validates completed output. The control response
+still proves the exact invocation sequence and actual output association.
+
+Before sending a native render request, the parent acquires one owned RGBA
+allocation under the invocation checkpoint/deadline and its admitted resource
+grant. After observed completion it copies raw native-endian blocks into that
+same spare capacity.
+No frame or f32 reference is published until the entire checked range is
+initialized. Cancellation drops the allocation without reading uninitialized
+slots. The shared output borrow ends before a subsequent worker request, and
+the returned frame owns independent storage. Opaque output has its ignored
+physical A lane canonicalized to 1 while all RGB bits remain unchanged; other
+representations preserve every raw channel bit, including negative zero,
+subnormal values, HDR, extended alpha and zero-alpha associated emission.
+
+The sole Effects controlled storage admission validates complete shape, sample
+precision, finite values and exact alpha domain with checkpoints at each
+65,536-pixel block and before publication. It allocates no second raster and
+does no association conversion. There is no per-frame profile allocation or
+logging. Original cancellation/deadline, changed-binary and native isolation
+semantics remain in place.
+
+Root's pre-Float r30 release baseline failed all four unchanged public-call
+performance gates (1080p/UHD at 30/60 fps), with 600 measured samples per group
+and no correctness errors. This source stage targets scalar representation
+transport overhead; it has not established any throughput result. It requires
+fresh source/product/test/fixture receipts and the same gate budgets, plus
+separate complete Float graph and cold-residency qualification.
+
+
+### Native output resource admission and residency
+
+The parent acquires the complete single output owner before incrementing the
+request serial, copying input, sending a request, or advancing authored native
+parameters/render state. A failed allocation returns the typed Effects
+`OutputAllocation` host-resource refusal. It does not retire the valid native
+worker, quarantine the plugin definition, publish staged pixels, or replay the
+invocation. The admitted three-raster logical charge is unchanged: the output
+owner moves earlier, without adding another raster. Actual Vec capacity must
+fit the admitted output bytes. An allocator-provided larger capacity is a typed
+OutputCapacity refusal before DSP, not silently uncharged retained storage.
+Allocator usable-size and OS bookkeeping remain separate excluded frontiers.
+Actual completion fills
+the same exclusively owned allocation and uses the sole controlled frame
+validator. Both binary SHA checks and the native boundary validation remain.
+
+Effects alone records the exact prepared occurrence/provider revision and
+decides Retained or Evicted using its existing optional count/byte grant. If
+optional retention is denied, the instance is actually dropped before the
+receipt is issued; a later invocation must prepare a new instance. A scheduler
+stop wins before retention and staged publication. No application-side spare
+instance is retained. These facts describe resource admission, not a native
+processor fault and not successful execution. Persistent plugin user-blocked outcomes use this same typed invocation/retention authority, with actual native qualification recorded separately.
+
+This source amendment is not runtime or performance qualification. Original
+r30 failures remain failed; the complete Float/bulk chain requires newly pinned
+artifacts and all four original public render budgets plus cold/residency gates.
+
+### OpenFX image identity across process replacement
+
+The image authority uses the parent-issued `EffectProcessorOwnerId` as its
+namespace. `Prepare` transports the same typed lifetime once; the native create
+boundary rejects null/nil identity before acquiring the SDK host lease and
+retains a deep copy of exactly 16 bytes. Per-binding generations and distinct
+Source/Output suffixes remain stable for repeated fetches of the same binding.
+Reprepare, eviction, and project reopen create a new namespace, even when the
+OS recycles PID or the raster/time returns to a previous coordinate. There is
+no per-pixel hash or per-frame UUID generation.
+
+A conforming plugin may persist UID-indexed analysis past one child lifetime.
+The owned qualification fixture saves an actual UID/RGB analysis record, then
+restores it in fresh processes with changed source pixels; an independent Basic
+gain oracle detects a stale cache hit. The public-worker contract additionally
+checks the actual native UID prefix against the exact parent lifetime. This is
+private analysis-cache qualification, not proof of host private-state
+serialization, every plugin's persistence format, or whole project save/reopen.
+
+Known fixed image-identity storage charges three 16-byte values: the parent
+session owner, child Prepare owner, and retained native namespace. Temporary
+call stack, allocator bookkeeping and vendor/plugin heap remain explicit
+frontiers. Fresh build/native tests and the unchanged release performance gates
+are required before recording runtime/performance acceptance.
+
+### Bounded native auxiliary feedback (Stage A)
+
+The product-owned OpenFX Message V1/V2, Progress V1/V2 and Timeline V1
+dispatchers resolve actual registered Host/Descriptor/Instance handles without
+casting an untrusted callback token. Intrusive guards are constructed before
+the SDK base and destroyed after its DestroyInstance action. Copied auxiliary
+timeline/text state outlives that action; callback threads join before the
+Host's auxiliary owner is destroyed. Wrong object kinds and dead/unregistered
+tokens refuse without dereferencing their storage. A bounded complete UTF-8
+journal replaces stdout logging; oversize, invalid or full-slot posts fail
+atomically. The policy is 32 notices, 4096 text bytes and 256 identifier bytes,
+not a maximum claimed by the OpenFX standard.
+
+Persistent Error prevents rendering/publication until a real authored
+InstanceChanged or explicit clear repairs it. Warning and information permit
+output. A terminal report has the exact native invocation serial; the
+supervisor attaches the same parent-issued Core EffectProcessorOwnerId used by
+image namespaces and its actual nonzero child PID. The compiler/bank attach
+EffectId, sizing/alpha format and provider revision. Valid UserBlocked and
+pre-DSP HostResourceRefused remain distinct from cancellation, deadline,
+malformed protocol and native faults. Effects alone decides optional Retained
+or Evicted ownership for each recoverable disposition. A parameter change keeps
+the author occurrence/provider revision, so a genuinely retained child can
+repair its existing private instance; dimension, format, provider replacement
+and real eviction require a new parent identity. App stores bounded facts only.
+
+Both scalar whole-graph/Timeline and heterogeneous whole-batch routes refuse
+more than 32 declared feedback-bearing occurrences before the first stateful
+callback. Zero-feedback providers retain their original small-grant path. For
+feedback providers, the control reserves its complete receipt capacity before
+prepare/DSP and checks actual capacity against the admitted bytes. Completed
+receipt batches move through fixed inline storage without a full raster clone
+or a replay of advanced state. The CPU Viewer fallback preserves the canonical
+typed error and actual successful feedback instead of converting all outcomes
+to text. Current Viewer projection requires its existing exact work key,
+author generation, playback epoch and consumed/active execution authority.
+Stale facts cannot clear a new owner or publish notifications. UserBlocked
+projects to a blocked Viewer delivery, without fabricated frame completion or
+plugin quarantine; repair and removal retire only the observational view.
+
+Noninteractive Question returns Failed, never a fabricated Yes/No/Default.
+Timeline getTime/getTimeBounds return the actual request snapshot; gotoTime
+returns Failed for a finite unsupported interactive navigation and ErrValue
+for nonfinite input. Progress owns its real begin/update/end lifecycle.
+The native journal also supplies current-work live progress and cooperative
+abort through the same supervised authority described below. Actual generic GUI
+Question/reply uses the bounded current-work consumer described in the C1 section;
+ordinary realtime/noninteractive work still returns Failed without a modal wait.
+Interactive Timeline navigation and Interact remain required closures on this
+same work/owner/channel, with no additional instance, graph or request authority.
+
+The wire is one current generation (v8), with strict complete schema admission
+and no older ownerless fallback. The fixed auxiliary state/report, guard cap,
+maximum separately owned snapshots and bounded parent/child packet buffers are
+charged before loading. This is a conservative known-host logical ledger, not
+whole process RSS: allocator bookkeeping, OS/CRT thread state, existing SDK
+objects and arbitrary plugin allocation remain separate. Existing host UID
+std::string capacities and SDK image-property UID copies are also explicit
+unmeasured frontiers, not mislabeled plugin heap. The original UHD optional
+384 MiB cap remains unchanged; active admission may execute while actual
+optional retention evicts, and cold prepare/performance must be measured.
+
+This source contract does not establish runtime or performance acceptance.
+The owned suite/status, actual Effects repair/eviction, current-work consumer,
+source stability and fresh release timing gates must be run on pinned artifacts.
+
+### Native Log diagnostic delivery
+
+The supervisor emits native Log notices once to the existing product tracing
+target `mondrian.openfx.plugin`, after matching work sequence, native revision,
+parent owner and both binary checks. Fields carry the actual parent
+EffectProcessorOwnerId, actual nonzero child PID, native invocation and complete
+plugin-authored UTF-8 text/ID. This is an execution diagnostic, not successful
+frame/presentation evidence or an authoring request. Both Viewer and export use
+this same supervisor; the App notification projection does not emit a second
+log or a user popup for Log notices. Information and warning delivery remains
+the current-work consumer contract.
+
+The existing product subscriber uses rotated bounded JSONL and stderr,
+with its existing filters and non-blocking writer/backpressure policy. It does
+not write to the native child control stream or stdout. It remains best effort,
+not durable audit publication, and cannot promise persistence after abrupt
+process failure or an unavailable user-state log directory. These properties
+do not establish fatal/discovery/unload notice or live interaction support.
+
+
+### Active versus retained native processor storage
+
+Native factory sizing uses the shared Effects `EffectFloatProcessorStorage`
+contract. Active admission covers two mapping ranges, its one pre-admitted
+output Vec, reserved callback stack/guard and fixed thread/mutex/namespace POD.
+After a successful response, the complete typed output Vec moves into the
+Effects caller's frame; the native session retains only the pair of shared
+ranges and fixed owner reservation. Effects separately charges its input,
+staging, cache, mask workspace and resident siblings. The unchanged Professional
+preview policy is 768 MiB working and 384 MiB optional native retention.
+
+This is a conservative controllable logical-owner ledger, not complete RSS.
+FrameState Source/Output UID strings and SDK-owned property string copies remain
+known unmeasured host allocations; they are not arbitrary plugin heap. SDK
+descriptor/cache allocations, executable mappings, OS/CRT bookkeeping, arbitrary
+plugin memory and allocator usable-size overhead remain separate frontiers.
+Real authored-factory owner/PID reuse, cold cost and fresh unchanged release
+frame budgets require independent qualification; source sizing does not confer
+performance PASS.
+
+CPU Preview treats invalid complete Float frame storage as a typed frame-contract refusal. It does not start another backend to conceal an invalid extent or sample. Scheduler stops remain cancellation/deadline outcomes through scalar admission.
+
+
+### Cooperative current-work control and live progress
+
+The supervised native session uses wire generation 8 with one existing TCP
+connection and one request authority. Its domain-owned control pump is the sole
+socket reader/writer in the child; native actions remain on the dispatch thread.
+Render and Cancel name the exact parent-issued processor owner and checked work
+serial. Cancellation accepted while queued remains sticky during activation.
+One original completion retains its slot until every byte commits, and a checked
+local acknowledgement token lets dispatch recognize that original completion
+even when the next valid request is already queued. Serial/token exhaustion
+refuses before work admission. Invalid old/future/foreign cancellation does not
+mutate the current work; a malformed peer protocol is still a supervisor fault.
+
+The native scoped control borrow exposes genuine SDK abort observations and
+fixed POD progress to this same owner. It never invokes the parent's borrowed
+Rust control closure on a foreign thread. Native callbacks and declared CPU
+computations finish before that borrow clears; native destruction precedes pump
+shutdown. The only cloned socket is a shutdown capability, not a second reader.
+Stop shuts the socket, wakes the bounded slot and joins the pump; no detached
+reader can retain an invocation. A pump panic retires the supervised process.
+
+One progress POD coalesces in the child. Packet reader/writer owners are admitted
+before native DSP, bounded to two MiB per direction and reused; partial cursors
+survive polls. Input is serviced before an outbound write quantum, so a full
+progress socket cannot mask Cancel. Accepted live packets prove parent owner,
+request serial, native owner, monotonically increasing revision and progress
+generation before a product observer sees them. Terminal snapshot/lifetime,
+binary fingerprints, complete Float-frame and output-owner checks remain
+unchanged. Progress is not frame readiness or Retained/Evicted evidence.
+
+The parent owning thread samples its canonical work checkpoint throughout I/O.
+An explicit cancellation submits one exact Cancel and drains within the smaller
+of the original scheduler/native deadline and a 100 ms retirement grace. A
+deadline already expired does not acquire extra grace. An uncooperative plugin
+is killed/reaped under that authority; advanced DSP is never replayed. A late
+Rendered/UserBlocked reply cannot override the owning stop or publish pixels.
+
+The pump adds a declared 8 MiB requested stack and conservative 64 KiB guard
+allowance, fixed owner/cursor/slot sizes, and admitted packet capacities to the
+canonical native active/retained policy. These are logical resource policy, not
+exact OS committed/reserved bytes or whole-process RSS. OS/CRT/TLS, Arc headers,
+SDK property/string storage, serde-owned metadata/transients and allocator
+bookkeeping remain explicit known resource frontiers; unsupported reservations
+or limits refuse. No throughput, complete memory or all-vendor compatibility
+acceptance follows from the existence of these interfaces.
+
+Owned SessionProbe controls distinguish actual Render-before-cancel/SDK-abort
+from immediate worker retirement, and a real live .375 observation from a
+terminal-only snapshot. Public Effects-factory tests bind the same occurrence,
+provider revision, child PID, parent/native owner and terminal receipt. They
+retain independent Basic unit-gain pixels and one-action/no-replay checks.
+Question modal/reply is carried by the actual generic GUI consumer below.
+Interactive Timeline navigation and OFX Interact remain required closures;
+noninteractive Question/goto failure does not claim those services are complete.
+
+### Bounded native ingress and completed provider admission
+
+The reusable native request validates raster storage through the sole borrowed
+Effects controlled validator with the same work-owner checkpoint before its
+first scan, at each 65,536-pixel block and before completion. This precedes output
+reservation, request serial advancement, shared input copies and native DSP.
+The private request contract requires an explicit checkpoint at every caller;
+the convenience call without a scheduler supplies its explicit no-op owner.
+
+Bank-backed and direct CPU provider completion share one metadata admission and
+the same controlled storage validator. Exact extent, format, alpha negotiation
+and numeric violations retain their actual diagnostic; they are not described
+collectively as a changed pixel count. An owner stop during either bank admission
+or the outer staged publication remains sticky and reaches the existing stopped
+outcome: the sole bank owner retires, staged pixels do not publish, DSP does not
+replay and a valid provider is not quarantined as a fault. This amendment keeps
+the existing two completed-provider scans and all finite/shape/alpha checks;
+it does not claim a measured speedup or remove binary fingerprints/output clear.
+Native C++ scans, allocator/metadata/OS frontiers and full release timing require
+their separate qualification; this source proposal is not full latest-OFX support.
+
+### Whole-call OpenFX performance diagnosis
+
+The `openfx_frame_diagnostic` release example carries the same complete public
+`OpenFxFilterSession::render` gate as the integration harness, including native
+execution, ownership checks, file fingerprints, copies and typed output admission.
+It preserves the independent full-raster oracle outside the timer and the original
+32 warmups, 600 samples and 80% stage budget. Selecting this example avoids building
+unrelated integration companion binaries; it does not narrow the timed boundary.
+The explicit diagnostic helper path must match the actual worker role/path/hash in
+the unified machine/build receipt. Run with the same release/all-feature profile.
+
+Diagnostic traces and phase timers are attribution evidence, with overhead and
+source/artifact identity recorded separately. They are not performance acceptance.
+A candidate still requires a fresh uninstrumented whole-call run under the unchanged
+budget; a native-only interval cannot substitute for that result.
+
+Validation-only `render_diagnostic` delegates to the same generic owned render
+path as ordinary `render`/`render_observed`. Its fixed caller-owned POD report
+records the actual parent owner, child PID and original request serial; it grants
+no work authority or native action policy. The current strict wire carries the
+explicit child-probe selection and bounded report; its fixed owning storage is
+charged by the canonical native active/retained ledger. Normal
+execution uses a zero-sized statically dispatched no-op probe with no diagnostic
+clock, queue, log or allocation. Instrumentation keeps all mutable-frame input,
+complete output, fingerprint, copy, output-clear and owner checkpoint contracts.
+
+The phase attribution example retains the original full-raster independent gain
+oracle and whole public timer. Every sample and original 80% budget miss is
+reported after timing, but this diagnostic test deliberately produces no PASS
+verdict. Parent idle sleep counts and requested/observed durations are recorded
+inside the inclusive completion wait; they must not be added again as separate
+phases or interpreted as exact child DSP time. The report/retained sample Vec are
+explicit validation-caller storage, not native resident or whole RSS proof. Fresh
+same-source release/all-feature artifacts and measured instrumentation overhead
+are required. Performance acceptance still uses the uninstrumented original gate.
+
+`owned_invocation_elapsed` starts after the fixed diagnostic report reset and
+ends after the canonical owned render attempt, including failure retirement.
+Its phase sum and unassigned gap are internal attribution only. The outer
+`render_ns` remains the complete public-call interval, including report setup
+and final reporting overhead; it is the sole original budget authority.
+
+
+### OpenFX actual GUI, Question and idle action feedback
+
+A generic Inspector opens native interactivity only while its actual effect
+PropertySection Widget remains visible in the current private author view. A
+selection/model DTO is insufficient. The native worker pairs BeginInstanceEdit
+and EndInstanceEdit on the same instance, including a legal Failed Begin reply;
+that private setup result is distinct from the real generic GUI lifetime.
+
+An explicit nonrealtime editor-refresh work may ask a bounded Question through
+the existing sole TCP pump and task result channel. Yes/No come only from local
+buttons after the original modal has a real successful Window presentation.
+Unavailable, stale, full, disconnected or dismissed service returns native Failed;
+it does not invent No, a native fault or loss of otherwise legal Render output.
+Human waiting cannot extend an absolute scheduler deadline. Ordinary playback,
+selection metadata and native booleans do not grant that waiting purpose.
+
+TCP action serial and SDK Render invocation count are independent nonwrapping
+coordinates. Render→idle End→Render uses wire 1/2/3 and native Render 1/2.
+Diagnostic `sequence` remains the original Render TCP action serial; it must not
+be compared to the native invocation count after an idle action. Late original
+cancel/reply/GUI callbacks cannot consume replacement work.
+
+End drains its bounded notices immediately. The canonical residency bank binds
+actual preparation/provider/processor owner and Retained disposition before
+publishing an explicit GUI-action receipt. This carries no new FrameWork,
+RenderedScope, presentation ticket or author edit. App rechecks the current
+private author view and previously observed exact retained native binding before
+updating the same processor-feedback/notification state. Full delivery is an
+observational failure, not another lifetime authority or a reason to replay DSP.
+
+Before idle SDK action/decode the same bank admits declared temporary metadata
+against its actual working grant. Resource denial may evict through the canonical
+bank, without provider quarantine; it never increases the optional 384 MiB cap.
+Actual bounded result/drain storage and cloned author metadata are declared.
+SDK properties/serde temporary allocation, Arc/allocator administration and
+OS/CRT remain explicit resource frontiers, not a whole-RSS guarantee.
+
+Native parameter writes, native-origin author gestures, SyncPrivateData,
+Timeline goto/Interact/Overlay and other formats/contexts remain separate missing
+vertical consumers. Current code proposals do not establish arbitrary-plugin,
+physical-modal, cross-platform or realtime performance qualification. Root's
+r171/r245 pre-C1 whole-call measurements failed the unchanged frame budgets;
+new C1 source requires fresh pinned build and qualification before such claims.
+
+
+### Default-off child and native attribution
+
+A measured render requests a fixed report on the same TCP owner/work serial.
+Normal requests explicitly disable it: the Rust dispatcher and sole C++ render
+law instantiate no-op probes, with no diagnostic clocks, raster owner, per-frame
+log or new queue. The first Output-fetch clear remains one shared operation;
+its optional clock is outside the pixel loop and protected by the existing fetch
+mutex. All native computations join before the borrowed CABI diagnostic pointer
+is cleared by RAII, including exceptional exits. Existing finite/shape/alpha,
+mutable-frame input, fingerprints, output clear and cancellation checks remain.
+
+The child records disjoint admission, binary verification, parameter arena,
+actual cold create, native dispatch, and terminal preparation. Native phases
+record session admission/image binding, suite setup, parameter/clip actions,
+sequence begin/ROI/Render/end, raw output admission and auxiliary report copy.
+Output clear is nested inside plugin Render. Render includes host callbacks and
+legal spawned computations, so it is not pure plugin algorithm/DSP cost.
+
+Child total ends before Shared completion, pump serialization/socket commit and
+original acknowledgement. Those costs are unmeasured by the response carrying
+this report. Child dispatch can start while parent request submission finishes;
+never subtract across process start coordinates as an exact transport residual.
+Native spans nest inside child NativeDispatch, and those spans overlap parent
+Await. Each level has its own nonoverlapping sum/unassigned duration; adding
+levels or adding nested clear/sleep again would double count time.
+
+The strict generation is 8, with no older helper fallback. The parent verifies
+exact parent owner, original wire/action serial, actual native Render invocation,
+input bytes, accepted output alpha and bounded timing metadata. Diagnostic
+counter overflow is a reported measurement failure, not a plugin DSP fault.
+Fixed inline report copies and the borrowed native pointer have a declared
+conservative logical reservation; slot/Response storage is counted by its actual
+owner size. Existing packet capacity remains bounded. OS/CRT/SDK/serde allocator
+transients remain known frontiers, so this is not whole RSS/resource acceptance.
+
+Fresh same-source release product and diagnostic-example artifacts are required.
+The paired HD30/UHD30 32-warmup/200-sample run is attribution only. The original
+600/all-four uninstrumented whole-call 80% budget and complete analytic pixel
+oracle remain the performance acceptance. Previous parent-only performance
+failure remains valid evidence; this source change is not a repair or PASS.
+
+The CLAP note-port facade interprets `preferred_dialect` using its official
+unsigned 32-bit field carrier. The separate C enum typedef is not the carrier
+for this metadata field. Enabling the SDK note-port feature for owned native
+fixtures does not expose a product host note-port service or accept note/MIDI
+outputs without a canonical consumer.

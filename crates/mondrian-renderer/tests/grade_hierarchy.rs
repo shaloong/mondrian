@@ -238,7 +238,7 @@ fn composite_grade_plan(plan: &TimelineRenderPlan) -> Vec<[f32; 4]> {
                     TimelineAdjustmentLayer {
                         effect_graph: Arc::clone(&grade.effect_graph),
                         opacity: 1.0,
-                        blend_mode: None,
+                        blend_policy: mondrian_effects::EffectPassBlendPolicy::Mix,
                         frame_seed: grade.frame_seed,
                     },
                 ));

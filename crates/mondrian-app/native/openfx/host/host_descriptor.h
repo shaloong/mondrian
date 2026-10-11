@@ -3,6 +3,9 @@
 #ifndef HOST_DEMO_HOST_DESCRIPTOR_H
 #define HOST_DEMO_HOST_DESCRIPTOR_H
 
+#include "thread_suite.h"
+#include "aux_suite.h"
+
 namespace MondrianOpenFx {
 
   /// a host combines several things...
@@ -14,8 +17,22 @@ namespace MondrianOpenFx {
   ///      which is passed back to the plugin.
   class Host : public OFX::Host::ImageEffect::Host
   {
+    // Reverse destruction joins callback computation before auxiliary facts die.
+    AuxSuite _aux;
+    ThreadSuite _threads;
   public:
     Host();
+    AuxSuite& auxiliary() noexcept { return _aux; }
+    const void* fetchSuite(const char*, int) override;
+    OfxStatus multiThread(OfxThreadFunctionV1 function, unsigned count, void* argument) override { return _threads.run(function, count, argument); }
+    OfxStatus multiThreadNumCPUS(unsigned* output) const override { return _threads.numCPUs(output); }
+    OfxStatus multiThreadIndex(unsigned* output) const override { return _threads.index(output); }
+    int multiThreadIsSpawnedThread() const override { return _threads.isSpawned(); }
+    OfxStatus mutexCreate(OfxMutexHandle* output, int count) override { return _threads.createMutex(output, count); }
+    OfxStatus mutexDestroy(OfxMutexHandle handle) override { return _threads.destroyMutex(handle); }
+    OfxStatus mutexLock(OfxMutexHandle handle) override { return _threads.lockMutex(handle); }
+    OfxStatus mutexUnLock(OfxMutexHandle handle) override { return _threads.unlockMutex(handle); }
+    OfxStatus mutexTryLock(OfxMutexHandle handle) override { return _threads.tryMutex(handle); }
 
     /// Create a new instance of an image effect plug-in.
     ///

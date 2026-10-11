@@ -91,7 +91,10 @@ mod tests;
 
 use std::ffi::c_void;
 
-pub use class::{Class, ComWrapper, Construct, Header, InterfaceList, MakeHeader, Wrapper};
+pub use class::{
+    Class, ComWeak, ComWrapper, ComWrapperPayloadStorage, Construct, Header, InterfaceList,
+    MakeHeader, Wrapper,
+};
 pub use ptr::{ComPtr, ComRef, SmartPtr};
 
 /// A 16-byte unique identifier for a COM interface.

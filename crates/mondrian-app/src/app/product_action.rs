@@ -246,6 +246,8 @@ pub const AUDIO_EDIT_COMPONENT: &str = "edit_component";
 pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 /// External action name for navigating an Inspector Scope occurrence without authoring.
 pub const AUDIO_SELECT_SCOPE_OCCURRENCE: &str = "select_scope_occurrence";
+/// External action for one exact native editor product surface.
+pub const AUDIO_NATIVE_EDITOR: &str = "native_editor";
 
 /// External custom-action namespace for Project Asset Library operations.
 pub const ASSET_NAMESPACE: &str = "ui.asset";
@@ -471,6 +473,8 @@ pub enum ViewerProductAction {
 /// Closed Sequence audio authoring operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioProductAction {
+    /// Open or close the exact selected native author surface.
+    NativeEditor(AudioNativeEditorPayload),
     /// Navigate a shared Scope curve using an explicit Component occurrence.
     SelectScopeOccurrence(AudioScopeOccurrencePayload),
     /// Query or cancel transient processor input observation.
@@ -758,6 +762,9 @@ impl ProductAction {
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
+                AUDIO_NATIVE_EDITOR => Ok(Some(Self::Audio(AudioProductAction::NativeEditor(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 AUDIO_SELECT_SCOPE_OCCURRENCE => Ok(Some(Self::Audio(
                     AudioProductAction::SelectScopeOccurrence(decode_payload(
                         namespace, name, payload,
@@ -1159,6 +1166,11 @@ impl ProductAction {
             Self::Audio(AudioProductAction::QueryProcessorInputs(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_QUERY_PROCESSOR_INPUTS,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::NativeEditor(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_NATIVE_EDITOR,
                 serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::SelectScopeOccurrence(payload)) => (
@@ -1904,6 +1916,28 @@ pub struct AudioProcessorRebindVst3Payload {
     pub address: mondrian_timeline::AudioProcessorRackAddress,
     /// Stable processor instance identity.
     pub processor_id: AudioProcessorInstanceId,
+}
+
+/// Closed native editor surface intent; metadata cannot mint runtime permission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNativeEditorPayload {
+    /// Real open author lifetime observed by the source projection.
+    pub session_id: mondrian_editor_state::AuthoringSessionId,
+    /// Exact source Sequence of the selected surface.
+    pub sequence_id: SequenceId,
+    /// Stable authored rack.
+    pub address: mondrian_timeline::AudioProcessorRackAddress,
+    /// Required materialization for a shared Scope.
+    pub occurrence: Option<mondrian_timeline::AudioComponentAddress>,
+    /// Stable processor within that rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Complete installed binary/definition binding at projection.
+    pub definition: mondrian_timeline::audio::AudioProcessorDefinitionRef,
+    /// Explicit edit time chosen at this surface; no later active-frame inference.
+    pub sequence_time: mondrian_core::DomainTime,
+    /// True opens the selected editor, false closes its actual current target.
+    pub open: bool,
 }
 
 /// Inspector navigation into one shared Scope occurrence in the active Sequence.

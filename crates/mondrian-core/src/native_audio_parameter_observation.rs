@@ -1,0 +1,205 @@
+//! Native parameter presentation facts on the existing observation completion.
+//! They are neither automation, persisted author state nor installed permission.
+
+use crate::{NativeAudioEditorTarget, ParameterId};
+
+/// Maximum facts in a single bounded main/control observation reply.
+pub const NATIVE_AUDIO_PARAMETER_FACTS: usize = 1152;
+/// Maximum aggregate owned bytes of the fact vector and its strings.
+pub const NATIVE_AUDIO_PARAMETER_FACT_BYTES: usize = 256 * 1024;
+
+/// Actual origin of a parameter observation; flush has no sample clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAudioParameterObservationOrigin {
+    /// Actual signal grid before the original callback offset; not UI edit time.
+    Process {
+        /// Signed signal sample position after the sole PDC calculation.
+        start_sample: i64,
+        /// Actual sample rate of the native call.
+        sample_rate: u32,
+        /// Actual frame extent of that call.
+        frames: u32,
+        /// Original callback offset within the native call.
+        offset: u32,
+    },
+    /// A flush on the actual inactive main role; its raw offset is not a clock.
+    InactiveFlush {
+        /// Original raw offset, explicitly without sample timing.
+        raw_offset: u32,
+    },
+    /// A flush on the actual active audio role; its raw offset is not a clock.
+    ActiveFlush {
+        /// Original raw offset, explicitly without sample timing.
+        raw_offset: u32,
+    },
+    /// An actual main-thread get_value/get_info/value_to_text query.
+    MainQuery {
+        /// The original rescan mask, or zero for a current-value query.
+        rescan_flags: u32,
+    },
+}
+
+/// One bounded parameter presentation record in source/query order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeAudioParameterFact {
+    /// Original callback/control revision, or current revision for a main query.
+    pub revision: u64,
+    /// Stable schema identity translated from the original native parameter ID.
+    pub parameter: ParameterId,
+    /// Original native output event flag bits; unknown bits remain observable.
+    pub event_flags: u32,
+    /// Exact optional finite plain value; no descriptor default is substituted.
+    pub value_bits: Option<u64>,
+    /// Original origin and sample/flush evidence.
+    pub origin: NativeAudioParameterObservationOrigin,
+    /// Actual queried UI visibility, independent of persisted schema metadata.
+    pub hidden: Option<bool>,
+    /// Actual periodic/meter presentation hint, never an author write request.
+    pub periodic: Option<bool>,
+    /// Actual current INFO caption, absent on raw output-only records.
+    pub name: Option<String>,
+    /// Actual current INFO module path, absent on raw output-only records.
+    pub module: Option<String>,
+    /// Original current INFO parameter flags, absent on raw output-only records.
+    pub info_flags: Option<u32>,
+    /// Actual value_to_text result. None is explicitly unavailable.
+    pub display: Option<String>,
+}
+
+impl NativeAudioParameterFact {
+    /// Shape admission only; callers must still compare the actual installed owner.
+    pub fn validate(&self) -> Result<(), NativeAudioParameterObservationError> {
+        if self.parameter.storage_owner().capacity() > 255
+            || self.value_bits.is_some_and(|bits| !f64::from_bits(bits).is_finite())
+            || self.name.as_ref().is_some_and(|text| text.len() > 255 || text.contains('\0'))
+            || self
+                .module
+                .as_ref()
+                .is_some_and(|text| text.len() > 1023 || text.contains('\0'))
+            || self
+                .display
+                .as_ref()
+                .is_some_and(|text| text.len() > 1023 || text.contains('\0'))
+            || match self.origin {
+                NativeAudioParameterObservationOrigin::Process {
+                    start_sample,
+                    sample_rate,
+                    frames,
+                    offset,
+                } => {
+                    sample_rate == 0
+                        || offset >= frames
+                        || start_sample.checked_add(i64::from(offset)).is_none()
+                }
+                NativeAudioParameterObservationOrigin::MainQuery { rescan_flags } => {
+                    rescan_flags & !15 != 0
+                }
+                _ => false,
+            }
+        {
+            return Err(NativeAudioParameterObservationError::InvalidFact);
+        }
+        Ok(())
+    }
+    /// Actual string allocation capacities, separately from inline vector storage.
+    pub fn string_capacity_bytes(&self) -> Result<usize, NativeAudioParameterObservationError> {
+        [
+            Some(self.parameter.storage_owner().capacity()),
+            self.name.as_ref().map(String::capacity),
+            self.module.as_ref().map(String::capacity),
+            self.display.as_ref().map(String::capacity),
+        ]
+        .into_iter()
+        .flatten()
+        .try_fold(0usize, |sum, bytes| {
+            sum.checked_add(bytes).ok_or(NativeAudioParameterObservationError::Extent)
+        })
+    }
+}
+
+/// Bounded shape/resource refusal; no value or unknown flag is fabricated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NativeAudioParameterObservationError {
+    /// A record carries inadmissible bytes, non-finite value or impossible origin.
+    #[error("native parameter presentation fact is invalid")]
+    InvalidFact,
+    /// Aggregate actual owned vector/string storage exceeds this response bound.
+    #[error("native parameter observation storage exceeds its bound")]
+    Extent,
+}
+
+/// Same-owner presentation facts retained only by the current UI execution context.
+/// Public DTO construction does not grant an author, runtime or child lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeAudioParameterObservation {
+    target: NativeAudioEditorTarget,
+    process_id: std::num::NonZeroU32,
+    object_serial: std::num::NonZeroU64,
+    source_revision: u64,
+    facts: Vec<NativeAudioParameterFact>,
+}
+
+impl NativeAudioParameterObservation {
+    /// Project an already authenticated installed object; shape checks are separate
+    /// from Runtime authority and cannot turn a copied target into permission.
+    pub fn project(
+        target: NativeAudioEditorTarget,
+        process_id: std::num::NonZeroU32,
+        object_serial: std::num::NonZeroU64,
+        source_revision: u64,
+        facts: Vec<NativeAudioParameterFact>,
+    ) -> Result<Self, NativeAudioParameterObservationError> {
+        Self::validate_facts(&facts)?;
+        if facts.iter().any(|fact| fact.revision > source_revision) {
+            return Err(NativeAudioParameterObservationError::InvalidFact);
+        }
+        Ok(Self {
+            target,
+            process_id,
+            object_serial,
+            source_revision,
+            facts,
+        })
+    }
+    /// The exact installed root/local occurrence/binding at Runtime projection.
+    pub const fn target(&self) -> NativeAudioEditorTarget {
+        self.target
+    }
+    /// Actual authenticated child process identity.
+    pub const fn process_id(&self) -> std::num::NonZeroU32 {
+        self.process_id
+    }
+    /// Actual process-local native load incarnation, not a definition/class ID.
+    pub const fn object_serial(&self) -> std::num::NonZeroU64 {
+        self.object_serial
+    }
+    /// Actual coherent native source revision when these records were observed.
+    pub const fn source_revision(&self) -> u64 {
+        self.source_revision
+    }
+    /// Exact retained source/query order. Values do not write host curves.
+    pub fn facts(&self) -> &[NativeAudioParameterFact] {
+        &self.facts
+    }
+    /// Check actual owned capacities before native response or Core publication.
+    pub fn validate_facts(
+        facts: &Vec<NativeAudioParameterFact>,
+    ) -> Result<usize, NativeAudioParameterObservationError> {
+        if facts.capacity() > NATIVE_AUDIO_PARAMETER_FACTS {
+            return Err(NativeAudioParameterObservationError::Extent);
+        }
+        let storage = std::alloc::Layout::array::<NativeAudioParameterFact>(facts.capacity())
+            .map_err(|_| NativeAudioParameterObservationError::Extent)?
+            .size();
+        let total = facts.iter().try_fold(storage, |total, fact| {
+            fact.validate()?;
+            total
+                .checked_add(fact.string_capacity_bytes()?)
+                .ok_or(NativeAudioParameterObservationError::Extent)
+        })?;
+        if total > NATIVE_AUDIO_PARAMETER_FACT_BYTES {
+            return Err(NativeAudioParameterObservationError::Extent);
+        }
+        Ok(total)
+    }
+}

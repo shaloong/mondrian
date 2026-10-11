@@ -1125,6 +1125,7 @@ fn apply_viewer_zoom_mode_to_model(model: &mut ViewerPanelModel, mode: ViewerZoo
 
 /// Root widget for the app UI editor window.
 pub struct AppUiAppRoot {
+    native_visual_gui: std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiRegistry>,
     id: WidgetId,
     title_bar: TitleBar,
     dock: DockSplitter,
@@ -1580,6 +1581,10 @@ impl AppUiAppRoot {
     ) -> Self {
         let viewer_zoom_mode = ViewerZoomMode::Fit;
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
+        let native_visual_gui = std::sync::Arc::new(
+            crate::app::preview_native_gui::PreviewNativeGuiRegistry::default(),
+        );
+        bind_native_visual_gui_models(&mut models, &native_visual_gui);
         let dock = build_dock_tree_for_workspace(
             models.clone(),
             workspace_preset,
@@ -1589,6 +1594,7 @@ impl AppUiAppRoot {
         let localizer =
             Localizer::new(preferences_model.locale).expect("bundled UI catalogs must be valid");
         let mut root = Self {
+            native_visual_gui,
             id: WidgetId::new(),
             title_bar,
             dock,
@@ -1650,6 +1656,12 @@ impl AppUiAppRoot {
         Some(layout)
     }
 
+    pub(crate) fn native_visual_gui_registry(
+        &self,
+    ) -> std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiRegistry> {
+        std::sync::Arc::clone(&self.native_visual_gui)
+    }
+
     /// Whether `panel` is the active visible tab, without allocating a layout snapshot.
     pub fn is_panel_active(&self, panel: PanelKind) -> bool {
         is_panel_active_in_widget(&self.dock, panel)
@@ -1695,6 +1707,56 @@ impl AppUiAppRoot {
     /// Replace the shell-local asset-library browser folder.
     pub fn set_asset_folder_id(&mut self, folder_id: Option<String>) {
         self.asset_folder_id = folder_id;
+    }
+
+    /// Admit an opaque delivery into the one existing modal/focus owner.
+    /// Other modals keep their lifetime; unavailable native UI returns Failed.
+    pub(crate) fn show_native_visual_question(
+        &mut self,
+        presentation: crate::app::preview_native_gui::NativeVisualQuestionPresentation,
+    ) -> bool {
+        self.retire_stale_native_visual_question();
+        if self.modal.is_some() || !presentation.is_current() {
+            presentation.dismiss();
+            return false;
+        }
+        self.show_modal(ShellModal::native_visual_question(
+            presentation,
+            self.preferences_model.locale,
+        ));
+        true
+    }
+
+    pub(crate) fn retire_stale_native_visual_question(&mut self) -> bool {
+        if self
+            .modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .is_some_and(|dialog| !dialog.is_current())
+        {
+            self.modal = None;
+            return true;
+        }
+        false
+    }
+
+    #[cfg(feature = "validation")]
+    pub(crate) fn validation_native_question_controls(
+        &self,
+    ) -> Option<super::native_question_validation::NativeQuestionValidationControls> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .and_then(|dialog| dialog.validation_controls())
+    }
+
+    pub(crate) fn painted_native_visual_question(
+        &self,
+    ) -> Option<crate::app::preview_native_gui::NativeVisualQuestionPresentation> {
+        self.modal
+            .as_ref()
+            .and_then(ShellModal::as_native_visual_question)
+            .and_then(|dialog| dialog.painted_delivery())
     }
 
     fn show_modal(&mut self, modal: ShellModal) {
@@ -1777,7 +1839,8 @@ impl AppUiAppRoot {
 
     /// Replace panel contents from a fresh model snapshot while preserving the
     /// root widget id and menu state.
-    pub fn set_models(&mut self, models: AppUiPanelModels) {
+    pub fn set_models(&mut self, mut models: AppUiPanelModels) {
+        bind_native_visual_gui_models(&mut models, &self.native_visual_gui);
         if self
             .modal
             .as_ref()
@@ -3250,6 +3313,23 @@ impl Widget for AppUiAppRoot {
             3 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
+    }
+}
+
+fn bind_native_visual_gui_models(
+    models: &mut AppUiPanelModels,
+    registry: &crate::app::preview_native_gui::PreviewNativeGuiRegistry,
+) {
+    let views = models
+        .inspector
+        .effects
+        .iter()
+        .filter_map(|effect| effect.native_author_view.clone())
+        .collect::<Vec<_>>();
+    registry.reconcile_views(&views);
+    for effect in &mut models.inspector.effects {
+        effect.native_gui_controller =
+            effect.native_author_view.as_ref().and_then(|view| registry.controller(view));
     }
 }
 
@@ -7029,9 +7109,20 @@ mod tests {
             .expect("compile native compound graph");
             let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate graph");
             let input = [[0.1, 0.2, 0.3, 0.05]; 4];
-            let output =
-                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1415)
-                    .expect("execute actual supervised product SDK pixels");
+            let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    &input,
+                ),
+                &graph,
+                1415,
+            )
+            .expect("execute actual supervised product SDK pixels");
             let mut multiplier = 1.0;
             for (index, (name, default)) in defaults.iter().enumerate() {
                 let actual = clip.effects[0]
@@ -7059,7 +7150,12 @@ mod tests {
             }
             output
         };
-        assert_eq!(execute(&state), vec![[0.1, 0.2, 0.3, 0.05]; 4]);
+        let initial_pixels = execute(&state);
+        assert_eq!(
+            initial_pixels.format().alpha(),
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(initial_pixels.pixels(), &[[0.1, 0.2, 0.3, 0.05]; 4]);
         for (index, (_, original)) in defaults.iter().enumerate() {
             let before = execute(&state);
             let mut channels = original.to_channel_values();
@@ -7423,9 +7519,20 @@ mod tests {
             .expect("compile native paths");
             let graph = program.evaluate(TimelineTime::ZERO).expect("evaluate");
             let input = vec![[0.1, 0.2, 0.3, 0.05]; 4];
-            let pixels =
-                mondrian_effects::apply_compiled_effect_graph_rgba_f32(&input, 2, 2, &graph, 1193)
-                    .expect("actual native pixels");
+            let pixels = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(2, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    &input,
+                ),
+                &graph,
+                1193,
+            )
+            .expect("actual native pixels");
             let gain = 1.0 + (bytes % 11) as f32 / 10.0;
             for (actual, original) in pixels.iter().zip(&input) {
                 for channel in 0..4 {
@@ -7806,16 +7913,22 @@ mod tests {
             )
             .expect("compile authored LUT");
             mondrian_effects::apply_compiled_effect_graph_rgba_f32(
-                &[
-                    [1.0, 0.0, 0.0, 0.375],
-                    [0.125, 0.25, 0.75, 1.0],
-                    [0.75, 0.5, 0.125, 0.0],
-                    [0.125, 0.25, 0.75, 1.0 / 65_535.0],
-                    [1.0, 1.0, 1.0, 1.0],
-                    [0.5, 0.5, 0.5, 0.25],
-                ],
-                3,
-                2,
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(3, 2),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightCoverage,
+                    ),
+                    &[
+                        [1.0, 0.0, 0.0, 0.375],
+                        [0.125, 0.25, 0.75, 1.0],
+                        [0.75, 0.5, 0.125, 0.0],
+                        [0.125, 0.25, 0.75, 1.0 / 65_535.0],
+                        [1.0, 1.0, 1.0, 1.0],
+                        [0.5, 0.5, 0.5, 0.25],
+                    ],
+                ),
                 &graph,
                 0,
             )
@@ -7823,8 +7936,12 @@ mod tests {
         };
         let before_save = execute_lut(&state);
         assert_eq!(
-            before_save,
-            vec![
+            before_save.format().alpha(),
+            mondrian_core::ColorFrameAlpha::StraightCoverage
+        );
+        assert_eq!(
+            before_save.pixels(),
+            &[
                 [0.0, 0.0, 1.0, 0.375],
                 [0.75, 0.25, 0.125, 1.0],
                 [0.75, 0.5, 0.125, 0.0],
@@ -7917,15 +8034,21 @@ mod tests {
         )
         .expect("compile persisted LUT");
         let output = mondrian_effects::apply_compiled_effect_graph_rgba_f32(
-            &[[1.0, 0.0, 0.0, 0.375]],
-            1,
-            1,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(1, 1),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &[[1.0, 0.0, 0.0, 0.375]],
+            ),
             &graph,
             0,
         )
         .expect("execute compiled LUT");
         assert_eq!(
-            output,
+            output.pixels(),
             vec![[0.0, 0.0, 1.0, 0.375]],
             "real cube must swap red and blue without changing alpha"
         );

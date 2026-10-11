@@ -7,6 +7,9 @@
 #include <atomic>
 #include <map>
 #include <string>
+#include <limits>
+#include <array>
+#include <algorithm>
 namespace MondrianOpenFx {
   struct ParameterSource {
     int mode;
@@ -16,8 +19,36 @@ namespace MondrianOpenFx {
   };
   struct FrameState {
     MondrianOpenFxFrameInfo info{};
+    // Borrowed only for an explicitly measured action. Legal callback threads
+    // join before CABI return; only Output first-fetch writes the nested clear.
+    MondrianOpenFxNativeDiagnostic* renderDiagnostic = nullptr;
+    // Parent-issued lifetime namespace survives no reprepare/reopen. Plugins
+    // may persist UID-indexed analysis beyond one child, so process counters
+    // alone cannot identify image content across fresh owners.
+    std::array<uint8_t, 16> imageNamespace{};
+    uint64_t imageGeneration = 0;
+    std::string sourceIdentifier;
+    std::string outputIdentifier;
+    bool beginImageBinding() {
+      if (std::all_of(imageNamespace.begin(), imageNamespace.end(), [](uint8_t byte) { return byte == 0; }) || imageGeneration == std::numeric_limits<uint64_t>::max()) { return false; }
+      ++imageGeneration;
+      constexpr char hex[] = "0123456789abcdef";
+      char encoded[32];
+      for (size_t index = 0; index < imageNamespace.size(); ++index) {
+        encoded[index * 2] = hex[imageNamespace[index] >> 4];
+        encoded[index * 2 + 1] = hex[imageNamespace[index] & 15];
+      }
+      const std::string prefix = "mondrian-ofx:" + std::string(encoded, sizeof(encoded)) + ":" + std::to_string(imageGeneration) + ":";
+      sourceIdentifier = prefix + "Source";
+      outputIdentifier = prefix + "Output";
+      return true;
+    }
+
     std::map<std::string, ParameterSource> parameterSources;
     bool applyingParameters = false;
+    // The ordinary host-owned Inspector can write through the author session;
+    // plugin-origin writes require the later coherent C2 author bridge.
+    bool readOnlyInteractive = false;
     bool constantParameter(const std::string& name) const {
       return parameterSources.count(name) == 0;
     }
@@ -26,7 +57,7 @@ namespace MondrianOpenFx {
       return found != parameterSources.end() && found->second.mode == 2 ? &found->second : nullptr;
     }
     bool permitsParameterWrite(const std::string& name) const {
-      return applyingParameters || !curveParameter(name);
+      return applyingParameters || (!readOnlyInteractive && !curveParameter(name));
     }
     int queryParameter(const std::string& name, int operation, double start,
                        double end, int index, int direction, MondrianOpenFxQueryResult& result) const {

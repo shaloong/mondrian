@@ -36,8 +36,8 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Native editors | Vendor primitives exist; product-native window hosting is incomplete | Isolated editor protocol, parameter/state transactions, resize/DPI/focus/keyboard, GUI/timers/FDs |
-| OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; typed output association and finite division into the existing straight coverage graph; resident native instances | Complete finite Float association including zero-alpha emission and signed/out-of-range alpha, other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling |
+| Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
+| OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
 | OpenFX author controls | Numeric tuples/colour/bool/choice/StrChoice/UTF-8 text/resources; canonical curve queries and shared transactions | Spatial semantic types, hierarchy/buttons/custom/parametric/interacts, dynamic descriptors, plugin-origin writes/private data |
 | OpenFX product callbacks | Native message/progress/timeline primitives exist | Typed application messages, real cancellation/progress/transport responses and consistent persistence |
@@ -71,13 +71,16 @@ Report build profile, CPU/OS, source and fixture hashes, iterations, setup cost,
 tail/overload/cancellation and memory. No universal zero-overhead or compatibility
 claim follows from a fixture, cache counter or a single machine.
 
-Correctness qualification builds the product with the same test profile used by
-the integration harness, then verifies a copy in a content-addressed directory
-before starting any native tests. Every helper uses that immutable copy. The
-initial receipt records source, product and fixture hashes; completion rechecks
-all of them. Cargo can rebuild its shared `target/debug/mondrian.exe` during an
-integration test, so that shared path cannot serve as a frozen helper artifact.
-Test-profile correctness results are separate from release performance evidence.
+Correctness qualification selects the product and test executables from the same
+Cargo test-profile build before starting native gates. The actual product, lib,
+integration and plugin binaries are hashed and held under read-sharing file
+leases; no Cargo build runs between pinning and direct gate execution. An
+immutable content-addressed helper copy is also usable when that harness supports
+an explicit helper override. The initial receipt records source and binary
+hashes, and completion rechecks them. An unleased shared
+`target/debug/mondrian.exe` can be overwritten by a later Cargo selection and is
+not a frozen qualification artifact. Test-profile correctness and release
+performance remain separate evidence.
 
 ## Current execution receipts
 
@@ -217,3 +220,46 @@ realtime deadline, complete host resource accounting or universal compatibility.
 
 Physical IME, native editors, screen-reader delivery, multiline visual navigation
 and complete-line shaping performance remain separate qualification requirements.
+
+
+## Complete finite native image checkpoint (2026-10-09)
+
+The previous r90 batch reached a genuine nested-compositor failure: legitimate
+PremultipliedFloat output was rejected as if every input had to be
+StraightCoverage. Its separate dev/test profile artifact replacement also
+invalidated the batch lease. Both original receipts and logs are preserved.
+
+The repair uses the sole controlled borrowed storage validator at the timeline
+admission seam. Actual complete association remains attached to the raster;
+identity, ordinary, fused and transition inputs receive finite/alpha-domain
+validation with owner cancellation checkpoints. No admission clone, conversion,
+clamp or change to the original raw-cache/nested/output oracle is introduced.
+Three old-behavior renderer failures independently reproduced rejection of legal
+Opaque, publication of NaN through identity, and missed cancellation while
+scanning a raster. Their repaired full-workspace runtime result remains a
+separate gate from the native suite.
+
+The current r103 matching-profile native suite executed **20 exact gates,
+20 passed, zero failed, zero ignored**. Source and all selected native artifact
+hashes remained stable. It includes parent-issued cross-child image namespaces,
+plugin-private persisted analysis, FieldNone, signed recursive mutexes and stale
+handles, accepted-caller thread completion, bounded mutex capacity, pre-DSP
+resource refusal without advancing native work, actual Source/output association,
+and public disk-cache → nested Over → real opaque output. Public thread, mutex,
+completion and stuck-callback cancellation/reaping also passed.
+
+Actual product SHA-256:
+`55692cd29d1154b6ba46dc19da51fbd004f3fe691e9457358d1cdbe02a99da94`.
+Native qualification receipt SHA-256:
+`6ae04ebad314ce279afbec99ee5ed42ae3cd653c2d67ec2108d167bd82bd1c35`
+(`.scratch/plugin-standard-audit/native-float-result-r103.json`).
+The same source's r102 full workspace/all-target/all-feature Clippy and fmt gates
+passed with warnings denied. These receipts qualify the named source and owned
+native workflows; they do not establish all OpenFX formats/contexts, latest
+standard feature completeness, native editors or a vendor/platform matrix.
+
+The original release video deadline failures and small-block audio deadline
+failures remain evidence. Current bulk transport and complete-float source need
+fresh unchanged-policy release measurement, then actual cold factory, whole
+compositor/NLE and device acceptance. Correct image pixels and source lint are
+not performance acceptance.

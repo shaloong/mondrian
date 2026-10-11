@@ -151,14 +151,8 @@ pub(crate) fn read(path: &Path) -> Result<Option<ModuleInfo>> {
         )));
     }
 
-    // Steinberg calls the format JSON5. moduleinfotool output uses JSON with comments and
-    // trailing commas, so accept those two extensions without pulling a permissive parser
-    // into the host. Other JSON5 extensions remain errors.
-    let normalized = normalize_json5(&bytes).map_err(|message| {
+    let raw: RawModuleInfo = parse_json5(&bytes).map_err(|message| {
         Error::PluginLoadFailed(format!("invalid {}: {message}", module_info_path.display()))
-    })?;
-    let raw: RawModuleInfo = serde_json::from_slice(&normalized).map_err(|error| {
-        Error::PluginLoadFailed(format!("invalid {}: {error}", module_info_path.display()))
     })?;
     validate(raw, module_info_path)
 }
@@ -323,11 +317,8 @@ pub(crate) fn read_factory_compatibility(
                 "runtime compatibility JSON exceeds the {MAX_MODULE_INFO_BYTES} byte limit"
             ));
         }
-        let normalized = normalize_json5(&bytes).map_err(|message| {
+        let raw: Vec<RawCompatibility> = parse_json5(&bytes).map_err(|message| {
             Error::PluginLoadFailed(format!("invalid compatibility JSON: {message}"))
-        })?;
-        let raw: Vec<RawCompatibility> = serde_json::from_slice(&normalized).map_err(|error| {
-            Error::PluginLoadFailed(format!("invalid compatibility JSON: {error}"))
         })?;
         validate_compatibility(raw, &audio_class_ids)
     }
@@ -678,107 +669,86 @@ fn invalid<T>(message: String) -> Result<T> {
     )))
 }
 
-fn normalize_json5(input: &[u8]) -> std::result::Result<Vec<u8>, String> {
+// The format parser owns JSON5 grammar and typed values. This envelope only
+// bounds recursive deserialization and checks lexical termination, without
+// changing a byte or allocating a normalized document.
+fn parse_json5<'de, T: Deserialize<'de>>(input: &'de [u8]) -> std::result::Result<T, String> {
+    if input.len() as u64 > MAX_MODULE_INFO_BYTES {
+        return Err(format!(
+            "JSON5 exceeds the {MAX_MODULE_INFO_BYTES} byte limit"
+        ));
+    }
     let source = std::str::from_utf8(input).map_err(|error| error.to_string())?;
-    let bytes = source.as_bytes();
-    let mut without_comments = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            without_comments.push(byte);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            index += 1;
-            continue;
-        }
-        if byte == b'"' {
-            in_string = true;
-            without_comments.push(byte);
-            index += 1;
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            if index < bytes.len() {
-                without_comments.push(b'\n');
-                index += 1;
-            }
-        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index += 2;
-            let mut closed = false;
-            while index + 1 < bytes.len() {
-                if bytes[index] == b'\n' {
-                    without_comments.push(b'\n');
-                }
-                if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-                    index += 2;
-                    closed = true;
-                    break;
-                }
-                index += 1;
-            }
-            if !closed {
-                return Err("unterminated block comment".to_string());
-            }
-        } else {
-            without_comments.push(byte);
-            index += 1;
-        }
-    }
-    if in_string {
-        return Err("unterminated string".to_string());
-    }
+    validate_json5_envelope(source)?;
+    json5::from_str(source).map_err(|error| error.to_string())
+}
 
-    let mut normalized = Vec::with_capacity(without_comments.len());
-    let mut index = 0usize;
-    in_string = false;
-    escaped = false;
-    while index < without_comments.len() {
-        let byte = without_comments[index];
-        if in_string {
-            normalized.push(byte);
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
+fn validate_json5_envelope(source: &str) -> std::result::Result<(), String> {
+    const MAX_JSON5_DEPTH: usize = 128;
+    let mut delimiters = ['\0'; MAX_JSON5_DEPTH];
+    let mut depth = 0;
+    let mut chars = source.char_indices().peekable();
+    while let Some((offset, character)) = chars.next() {
+        match character {
+            '\'' | '"' => {
+                let mut closed = false;
+                while let Some((_, value)) = chars.next() {
+                    if value == character {
+                        closed = true;
+                        break;
+                    }
+                    if value == '\\' && chars.next().is_none() {
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err(format!("unterminated JSON5 string at byte {offset}"));
+                }
             }
-            index += 1;
-            continue;
-        }
-        if byte == b'"' {
-            in_string = true;
-            normalized.push(byte);
-            index += 1;
-        } else if byte == b',' {
-            let mut lookahead = index + 1;
-            while lookahead < without_comments.len()
-                && without_comments[lookahead].is_ascii_whitespace()
-            {
-                lookahead += 1;
+            '/' if chars.peek().is_some_and(|(_, value)| *value == '/') => {
+                chars.next();
+                for (_, value) in chars.by_ref() {
+                    if matches!(value, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                        break;
+                    }
+                }
             }
-            if matches!(without_comments.get(lookahead), Some(b'}' | b']')) {
-                index += 1;
-            } else {
-                normalized.push(byte);
-                index += 1;
+            '/' if chars.peek().is_some_and(|(_, value)| *value == '*') => {
+                chars.next();
+                let mut closed = false;
+                while let Some((_, value)) = chars.next() {
+                    if value == '*' && chars.peek().is_some_and(|(_, value)| *value == '/') {
+                        chars.next();
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err(format!("unterminated JSON5 comment at byte {offset}"));
+                }
             }
-        } else {
-            normalized.push(byte);
-            index += 1;
+            '{' | '[' => {
+                if depth == MAX_JSON5_DEPTH {
+                    return Err(format!(
+                        "JSON5 nesting exceeds {MAX_JSON5_DEPTH} at byte {offset}"
+                    ));
+                }
+                delimiters[depth] = if character == '{' { '}' } else { ']' };
+                depth += 1;
+            }
+            '}' | ']' => {
+                if depth == 0 || delimiters[depth - 1] != character {
+                    return Err(format!("unmatched JSON5 delimiter at byte {offset}"));
+                }
+                depth -= 1;
+            }
+            _ => {}
         }
     }
-    Ok(normalized)
+    if depth != 0 {
+        return Err("unterminated JSON5 collection".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -789,6 +759,296 @@ mod tests {
     const CURRENT_UID: &str = "00112233445566778899AABBCCDDEEFF";
     const OLD_UID: &str = "FFEEDDCCBBAA99887766554433221100";
     static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn moduleinfo_json5_rejects_malformed_or_unterminated_documents() {
+        for input in [
+            "{} /* unfinished",
+            "{/*unfinished",
+            "{Name:'unfinished}",
+            "{Name:'bad\\1'}",
+            "{Name:'bad\\uD800'}",
+            "{Name:'line\nbreak'}",
+            "{Name:'a',,}",
+            "{Classes:[,]}",
+            "{Classes:[1 2]}",
+            "{} {}",
+            "{ignored: 01}",
+            "{ignored: 0x}",
+            "{ignored: truefalse}",
+            "{ignored: [}",
+            "{Name: undefined}",
+            "{Name: 'x', /*/}",
+        ] {
+            let bundle = write_json5_bundle(input);
+            assert!(read(&bundle.0).is_err(), "invalid JSON5 accepted: {input}");
+        }
+        let bundle = TempBundle::new();
+        std::fs::write(
+            bundle.0.join("Contents/Resources/moduleinfo.json"),
+            [0xff, 0xfe],
+        )
+        .expect("write invalid UTF-8");
+        assert!(read(&bundle.0).is_err());
+    }
+
+    #[test]
+    fn moduleinfo_json5_preserves_finite_snapshot_and_integer_schema() {
+        for value in [
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "+Infinity",
+            "1e400",
+            "-0",
+            "0",
+        ] {
+            let input = format!(
+                "{{Classes:[{{CID:'{CURRENT_UID}', Category:'Audio Module Class',
+                Snapshots:[{{'Scale Factor':{value},
+                Path:'Contents/Resources/Snapshots/{CURRENT_UID}_snapshot.png'}}]}}]}}"
+            );
+            let bundle = write_json5_bundle(&input);
+            let error = read(&bundle.0).expect_err("nonfinite/nonpositive snapshot scale");
+            assert!(
+                error.to_string().contains("finite and positive"),
+                "{value}: {error}"
+            );
+        }
+        for input in [
+            "{'Factory Info':{Flags:0x4}}",
+            "{'Factory Info':{Flags:0x80000000}}",
+            "{Classes:[{CID:'00112233445566778899AABBCCDDEEFF','Class Flags':2147483648}]}",
+            "{Classes:[{CID:'00112233445566778899AABBCCDDEEFF',Cardinality:1.5}]}",
+            "{Name:NaN}",
+        ] {
+            let bundle = write_json5_bundle(input);
+            assert!(
+                read(&bundle.0).is_err(),
+                "invalid typed metadata accepted: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn moduleinfo_json5_preserves_existing_collection_string_and_byte_bounds() {
+        let input = format!("{{Name:'{}'}}", "x".repeat(MAX_STRING_BYTES + 1));
+        let bundle = write_json5_bundle(&input);
+        assert!(read(&bundle.0)
+            .expect_err("string bound")
+            .to_string()
+            .contains("Name"));
+        let classes = std::iter::repeat_n(format!("{{CID:'{CURRENT_UID}'}}"), MAX_CLASSES + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        let bundle = write_json5_bundle(&format!("{{Classes:[{classes}]}}"));
+        let error = read(&bundle.0).expect_err("class count bound");
+        assert!(error
+            .to_string()
+            .contains("Classes has 4097 entries; limit is 4096"));
+        let bundle = write_json5_bundle(&format!(
+            "{{Name:'{}'}}",
+            "x".repeat(MAX_MODULE_INFO_BYTES as usize)
+        ));
+        assert!(read(&bundle.0)
+            .expect_err("byte bound")
+            .to_string()
+            .contains("byte moduleinfo.json limit"));
+    }
+
+    #[test]
+    fn moduleinfo_json5_bounds_unknown_nesting_before_recursive_deserialization() {
+        // The module object is one level. Unknown fields remain extensible;
+        // strings/comments containing delimiters do not consume nesting budget.
+        let input = format!(
+            "{{Name:'[]{{}}', ignored:{}0{}, /*[{{*/}}",
+            "[".repeat(127),
+            "]".repeat(127)
+        );
+        let bundle = write_json5_bundle(&input);
+        assert_eq!(
+            read(&bundle.0).expect("128 levels").expect("present").name,
+            "[]{}"
+        );
+        let input = format!("{{ignored:{}0{}}}", "[".repeat(128), "]".repeat(128));
+        let bundle = write_json5_bundle(&input);
+        let error = read(&bundle.0).expect_err("129 levels refused");
+        assert!(error.to_string().contains("nesting exceeds 128"));
+    }
+
+    #[test]
+    fn moduleinfo_json5_preserves_factory_compatibility_validation() {
+        for input in [
+            "[{New:'00112233445566778899AABBCCDDEEFF',Old:['short']}]",
+            "[{New:'FFEEDDCCBBAA99887766554433221100',Old:['00112233445566778899AABBCCDDEEFF']}]",
+            "[{New:'00112233445566778899AABBCCDDEEFF',Old:['FFEEDDCCBBAA99887766554433221100','FFEEDDCCBBAA99887766554433221100']}]",
+            "[] /* unfinished",
+        ] {
+            assert!(read_factory_compatibility(&json5_compatibility_factory(input)).is_err(),
+                "invalid compatibility stream accepted: {input}");
+        }
+    }
+
+    fn write_json5_bundle(input: &str) -> TempBundle {
+        let bundle = TempBundle::new();
+        std::fs::write(bundle.0.join("Contents/Resources/moduleinfo.json"), input)
+            .expect("write JSON5 fixture");
+        bundle
+    }
+
+    #[test]
+    fn moduleinfo_json5_reads_official_extended_syntax() {
+        let bundle = write_json5_bundle(
+            r#"{
+            // JSON5 syntax, not a JSON document with comments removed.
+            Name: 'Extended module', Version: '3.8.1',
+            'Factory Info': { Vendor: 'Owned fixture', Flags: +0x10, },
+            Classes: [{ CID: '00112233445566778899aabbccddeeff',
+                Category: 'Audio Module Class', Name: 'Gain',
+                'Class Flags': +0x1, Cardinality: -1,
+                'Sub Categories': ['Fx', 'Dynamics',],
+                Snapshots: [{ 'Scale Factor': +.5,
+                    Path: 'Contents/Resources/Snapshots/00112233445566778899AABBCCDDEEFF_snapshot_0.5x.png', },],
+            },],
+            Compatibility: [{ New: '00112233445566778899AABBCCDDEEFF',
+                Old: ['FFEEDDCCBBAA99887766554433221100',], },],
+            ignored: [NaN, -Infinity, +Infinity, 1.,],
+        }"#,
+        );
+        let info = read(&bundle.0).expect("official JSON5").expect("present");
+        assert_eq!(info.name, "Extended module");
+        assert!(info.factory.flags.unicode);
+        assert_eq!(info.classes[0].class_id, CURRENT_UID);
+        assert_eq!(info.classes[0].class_flags, 1);
+        assert_eq!(info.classes[0].cardinality, -1);
+        assert_eq!(info.classes[0].snapshots[0].scale_factor, 0.5);
+        assert_eq!(info.resolve_class_id(OLD_UID), Some(CURRENT_UID));
+    }
+
+    #[test]
+    fn moduleinfo_json5_reads_unicode_whitespace_keys_and_string_escapes() {
+        let input = concat!(
+            "\u{feff}{\u{00a0}",
+            r#"\u004eame: 'Caf\u00e9 \x4eLE', Version: 'line\
+continued', 'Factory Info': { URL: 'https://example.test/a//b',
+                Vendor: '/* literal */', 'E-Mail': 'a\vb' },
+            \u0043lasses: [], // line ends at U+2028"#,
+            "\u{2028}",
+            r#" ignored: ['[]{}', '\\', '\'', '\"', '\0c'], }"#,
+            "\u{2029}"
+        );
+        let bundle = write_json5_bundle(input);
+        let info = read(&bundle.0).expect("Unicode JSON5").expect("present");
+        assert_eq!(info.name, "Caf\u{00e9} NLE");
+        assert_eq!(info.version, "linecontinued");
+        assert_eq!(info.factory.url, "https://example.test/a//b");
+        assert_eq!(info.factory.vendor, "/* literal */");
+        assert_eq!(info.factory.email, "a\u{000b}b");
+        assert!(info.classes.is_empty());
+    }
+
+    struct Json5CompatibilityFactory(&'static str);
+    impl vst3::Class for Json5CompatibilityFactory {
+        type Interfaces = (IPluginFactory,);
+    }
+
+    impl IPluginFactoryTrait for Json5CompatibilityFactory {
+        unsafe fn getFactoryInfo(&self, _info: *mut PFactoryInfo) -> tresult {
+            kNotImplemented
+        }
+
+        unsafe fn countClasses(&self) -> i32 {
+            2
+        }
+
+        unsafe fn getClassInfo(&self, index: i32, output: *mut PClassInfo) -> tresult {
+            if output.is_null() {
+                return kInvalidArgument;
+            }
+            let (uid, category) = match index {
+                0 => (CURRENT_UID, "Audio Module Class"),
+                1 => (OLD_UID, "Plugin Compatibility Class"),
+                _ => return kInvalidArgument,
+            };
+            let output = &mut *output;
+            output.cid = crate::internal::utils::parse_class_uid(uid).expect("owned UID");
+            output.category.fill(0);
+            for (slot, byte) in output.category.iter_mut().zip(category.bytes()) {
+                *slot = byte as std::os::raw::c_char;
+            }
+            kResultOk
+        }
+
+        unsafe fn createInstance(
+            &self,
+            cid: FIDString,
+            iid: FIDString,
+            output: *mut *mut std::ffi::c_void,
+        ) -> tresult {
+            if cid.is_null() || iid.is_null() || output.is_null() {
+                return kInvalidArgument;
+            }
+            *output = ptr::null_mut();
+            let expected = crate::internal::utils::parse_class_uid(OLD_UID).expect("owned UID");
+            if std::slice::from_raw_parts(cid, 16) != expected
+                || std::slice::from_raw_parts(iid.cast::<u8>(), 16) != IPluginCompatibility::IID
+            {
+                return kNoInterface;
+            }
+            let value = vst3::ComWrapper::new(Json5Compatibility(self.0))
+                .to_com_ptr::<IPluginCompatibility>()
+                .expect("compatibility interface");
+            *output = value.into_raw().cast();
+            kResultOk
+        }
+    }
+
+    struct Json5Compatibility(&'static str);
+    impl vst3::Class for Json5Compatibility {
+        type Interfaces = (IPluginCompatibility,);
+    }
+    impl IPluginCompatibilityTrait for Json5Compatibility {
+        unsafe fn getCompatibilityJSON(&self, stream: *mut IBStream) -> tresult {
+            let Some(stream) = vst3::ComRef::from_raw(stream) else {
+                return kInvalidArgument;
+            };
+            let mut written = 0;
+            let result = stream.write(
+                self.0.as_ptr().cast_mut().cast(),
+                self.0.len() as i32,
+                &mut written,
+            );
+            if result == kResultOk && written == self.0.len() as i32 {
+                kResultOk
+            } else {
+                kResultFalse
+            }
+        }
+    }
+
+    fn json5_compatibility_factory(input: &'static str) -> ComPtr<IPluginFactory> {
+        vst3::ComWrapper::new(Json5CompatibilityFactory(input))
+            .to_com_ptr::<IPluginFactory>()
+            .expect("owned factory")
+    }
+
+    #[test]
+    fn moduleinfo_json5_reads_actual_factory_compatibility_interface() {
+        let factory = json5_compatibility_factory(
+            r#"[
+            { New: '00112233445566778899aabbccddeeff',
+              Old: ['ffeeddccbbaa99887766554433221100',], },
+        ]"#,
+        );
+        let mappings = read_factory_compatibility(&factory).expect("interface JSON5 stream");
+        assert_eq!(
+            mappings,
+            vec![ClassCompatibility {
+                new_class_id: CURRENT_UID.to_string(),
+                old_class_ids: vec![OLD_UID.to_string()],
+            }]
+        );
+    }
 
     struct TempBundle(PathBuf);
 
@@ -846,8 +1106,7 @@ mod tests {
                comment */
             "object": {"value": "/* literal */",},
         }"#;
-        let value: serde_json::Value =
-            serde_json::from_slice(&normalize_json5(input).expect("normalize")).expect("json");
+        let value: serde_json::Value = parse_json5(input).expect("JSON5");
         assert_eq!(value["url"], "https://example.test/a//b");
         assert_eq!(value["array"], serde_json::json!([1, 2]));
         assert_eq!(value["object"]["value"], "/* literal */");
@@ -855,8 +1114,8 @@ mod tests {
 
     #[test]
     fn rejects_unterminated_json5_constructs() {
-        assert!(normalize_json5(br#"{"x": "unterminated}"#).is_err());
-        assert!(normalize_json5(b"{ /* unterminated").is_err());
+        assert!(parse_json5::<serde_json::Value>(br#"{"x": "unterminated}"#).is_err());
+        assert!(parse_json5::<serde_json::Value>(b"{ /* unterminated").is_err());
     }
 
     #[test]
@@ -870,12 +1129,17 @@ mod tests {
     }
 
     #[test]
-    fn reads_sdk_generated_bundle_metadata() {
-        let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_plugins/Dexed.vst3");
-        let info = read(&bundle)
+    fn reads_self_contained_bundle_metadata() {
+        let bundle = TempBundle::new();
+        std::fs::write(
+            bundle.0.join("Contents/Resources/moduleinfo.json"),
+            include_bytes!("../../test-data/moduleinfo.json"),
+        )
+        .expect("write owned moduleinfo fixture");
+        let info = read(&bundle.0)
             .expect("valid moduleinfo")
             .expect("moduleinfo exists");
-        assert_eq!(info.name, "Dexed");
+        assert_eq!(info.name, "Metadata Fixture");
         assert_eq!(info.classes.len(), 3);
         assert!(info.factory.flags.unicode);
         assert_eq!(

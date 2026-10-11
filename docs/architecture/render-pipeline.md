@@ -1141,7 +1141,11 @@ exact time.
 - `NestedSequence`
 - `CrossDissolve`
 
-Each element carries opacity, blend mode, transforms where applicable, effect graph, frame seed, and color/media interpretation data.
+Each element carries opacity, transforms where applicable, effect graph,
+frame seed, and color/media interpretation data. Ordinary sources retain their
+explicit `BlendMode`. The sole Timeline compiler lowers an Adjustment's authored
+Normal mode to `EffectPassBlendPolicy::Mix`; other authored modes become
+`Blend(mode)`. This typed policy survives both Preview and Export lowering.
 
 `CrossDissolve` contains two typed endpoint plans (`Media`, `SolidColor`,
 `BasicTitle`, `NestedSequence`, or explicit transparent coverage) and one
@@ -3319,15 +3323,28 @@ and adjustment elements:
   inverse-affine GPU sampling;
 - media and solid sources may carry a lowered working-space-aware ColorAdjust,
   Vignette, or Grain chain; effects run before source-over composition;
-- adjustment layers process the lower accumulated working pixels and blend the
-  result back with their opacity, matching the CPU float reference semantics;
+- adjustment layers process the lower accumulated working pixels. Default
+  Normal uses `Mix`: opacity interpolates associated scene-linear RGB and
+  coverage between original and processed samples. Other authored modes use
+  explicit `Blend(mode)`. Ordinary Normal layers and graph Blend nodes retain
+  source-over composition;
+- Mix preserves the exact selected input at opacity zero or one, and preserves
+  an exactly identical sample, including straight hidden RGB at zero alpha.
+  Otherwise zero mixed associated colour and alpha have canonical zero samples;
+  unrepresentable associated emission is refused by the typed CPU consumer.
+  GPU execution admits its existing straight coverage and Opaque contracts;
+- an Adjustment Crop can lower coverage over an Opaque original under Mix.
+  Opaque output proof therefore follows authored layer order and is revoked by
+  a contributing Mix with a coverage-changing plan. A later full Opaque Normal
+  source can establish it again;
 - media and scene-linear procedural-solid layers may use invertible affine
   transforms; external effect-domain solids materialize before their OCIO
   round trip so authored effect/transform order remains unchanged;
 - all executed layers may use any canonical `BlendMode`; the GPU shader shares
   the CPU Float32 straight-alpha algebra, and Dissolve consumes the complete
   frame seed plus destination pixel identity;
-- skipped leading/identity/zero-opacity adjustments do not consume passes;
+- skipped leading, zero-opacity, or identity Mix adjustments do not consume
+  passes. An identity effect with explicit Blend still executes its composite;
   admitted contributing layers execute in authored order across reusable
   uniform pages without a separate layer-count gate.
 
@@ -3399,3 +3416,89 @@ returns no frame and retires retained processor resources. Identity passthrough
 and final publication observe the owner as well. Noncontrolled color/blend
 kernels poll at enclosing boundaries; this contract does not claim a hard
 realtime bound for all CPU operations.
+
+## Canonical Float association boundary
+
+Working/nested composites carry actual Core association through complete typed Float values. The sole Normal Over law admits finite associated emission and signed/above-one Float alpha; explicit OpaqueBlack delivery closes these values before output encoding. Identity geometry has no separate Vec interpretation. Artistic blending, resampling and temporal coverage consumers reject values they cannot represent; failed native materialization does not replay stateful DSP.
+
+## Processor auxiliary facts and recoverable delivery
+
+The compiled scalar graph and Timeline operation preflight the complete
+feedback occurrence/storage requirement before stateful processing. The
+heterogeneous CPU prefix/batch carries the same bounded Effects receipts in
+its actual owned completion. No metadata path re-evaluates the graph or clones
+its raster. The existing scalar CPU Viewer fallback retains typed UserBlocked
+instead of erasing it into a failure string. Canonical consumer refusal remains
+Blocked; malformed/nonfinite frames remain Failed. App observes only the exact
+current work key/generation/epoch and existing execution authority. Persistent
+error may have no output frame; its actual consumed attempt is sufficient for
+the bounded state view but never successful-frame evidence. Live suite replies
+and progress/cancel streaming are not provided by a terminal receipt.
+
+CPU batch retained-byte admission counts each item's complete pixel frontier
+plus its single fixed feedback container. Working invocation peaks separately
+reserve the temporary feedback result through Effects. Boundary-value count
+and frame extent therefore cannot substitute for the complete owned completion
+when sizing a batch grant.
+
+### Borrowed timeline media admission
+
+Every typed media or transition endpoint must carry the composite's exact
+working space, domain, LinearFloat encoding and CPU residency. Its actual Core
+alpha association is preserved, then `EffectFloatFrameView::validate_controlled`
+admits the complete borrowed raster through the sole Effects storage validator.
+This checks shape, every finite lane and the declared alpha domain before any
+identity, fused or ordinary pixel path, with owner checkpoints every 65,536
+pixels and before admission completes. It creates no raster allocation or
+conversion. An exact identity can share the original storage for all admitted
+associations, including zero-alpha associated emission and signed Float alpha.
+It still must admit the graph's temporal/state/backend/precision contract.
+
+The two-layer normalized fusion remains StraightCoverage-only. Normal Over
+uses the existing complete-value algebra; artistic blending and resampling
+retain explicit straight-coverage materialization or typed refusal. The
+complete-frame ingress does not broaden their contracts. Existing nested,
+disk-cache and real opaque-output bit/pixel oracles remain unchanged. This
+source contract does not itself establish throughput or physical-output proof.
+
+### Exact normalized GPU route input
+
+The renderer-owned scene-linear Float32 CPU-to-GPU capability binds its known
+input as an exact StraightCoverage value, matching its exact GPU output. An
+unresolved alpha declaration is reserved for a producer that actually resolves
+its representation at execution. Native intermediate producers retain their
+own negotiated association and the existing explicit transfer materialization;
+this capability does not admit unsupported full-Float values directly to GPU
+coverage kernels.
+
+
+### Viewer native progress during current work
+
+Both scalar fallback and heterogeneous CPU-prefix workers bind their existing
+canonical Effects observer for the dequeued task. Progress uses each task's
+existing bounded result channel; a full channel drops only observations and
+does not block native execution, cancellation or create another request queue.
+The Runtime checks exact semantic work key, generation and playback epoch
+before exposing metadata. The current-work projection additionally rejects old
+provider/native-owner/invocation/revision facts and terminal resurrection.
+Completion/end messages share the original worker's ordered result channel;
+they clear only the matching current scope, never a different task's display.
+
+Viewer shows the current plugin label and percentage with a neutral localized
+status. This cannot replace a frame/presentation lease, publish pixels, infer
+private retention, request authoring changes or fabricate native replies.
+Persistent Error still has its typed recoverable blocked state, and removal,
+seek, generation rotation and actual completion retire stale observations.
+Preview's real Broker checkpoint remains authoritative; the native absolute
+deadline is a conservatively projected bound, not a second scheduler.
+
+## Native GUI observations on existing render work
+
+Scalar and heterogeneous Preview routes carry optional current GUI facts and
+Question publications on their existing bounded worker result channels. The real
+Inspector section plus active dock panel provides weak GUI presence. Exact
+Session/generation/Sequence/Clip/Effect and work scope are checked before modal
+admission and each answer. Closed/replaced views fail the Question service; real
+execution cancellation independently uses the original cooperative native abort
+path. Idle End receipts use the same retained worker/bank and never synthesize a
+new FrameWork or replay a Render. Prefetch gets no GUI wait grant.

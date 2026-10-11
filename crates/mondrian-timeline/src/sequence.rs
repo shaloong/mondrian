@@ -2919,7 +2919,7 @@ fn rekey_audio_scope(scope: &mut crate::audio::AudioProcessingScope) {
     for processor in &mut scope.processors.processors {
         processor.id = AudioProcessorInstanceId::new();
         for parameter in processor.parameters.values_mut() {
-            rekey_exact_curve(&mut parameter.automation);
+            rekey_optional_exact_curve(&mut parameter.automation);
         }
     }
 }
@@ -2930,7 +2930,7 @@ fn rekey_audio_channel_strip(strip: &mut crate::audio::AudioChannelStrip) {
         for processor in &mut rack.processors {
             processor.id = AudioProcessorInstanceId::new();
             for parameter in processor.parameters.values_mut() {
-                rekey_exact_curve(&mut parameter.automation);
+                rekey_optional_exact_curve(&mut parameter.automation);
             }
         }
     }

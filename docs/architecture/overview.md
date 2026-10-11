@@ -971,3 +971,179 @@ rendering at descriptor, creation or change time. Progressive fields and
 PAR-scaled canonical project geometry are explicit; both Rust and native input
 validation reject nonrepresentable extents. These additions do not advertise
 all OpenFX contexts, GPU/interact support or a universal performance result.
+
+## Canonical Float association boundary
+
+Core owns the canonical ColorFrameAlpha/Formats contracts. Effects owns complete typed Float values and association algebra; Renderer/Preview/Export adapters consume those contracts, and the render-cache artifact header retains actual association under its identity admission. This is one interpretation across scalar, heterogeneous, nested and output execution.
+
+### Pending native audio configuration keeps one clock authority
+
+Audio owns root-window admission and exact occurrence/session/cohort identities.
+Media retains the renderer, cancels its generation and acknowledges the exact
+output callback retirement token. Playback owns a typed frozen wait retaining
+play intent and exact sample phase; App projects coherent device evidence
+through that public contract. A configuration wait has no advancing Synthetic
+clock and no substitute PCM. Output retirement/final-anchor completion is not
+prepared-plan installation or successful playback. A future canonical non-RT
+service must admit all known old/new peak owners, install the sole bottom-up
+prepared audio plan/PDC graph, and produce fresh matching generation/preroll
+device evidence before releasing the clock hold.
+
+### Ephemeral PCM materialization evidence
+
+`AudioPcmRendererMaterializationId` is an execution identity allocated for one
+live prepared Media PCM renderer. Work/completions carry it with the local
+generation so a retained complete-PCM journal cannot accept another renderer's
+buffer. It is not persisted author state, a project generation or a substitute
+for Audio's immutable Plan, exclusive Session, occurrence and epoch identities.
+
+## Native audio scheduling adapter
+
+`mondrian-audio-scheduling` is a narrow execution adapter used by Media's PCM
+producer and dedicated Audio DSP roles. It owns physical native thread admission
+and restoration without desktop UI dependencies or author/time interpretation.
+Its Windows scheduling facts and ordinary unsupported-platform execution facts
+are explicit; neither implies a measured deadline or device-ready result.
+See [native audio scheduling](audio-scheduling.md).
+
+## Processor lifetime identity
+
+`mondrian-core::EffectProcessorOwnerId` identifies one execution-owned visual
+processor lifetime. It is issued by the parent supervisor and is independent of
+authored `EffectId`, OS PID, frame time, and native child-local counters. It is
+not persisted as authoring state. A reprepare or project reopen issues a new
+lifetime; a retained instance keeps its original identity. Native transport
+encodes this typed value at initialization, rather than accepting a bare UUID
+from plugin-authored properties.
+
+## Actual audio renderer installation authority
+
+Core supplies the domain-free current-renderer installation gate used by Media
+and Audio. Media privately retains its one non-Clone Source for the actual slot;
+Runtime binds one read-only verifier. Register/reserve performs no installation.
+After all foreign output preflight, a short local commit rechecks the old claim
+and publishes beside the actual renderer slot exchange. No native callbacks,
+queues, destructor calls, allocation or author edits run inside that guard.
+Claims and reservations have no public constructor/Deserialize; unrelated
+sources cannot replace an already registered Runtime. Actual native permission
+also requires its exact current root/nested Hosted binding record and child
+load observation. The Core gate is neither a general registry nor a second
+author/session authority.
+
+
+### Native audio diagnostic completions
+
+Core carries a fixed immutable diagnostic batch with exact root/local Plan and
+exclusive Session IDs, generated processor location and actual authenticated
+child PID. These are provenance, not an editor lease or author permission.
+The audio format adapter remains the sole interpreter of native severity,
+retained bytes and UTF-8 facts. Media and App depend on Core's projected facts;
+Media acquires no Audio dependency and EventBus is not the control transport.
+
+## Native auxiliary ownership
+
+OpenFX feedback reuses the Core EffectProcessorOwnerId issued once by its
+parent supervisor for native image namespaces. The Effects resource bank owns
+the only private processor instance and the actual retained/evicted decision;
+its compiler-bound receipt is observation, not authoring or playback authority.
+Message/Progress/Timeline dispatch remains within the exclusive native host
+lifetime. Current Viewer consumes bounded facts through the existing exact
+work key, author generation, playback epoch and execution lease. It cannot keep
+an evicted instance alive or apply a stale clear to another owner. Stage A
+terminal metadata does not claim live Question, navigation, Interact or abort
+support; those still require the same owner/channel and independent gates.
+
+
+### Native pending-contract prerequisite
+
+The typed Core request and exact Audio plan/Session/occurrence ticket are the
+canonical pending lifecycle contract. Session and whole-root preflight precede
+source reads, DSP, meter publication and caller output mutation. This narrow
+prerequisite exposes a default-empty processor query and prepares the Session
+gate for independent behavioral regression. Actual native IPC producers, child
+lifecycle service, candidate/PDC/resource installation, Media/Clock Master hold,
+diagnostics/editor services and device deadlines require their later consumers
+and qualification; this prerequisite alone does not implement those features.
+
+## Native visual editor address evidence
+
+EditorState issues a read-only `NativeVisualAuthorView` for the current Session,
+author generation, active Sequence, unlocked visual Clip and exact Effect. It
+opens no gesture or history group. Actual Inspector control-subtree presence and
+current Effects residency are independent required facts; the read-only view
+cannot authorize a native parameter write. Native coherent parameter/state edits
+remain a subsequent consumer of the sole pending native author gesture boundary.
+
+### Actual audio Runtime publication authorization
+
+The private Media current-renderer installation Source can convert one exact
+reserved registered replacement into a non-Clone Runtime authorization. The
+provider receives no issuer, registration or revocation handle. It finishes
+native/resource preparation while retaining the actual old Runtime, then holds
+its exclusive Runtime and the canonical author publication read guard before
+acquiring the final Source CAS for the exact destination verifier. Only an
+infallible actual Plan/scratch/Hosted-record exchange belongs inside that short
+guard. Registered publication returns one opaque claim without a post-swap
+failure branch; native acknowledgement and retirement occur after the guard.
+This is the same current-renderer authority as initial installation, not an
+editor permission, native object proof, resource grant or second author history.
+
+
+`ParameterId::storage_owner` exposes a borrowed immutable String owner for exact
+host storage observation. It preserves validation, serialized identity and all
+author semantics; capacity/identity observation is not edit or execution authority.
+
+### V7 native audio nonterminal author delivery
+
+The native audio observation transport has one current schema (V7), one PollNativeObservations command (tag 9), and the existing Bind/Open/Close commands (10/11/12). Public target metadata and callback proposals are facts, not installed-owner or author permissions. The current registered renderer, exact Hosted record, native object incarnation, installed binding and sole AuthoringSession independently admit work. No old-schema reader or editor-only instance is retained.
+
+A nonterminal VST callback prefix enters the existing Session native gesture and canonical parameter/time write policy once. The same immutable canonical audio compiler then prepares a parameter-only Plan replacement. On the sole Media render worker, actual old/new resource owners are admitted against the unchanged frozen Runtime grant; actual binding acknowledgements and allocations finish before final author/Core guards. The bounded final section swaps the prepared Plan, scratch, installed binding, renderer author snapshot metadata and registered claim. Retired owners and the exact callback-prefix Ack are handled outside the guards. InstalledAwaitingAcknowledgement retries only the same Ack, never a second author commit or Plan install.
+
+This is a nonterminal functional slice. A terminal coherent opaque state that would require reseeding peer materializations is explicitly refused; it is not claimed as complete Scope synchronization, native Undo/Redo/save/reopen, or physical GUI qualification. CLAP recorded author delivery remains unavailable until its real typed producer and consumer join this same transport. Architecture and source contracts alone are not execution evidence.
+
+
+### Native parameter presentation and author admission
+
+Core native parameter observations are bounded facts carrying exact installed
+target, actual PID/load incarnation, source revision, raw flags, plain value and
+origin. Media projects them from the existing serial Poll completion after its
+renderer/generation/installation checks. App compares the current surface owner
+again before Inspector presentation; unavailable values stay unavailable. Native
+INFO visibility/captions use the sole rack row projector and do not mutate a
+second author schema. Recorded parameter edits and ordered Clear/rescan changes
+enter the existing author Session and same-live Plan/Ack transaction. Facts,
+queries, diagnostics and empty sources independently grant no author permission.
+
+
+Native audio finality is a format-neutral Core fact carried on the existing
+observation path. The Audio producer distinguishes optional State absence from
+state-save failure; the authoring Session validates parameter-only versus opaque
+completion, and App seals the existing group only after Plan/Ack acceptance. No
+new history, state authority, queue or native instance is introduced.
+
+## Installation Source relationship
+
+Core's format-neutral `NativeAudioEditorAttachmentObservation` describes
+original/current attachment addresses and actual process/object identity. It is
+read-only metadata on the existing observation completion, not an installation
+claim, author grant, request queue or alternate state authority. Audio retains
+the actual native attachment across nondestructive first signal entry; Media
+validates Source and renderer identity before App uses a same-view target refresh.
+
+The Core read-only installation verifier can compare whether two registrations
+belong to the same one Media Source. This relation is not an installed claim,
+editor capability or author grant. Native parameter/state preparation rejects a
+foreign Source before allocation and foreign native binding; final publication
+still requires the existing one-shot matching Source authorization and CAS.
+
+
+## Effect pass policy foundation
+
+Core owns `EffectPassBlendPolicy::{Mix, Blend}`. It is a value contract, not a
+second evaluator. The sole Timeline plan compiler lowers a resolved Normal
+Adjustment to Mix; ordinary layers and explicit graph Blend nodes retain their
+compositing mode. Execution carries the complete typed policy through Preview
+and Export. Resolved visual semantic epoch 3 invalidates both the former default
+self-Over law and approximate Mix cancellation for prepared and standalone
+frame identities. The existing identity constructors consume this one epoch;
+no alternate cache identity or compatibility reader is introduced.

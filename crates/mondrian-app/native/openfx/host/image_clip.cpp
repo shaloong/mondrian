@@ -42,6 +42,10 @@ namespace MondrianOpenFx {
     // active frame mapping, which outlives every legal action-scoped handle.
     _data = clip.isOutput() ? state.output : const_cast<OfxRGBAColourF*>(state.input);
 
+    // Image-owned metadata identifies this binding, not its reusable address.
+    setStringProperty(kOfxImagePropUniqueIdentifier, clip.isOutput() ? state.outputIdentifier : state.sourceIdentifier);
+    setStringProperty(kOfxImagePropField, kOfxImageFieldNone);
+
     // render scale x and y of 1.0
     setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 0);
     setDoubleProperty(kOfxImageEffectPropRenderScale, 1.0, 1);
@@ -111,8 +115,14 @@ namespace MondrianOpenFx {
   const std::string &FilterClipInstance::getPremult() const
   {
     if (isOutput()) { return _effect->getOutputPreMultiplication(); }
-    static const std::string v(kOfxImageUnPreMultiplied);
-    return v;
+    static const std::string straight(kOfxImageUnPreMultiplied);
+    static const std::string associated(kOfxImagePreMultiplied);
+    static const std::string opaque(kOfxImageOpaque);
+    switch (frameState().info.source_alpha) {
+      case 1: return associated;
+      case 2: return opaque;
+      default: return straight; // loadFrame admitted exactly one known ABI value.
+    }
   }
 
   // Pixel Aspect Ratio -
@@ -214,7 +224,14 @@ namespace MondrianOpenFx {
       // Initialize only when the current render actually requests Output.
       // An unfetched/denied frame never writes the caller's staging buffer.
       if (!_outputFetched) {
+        auto* diagnostic = frame.renderDiagnostic;
+        const auto started = diagnostic ? DiagnosticClock::now() : DiagnosticClock::time_point{};
         std::fill(frame.output, frame.output + frame.pixelCount, OfxRGBAColourF{0, 0, 0, 0});
+        if (diagnostic) {
+          diagnostic->output_clear_calls = 1;
+          diagnostic->output_clear_bytes = frame.pixelCount * sizeof(OfxRGBAColourF);
+          if (!diagnosticNanoseconds(started, diagnostic->output_clear_ns)) { diagnostic->counter_overflowed = 1; }
+        }
         _outputFetched = true;
       }
       return image;

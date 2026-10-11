@@ -261,7 +261,7 @@ pub enum ViewerPreviewState {
     /// A previously presented transparent canvas remains visible while the
     /// current demand awaits exact presentation authority.
     StaleTransparent,
-    /// A frame request has been queued or is currently rendering/decoding.
+    /// Output awaits its first UI admission, is queued, or is rendering/decoding.
     Loading,
     /// The requested frame is not ready, so the viewer may keep the previous frame visible.
     Stale(ViewerFrameContent),
@@ -1102,6 +1102,8 @@ impl ViewerPanelModel {
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
             localizer,
         );
+        let (status, status_tone) =
+            viewer_processor_progress_status(state, status, status_tone, localizer);
         self.status = status;
         self.status_tone = status_tone;
     }
@@ -1123,6 +1125,8 @@ impl ViewerPanelModel {
             self.preview_unavailability.as_ref().map(PreviewUnavailability::disposition),
             localizer,
         );
+        let (status, status_tone) =
+            viewer_processor_progress_status(state, status, status_tone, localizer);
         self.status = status;
         self.status_tone = status_tone;
     }
@@ -1260,6 +1264,8 @@ impl ViewerPanelModel {
             localizer,
         );
 
+        let (status, status_tone) =
+            viewer_processor_progress_status(state, status, status_tone, localizer);
         Self {
             title: sequence.name.clone(),
             status,
@@ -1507,6 +1513,28 @@ fn mask_shape_from_viewer(shape: ViewerPowerWindowShape) -> MaskShape {
             closed,
         },
     }
+}
+
+fn viewer_processor_progress_status(
+    state: &AppState,
+    fallback: String,
+    tone: ViewerStatusTone,
+    localizer: Option<&Localizer>,
+) -> (String, ViewerStatusTone) {
+    let Some(receipt) = state.processor_feedback.active_progress() else {
+        return (fallback, tone);
+    };
+    let progress = &receipt.progress.progress;
+    let percent = (progress.fraction() * 100.0).round() as u8;
+    let text = if let Some(localizer) = localizer {
+        let mut args = fluent_bundle::FluentArgs::new();
+        args.set("message", progress.label().text());
+        args.set("percent", i64::from(percent));
+        localizer.format("viewer-native-progress", Some(&args))
+    } else {
+        format!("{} · {}%", progress.label().text(), percent)
+    };
+    (text, ViewerStatusTone::Neutral)
 }
 
 fn viewer_status(
@@ -2354,6 +2382,11 @@ pub struct InspectorAudioStreamOptionModel {
 /// Effect row data shown by the app UI inspector.
 #[derive(Debug, Clone)]
 pub struct InspectorEffectModel {
+    /// Current read-only Session address; never native or author-write authority.
+    pub(crate) native_author_view: Option<mondrian_editor_state::NativeVisualAuthorView>,
+    /// Shared metadata only. The actual section Widget separately acquires presence.
+    pub(crate) native_gui_controller:
+        Option<std::sync::Arc<crate::app::preview_native_gui::PreviewNativeGuiController>>,
     /// Effect instance id targeted by enable/disable actions.
     pub effect_id: EffectId,
     /// Human-readable effect name.
@@ -2795,6 +2828,12 @@ impl InspectorPanelModel {
                 .effects
                 .iter()
                 .map(|effect| InspectorEffectModel {
+                    native_author_view: matches!(effect.effect_type, EffectType::Plugin(_))
+                        .then(|| {
+                            state.native_visual_author_view(sequence.id, clip.id, effect.id).ok()
+                        })
+                        .flatten(),
+                    native_gui_controller: None,
                     effect_id: effect.id,
                     label: localized_effect_name(&effect.effect_type, Some(localizer)),
                     enabled: effect.is_enabled,

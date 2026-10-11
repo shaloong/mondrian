@@ -286,6 +286,13 @@ impl MacOSModule {
 unsafe impl Send for MacOSModule {}
 
 impl VstModule for MacOSModule {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::path(&self.path)?)
+    }
+
     fn get_factory(&self) -> Result<*mut IPluginFactory> {
         match self.get_factory_fn {
             Some(factory_fn) => {

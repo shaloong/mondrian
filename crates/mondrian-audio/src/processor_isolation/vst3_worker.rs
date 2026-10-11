@@ -1,5 +1,8 @@
 //! VST3 audio effects run only inside the supervised native worker.
 
+mod author_state_entry;
+mod native_author;
+
 use super::{
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
     IsolatedAudioProcessorWorkerBlock, IsolatedAudioProcessorWorkerFactory,
@@ -63,16 +66,59 @@ impl Vst3ParameterDescriptor {
             .map_err(|error| invalid(format!("invalid VST3 parameter identity: {error}")))
     }
 
+    /// Project the official normalized coordinate into this descriptor's same
+    /// canonical author domain. Stepped values use the existing nearest index
+    /// convention; continuous values retain exact Float64 bits.
+    pub fn author_scalar_from_normalized(
+        &self,
+        value: f64,
+    ) -> Result<f64, AudioProcessorHostError> {
+        validate_parameter(self)?;
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(invalid("VST3 normalized parameter value is invalid"));
+        }
+        Ok(if self.step_count > 0 {
+            (value * f64::from(self.step_count)).round()
+        } else {
+            value
+        })
+    }
+
+    /// Project this same descriptor's exact canonical scalar into the native
+    /// normalized ABI coordinate, without a Float32 or display conversion.
+    pub fn normalized_from_author_scalar(
+        &self,
+        value: f64,
+    ) -> Result<f64, AudioProcessorHostError> {
+        validate_parameter(self)?;
+        let maximum = if self.step_count > 0 {
+            f64::from(self.step_count)
+        } else {
+            1.0
+        };
+        if !value.is_finite()
+            || value < 0.0
+            || value > maximum
+            || self.step_count > 0 && value.fract() != 0.0
+        {
+            return Err(invalid("VST3 canonical parameter scalar is invalid"));
+        }
+        Ok(if self.step_count > 0 {
+            value / maximum
+        } else {
+            value
+        })
+    }
+
     /// Host authoring schema. Stepped VST3 values are stored as integer indices.
     pub fn authoring_schema(&self) -> Result<ParameterSchema, AudioProcessorHostError> {
         validate_parameter(self)?;
         let stepped = self.step_count > 0;
+        let scalar = self.author_scalar_from_normalized(self.default_normalized)?;
         let default = if stepped {
-            PropertyValue::Int(
-                (self.default_normalized * f64::from(self.step_count)).round() as i64,
-            )
+            PropertyValue::Int(scalar as i64)
         } else {
-            PropertyValue::Double(self.default_normalized)
+            PropertyValue::Double(scalar)
         };
         let mut schema = ParameterSchema::v1(self.parameter_id()?, default);
         schema.is_animatable = self.can_automate && !self.read_only;
@@ -208,6 +254,7 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             parameter_ids,
             request.render_contract(),
         )?
+        .with_native_worker_lane_resources(native_worker_lane_profile()?)
         .with_dispatch_argument(Some(OsString::from(VST3_AUDIO_WORKER_ARGUMENT)))
         .with_deadlines(
             std::time::Duration::from_secs(15),
@@ -217,6 +264,32 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
     }
 }
 
+// The concrete preparation codec remains the only interpreter for this format.
+// This non-RT helper neither loads a plugin nor grants author/install authority.
+pub(super) fn payload_with_configuration_seed(
+    payload: &[u8],
+    configuration: &[u8],
+) -> Result<Vec<u8>, AudioProcessorHostError> {
+    if configuration.len() > MAX_STATE_BYTES {
+        return Err(invalid(
+            "native configuration seed exceeds the existing state limit",
+        ));
+    }
+    let mut decoded: Vst3Payload = serde_json::from_slice(payload)
+        .map_err(|error| invalid(format!("invalid concrete payload for native seed: {error}")))?;
+    // Retire the decoded old seed outside publication/SDK guards before
+    // allocating its replacement; preserve all other concrete metadata.
+    decoded.state = None;
+    let mut seed = Vec::new();
+    seed.try_reserve_exact(configuration.len()).map_err(|error| {
+        invalid(format!(
+            "native configuration seed allocation refused: {error}"
+        ))
+    })?;
+    seed.extend_from_slice(configuration);
+    decoded.state = Some(seed);
+    super::encode_native_configuration_payload(&decoded)
+}
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Vst3Payload {
@@ -233,6 +306,11 @@ struct Vst3Payload {
 pub struct Vst3AudioProcessorWorkerFactory;
 
 impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
+    fn native_worker_lane_resources(
+        &self,
+    ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+        native_worker_lane_profile()
+    }
     fn prepare(
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
@@ -277,6 +355,14 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             AudioProcessingMode::Realtime => ProcessMode::Realtime,
             AudioProcessingMode::Offline => ProcessMode::Offline,
         };
+        #[cfg(target_os = "windows")]
+        let native_main = std::rc::Rc::new(
+            vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
+                unavailable(format!(
+                    "VST3 actual native main initialization failed: {error}"
+                ))
+            })?,
+        );
         let mut host = Vst3Host::builder()
             .sample_rate(f64::from(render.sample_rate))
             .block_size(render.max_block_frames)
@@ -313,6 +399,12 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             .start_processing()
             .map_err(|error| unavailable(format!("VST3 processing start failed: {error}")))?;
         Ok(Box::new(Vst3Worker {
+            native_lane: request.native_worker_lane_resources(),
+            last_parameter_values: vec![None; payload.parameter_ids.len()],
+            configuration_phase:
+                super::native_configuration_control::NativeConfigurationPhase::Admitted,
+            #[cfg(target_os = "windows")]
+            native_parent: None,
             plugin: Some(plugin),
             host,
             payload,
@@ -322,11 +414,22 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
             auxiliary_inputs: registration.auxiliary_inputs,
             input_names,
             last_end: None,
+            initial_signal_available: true,
+            native_binding: None,
+            native_author_delivery: None,
+            prepared_author_entry: None,
+            #[cfg(target_os = "windows")]
+            native_main,
         }))
     }
 }
 
 struct Vst3Worker {
+    native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
+    last_parameter_values: Vec<Option<f64>>,
+    configuration_phase: super::native_configuration_control::NativeConfigurationPhase,
+    #[cfg(target_os = "windows")]
+    native_parent: Option<vst3_host::window::WindowsPluginEditorParent>,
     plugin: Option<Plugin>,
     host: Vst3Host,
     payload: Vst3Payload,
@@ -336,9 +439,514 @@ struct Vst3Worker {
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     input_names: Vec<crate::AudioProcessorInputName>,
     last_end: Option<i64>,
+    // Successful native Prepare accepted state/mode/metadata and activation.
+    // This fact is consumed only once; last_end=None is not initialization proof.
+    initial_signal_available: bool,
+    native_binding: Option<crate::NativeAudioObjectBindReceipt>,
+    native_author_delivery: Option<native_author::PendingDelivery>,
+    prepared_author_entry: Option<author_state_entry::PreparedAuthorEntry>,
+    // Last field: same-main OLE survives the plugin, controller, native module
+    // and any explicitly removed native parent. It is never sent to DSP.
+    #[cfg(target_os = "windows")]
+    native_main: std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+}
+
+#[cfg(target_os = "windows")]
+impl Vst3Worker {
+    fn native_editor_binding_matches(
+        &self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<bool, AudioProcessorHostError> {
+        let actual = self.native_audio_object_observation()?;
+        Ok(self.native_binding.is_some_and(|receipt| {
+            receipt.binding() == binding.binding && receipt.object() == binding.expected_object
+        }) && actual == Some(binding.expected_object))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn classify_editor_close_error(
+    binding: crate::NativeAudioObjectBindRequest,
+    error: vst3_host::error::Error,
+) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+    match error {
+        vst3_host::error::Error::EditorDetachFailed {
+            stage: vst3_host::error::EditorDetachStage::FrameClear,
+            ..
+        } => Ok(crate::NativeAudioEditorOutcome::ClosePending {
+            binding,
+            stage: crate::NativeAudioEditorCloseStage::ClearHostFrame,
+        }),
+        error => Err(native_editor_removal_failed(error)),
+    }
 }
 
 impl IsolatedAudioProcessorWorker for Vst3Worker {
+    fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
+        self.native_lane
+    }
+    fn native_staged_seed_layout(&self) -> crate::NativeHostBufferLayout {
+        let bytes = match &self.configuration_phase {
+            super::native_configuration_control::NativeConfigurationPhase::ReadyForInstall {
+                candidate,
+                ..
+            } => candidate
+                .staged_receipt()
+                .map_or(0, |receipt| receipt.child_seed_capacity_bytes),
+            _ => 0,
+        };
+        crate::NativeHostBufferLayout { bytes, alignment: align_of::<u8>() }
+    }
+    fn uses_native_processing_split(&self) -> bool {
+        cfg!(target_os = "windows")
+    }
+
+    #[cfg(target_os = "windows")]
+    fn split_native_processing(
+        &mut self,
+    ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("VST3 retained native processor is closed"))?;
+        let vst3_host::plugin::PluginEditorProcessingSplit { editor, processor } =
+            plugin.split_editor_processing().map_err(|error| {
+                unavailable(format!("VST3 actual native thread split failed: {error}"))
+            })?;
+        let signal = VstSignalFields {
+            last_parameter_values: &mut self.last_parameter_values,
+            configuration_phase: &self.configuration_phase,
+            payload: &self.payload,
+            render: self.render,
+            buffers: &mut self.buffers,
+            auxiliary_inputs: &self.auxiliary_inputs,
+            last_end: &mut self.last_end,
+        };
+        Ok(super::IsolatedAudioProcessorWorkerSplit {
+            main: Box::new(VstMainRole {
+                editor,
+                native_main: &self.native_main,
+                native_parent: &mut self.native_parent,
+                configuration_phase: &self.configuration_phase,
+                native_binding: &self.native_binding,
+                native_author_delivery: &self.native_author_delivery,
+                prepared_author_entry: &self.prepared_author_entry,
+            }),
+            processing: Box::new(VstDspRole { native: processor, signal }),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn service_native_editor_close_request(
+        &mut self,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        let Some(receipt) = self.native_binding else {
+            return Ok(crate::NativeAudioEditorOutcome::Refused(
+                crate::NativeAudioEditorRefusal::NotInstalled,
+            ));
+        };
+        self.close_native_audio_editor(crate::NativeAudioObjectBindRequest {
+            binding: receipt.binding(),
+            expected_object: receipt.object(),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn close_native_editor_owner(&mut self) -> Result<(), AudioProcessorHostError> {
+        let Some(plugin) = self.plugin.as_mut() else {
+            return if self.native_parent.is_some() {
+                Err(AudioProcessorHostError::WorkerFailed {
+                    operation: "native editor owner removal",
+                    detail: "same native parent outlived its processor owner".into(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        if let Some(parent) = self.native_parent.as_mut() {
+            let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
+                plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
+            // This is after the real DSP scope joined. The temporary unused
+            // processing borrow is dropped, then the same parent checks its
+            // private exact native-object attachment identity before removal.
+            drop(processor);
+            parent.close(&mut editor).map_err(native_editor_removal_failed)?;
+            self.native_parent = None;
+        } else {
+            // An unsuccessful attach can retain only failed host-frame cleanup.
+            // The canonical attachment model decides the exact remaining step;
+            // absence of a parent must never invent successful native removal.
+            plugin.close_editor().map_err(native_editor_removal_failed)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn native_editor_detach_stage(&self) -> Option<crate::NativeAudioEditorCloseStage> {
+        self.plugin.as_ref()?.native_editor_pending_detach().map(|stage| match stage {
+            vst3_host::error::EditorDetachStage::Removal => {
+                crate::NativeAudioEditorCloseStage::RemoveView
+            }
+            vst3_host::error::EditorDetachStage::FrameClear => {
+                crate::NativeAudioEditorCloseStage::ClearHostFrame
+            }
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn open_native_audio_editor(
+        &mut self,
+        request: crate::NativeAudioEditorOpenRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+        let binding = request.binding();
+        if !self.native_editor_binding_matches(binding)? {
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        if self.pending_reprepare().is_some() || self.configuration_phase.ready_token().is_some() {
+            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+        }
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
+        if plugin.native_editor_pending_detach().is_some() {
+            return Ok(Outcome::Refused(Refusal::ConfigurationPending));
+        }
+        if !plugin.has_editor() {
+            return Ok(Outcome::Refused(Refusal::NoEditor));
+        }
+        let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
+            plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
+        drop(processor);
+        if self.native_parent.is_none() {
+            match vst3_host::window::WindowsPluginEditorParent::open(
+                std::rc::Rc::clone(&self.native_main),
+                &mut editor,
+                request.title(),
+            ) {
+                Ok(parent) => self.native_parent = Some(parent),
+                Err(vst3_host::error::Error::EditorUnavailable) => {
+                    return Ok(Outcome::Refused(Refusal::NoEditor))
+                }
+                Err(vst3_host::error::Error::EditorPlatformUnsupported) => {
+                    return Ok(Outcome::Refused(Refusal::UnsupportedAdapter))
+                }
+                Err(error) => return classify_editor_close_error(binding, error),
+            }
+        }
+        let (width, height) = editor.editor_size().map_err(native_editor_removal_failed)?;
+        let width = u32::try_from(width)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid("native view width is not positive"))?;
+        let height = u32::try_from(height)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid("native view height is not positive"))?;
+        Ok(Outcome::Opened { binding, width, height })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn close_native_audio_editor(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError> {
+        use crate::{NativeAudioEditorOutcome as Outcome, NativeAudioEditorRefusal as Refusal};
+        if !self.native_editor_binding_matches(binding)? {
+            return Ok(Outcome::Refused(Refusal::OwnerChanged));
+        }
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
+        let result = if let Some(parent) = self.native_parent.as_mut() {
+            let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
+                plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
+            drop(processor);
+            parent.close(&mut editor)
+        } else {
+            plugin.close_editor()
+        };
+        match result {
+            Ok(()) => {
+                self.native_parent = None;
+                Ok(Outcome::Closed { binding })
+            }
+            Err(error) => classify_editor_close_error(binding, error),
+        }
+    }
+
+    fn native_audio_object_observation(
+        &self,
+    ) -> Result<Option<crate::NativeAudioObjectObservation>, AudioProcessorHostError> {
+        let Some(owner) = self.plugin.as_ref().and_then(Plugin::native_editor_attachment_owner)
+        else {
+            return Ok(None);
+        };
+        let process = std::num::NonZeroU32::new(std::process::id())
+            .ok_or_else(|| unavailable("native child PID is zero"))?;
+        Ok(Some(crate::NativeAudioObjectObservation::new(
+            process,
+            owner.serial(),
+        )))
+    }
+
+    fn poll_native_observations(
+        &mut self,
+        consumption: crate::NativeAudioObservationConsumption,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        let object = self.native_audio_object_observation()?;
+        let author = self.observe_native_author(consumption)?;
+        Ok(crate::NativeAudioObservations {
+            object,
+            author,
+            editor_cleanup: self.native_editor_detach_stage(),
+            pending_reprepare: self.pending_reprepare(),
+            ..Default::default()
+        })
+    }
+
+    fn bind_native_audio_object(
+        &mut self,
+        request: crate::NativeAudioObjectBindRequest,
+    ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+        let Some(actual) = self.native_audio_object_observation()? else {
+            return Ok(crate::NativeAudioObjectBindOutcome::Refused(
+                crate::NativeAudioObjectBindRefusal::ObjectChanged,
+            ));
+        };
+        if let Some(receipt) = self.native_binding
+            && receipt.binding() == request.binding
+            && receipt.object() == actual
+            && actual == request.expected_object
+        {
+            return Ok(crate::NativeAudioObjectBindOutcome::Bound(receipt));
+        }
+        match crate::NativeAudioObjectBindReceipt::acknowledge(request, actual) {
+            Ok(receipt) => {
+                self.native_binding = Some(receipt);
+                Ok(crate::NativeAudioObjectBindOutcome::Bound(receipt))
+            }
+            Err(refusal) => Ok(crate::NativeAudioObjectBindOutcome::Refused(refusal)),
+        }
+    }
+
+    fn native_configuration_cohort(&self) -> Option<super::NativeRequestCohort> {
+        let cohort = self.plugin.as_ref()?.pending_restart_cohort()?;
+        if !cohort.pending() {
+            return None;
+        }
+        Some(super::NativeRequestCohort {
+            serial: cohort.serial(),
+            request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                flags: cohort.flags().bits() as u32,
+            },
+        })
+    }
+
+    fn service_native_configuration(
+        &mut self,
+        request: super::NativeConfigurationControlRequest<'_>,
+    ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        use super::native_configuration_control::{
+            observed_contract, NativeConfigurationPhase as Phase,
+        };
+        use super::{
+            NativeConfigurationCandidate as Candidate,
+            NativeConfigurationControlOutcome as Outcome, NativeConfigurationFormat as Format,
+            NativeConfigurationRefusal as Refusal, NativeControlBufferReceipt as Buffers,
+        };
+        use vst3_host::configuration_capture::ConfigurationCaptureError as CaptureError;
+        if self.configuration_phase.ready_token().is_some() {
+            return Ok(Outcome::CapabilityRefused(Refusal::AwaitingInstallation));
+        }
+        let Some(expected_native) = self
+            .plugin
+            .as_ref()
+            .ok_or_else(|| unavailable("VST3 retained processor is closed"))?
+            .pending_restart_cohort()
+        else {
+            return Ok(Outcome::CapabilityRefused(Refusal::UnsupportedAdapter));
+        };
+        let actual = expected_native.pending().then_some(super::NativeRequestCohort {
+            serial: expected_native.serial(),
+            request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                flags: expected_native.flags().bits() as u32,
+            },
+        });
+        if actual != Some(request.expected_cohort) {
+            return Ok(Outcome::StillPending(actual));
+        }
+        self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
+        if request.expected_cohort.exhausted() {
+            return Ok(Outcome::CapabilityRefused(Refusal::SerialExhausted));
+        }
+        let mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags } =
+            request.expected_cohort.request
+        else {
+            return Err(invalid(
+                "VST3 configuration control received a different ABI cohort",
+            ));
+        };
+        // This bounded slice admits latency only, not hidden bus/parameter changes.
+        if flags != 8 {
+            return Ok(Outcome::CapabilityRefused(Refusal::UnsupportedRequest));
+        }
+        if request.configuration_limit_bytes == 0
+            || request.configuration_limit_bytes > MAX_STATE_BYTES
+        {
+            return Ok(Outcome::CapabilityRefused(Refusal::ConfigurationTooLarge));
+        }
+        if request.canonical_constant_values.len() != self.last_parameter_values.len()
+            || self
+                .last_parameter_values
+                .iter()
+                .zip(request.canonical_constant_values)
+                .any(|(actual, expected)| !expected.is_finite() || *actual != Some(*expected))
+        {
+            // Only successful delivered DSP values prove component configuration.
+            // Controller mirrors and setParamNormalized are not such evidence.
+            return Ok(Outcome::CapabilityRefused(
+                Refusal::UnsupportedConstantProfile,
+            ));
+        }
+        if fingerprint(&self.payload.binary_path)? != self.payload.binary_sha256 {
+            return Err(unavailable(
+                "VST3 binary changed before retained configuration service",
+            ));
+        }
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("VST3 retained processor is closed"))?;
+        plugin.reactivate_configuration_stopped().map_err(|error| {
+            unavailable(format!(
+                "VST3 legal configuration activation failed: {error}"
+            ))
+        })?;
+        let inputs = observe_active_audio_inputs(plugin, self.render.channel_layout)?;
+        if inputs != self.auxiliary_inputs
+            || parameter_descriptors(plugin)? != self.payload.parameters
+        {
+            return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
+        }
+        let tail = match plugin.tail_samples() {
+            0 => AudioProcessorTail::None,
+            u32::MAX => AudioProcessorTail::Infinite,
+            frames => AudioProcessorTail::Finite(frames as usize),
+        };
+        let observed = observed_contract(self.contract, plugin.latency_samples() as usize, tail)?;
+        let captured = match plugin.save_state_bounded(
+            request.configuration_limit_bytes,
+            request.control_buffer_grant_bytes,
+        ) {
+            Ok(state) => state,
+            Err(CaptureError::Unavailable) => {
+                return Ok(Outcome::CapabilityRefused(
+                    Refusal::ConfigurationUnavailable,
+                ))
+            }
+            Err(CaptureError::StateLimitExceeded { .. } | CaptureError::InvalidLimit { .. }) => {
+                return Ok(Outcome::CapabilityRefused(Refusal::ConfigurationTooLarge))
+            }
+            Err(
+                CaptureError::BufferGrantExceeded { .. }
+                | CaptureError::AllocationExtent { .. }
+                | CaptureError::AllocationFailed,
+            ) => return Ok(Outcome::CapabilityRefused(Refusal::BufferGrantExceeded)),
+            Err(error) => {
+                return Err(unavailable(format!(
+                    "VST3 bounded configuration capture failed: {error}"
+                )))
+            }
+        };
+        let buffer_receipt = captured.buffer_receipt();
+        let candidate = Candidate {
+            serviced_cohort: request.expected_cohort,
+            control_token: request.control_token,
+            observed_contract: observed,
+            format: Format::Vst3ComponentAndController,
+            configuration: captured.into_bytes(),
+            buffers: Buffers {
+                request_value_capacity_bytes: 0,
+                capture_payload_bytes: buffer_receipt.stream_payload_bytes,
+                configuration_capacity_bytes: buffer_receipt.envelope_capacity_bytes,
+            },
+            parent_configuration_capacity_bytes: 0,
+        };
+        if !plugin
+            .retire_restart_cohort(expected_native)
+            .map_err(|error| unavailable(format!("VST3 cohort retirement failed: {error}")))?
+        {
+            return Ok(Outcome::StillPending(self.native_configuration_cohort()));
+        }
+        self.configuration_phase = Phase::issued(&candidate);
+        Ok(Outcome::ReadyForInstall(candidate))
+    }
+    fn stage_native_configuration_seed(
+        &mut self,
+        seed: super::NativeConfigurationOwnedSeed,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        let Some(current) = self.plugin.as_ref().and_then(Plugin::pending_restart_cohort) else {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(
+                super::NativeConfigurationSeedRefusal::UnsupportedAdapter,
+            ));
+        };
+        if current.pending()
+            || current.serial() != seed.ticket.serviced_cohort.serial
+            || self.configuration_phase.seed_ticket() != Some(seed.ticket)
+        {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(
+                super::NativeConfigurationSeedRefusal::StaleTicket,
+            ));
+        }
+        Ok(self.configuration_phase.stage_seed(seed))
+    }
+
+    fn commit_native_configuration_seed(
+        &mut self,
+        ticket: super::NativeConfigurationSeedTicket,
+    ) -> Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+        if let Err(refusal) = self.configuration_phase.seed_receipt(ticket) {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(refusal));
+        }
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("VST3 retained processor is closed"))?;
+        if !plugin
+            .claim_retired_restart_serial(ticket.serviced_cohort.serial)
+            .map_err(|error| {
+                unavailable(format!("VST3 seed request serial claim failed: {error}"))
+            })?
+        {
+            return Ok(super::NativeConfigurationSeedOutcome::Refused(
+                super::NativeConfigurationSeedRefusal::StaleTicket,
+            ));
+        }
+        let (seed, receipt) = match self.configuration_phase.take_seed(ticket) {
+            Ok(value) => value,
+            Err(refusal) => return Ok(super::NativeConfigurationSeedOutcome::Refused(refusal)),
+        };
+        // Future Enter destroys/reloads the component: its actual canonical
+        // payload must contain the new seed before accepting a fresh generation.
+        let previous = self.payload.state.replace(seed);
+        self.contract = ticket.observed_contract;
+        self.last_end = None;
+        self.configuration_phase =
+            super::native_configuration_control::NativeConfigurationPhase::Admitted;
+        drop(previous);
+        Ok(super::NativeConfigurationSeedOutcome::Accepted(receipt))
+    }
+
+    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
+        let flags = self.plugin.as_ref()?.pending_restart_flags().bits() as u32;
+        (flags != 0)
+            .then_some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
+            .or(self.configuration_phase.blocked_request())
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.contract
     }
@@ -351,77 +959,137 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         self.input_names.clone()
     }
 
+    fn prepare_native_author_state_entry(
+        &mut self,
+        request: crate::NativeAudioAuthorStateEntryRequest<'_>,
+    ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        self.prepare_author_state_entry(request)
+    }
+
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
-        let mut previous = self.plugin.take().ok_or_else(|| {
-            AudioProcessorHostError::StateEntry("VST3 processor is closed".to_owned())
-        })?;
-        previous.stop_processing().map_err(|error| {
-            AudioProcessorHostError::StateEntry(format!("VST3 stop failed: {error}"))
-        })?;
-        drop(previous);
-        if fingerprint(&self.payload.binary_path)? != self.payload.binary_sha256 {
-            return Err(AudioProcessorHostError::StateEntry(
-                "VST3 binary changed before continuity entry".to_owned(),
-            ));
+        self.native_binding = None;
+        if self.enter_prepared_author_state(start_sample)? {
+            return Ok(());
         }
-        let mut fresh = self
-            .host
-            .load_plugin_class(&self.payload.binary_path, &self.payload.class_id)
-            .map_err(|error| {
-                AudioProcessorHostError::StateEntry(format!(
-                    "VST3 state-entry load failed: {error}"
-                ))
-            })?;
-        if fingerprint(&self.payload.binary_path)? != self.payload.binary_sha256 {
-            return Err(AudioProcessorHostError::StateEntry(
-                "VST3 binary changed while rebuilding the class".to_owned(),
-            ));
+        if let Some(request) = self.pending_reprepare() {
+            return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
-        if let Some(state) = self.payload.state.as_deref() {
-            fresh.load_state(state).map_err(|error| {
-                AudioProcessorHostError::StateEntry(format!(
-                    "VST3 state-entry restore failed: {error}"
-                ))
-            })?;
+        if self.initial_signal_available {
+            // Anchor the initialized object without Stop, reset, reload, state
+            // capture or a synthetic Process. Its source and HWND stay owned.
+            self.initial_signal_available = false;
+            self.last_end = Some(start_sample);
+            return Ok(());
         }
-        let mode = match self.render.processing_mode {
-            AudioProcessingMode::Realtime => ProcessMode::Realtime,
-            AudioProcessingMode::Offline => ProcessMode::Offline,
-        };
-        fresh.set_process_mode(mode).map_err(|error| {
-            AudioProcessorHostError::StateEntry(format!("VST3 state-entry mode failed: {error}"))
-        })?;
-        validate_loaded(
-            &mut fresh,
-            &Vst3PluginRegistration {
-                class_id: self.payload.class_id.clone(),
-                vendor: self.payload.vendor.clone(),
-                binary_path: self.payload.binary_path.clone(),
-                binary_sha256: self.payload.binary_sha256,
-                execution_contract: self.contract,
-                auxiliary_inputs: self.auxiliary_inputs.clone(),
-                parameters: self.payload.parameters.clone(),
-            },
-            self.render.channel_layout,
-        )?;
-        fresh.start_processing().map_err(|error| {
-            AudioProcessorHostError::StateEntry(format!("VST3 state-entry start failed: {error}"))
-        })?;
-        self.plugin = Some(fresh);
+        self.close_native_editor_owner()?;
+        self.prepared_author_entry = None;
+        self.rebuild_native_state()?;
         self.last_end = Some(start_sample);
         Ok(())
     }
 
     fn process(
         &mut self,
+        block: IsolatedAudioProcessorWorkerBlock<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        let native = self.plugin.as_mut().ok_or_else(|| {
+            AudioProcessorHostError::Process("VST3 processor is closed".to_owned())
+        })?;
+        VstSignalFields {
+            last_parameter_values: &mut self.last_parameter_values,
+            configuration_phase: &self.configuration_phase,
+            payload: &self.payload,
+            render: self.render,
+            buffers: &mut self.buffers,
+            auxiliary_inputs: &self.auxiliary_inputs,
+            last_end: &mut self.last_end,
+        }
+        .process(native, block)
+    }
+}
+
+/// Borrowed signal state of the same worker, shared by inline and scoped DSP.
+/// Parameter domains, auxiliary wiring and sample continuity are interpreted
+/// exactly once here; native operations only differ in their thread capability.
+struct VstSignalFields<'a> {
+    last_parameter_values: &'a mut Vec<Option<f64>>,
+    configuration_phase: &'a super::native_configuration_control::NativeConfigurationPhase,
+    payload: &'a Vst3Payload,
+    render: crate::AudioRenderContract,
+    buffers: &'a mut BusAudioBuffers,
+    auxiliary_inputs: &'a AudioProcessorAuxiliaryInputContract,
+    last_end: &'a mut Option<i64>,
+}
+
+trait VstNativeSignal {
+    fn deliver_parameter_at(
+        &mut self,
+        id: u32,
+        value: f64,
+        sample_offset: i32,
+    ) -> vst3_host::error::Result<()>;
+    fn deliver_timeline(
+        &mut self,
+        context: vst3_host::audio::ProcessTimelineContext,
+    ) -> vst3_host::error::Result<()>;
+    fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()>;
+}
+
+impl VstNativeSignal for Plugin {
+    fn deliver_parameter_at(
+        &mut self,
+        id: u32,
+        value: f64,
+        sample_offset: i32,
+    ) -> vst3_host::error::Result<()> {
+        self.set_parameter_at(id, value, sample_offset)
+    }
+    fn deliver_timeline(
+        &mut self,
+        context: vst3_host::audio::ProcessTimelineContext,
+    ) -> vst3_host::error::Result<()> {
+        self.set_process_timeline_context(context)
+    }
+    fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
+        self.process_bus_audio(buffers)
+    }
+}
+
+impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
+    fn deliver_parameter_at(
+        &mut self,
+        id: u32,
+        value: f64,
+        sample_offset: i32,
+    ) -> vst3_host::error::Result<()> {
+        self.queue_parameter_at(id, value, sample_offset)
+    }
+    fn deliver_timeline(
+        &mut self,
+        context: vst3_host::audio::ProcessTimelineContext,
+    ) -> vst3_host::error::Result<()> {
+        self.set_process_timeline_context(context)
+    }
+    fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
+        self.process_bus_audio(buffers)
+    }
+}
+
+impl VstSignalFields<'_> {
+    fn process(
+        &mut self,
+        native: &mut dyn VstNativeSignal,
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
+        if let Some(request) = self.configuration_phase.blocked_request() {
+            return Err(AudioProcessorHostError::ReprepareRequired(request));
+        }
         let frames = block.frames();
         let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
             AudioProcessorHostError::Process("VST3 sample position overflowed".to_owned())
         })?;
         let channels = self.render.channel_count();
-        if self.last_end != Some(block.start_sample())
+        if *self.last_end != Some(block.start_sample())
             || frames == 0
             || frames > self.render.max_block_frames
             || block.main_interleaved().len() != frames * channels
@@ -453,20 +1121,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                         "VST3 parameter event capacity exceeded".to_owned(),
                     ));
                 }
-                let value = if descriptor.step_count > 0 {
-                    if !event.value.is_finite()
-                        || event.value.fract() != 0.0
-                        || event.value < 0.0
-                        || event.value > f64::from(descriptor.step_count)
-                    {
-                        return Err(AudioProcessorHostError::Process(
-                            "VST3 discrete parameter value is invalid".to_owned(),
-                        ));
-                    }
-                    event.value / f64::from(descriptor.step_count)
-                } else {
-                    event.value
-                };
+                let value = descriptor.normalized_from_author_scalar(event.value)?;
                 if event.sample_offset as usize >= frames
                     || !value.is_finite()
                     || !(0.0..=1.0).contains(&value)
@@ -475,12 +1130,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                         "VST3 parameter event is out of bounds".to_owned(),
                     ));
                 }
-                self.plugin
-                    .as_mut()
-                    .ok_or_else(|| {
-                        AudioProcessorHostError::Process("VST3 processor is closed".to_owned())
-                    })?
-                    .set_parameter_at(native_id, value, event.sample_offset as i32)
+                native
+                    .deliver_parameter_at(native_id, value, event.sample_offset as i32)
                     .map_err(|error| {
                         AudioProcessorHostError::Process(format!(
                             "VST3 parameter delivery failed: {error}"
@@ -515,29 +1166,30 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             }
         }
         self.buffers.block_size = frames;
-        self.plugin
-            .as_mut()
-            .ok_or_else(|| AudioProcessorHostError::Process("VST3 processor is closed".to_owned()))?
-            .set_process_timeline_context(vst3_host::audio::ProcessTimelineContext {
+        native
+            .deliver_timeline(vst3_host::audio::ProcessTimelineContext {
                 sample_position: block.start_sample(),
                 sample_rate: block.sample_rate(),
             })
             .map_err(|error| {
                 AudioProcessorHostError::Process(format!("VST3 timeline delivery failed: {error}"))
             })?;
-        self.plugin
-            .as_mut()
-            .ok_or_else(|| AudioProcessorHostError::Process("VST3 processor is closed".to_owned()))?
-            .process_bus_audio(&mut self.buffers)
-            .map_err(|error| {
-                AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
-            })?;
+        native.process_buses(self.buffers).map_err(|error| {
+            AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
+        })?;
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
             for (channel, sample) in samples.iter_mut().enumerate() {
                 *sample = self.buffers.outputs[0].channels[channel][frame];
             }
         }
-        self.last_end = Some(end_sample);
+        for lane in 0..self.payload.parameter_ids.len() {
+            if let Some(events) = block.parameter_events(lane) {
+                for event in events {
+                    self.last_parameter_values[lane] = Some(event.value);
+                }
+            }
+        }
+        *self.last_end = Some(end_sample);
         Ok(())
     }
 }
@@ -577,6 +1229,29 @@ fn validate_loaded(
         ));
     }
     Ok(metadata.names)
+}
+
+/// Read already activated bus facts without mutating native bus activation.
+fn observe_active_audio_inputs(
+    plugin: &mut Plugin,
+    channel_layout: AudioChannelLayout,
+) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    let metadata = plugin
+        .native_audio_bus_info()
+        .map_err(|error| invalid(format!("VST3 active bus metadata failed: {error}")))?;
+    let layout = plugin
+        .audio_bus_layout()
+        .map_err(|error| invalid(format!("VST3 active bus layout failed: {error}")))?;
+    let arrangements = plugin
+        .bus_arrangements()
+        .map_err(|error| invalid(format!("VST3 active arrangements failed: {error}")))?;
+    let contract = audio_inputs_from_metadata(&metadata, &layout, &arrangements, channel_layout)?;
+    if layout.inputs.iter().chain(&layout.outputs).any(|bus| !bus.active) {
+        return Err(invalid(
+            "VST3 retained activation left an admitted bus inactive",
+        ));
+    }
+    Ok(contract)
 }
 
 /// Read roles from the actual restored component and activate admitted audio ports.
@@ -802,6 +1477,337 @@ fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
 
 fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::Unavailable(detail.into())
+}
+
+#[cfg(target_os = "windows")]
+fn native_editor_removal_failed(error: vst3_host::error::Error) -> AudioProcessorHostError {
+    AudioProcessorHostError::WorkerFailed {
+        operation: "native editor owner removal",
+        detail: error.to_string(),
+    }
+}
+
+/// Same native controller/view storage remains confined to its real main.
+/// This role cannot reach the DSP processor or replacement/configuration APIs.
+#[cfg(target_os = "windows")]
+struct VstMainRole<'a> {
+    editor: vst3_host::plugin::PluginEditorControl<'a>,
+    native_main: &'a std::rc::Rc<vst3_host::window::WindowsEditorMainThread>,
+    native_parent: &'a mut Option<vst3_host::window::WindowsPluginEditorParent>,
+    configuration_phase: &'a super::native_configuration_control::NativeConfigurationPhase,
+    native_binding: &'a Option<crate::NativeAudioObjectBindReceipt>,
+    native_author_delivery: &'a Option<native_author::PendingDelivery>,
+    prepared_author_entry: &'a Option<author_state_entry::PreparedAuthorEntry>,
+}
+
+#[cfg(target_os = "windows")]
+impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        Some([
+            native_layout(std::alloc::Layout::for_value(self)),
+            native_layout(self.editor.allocation_layout()),
+        ])
+    }
+    fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
+        let step = if let Some(parent) = self.native_parent.as_mut() {
+            parent.service(&mut self.editor)
+        } else {
+            let step = self.native_main.dispatch_messages();
+            self.editor
+                .service_controller()
+                .and_then(|_| self.editor.service_run_loop())
+                .map_err(|error| {
+                    unavailable(format!(
+                        "VST3 actual controller main service failed: {error}"
+                    ))
+                })?;
+            step
+        }
+        .map_err(|error| {
+            unavailable(format!(
+                "VST3 actual native message service failed: {error}"
+            ))
+        })?;
+        if let vst3_host::window::WindowsMessageStep::Quit { exit_code } = step {
+            return Err(AudioProcessorHostError::WorkerFailed {
+                operation: "native main message service",
+                detail: format!("actual native WM_QUIT: {exit_code}"),
+            });
+        }
+        Ok(())
+    }
+
+    fn finish_processing_scope(&mut self) -> Result<(), AudioProcessorHostError> {
+        // Flush processor-to-controller display/DataExchange updates on main
+        // only after DSP join. No synthetic author End, frame removal or native
+        // state/processor replacement is inferred from temporary role lifetime.
+        self.editor
+            .service_controller()
+            .and_then(|_| self.editor.service_run_loop())
+            .map_err(|error| {
+                unavailable(format!(
+                    "VST3 joined controller main finish failed: {error}"
+                ))
+            })
+    }
+
+    fn native_configuration_cohort(
+        &self,
+    ) -> Result<Option<super::NativeRequestCohort>, AudioProcessorHostError> {
+        let cohort = self.editor.pending_restart_cohort().map_err(|error| {
+            unavailable(format!("VST3 main cohort observation failed: {error}"))
+        })?;
+        Ok(cohort
+            .filter(|cohort| cohort.pending())
+            .map(|cohort| super::NativeRequestCohort {
+                serial: cohort.serial(),
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                    flags: cohort.flags().bits() as u32,
+                },
+            }))
+    }
+
+    fn pending_reprepare(
+        &self,
+    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+        let cohort = self.native_configuration_cohort()?;
+        Ok(cohort
+            .map(|cohort| cohort.request)
+            .or(self.configuration_phase.blocked_request()))
+    }
+
+    fn preserve_native_observations(
+        &self,
+    ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+        let owner = self.editor.attachment_owner().map_err(|error| {
+            unavailable(format!(
+                "VST3 main native object observation failed: {error}"
+            ))
+        })?;
+        let pid = std::num::NonZeroU32::new(std::process::id())
+            .ok_or_else(|| unavailable("actual native main PID is zero"))?;
+        let author = Some(crate::NativeAudioAuthorObservation {
+            source: native_author::status(self.editor.editor_event_source_status().map_err(
+                |error| {
+                    unavailable(format!(
+                        "VST3 main author source observation failed: {error}"
+                    ))
+                },
+            )?)?,
+            delivery: if self
+                .prepared_author_entry
+                .as_ref()
+                .is_some_and(|entry| entry.awaiting_ack())
+            {
+                crate::NativeAudioAuthorDeliveryState::Refused(
+                    crate::NativeAudioAuthorRefusal::AwaitingAcceptance,
+                )
+            } else {
+                native_author::pending_projection(self.native_author_delivery.as_ref())
+            },
+        });
+        // Attachment cleanup is a full-owner transition after this borrow joins.
+        // Live role service never closes/replaces the canonical native object.
+        Ok(crate::NativeAudioObservations {
+            object: Some(crate::NativeAudioObjectObservation::new(
+                pid,
+                owner.serial(),
+            )),
+            author,
+            ..Default::default()
+        })
+    }
+
+    fn native_author_binding_matches(
+        &self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<bool, AudioProcessorHostError> {
+        let owner = self.editor.attachment_owner().map_err(|error| {
+            unavailable(format!("VST3 author object observation failed: {error}"))
+        })?;
+        let pid = std::process::id();
+        Ok(self.native_binding.as_ref().is_some_and(|receipt| {
+            receipt.binding() == binding.binding && receipt.object() == binding.expected_object
+        }) && binding.expected_object.process_id().get() == pid
+            && binding.expected_object.object_serial() == owner.serial())
+    }
+
+    fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {
+        self.native_parent.as_ref().map_or(Ok(false), |parent| {
+            parent.closed_by_user().map_err(|error| {
+                unavailable(format!(
+                    "VST3 same native parent close observation failed: {error}"
+                ))
+            })
+        })
+    }
+}
+
+/// The one loaded processor and canonical signal fields, exclusively borrowed
+/// into the scoped DSP thread. No controller/window/main storage is reachable.
+#[cfg(target_os = "windows")]
+struct VstDspRole<'a> {
+    native: vst3_host::plugin::PluginAudioProcessing<'a>,
+    signal: VstSignalFields<'a>,
+}
+
+#[cfg(target_os = "windows")]
+impl super::IsolatedAudioProcessorProcessingRole for VstDspRole<'_> {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        Some([
+            native_layout(std::alloc::Layout::for_value(self)),
+            native_layout(self.native.allocation_layout()),
+        ])
+    }
+    fn process(
+        &mut self,
+        block: IsolatedAudioProcessorWorkerBlock<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        self.signal.process(&mut self.native, block)
+    }
+    fn flush_native_author_parameters(
+        &mut self,
+    ) -> Result<crate::NativeAudioAuthorParameterFlushOutcome, AudioProcessorHostError> {
+        if !self.native.queue_unconsumed_editor_values().map_err(|error| {
+            unavailable(format!("VST3 same-source parameter replay failed: {error}"))
+        })? {
+            return Ok(crate::NativeAudioAuthorParameterFlushOutcome::Refused(
+                crate::NativeAudioAuthorRefusal::InvalidSource,
+            ));
+        }
+        // Keep bus metadata and actual capacities, but expose no PCM samples.
+        // The SDK hides audio I/O for its normative zero-sample control path.
+        // Neither canonical sample continuity nor timeline context is changed.
+        self.signal.buffers.block_size = 0;
+        for bus in self.signal.buffers.inputs.iter_mut().chain(&mut self.signal.buffers.outputs) {
+            for channel in &mut bus.channels {
+                channel.clear();
+            }
+        }
+        self.native.process_bus_audio(self.signal.buffers).map_err(|error| {
+            unavailable(format!("VST3 zero-sample parameter flush failed: {error}"))
+        })?;
+        Ok(crate::NativeAudioAuthorParameterFlushOutcome::Flushed)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
+    crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
+}
+
+pub(super) fn native_worker_lane_profile(
+) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+    #[cfg(target_os = "windows")]
+    {
+        let [sdk_main, sdk_dsp] =
+            vst3_host::plugin::PluginEditorProcessingSplit::allocation_layouts();
+        let owners = crate::NativeWorkerLaneOwnedLayouts {
+            reader_slots: native_layout(std::alloc::Layout::new::<
+                super::native_worker_ingress::NativeReaderSlots,
+            >()),
+            processing_slots: native_layout(std::alloc::Layout::new::<
+                super::native_worker_processing::NativeProcessingSlots,
+            >()),
+            // Separately identified logical inline obligations. Compiler stack
+            // layout, thread TLS/bookkeeping and committed OS pages are frontier.
+            main_inline: native_layout(std::alloc::Layout::new::<(
+                super::native_worker_ingress::NativeCommandIngress<'static>,
+                super::worker::WorkerProcessContext<'static>,
+                super::native_worker_processing::NativeDspDispatch<'static>,
+                crate::NativeAudioObservations,
+            )>()),
+            runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
+            runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
+            sdk_main_role: native_layout(sdk_main),
+            sdk_dsp_role: native_layout(sdk_dsp),
+        };
+        let byte_limit = crate::NativeHostBufferLayout {
+            bytes: super::protocol::MAX_CONTROL_FRAME_BYTES,
+            alignment: 1,
+        };
+        let control = crate::NativeWorkerControlOverlapLayout {
+            decoded_input: crate::NativeHostBufferLayout {
+                bytes: byte_limit.bytes,
+                alignment: align_of::<f64>(),
+            },
+            reply_storage: byte_limit,
+            staged_seed: byte_limit,
+        };
+        Ok(Some(
+            crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
+                .map_err(AudioProcessorHostError::from)?,
+        ))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(None)
+    }
+}
+
+impl Vst3Worker {
+    /// Sole native reload used by ordinary Enter and explicit author preparation.
+    fn rebuild_native_state(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.initial_signal_available = false;
+        self.last_parameter_values.fill(None);
+        let mut previous = self.plugin.take().ok_or_else(|| {
+            AudioProcessorHostError::StateEntry("VST3 processor is closed".to_owned())
+        })?;
+        previous.stop_processing().map_err(|error| {
+            AudioProcessorHostError::StateEntry(format!("VST3 stop failed: {error}"))
+        })?;
+        drop(previous);
+        if fingerprint(&self.payload.binary_path)? != self.payload.binary_sha256 {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 binary changed before continuity entry".to_owned(),
+            ));
+        }
+        let mut fresh = self
+            .host
+            .load_plugin_class(&self.payload.binary_path, &self.payload.class_id)
+            .map_err(|error| {
+                AudioProcessorHostError::StateEntry(format!(
+                    "VST3 state-entry load failed: {error}"
+                ))
+            })?;
+        if fingerprint(&self.payload.binary_path)? != self.payload.binary_sha256 {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 binary changed while rebuilding the class".to_owned(),
+            ));
+        }
+        if let Some(state) = self.payload.state.as_deref() {
+            fresh.load_state(state).map_err(|error| {
+                AudioProcessorHostError::StateEntry(format!(
+                    "VST3 state-entry restore failed: {error}"
+                ))
+            })?;
+        }
+        let mode = match self.render.processing_mode {
+            AudioProcessingMode::Realtime => ProcessMode::Realtime,
+            AudioProcessingMode::Offline => ProcessMode::Offline,
+        };
+        fresh.set_process_mode(mode).map_err(|error| {
+            AudioProcessorHostError::StateEntry(format!("VST3 state-entry mode failed: {error}"))
+        })?;
+        validate_loaded(
+            &mut fresh,
+            &Vst3PluginRegistration {
+                class_id: self.payload.class_id.clone(),
+                vendor: self.payload.vendor.clone(),
+                binary_path: self.payload.binary_path.clone(),
+                binary_sha256: self.payload.binary_sha256,
+                execution_contract: self.contract,
+                auxiliary_inputs: self.auxiliary_inputs.clone(),
+                parameters: self.payload.parameters.clone(),
+            },
+            self.render.channel_layout,
+        )?;
+        fresh.start_processing().map_err(|error| {
+            AudioProcessorHostError::StateEntry(format!("VST3 state-entry start failed: {error}"))
+        })?;
+        self.plugin = Some(fresh);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

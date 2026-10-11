@@ -3,14 +3,29 @@ use super::*;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
+pub(super) mod child_diagnostic;
+mod diagnostic;
+use child_diagnostic::ChildProbe;
+pub use child_diagnostic::{
+    OpenFxChildRenderDiagnostic, OpenFxChildRenderPhase, OpenFxNativeRenderPhase,
+};
+pub(super) mod pump;
+pub(super) mod question;
+pub(super) mod question_budget;
+#[cfg(any(test, feature = "validation"))]
+pub use diagnostic::OpenFxRenderDiagnostic;
+pub use diagnostic::OpenFxRenderPhase;
+use diagnostic::{ParentProbe, ProbeEvent};
 
 /// Hidden executable mode for a resident native Filter session.
-pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v2";
+pub const OPENFX_RESIDENT_WORKER_ARGUMENT: &str = "--internal-openfx-session-v8";
 const ENDPOINT_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_ENDPOINT";
 const NONCE_ENV: &str = "MONDRIAN_INTERNAL_OPENFX_NONCE";
-const VERSION: u16 = 2;
+const VERSION: u16 = 8;
 const POLL: Duration = Duration::from_millis(20);
 const RETIRE: Duration = Duration::from_millis(100);
+const FRAME_TRANSFER_BYTES: usize = 1024 * 1024;
+const FRAME_TRANSFER_PIXELS: usize = FRAME_TRANSFER_BYTES / std::mem::size_of::<[f32; 4]>();
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,21 +39,46 @@ struct Prepare {
     width: u32,
     height: u32,
     shared_path: PathBuf,
+    input_alpha: mondrian_core::ColorFrameAlpha,
+    owner: mondrian_core::EffectProcessorOwnerId,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
     Render {
+        owner: mondrian_core::EffectProcessorOwnerId,
         sequence: u64,
+        gui_open: bool,
+        interactive_render: bool,
+        question_work: bool,
         timing: OpenFxRenderTiming,
         parameters: BTreeMap<String, OpenFxParameterBinding>,
+        diagnostic: bool,
+    },
+    Cancel {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+    },
+    QuestionReply {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        identity: question::QuestionIdentity,
+        reply: question::QuestionReply,
+    },
+    CloseGui {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
     },
     Shutdown {},
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "fixed bounded diagnostic POD avoids a per-frame boxed allocation; inline size is charged by the host ledger"
+)]
 enum Response {
     Connected {
         version: u16,
@@ -50,13 +90,51 @@ enum Response {
     },
     Rendered {
         sequence: u64,
-        alpha: mondrian_renderer::ColorFrameAlpha,
+        alpha: mondrian_core::ColorFrameAlpha,
+        feedback: mondrian_effects::EffectProcessorFeedbackSnapshot,
+        #[serde(deserialize_with = "child_diagnostic::required_optional")]
+        diagnostic: Option<OpenFxChildRenderDiagnostic>,
+    },
+    UserBlocked {
+        sequence: u64,
+        feedback: mondrian_effects::EffectProcessorFeedbackSnapshot,
+        #[serde(deserialize_with = "child_diagnostic::required_optional")]
+        diagnostic: Option<OpenFxChildRenderDiagnostic>,
     },
     Rejected {
         sequence: u64,
         status: i32,
     },
+    Progress {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        revision: u64,
+        native_owner: u64,
+        progress: mondrian_effects::EffectProcessorProgress,
+    },
+    Question {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        identity: question::QuestionIdentity,
+        text: mondrian_effects::EffectProcessorNotice,
+    },
+    Canceled {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+    },
+    GuiClosed {
+        owner: mondrian_core::EffectProcessorOwnerId,
+        sequence: u64,
+        #[serde(deserialize_with = "required_gui_feedback")]
+        feedback: Option<mondrian_effects::EffectProcessorFeedbackSnapshot>,
+    },
     Closed {},
+}
+
+fn required_gui_feedback<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<mondrian_effects::EffectProcessorFeedbackSnapshot>, D::Error> {
+    Deserialize::deserialize(deserializer)
 }
 
 fn check_owner(
@@ -82,6 +160,10 @@ impl ProcessOwner {
         deadline: Instant,
     ) -> Result<(), OpenFxHostError> {
         check_owner(owner_checkpoint, deadline)?;
+        self.check_liveness()
+    }
+
+    fn check_liveness(&mut self) -> Result<(), OpenFxHostError> {
         if !self.active {
             return Err(unavailable("native session has been retired"));
         }
@@ -133,22 +215,173 @@ pub struct OpenFxFilterSession {
     height: u32,
     frame_bytes: usize,
     sequence: u64,
+    input_format: mondrian_effects::EffectValueFormat,
+    owner: mondrian_core::EffectProcessorOwnerId,
+    process_id: std::num::NonZeroU32,
+    native_owner: Option<u64>,
+    last_invocation: u64,
+    persistent_revision: u64,
+    progress_generation: u64,
+    feedback: Option<mondrian_effects::EffectProcessorFeedback>,
+    response_reader: pump::PacketReader,
+    request_writer: pump::PacketWriter,
+}
+
+/// Owner-thread observations from the sole native request transport.
+/// Borrowed questions are never moved to a foreign native callback thread.
+#[derive(Debug)]
+pub enum OpenFxRenderObservation<'a> {
+    /// Poll the canonical owner cancellation/deadline before further work.
+    Checkpoint,
+    /// Actual coalesced native progress, bound to the current request.
+    Progress(mondrian_effects::EffectProcessorLiveProgress),
+    /// Publish/sample the same exact currently waiting user service.
+    Question(&'a mondrian_effects::EffectProcessorLiveQuestion),
+    /// Release only this original service after reply, stop, fault or teardown.
+    QuestionEnded(&'a mondrian_effects::EffectProcessorLiveQuestion),
+}
+
+struct ActiveQuestion {
+    identity: question::QuestionIdentity,
+    presented: bool,
+    question: mondrian_effects::EffectProcessorLiveQuestion,
+}
+
+struct RenderObservation<'a, P> {
+    owner_control: &'a mut dyn FnMut(
+        OpenFxRenderObservation<'_>,
+    ) -> Result<
+        mondrian_effects::EffectProcessorQuestionState,
+        OpenFxHostError,
+    >,
+    gui: mondrian_effects::EffectProcessorGuiAdmission,
+    probe: &'a mut P,
 }
 
 impl OpenFxFilterSession {
-    /// Peak controlled frame storage for this session: two shared rasters,
-    /// and the returned Float32 raster. Native image handles borrow mappings.
+    /// Reconcile disappearance of an actually opened GUI on this same owner.
+    /// No image/DSP/stateful render is run, and no replacement instance is made.
+    pub(crate) fn close_gui(
+        &mut self,
+    ) -> Result<Option<(u64, mondrian_effects::EffectProcessorFeedback)>, OpenFxHostError> {
+        let deadline = Instant::now()
+            .checked_add(DEADLINE)
+            .ok_or_else(|| unavailable("native GUI action deadline overflow"))?;
+        let result = self.close_gui_inner(deadline);
+        if result.is_err() {
+            let _ = self.process.terminate();
+        }
+        result
+    }
+
+    fn close_gui_inner(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<Option<(u64, mondrian_effects::EffectProcessorFeedback)>, OpenFxHostError> {
+        self.process.check(&mut || Ok(()), deadline)?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| unavailable("native GUI action sequence exhausted"))?;
+        let request = Request::CloseGui { owner: self.owner, sequence: self.sequence };
+        self.request_writer.write(
+            &mut self.control,
+            &request,
+            deadline,
+            &mut || self.process.check(&mut || Ok(()), deadline),
+            &mut false,
+        )?;
+        self.control.set_nonblocking(true).map_err(control_error)?;
+        loop {
+            self.process.check(&mut || Ok(()), deadline)?;
+            match self.response_reader.step::<Response>(&mut self.control)? {
+                Some(Response::GuiClosed { owner, sequence, feedback })
+                    if owner == self.owner && sequence == self.sequence =>
+                {
+                    let Some(snapshot) = feedback else {
+                        return Ok(None);
+                    };
+                    if self.native_owner != Some(snapshot.native_owner())
+                        || self.last_invocation == 0
+                        || snapshot.invocation() != self.last_invocation
+                        || snapshot.persistent_revision() < self.persistent_revision
+                        || snapshot.progress().is_some_and(|progress| {
+                            progress.generation() < self.progress_generation
+                        })
+                    {
+                        return Err(unavailable(
+                            "GUI feedback lost its actual native owner/action",
+                        ));
+                    }
+                    self.persistent_revision = snapshot.persistent_revision();
+                    if let Some(progress) = snapshot.progress() {
+                        self.progress_generation = progress.generation();
+                    }
+                    publish_native_log_notices(self.owner, self.process_id, &snapshot);
+                    // This is an End action, not another completed frame. It
+                    // neither advances native Render count nor replaces the
+                    // last-render take_feedback slot.
+                    return Ok(Some((
+                        sequence,
+                        mondrian_effects::EffectProcessorFeedback {
+                            owner: self.owner,
+                            origin:
+                                mondrian_effects::EffectProcessorExecutionOrigin::SupervisedChild {
+                                    process_id: self.process_id,
+                                },
+                            snapshot,
+                        },
+                    )));
+                }
+                Some(_) => return Err(invalid("GUI teardown lost its exact owner/action")),
+                None if self.response_reader.made_io_progress() => {}
+                None => thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(1)),
+                ),
+            }
+        }
+    }
+
+    /// Conservative processor-owned active and retained logical storage.
     ///
-    /// This is a logical frame charge, counted once for shared physical pages.
-    /// It excludes executable mappings, control metadata and arbitrary private
-    /// allocations made by the installed plugin; it is not a process RSS cap.
-    pub fn required_frame_storage(width: u32, height: u32) -> Result<usize, OpenFxHostError> {
+    /// Both phases own two shared rasters, one reserved callback stack/guard,
+    /// fixed thread/mutex and bounded auxiliary/transport state, and three typed
+    /// namespace POD values. Active
+    /// admission additionally covers the single pre-DSP output Vec. Success
+    /// moves that Vec to the caller; the session retains no output raster owner.
+    /// Effects owns and separately charges its source/staging/cache rasters.
+    /// Shared physical mapping pages are charged once.
+    ///
+    /// Executable mappings, SDK descriptor/cache/property allocations, the two
+    /// FrameState UID strings and SDK-owned UID copies, OS/CRT bookkeeping,
+    /// arbitrary plugin allocations and allocator usable-size overhead are
+    /// excluded. Stack reservation is logical, not committed physical RSS. The
+    /// output Vec's actual capacity must fit its separate pre-DSP frame grant.
+    pub fn storage(
+        width: u32,
+        height: u32,
+    ) -> Result<mondrian_effects::EffectFloatProcessorStorage, OpenFxHostError> {
         let count = (width as usize)
             .checked_mul(height as usize)
             .ok_or_else(|| invalid("frame dimensions overflow"))?;
-        validate_frame(width, height, count)?
-            .checked_mul(3)
-            .ok_or_else(|| invalid("native frame storage overflows"))
+        let frame_bytes = validate_frame(width, height, count)?;
+        let fixed = native_thread_resident_bytes()?
+            .checked_add(native_auxiliary_resident_bytes()?)
+            .and_then(|bytes| {
+                bytes.checked_add(3 * std::mem::size_of::<mondrian_core::EffectProcessorOwnerId>())
+            })
+            .ok_or_else(|| invalid("native fixed storage overflows"))?;
+        let retained = frame_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(fixed))
+            .ok_or_else(|| invalid("native retained storage overflows"))?;
+        let active = retained
+            .checked_add(frame_bytes)
+            .ok_or_else(|| invalid("native active storage overflows"))?;
+        mondrian_effects::EffectFloatProcessorStorage::new(active, retained)
+            .map_err(|error| invalid(error.to_string()))
     }
 
     /// Prepare a pinned filter and fixed frame extent without loading it in the
@@ -161,9 +394,13 @@ impl OpenFxFilterSession {
         identifier: &str,
         width: u32,
         height: u32,
+        input_format: mondrian_effects::EffectValueFormat,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
     ) -> Result<Self, OpenFxHostError> {
         owner_checkpoint()?;
+        if input_format.precision() != mondrian_effects::EffectWorkingPrecision::Float32 {
+            return Err(invalid("native input format is not Float32"));
+        }
         if !helper.is_absolute() || !helper.is_file() {
             return Err(invalid("helper must be an absolute regular file"));
         }
@@ -185,6 +422,7 @@ impl OpenFxFilterSession {
             TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(control_error)?;
         listener.set_nonblocking(true).map_err(control_error)?;
         let nonce = uuid::Uuid::new_v4().to_string();
+        let owner = mondrian_core::EffectProcessorOwnerId::new();
         let mut command = Command::new(helper);
         command
             .arg(OPENFX_RESIDENT_WORKER_ARGUMENT)
@@ -201,6 +439,10 @@ impl OpenFxFilterSession {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
+        // One retained, fallibly acquired packet owner precedes child/native
+        // creation and every DSP request. Partial cursors survive live controls.
+        let response_reader = pump::PacketReader::acquire()?;
+        let request_writer = pump::PacketWriter::acquire()?;
         let mut process = ProcessOwner {
             child: command.spawn().map_err(control_error)?,
             active: true,
@@ -226,6 +468,8 @@ impl OpenFxFilterSession {
             width,
             height,
             shared_path: file.path().to_path_buf(),
+            input_alpha: input_format.alpha(),
+            owner,
         };
         let mut checkpoint = || process.check(owner_checkpoint, deadline);
         let connected: Response = read_packet(&mut control, &mut checkpoint)?;
@@ -242,6 +486,8 @@ impl OpenFxFilterSession {
             ));
         }
         checkpoint()?;
+        let process_id = std::num::NonZeroU32::new(process.child.id())
+            .ok_or_else(|| unavailable("native process identity is zero"))?;
         Ok(Self {
             process,
             control,
@@ -252,7 +498,23 @@ impl OpenFxFilterSession {
             height,
             frame_bytes,
             sequence: 0,
+            input_format,
+            owner,
+            process_id,
+            native_owner: None,
+            last_invocation: 0,
+            persistent_revision: 0,
+            progress_generation: 0,
+            feedback: None,
+            response_reader,
+            request_writer,
         })
+    }
+
+    /// Parent-issued native instance namespace, stable until actual retirement.
+    /// A reprepare/reopen receives a fresh identity even if the OS recycles PID.
+    pub const fn processor_owner(&self) -> mondrian_core::EffectProcessorOwnerId {
+        self.owner
     }
 
     /// Child identity for lifecycle diagnostics; it remains stable across frames.
@@ -260,7 +522,10 @@ impl OpenFxFilterSession {
         self.process.child.id()
     }
 
-    /// Execute one complete authored frame. Cancellation, deadline, native or
+    /// Execute one complete authored frame. The one returned raster is acquired
+    /// before any request/native processing. A typed host-resource refusal keeps
+    /// this valid worker alive; Effects owns its actual optional retention.
+    /// Cancellation, deadline, native or
     /// protocol failure retires the worker before an output can be published.
     /// The owner checkpoint can return Canceled or DeadlineExceeded without
     /// creating an adapter-owned token or cancellation thread.
@@ -268,15 +533,172 @@ impl OpenFxFilterSession {
         &mut self,
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
-        frame: &OpenFxFloatFrame,
+        frame: &EffectFloatFrame,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
-    ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
-        if frame.width != self.width || frame.height != self.height {
-            return Err(invalid("frame extent differs from the native session"));
-        }
-        validate_render_request(timing, parameters, frame)?;
-        let result = self.render_inner(timing, parameters, frame, owner_checkpoint);
-        if result.is_err() {
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_observed(
+            timing,
+            parameters,
+            frame,
+            None,
+            mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+            &mut |_| {
+                owner_checkpoint()?;
+                Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+            },
+        )
+    }
+
+    /// Execute with actual live native progress on this owning thread.
+    /// The callback is never moved to a pump/native callback thread. Its exact
+    /// scheduler deadline clips both processing and cooperative cancel grace.
+    pub fn render_observed(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        owner_deadline: Option<Instant>,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_owned(
+            timing,
+            parameters,
+            frame,
+            owner_deadline,
+            RenderObservation { owner_control, gui, probe: &mut () },
+            reserve_native_output,
+        )
+    }
+
+    /// Attribute parent phases of the same complete owned render path.
+    /// This validation-only report owns no work/cancellation authority. Normal
+    /// render uses a zero-sized no-op probe and performs no diagnostic clocks.
+    /// Instrumented timing is diagnosis, never performance acceptance.
+    #[cfg(any(test, feature = "validation"))]
+    pub fn render_diagnostic(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+        report: &mut OpenFxRenderDiagnostic,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        *report = OpenFxRenderDiagnostic::default();
+        report.owner = Some(self.owner);
+        report.worker_process_id = Some(self.process_id);
+        let begin = Instant::now();
+        let result = self.render_owned(
+            timing,
+            parameters,
+            frame,
+            None,
+            RenderObservation {
+                owner_control: &mut |_| {
+                    owner_checkpoint()?;
+                    Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                },
+                gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                probe: &mut *report,
+            },
+            reserve_native_output,
+        );
+        report.owned_invocation_elapsed = Some(begin.elapsed());
+        report.accepted_output = result.is_ok();
+        result
+    }
+
+    #[cfg(test)]
+    fn render_with_output_reservation(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+        reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        self.render_owned(
+            timing,
+            parameters,
+            frame,
+            None,
+            RenderObservation {
+                owner_control: &mut |_| {
+                    owner_checkpoint()?;
+                    Ok(mondrian_effects::EffectProcessorQuestionState::Unavailable)
+                },
+                gui: mondrian_effects::EffectProcessorGuiAdmission::CLOSED,
+                probe: &mut (),
+            },
+            reserve,
+        )
+    }
+
+    fn render_owned(
+        &mut self,
+        timing: &OpenFxRenderTiming,
+        parameters: &BTreeMap<String, OpenFxParameterBinding>,
+        frame: &EffectFloatFrame,
+        owner_deadline: Option<Instant>,
+        observation: RenderObservation<'_, impl ParentProbe>,
+        reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        let RenderObservation { owner_control, gui, probe } = observation;
+        self.feedback = None;
+        let native_deadline = Instant::now() + DEADLINE;
+        let mut budget =
+            question_budget::QuestionExecutionBudget::new(native_deadline, owner_deadline);
+        let deadline = budget
+            .deadline()
+            .ok_or_else(|| unavailable("new native work has no active budget"))?;
+        let mut owner_checkpoint =
+            || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ());
+        let phase = probe.start();
+        let admission = (|| {
+            self.process.check(&mut owner_checkpoint, deadline)?;
+            if frame.width() != self.width
+                || frame.height() != self.height
+                || frame.format() != self.input_format
+            {
+                return Err(invalid("frame extent differs from the native session"));
+            }
+            validate_render_request(timing, parameters, frame, &mut || {
+                self.process.check(&mut owner_checkpoint, deadline)
+            })
+        })();
+        probe.finish(OpenFxRenderPhase::InputAdmission, phase);
+        admission?;
+        let phase = probe.start();
+        let allocation = {
+            let mut checkpoint = || self.process.check(&mut owner_checkpoint, deadline);
+            NativeOutputAllocation::acquire(frame.extent(), &mut checkpoint, reserve)
+        };
+        probe.finish(OpenFxRenderPhase::OutputAllocation, phase);
+        let output_owner = match allocation {
+            Ok(owner) => owner,
+            Err(error @ OpenFxHostError::HostResourceRefused(_)) => return Err(error),
+            Err(error) => {
+                self.process.terminate()?;
+                return Err(error);
+            }
+        };
+        let result = self.render_inner(
+            timing,
+            parameters,
+            frame,
+            RenderObservation { owner_control, gui, probe },
+            &mut budget,
+            output_owner,
+        );
+        if result
+            .as_ref()
+            .is_err_and(|error| !matches!(error, OpenFxHostError::UserBlocked(_)))
+        {
             self.process.terminate()?;
         }
         result
@@ -286,39 +708,128 @@ impl OpenFxFilterSession {
         &mut self,
         timing: &OpenFxRenderTiming,
         parameters: &BTreeMap<String, OpenFxParameterBinding>,
-        frame: &OpenFxFloatFrame,
-        owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
-    ) -> Result<OpenFxFloatFrame, OpenFxHostError> {
-        let deadline = Instant::now() + DEADLINE;
-        self.process.check(owner_checkpoint, deadline)?;
-        if sha256_file(&self.inspection.binary_path)? != self.inspection.binary_sha256 {
+        frame: &EffectFloatFrame,
+        observation: RenderObservation<'_, impl ParentProbe>,
+        budget: &mut question_budget::QuestionExecutionBudget,
+        output_owner: NativeOutputAllocation,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        let RenderObservation { owner_control, gui, probe } = observation;
+        let deadline = budget
+            .deadline()
+            .ok_or_else(|| unavailable("unsubmitted native work has no active budget"))?;
+        self.process.check(
+            &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+            deadline,
+        )?;
+        let phase = probe.start();
+        let identity = sha256_file(&self.inspection.binary_path);
+        probe.finish(OpenFxRenderPhase::IdentityBefore, phase);
+        if identity? != self.inspection.binary_sha256 {
             return Err(invalid("OpenFX binary changed before render"));
         }
         self.sequence = self
             .sequence
             .checked_add(1)
             .ok_or_else(|| unavailable("native session sequence exhausted"))?;
-        // Check the owner at bounded copy intervals without a process syscall
-        // for every pixel block. The child is idle until the request is sent.
-        for (destination, source) in self.shared[..self.frame_bytes]
-            .chunks_mut(1024 * 1024)
-            .zip(frame.pixels.chunks(65536))
-        {
-            check_owner(owner_checkpoint, deadline)?;
-            for (bytes, channel) in destination.chunks_exact_mut(4).zip(source.iter().flatten()) {
-                bytes.copy_from_slice(&channel.to_ne_bytes());
-            }
-        }
+        probe.event(ProbeEvent::Sequence(self.sequence));
+        let mut copy_checkpoint = || {
+            check_owner(
+                &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                deadline,
+            )
+        };
+        let phase = probe.start();
+        let copied = copy_native_input(
+            &mut self.shared[..self.frame_bytes],
+            frame.pixels(),
+            &mut copy_checkpoint,
+        );
+        probe.finish(OpenFxRenderPhase::InputCopy, phase);
+        copied?;
+        probe.event(ProbeEvent::InputCopied(self.frame_bytes));
+        let phase = probe.start();
         let request = Request::Render {
+            owner: self.owner,
             sequence: self.sequence,
+            gui_open: gui.is_open(),
+            interactive_render: gui.is_user_edited(),
+            question_work: gui.allows_question(),
             timing: timing.clone(),
             parameters: parameters.clone(),
+            diagnostic: probe.measure_child(),
         };
-        let mut checkpoint = || self.process.check(owner_checkpoint, deadline);
-        write_packet(&mut self.control, &request, &mut checkpoint)?;
-        let response: Response = read_packet(&mut self.control, &mut checkpoint)?;
-        let alpha = match response {
-            Response::Rendered { sequence, alpha } if sequence == self.sequence => alpha,
+        let mut submitted = false;
+        let submission = self.request_writer.write(
+            &mut self.control,
+            &request,
+            deadline,
+            &mut || {
+                self.process.check(
+                    &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                    deadline,
+                )
+            },
+            &mut submitted,
+        );
+        probe.finish(OpenFxRenderPhase::RequestSubmission, phase);
+        if submitted {
+            probe.event(ProbeEvent::RequestCommitted);
+        }
+        let initial_stop = match submission {
+            Ok(()) => None,
+            Err(OpenFxHostError::Canceled) if submitted => Some(OpenFxHostError::Canceled),
+            Err(error) => return Err(error), // Partial packet can only be retired.
+        };
+        let phase = probe.start();
+        let response = self.await_render(owner_control, budget, gui, initial_stop, probe);
+        probe.finish(OpenFxRenderPhase::AwaitCompletion, phase);
+        let response = response?;
+        let deadline = budget
+            .deadline()
+            .ok_or_else(|| unavailable("native completed with an unreleased human wait"))?;
+        let phase = probe.start();
+        let mut checkpoint = || {
+            self.process.check(
+                &mut || owner_control(OpenFxRenderObservation::Checkpoint).map(|_| ()),
+                deadline,
+            )
+        };
+        let (alpha, snapshot) = match response {
+            Response::Rendered { sequence, alpha, feedback, diagnostic }
+                if sequence == self.sequence
+                    && matches!(
+                        alpha,
+                        mondrian_core::ColorFrameAlpha::StraightFloat
+                            | mondrian_core::ColorFrameAlpha::PremultipliedFloat
+                            | mondrian_core::ColorFrameAlpha::Opaque
+                    )
+                    && !feedback.is_blocked() =>
+            {
+                admit_child_diagnostic(
+                    diagnostic,
+                    self.owner,
+                    self.sequence,
+                    &feedback,
+                    Some(alpha),
+                    self.frame_bytes,
+                    probe,
+                )?;
+                (Some(alpha), feedback)
+            }
+            Response::UserBlocked { sequence, feedback, diagnostic }
+                if sequence == self.sequence && feedback.is_blocked() =>
+            {
+                admit_child_diagnostic(
+                    diagnostic,
+                    self.owner,
+                    self.sequence,
+                    &feedback,
+                    None,
+                    self.frame_bytes,
+                    probe,
+                )?;
+                (None, feedback)
+            }
             Response::Rejected { sequence, status } if sequence == self.sequence => {
                 return Err(OpenFxHostError::WorkerFailed(format!(
                     "native status {status}"
@@ -326,34 +837,355 @@ impl OpenFxFilterSession {
             }
             _ => {
                 return Err(unavailable(
-                    "native session response sequence does not match",
+                    "native session response sequence/disposition does not match",
                 ))
             }
         };
         checkpoint()?;
-        if sha256_file(&self.inspection.binary_path)? != self.inspection.binary_sha256 {
+        probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
+        let phase = probe.start();
+        let identity = sha256_file(&self.inspection.binary_path);
+        probe.finish(OpenFxRenderPhase::IdentityAfter, phase);
+        if identity? != self.inspection.binary_sha256 {
             return Err(invalid("OpenFX binary changed during render"));
         }
-        let mut pixels = Vec::with_capacity(frame.pixels.len());
-        for block in self.shared[self.frame_bytes..].chunks(1024 * 1024) {
-            checkpoint()?;
-            for pixel in block.chunks_exact(16) {
-                let channel = |index| {
-                    f32::from_ne_bytes([
-                        pixel[index],
-                        pixel[index + 1],
-                        pixel[index + 2],
-                        pixel[index + 3],
-                    ])
-                };
-                pixels.push(normalize_native_output_sample(
-                    [channel(0), channel(4), channel(8), channel(12)],
-                    alpha,
-                )?);
-            }
+        let phase = probe.start();
+        if self.native_owner.is_some_and(|owner| owner != snapshot.native_owner())
+            || snapshot.invocation()
+                != self
+                    .last_invocation
+                    .checked_add(1)
+                    .ok_or_else(|| unavailable("native Render invocation exhausted"))?
+            || snapshot.invocation() <= self.last_invocation
+            || snapshot.persistent_revision() < self.persistent_revision
+            || snapshot
+                .progress()
+                .is_some_and(|progress| progress.generation() < self.progress_generation)
+        {
+            return Err(unavailable(
+                "native feedback owner or revision does not match",
+            ));
         }
-        checkpoint()?;
-        Ok(OpenFxFloatFrame { width: self.width, height: self.height, pixels })
+        self.native_owner = Some(snapshot.native_owner());
+        self.last_invocation = snapshot.invocation();
+        self.persistent_revision = snapshot.persistent_revision();
+        if let Some(progress) = snapshot.progress() {
+            self.progress_generation = progress.generation();
+        }
+        // Log is a diagnostic contract, not a user popup or frame-delivery
+        // claim. Both Viewer and export share this exact trusted supervisor.
+        // The response's work, owner/revision and binary checks above have
+        // completed before any unmodified plugin text reaches product tracing.
+        publish_native_log_notices(self.owner, self.process_id, &snapshot);
+        let feedback = mondrian_effects::EffectProcessorFeedback {
+            owner: self.owner,
+            origin: mondrian_effects::EffectProcessorExecutionOrigin::SupervisedChild {
+                process_id: self.process_id,
+            },
+            snapshot,
+        };
+        let Some(alpha) = alpha else {
+            probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
+            return Err(OpenFxHostError::UserBlocked(Box::new(feedback)));
+        };
+        self.feedback = Some(feedback);
+        probe.finish(OpenFxRenderPhase::FeedbackAdmission, phase);
+        probe.event(ProbeEvent::OutputAlpha(alpha));
+        let format = frame.format().with_alpha(alpha);
+        let output = materialize_native_output_profiled(
+            &self.shared[self.frame_bytes..],
+            output_owner,
+            format,
+            &mut checkpoint,
+            probe,
+        )?;
+        let phase = probe.start();
+        let publication = checkpoint();
+        probe.finish(OpenFxRenderPhase::FinalPublication, phase);
+        publication?;
+        Ok(output)
+    }
+
+    fn await_render(
+        &mut self,
+        owner_control: &mut dyn FnMut(
+            OpenFxRenderObservation<'_>,
+        ) -> Result<
+            mondrian_effects::EffectProcessorQuestionState,
+            OpenFxHostError,
+        >,
+        budget: &mut question_budget::QuestionExecutionBudget,
+        gui: mondrian_effects::EffectProcessorGuiAdmission,
+        mut stopped: Option<OpenFxHostError>,
+        probe: &mut impl ParentProbe,
+    ) -> Result<Response, OpenFxHostError> {
+        use mondrian_effects::{
+            EffectProcessorQuestionReply as Reply, EffectProcessorQuestionState as State,
+        };
+        self.control.set_nonblocking(true).map_err(control_error)?;
+        let mut cancel_sent = false;
+        let mut drain_deadline = None;
+        let mut progress_revision = 0;
+        let mut last_service = 0;
+        let render_invocation = self
+            .last_invocation
+            .checked_add(1)
+            .ok_or_else(|| unavailable("native Render invocation exhausted"))?;
+        let mut active: Option<ActiveQuestion> = None;
+        // Every exit clears only its original GUI service, including protocol,
+        // native, cancellation and timeout errors. No borrowed native data is
+        // retained in the product and no completed DSP invocation is replayed.
+        let result = (|| loop {
+            if stopped.is_none() {
+                match owner_control(OpenFxRenderObservation::Checkpoint) {
+                    Ok(_) => {}
+                    Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
+                    Err(error) => return Err(error),
+                }
+                self.process.check_liveness()?;
+                if stopped.is_none() {
+                    budget.check(Instant::now()).map_err(|_| OpenFxHostError::DeadlineExceeded)?;
+                }
+            }
+            if stopped.is_some() && !cancel_sent {
+                let deadline = budget
+                    .cancellation_deadline(Instant::now(), RETIRE)
+                    .map_err(|_| OpenFxHostError::DeadlineExceeded)?;
+                drain_deadline = Some(deadline);
+                let request = Request::Cancel { owner: self.owner, sequence: self.sequence };
+                let result = self.request_writer.write(
+                    &mut self.control,
+                    &request,
+                    deadline,
+                    &mut || {
+                        if Instant::now() >= deadline {
+                            Err(OpenFxHostError::DeadlineExceeded)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    &mut false,
+                );
+                if result.is_err() {
+                    return Err(stopped
+                        .take()
+                        .ok_or_else(|| unavailable("cancel lost stop reason"))?);
+                }
+                cancel_sent = true;
+            }
+            let deadline = drain_deadline.or_else(|| budget.deadline());
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(stopped.take().unwrap_or(OpenFxHostError::DeadlineExceeded));
+            }
+            if stopped.is_none()
+                && let Some(question) = active.as_mut()
+            {
+                match owner_control(OpenFxRenderObservation::Question(&question.question)) {
+                    Err(error @ OpenFxHostError::Canceled) => {
+                        stopped = Some(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                    Ok(State::Pending) => {}
+                    Ok(State::Presented) => {
+                        if !question.presented {
+                            budget
+                                .presented(question.identity, Instant::now())
+                                .map_err(|_| OpenFxHostError::DeadlineExceeded)?;
+                            question.presented = true;
+                        }
+                    }
+                    Ok(state @ (State::Unavailable | State::Answered(_))) => {
+                        let reply = match state {
+                            State::Answered(Reply::Yes) => question::QuestionReply::Yes,
+                            State::Answered(Reply::No) => question::QuestionReply::No,
+                            _ => question::QuestionReply::Dismissed,
+                        };
+                        // A Yes/No without an actually painted original modal
+                        // is not a real user reply and cannot unblock native.
+                        let reply =
+                            if !question.presented && reply != question::QuestionReply::Dismissed {
+                                // The suite cannot invent a user answer. A product
+                                // response without actual presentation is Failed;
+                                // the plugin may legally continue its Render.
+                                question::QuestionReply::Dismissed
+                            } else {
+                                reply
+                            };
+                        if question.presented {
+                            budget
+                                .answered(question.identity, Instant::now())
+                                .map_err(|_| OpenFxHostError::DeadlineExceeded)?;
+                        }
+                        let deadline = budget.deadline().ok_or_else(|| {
+                            unavailable("Question reply did not resume its active budget")
+                        })?;
+                        let request = Request::QuestionReply {
+                            owner: self.owner,
+                            sequence: self.sequence,
+                            identity: question.identity,
+                            reply,
+                        };
+                        self.request_writer.write(
+                            &mut self.control,
+                            &request,
+                            deadline,
+                            &mut || {
+                                self.process.check(
+                                    &mut || {
+                                        owner_control(OpenFxRenderObservation::Checkpoint)
+                                            .map(|_| ())
+                                    },
+                                    deadline,
+                                )
+                            },
+                            &mut false,
+                        )?;
+                        let original = active
+                            .take()
+                            .ok_or_else(|| unavailable("Question reply lost its service"))?;
+                        let _ = owner_control(OpenFxRenderObservation::QuestionEnded(
+                            &original.question,
+                        ));
+                        continue;
+                    }
+                }
+            }
+            probe.event(ProbeEvent::PollStep);
+            let response = match self.response_reader.step::<Response>(&mut self.control) {
+                Ok(Some(response)) => response,
+                Ok(None) => {
+                    if self.response_reader.made_io_progress() {
+                        probe.event(ProbeEvent::ReadMadeProgress);
+                        continue;
+                    }
+                    let wait = deadline.map_or(Duration::from_millis(1), |deadline| {
+                        deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(Duration::from_millis(1))
+                    });
+                    if !wait.is_zero() {
+                        let start = probe.start();
+                        thread::sleep(wait);
+                        probe.slept(wait, start);
+                    }
+                    continue;
+                }
+                Err(error) => return Err(stopped.take().unwrap_or(error)),
+            };
+            if let Response::Question { owner, sequence, identity, text } = response {
+                if owner != self.owner
+                    || sequence != self.sequence
+                    || identity.invocation != render_invocation
+                    || identity.native_owner == 0
+                    || identity.service <= last_service
+                    || self.native_owner.is_some_and(|old| old != identity.native_owner)
+                    || !gui.is_open()
+                    || !gui.allows_question()
+                    || text.kind() != mondrian_effects::EffectProcessorNoticeKind::Information
+                    || active.is_some()
+                {
+                    return Err(unavailable(
+                        "Question lost its exact current GUI/native work identity",
+                    ));
+                }
+                last_service = identity.service;
+                self.native_owner = Some(identity.native_owner);
+                if stopped.is_some() {
+                    continue;
+                }
+                let id = mondrian_effects::EffectProcessorQuestionId::new(
+                    identity.native_owner,
+                    identity.invocation,
+                    identity.service,
+                )
+                .ok_or_else(|| unavailable("Question service coordinates are invalid"))?;
+                active = Some(ActiveQuestion {
+                    identity,
+                    presented: false,
+                    question: mondrian_effects::EffectProcessorLiveQuestion {
+                        owner: self.owner,
+                        origin: mondrian_effects::EffectProcessorExecutionOrigin::SupervisedChild {
+                            process_id: self.process_id,
+                        },
+                        id,
+                        text,
+                    },
+                });
+                continue;
+            }
+            if let Response::Progress { owner, sequence, revision, native_owner, progress } =
+                response
+            {
+                if owner != self.owner
+                    || sequence != self.sequence
+                    || revision <= progress_revision
+                    || native_owner == 0
+                    || self.native_owner.is_some_and(|old| old != native_owner)
+                    || progress.generation() < self.progress_generation
+                {
+                    return Err(unavailable(
+                        "live progress lost its exact native work identity",
+                    ));
+                }
+                probe.event(ProbeEvent::ProgressPacket);
+                progress_revision = revision;
+                self.progress_generation = progress.generation();
+                self.native_owner = Some(native_owner);
+                if stopped.is_none() {
+                    match owner_control(OpenFxRenderObservation::Checkpoint) {
+                        Ok(_) => {}
+                        Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
+                        Err(error) => return Err(error),
+                    }
+                }
+                if stopped.is_none() {
+                    let progress = mondrian_effects::EffectProcessorLiveProgress {
+                        owner: self.owner,
+                        origin: mondrian_effects::EffectProcessorExecutionOrigin::SupervisedChild {
+                            process_id: self.process_id,
+                        },
+                        native_owner,
+                        invocation: render_invocation,
+                        revision,
+                        progress,
+                    };
+                    match owner_control(OpenFxRenderObservation::Progress(progress)) {
+                        Ok(_) => {}
+                        Err(error @ OpenFxHostError::Canceled) => stopped = Some(error),
+                        Err(error) => return Err(error),
+                    }
+                }
+                continue;
+            }
+            if let Some(reason) = stopped.take() {
+                match response {
+                    Response::Canceled { owner, sequence }
+                        if owner == self.owner && sequence == self.sequence => {}
+                    Response::Rendered { sequence, .. }
+                    | Response::Rejected { sequence, .. }
+                    | Response::UserBlocked { sequence, .. }
+                        if sequence == self.sequence => {}
+                    _ => return Err(unavailable("cancel completion lost its current work")),
+                }
+                return Err(reason);
+            }
+            if active.is_some() {
+                return Err(unavailable(
+                    "native completed while its Question was unacknowledged",
+                ));
+            }
+            return Ok(response);
+        })();
+        if let Some(original) = active.take() {
+            let _ = owner_control(OpenFxRenderObservation::QuestionEnded(&original.question));
+        }
+        result
+    }
+
+    /// Consume the exact feedback accompanying the last accepted output.
+    pub fn take_feedback(&mut self) -> Option<mondrian_effects::EffectProcessorFeedback> {
+        self.feedback.take()
     }
 
     /// Retire the native instance gracefully under a short deadline, then verify
@@ -370,8 +1202,26 @@ impl OpenFxFilterSession {
                 }
                 Ok(())
             };
-            write_packet(&mut self.control, &Request::Shutdown {}, &mut checkpoint)?;
-            let response: Response = read_packet(&mut self.control, &mut checkpoint)?;
+            self.request_writer.write(
+                &mut self.control,
+                &Request::Shutdown {},
+                deadline,
+                &mut checkpoint,
+                &mut false,
+            )?;
+            let response = loop {
+                checkpoint()?;
+                if let Some(response) = self.response_reader.step::<Response>(&mut self.control)? {
+                    break response;
+                }
+                if self.response_reader.made_io_progress() {
+                    continue;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    thread::sleep(remaining.min(Duration::from_millis(1)));
+                }
+            };
             if !matches!(response, Response::Closed {}) {
                 return Err(unavailable("native session did not close"));
             }
@@ -398,6 +1248,188 @@ impl Drop for OpenFxFilterSession {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+// The existing product subscriber writes rotated bounded JSONL and stderr,
+// never the child control transport/stdout. Its ordinary filtering/backpressure
+// policy applies; the native host journal is not a crash-durability guarantee.
+fn publish_native_log_notices(
+    owner: mondrian_core::EffectProcessorOwnerId,
+    process_id: std::num::NonZeroU32,
+    snapshot: &mondrian_effects::EffectProcessorFeedbackSnapshot,
+) {
+    for notice in snapshot.notices() {
+        if notice.kind() == mondrian_effects::EffectProcessorNoticeKind::Log {
+            tracing::info!(
+                target: "mondrian.openfx.plugin",
+                processor_owner = %owner,
+                worker_process_id = process_id.get(),
+                native_invocation = snapshot.invocation(),
+                notice_id = notice.id(),
+                plugin_message = notice.text(),
+                "OpenFX plugin log"
+            );
+        }
+    }
+}
+
+// Raw transport owns no color interpretation. The parent's admitted frame is
+// immutable during this borrow; the native worker is idle until its request.
+fn copy_native_input(
+    destination: &mut [u8],
+    pixels: &[[f32; 4]],
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<(), OpenFxHostError> {
+    let source: &[u8] = bytemuck::cast_slice(pixels);
+    if destination.len() != source.len() {
+        return Err(invalid(
+            "shared input range does not match admitted frame storage",
+        ));
+    }
+    for (destination, source) in destination
+        .chunks_mut(FRAME_TRANSFER_BYTES)
+        .zip(source.chunks(FRAME_TRANSFER_BYTES))
+    {
+        checkpoint()?;
+        destination.copy_from_slice(source);
+    }
+    checkpoint()
+}
+
+// One parent-owned raster acquired before a native request can advance DSP.
+// It is still uninitialized storage: there is no frame/association authority
+// until the matching completion fills and admits the complete signal.
+#[derive(Debug)]
+struct NativeOutputAllocation {
+    pixels: Vec<[f32; 4]>,
+    extent: mondrian_effects::EffectFrameExtent,
+    count: usize,
+    bytes: usize,
+}
+
+fn reserve_native_output(
+    pixels: &mut Vec<[f32; 4]>,
+    count: usize,
+) -> Result<(), std::collections::TryReserveError> {
+    pixels.try_reserve_exact(count)
+}
+
+impl NativeOutputAllocation {
+    fn acquire(
+        extent: mondrian_effects::EffectFrameExtent,
+        checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+        reserve: impl FnOnce(&mut Vec<[f32; 4]>, usize) -> Result<(), std::collections::TryReserveError>,
+    ) -> Result<Self, OpenFxHostError> {
+        let count = (extent.width() as usize)
+            .checked_mul(extent.height() as usize)
+            .ok_or_else(|| invalid("native output dimensions overflow"))?;
+        let bytes = validate_frame(extent.width(), extent.height(), count)?;
+        checkpoint()?;
+        let mut pixels = Vec::new();
+        let acquired = reserve(&mut pixels, count);
+        // An owner stop observed during allocation wins over resource refusal.
+        checkpoint()?;
+        acquired.map_err(|_| {
+            OpenFxHostError::HostResourceRefused(
+                mondrian_effects::EffectProcessorHostResourceRefusal::OutputAllocation {
+                    required_bytes: bytes,
+                },
+            )
+        })?;
+        if !pixels.is_empty() || pixels.capacity() < count {
+            return Err(invalid(
+                "native output reservation did not acquire empty complete storage",
+            ));
+        }
+        // reserve_exact need not promise equality in the public Vec contract.
+        // Observe the actual logical owner, not allocator usable-size/RSS, and
+        // refuse before DSP if it exceeds the already admitted output charge.
+        let capacity_bytes = pixels
+            .capacity()
+            .checked_mul(std::mem::size_of::<[f32; 4]>())
+            .ok_or_else(|| invalid("native output capacity byte size overflows"))?;
+        if capacity_bytes > bytes {
+            return Err(OpenFxHostError::HostResourceRefused(
+                mondrian_effects::EffectProcessorHostResourceRefusal::OutputCapacity {
+                    required_bytes: capacity_bytes,
+                    admitted_bytes: bytes,
+                },
+            ));
+        }
+        Ok(Self { pixels, extent, count, bytes })
+    }
+}
+
+// Fill the already acquired owner only after proved native completion. Copying
+// bytes into spare capacity creates no foreign f32 reference and requires no
+// source alignment. The sole Effects admission remains the numeric boundary.
+#[cfg(test)]
+fn materialize_native_output(
+    source: &[u8],
+    owner: NativeOutputAllocation,
+    format: mondrian_effects::EffectValueFormat,
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<EffectFloatFrame, OpenFxHostError> {
+    materialize_native_output_profiled(source, owner, format, checkpoint, &mut ())
+}
+
+fn materialize_native_output_profiled(
+    source: &[u8],
+    owner: NativeOutputAllocation,
+    format: mondrian_effects::EffectValueFormat,
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    probe: &mut impl ParentProbe,
+) -> Result<EffectFloatFrame, OpenFxHostError> {
+    let phase = probe.start();
+    let NativeOutputAllocation { mut pixels, extent, count, bytes } = owner;
+    if source.len() != bytes {
+        return Err(invalid(
+            "shared output range does not match admitted frame storage",
+        ));
+    }
+    checkpoint()?;
+    let destination = pixels.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+    let mut offset = 0usize;
+    for block in source.chunks(FRAME_TRANSFER_BYTES) {
+        checkpoint()?;
+        // SAFETY: reserve acquired at least count aligned RGBA slots, whose
+        // combined byte size was checked above. These consecutive blocks cover
+        // only that range. Destination is a new exclusive allocation, never
+        // overlaps the borrowed shared source. Length remains zero until every
+        // slot is initialized, so a cancellation drops no uninitialized value.
+        unsafe {
+            std::ptr::copy_nonoverlapping(block.as_ptr(), destination.add(offset), block.len());
+        }
+        offset += block.len();
+        probe.event(ProbeEvent::OutputCopied(block.len()));
+    }
+    checkpoint()?;
+    // SAFETY: the entire checked RGBA range is now initialized. f32 permits all
+    // bit patterns; frame validation below is the numeric/association boundary.
+    unsafe {
+        pixels.set_len(count);
+    }
+    probe.finish(OpenFxRenderPhase::OutputCopy, phase);
+    if format.alpha() == mondrian_core::ColorFrameAlpha::Opaque {
+        // OFX ignores the stored A lane for opaque images. The sole public
+        // Opaque representation owns A=1. Dispatch once for the complete frame,
+        // preserve all RGB bits, and keep bounded owner checkpoints.
+        let phase = probe.start();
+        for block in pixels.chunks_mut(FRAME_TRANSFER_PIXELS) {
+            checkpoint()?;
+            let count = block.len();
+            for pixel in block {
+                pixel[3] = 1.0;
+            }
+            probe.event(ProbeEvent::OpaquePixels(count));
+        }
+        probe.finish(OpenFxRenderPhase::OpaqueCanonicalization, phase);
+    }
+    let phase = probe.start();
+    let admitted =
+        EffectFloatFrame::from_pixels_controlled(extent, format, pixels, &mut || checkpoint());
+    probe.finish(OpenFxRenderPhase::OutputAdmission, phase);
+    admitted
 }
 
 fn configure(stream: &TcpStream, timeout: Duration) -> Result<(), OpenFxHostError> {
@@ -427,7 +1459,11 @@ fn read_exact_controlled(
             Ok(count) => {
                 bytes = &mut bytes[count..];
             }
-            Err(error) if retry(&error) => {}
+            Err(error) if retry(&error) => {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
             Err(error) => return Err(control_error(error)),
         }
     }
@@ -455,29 +1491,19 @@ fn read_body<T: DeserializeOwned>(
     serde_json::from_slice(&bytes)
         .map_err(|error| unavailable(format!("native session packet is malformed: {error}")))
 }
-fn read_idle_request(stream: &mut TcpStream) -> Result<Request, OpenFxHostError> {
-    stream.set_read_timeout(None).map_err(control_error)?;
-    let mut header = [0; 4];
-    // Only the first byte may wait indefinitely. Once a packet starts, the
-    // remaining header/body must arrive under the bounded operation deadline.
-    stream.read_exact(&mut header[..1]).map_err(control_error)?;
-    configure(stream, POLL)?;
-    let deadline = Instant::now() + DEADLINE;
-    let mut checkpoint = || {
-        if Instant::now() >= deadline {
-            Err(OpenFxHostError::DeadlineExceeded)
-        } else {
-            Ok(())
-        }
-    };
-    read_exact_controlled(stream, &mut header[1..], &mut checkpoint)?;
-    read_body(stream, header, &mut checkpoint)
-}
-
 fn write_packet<T: Serialize>(
     stream: &mut TcpStream,
     value: &T,
     checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+) -> Result<(), OpenFxHostError> {
+    write_packet_committed(stream, value, checkpoint, &mut false)
+}
+
+fn write_packet_committed<T: Serialize>(
+    stream: &mut TcpStream,
+    value: &T,
+    checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    committed: &mut bool,
 ) -> Result<(), OpenFxHostError> {
     let bytes = serde_json::to_vec(value)
         .map_err(|error| invalid(format!("native session packet encoding failed: {error}")))?;
@@ -493,22 +1519,16 @@ fn write_packet<T: Serialize>(
         match stream.write(remaining) {
             Ok(0) => return Err(unavailable("native session control closed mid-packet")),
             Ok(count) => remaining = &remaining[count..],
-            Err(error) if retry(&error) => {}
+            Err(error) if retry(&error) => {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
             Err(error) => return Err(control_error(error)),
         }
     }
+    *committed = true;
     checkpoint()
-}
-
-fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), OpenFxHostError> {
-    let deadline = Instant::now() + DEADLINE;
-    write_packet(stream, response, &mut || {
-        if Instant::now() >= deadline {
-            Err(OpenFxHostError::DeadlineExceeded)
-        } else {
-            Ok(())
-        }
-    })
 }
 
 fn map_frames(
@@ -538,6 +1558,17 @@ fn map_frames(
     let output = unsafe { MmapOptions::new().offset(bytes as u64).len(bytes).map_mut(&file) }
         .map_err(control_error)?;
     Ok((file, source, output))
+}
+
+// Admit the entire new schema before shared mapping, binary verification or
+// any native initialization. There is one version, with no ownerless fallback.
+fn validate_prepare_envelope(prepare: &Prepare, nonce: &str) -> Result<(), OpenFxHostError> {
+    if prepare.version != VERSION || prepare.nonce != nonce || prepare.owner.0.is_nil() {
+        return Err(invalid(
+            "native session preparation envelope does not match",
+        ));
+    }
+    Ok(())
 }
 
 /// Run a resident native session before media, graphics or application startup.
@@ -574,11 +1605,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
             Ok(())
         }
     })?;
-    if prepare.version != VERSION || prepare.nonce != nonce {
-        return Err(invalid(
-            "native session preparation envelope does not match",
-        ));
-    }
+    validate_prepare_envelope(&prepare, &nonce)?;
     let (_file, input, mut output) = map_frames(&prepare)?;
     verify_worker_binary(
         &prepare.binary_path,
@@ -589,7 +1616,11 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
     let bundle = native_string(&prepare.bundle_path)?;
     let identifier = CString::new(prepare.plugin_identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
-    write_response(&mut control, &Response::Ready { version: VERSION, nonce })?;
+    let mut pump = pump::WorkerPump::start(
+        control,
+        prepare.owner,
+        Response::Ready { version: VERSION, nonce },
+    )?;
     // Declared before the session: native destruction may query its last snapshot.
     let mut curves: BTreeMap<String, std::sync::Arc<curves::CurveContext>> = BTreeMap::new();
     let mut session: Option<NativeSession> = None;
@@ -597,268 +1628,400 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
     loop {
         // Idle read is interrupted by parent EOF. Processing is supervised by
         // the parent, whose cancellation/deadline kills and reaps this process.
-        let request = read_idle_request(&mut control)?;
+        let request = pump.shared.take_request()?;
         match request {
             Request::Shutdown {} => {
                 drop(session.take());
-                write_response(&mut control, &Response::Closed {})?;
+                let completion = pump.shared.complete(Response::Closed {})?;
+                pump.shared.wait_acknowledged(completion)?;
+                pump.stop_and_join();
                 return Ok(());
             }
-            Request::Render { sequence: received, timing, mut parameters } => {
+            Request::Cancel { .. } | Request::QuestionReply { .. } => {
+                return Err(invalid("control service reached native dispatch"))
+            }
+            Request::CloseGui { owner, sequence: received } => {
+                if owner != prepare.owner || sequence.checked_add(1) != Some(received) {
+                    return Err(invalid(
+                        "GUI action lost its parent instance namespace or serial",
+                    ));
+                }
+                sequence = received;
+                let feedback = session
+                    .as_mut()
+                    .map(|instance| instance.close_gui())
+                    .transpose()
+                    .map_err(|status| {
+                        unavailable(format!("native GUI teardown rejected ({status})"))
+                    })?
+                    .flatten();
+                let completion =
+                    pump.shared.complete(Response::GuiClosed { owner, sequence, feedback })?;
+                pump.shared.wait_acknowledged(completion)?;
+            }
+            Request::Render {
+                owner,
+                sequence: received,
+                timing,
+                parameters,
+                diagnostic,
+                ..
+            } => {
+                if owner != prepare.owner {
+                    return Err(invalid("render lost parent instance namespace"));
+                }
+                if pump.shared.is_canceled() {
+                    let completion =
+                        pump.shared.complete(Response::Canceled { owner, sequence: received })?;
+                    pump.shared.wait_acknowledged(completion)?;
+                    return Ok(());
+                }
                 sequence = sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid("native session sequence exhausted"))?;
                 if received != sequence {
                     return Err(invalid("native session request sequence does not match"));
                 }
-                validate_timing(&timing)?;
-                validate_parameters(&parameters)?;
-                let mut candidate_curves = BTreeMap::new();
-                for (name, binding) in &mut parameters {
-                    if let OpenFxParameterQueryMode::Curve { time_scale, .. } = &binding.query_mode
-                    {
-                        if mondrian_core::TimelineTime::from(*time_scale).to_f64()
-                            != timing.frame_rate
-                        {
-                            return Err(invalid("curve grid does not match the render frame rate"));
-                        }
-                        let kind = binding.value.native_fields().0;
-                        let prepared = if let Some(cached) = curves.get(name)
-                            && cached.source == binding.query_mode
-                            && cached.kind == kind
-                        {
-                            std::sync::Arc::clone(cached)
-                        } else {
-                            std::sync::Arc::new(curves::CurveContext::prepare(binding, sequence)?)
-                        };
-                        binding.value = prepared.value_at(timing.frame)?;
-                        candidate_curves.insert(name.clone(), prepared);
-                    }
-                }
-                validate_parameters(&parameters)?;
-                verify_worker_binary(
-                    &prepare.binary_path,
-                    &prepare.bundle_path,
-                    &prepare.binary_sha256,
-                )?;
-                let strings = parameters
-                    .iter()
-                    .map(|(name, value)| {
-                        let name = CString::new(name.as_str())
-                            .map_err(|_| invalid("parameter name contains null"))?;
-                        let text = if let OpenFxParameterValue::StrChoice(key)
-                        | OpenFxParameterValue::String(key) = &value.value
-                        {
-                            Some(
-                                CString::new(key.as_str())
-                                    .map_err(|_| invalid("parameter string contains null"))?,
-                            )
-                        } else {
-                            None
-                        };
-                        Ok((name, text))
-                    })
-                    .collect::<Result<Vec<_>, OpenFxHostError>>()?;
-                let native = parameters
-                    .iter()
-                    .zip(&strings)
-                    .map(|((key, value), (name, text))| {
-                        let (kind, channels) = value.value.native_fields();
-                        NativeParameter {
-                            query_mode: match &value.query_mode {
-                                OpenFxParameterQueryMode::Constant {} => 0,
-                                OpenFxParameterQueryMode::CurrentFrame {} => 1,
-                                OpenFxParameterQueryMode::Curve { .. } => 2,
-                            },
-                            name: name.as_ptr(),
-                            kind,
-                            value: channels,
-                            string_value: text
-                                .as_ref()
-                                .map_or(std::ptr::null(), |text| text.as_ptr()),
-                            string_length: text.as_ref().map_or(0, |text| text.as_bytes().len()),
-                            query: candidate_curves.contains_key(key).then_some(curves::query),
-                            query_context: candidate_curves
-                                .get(key)
-                                .map_or(std::ptr::null(), |curve| {
-                                    std::sync::Arc::as_ptr(curve).cast()
-                                }),
-                            query_revision: candidate_curves
-                                .get(key)
-                                .map_or(0, |curve| curve.revision),
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let info = NativeFrameInfo {
-                    width: prepare.width as c_int,
-                    height: prepare.height as c_int,
-                    frame: timing.frame,
-                    frame_rate: timing.frame_rate,
-                    first_frame: timing.first_frame,
-                    last_frame: timing.last_frame,
-                    pixel_aspect_ratio: timing.pixel_aspect_ratio,
+                let context = WorkerRenderContext {
+                    prepare: &prepare,
+                    shared: &pump.shared,
+                    binary: &binary,
+                    bundle: &bundle,
+                    identifier: &identifier,
+                    input: &input,
+                    output: &mut output,
+                    session: &mut session,
+                    curves: &mut curves,
                 };
-                let result = if let Some(instance) = session.as_mut() {
-                    instance.render(&input, &mut output, &info, &native)
+                let result = if diagnostic {
+                    let mut report = OpenFxChildRenderDiagnostic::new(owner, sequence, input.len());
+                    let started = Instant::now();
+                    let mut result =
+                        render_worker_request(context, sequence, timing, parameters, &mut report)?;
+                    result.response = report.attach(result.response, started);
+                    result
                 } else {
-                    match NativeSession::create(
-                        &binary,
-                        &bundle,
-                        &identifier,
-                        &input,
-                        &info,
-                        &native,
-                    ) {
-                        Ok(mut instance) => {
-                            let result = instance.render(&input, &mut output, &info, &native);
-                            session = Some(instance);
-                            result
-                        }
-                        Err(status) => Err(status),
-                    }
+                    render_worker_request(context, sequence, timing, parameters, &mut ())?
                 };
-                let alpha = match result {
-                    Ok(alpha) => alpha,
-                    Err(status) => {
-                        // Both old and candidate contexts survive failure teardown,
-                        // even if native publication stopped between callbacks.
-                        drop(session.take());
-                        write_response(&mut control, &Response::Rejected { sequence, status })?;
-                        return Ok(());
-                    }
-                };
-                curves = candidate_curves;
-                write_response(&mut control, &Response::Rendered { sequence, alpha })?;
+                let completion = pump.shared.complete(result.response)?;
+                pump.shared.wait_acknowledged(completion)?;
+                if result.stop {
+                    return Ok(());
+                }
             }
         }
     }
 }
 
-// Native OFX Float alpha may exceed [0, 1]. The public raw Straight contract
-// preserves that data. Canonical premultiplied coverage conversion has a
-// narrower explicit domain; reject values outside it instead of clamping RGB.
-fn normalize_native_output_sample(
-    sample: [f32; 4],
-    alpha: mondrian_renderer::ColorFrameAlpha,
-) -> Result<[f32; 4], OpenFxHostError> {
-    use mondrian_renderer::ColorFrameAlpha;
-    if sample.iter().any(|channel| !channel.is_finite()) {
-        return Err(unavailable("render output contains a nonfinite channel"));
+struct WorkerRenderContext<'a> {
+    prepare: &'a Prepare,
+    shared: &'a pump::Shared,
+    binary: &'a CString,
+    bundle: &'a CString,
+    identifier: &'a CString,
+    input: &'a [u8],
+    output: &'a mut [u8],
+    session: &'a mut Option<NativeSession>,
+    curves: &'a mut BTreeMap<String, std::sync::Arc<curves::CurveContext>>,
+}
+struct WorkerRenderResult {
+    response: Response,
+    stop: bool,
+}
+// Both mode instantiations execute this same parameter/native/retirement law.
+fn render_worker_request(
+    context: WorkerRenderContext<'_>,
+    sequence: u64,
+    timing: OpenFxRenderTiming,
+    mut parameters: BTreeMap<String, OpenFxParameterBinding>,
+    probe: &mut impl ChildProbe,
+) -> Result<WorkerRenderResult, OpenFxHostError> {
+    let WorkerRenderContext {
+        prepare,
+        shared,
+        binary,
+        bundle,
+        identifier,
+        input,
+        output,
+        session,
+        curves,
+    } = context;
+    let phase = probe.start();
+    validate_timing(&timing)?;
+    validate_parameters(&parameters)?;
+    let mut candidate_curves = BTreeMap::new();
+    for (name, binding) in &mut parameters {
+        if let OpenFxParameterQueryMode::Curve { time_scale, .. } = &binding.query_mode {
+            if mondrian_core::TimelineTime::from(*time_scale).to_f64() != timing.frame_rate {
+                return Err(invalid("curve grid does not match the render frame rate"));
+            }
+            let kind = binding.value.native_fields().0;
+            let prepared = if let Some(cached) = curves.get(name)
+                && cached.source == binding.query_mode
+                && cached.kind == kind
+            {
+                std::sync::Arc::clone(cached)
+            } else {
+                std::sync::Arc::new(curves::CurveContext::prepare(binding, sequence)?)
+            };
+            binding.value = prepared.value_at(timing.frame)?;
+            candidate_curves.insert(name.clone(), prepared);
+        }
     }
-    let normalized = match alpha {
-        ColorFrameAlpha::StraightCoverage => sample,
-        ColorFrameAlpha::Opaque => [sample[0], sample[1], sample[2], 1.0],
-        ColorFrameAlpha::PremultipliedCoverage => {
-            if !(0.0..=1.0).contains(&sample[3]) {
-                return Err(unavailable(
-                    "premultiplied OpenFX output alpha is outside the canonical coverage domain [0, 1]",
-                ));
+    validate_parameters(&parameters)?;
+    probe.finish(OpenFxChildRenderPhase::RequestAdmission, phase);
+    let phase = probe.start();
+    verify_worker_binary(
+        &prepare.binary_path,
+        &prepare.bundle_path,
+        &prepare.binary_sha256,
+    )?;
+    probe.finish(OpenFxChildRenderPhase::BinaryIdentity, phase);
+    let phase = probe.start();
+    let strings = parameters
+        .iter()
+        .map(|(name, value)| {
+            let name =
+                CString::new(name.as_str()).map_err(|_| invalid("parameter name contains null"))?;
+            let text = if let OpenFxParameterValue::StrChoice(key)
+            | OpenFxParameterValue::String(key) = &value.value
+            {
+                Some(
+                    CString::new(key.as_str())
+                        .map_err(|_| invalid("parameter string contains null"))?,
+                )
+            } else {
+                None
+            };
+            Ok((name, text))
+        })
+        .collect::<Result<Vec<_>, OpenFxHostError>>()?;
+    let native = parameters
+        .iter()
+        .zip(&strings)
+        .map(|((key, value), (name, text))| {
+            let (kind, channels) = value.value.native_fields();
+            NativeParameter {
+                query_mode: match &value.query_mode {
+                    OpenFxParameterQueryMode::Constant {} => 0,
+                    OpenFxParameterQueryMode::CurrentFrame {} => 1,
+                    OpenFxParameterQueryMode::Curve { .. } => 2,
+                },
+                name: name.as_ptr(),
+                kind,
+                value: channels,
+                string_value: text.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
+                string_length: text.as_ref().map_or(0, |text| text.as_bytes().len()),
+                query: candidate_curves.contains_key(key).then_some(curves::query),
+                query_context: candidate_curves.get(key).map_or(std::ptr::null(), |curve| {
+                    std::sync::Arc::as_ptr(curve).cast()
+                }),
+                query_revision: candidate_curves.get(key).map_or(0, |curve| curve.revision),
             }
-            if sample[3] == 0.0 && sample[..3].iter().any(|channel| *channel != 0.0) {
-                return Err(unavailable(
-                    "zero-alpha emission in premultiplied OpenFX output cannot be represented by canonical Straight coverage",
-                ));
+        })
+        .collect::<Vec<_>>();
+    let info = NativeFrameInfo {
+        source_alpha: if prepare.input_alpha.is_premultiplied() {
+            1
+        } else if prepare.input_alpha == mondrian_core::ColorFrameAlpha::Opaque {
+            2
+        } else {
+            0
+        },
+        width: prepare.width as c_int,
+        height: prepare.height as c_int,
+        frame: timing.frame,
+        frame_rate: timing.frame_rate,
+        first_frame: timing.first_frame,
+        last_frame: timing.last_frame,
+        pixel_aspect_ratio: timing.pixel_aspect_ratio,
+    };
+
+    probe.finish(OpenFxChildRenderPhase::ParameterArena, phase);
+    let dispatched = if let Some(instance) = session.as_mut() {
+        dispatch_prepared_native_render_profiled(
+            shared, instance, input, output, &info, &native, probe,
+        )
+    } else {
+        let phase = probe.start();
+        let created = NativeSession::create(
+            prepare.owner,
+            binary,
+            bundle,
+            identifier,
+            input,
+            &info,
+            &native,
+        );
+        probe.finish(OpenFxChildRenderPhase::NativeCreate, phase);
+        match created {
+            Ok(mut instance) => {
+                let dispatched = dispatch_prepared_native_render_profiled(
+                    shared,
+                    &mut instance,
+                    input,
+                    output,
+                    &info,
+                    &native,
+                    probe,
+                );
+                *session = Some(instance);
+                dispatched
             }
-            mondrian_effects::straight_rgba_from_premultiplied(sample)
+            Err(status) => NativeRenderDispatch::Invoked(Err(NativeRenderError::Rejected(status))),
         }
     };
-    if normalized.iter().any(|channel| !channel.is_finite()) {
+    let phase = probe.start();
+    let result = match dispatched {
+        NativeRenderDispatch::Invoked(result) => result,
+        NativeRenderDispatch::Canceled => {
+            drop(session.take());
+            probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+            return Ok(WorkerRenderResult {
+                response: Response::Canceled { owner: prepare.owner, sequence },
+                stop: true,
+            });
+        }
+    };
+    if shared.is_canceled() {
+        drop(session.take());
+        probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+        return Ok(WorkerRenderResult {
+            response: Response::Canceled { owner: prepare.owner, sequence },
+            stop: true,
+        });
+    }
+    let alpha = match result {
+        Ok(alpha) => alpha,
+        Err(NativeRenderError::UserBlocked(feedback)) => {
+            *curves = candidate_curves;
+            probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+            return Ok(WorkerRenderResult {
+                response: Response::UserBlocked { sequence, feedback: *feedback, diagnostic: None },
+                stop: false,
+            });
+        }
+        Err(NativeRenderError::Rejected(status)) => {
+            // Old and candidate query sources remain live during native teardown.
+            drop(session.take());
+            probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+            return Ok(WorkerRenderResult {
+                response: Response::Rejected { sequence, status },
+                stop: true,
+            });
+        }
+    };
+    let feedback = match session.as_mut().and_then(NativeSession::take_feedback) {
+        Some(feedback) => feedback,
+        None => {
+            // Even impossible host-contract failure must retire before candidate
+            // query arenas leave this dispatch scope; no SDK pointer can dangle.
+            drop(session.take());
+            return Err(unavailable(
+                "accepted native frame lost its feedback report",
+            ));
+        }
+    };
+    *curves = candidate_curves;
+    probe.finish(OpenFxChildRenderPhase::TerminalPreparation, phase);
+    Ok(WorkerRenderResult {
+        response: Response::Rendered { sequence, alpha, feedback, diagnostic: None },
+        stop: false,
+    })
+}
+fn admit_child_diagnostic(
+    value: Option<OpenFxChildRenderDiagnostic>,
+    owner: mondrian_core::EffectProcessorOwnerId,
+    sequence: u64,
+    feedback: &mondrian_effects::EffectProcessorFeedbackSnapshot,
+    alpha: Option<mondrian_core::ColorFrameAlpha>,
+    bytes: usize,
+    probe: &mut impl ParentProbe,
+) -> Result<(), OpenFxHostError> {
+    if value.is_some() != probe.measure_child() {
         return Err(unavailable(
-            "premultiplied OpenFX output cannot be represented as finite Straight pixels",
+            "child diagnostic selection disagrees with original request",
         ));
     }
-    Ok(normalized)
+    if let Some(value) = value {
+        value.validate(owner, sequence, feedback, alpha, bytes)?;
+        probe.record_child(value);
+    }
+    Ok(())
+}
+
+/// One action boundary after real native construction, using the same work
+/// owner/control. This is not another instance, graph or SDK interpretation.
+enum NativeRenderDispatch {
+    Canceled,
+    Invoked(Result<mondrian_core::ColorFrameAlpha, NativeRenderError>),
+}
+
+#[cfg(test)]
+fn dispatch_prepared_native_render(
+    shared: &pump::Shared,
+    instance: &mut NativeSession,
+    input: &[u8],
+    output: &mut [u8],
+    info: &NativeFrameInfo,
+    parameters: &[NativeParameter],
+) -> NativeRenderDispatch {
+    dispatch_prepared_native_render_profiled(
+        shared,
+        instance,
+        input,
+        output,
+        info,
+        parameters,
+        &mut (),
+    )
+}
+
+fn dispatch_prepared_native_render_profiled(
+    shared: &pump::Shared,
+    instance: &mut NativeSession,
+    input: &[u8],
+    output: &mut [u8],
+    info: &NativeFrameInfo,
+    parameters: &[NativeParameter],
+    probe: &mut impl ChildProbe,
+) -> NativeRenderDispatch {
+    // Construction remains externally supervised; it has no invented SDK
+    // abort authority. A stop accepted during it wins before entering Render.
+    if shared.is_canceled() {
+        return NativeRenderDispatch::Canceled;
+    }
+    let native_control = shared.native_control();
+    let phase = probe.start();
+    let result = instance.render_with_native_diagnostic(
+        input,
+        output,
+        info,
+        parameters,
+        Some(&native_control),
+        probe.native_target(),
+    );
+    probe.finish(OpenFxChildRenderPhase::NativeDispatch, phase);
+    NativeRenderDispatch::Invoked(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn native_output_alpha_conversion_preserves_finite_hdr_and_raw_straight_values() {
-        use mondrian_renderer::ColorFrameAlpha;
-        for alpha in [-0.5, 0.0, 0.5, 1.5] {
-            let raw = [-2.0, 4.0, 0.25, alpha];
-            assert_eq!(
-                normalize_native_output_sample(raw, ColorFrameAlpha::StraightCoverage)
-                    .expect("raw Straight"),
-                raw
-            );
-            assert_eq!(
-                normalize_native_output_sample(raw, ColorFrameAlpha::Opaque).expect("Opaque"),
-                [-2.0, 4.0, 0.25, 1.0]
-            );
-        }
-        assert_eq!(
-            normalize_native_output_sample(
-                [-0.5, 2.0, 0.125, 0.25],
-                ColorFrameAlpha::PremultipliedCoverage
-            )
-            .expect("HDR coverage"),
-            [-2.0, 8.0, 0.5, 0.25]
-        );
-        assert_eq!(
-            normalize_native_output_sample([0.0; 4], ColorFrameAlpha::PremultipliedCoverage)
-                .expect("zero coverage"),
-            [0.0; 4]
-        );
-        let tiny = f32::MIN_POSITIVE;
-        assert_eq!(
-            normalize_native_output_sample(
-                [tiny * 2.0, -tiny * 4.0, tiny * 8.0, tiny],
-                ColorFrameAlpha::PremultipliedCoverage
-            )
-            .expect("tiny positive coverage"),
-            [2.0, -4.0, 8.0, tiny]
-        );
-    }
-
-    #[test]
-    fn native_output_alpha_conversion_rejects_nonfinite_and_unrepresentable_pixels() {
-        use mondrian_renderer::ColorFrameAlpha;
-        for representation in [
-            ColorFrameAlpha::StraightCoverage,
-            ColorFrameAlpha::PremultipliedCoverage,
-            ColorFrameAlpha::Opaque,
-        ] {
-            for channel in 0..4 {
-                for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-                    let mut sample = [0.25; 4];
-                    sample[channel] = value;
-                    assert!(normalize_native_output_sample(sample, representation).is_err());
-                }
-            }
-        }
-        for alpha in [-0.5, 1.5] {
-            assert!(normalize_native_output_sample(
-                [0.25, 0.5, 1.0, alpha],
-                ColorFrameAlpha::PremultipliedCoverage
-            )
-            .is_err());
-        }
-        assert!(
-            normalize_native_output_sample(
-                [f32::MAX, 0.5, 1.0, f32::MIN_POSITIVE],
-                ColorFrameAlpha::PremultipliedCoverage
-            )
-            .is_err(),
-            "finite input division can overflow"
-        );
-        assert!(
-            normalize_native_output_sample(
-                [7.0, -3.0, 11.0, 0.0],
-                ColorFrameAlpha::PremultipliedCoverage
-            )
-            .is_err(),
-            "zero-alpha emission must not silently disappear"
-        );
+    fn empty_feedback() -> mondrian_effects::EffectProcessorFeedbackSnapshot {
+        mondrian_effects::EffectProcessorFeedbackSnapshot::new(1, 1, 0, None, None, Vec::new())
+            .expect("bounded empty protocol fixture")
     }
 
     #[test]
     fn successful_native_response_requires_exact_typed_alpha_metadata() {
-        for representation in ["straight_coverage", "premultiplied_coverage", "opaque"] {
-            let packet =
-                format!(r#"{{"kind":"rendered","sequence":7,"alpha":"{representation}"}}"#);
+        for representation in ["straight_float", "premultiplied_float", "opaque"] {
+            let packet = serde_json::json!({
+                "kind": "rendered", "sequence": 7, "alpha": representation,
+                "feedback": empty_feedback(), "diagnostic": null,
+            })
+            .to_string();
             assert!(serde_json::from_str::<Response>(&packet).is_ok());
         }
         for packet in [
@@ -884,7 +2047,9 @@ mod tests {
         let writer = thread::spawn(move || {
             let body = serde_json::to_vec(&Response::Rendered {
                 sequence: 17,
-                alpha: mondrian_renderer::ColorFrameAlpha::StraightCoverage,
+                alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+                feedback: empty_feedback(),
+                diagnostic: None,
             })
             .expect("body");
             let header = (body.len() as u32).to_be_bytes();
@@ -909,7 +2074,8 @@ mod tests {
             response,
             Response::Rendered {
                 sequence: 17,
-                alpha: mondrian_renderer::ColorFrameAlpha::StraightCoverage
+                alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+                ..
             }
         ));
         writer.join().expect("writer");
@@ -979,10 +2145,664 @@ mod tests {
                 width: 1,
                 height: 1,
                 shared_path: file.path().to_path_buf(),
+                input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+                owner: mondrian_core::EffectProcessorOwnerId::new(),
             };
             assert!(
                 matches!(map_frames(&prepare), Err(OpenFxHostError::Invalid(reason)) if reason == "shared frame has an invalid size")
             );
         }
+    }
+    #[test]
+    fn parent_namespace_schema_has_one_generation_and_refuses_stale_or_missing_identity() {
+        // Nonexistent paths prove envelope admission is before any map/load.
+        let mut prepare = Prepare {
+            version: VERSION,
+            nonce: "actual nonce".to_owned(),
+            binary_path: PathBuf::from("must-never-load.ofx"),
+            bundle_path: PathBuf::from("must-never-load.ofx.bundle"),
+            binary_sha256: String::new(),
+            plugin_identifier: "must-never-execute".to_owned(),
+            width: 1,
+            height: 1,
+            shared_path: PathBuf::from("must-never-map"),
+            input_alpha: mondrian_core::ColorFrameAlpha::StraightFloat,
+            owner: mondrian_core::EffectProcessorOwnerId::new(),
+        };
+        assert!(validate_prepare_envelope(&prepare, "actual nonce").is_ok());
+        for stale in [0, 1, 2, 3, 4, 5, 6, 7, u16::MAX] {
+            prepare.version = stale;
+            assert!(matches!(
+                validate_prepare_envelope(&prepare, "actual nonce"),
+                Err(OpenFxHostError::Invalid(_))
+            ));
+        }
+        prepare.version = VERSION;
+        assert!(validate_prepare_envelope(&prepare, "wrong nonce").is_err());
+        let mut missing = serde_json::to_value(&prepare).expect("canonical Prepare schema");
+        missing.as_object_mut().expect("schema object").remove("owner");
+        assert!(
+            serde_json::from_value::<Prepare>(missing).is_err(),
+            "no ownerless schema fallback"
+        );
+        prepare.owner = mondrian_core::EffectProcessorOwnerId(uuid::Uuid::nil());
+        assert!(validate_prepare_envelope(&prepare, "actual nonce").is_err());
+        assert!(
+            OPENFX_RESIDENT_WORKER_ARGUMENT.ends_with("-v8"),
+            "sole worker dispatch uses the current generation"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bulk_transport_tests {
+    use super::*;
+
+    // The two-phase production path acquires this owner before native work.
+    // These bit-transport contracts exercise its fill/publication phase only.
+    fn materialize_native_output(
+        source: &[u8],
+        extent: mondrian_effects::EffectFrameExtent,
+        format: mondrian_effects::EffectValueFormat,
+        checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
+    ) -> Result<EffectFloatFrame, OpenFxHostError> {
+        let owner = NativeOutputAllocation::acquire(extent, &mut || Ok(()), reserve_native_output)?;
+        super::materialize_native_output(source, owner, format, checkpoint)
+    }
+
+    use mondrian_core::ColorFrameAlpha;
+    use mondrian_effects::{
+        EffectColorDomain, EffectFrameExtent, EffectValueFormat, EffectWorkingPrecision,
+    };
+
+    fn format(alpha: ColorFrameAlpha) -> EffectValueFormat {
+        EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            alpha,
+        )
+    }
+    fn bits(pixels: &[[f32; 4]]) -> Vec<[u32; 4]> {
+        pixels.iter().map(|pixel| pixel.map(f32::to_bits)).collect()
+    }
+
+    #[test]
+    fn native_bulk_input_preserves_raw_native_float_bits_and_full_tail() {
+        let signal = [
+            [f32::MAX, -f32::MAX, f32::from_bits(1), -0.0],
+            [-f32::from_bits(1), 16.0, -2.0, 1.5],
+            [7.0, -3.0, 11.0, 0.0],
+        ];
+        let mut shared = vec![0; std::mem::size_of_val(&signal)];
+        let mut calls = 0;
+        copy_native_input(&mut shared, &signal, &mut || {
+            calls += 1;
+            Ok(())
+        })
+        .expect("complete raw transfer");
+        let independent: Vec<u8> =
+            signal.iter().flatten().flat_map(|value| value.to_ne_bytes()).collect();
+        assert_eq!(shared, independent);
+        assert_eq!(calls, 2, "one block plus completed-transfer checkpoint");
+    }
+
+    #[test]
+    fn native_bulk_input_refuses_length_and_never_copies_past_cancel_boundary() {
+        let signal = vec![[0.25, -2.0, 8.0, 0.5]; FRAME_TRANSFER_PIXELS * 2 + 1];
+        let length = signal.len() * 16;
+        assert!(copy_native_input(&mut vec![0; length - 1], &signal, &mut || Ok(())).is_err());
+        for stop_at in 1..=4 {
+            let mut shared = vec![0xa5; length];
+            let mut calls = 0;
+            let result = copy_native_input(&mut shared, &signal, &mut || {
+                calls += 1;
+                if calls == stop_at {
+                    Err(OpenFxHostError::Canceled)
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(matches!(result, Err(OpenFxHostError::Canceled)));
+            assert_eq!(calls, stop_at);
+            let copied = ((stop_at - 1) * FRAME_TRANSFER_BYTES).min(length);
+            let raw: &[u8] = bytemuck::cast_slice(&signal);
+            assert_eq!(&shared[..copied], &raw[..copied]);
+            assert!(shared[copied..].iter().all(|byte| *byte == 0xa5));
+        }
+    }
+
+    #[test]
+    fn native_bulk_output_retains_raw_finite_association_and_owns_independent_storage() {
+        let pixels = [
+            [f32::MAX, -f32::MAX, -0.0, -0.5],
+            [f32::from_bits(1), -f32::from_bits(1), 16.0, 1.5],
+            [7.0, -3.0, 11.0, 0.0],
+        ];
+        for alpha in [
+            ColorFrameAlpha::StraightFloat,
+            ColorFrameAlpha::PremultipliedFloat,
+        ] {
+            let expected = bits(&pixels);
+            let mut shared: Vec<u8> = bytemuck::cast_slice(&pixels).to_vec();
+            let frame = materialize_native_output(
+                &shared,
+                EffectFrameExtent::new(3, 1),
+                format(alpha),
+                &mut || Ok(()),
+            )
+            .expect("complete typed raw float output");
+            assert_eq!(frame.alpha(), alpha);
+            assert_eq!(bits(frame.pixels()), expected);
+            shared.fill(0);
+            assert_eq!(
+                bits(frame.pixels()),
+                expected,
+                "next shared-frame work cannot overwrite the returned owner"
+            );
+        }
+    }
+
+    #[test]
+    fn native_bulk_opaque_output_canonicalizes_ignored_alpha_only() {
+        let pixels = [
+            [f32::MAX, -f32::MAX, -0.0, -0.5],
+            [f32::from_bits(1), -f32::from_bits(1), 16.0, 1.5],
+            [7.0, -3.0, 11.0, 0.0],
+        ];
+        let frame = materialize_native_output(
+            bytemuck::cast_slice(&pixels),
+            EffectFrameExtent::new(3, 1),
+            format(ColorFrameAlpha::Opaque),
+            &mut || Ok(()),
+        )
+        .expect("canonical opaque output");
+        assert_eq!(frame.alpha(), ColorFrameAlpha::Opaque);
+        for (actual, original) in frame.pixels().iter().zip(&pixels) {
+            for lane in 0..3 {
+                assert_eq!(actual[lane].to_bits(), original[lane].to_bits());
+            }
+            assert_eq!(actual[3].to_bits(), 1.0f32.to_bits());
+        }
+    }
+
+    #[test]
+    fn native_bulk_output_accepts_unaligned_raw_source_without_borrowing_float_references() {
+        let pixels = [[-0.0, f32::from_bits(1), f32::MAX, 1.5]];
+        let mut raw = vec![0xff];
+        raw.extend_from_slice(bytemuck::cast_slice(&pixels));
+        let frame = materialize_native_output(
+            &raw[1..],
+            EffectFrameExtent::new(1, 1),
+            format(ColorFrameAlpha::StraightFloat),
+            &mut || Ok(()),
+        )
+        .expect("byte copy needs no foreign float alignment");
+        assert_eq!(bits(frame.pixels()), bits(&pixels));
+    }
+
+    #[test]
+    fn native_bulk_output_preserves_foreign_boundary_shape_finite_and_alpha_refusals() {
+        let extent = EffectFrameExtent::new(1, 1);
+        let valid = [[0.25, -2.0, 8.0, 0.5]];
+        for length in [0, 15, 17, 32] {
+            assert!(materialize_native_output(
+                &vec![0; length],
+                extent,
+                format(ColorFrameAlpha::StraightFloat),
+                &mut || Ok(())
+            )
+            .is_err());
+        }
+        for lane in 0..4 {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut samples = valid;
+                samples[0][lane] = value;
+                assert!(matches!(
+                    materialize_native_output(
+                        bytemuck::cast_slice(&samples),
+                        extent,
+                        format(ColorFrameAlpha::StraightFloat),
+                        &mut || Ok(())
+                    ),
+                    Err(OpenFxHostError::Frame(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample {
+                            index: 0,
+                            alpha: ColorFrameAlpha::StraightFloat
+                        }
+                    ))
+                ));
+            }
+        }
+        for alpha in [
+            ColorFrameAlpha::StraightCoverage,
+            ColorFrameAlpha::PremultipliedCoverage,
+        ] {
+            for extended in [-0.5_f32, 1.5_f32] {
+                let invalid = [[0.25, -2.0, 8.0, extended]];
+                assert_eq!(
+                    std::mem::size_of_val(&invalid),
+                    16,
+                    "one raw Float32 RGBA pixel"
+                );
+                assert!(matches!(
+                    materialize_native_output(
+                        bytemuck::cast_slice(&invalid),
+                        extent,
+                        format(alpha),
+                        &mut || Ok(())
+                    ),
+                    Err(OpenFxHostError::Frame(
+                        mondrian_effects::EffectFloatFrameError::InvalidSample { index: 0, .. }
+                    ))
+                ));
+            }
+        }
+        let wrong_precision = EffectValueFormat::new(
+            EffectWorkingPrecision::NormalizedU8,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        assert!(matches!(
+            materialize_native_output(
+                bytemuck::cast_slice(&valid),
+                extent,
+                wrong_precision,
+                &mut || Ok(())
+            ),
+            Err(OpenFxHostError::Frame(
+                mondrian_effects::EffectFloatFrameError::WrongPrecision { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn native_bulk_output_cancel_and_deadline_never_publish_partial_or_unvalidated_pixels() {
+        let extent = EffectFrameExtent::new(1024, 129);
+        let pixels = vec![[0.25, -2.0, 8.0, 0.5]; 1024 * 129];
+        // Opaque also traverses three bounded canonical-A chunks. Exercise
+        // every ordinary/opaque copy/admission/final-publication frontier.
+        for (alpha, frontiers) in [
+            (ColorFrameAlpha::StraightFloat, 9),
+            (ColorFrameAlpha::Opaque, 12),
+        ] {
+            for stop_at in 1..=frontiers {
+                let mut calls = 0;
+                let result = materialize_native_output(
+                    bytemuck::cast_slice(&pixels),
+                    extent,
+                    format(alpha),
+                    &mut || {
+                        calls += 1;
+                        if calls != stop_at {
+                            Ok(())
+                        } else if matches!(stop_at, 3 | 7) {
+                            Err(OpenFxHostError::DeadlineExceeded)
+                        } else {
+                            Err(OpenFxHostError::Canceled)
+                        }
+                    },
+                );
+                if matches!(stop_at, 3 | 7) {
+                    assert!(matches!(result, Err(OpenFxHostError::DeadlineExceeded)));
+                } else {
+                    assert!(matches!(result, Err(OpenFxHostError::Canceled)));
+                }
+                assert_eq!(calls, stop_at);
+            }
+            let frame = materialize_native_output(
+                bytemuck::cast_slice(&pixels),
+                extent,
+                format(alpha),
+                &mut || Ok(()),
+            )
+            .expect("complete tail through the same path");
+            let expected = pixels
+                .iter()
+                .copied()
+                .map(|mut pixel| {
+                    if alpha == ColorFrameAlpha::Opaque {
+                        pixel[3] = 1.0;
+                    }
+                    pixel.map(f32::to_bits)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(bits(frame.pixels()), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_resource_tests {
+    use super::*;
+    use mondrian_core::ColorFrameAlpha;
+    use mondrian_effects::{
+        EffectColorDomain, EffectFrameExtent, EffectProcessorHostResourceRefusal,
+        EffectValueFormat, EffectWorkingPrecision,
+    };
+
+    fn refused_reservation(
+        pixels: &mut Vec<[f32; 4]>,
+        _: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        // Deterministic capacity overflow, not artificial allocator pressure or
+        // a product fault flag; no bytes or native action are needed to fail.
+        pixels.try_reserve_exact(usize::MAX)
+    }
+
+    #[test]
+    fn output_reservation_is_typed_and_checks_owner_before_and_after_allocation() {
+        let extent = EffectFrameExtent::new(3, 2);
+        let mut polls = 0;
+        let result = NativeOutputAllocation::acquire(
+            extent,
+            &mut || {
+                polls += 1;
+                Ok(())
+            },
+            refused_reservation,
+        );
+        assert!(matches!(
+            result,
+            Err(OpenFxHostError::HostResourceRefused(
+                EffectProcessorHostResourceRefusal::OutputAllocation { required_bytes: 96 }
+            ))
+        ));
+        assert_eq!(polls, 2);
+        for reason in [false, true] {
+            let mut polls = 0;
+            let result = NativeOutputAllocation::acquire(
+                extent,
+                &mut || {
+                    polls += 1;
+                    if polls == 2 {
+                        if reason {
+                            Err(OpenFxHostError::DeadlineExceeded)
+                        } else {
+                            Err(OpenFxHostError::Canceled)
+                        }
+                    } else {
+                        Ok(())
+                    }
+                },
+                refused_reservation,
+            );
+            if reason {
+                assert!(matches!(result, Err(OpenFxHostError::DeadlineExceeded)));
+            } else {
+                assert!(matches!(result, Err(OpenFxHostError::Canceled)));
+            }
+        }
+        let mut allocator_called = false;
+        let result = NativeOutputAllocation::acquire(
+            extent,
+            &mut || Err(OpenFxHostError::Canceled),
+            |pixels, count| {
+                allocator_called = true;
+                reserve_native_output(pixels, count)
+            },
+        );
+        assert!(matches!(result, Err(OpenFxHostError::Canceled)));
+        assert!(!allocator_called);
+    }
+
+    #[test]
+    fn completed_output_uses_the_pre_admitted_owner_without_a_second_raster_allocation() {
+        let extent = EffectFrameExtent::new(2, 1);
+        let owner = NativeOutputAllocation::acquire(extent, &mut || Ok(()), reserve_native_output)
+            .expect("empty admitted owner");
+        let pointer = owner.pixels.as_ptr();
+        let capacity = owner.pixels.capacity();
+        let signal = [
+            [f32::MAX, -0.0, f32::from_bits(1), -0.5],
+            [7.0, -3.0, 11.0, 0.0],
+        ];
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::PremultipliedFloat,
+        );
+        let frame =
+            materialize_native_output(bytemuck::cast_slice(&signal), owner, format, &mut || Ok(()))
+                .expect("one same owner through publication");
+        assert_eq!(frame.pixels().as_ptr(), pointer);
+        assert!(capacity >= frame.len());
+        let actual: Vec<[u32; 4]> =
+            frame.pixels().iter().map(|sample| sample.map(f32::to_bits)).collect();
+        assert_eq!(actual, signal.map(|sample| sample.map(f32::to_bits)));
+    }
+
+    #[test]
+    fn oversized_output_owner_is_refused_against_actual_capacity_before_native_work() {
+        let extent = EffectFrameExtent::new(3, 2);
+        let mut actual_capacity = 0;
+        let result = NativeOutputAllocation::acquire(extent, &mut || Ok(()), |pixels, count| {
+            pixels.try_reserve_exact(count + 1)?;
+            actual_capacity = pixels.capacity();
+            Ok(())
+        });
+        assert!(
+            matches!(result, Err(OpenFxHostError::HostResourceRefused(EffectProcessorHostResourceRefusal::OutputCapacity { required_bytes, admitted_bytes: 96 })) if required_bytes == actual_capacity * 16)
+        );
+        assert!(actual_capacity > 6);
+    }
+
+    #[test]
+    #[ignore = "requires a fresh pinned MONDRIAN_OPENFX_TEST_HELPER and official Basic MONDRIAN_OPENFX_REFERENCE_BINARY"]
+    fn supervised_output_refusal_keeps_actual_worker_and_never_advances_request_or_native_frame() {
+        const TEST: &str = "openfx_host::resident::output_resource_tests::supervised_output_refusal_keeps_actual_worker_and_never_advances_request_or_native_frame";
+        if !super::super::shared_frame_tests::qualification_child(TEST, &[]) {
+            return;
+        }
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned product worker"),
+        );
+        let binary = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic"),
+        );
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("actual independent binary inspection");
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightFloat,
+        );
+        let input = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(1, 1),
+            format,
+            vec![[0.25, 0.5, 0.75, 0.5]],
+        )
+        .expect("input signal");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("actual owned worker");
+        let worker = session.worker_process_id();
+        session.shared[..session.frame_bytes].fill(0xa5);
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 24.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let parameters = BTreeMap::from([(
+            "scale".to_owned(),
+            OpenFxParameterBinding::constant(OpenFxParameterValue::Double(1.0)),
+        )]);
+        for _ in 0..4 {
+            let result = session.render_with_output_reservation(
+                &timing,
+                &parameters,
+                &input,
+                &mut || Ok(()),
+                refused_reservation,
+            );
+            assert!(matches!(
+                result,
+                Err(OpenFxHostError::HostResourceRefused(
+                    EffectProcessorHostResourceRefusal::OutputAllocation { required_bytes: 16 }
+                ))
+            ));
+            assert_eq!(session.sequence, 0, "no native request serial was issued");
+            assert!(
+                session.shared[..session.frame_bytes].iter().all(|byte| *byte == 0xa5),
+                "no shared input or native parameter/render work occurred"
+            );
+            assert_eq!(session.worker_process_id(), worker);
+            assert!(session.process.active);
+            assert!(session.process.child.try_wait().expect("observe actual worker").is_none());
+        }
+        let result = session.render_with_output_reservation(
+            &timing,
+            &parameters,
+            &input,
+            &mut || Ok(()),
+            |pixels, count| reserve_native_output(pixels, count + 1),
+        );
+        assert!(matches!(
+            result,
+            Err(OpenFxHostError::HostResourceRefused(
+                EffectProcessorHostResourceRefusal::OutputCapacity { admitted_bytes: 16, .. }
+            ))
+        ));
+        assert_eq!(session.sequence, 0);
+        assert!(session.shared[..session.frame_bytes].iter().all(|byte| *byte == 0xa5));
+        assert!(session
+            .process
+            .child
+            .try_wait()
+            .expect("oversized owner did not retire actual worker")
+            .is_none());
+        let output = session
+            .render(&timing, &parameters, &input, &mut || Ok(()))
+            .expect("first native invocation after allocator recovery");
+        assert_eq!(session.sequence, 1);
+        assert_eq!(session.worker_process_id(), worker);
+        assert_eq!(output.pixels(), input.pixels());
+        session.shutdown().expect("same owner destroys/reaps worker");
+    }
+}
+
+#[cfg(test)]
+mod ingress_owner_boundary_tests {
+    use super::*;
+    use mondrian_core::ColorFrameAlpha;
+    use mondrian_effects::{
+        EffectColorDomain, EffectFrameExtent, EffectValueFormat, EffectWorkingPrecision,
+    };
+
+    fn actual_ingress_stop(reason: bool, stop_at: usize) {
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned current product worker"),
+        );
+        let binary = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("pinned official Basic"),
+        );
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("actual independent inspection");
+        let format = EffectValueFormat::new(
+            EffectWorkingPrecision::Float32,
+            EffectColorDomain::SceneLinearRgb,
+            ColorFrameAlpha::StraightCoverage,
+        );
+        let mut frame = EffectFloatFrame::from_pixels(
+            EffectFrameExtent::new(256, 257),
+            format,
+            vec![[0.25, -0.5, 1.5, 0.25]; 256 * 257],
+        )
+        .expect("initial valid complete image");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            256,
+            257,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("actual isolated ready owner");
+        let last = frame.len() - 1;
+        frame.pixels_mut()[last][0] = f32::NAN;
+        session.shared[..session.frame_bytes].fill(0xa5);
+        let timing = OpenFxRenderTiming {
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 24.0,
+            pixel_aspect_ratio: 1.0,
+        };
+        let parameters = BTreeMap::from([(
+            "scale".to_owned(),
+            OpenFxParameterBinding::constant(OpenFxParameterValue::Double(1.0)),
+        )]);
+        let mut polls = 0;
+        let mut reserved = false;
+        let result = session.render_with_output_reservation(
+            &timing,
+            &parameters,
+            &frame,
+            &mut || {
+                polls += 1;
+                if polls == stop_at {
+                    if reason {
+                        Err(OpenFxHostError::DeadlineExceeded)
+                    } else {
+                        Err(OpenFxHostError::Canceled)
+                    }
+                } else {
+                    Ok(())
+                }
+            },
+            |pixels, count| {
+                reserved = true;
+                reserve_native_output(pixels, count)
+            },
+        );
+        if reason {
+            assert!(
+                matches!(result, Err(OpenFxHostError::DeadlineExceeded)),
+                "current deadline must precede invalid tail: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(OpenFxHostError::Canceled)),
+                "current cancel must precede invalid tail: {result:?}"
+            );
+        }
+        assert_eq!(polls, stop_at);
+        assert!(!reserved, "stopped ingress must precede output allocation");
+        assert_eq!(
+            session.sequence, 0,
+            "no request/native invocation may advance"
+        );
+        assert!(
+            session.shared[..session.frame_bytes].iter().all(|byte| *byte == 0xa5),
+            "no native source/image mutation"
+        );
+        session.shutdown().expect("join the sole ready worker");
+    }
+    #[test]
+    #[ignore = "requires a matching fresh pinned product/helper and official Basic; no sleeps"]
+    fn resident_ingress_current_cancel_wins_before_invalid_raster_scan() {
+        const TEST: &str = "openfx_host::resident::ingress_owner_boundary_tests::resident_ingress_current_cancel_wins_before_invalid_raster_scan";
+        if !super::super::shared_frame_tests::qualification_child(TEST, &[]) {
+            return;
+        }
+        actual_ingress_stop(false, 1);
+    }
+    #[test]
+    #[ignore = "requires a matching fresh pinned product/helper and official Basic; no sleeps"]
+    fn resident_ingress_deadline_polls_before_nonfinite_second_block() {
+        const TEST: &str = "openfx_host::resident::ingress_owner_boundary_tests::resident_ingress_deadline_polls_before_nonfinite_second_block";
+        if !super::super::shared_frame_tests::qualification_child(TEST, &[]) {
+            return;
+        }
+        actual_ingress_stop(true, 4);
     }
 }

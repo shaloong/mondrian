@@ -278,23 +278,23 @@ pub struct HeterogeneousCpuPrefixBatchGrant {
     effect_session: EffectExecutionSessionConfig,
     graph_execution: EffectGraphExecutionBudget,
     max_batch_items: usize,
-    max_batch_pixel_bytes: u64,
+    max_batch_retained_bytes: u64,
 }
 
 impl HeterogeneousCpuPrefixBatchGrant {
-    /// Construct exact Session, graph-planning, cardinality, and retained-pixel
+    /// Construct exact Session, graph-planning, cardinality, and retained-value
     /// limits.
     pub const fn new(
         effect_session: EffectExecutionSessionConfig,
         graph_execution: EffectGraphExecutionBudget,
         max_batch_items: usize,
-        max_batch_pixel_bytes: u64,
+        max_batch_retained_bytes: u64,
     ) -> Self {
         Self {
             effect_session,
             graph_execution,
             max_batch_items,
-            max_batch_pixel_bytes,
+            max_batch_retained_bytes,
         }
     }
 
@@ -315,8 +315,8 @@ impl HeterogeneousCpuPrefixBatchGrant {
 
     /// Maximum aggregate logical bytes retained by immutable inputs plus all
     /// successful CPU frontier values.
-    pub const fn max_batch_pixel_bytes(self) -> u64 {
-        self.max_batch_pixel_bytes
+    pub const fn max_batch_retained_bytes(self) -> u64 {
+        self.max_batch_retained_bytes
     }
 }
 
@@ -347,7 +347,7 @@ impl HeterogeneousCpuPrefixBatchRequest {
         &self.items
     }
 
-    /// Validate frame contracts, unique addresses, and retained-pixel
+    /// Validate frame contracts, unique addresses, and retained-value
     /// authority without preparing or executing an Effect graph.
     pub fn validate(&self) -> Result<(), HeterogeneousCpuPrefixBatchError> {
         validate_batch_request(self)
@@ -363,6 +363,19 @@ impl HeterogeneousCpuPrefixBatchRequest {
             item.route.gpu_recording_requirements().validate(grant)?;
         }
         Ok(())
+    }
+}
+
+impl HeterogeneousCpuPrefixBatchError {
+    /// The exact processor/occurrence that blocked this attempted batch.
+    /// This is not successful frame completion or GPU publication evidence.
+    pub fn processor_blocked(
+        &self,
+    ) -> Option<&std::sync::Arc<mondrian_effects::EffectProcessorFeedbackReceipt>> {
+        match self {
+            Self::Execute { source, .. } => source.processor_blocked(),
+            _ => None,
+        }
     }
 }
 
@@ -400,6 +413,20 @@ impl HeterogeneousCpuPrefixBatchOutput {
     /// Addressed completions in deterministic request order.
     pub fn completions(&self) -> &[HeterogeneousCpuPrefixBatchCompletion] {
         &self.completions
+    }
+
+    /// Move bounded facts out of this admitted batch without copying any raster.
+    pub fn take_processor_feedback(
+        &mut self,
+    ) -> Result<
+        mondrian_effects::EffectProcessorFeedbackBatch,
+        mondrian_effects::EffectProcessorFeedbackError,
+    > {
+        let mut feedback = mondrian_effects::EffectProcessorFeedbackBatch::new();
+        for item in &mut self.completions {
+            feedback.append(item.completion.take_processor_feedback())?;
+        }
+        Ok(feedback)
     }
 
     /// Consume all addressed completions.
@@ -473,6 +500,14 @@ pub enum HeterogeneousCpuPrefixFrameContractViolation {
 /// Request validation, route preparation, or controlled execution failure.
 #[derive(Debug, thiserror::Error)]
 pub enum HeterogeneousCpuPrefixBatchError {
+    /// Declared whole-batch feedback policy refused work before any DSP.
+    #[error("CPU batch feedback occurrences {actual} exceed {limit}")]
+    FeedbackCapacityExceeded {
+        /// Immutable provider-declared occurrence count.
+        actual: usize,
+        /// Whole batch bounded observer capacity.
+        limit: usize,
+    },
     /// Atomic batches must contain at least one item.
     #[error("heterogeneous CPU-prefix batch is empty")]
     EmptyBatch,
@@ -524,7 +559,7 @@ pub enum HeterogeneousCpuPrefixBatchError {
         /// Caller address.
         address: u32,
     },
-    /// Aggregate retained-pixel accounting overflowed.
+    /// Aggregate retained-value accounting overflowed.
     #[error("heterogeneous CPU-prefix batch pixel-byte accounting overflowed")]
     BatchPixelBytesOverflow,
     /// Immutable inputs plus successful outputs exceed caller authority.
@@ -565,6 +600,20 @@ pub struct HeterogeneousCpuPrefixBatchExecutor {
 }
 
 impl HeterogeneousCpuPrefixBatchExecutor {
+    /// Reconcile closed generic native GUIs without executing a graph again.
+    pub fn reconcile_processor_guis(&mut self) -> usize {
+        self.scratch.reconcile_processor_guis()
+    }
+
+    /// Bind the current producer task's exact observer/deadline before execute;
+    /// clear it on every terminal disposition, including errors.
+    pub fn bind_processor_observation(
+        &mut self,
+        observation: mondrian_effects::EffectProcessorObservation,
+    ) {
+        self.scratch.bind_processor_observation(observation);
+    }
+
     /// Execute every item serially and publish completions only if the complete
     /// batch succeeds.
     pub fn execute(
@@ -586,7 +635,18 @@ impl HeterogeneousCpuPrefixBatchExecutor {
                     self.scratch.execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
                         item.route.work(),
                         generation,
-                        input.rgba_f32().data.as_slice(),
+                        mondrian_effects::EffectFloatFrameView::new(
+                            mondrian_effects::EffectFrameExtent::new(
+                                input.rgba_f32().width,
+                                input.rgba_f32().height,
+                            ),
+                            mondrian_effects::EffectValueFormat::new(
+                                mondrian_effects::EffectWorkingPrecision::Float32,
+                                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                                input.rgba_f32().alpha,
+                            ),
+                            &input.rgba_f32().data,
+                        ),
                         item.frame_seed,
                         item.working_color_space,
                         &mut checkpoint,
@@ -647,7 +707,17 @@ fn validate_batch_request(
     }
     let mut addresses = HashSet::with_capacity(request.items.len());
     let mut retained_pixel_bytes = 0_u64;
+    let mut feedback_slots = 0usize;
     for item in &request.items {
+        feedback_slots = feedback_slots
+            .checked_add(item.route.work().cpu_feedback_slots())
+            .ok_or(HeterogeneousCpuPrefixBatchError::BatchPixelBytesOverflow)?;
+        if feedback_slots > mondrian_effects::EFFECT_PROCESSOR_FEEDBACK_SLOTS {
+            return Err(HeterogeneousCpuPrefixBatchError::FeedbackCapacityExceeded {
+                actual: feedback_slots,
+                limit: mondrian_effects::EFFECT_PROCESSOR_FEEDBACK_SLOTS,
+            });
+        }
         if !addresses.insert(item.address) {
             return Err(HeterogeneousCpuPrefixBatchError::DuplicateAddress {
                 address: item.address,
@@ -696,10 +766,10 @@ fn validate_batch_request(
             .and_then(|bytes| bytes.checked_add(item.route.cpu_frontier_retained_bytes()))
             .ok_or(HeterogeneousCpuPrefixBatchError::BatchPixelBytesOverflow)?;
     }
-    if retained_pixel_bytes > request.grant.max_batch_pixel_bytes {
+    if retained_pixel_bytes > request.grant.max_batch_retained_bytes {
         return Err(HeterogeneousCpuPrefixBatchError::BatchPixelBytesExceeded {
             required: retained_pixel_bytes,
-            limit: request.grant.max_batch_pixel_bytes,
+            limit: request.grant.max_batch_retained_bytes,
         });
     }
     Ok(())
@@ -742,7 +812,13 @@ fn validate_working_frame(
             },
         );
     }
-    if !descriptor.alpha.is_straight_compatible() {
+    let source_contract = item
+        .route
+        .work()
+        .plan()
+        .materialization(item.route.work().plan().input_materialization())
+        .map(|value| value.residency().format());
+    if !source_contract.is_some_and(|format| format.alpha().formats().contains(descriptor.alpha)) {
         return Err(HeterogeneousCpuPrefixFrameContractViolation::Alpha {
             actual: descriptor.alpha,
         });
@@ -750,6 +826,9 @@ fn validate_working_frame(
     let expected_pixels = usize::try_from(frame.width).ok().and_then(|width| {
         usize::try_from(frame.height).ok().and_then(|height| width.checked_mul(height))
     });
+    if descriptor.alpha != frame.alpha {
+        return Err(HeterogeneousCpuPrefixFrameContractViolation::Alpha { actual: frame.alpha });
+    }
     if descriptor.width != frame.width
         || descriptor.height != frame.height
         || expected_pixels != Some(frame.data.len())
@@ -837,6 +916,7 @@ mod tests {
             address,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),
                 color_space: WORKING_SPACE,
@@ -877,6 +957,7 @@ mod tests {
             address,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),
                 color_space: WORKING_SPACE,
@@ -887,13 +968,15 @@ mod tests {
         )
     }
 
-    fn grant_with_retained_limit(max_batch_pixel_bytes: u64) -> HeterogeneousCpuPrefixBatchGrant {
+    fn grant_with_retained_limit(
+        max_batch_retained_bytes: u64,
+    ) -> HeterogeneousCpuPrefixBatchGrant {
         let base = grant();
         HeterogeneousCpuPrefixBatchGrant::new(
             base.effect_session(),
             base.graph_execution(),
             base.max_batch_items(),
-            max_batch_pixel_bytes,
+            max_batch_retained_bytes,
         )
     }
 
@@ -991,24 +1074,30 @@ mod tests {
     #[test]
     fn batch_budget_counts_every_retained_cpu_frontier_value() {
         const FRAME_BYTES: u64 = 3 * 2 * 16;
-        const ONE_ITEM_RETAINED_BYTES: u64 = FRAME_BYTES * 3;
+        let feedback_bytes =
+            u64::try_from(mondrian_effects::EffectProcessorFeedbackBatch::storage_bytes())
+                .expect("fixed feedback storage fits the resource byte domain");
+        let one_item_retained_bytes = FRAME_BYTES * 3 + feedback_bytes;
         let item = two_frontier_item(5);
-        assert_eq!(item.route.cpu_frontier_retained_bytes(), FRAME_BYTES * 2);
+        assert_eq!(
+            item.route.cpu_frontier_retained_bytes(),
+            FRAME_BYTES * 2 + feedback_bytes
+        );
 
         let undersized = HeterogeneousCpuPrefixBatchRequest::new(
-            grant_with_retained_limit(ONE_ITEM_RETAINED_BYTES - 1),
+            grant_with_retained_limit(one_item_retained_bytes - 1),
             vec![item.clone()],
         );
         assert!(matches!(
             undersized.validate(),
             Err(HeterogeneousCpuPrefixBatchError::BatchPixelBytesExceeded {
-                required: ONE_ITEM_RETAINED_BYTES,
+                required,
                 limit
-            }) if limit == ONE_ITEM_RETAINED_BYTES - 1
+            }) if required == one_item_retained_bytes && limit == one_item_retained_bytes - 1
         ));
 
         let exact = HeterogeneousCpuPrefixBatchRequest::new(
-            grant_with_retained_limit(ONE_ITEM_RETAINED_BYTES * 2),
+            grant_with_retained_limit(one_item_retained_bytes * 2),
             vec![item, two_frontier_item(9)],
         );
         exact.validate().expect("exact two-item frontier budget");
@@ -1037,6 +1126,7 @@ mod tests {
             5,
             route,
             CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width: EXTENT.width(),
                 height: EXTENT.height(),
                 color_space: WORKING_SPACE,

@@ -39,9 +39,46 @@ type PlaybackFrameStore = mondrian_playback::PreviewFrameStore<
     MediaPreviewKey,
     MediaPreviewFrame,
     ViewerPreviewCacheKey,
-    PreviewRasterFrame,
+    PreviewViewerCpuFrame,
     ViewerFrameScope,
 >;
+
+/// One immutable CPU result admitted under the sole playback residency budget.
+/// Working pixels retain their exact linear/alpha contract for GPU presentation.
+#[derive(Debug, Clone)]
+pub(crate) enum PreviewViewerCpuFrame {
+    Raster(PreviewRasterFrame),
+    Working(mondrian_renderer::CpuColorFrame),
+}
+
+/// Immutable working pixels and their one playback-issued physical charge.
+#[derive(Debug, Clone)]
+pub(crate) struct PreviewOwnedWorkingFrame {
+    frame: mondrian_renderer::CpuColorFrame,
+    resource: mondrian_playback::ViewerFrameResourceLease,
+}
+
+impl std::ops::Deref for PreviewOwnedWorkingFrame {
+    type Target = mondrian_renderer::CpuColorFrame;
+    fn deref(&self) -> &Self::Target {
+        &self.frame
+    }
+}
+
+impl PreviewOwnedWorkingFrame {
+    /// Retain the admitted allocation and charge as one ordered owner.
+    pub(crate) fn new(
+        frame: mondrian_renderer::CpuColorFrame,
+        resource: mondrian_playback::ViewerFrameResourceLease,
+    ) -> Self {
+        Self { frame, resource }
+    }
+
+    /// Share only the existing charge after a complete GPU candidate owns the pixels.
+    pub(crate) fn resource(&self) -> &mondrian_playback::ViewerFrameResourceLease {
+        &self.resource
+    }
+}
 
 /// One final raster pinned for exact-scope stale reuse.
 #[derive(Debug, Clone)]
@@ -154,7 +191,10 @@ impl PreviewFrameStoreAdapter {
         &mut self,
         key: &ViewerPreviewCacheKey,
     ) -> Option<PreviewRasterFrame> {
-        self.store.viewer_frame(key)
+        match self.store.viewer_frame(key)? {
+            PreviewViewerCpuFrame::Raster(frame) => Some(frame),
+            PreviewViewerCpuFrame::Working(_) => None,
+        }
     }
 
     /// Admit one final Preview raster under its encoded byte reservation.
@@ -164,7 +204,93 @@ impl PreviewFrameStoreAdapter {
         frame: PreviewRasterFrame,
     ) -> bool {
         let reserved_bytes = frame.reserved_bytes();
-        self.store.admit_viewer_frame(key, frame, reserved_bytes).is_resident()
+        self.store
+            .admit_viewer_frame(key, PreviewViewerCpuFrame::Raster(frame), reserved_bytes)
+            .is_resident()
+    }
+
+    /// Borrow an exact result with its charge retained by the returned owner.
+    pub(crate) fn viewer_working_frame(
+        &mut self,
+        key: &ViewerPreviewCacheKey,
+    ) -> Option<PreviewOwnedWorkingFrame> {
+        let (frame, resource) = self.store.owned_viewer_frame(key)?;
+        match frame {
+            PreviewViewerCpuFrame::Working(frame) => {
+                Some(PreviewOwnedWorkingFrame { frame, resource })
+            }
+            PreviewViewerCpuFrame::Raster(frame) => {
+                drop(frame);
+                drop(resource);
+                None
+            }
+        }
+    }
+
+    /// Detach one exact single-use completion; external ownership stays charged.
+    pub(crate) fn detach_viewer_working_frame(
+        &mut self,
+        key: &ViewerPreviewCacheKey,
+    ) -> Option<PreviewOwnedWorkingFrame> {
+        let (frame, resource) = self.store.detach_owned_viewer_frame(key)?;
+        match frame {
+            PreviewViewerCpuFrame::Working(frame) => {
+                Some(PreviewOwnedWorkingFrame { frame, resource })
+            }
+            PreviewViewerCpuFrame::Raster(frame) => {
+                drop(frame);
+                drop(resource);
+                None
+            }
+        }
+    }
+
+    /// Reserve the known actual pixel extent before queueing CPU allocation.
+    pub(crate) fn reserve_working_result(
+        &mut self,
+        bytes: usize,
+    ) -> Option<mondrian_playback::ViewerFrameWorkLease> {
+        self.store.reserve_viewer_work(bytes)
+    }
+
+    /// Publish completed pixels using the original pre-allocation admission.
+    pub(crate) fn insert_admitted_working_frame(
+        &mut self,
+        key: ViewerPreviewCacheKey,
+        frame: mondrian_renderer::CpuColorFrame,
+        resource: mondrian_playback::ViewerFrameResourceLease,
+    ) -> bool {
+        if frame.rgba_f32().data.capacity().checked_mul(std::mem::size_of::<[f32; 4]>())
+            != Some(resource.reserved_bytes())
+        {
+            drop(frame);
+            drop(resource);
+            return false;
+        }
+        self.store
+            .admit_owned_viewer_frame(key, PreviewViewerCpuFrame::Working(frame), resource)
+            .is_resident()
+    }
+
+    /// Admit a completed test-owned allocation through the same reservation seam.
+    #[cfg(test)]
+    pub(crate) fn insert_viewer_working_frame(
+        &mut self,
+        key: ViewerPreviewCacheKey,
+        frame: mondrian_renderer::CpuColorFrame,
+    ) -> bool {
+        let Some(bytes) =
+            frame.rgba_f32().data.capacity().checked_mul(std::mem::size_of::<[f32; 4]>())
+        else {
+            return false;
+        };
+        let Some(work) = self.store.reserve_viewer_work(bytes) else {
+            return false;
+        };
+        let Ok(resource) = work.finish(bytes) else {
+            return false;
+        };
+        self.insert_admitted_working_frame(key, frame, resource)
     }
 
     /// Remember one terminal media failure.
@@ -196,7 +322,11 @@ impl PreviewFrameStoreAdapter {
             height: frame.height,
         };
         let reserved_bytes = frame.frame.reserved_bytes();
-        self.store.pin_viewer_frame(scope, frame.frame, reserved_bytes);
+        self.store.pin_viewer_frame(
+            scope,
+            PreviewViewerCpuFrame::Raster(frame.frame),
+            reserved_bytes,
+        );
     }
 
     /// Return the pinned raster only when its presentation scope matches exactly.
@@ -206,7 +336,13 @@ impl PreviewFrameStoreAdapter {
         width: u32,
         height: u32,
     ) -> Option<PreviewRasterFrame> {
-        self.store.stale_viewer_frame(&ViewerFrameScope { sequence_id, width, height })
+        match self
+            .store
+            .stale_viewer_frame(&ViewerFrameScope { sequence_id, width, height })?
+        {
+            PreviewViewerCpuFrame::Raster(frame) => Some(frame),
+            PreviewViewerCpuFrame::Working(_) => None,
+        }
     }
 
     /// Release the non-evictable current/stale Viewer pin.
@@ -259,4 +395,99 @@ impl PreviewFrameStoreAdapter {
 
 fn media_key_authorizes_residency(key: &MediaPreviewKey) -> bool {
     key.decode.source().fingerprint().authorizes_reuse()
+}
+
+#[cfg(test)]
+mod working_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_working_residency_counts_capacity_and_preserves_shared_linear_pixels() {
+        let mut data = Vec::with_capacity(5);
+        data.push([-0.5, 2.0, 0.25, 0.5]);
+        let bytes = data.capacity() * std::mem::size_of::<[f32; 4]>();
+        let frame = mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            width: 1,
+            height: 1,
+            data,
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+        });
+        let key = ViewerPreviewCacheKey::new(
+            SequenceId::new(),
+            1,
+            1,
+            super::super::preview_execution::PreviewSemanticIdentityBuilder::new(
+                b"working-capacity",
+            )
+            .finish_identity(),
+        );
+        let mut refused = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+            viewer_byte_budget: bytes - 1,
+            ..Default::default()
+        });
+        assert!(!refused.insert_viewer_working_frame(key.clone(), frame.clone()));
+        assert_eq!(refused.diagnostics().viewer_reserved_bytes, 0);
+        let mut admitted = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+            viewer_byte_budget: bytes,
+            ..Default::default()
+        });
+        assert!(admitted.insert_viewer_working_frame(key.clone(), frame.clone()));
+        let retained = admitted.viewer_working_frame(&key).expect("exact working result");
+        assert!(retained.shares_storage_with(&frame));
+        assert_eq!(retained.rgba_f32().data, [[-0.5, 2.0, 0.25, 0.5]]);
+        assert_eq!(retained.descriptor(), frame.descriptor());
+        assert!(admitted.viewer_frame(&key).is_none());
+        assert_eq!(admitted.diagnostics().viewer_reserved_bytes, bytes);
+        admitted.clear_viewer_frames();
+        assert!(admitted.viewer_working_frame(&key).is_none());
+        assert_eq!(admitted.diagnostics().viewer_reserved_bytes, 0);
+    }
+
+    #[test]
+    fn cpu_working_external_owner_remains_charged_after_store_clear() {
+        let frame = mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+            width: 1,
+            height: 1,
+            data: vec![[0.5, 0.25, 0.75, 1.0]],
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+            color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        });
+        let bytes = frame.rgba_f32().data.capacity() * std::mem::size_of::<[f32; 4]>();
+        let key = ViewerPreviewCacheKey::new(
+            SequenceId::new(),
+            1,
+            1,
+            super::super::preview_execution::PreviewSemanticIdentityBuilder::new(
+                b"live-working-owner",
+            )
+            .finish_identity(),
+        );
+        let mut store = PreviewFrameStoreAdapter::new(PreviewFrameStoreAdapterConfig {
+            viewer_byte_budget: bytes,
+            ..Default::default()
+        });
+        assert!(store.insert_viewer_working_frame(key.clone(), frame));
+        let retained = store.viewer_working_frame(&key).expect("actual external working owner");
+        store.clear_viewer_frames();
+        assert!(store.viewer_working_frame(&key).is_none());
+        let another =
+            mondrian_renderer::CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                width: 1,
+                height: 1,
+                data: vec![[0.1, 0.2, 0.3, 1.0]],
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
+                color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            });
+        assert!(
+            !store.insert_viewer_working_frame(key.clone(), another.clone()),
+            "live detached working pixels must retain their Viewer residency charge"
+        );
+        assert_eq!(retained.rgba_f32().data, [[0.5, 0.25, 0.75, 1.0]]);
+        drop(retained);
+        assert!(
+            store.insert_viewer_working_frame(key, another),
+            "last external retirement restores actual headroom"
+        );
+    }
 }

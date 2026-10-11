@@ -66,7 +66,9 @@ pub mod simple;
 pub mod transport;
 pub mod window;
 
+pub mod configuration_capture;
 pub mod discovery;
+pub mod host_storage;
 
 #[cfg(feature = "egui-widgets")]
 pub mod embed;
@@ -111,9 +113,11 @@ pub use playback::{
     RtAudioHandle,
 };
 pub use plugin::{
-    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
-    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
+    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, NativeEditorEvent,
+    NativeEditorEventDrain, NativeEditorEventFailure, NativeEditorEventSourceStatus,
+    OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset,
+    PluginUnit, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue, RestartCohort,
+    RestartFlags, StateContext, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
@@ -141,9 +145,10 @@ pub mod prelude {
         playback::{play_with_backend, AudioHandle},
         plugin::{
             AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
-            OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
-            PluginInfo, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue, StateContext,
-            WindowHandle,
+            NativeEditorEvent, NativeEditorEventDrain, NativeEditorEventFailure,
+            NativeEditorEventSourceStatus, OutputEventConsumer, OutputMidiConsumer, ParameterEdit,
+            ParameterEditKind, Plugin, PluginInfo, ProcessMode, ProgramPitchName, ProgressKind,
+            ProgressValue, StateContext, WindowHandle,
         },
         transport::{AutomationLane, MidiClip, Timeline},
         window::PluginWindow,

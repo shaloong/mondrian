@@ -415,8 +415,19 @@ default, and Project color changes build a complete new certificate. Sequence
 and Project change detection use
 their typed structural equality contracts rather than serializing JSON as a
 comparison mechanism. History admission plus candidate installation and
-generation publication then form one atomic operation. Runtime-only state must
-not leak into Project JSON unless it becomes an explicit Project contract.
+generation publication form one atomic operation. The actual Authoring Session
+takes its execution-publication writer before replacing any canonical document,
+History stack/pending command, revision, gesture or generation. All five real
+paths (prepared Sequence, Project, gesture cancel, Undo and Redo) use that gate.
+An old execution read guard therefore cannot install after authored state has
+already changed while the old generation remains visible. Detached validation,
+History cursor reservation and private footprint/cache preparation complete
+before the writer; the guarded region only moves prepared owners and publishes
+the existing canonical generation. Replaced document/certificate/History roots,
+diagnostic callbacks and logs retire after the writer is released. A poisoned
+execution gate still allows a validated author publication to complete, while
+refusing every execution admission. Runtime-only state must not leak into
+Project JSON unless it becomes an explicit Project contract.
 
 History stores typed before/after `AuthoringSnapshot` roots. The author model's
 copy-on-write allocations are shared between candidates and adjacent History
@@ -847,3 +858,58 @@ author value. Integer Hold keys retain every bit through edits, archive snapshot
 readback and prepared execution queries. The writer emits document schema 31;
 existing alpha rejection of earlier schemas remains, with no implicit migration
 or old scalar-value parser. The `.mdp` ZIP format and SQLite schema are unchanged.
+
+### Native audio author gesture boundary
+
+NativeAudioAuthorGesture is issued by the existing AuthoringSession and retains
+only exact session/sequence/group/owner/definition identities. Scope owners carry
+their concrete Component occurrence. Begin publishes no author change; updates
+use the native kind of the existing Sequence gesture and targeted Timeline operation; End and Cancel
+use the existing bounded history. Parameters and opaque state within one native
+group share one Undo/Redo restore point, and unrelated author commits invalidate
+late updates or cancellation. Save must settle the group before snapshotting.
+
+This handle is author admission only. It does not prove a child native object,
+callback origin, renderer/plan/epoch, ordered complete event source, or runtime
+installation lease. The product adapter must validate all those before applying
+callbacks. Explicit `Unkeyed` callbacks refuse existing keys; `AtOwnerTime`
+writes carry a qualified exact canonical domain and preserve the complete
+author curve through ordinary automation admission. Product origin proof,
+same-live canonical Plan handoff and exact native delivery acknowledgement
+remain required; committing author state alone does not update a live DSP Plan. This author layer introduces no editor window,
+controller copy, event queue, opaque replay checkpoint, or second history.
+
+
+## Native author completion barrier
+
+The sole Sequence gesture distinguishes an ordinary interactive edit from a
+native state whose terminal configuration is still pending. Live native values
+remain validated Session commits in the same bounded group. Ordinary Sequence
+or Project edits, Undo/Redo, gesture start/end, Sequence navigation and persistence
+snapshot admission refuse before running caller closures while that state is
+incomplete. The product must deliver a coherent control-side final configuration
+for the exact ordered native source/installed owner or explicitly cancel it.
+An unrelated action never invents an End or silently saves scalar edits with an
+older opaque seed. Read-only UI/execution observation still uses canonical state.
+
+Native updates require the existing prepared History candidate to retain this
+group's reversible origin before installation. A disabled/oversize history
+admission refuses atomically instead of accepting an unretained native edit and
+sealing an unretained command. Ordinary interactive history policy is unchanged.
+Final native completion atomically applies its mandatory opaque configuration
+with the current parameter endpoint, then seals one existing group. Cancel uses
+that same retained origin and does not create a second history or rollback an
+independent author change. Author handles still do not prove runtime ownership;
+exact native source/install admission and physical GUI qualification are separate.
+
+### Persisted native parameter reference absence
+
+The current audio parameter format requires the `automation` field. A curve
+object is a host reference; explicit JSON `null` is its absence. There is no
+compatibility parser for an omitted field or parallel persisted current value.
+Stable schemas and native opaque configuration remain in the same canonical
+processor. Native reference removal uses the existing bounded author group and
+history candidate; Undo/Redo restores its exact curve/absence and opaque seed.
+The ordinary coherent Session snapshot and durable `.mdp` publication preserve
+that distinction on reopening. An unsettled native-state group still blocks
+save admission.

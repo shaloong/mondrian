@@ -1,0 +1,539 @@
+{
+  "schema": 1,
+  "status": "REPLAYED_LOCAL_FORMAT_AND_DECLARED_SOURCE_CORRECTIONS_NOT_RUNTIME_QUALIFICATION",
+  "rustfmt_sha256_raw": "84abd1fa0d8e9e0dd4c2bce3544e650b4137ee87ec8179e8e16dbb974af11db0",
+  "files": [
+    {
+      "path": "src/audio_buffer.rs",
+      "preimage_sha256_raw": "8dcbbae4000e26ffecd6071e586dd8bec1067bb6fb94d609bb097865c17bb244",
+      "shipped_sha256_raw": "f65fdc0a3727a4a55355997d9ca4d006df8eff50d47d513f2629093e2c6e90e0",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/color.rs",
+      "preimage_sha256_raw": "091bad527985d4f700e72c5e827282ba91e1ef776586d0c43b00b70ee3259658",
+      "shipped_sha256_raw": "ca4aa2109517c8e3d2c0719203b7cfd792b9529619ebf973761dd5389787fa6e",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/entry.rs",
+      "preimage_sha256_raw": "172c1764ac66ce8d385cb02b4e255847a2a9bfa4fb348349aa2f0eba818c97b5",
+      "shipped_sha256_raw": "62d28b8004fe06f88256de703f450f4ab18a1db0f2fef361ee4452531d55a691",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/events.rs",
+      "preimage_sha256_raw": "15e812e9daaa4cae9f3d0f2c1fff8e1b37cae60b6f16b41ffc51e4b429075ba2",
+      "shipped_sha256_raw": "21e2793b05e7ce90473f70788ee906c60196e338ff4a3ff0ebe4430fed6b3c1c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/ambisonic.rs",
+      "preimage_sha256_raw": "962660aec049ae4e17f68072e2272d1410f5a0e2edb6e14cb35260bc688f0c37",
+      "shipped_sha256_raw": "825d36c717f6a646cb813fd62711939ab6e1bf63b31737ed11e3d873e2b0f2f5",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/audio_ports.rs",
+      "preimage_sha256_raw": "7cd7e3c0edb7b90ac4a39c5b80ee9167bb12f80dc825331e2fd2c6c9eb00e92c",
+      "shipped_sha256_raw": "05ce01fe504c03ed313ff42852700c8e99319519df4d5f2e722c611b43313be6",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/audio_ports_activation.rs",
+      "preimage_sha256_raw": "1d6ab43f53c0559c5ee65f56aaddf1622aa4fe6643f928d047f80f60067ce438",
+      "shipped_sha256_raw": "ae287e4193ae6ca8d6b6eb63937ca75dd16b755eb82249161e67de7e2547fa4c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/audio_ports_config.rs",
+      "preimage_sha256_raw": "7f94ab45857142f34ccb0ac9970b94308e67c60b0326418179574e223f98611d",
+      "shipped_sha256_raw": "ee37a4d596a175ab8ff566c1be7cf509fe470b7342774d82c7ab31aecd7c7d0a",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/configurable_audio_ports.rs",
+      "preimage_sha256_raw": "66e45f080ec4a7b636809f636269695960fb6c54c0b1d61293f6d78ce9dfede4",
+      "shipped_sha256_raw": "c0cbb72e4e7c90df5b2daa96dd2cdc12b95dab0c07965654de3aa964f63851e0",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/context_menu.rs",
+      "preimage_sha256_raw": "cc28c0d5f5833f568537c824e6adc0ddd99fb0605d6426e890ca4d373fb752ad",
+      "shipped_sha256_raw": "45a0445e55b3840c6bd92294c4e51a8e985cdcfa054b52b08821fbb948d914b6",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/background_activation.rs",
+      "preimage_sha256_raw": "af82a41a6a605bb5f96a959263fe8cc033a9a6a7d85b20c593cff6ca4de27fd3",
+      "shipped_sha256_raw": "4aa9a3843a835e6dfe8baf87c3ddbfee49b9176c62dab44f08cb01a8e0741856",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/background_progress.rs",
+      "preimage_sha256_raw": "02e546d58fe10008513905196c4edbe783b4f76b74830c065a69975dea9580e1",
+      "shipped_sha256_raw": "e104900ac6ea404ee08f2ca478d55e3c028d54173284c8daf60a2ab3811f850d",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/background_state_context.rs",
+      "preimage_sha256_raw": "107b784d022c45e3732ee5e90ef37dd76b03163964438daa610b98b3fa22e22e",
+      "shipped_sha256_raw": "e1225df265457751d0416a649f2cc49e13a6257fab84a641f7fff0ac9cedefae",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/extensible_audio_ports.rs",
+      "preimage_sha256_raw": "8a6aedb935f4a685d6881fdddfd64c2064a545318f63ce75e2601ad224fdf3ca",
+      "shipped_sha256_raw": "1fa506b1c7c514b1bd8a389209778f007540d971e2fdf599c119b2d4cb9d350a",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/flush_events.rs",
+      "preimage_sha256_raw": "21812f09303df77e12a693b64a2a33ea6aec12f3fce62f2df0d37cf38e6bbab3",
+      "shipped_sha256_raw": "2a6de9d8be6434385775de7b262c3f7e3c0e9a6e5c865fbbb49832ac38a270d4",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/gain_adjustment_metering.rs",
+      "preimage_sha256_raw": "19dae50d2101eb2e02a0dc9a507cb94fc6de1bcf4096f5e04bb4d7a8611514ef",
+      "shipped_sha256_raw": "e36c0043a9a70499f981926df498e88fe554a80009c364ab0284155c3e1b893e",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/mini_curve_display.rs",
+      "preimage_sha256_raw": "d930bbe1177c56e50282e94b65d453064443513807f03931aeb8f33b6942c5e6",
+      "shipped_sha256_raw": "c3739270d658c6819b5c0c544256347395e68aefa8a4af8ad7c0bad1b0ea9b97",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/octave_number.rs",
+      "preimage_sha256_raw": "a5ddce3db78efbfbd767f5f4bb4484bb5bcea7c8895c89f6670d127476fe4d36",
+      "shipped_sha256_raw": "8ae1fd3c3db4164eb6b6c2c0dc3f40bf07999669e793a91ba84cc473b3c16e04",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/param_hovered.rs",
+      "preimage_sha256_raw": "be7aaf6cc23577c504878865c5d21649ee52ab167a5f738fc3b85262bc2c482d",
+      "shipped_sha256_raw": "655cfac764a1b54b1b05268f8f00a4c5af9068eebd2a42732fcad7d99332b574",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/params_origin.rs",
+      "preimage_sha256_raw": "24d7f6e15e145887aeb5065512a6d284f2b5fbf05b6def459380d093465e01d8",
+      "shipped_sha256_raw": "58f8026be8474824b0364ac292bd13cab94cb56d7c0c5d8c59472ac1b43714da",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/project_location.rs",
+      "preimage_sha256_raw": "bbc06bd0492f8e3e82a299d5386905d78eae7f1cf38b7e3acc709a751efc2ead",
+      "shipped_sha256_raw": "b23714919031470970110fdd2ae841c224373fd056a4b3025df68c51a70ad8c1",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/resource_directory.rs",
+      "preimage_sha256_raw": "baf49a06795909174c6949f020da5d9c81ebe5befe399b946beb098c8e2adc6b",
+      "shipped_sha256_raw": "56e69c55945f5c244fc89ca4c8e40c47608d9c0c7c04ae593d5f869fab7a510e",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/scratch_memory.rs",
+      "preimage_sha256_raw": "25d566c271e674643539f654091613e2fea24ff6be48f888a128098ff75ce165",
+      "shipped_sha256_raw": "9ff95fa059b645e616e46b1fad723b6902cbb8413fa62ad1bb8a66061203388c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/transport_control.rs",
+      "preimage_sha256_raw": "d45cd2afef3a67890de71a8e56ce8e877fb5bab27ca3a63c489b67d0ddd92e74",
+      "shipped_sha256_raw": "ba97dc11c89611b9f3fd4af22ff5e9fc9643e2782a29b6e588a79478152aebfe",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/triggers.rs",
+      "preimage_sha256_raw": "799b7d1c4b78dbe0213eb15c890ff3da9598c72ce7f8aee272e002c36ab94cbc",
+      "shipped_sha256_raw": "5aeb75364e3e3c0346d871f381164eede51e9ce582ab016d8b67bc0809ed39c4",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/tuning.rs",
+      "preimage_sha256_raw": "eff7ea3f79d7a45565fda35336594b2da9fdbcbe816cc53a70cfadb5229b2380",
+      "shipped_sha256_raw": "16797678956ad514a986b3dca5617039ce7c321cd2dbd239be56ff77751db06f",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/undo.rs",
+      "preimage_sha256_raw": "d8d5e47def9843d437def5f2f82047b5d439d418e75bb15a97d94606de4f4334",
+      "shipped_sha256_raw": "752a98d8031e55aee5d89337a341e88927e3e89239e2f3d6eabd44f0050d8469",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/draft/webview.rs",
+      "preimage_sha256_raw": "5dc859b6fd09dfd3b6737f3d3dc8ffbcb1c3bcf5100af226fd8ac1a9e1ba06aa",
+      "shipped_sha256_raw": "283754c524f5d96d6f20b1c9a186693973c5ad5a54f56ea78cf9f6752790904b",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/event_registry.rs",
+      "preimage_sha256_raw": "f3eaadb68c690022d64e37eb11960ae161e558a5288b1a853c7e2e4adfa8f1cd",
+      "shipped_sha256_raw": "a47e8a405340bd7f40fb536aee6daf9eea4ac737f7a679df27e1743686206910",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/gui.rs",
+      "preimage_sha256_raw": "2cf825bd7197cef9f1da7634628d2eeb8a032c347c10dece7dce0acfbee0ffe2",
+      "shipped_sha256_raw": "56da1587c63fe096e60718980a2bb4cb98f45f73e5d7f2fbc9fce814e8285391",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/latency.rs",
+      "preimage_sha256_raw": "3aba7fb54334e08e5e5b9b21b7c7e51fdb901a1e60a3ce06c65ac26371b1e5dd",
+      "shipped_sha256_raw": "85b4025adef1fc402fe68759dc31a9b5f284a235575c67aaf5d9ae9d73b5d0ed",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/log.rs",
+      "preimage_sha256_raw": "29f5708520f9093a78a09f88ef15f711dd51a4c22c249eb75383d285a98eeb70",
+      "shipped_sha256_raw": "2a944f8d8c0e298f737d78ebcf66c3ed728c12c237b2a705894c9ff87381691a",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/note_name.rs",
+      "preimage_sha256_raw": "f0d3876125875a3df6259a62f13c7a1b967b80f71bce5eafa6ec82d3dccab6f4",
+      "shipped_sha256_raw": "56c08c909d6f3d848d219cd96d4bbd6d8b65da6de1599f18c379b9207d597be5",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/note_ports.rs",
+      "preimage_sha256_raw": "04d64f39a0a9e0705efb3df4d1bf1d04336562b690bdfe01db550cb85ed74010",
+      "shipped_sha256_raw": "2feaed92e51da3b655ffa1c30434f9f41b450dca04e5254361a346428c3c5b45",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/param_indication.rs",
+      "preimage_sha256_raw": "3063f668e16569ad025cb0381e12db179f0e0903c4b612548297caa76c866834",
+      "shipped_sha256_raw": "ada97d4c60e78981f7b11f8035ace0d4a0b03c57f690ffb096d0d00de5c10fdf",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/params.rs",
+      "preimage_sha256_raw": "884f6c385977518693cb330e23c8fb39b4dfe8618be3cfab897dc0bf91bc87d4",
+      "shipped_sha256_raw": "907f88bb33f26980e2a35d8541a5f1714daac32059db30d8e1d1fcba53cbaa74",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/posix_fd_support.rs",
+      "preimage_sha256_raw": "e3c483dca5ce76005378b70a88cada7dc50d6e2f3c5e2e7e589d2b3bb6142d65",
+      "shipped_sha256_raw": "e7000d2e54323b1c1db015e6e0be0d4f77206e0d0f8cd4e3d02ba22f25782f0c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/preset_load.rs",
+      "preimage_sha256_raw": "7aa594a1d64c8e9b0775971d3a5535015dccb266cd7303eb5669144105151548",
+      "shipped_sha256_raw": "f83a16caf26b2df1df335ffde667ada4da43992e1f3b692945db1f4f15a60c98",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/remote_controls.rs",
+      "preimage_sha256_raw": "6cea91a803efebad39a35b9e29e0f3a8819ba6476d5a3ed759ec988939c5457a",
+      "shipped_sha256_raw": "aa2958595d4a41e6d59d387a652de23623a4715925b3b6d181a96b072d59b798",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/render.rs",
+      "preimage_sha256_raw": "55876ea2638822bf614fd4a2c288754bc877023bc43243d713f169ac882b2362",
+      "shipped_sha256_raw": "cc8b2ed8e235099f7e5aaed6044a514ff2eb1eeb54f3d5e845d39121b928eeef",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/state.rs",
+      "preimage_sha256_raw": "28e1c3e0ca0c0a3afff364aebd99595bd8b31bbeb00cee0c36e3484fb6400ce1",
+      "shipped_sha256_raw": "f0590d5de5fbaf7ceb7e4c60bd168d2fc37d0e0afbeca036597ddcf05a2933f8",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/state_context.rs",
+      "preimage_sha256_raw": "4dffecff322c5a7c153c8fbc2c6d0f1cf4041dd986bb92cf53daf27115a9ccb6",
+      "shipped_sha256_raw": "079a0a3f99e6befbbddce12c764e59ad196e57b072f8c6e8ce844b6463569214",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/surround.rs",
+      "preimage_sha256_raw": "c78a419e47212a57452629ec8355f38ab43ee196f55d1beb9fd432d6d69083b0",
+      "shipped_sha256_raw": "d80745f91411fe364124f78e6c84932a826ed671a014b42fa686858cb0c5e2e4",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/tail.rs",
+      "preimage_sha256_raw": "50eed9b55651780ad2525e7769430ade7523c0ddd1ee3e1567cc79e99d4236f7",
+      "shipped_sha256_raw": "1b7948fcfbedfafa7fe04963247ff1dae6e60e36873630d58277a6f7b0fc1ed2",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/thread_check.rs",
+      "preimage_sha256_raw": "235cf36ae68dcee715c19ec98b19a0a3386b104b39c71a783e59caae1a223852",
+      "shipped_sha256_raw": "368b311d033ae8da87e120d7d0018704d0270ba68033b837fa94296489d90911",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/thread_pool.rs",
+      "preimage_sha256_raw": "621f182b4d22eab81795fe5c16265633ab8d9d88f74e17450e5e13009ad93fcd",
+      "shipped_sha256_raw": "5b22cf1c338e785a03f9fce03d6ed4fa126c3fc612c96433f1ec3f63f4609237",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/timer_support.rs",
+      "preimage_sha256_raw": "2c85476ffb066a1b27bc8c3d12df113075ebba2352cb3f6d165fac0af25862da",
+      "shipped_sha256_raw": "0d5dd9d8b24280e44e206fa2995a6b43f9da9063163fc4a1783741e1f39389c9",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/track_info.rs",
+      "preimage_sha256_raw": "96b4105f37201b238502019c4dd7b8d4b89db1987601fbcc6afaa99652e8ffaf",
+      "shipped_sha256_raw": "cc05fc3056f0d2bc0d7255930dde7ded0466605d439285f8d6a79c24ae5cebe3",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/ext/voice_info.rs",
+      "preimage_sha256_raw": "00b31e577a8f7c82dd856480f7db1e6abc0572091744a8086aa51ae62049c125",
+      "shipped_sha256_raw": "88dd560c737d79131e5a350b8e71e0e75144479f53674662bc66918faf1da081",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/factory/draft/plugin_invalidation.rs",
+      "preimage_sha256_raw": "821f90305ea5743fd1654fc101ce369f18a6056fa725a599aadd2de4c749b1bc",
+      "shipped_sha256_raw": "dfee3127966818d07fe3440fea2c2e5cb840d2bd90ee09dc585d125dc3905130",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/factory/draft/plugin_state_converter.rs",
+      "preimage_sha256_raw": "ede776412fdc38346a70ca51272036028f2bdb801a965f95a6e7f4a7c9a74f22",
+      "shipped_sha256_raw": "122f52a66bfb90ddf2538ca85a72da77a6630c5893372c290dae5340953c7a75",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/factory/plugin_factory.rs",
+      "preimage_sha256_raw": "0120490219343005addba5eca56381cb0d35ed4430de672337af4d40f5472840",
+      "shipped_sha256_raw": "572c90d54a3389b78e5d885888abedaf315d7f46983918c29e7e0a51a5876304",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/factory/preset_discovery.rs",
+      "preimage_sha256_raw": "a1c2b932a3ef9c72a1a3514e4a31d1bc5c37543e016d825f106c798ec4646630",
+      "shipped_sha256_raw": "dcbc8d3935db1a45fa4540b7229c1b03cda478b2574fea841fad4efa9cc16df9",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/fixedpoint.rs",
+      "preimage_sha256_raw": "09515d2e2b4ecf2bc67256afa75af6f4d0dcc0a4de6299aa9ea953a1d70d37ea",
+      "shipped_sha256_raw": "c1dd9df96beddff10008d0e0f017a7224290b9e826524b29a8405c95b32f1ff1",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/host.rs",
+      "preimage_sha256_raw": "8943ea3ad96f091e606c4b5dfcb80cf7666dc69cc1f3ab6434c3065a303c950c",
+      "shipped_sha256_raw": "edda431a7c13a6cff57d4d8f7922e292c578bb234c257cf32cfadfdd53985806",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/id.rs",
+      "preimage_sha256_raw": "dfe4e2fc4340ecff30606b492c387faeae1074adc576971297969f780f879904",
+      "shipped_sha256_raw": "34283e722315599a39a79bfc34c01544976003bebf1df75df8683a525d69837c",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/lib.rs",
+      "preimage_sha256_raw": "699582de5f0ea5f3b2cd8a8a52252608efece0b0c5a66280ccbcfbb5fcfb6221",
+      "shipped_sha256_raw": "e2f2510afb2e777cc36af7e1380d159c260ae3b540fc985a23182b351583c071",
+      "corrections": [
+        "Exclude generated raw module from rustfmt; preserve original bindgen bytes"
+      ],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/plugin.rs",
+      "preimage_sha256_raw": "dee437e11e5a039f583f7590ce2b0b2a4ee38cbcb52df6b574ef9b08241bebd8",
+      "shipped_sha256_raw": "bd7614884aa53161ac2be2f76f858eac72fc213d31cedeeebf1b0290ca986fea",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/plugin_features.rs",
+      "preimage_sha256_raw": "6381a82789c2bb161416691f311bf20dc397f19794e3a9fa48603337b2643c15",
+      "shipped_sha256_raw": "e14b9be16cf0ff086275c4104f7d4d38cd70de89120736946f0650f1615f6f43",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/process.rs",
+      "preimage_sha256_raw": "3b05f9b661aa1a073384194799ff64fe5b155fdf1e6326b7f3d2102b731b8dcb",
+      "shipped_sha256_raw": "40f6583eeebb8633e773d6e2c070e176070e6e6b8008afed39955bc2a9acc1f1",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/stream.rs",
+      "preimage_sha256_raw": "feafc1c23235b3f3edd73cb7fad35811672e56a32e599b4664ced5cccbc411f8",
+      "shipped_sha256_raw": "25a29a0e9e114fbf80a86266978b0e5686d5bd175b4673fa4bf24912432c8ad5",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/string_sizes.rs",
+      "preimage_sha256_raw": "793b3573a0448392d546f613551665b58dd20bd7dcf2a1add328fc3b2b897c7d",
+      "shipped_sha256_raw": "cc84ccfea03dae19087622868b03f20e03f3fa62c35c4b6475acd2c7446bdb10",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/support.rs",
+      "preimage_sha256_raw": "5d46727e1fff0f2c182eafaa1922cb9211095d252a3fb670b1ff0abc88252872",
+      "shipped_sha256_raw": "65d1b63e314c00479285eccf4f8770324af1945348bfa94845e1bc9c360617be",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/timestamp.rs",
+      "preimage_sha256_raw": "6ab9b6e5eeb6636e5676652e78356ea11259ac93b352090e8b70fddc7b8fca17",
+      "shipped_sha256_raw": "28d8000f759263b49ced5acc4f9c0d9cd3c218a8b2e44d32fa953d3c83f0e7db",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/universal_plugin_id.rs",
+      "preimage_sha256_raw": "71bd4759ae5636b2eba686bdb11f5fe4e36af9ccb641268cef875c4daa21e91b",
+      "shipped_sha256_raw": "5a20947aff0f86315a7d7781f2c2f8339db8ff200afc08f9be26e4594394e9ac",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    },
+    {
+      "path": "src/version.rs",
+      "preimage_sha256_raw": "9f38fba4e9ada7987e96ae01f2419cceaadf7a256d06c940e2164c9e91d1d6a7",
+      "shipped_sha256_raw": "fdc8fe1b63bb232712e9bee51ae753f04df2929b50452b5df79118ce10cdedf6",
+      "corrections": [],
+      "format_config": "rustfmt.toml",
+      "format_config_sha256_raw": "ae0e2fdc45675c43da74f94099a9a97910ccc2ac3cb4aca6e35116f3db14745e"
+    }
+  ],
+  "official_inputs_unchanged": true,
+  "generated_raw_unchanged": true
+}

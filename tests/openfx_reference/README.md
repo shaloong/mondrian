@@ -131,7 +131,9 @@ handles borrow the action's read-only Source/writable Output mappings. No image
 wrapper or native frame allocation is retained between actions. Output clears
 on its first fetch; an unfetched frame cannot publish an old raster. Factory
 admission now counts three host rasters, plus executor staging; the one-pixel
-boundary is 79/80 bytes, with 48 bytes charged to host storage.
+pixel component is 80 bytes, with 48 bytes of host rasters. The complete owned
+callback stack/guard and fixed thread/mutex state are additionally charged by
+the native sizing getter; boundary tests use that total, not a pixel-only grant.
 
 The same probe forbids Source fetches in Create/Destroy, BeginInstanceChanged
 and Begin/EndSequenceRender, and exercises legal user-edited InstanceChanged
@@ -145,13 +147,17 @@ cargo test -p mondrian-app --all-features --test openfx_host \
   authored_uhd_filter_fits_professional_working_grant -- --ignored --nocapture
 ```
 
-It rejects a one-byte-short 663,552,000-byte working grant, then renders the
+It rejects a one-byte-short total grant: 663,552,000 pixel bytes plus the declared
+controlled native owner reservation. It then renders the
 complete unclamped frame under 768 MiB, including distinct corner samples.
 
-The same UHD case now uses the nominal Professional eight-instance/384 MiB
-optional native grant, seeks with reversed Source data across generations,
-checks both complete unclamped outputs and resident frame charge, then trims
-to zero. The one-pixel unfetched probe also changes frame generation before
+The same UHD case preserves the nominal eight-instance/384 MiB optional
+retention limit. The complete native owner exceeds that limit: active execution
+under 768 MiB succeeds, but the worker is not retained. Reversed-source seeks
+remain correct through fresh stateless preparation. Its cold preparation cost
+has not passed realtime performance qualification; the product UHD retention
+policy must be assessed separately. The low-resolution unfetched-output probe
+still fits its retention grant and proves actual worker reuse across frames. The one-pixel unfetched probe also changes frame generation before
 its required second-call failure, detecting accidental worker restarts.
 
 Choice qualification uses MONDRIAN_OPENFX_SESSION_PROBE_MODE=choice and the ignored integration test choice_filter_preserves_canonical_indices_and_native_pixels. The owned wrapper declares duplicate captions with extreme signed ChoiceOrder ranks; its native Render reads the authored original index through paramGetValueAtTime, as required in Render actions. The test compares per-index Float32 output against expected gains and exercises the same choice through the compiled effect graph. This qualification does not establish StrChoice or historical-time access.
@@ -422,3 +428,72 @@ All unsupported callbacks abort if reached. The fixture has distinct identifiers
 Source inspection and final public native/graph tests must remain GREEN after
 the original API bound/native-header rejection RED. UTF-8 API naming is not
 asserted as a normative requirement by this fixture.
+
+
+### Raw Float association qualification
+
+`output_alpha` drives native metadata and independent raw finite outputs,
+including division-overflow values that remain valid while associated, signed
+and above-one alpha, and zero-alpha emission. `source_alpha` checks both Source
+clip and image metadata against the authored alpha choice before Basic renders;
+the product supplies each canonical Core association through immutable native
+preparation. A public integration fixture chains raw native output through real
+disk cache reopen, transparent nested composite, explicit Opaque delivery and
+stock OCIO RGBA8 output. These are product behavioral qualifications, not blanket
+OpenFX 1.5.1 or arbitrary vendor acceptance.
+
+
+### Actual image metadata qualification
+
+`image_uid` reads Source and Output image UniqueIdentifier independently, checks
+multiple fetches in the same action, and caches a source pixel analysis under
+that label. Equal-time changed input, seeks and a replacement native session
+must invalidate the analysis. A fixture-only identifier export allows the
+supervised source test to inspect exact labels while keeping the module loaded
+across session replacement. `image_field` checks FieldNone on both actual image
+handles independently of Render argument and clip fielding checks. Product
+resident tests compare raw Float pixel oracles across repeated frame bindings.
+
+
+### CPU thread and mutex qualification
+
+Owned SessionProbe modes are independent behavioral oracles:
+
+- `mutex_contract`: distinct real handles; initial recursive count two; recursive
+  lock/trylock; foreign trylock failure without count mutation; plugin-created
+  threads update a protected counter; destroy/invalid-handle rejection; repeated
+  slot reuse cannot revalidate an old handle.
+- `mutex_negative`: negative and INT_MIN initial count accepted with exclusion;
+  INT_MAX initial count is usable without an initial O(count) lock loop.
+- `mutex_lifecycle`: destruction invalidates a foreign lock attempt and wakes
+  an already waiting call without dangling state or a join hang.
+- `thread_contract`: one truthful CPU allowance, physically separate callback
+  thread, complete batch before return, actual callback index/spawned status,
+  plugin-created thread TLS exclusion, nested call ErrExists and UINT_MAX request
+  bounded by the allowance; native parameter reads on the callback thread agree
+  with the main thread's value at the same time.
+- `mutex_capacity`: product policy, 1024 live slots then ErrMemory; destroying
+  them restores admission on later frames. This is separate from normative suite
+  semantics.
+- `thread_concurrent`: two plugin-created/calling threads compete for successive
+  batches. The second callback depends on the first caller returning; the first
+  accepted caller must receive its own completion, without a second result
+  replacing it. Sixty-four rounds stress the publication/acknowledgement window.
+  Race scheduling is nondeterministic, so this is a regression control, not an
+  unconditional RED claim against every old run. It uses no thrown callback or
+  sleep to force a timing threshold.
+
+Source tests reuse the bounded qualification child, existing NativeSession API,
+independent pixel oracle, equal-time rebinding, seeks and two native owners.
+The four normative modes can run real behavioral RED before applying the suite
+fix, against the complete preceding Float+image-identity stage. Concurrent
+completion provides a stress control; capacity and storage tests qualify the
+newly declared owner budget. Product tests use the actual
+resident helper, assert raw pixel bits and retain the same valid worker.
+`thread_hang` qualifies parent cancellation, process termination/reap and frame
+preservation while the separately spawned callback is blocked for five seconds.
+
+Measure the release resident Basic gate again after this stage, excluding warmup
+and retaining the machine/source/binary receipts. Report suite callback dispatch
+separately from ordinary Basic, which may use its own one-thread shortcut. No
+multi-CPU throughput claim follows from the one-CPU suite tests.

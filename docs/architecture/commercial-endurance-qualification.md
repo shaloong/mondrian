@@ -1179,32 +1179,31 @@ Interface before asserting zero physical leases. Separate controlled-worker
 tests cover nonblocking Drop and eventual lease release, and result-backpressure
 shutdown covers the explicit join and immediate post-join zero inventory.
 
-The validation-only `preview_visual_protocol` Cargo example uses the standard
-libtest harness and directly compiles the actual worker-lifecycle,
-work-notification, visual-task and dependency-observer source Modules. Their
-private tests live in `crates/mondrian-app/tests/protocol/`, loaded only under
-`cfg(test)` by both App lib tests and the example. No Implementation is copied,
-no private hook becomes a product Interface, and the test files are not ordinary
-App library inputs. Narrow harness-only unused-method allowances do not affect
-the production library. The Runtime keeps its public lifecycle-type re-export;
-the task Modules import that type directly from its owning Module.
+The Preview worker-lifecycle, work-notification, visual-task and dependency
+protocol tests live in `crates/mondrian-app/tests/protocol/`, loaded under
+`cfg(test)` by their owning App modules. They execute once in the actual App
+library context with the same native GUI and processor feedback dependencies.
+The former source-including example created a second module context; it has been
+removed. No stub App messages, duplicated GUI services or unused-method
+allowances are needed to maintain that alternate context.
 
-Run the bounded source-protocol tests through Cargo from the repository root:
+Run the relevant module suites through Cargo from the repository root:
 
 ```powershell
 $env:CARGO_INCREMENTAL='0'
-cargo test --release -p mondrian-app --features validation --example preview_visual_protocol -j 1 -- --test-threads=1
+cargo test --release -p mondrian-app --features validation --lib app::owned_worker_lifecycle:: -j 1 -- --test-threads=1
+cargo test --release -p mondrian-app --features validation --lib app::preview_worker_lifecycle:: -j 1 -- --test-threads=1
+cargo test --release -p mondrian-app --features validation --lib app::preview_work_notification:: -j 1 -- --test-threads=1
+cargo test --release -p mondrian-app --features validation --lib app::preview_visual_execution_task:: -j 1 -- --test-threads=1
+cargo test --release -p mondrian-app --features validation --lib app::preview_visual_dependencies:: -j 1 -- --test-threads=1
 ```
 
-The explicit example selector avoids the companion product/tool executables
-scheduled by integration-test selectors and does not build the giant App
-lib-test unit. Cargo still owns the ordinary library/dependency builds, profile,
-features, native linking and test loader environment; a cold or changed library
-can still be expensive. There is no manually assembled rlib/native-path runner
-or profile override. The non-test example executable prints this command and
-returns failure, never a passing qualification receipt. It is outside product
-binary routing and requires `validation`. Source-protocol tests remain distinct
-from linked App Runtime tests, real Headless GPU closure and physical campaigns.
+The explicit library selector avoids companion product/tool test executables.
+Cargo owns the real App library, dependency/profile selection, native linking and
+loader environment. A cold library test build can be expensive; the subsequent
+module filters use the same artifact. There is no manually linked runner or
+alternate App Runtime. These protocol tests remain distinct from physical Window
+presentation, real Headless GPU closure and platform/driver campaigns.
 
 Preview diagnostics read the dependency observer's live health stamp directly,
 without requiring an evaluation or result poll to latch its exit. Headless owner

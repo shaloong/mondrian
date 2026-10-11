@@ -352,7 +352,7 @@ audio-mixer-port-prefader = 推子前
 audio-mixer-port-postfader-premute = 推子后 / 静音前
 audio-mixer-port-postmute = 静音后
 audio-mixer-port-postfader = 推子后
-audio-mixer-missing-bus = 缺失 Bus · { $identity }
+audio-mixer-missing-bus = 缺失总线 · { $identity }
 audio-mixer-missing-output = 缺失节目输出 · { $identity }
 audio-mixer-locked-strip = 轨道 { $identity } 已锁定；处理器、输入增益和推子为只读
 audio-mixer-locked-route = 轨道 { $identity } 已锁定；其 Route 为只读
@@ -1461,3 +1461,101 @@ timeline-invalid-display = 序列时间显示设置无效
     { $reason }
 inspector-empty-selection = 未选择剪辑
     选择剪辑、图层或效果后，可在这里调整参数。
+notification-native-processor = 处理器：{ $message }
+
+# Authenticated native audio diagnostics, never lifecycle/author authority.
+notification-native-audio-warning = 原生音频插件警告 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-error = 原生音频插件错误 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-fatal = 原生音频插件严重诊断 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-host-misbehavior = 原生音频插件报告宿主行为异常 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-plugin-misbehavior = 原生音频插件报告插件行为异常 ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-unknown-severity = 原生音频插件报告未知级别 { $severity } ({ $instance }, { $process }): { $encoding ->
+        [hex] 原始字节（十六进制）: { $detail }
+       *[text] { $detail }
+    } { $truncated ->
+        [yes] (消息已截断)
+       *[no] { "" }
+    } { $null ->
+        [yes] (插件传入了无效空消息)
+       *[no] { "" }
+    }
+notification-native-audio-log-incomplete = 原生音频插件诊断消息不完整 ({ $instance }, { $process }). { $capacity ->
+        [yes] 消息队列已满.
+       *[no] { "" }
+    } { $contention ->
+        [yes] 并发生产者已耗尽有界尝试.
+       *[no] { "" }
+    } { $exhausted ->
+        [yes] 原生消息序号已耗尽.
+       *[no] { "" }
+    }
+
+viewer-native-progress = { $message } · { $percent }%
+
+# Native replies are opaque local Widget callbacks, never authoring actions.
+native-visual-question-title = 插件问题
+native-visual-question-yes = 是
+native-visual-question-no = 否
+native-visual-question-dismiss = 关闭
+
+# Product-owned native editor status; plugin labels remain native metadata.
+native-editor-row = 原生编辑器
+native-editor-open = 打开编辑器
+native-editor-close = 关闭编辑器
+native-editor-opening = 原生编辑器请求已排队
+native-editor-opened = 原生编辑器已打开
+native-editor-closed = 原生编辑器已关闭
+native-editor-unavailable = 当前适配器暂不支持原生编辑器
+native-editor-no-view = 此处理器没有原生编辑器
+native-editor-control-pending = 原生编辑器更改尚待完成
+native-editor-owner-changed = 原生编辑器所属实例已更改，请重新打开
+native-editor-close-current = 请先关闭当前原生编辑器
+native-editor-cleanup-pending = 原生编辑器尚待清理
+native-editor-failed = 原生编辑器请求失败
+
+audio-rack-native-controlled-parameter = 由插件控制

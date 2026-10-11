@@ -308,6 +308,13 @@ impl EffectFrameTileF32 {
                 reason: "tile ROI exceeds the complete frame extent".to_owned(),
             });
         }
+        for (index, sample) in pixels.iter().enumerate() {
+            if !sample.iter().all(|channel| channel.is_finite())
+                || !mondrian_core::ColorFrameAlpha::StraightCoverage.admits_alpha(sample[3])
+            {
+                return Err(EffectTemporalFrameProviderError::InvalidTile { reason: format!("normalized straight source tile sample {index} violates its exact contract") });
+            }
+        }
         Ok(Self { time, frame_extent, roi, frame_seed, pixels })
     }
 
@@ -607,6 +614,9 @@ impl EffectTemporalExecutionOutput {
 /// Why exact temporal/ROI scalar execution failed closed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectTemporalExecutionError {
+    /// The exact retained value cannot enter this temporal coverage consumer.
+    #[error(transparent)]
+    FrameContract(#[from] crate::EffectFloatFrameError),
     /// Demand planning could not represent the exact request.
     #[error(transparent)]
     Demand(#[from] EffectExecutionDemandError),
@@ -1714,10 +1724,24 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                                 .max_working_bytes()
                                                 .saturating_sub(self.working.budget),
                                         );
-                                        let processor_bytes = apply_custom_render_op_f32(
-                                            &mut output,
+                                        // This temporal executable slice has an exact
+                                        // Coverage source/output materialization contract.
+                                        // The custom provider receives/returns the same
+                                        // canonical Float value as scalar/mixed execution.
+                                        let extent = crate::EffectFrameExtent::new(
                                             self.raster_region.frame_width(),
                                             self.raster_region.frame_height(),
+                                        );
+                                        let format = crate::EffectValueFormat::new(
+                                            crate::EffectWorkingPrecision::Float32,
+                                            crate::EffectColorDomain::SceneLinearRgb,
+                                            mondrian_core::ColorFrameAlpha::StraightCoverage,
+                                        );
+                                        let mut frame = crate::EffectFloatFrame::from_pixels(
+                                            extent, format, output,
+                                        )?;
+                                        let processor_bytes = apply_custom_render_op_f32(
+                                            &mut frame,
                                             &op,
                                             frame_seed,
                                             Some(session),
@@ -1730,6 +1754,15 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                                             } => EffectTemporalExecutionError::Canceled,
                                             other => EffectTemporalExecutionError::CustomProcessor(other),
                                         })?;
+                                        // Admission follows the completed owned provider
+                                        // result. It does not quarantine/retire a valid
+                                        // instance or request a fallback replay.
+                                        frame = crate::materialize_finite_coverage_controlled(
+                                            frame,
+                                            crate::EffectAlphaConsumer::StraightCoverageOperation,
+                                            &mut || temporal_cancellation_checkpoint(&cancellation),
+                                        )?;
+                                        output = frame.into_parts().2;
                                         self.working.ensure_transient(
                                             scratch_bytes.saturating_add(processor_bytes),
                                         )?;
@@ -3348,9 +3381,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let reference = apply_compiled_effect_graph_rgba_f32(
-            &mixed,
-            extent.width(),
-            extent.height(),
+            crate::EffectFloatFrameView::new(
+                crate::EffectFrameExtent::new(extent.width(), extent.height()),
+                crate::EffectValueFormat::new(
+                    crate::EffectWorkingPrecision::Float32,
+                    crate::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &mixed,
+            ),
             &reference_graph,
             frame_seed,
         )
@@ -3469,7 +3508,7 @@ mod tests {
         let tiled = tiled_session
             .execute_temporal_f32(&temporal_graph, &full_request, &mut tiled_provider)
             .expect("budget-driven temporal tiles");
-        assert_eq!(tiled.tile().pixels(), reference);
+        assert_eq!(tiled.tile().pixels(), reference.pixels());
         assert_eq!(tiled.execution_tiles(), 4);
         assert_eq!(tiled.provider_requests(), tiled.execution_tiles() * 2);
         let largest_tile_peak = 9 * 6 * std::mem::size_of::<[f32; 4]>() * 3;
@@ -3495,7 +3534,7 @@ mod tests {
         let second_cached = cached_session
             .execute_temporal_f32(&temporal_graph, &full_request, &mut cached_provider)
             .expect("assembled output cache hit");
-        assert_eq!(second_cached.tile().pixels(), reference);
+        assert_eq!(second_cached.tile().pixels(), reference.pixels());
         assert_eq!(second_cached.execution_tiles(), 0);
         assert_eq!(second_cached.provider_requests(), 0);
         assert_eq!(second_cached.peak_working_bytes(), 0);

@@ -1,0 +1,15 @@
+[package]
+name = "mondrian-clap-process-author-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clack-plugin = { path = "../../../../../vendor/clack/plugin" }
+clack-extensions = { path = "../../../../../vendor/clack/extensions", features = ["audio-ports", "params", "clack-plugin"] }
+
+[workspace]

@@ -4,6 +4,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "aux_feedback.h"
+#include "render_diagnostic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +58,7 @@ struct MondrianOpenFxParameter {
 };
 
 struct MondrianOpenFxFrameInfo {
+  int source_alpha; // 0: unassociated Float, 1: associated Float, 2: opaque
   int width;
   int height;
   double frame;
@@ -117,11 +120,19 @@ int mondrian_openfx_describe(
 #endif
     ;
 
+// Known bounded auxiliary state; this is not a native process RSS cap.
+size_t mondrian_openfx_aux_resident_bytes(void)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
 // Handles are owned by one supervised child. Calls on a handle are serialized.
 struct MondrianOpenFxSession;
 
 int mondrian_openfx_session_create(
     const char* binary, const char* bundle, const char* identifier,
+    const uint8_t* image_namespace, // exactly 16 parent-issued bytes; copied once
     const void* input, size_t frame_bytes,
     const struct MondrianOpenFxFrameInfo* frame_info,
     const struct MondrianOpenFxParameter* parameters, int parameter_count,
@@ -140,17 +151,59 @@ enum MondrianOpenFxOutputAlpha {
     MONDRIAN_OPENFX_ALPHA_OPAQUE = 2
 };
 
+struct MondrianOpenFxLiveProgress {
+  uint64_t owner, invocation, generation;
+  int active;
+  double fraction;
+  struct MondrianOpenFxNotice label;
+};
+// Borrowed only within this render call. Callback context and all legal spawned
+// callback computations remain live until the action returns. No SDK pointer
+// or borrowed parent FnMut crosses into this thread-safe bounded POD seam.
+struct MondrianOpenFxLiveQuestion {
+  uint64_t owner, invocation;
+  struct MondrianOpenFxNotice text;
+};
+struct MondrianOpenFxInvocationControl {
+  const void* context;
+  int (*abort)(const void*);
+  int (*progress)(const void*, const struct MondrianOpenFxLiveProgress*);
+  // Exactly 0 for ordinary frame work, 1 only for proved active effect GUI work.
+  int gui_open;
+  int interactive_render;
+  int question_work;
+  int (*question)(const void*, const struct MondrianOpenFxLiveQuestion*);
+};
+
 // Output is caller-owned staging storage, valid only when status is zero.
 // Native actions may modify staging on failure; publication belongs to Rust.
 int mondrian_openfx_session_render(
     struct MondrianOpenFxSession* session, const void* input, void* output,
     size_t frame_bytes, const struct MondrianOpenFxFrameInfo* frame_info,
     const struct MondrianOpenFxParameter* parameters, int parameter_count,
-    int* output_alpha)
+    struct MondrianOpenFxRenderReport* report,
+    const struct MondrianOpenFxInvocationControl* control,
+    struct MondrianOpenFxNativeDiagnostic* diagnostic) // null: no timing clocks
 #ifdef __cplusplus
     noexcept
 #endif
     ;
+
+// Logical controlled callback stack, guard and fixed suite state reservation.
+// Returns zero if this platform cannot configure the declared reservation.
+size_t mondrian_openfx_thread_resident_bytes(void)
+#ifdef __cplusplus
+    noexcept
+#endif
+    ;
+
+/** Close the real generic GUI on the existing instance, without a render. */
+int mondrian_openfx_session_close_gui(struct MondrianOpenFxSession* session,
+    struct MondrianOpenFxFeedback* feedback, int* invoked)
+#ifdef __cplusplus
+  noexcept
+#endif
+;
 
 void mondrian_openfx_session_destroy(struct MondrianOpenFxSession* session)
 #ifdef __cplusplus

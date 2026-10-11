@@ -677,6 +677,7 @@ impl BasicTitleRasterizer {
 
         let frame = BasicTitleRasterFrame {
             frame: CpuColorFrame::working(WorkingRgbaF32Frame {
+                alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                 width,
                 height,
                 data: pixels,

@@ -123,6 +123,19 @@ impl FixedDelayLine {
     }
 }
 
+impl FixedDelayLine {
+    pub(crate) fn visit_host_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        visitor(crate::AudioProcessorFactoryStorageBorrow::complete(
+            &self.samples,
+        )?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

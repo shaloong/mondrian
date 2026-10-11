@@ -1368,70 +1368,73 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel, localizer: &Localizer
                 .on_select(inspector_effect_select_action(selected_clip, effect_id))
                 .with_row(PropertyRow::new(
                     localizer.text("inspector-effect-controls"),
-                    Box::new(
-                        FlexContainer::row(vec![
-                            FlexChild::flex(
-                                Box::new(
-                                    Checkbox::new(
-                                        localizer.text("inspector-enabled"),
-                                        effect.enabled,
-                                    )
-                                    .enabled(can_edit)
-                                    .on_change(
-                                        move |enabled| {
-                                            inspector_effect_enabled_action(
+                    crate::app_ui::native_visual_gui_section::wrap_section(
+                        effect.native_gui_controller.as_ref(),
+                        Box::new(
+                            FlexContainer::row(vec![
+                                FlexChild::flex(
+                                    Box::new(
+                                        Checkbox::new(
+                                            localizer.text("inspector-enabled"),
+                                            effect.enabled,
+                                        )
+                                        .enabled(can_edit)
+                                        .on_change(
+                                            move |enabled| {
+                                                inspector_effect_enabled_action(
+                                                    selected_clip,
+                                                    effect_id,
+                                                    enabled,
+                                                )
+                                            },
+                                        ),
+                                    ),
+                                    1.0,
+                                ),
+                                FlexChild::fixed(effect_icon_button(
+                                    AppIcon::CaretUp,
+                                    localizer.text("inspector-effect-move-up"),
+                                    localizer.text("inspector-effect-move-up-tooltip"),
+                                    can_move_up,
+                                    can_move_up
+                                        .then(|| {
+                                            inspector_reorder_effect_action(
                                                 selected_clip,
                                                 effect_id,
-                                                enabled,
+                                                EffectRelativePlacement::Before(
+                                                    model.effects[index - 1].effect_id,
+                                                ),
                                             )
-                                        },
-                                    ),
-                                ),
-                                1.0,
-                            ),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretUp,
-                                localizer.text("inspector-effect-move-up"),
-                                localizer.text("inspector-effect-move-up-tooltip"),
-                                can_move_up,
-                                can_move_up
-                                    .then(|| {
-                                        inspector_reorder_effect_action(
-                                            selected_clip,
-                                            effect_id,
-                                            EffectRelativePlacement::Before(
-                                                model.effects[index - 1].effect_id,
-                                            ),
-                                        )
-                                    })
-                                    .flatten(),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::CaretDown,
-                                localizer.text("inspector-effect-move-down"),
-                                localizer.text("inspector-effect-move-down-tooltip"),
-                                can_move_down,
-                                can_move_down
-                                    .then(|| {
-                                        inspector_reorder_effect_action(
-                                            selected_clip,
-                                            effect_id,
-                                            EffectRelativePlacement::After(
-                                                model.effects[index + 1].effect_id,
-                                            ),
-                                        )
-                                    })
-                                    .flatten(),
-                            )),
-                            FlexChild::fixed(effect_icon_button(
-                                AppIcon::Trash,
-                                localizer.text("inspector-effect-remove"),
-                                localizer.text("inspector-effect-remove-tooltip"),
-                                can_edit,
-                                inspector_remove_effect_row_action(selected_clip, effect_id),
-                            )),
-                        ])
-                        .with_gap(8.0),
+                                        })
+                                        .flatten(),
+                                )),
+                                FlexChild::fixed(effect_icon_button(
+                                    AppIcon::CaretDown,
+                                    localizer.text("inspector-effect-move-down"),
+                                    localizer.text("inspector-effect-move-down-tooltip"),
+                                    can_move_down,
+                                    can_move_down
+                                        .then(|| {
+                                            inspector_reorder_effect_action(
+                                                selected_clip,
+                                                effect_id,
+                                                EffectRelativePlacement::After(
+                                                    model.effects[index + 1].effect_id,
+                                                ),
+                                            )
+                                        })
+                                        .flatten(),
+                                )),
+                                FlexChild::fixed(effect_icon_button(
+                                    AppIcon::Trash,
+                                    localizer.text("inspector-effect-remove"),
+                                    localizer.text("inspector-effect-remove-tooltip"),
+                                    can_edit,
+                                    inspector_remove_effect_row_action(selected_clip, effect_id),
+                                )),
+                            ])
+                            .with_gap(8.0),
+                        ),
                     ),
                 ));
             let mut previous_group = None;
@@ -1811,6 +1814,22 @@ pub(super) fn with_audio_processor_rack_sections(
                     ),
                 ));
             }
+            if let Some(editor) = &processor.native_editor {
+                section = section.with_row(PropertyRow::new(
+                    localizer.text("native-editor-row"),
+                    Box::new(
+                        Button::new(localizer.text(editor.label_key))
+                            .with_control_inspection_key(audio_rack_control_inspection_key(
+                                rack,
+                                Some(processor),
+                                "native-editor",
+                                AudioRackControlSubject::Rack,
+                            ))
+                            .enabled(editor.action.is_some())
+                            .on_click(editor.action.clone()),
+                    ),
+                ));
+            }
             if let Some(query) = &processor.input_query {
                 let action = crate::app::product_action::ProductAction::Audio(
                     crate::app::product_action::AudioProductAction::QueryProcessorInputs(
@@ -1859,7 +1878,7 @@ pub(super) fn with_audio_processor_rack_sections(
                             .default_value
                             .to_channel_values()
                             .first()
-                            .is_some_and(|value| *value != parameter.static_value);
+                            .is_some_and(|value| Some(*value) != parameter.static_value);
                     let reset_action = crate::app::ui_actions::audio_processor_rack_edit_action(
                         mondrian_timeline::AudioProcessorRackEditRequest {
                             address: rack.address,
@@ -1886,6 +1905,7 @@ pub(super) fn with_audio_processor_rack_sections(
                         parameter,
                         numeric,
                         rack_can_edit,
+                        localizer,
                     );
                     name_numeric_control(scalar.as_mut(), &label);
                     let value = FlexContainer::row(vec![
@@ -2334,7 +2354,25 @@ pub(super) fn audio_processor_static_parameter_control(
     parameter: &crate::app_ui::audio_processor_rack::AudioProcessorParameterModel,
     numeric: mondrian_core::automation::ParameterNumericContract,
     can_edit: bool,
+    localizer: &Localizer,
 ) -> Box<dyn Widget> {
+    let Some(static_value) = parameter.static_value else {
+        // A native plain observation is presentation only. It does not create
+        // Some(automation), enable a host slider or fabricate a default value.
+        let text = parameter
+            .native_presentation
+            .as_ref()
+            .and_then(|fact| fact.value_bits.and(fact.display.as_ref()))
+            .map(|display| {
+                format!(
+                    "{} · {}",
+                    localizer.text("audio-rack-native-controlled-parameter"),
+                    display
+                )
+            })
+            .unwrap_or_else(|| localizer.text("audio-rack-native-controlled-parameter"));
+        return Box::new(Label::new(text).muted());
+    };
     let target = can_edit
         .then(|| {
             crate::app_ui::audio_processor_rack::static_parameter_target(rack, processor, parameter)
@@ -2352,7 +2390,7 @@ pub(super) fn audio_processor_static_parameter_control(
         let max = (numeric.soft_range.max.floor() as i64).clamp(hard_min, hard_max).max(min);
         let step = numeric.step.map_or(1, |value| value.round().max(1.0) as i64);
         numeric_slider_input_control_with_hard_range(
-            parameter.static_value as i64,
+            static_value as i64,
             min,
             max,
             hard_min,
@@ -2364,7 +2402,7 @@ pub(super) fn audio_processor_static_parameter_control(
         )
     } else {
         numeric_slider_input_control_with_hard_range(
-            parameter.static_value,
+            static_value,
             numeric.soft_range.min,
             numeric.soft_range.max,
             numeric.hard_range.min,
@@ -2548,6 +2586,32 @@ struct NumericSliderInputControl<T: mondrian_ui_widgets::NumberInputValue> {
 }
 
 impl<T: mondrian_ui_widgets::NumberInputValue> NumericSliderInputControl<T> {
+    fn adjust_slider_keyboard(
+        &mut self,
+        event: &mondrian_ui_core::UiEvent,
+        ctx: &mut mondrian_ui_core::widget::EventContext,
+    ) -> mondrian_ui_core::EventResult {
+        if !self.slider.is_enabled() || ctx.focus.focused_widget() != Some(self.slider.id()) {
+            return mondrian_ui_core::EventResult::Ignored;
+        }
+        let mondrian_ui_core::UiEvent::KeyDown { key, modifiers } = event else {
+            return mondrian_ui_core::EventResult::Ignored;
+        };
+        let Some(adjustment) =
+            mondrian_ui_widgets::NumericInputAdjustment::from_key(*key, *modifiers)
+        else {
+            return mondrian_ui_core::EventResult::Ignored;
+        };
+        // Finish the pointer gesture before the fresh discrete scalar command.
+        // The actual entry model, not the Slider ratio, owns this next value.
+        self.slider.finish_pointer_edit(ctx);
+        let result = self.input.adjust_unfocused_from_keyboard(adjustment, ctx);
+        if result == mondrian_ui_core::EventResult::Handled && self.synchronize_peers() {
+            ctx.request_repaint();
+        }
+        result
+    }
+
     fn synchronize_peers(&mut self) -> bool {
         let value = self.presented_value.get();
         let slider_changed = self.slider.set_value(value.ratio(self.soft_min, self.soft_max));
@@ -2580,6 +2644,9 @@ impl<T: mondrian_ui_widgets::NumberInputValue> Widget for NumericSliderInputCont
         event: &mondrian_ui_core::UiEvent,
         ctx: &mut mondrian_ui_core::widget::EventContext,
     ) -> mondrian_ui_core::EventResult {
+        if self.adjust_slider_keyboard(event, ctx) == mondrian_ui_core::EventResult::Handled {
+            return mondrian_ui_core::EventResult::Handled;
+        }
         let result = if self.input.event(event, ctx) == mondrian_ui_core::EventResult::Handled {
             mondrian_ui_core::EventResult::Handled
         } else {
@@ -2589,6 +2656,14 @@ impl<T: mondrian_ui_widgets::NumberInputValue> Widget for NumericSliderInputCont
             self.after_child_event(event, ctx);
         }
         result
+    }
+
+    fn before_child_event(
+        &mut self,
+        event: &mondrian_ui_core::UiEvent,
+        ctx: &mut mondrian_ui_core::widget::EventContext,
+    ) -> mondrian_ui_core::EventResult {
+        self.adjust_slider_keyboard(event, ctx)
     }
 
     fn after_child_event(

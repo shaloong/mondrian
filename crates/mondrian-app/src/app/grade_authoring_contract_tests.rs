@@ -241,9 +241,15 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
             .evaluate(TimelineTime::ZERO)
             .expect("compile hierarchy");
         mondrian_effects::apply_compiled_effect_graph_rgba_f32(
-            &[[0.125, 0.25, 0.75, 0.375], [0.75, 0.5, 0.125, 0.0]],
-            2,
-            1,
+            mondrian_effects::EffectFloatFrameView::new(
+                mondrian_effects::EffectFrameExtent::new(2, 1),
+                mondrian_effects::EffectValueFormat::new(
+                    mondrian_effects::EffectWorkingPrecision::Float32,
+                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                    mondrian_core::ColorFrameAlpha::StraightCoverage,
+                ),
+                &[[0.125, 0.25, 0.75, 0.375], [0.75, 0.5, 0.125, 0.0]],
+            ),
             &compiled,
             0,
         )
@@ -251,8 +257,12 @@ fn grade_graph_relative_resources_bind_once_and_survive_undo_and_reopen() {
     };
     let pixels = execute(&state);
     assert_eq!(
-        pixels,
-        vec![[0.75, 0.25, 0.125, 0.375], [0.75, 0.5, 0.125, 0.0]],
+        pixels.format().alpha(),
+        mondrian_core::ColorFrameAlpha::StraightCoverage
+    );
+    assert_eq!(
+        pixels.pixels(),
+        &[[0.75, 0.25, 0.125, 0.375], [0.75, 0.5, 0.125, 0.0]],
         "LUT transforms fractional RGB, preserves alpha and zero-alpha hidden RGB"
     );
     state.dispatch_action(Action::Undo).expect("Undo");

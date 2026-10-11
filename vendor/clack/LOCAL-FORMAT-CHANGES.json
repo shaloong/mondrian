@@ -1,0 +1,321 @@
+{
+  "schema": 1,
+  "status": "REPLAYED_LOCAL_FORMAT_AND_DECLARED_SOURCE_CORRECTIONS_NOT_RUNTIME_QUALIFICATION",
+  "rustfmt_sha256_raw": "84abd1fa0d8e9e0dd4c2bce3544e650b4137ee87ec8179e8e16dbb974af11db0",
+  "files": [
+    {
+      "path": "common/src/events/event_types/midi.rs",
+      "preimage_sha256_raw": "dd187fa491d08a1b31c392980d736630839192731a6226f1f6cdd181c76705af",
+      "shipped_sha256_raw": "fd42a42e6559f6a013845716e3026b69064980865e0a177859c5a22745effa3c",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/events/event_types/note.rs",
+      "preimage_sha256_raw": "db26144b0ed735ba4381c5f48910ded147533a599cf272fe19e67fcf32b79be8",
+      "shipped_sha256_raw": "a5ba5d27dcb55e43eb00202f57e6643f022ded3462420e96e989b05d9aef91b7",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/events/event_types/note_expression.rs",
+      "preimage_sha256_raw": "7d8d9254962063732c60fac38f5266ae7a95b4acab6b41607415960695dd23ef",
+      "shipped_sha256_raw": "04592f86a7d1ce8dc93bbacd96431f266dd3593e9c969d367ac01954741321cd",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/events/event_types/param_value.rs",
+      "preimage_sha256_raw": "ef434dd10480c64417f56345691bb68e25473bb8544db09802bc2e896ddb0566",
+      "shipped_sha256_raw": "bf16c97a02300637a4d99b38233ddf57c3d290a09f5802f72b1d82001af1da61",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/events/event_types/transport.rs",
+      "preimage_sha256_raw": "c3211a1b7656c30b303e9adbd0e8affc78d057d31a6ca398c32366df6697d3eb",
+      "shipped_sha256_raw": "1af9fb8cb1d4685b054327cfc63f0cc75384922ed8407e55fe84e5d776db1f76",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/events/header.rs",
+      "preimage_sha256_raw": "5e2ef5eb12d32c8267270ffb2a91fd56d22f92bf6b63e001374c7f4def00e2a7",
+      "shipped_sha256_raw": "081b692c86f818d02b384aef907051426dbadf0abec68528e2a69ba7b80f751f",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/ambisonic.rs",
+      "preimage_sha256_raw": "526ddc5468e17a318ed6f6b7fc013b225dbc4ade3df83b077ff2f10d57a7a80d",
+      "shipped_sha256_raw": "6161cac552a18c720084d2eda934a80d6522331ec801033fb742b3b99e854e7b",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/audio_ports.rs",
+      "preimage_sha256_raw": "a0e8f6d56e6c153ebb32d193023f100bebf78c4898b4cda8ec96dd3c908d34a3",
+      "shipped_sha256_raw": "3f2091230202e7128a1a893efcfc4864787f4fbb464e9c0c9b5a4e669e840d78",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/context_menu.rs",
+      "preimage_sha256_raw": "273df4721e62ca1de1a61601a7fe211d3d3a293361e4f32db2ecec2beb93c724",
+      "shipped_sha256_raw": "3c4ce8c5d724e6c75c95e23cfd8a9470ceb645feac11c2240e706c7f63ccf07d",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/context_menu/item.rs",
+      "preimage_sha256_raw": "1ce9f2c06326b4eb8ec6a93adf67b0856e5c67c2fcabd1dcfb42567ba0857442",
+      "shipped_sha256_raw": "f1584eb1ea8897c4997ffc9c199eade9d2987e3e4c9f5f7e0113a42f91ad0a22",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/gui/window.rs",
+      "preimage_sha256_raw": "97966d5563bb6f4cd5038c114faba4f88a91e588092999d2c56b6d8e80f6e07c",
+      "shipped_sha256_raw": "4fe7d59b841255d74c9f467bf25c553d2f032f432a30b4471ab8d0724f256f19",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/log.rs",
+      "preimage_sha256_raw": "569904d8d62fce6f498ca4a73428428dab3950900b3c550fa0a6a04c2dccbb48",
+      "shipped_sha256_raw": "97eab910a8f27b47ce2aff90b7bf2c416e1d43004415374a968f3c5b81db0866",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/log/host.rs",
+      "preimage_sha256_raw": "7ebe05b6618f9a33c8b9d8a18aa443c65a66f0e0581b060db6046cce91e40289",
+      "shipped_sha256_raw": "7aac383bb7289d2b78749ecfd9f5042da8563e75ebc2a4b52d2ae0e99c86f2a3",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/note_name.rs",
+      "preimage_sha256_raw": "e8734ac3ee4b9502f76528238225c1cf614dbad81d62399515d6ae7a8d480f4e",
+      "shipped_sha256_raw": "8556c0c4b1d65437f057b630a9d50162493cc5b1e9e8fea03053f8d006fb684b",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/note_ports.rs",
+      "preimage_sha256_raw": "00f102e19cea83ace0c2673d851ef0b2783b20f78c7d075ffd3a958e8f9c972f",
+      "shipped_sha256_raw": "5fdc7da7e24d1189694b79331f1033e11d660eda4ca3e6e34ea9e54ded25f5e5",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/param_indication.rs",
+      "preimage_sha256_raw": "dba08c647b67952f25ac8199b802b44358b4f1836912a76a317f9a81a4f19714",
+      "shipped_sha256_raw": "5dcf00346c8eba79a1120503332c73010ab83bfe55b706b49e7b5d5041030c77",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/params.rs",
+      "preimage_sha256_raw": "62dc6272ecd3cbb930d349516b355c73e20b3abda270d45c75c0442a1dc2b96a",
+      "shipped_sha256_raw": "c6fd1df9c8240e63f2c2a915796062283ef37e8dc8c828f83cd20b8293a595c9",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/posix_fd.rs",
+      "preimage_sha256_raw": "d2732eec8d313dd62286d843640a4b6eeae40b8e24178e838c7a0b48e4b7acdb",
+      "shipped_sha256_raw": "1f30892076b68e7d065a03490fdc78a60863f996b24df4bdc7505e5c88d3ff68",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/preset_discovery/preset_data.rs",
+      "preimage_sha256_raw": "b805234aa85a47cd769574ee8ec953cfdc4cde50ba44ba93163cf9a916db821a",
+      "shipped_sha256_raw": "97f0cd9cf882cc51ada469581181bbda76da6d2f0e750da38e42a32762af45e3",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/state_context.rs",
+      "preimage_sha256_raw": "e08a3e3cdc7cc0e3f05074629fc0bf7039593734466c75fb16a9eac3e31ab71d",
+      "shipped_sha256_raw": "0ab409e9e32204677cfa907e31aaa4d0ab7365c2925edafd728e58814a687b4b",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/surround.rs",
+      "preimage_sha256_raw": "de944935215e0297aa0ae54f4d27743dcb9241b84dcfc2f8a9e2759f501359a0",
+      "shipped_sha256_raw": "a0c23861cd9acedb09f81152430c66972f9697c593dde69bcb65ad8e09cc1f9f",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/track_info.rs",
+      "preimage_sha256_raw": "255d9d8244ecbcd3250d871bda14e7bed1efa2f2f7962dbf57fc75cc571e74a1",
+      "shipped_sha256_raw": "8fdd18c3ab77599619fc56232b38db0b4b1f441754096e106a49f3b580e31f05",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "extensions/src/voice_info.rs",
+      "preimage_sha256_raw": "0966fce695775434eede02e226648c93cf3315d592f78b748684debcafd6ef5b",
+      "shipped_sha256_raw": "2232c6a71148b2a8c0ddd0a7a26fc43b86870340412c2426d9516e445283b8a0",
+      "corrections": [
+        "Move ABI constant import after inner module documentation; unchanged import bytes"
+      ],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/entry.rs",
+      "preimage_sha256_raw": "2f7fd3eac5875263552ea9897030f34234213efcf1b60638eb501e3dde1c5c18",
+      "shipped_sha256_raw": "0c8490fa42e5ddbeb66372a381252d40eabe468537eef9286bfe4bfb41c01380",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/entry/cache.rs",
+      "preimage_sha256_raw": "9cc1faa65c0c885d5a95cea1dff19e87cb055ca28c434802722b92004b2d7046",
+      "shipped_sha256_raw": "950d463a7bd6ae3c2c1adc1600356c2b0f08650613e33ba0bba34f08837ba89e",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/entry/entry_provider.rs",
+      "preimage_sha256_raw": "3554f8e58be3e94eba85eb6bb5551e0db111a74a2329f53597f0f14bab5b42ae",
+      "shipped_sha256_raw": "b38bfb3bbf525c7afab4833ef24edc68730b9bb06ad80a4bc46cef2848390ba2",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/entry/library.rs",
+      "preimage_sha256_raw": "f7a2db2b7ffa0c6e6156b1331f999d0a1f688b4bb5654a4b2d9761659de29a35",
+      "shipped_sha256_raw": "d2b85fafd0add7e5905a9bdd813f9ae247e8a5758506c8ae666b1aed9c7f14af",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/entry/loaded_entry.rs",
+      "preimage_sha256_raw": "2fb474dfe5b6af13f8d7475fe30b377168efd9168932563d5910fa96e099807b",
+      "shipped_sha256_raw": "a1e263c2cd197322fc5cde179cf5486f56a5b2bd07f1e4a75d49f45117fd2c13",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/extensions/wrapper.rs",
+      "preimage_sha256_raw": "7954fd15f9e5a64d1a8475d45e57981e98584bc81d77cd50c70dfb271fea5cd5",
+      "shipped_sha256_raw": "6cb04ba00342e5716bff8344d434ff59fe3d17143c4fa286d7edc1989d9a4117",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/plugin.rs",
+      "preimage_sha256_raw": "0a44b9101d4a2910ef6b7be123a5b77d4b8b35e4160b166f0486f6a3f457e8fe",
+      "shipped_sha256_raw": "0d0240984d73a4998a6a86fdf377ff1fa3ff50523be9f7716801eeb9b3a13b75",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/plugin/instance.rs",
+      "preimage_sha256_raw": "fc049df277e65608f2753b9a9a16f729e6a6bdc5dd3323bcda77faaf0ea6ef45",
+      "shipped_sha256_raw": "10cd0cfff9e45afb9455c3040066e5041774c3b37620532aa307c71cce327129",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/process/audio_buffers.rs",
+      "preimage_sha256_raw": "b8469112a17d064f0c8bb02cdff99f6f39a1321f8b06486fdf57e5b06dbc440c",
+      "shipped_sha256_raw": "2c46eb9c61c6e9e7f080edc4e606472e44b6c829946e48f3f07d9ac06c427398",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/src/storage.rs",
+      "preimage_sha256_raw": "2c7db3f612781665cb1b0d5bfe63352694d7bb5835fe563813d5c549b36a41bd",
+      "shipped_sha256_raw": "c9c16ef728dcbba15ca725fa4b4d40280179e65d66f1ac900709edf9d2fbff3b",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/tests/sdk-storage.rs",
+      "preimage_sha256_raw": "3e452393814064c227600369469465813ebb7704f8ce80e50ce9357266f774f0",
+      "shipped_sha256_raw": "dfcc06e9b65ccd355858e5e6c453391bf0c0f816b1eaa96928a947259e91b646",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "host/tests/log_observation.rs",
+      "preimage_sha256_raw": "8ed11aa1cac138250e526de7750d6e7d8344b360afff6f5bf58bce129450ad8f",
+      "shipped_sha256_raw": "adea3c77644c8d75627a6c3b665f0aed8d9608f8aa20f23c0d89337500bc4f15",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    },
+    {
+      "path": "common/src/utils/abi_field_values.rs",
+      "preimage_sha256_raw": "c13eb945d47172f26131e8e75c35bfb3d391aaab42ffbdbddba47a1b412275bf",
+      "shipped_sha256_raw": "c24b934f1923b9d379e5cf96e4eafd50f4aa43e6f5f9ba2bf8dc11aecd6a0ac3",
+      "corrections": [],
+      "format_config": "vendor/clack/rustfmt.toml",
+      "format_config_sha256_raw": "b4508a3071526d33a9a324582875887adce45d7d95028a3502dc50a36e2ab815"
+    }
+  ],
+  "official_inputs_unchanged": true,
+  "generated_raw_unchanged": true
+}

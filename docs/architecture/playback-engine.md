@@ -2581,10 +2581,12 @@ through completion without acquiring Current protection. Retiring an evaluation
 or evicting a Frame Store entry therefore cannot make in-flight source bytes
 disappear from the physical ledger; completion drops the same shared leases.
 
-The standalone `preview_visual_protocol` test target compiles the same
-`preview_media_residency` lease carrier as App and its visual worker. The carrier
-is independent of decoded-frame/color adaptation, so protocol tests retain real
-Frame Store resource and protection leases without a substitute payload type.
+Preview protocol tests run in the owning App library module context. They use
+the actual `preview_media_residency` lease carrier and visual worker, including
+native GUI and processor feedback dependencies. The carrier remains independent
+of decoded-frame/color adaptation; tests retain real Frame Store resource and
+protection leases without substitute payload types. App internal source is not
+recompiled under a separate example module tree.
 
 Window `Current` GPU presentation reads the exact active-generation artifact
 from the production Preview owner after validating the physical Window slot.
@@ -2702,3 +2704,99 @@ Its wait fixture represents a completed whole queue as a persistent state,
 not a consumable sequence that idle polls can exhaust. It retains the bounded
 nonblocking handoff, independent native readiness, real join and exactly-once
 resource release assertions; product retirement deadlines are unchanged.
+
+### Frozen transport during native audio reconfiguration
+
+`HoldingForAudioConfiguration` retains play intent and the exact accepted
+subframe phase while a native processor blocks the next root window. Engine
+issues an opaque ticket naming its Epoch, Media generation and local hold
+serial. Ticks, expired startup deadlines, ordinary device observations and
+configuration completion do not advance or release this hold. Viewer receives
+a persistent demand for the frozen coordinate; decoder ownership remains in
+the active playback family. An explicit pause, stop, seek or new Epoch retires
+the ticket. A superseding pending Media generation receives a fresh ticket
+without clock advancement. Playback Evidence schema 7 records this state's
+residency separately from running playback and recovery.
+
+The first snapshot closes moving-clock authority provisionally. After Media
+acknowledges the exact output-deactivation token, App projects one coherent
+final callback snapshot using its paired old activation anchor. Engine accepts
+it only for the current ticket/Epoch and qualified old stream, sample rate,
+monotonic consumption and bounded uncertainty. If no usable device proof is
+available, the previously accepted authority remains frozen. Finalization
+updates the sample anchor once and keeps the hold. Callback-consumption
+evidence retains its existing estimate grade; it is not hardware DAC drain
+evidence. Pending retirement uses a bounded 2 ms Engine wake; after final
+acknowledgement it introduces no clock-poll timer.
+
+This layer provides no candidate-install or resume API. Native control service,
+complete old/new host-owner peak admission, sole prepared-plan/PDC installation
+and a fresh generation's device-ready preroll are still required before a
+future resume transition can restore Audio Device clock authority.
+
+Current Media pending generation admits both provisional Required and final
+Quiesced notices. A seek/source retirement invalidates old queued notices before
+Engine mutation. Unrepresentable final sample arithmetic does not invalidate the
+exact software callback acknowledgement: the accepted phase is finalized without
+refinement and retirement polling ends while playback remains held. Adjacent
+device evidence uses the canonical elapsed/rate and uncertainty bounds.
+
+
+## Finalized native configuration result stays paused
+
+A product service completion may use `finish_native_audio_control_hold_paused`
+only after it matches the exact Media renderer/pending-generation and a genuinely
+quiesced, graph/PDC/resource-validated configuration candidate. Engine additionally
+requires its current hold ticket, epoch and completed final callback observation.
+It preserves `hold.phase_ns` when leaving the wait as `Paused`; reconstructing the
+anchor from FramePosition would discard a subframe audio sample phase. This ends
+the hot hold polling obligation without creating a running clock or admitting PCM.
+Paused phase queries read this same accepted anchor at every later timestamp.
+A typed Seek replaces it through ordinary transport intent; explicit Play creates
+a fresh epoch in Priming with the normal frozen Synthetic preroll anchor.
+Neither path selects Audio Master without its independent qualification.
+
+The operation supplies clock authority only. It is not native configuration,
+candidate ownership transfer, DSP-history restoration or full service integration.
+Old generated cursor/PCM facts remain a separate Media/runtime obligation. A later
+explicit Play/seek uses the normal fresh continuity generation, PDC/state-entry and
+physical callback/preroll qualification before selecting Audio Master.
+
+
+### Native audio control hold accessors
+
+The canonical cleanup/configuration hold uses `native_audio_control_hold_ticket`,
+`finalize_native_audio_control_hold`, and `finish_native_audio_control_hold_paused`.
+They read, finalize, and settle the same `NativeAudioControlHoldTicket` issued by
+the Playback Engine. Residency evidence uses `native_audio_control_hold_us` for
+`HoldingForNativeAudioControl`. These accessors do not issue native editor or
+authoring permission.
+
+## Native author discontinuity and transport intent
+
+Shared opaque editing may admit a real whole-root DSP discontinuity after output
+quiescence. The finalized native control ticket retains the exact accepted
+subframe phase. Only that still-current ticket can complete into a fresh epoch,
+ordinary Priming and Synthetic preroll. Later user Pause, Seek or Stop retires
+the ticket; historical native completion cannot restart transport. A paused
+editor operation does not fabricate prior Play intent or preserved DSP state.
+
+### Owned CPU working pixels through Viewer submission
+
+The existing Frame Store issues a move-only Viewer work reservation before a
+CPU working request is queued. Completion binds the actual Float32 Vec capacity;
+growth beyond the admitted result reservation is refused. The shared resource
+lease follows the immutable allocation through result transport, Store residency,
+exact detachment and the existing GPU candidate/submission owner. Cache clearing
+or eviction cannot release externally owned pixels. The final lease releases its
+byte charge even after the Store has been dropped. Viewer aggregate diagnostics
+include live work/results and detached owners as well as ordinary raster cache
+entries. Budget reductions report retained overcommit and refuse more work until
+owners retire; they do not manufacture reclaimed memory.
+
+These bytes cover the known immutable working pixel allocation. Existing CPU
+active/scratch and GPU recording grants remain required. Bounded transport/lease
+metadata, Arc allocation bookkeeping, allocator rounding, device/driver resources
+and OS memory remain separate coverage; this is not whole-process physical peak
+or realtime acceptance. A persisted-frame cache and Viewer may conservatively
+charge shared storage under their own grants while both retain it.

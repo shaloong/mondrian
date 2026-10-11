@@ -888,6 +888,9 @@ impl AppUiHost {
     /// Evaluate and arbitrate the Window CPU/current-output projection before
     /// Widget models can observe it.
     fn refresh_window_preview_state(&self) {
+        // First admission must see the real current control subtree/panel;
+        // startup intentionally queues no native Render before RootBuilt.
+        self.sync_native_visual_gui_presence();
         {
             let state = self.app_state.borrow();
             if state.is_playing() && state.pending_playback_frame_demand_identity().is_none() {
@@ -1190,8 +1193,44 @@ impl AppUiHost {
             .refresh_playback_frame_from_app_state(&state, Some(&window_preview_snapshot));
     }
 
+    pub(crate) fn sync_native_visual_gui_presence(&self) {
+        self.preview_service.set_native_visual_gui_registry(
+            self.root.native_visual_gui_registry(),
+            self.mode == AppUiMode::Workspace
+                && !self.app_state.borrow().project_close_blocks_actions()
+                && self.root.is_panel_active(mondrian_editor_state::state::PanelKind::Inspector),
+        );
+    }
+
+    /// Read actual Preview admission facts without issuing work or a presentation ticket.
+    #[cfg(feature = "validation")]
+    pub(crate) fn validation_question_preview_observation(&self) -> String {
+        let state = self.app_state.borrow();
+        let diagnostics = self.preview_service.diagnostics();
+        format!(
+            "mode={:?}; inspector={}; viewer_geometry={:?}; viewer_state={:?}; demand={:?}; playing={}; gui_presence={:?}; render_requests={}; gpu_requests={}; gpu_loading={}; gpu_unavailable={}; last_gpu_loading={:?}; unavailability={:?}; visual_failed={}; callbacks={:?}; generation={}",
+            self.mode,
+            self.root.is_panel_active(PanelKind::Inspector),
+            self.viewer_presentation_geometry(),
+            self.window_preview_state.borrow(),
+            state.pending_playback_frame_demand_identity(),
+            state.is_playing(),
+            self.root.native_visual_gui_registry().validation_presence(),
+            diagnostics.render_requests,
+            diagnostics.gpu_preview_candidate_requests,
+            diagnostics.gpu_preview_candidate_loading,
+            diagnostics.gpu_preview_candidate_unavailable,
+            diagnostics.last_gpu_loading_reason,
+            diagnostics.unavailability,
+            diagnostics.visual_execution_health_failed,
+            diagnostics.work_callbacks,
+            diagnostics.preview_execution_generation,
+        )
+    }
+
     /// Poll background host tasks without conflating repaint and drain policy.
     pub(crate) fn poll_background_tasks(&mut self, bounds: Rect) -> AppUiBackgroundTaskPollOutcome {
+        self.sync_native_visual_gui_presence();
         let resource_inspection_changed = self.poll_resource_inspection();
         // Keep the waveform service's library reference in sync with the
         // current app state (e.g. when a new project opens).
@@ -1275,6 +1314,7 @@ impl AppUiHost {
         }
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
+        let native_question_changed = self.poll_native_visual_questions();
         let waveform_changed = self.waveform_service.poll_finished();
         let transport_model_changed = preview_outcome.transport_change;
         if transport_model_changed {
@@ -1299,7 +1339,7 @@ impl AppUiHost {
             || waveform_changed;
         let mut outcome =
             AppUiBackgroundTaskPollOutcome::from_changes(full_model_changed, preview_outcome);
-        outcome.repaint_required |= audio_devices_changed;
+        outcome.repaint_required |= audio_devices_changed || native_question_changed;
         outcome.repaint_required |= self.root.expire_notifications(Instant::now());
         outcome.quit_requested = quit_requested;
         if !full_model_changed {
@@ -1312,6 +1352,75 @@ impl AppUiHost {
         self.refresh_if_dirty(bounds);
         self.sync_playback_feedback_from_viewer();
         outcome
+    }
+
+    fn poll_native_visual_questions(&mut self) -> bool {
+        let mut changed = self.root.retire_stale_native_visual_question();
+        if let Some(presentation) = self.preview_service.take_native_visual_question() {
+            let current_author = self
+                .app_state
+                .borrow()
+                .native_visual_author_view_is_current(presentation.author_view());
+            if self.mode == AppUiMode::Workspace
+                && current_author
+                && self.root.is_panel_active(mondrian_editor_state::state::PanelKind::Inspector)
+            {
+                changed |= self.root.show_native_visual_question(presentation);
+            } else {
+                // Service unavailability is a legal native Failed reply. It
+                // never fabricates cancellation, faults or authored mutation.
+                presentation.dismiss();
+            }
+        }
+        changed
+    }
+
+    pub(crate) fn painted_native_visual_question(
+        &self,
+    ) -> Option<crate::app::preview_native_gui::NativeVisualQuestionPresentation> {
+        self.root.painted_native_visual_question()
+    }
+
+    /// A paint is not presentation. Only the actual Window surface receipt may
+    /// start human-wait budgeting for this original opaque Question delivery.
+    pub(crate) fn finish_native_visual_question_surface(
+        &self,
+        painted: Option<crate::app::preview_native_gui::NativeVisualQuestionPresentation>,
+        result: crate::app_ui::rendering::AppUiFrameResult,
+    ) {
+        let Some(presentation) = painted else {
+            return;
+        };
+        if self.mode != AppUiMode::Workspace
+            || !self.root.is_panel_active(mondrian_editor_state::state::PanelKind::Inspector)
+            || !self
+                .app_state
+                .borrow()
+                .native_visual_author_view_is_current(presentation.author_view())
+        {
+            presentation.dismiss();
+            return;
+        }
+        match result {
+            crate::app_ui::rendering::AppUiFrameResult::Presented {
+                uploaded_resources: false,
+                diagnostics,
+                ..
+            } if diagnostics.text_missing_glyphs == 0 => {
+                presentation.presented();
+            }
+            crate::app_ui::rendering::AppUiFrameResult::Presented {
+                uploaded_resources: true,
+                diagnostics,
+                ..
+            } if diagnostics.text_missing_glyphs == 0 => {
+                // Existing render policy requests the deterministic atlas
+                // follow-up; the service remains Pending until its receipt.
+            }
+            _ => {
+                presentation.dismiss();
+            }
+        }
     }
 
     pub(crate) fn native_audio_control_next_wake_delay(&self) -> Option<Duration> {
@@ -4331,6 +4440,8 @@ mod tests {
             AppUiPreferences::default(),
             temp_preferences_path("transport-preview-free-refresh"),
         );
+        host.refresh_if_dirty(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(!host.preview_dirty.get());
         let pending = PendingUiActions::default();
         let before_render_requests = host.preview_service.diagnostics().render_requests;
 
@@ -4388,6 +4499,8 @@ mod tests {
     fn transport_action_while_preview_pending_cancels_obsolete_work() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = workspace_host_without_preview_workers("transport-cancel-preview-work");
+        host.refresh_if_dirty(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(!host.preview_dirty.get());
         host.preview_service.seed_pending_preview_work_for_test();
         let before_render_requests = host.preview_service.diagnostics().render_requests;
         assert_eq!(
@@ -4528,6 +4641,12 @@ mod tests {
             AppUiPreferences::default(),
             temp_preferences_path("buffering-defer-gpu-prepare"),
         );
+        host.refresh_if_dirty(Rect::new(0.0, 0.0, 1280.0, 720.0));
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            crate::app_ui::panels::ViewerPreviewState::Transparent
+        ));
+        assert_eq!(host.playback_feedback, ViewerPlaybackFeedback::Ready);
         host.app_state.borrow_mut().play().expect("play");
         {
             let state = host.app_state.borrow();
@@ -9758,8 +9877,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(media_root);
     }
 
+    #[derive(Clone, Default)]
+    struct HostRelinkMemoryProbe {
+        critical: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl mondrian_platform::ProcessMemoryProbe for HostRelinkMemoryProbe {
+        fn process_memory(
+            &self,
+            scope: mondrian_platform::ProcessMemoryScope,
+        ) -> mondrian_platform::ProcessMemoryProbeResult {
+            let backend = match scope {
+                mondrian_platform::ProcessMemoryScope::CurrentProcess => {
+                    mondrian_platform::ProcessMemoryProbeBackend::WindowsCurrentProcessStatus
+                }
+                mondrian_platform::ProcessMemoryScope::ProductProcessTree => {
+                    mondrian_platform::ProcessMemoryProbeBackend::WindowsToolhelpProcessTree
+                }
+            };
+            let bytes = 64 * 1024 * 1024;
+            mondrian_platform::ProcessMemoryProbeResult::observed(
+                scope, backend, 1, 1, bytes, bytes, bytes,
+            )
+        }
+    }
+
+    impl mondrian_platform::SystemMemoryProbe for HostRelinkMemoryProbe {
+        fn current_system_memory(&self) -> mondrian_platform::SystemMemoryProbeResult {
+            let critical = self.critical.load(Ordering::Acquire);
+            mondrian_platform::SystemMemoryProbeResult::observed(
+                mondrian_platform::SystemMemoryProbeBackend::WindowsGlobalMemoryStatus,
+                16 * 1024 * 1024 * 1024,
+                if critical {
+                    128 * 1024 * 1024
+                } else {
+                    14 * 1024 * 1024 * 1024
+                },
+                if critical { 99 } else { 12 },
+            )
+        }
+    }
+
+    fn poll_host_until_relink_memory_pressure(
+        host: &mut AppUiHost,
+        expected: crate::app::execution_resource_coordination::ExecutionResourcePressure,
+    ) {
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            host.poll_background_tasks(bounds);
+            let state = host.app_state();
+            let decision = state.execution_resource_decision();
+            if decision.pressure == expected
+                && decision.pressure_source
+                    == crate::app::execution_resource_coordination::ExecutionResourcePressureSource::NativeMemory
+            {
+                let observation = decision.memory_observation.as_ref().expect("observed memory");
+                assert!(observation.product_process_tree.is_complete_for(
+                    mondrian_platform::ProcessMemoryScope::ProductProcessTree
+                ));
+                assert!(observation.system.available_physical_bytes.is_some());
+                assert!(observation.system.error.is_none());
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "scripted pressure did not reach {expected:?}; decision={decision:?}"
+            );
+            drop(state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn host_background_poll_commits_prepared_asset_relink() {
+        assert_host_asset_relink_completion(false);
+    }
+
+    #[test]
+    fn host_background_poll_retains_asset_relink_until_native_pressure_recovers() {
+        assert_host_asset_relink_completion(true);
+    }
+
+    fn assert_host_asset_relink_completion(hold_for_critical_pressure: bool) {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let library_root = temp_asset_library_dir("asset-relink-poll-library");
         let media_root = temp_asset_library_dir("asset-relink-poll-media");
@@ -9769,13 +9969,26 @@ mod tests {
         write_minimal_wav(&original_path);
         write_minimal_wav(&replacement_path);
         let library = AssetLibrary::open(library_root.clone()).expect("open asset library");
+        let memory_probe = HostRelinkMemoryProbe::default();
         let mut state = workspace_app_state();
+        state
+            .test_start_execution_memory_probe(memory_probe.clone())
+            .expect("start memory input");
         state.test_set_asset_library(Some(library));
         state
-            .start_media_import_batch(vec![original_path], None)
+            .start_media_import_batch(vec![original_path.clone()], None)
             .expect("admit original import");
-        let mut host = AppUiHost::new(state);
+        let preferences_path = temp_preferences_path("asset-relink-poll");
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
         poll_host_background_tasks_until_imports_idle(&mut host);
+        poll_host_until_relink_memory_pressure(
+            &mut host,
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Nominal,
+        );
         let asset_id = host
             .app_state()
             .asset_library()
@@ -9783,6 +9996,15 @@ mod tests {
             .list_assets()
             .expect("list assets")[0]
             .id;
+
+        if hold_for_critical_pressure {
+            memory_probe.critical.store(true, Ordering::Release);
+            poll_host_until_relink_memory_pressure(
+                &mut host,
+                crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+            );
+            assert!(!host.app_state().media_asset_mutation_diagnostics().dispatch_enabled);
+        }
 
         host.app_state
             .borrow_mut()
@@ -9799,6 +10021,42 @@ mod tests {
         );
 
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        if hold_for_critical_pressure {
+            let queued = host.app_state().media_asset_mutation_diagnostics();
+            assert_eq!(queued.queued, 1);
+            assert_eq!(queued.running, 0);
+            assert_eq!(queued.outstanding, 1);
+            assert_eq!(queued.transport_occupied, 1);
+            assert!(queued.worker_available);
+            assert!(!queued.worker_unexpectedly_exited);
+            assert!(!queued.dispatch_enabled);
+            assert!(queued.terminals.is_empty());
+            host.poll_background_tasks(bounds);
+            let retained = host.app_state().media_asset_mutation_diagnostics();
+            assert_eq!(retained.generation, queued.generation);
+            assert_eq!(retained.queued, 1);
+            assert_eq!(retained.running, 0);
+            assert_eq!(retained.outstanding, 1);
+            assert_eq!(retained.transport_occupied, 1);
+            assert_eq!(retained.completions, 0);
+            assert!(retained.terminals.is_empty());
+            let original = host
+                .app_state()
+                .asset_library()
+                .expect("library")
+                .get_asset(asset_id)
+                .expect("query queued Asset")
+                .expect("queued Asset");
+            assert_eq!(
+                original
+                    .file_path()
+                    .expect("original file path")
+                    .canonicalize()
+                    .expect("original path"),
+                original_path.canonicalize().expect("canonical original path")
+            );
+            memory_probe.critical.store(false, Ordering::Release);
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut terminal_poll_requested_refresh = false;
         while host.app_state().media_asset_mutation_diagnostics().outstanding > 0 {
@@ -9809,12 +10067,19 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "timed out waiting for host Asset relink completion"
+                "timed out waiting for host Asset relink completion; mutation={:?}; resources={:?}; status={:?}",
+                host.app_state().media_asset_mutation_diagnostics(),
+                host.app_state().execution_resource_decision(),
+                host.app_state().status_hint(),
             );
             std::thread::sleep(Duration::from_millis(10));
         }
 
         assert!(terminal_poll_requested_refresh);
+        assert_eq!(
+            host.app_state().execution_resource_decision().pressure,
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Nominal
+        );
         let asset = host
             .app_state()
             .asset_library()
@@ -9835,6 +10100,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(library_root);
         let _ = std::fs::remove_dir_all(media_root);
+        let _ = std::fs::remove_file(preferences_path);
     }
 
     #[test]
@@ -10000,6 +10266,8 @@ mod tests {
             ))
             .expect("Gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = -18.4;
         let processor_id = processor.id;
         sequence
@@ -10091,6 +10359,8 @@ mod tests {
             mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
         )]
             .automation
+            .as_ref()
+            .expect("bound host curve")
             .default_value
     }
 
@@ -10294,7 +10564,7 @@ mod tests {
     fn inspection_native_host_fixture(
         name: &str,
     ) -> (
-        AppUiHost,
+        Box<AppUiHost>,
         crate::app::product_action::AudioProcessorInputQueryPayload,
         Arc<AtomicUsize>,
         std::sync::mpsc::Receiver<()>,
@@ -10339,20 +10609,22 @@ mod tests {
             ))
             .expect("Gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = -18.4;
         state.selection.selected_clips = vec![crate::app::SelectedClipRef {
             track_id: occurrence.track_id,
             clip_id: occurrence.clip_id,
             is_video_track: false,
         }];
-        let mut host = AppUiHost::new_with_preferences_path(
+        let mut host = Box::new(AppUiHost::new_with_preferences_path(
             state,
             AppUiPreferences {
                 locale_preference: crate::app_ui::localization::AppUiLocalePreference::ZhCn,
                 ..AppUiPreferences::default()
             },
             temp_preferences_path(name),
-        );
+        ));
         host.preview_service.shutdown();
         host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
         (host, query, calls, started, release)
@@ -10972,7 +11244,7 @@ mod tests {
     fn inspection_sidechain_host_fixture(
         name: &str,
     ) -> (
-        AppUiHost,
+        Box<AppUiHost>,
         crate::app::product_action::AudioProcessorInputQueryPayload,
         mondrian_core::AudioRouteId,
     ) {
@@ -11778,7 +12050,7 @@ mod tests {
     fn inspection_armed_move_host_fixture(
         name: &str,
     ) -> (
-        AppUiHost,
+        Box<AppUiHost>,
         crate::app::product_action::AudioProcessorInputQueryPayload,
         mondrian_ui_events::EventRouter,
         PendingUiActions,
@@ -13177,7 +13449,7 @@ mod tests {
         } else {
             let (host, scope_id, processor_id) =
                 inspection_host_fixture("numeric-local-history-confirm");
-            (host, scope_id, processor_id, None)
+            (Box::new(host), scope_id, processor_id, None)
         };
         if !refresh {
             let clip_id = host.app_state().selection.selected_clips[0].clip_id;
@@ -14395,7 +14667,7 @@ mod tests {
     }
 
     struct AudioScalarDragFixture {
-        host: AppUiHost,
+        host: Box<AppUiHost>,
         track_id: mondrian_core::TrackId,
         route_id: mondrian_core::AudioRouteId,
         panel: PanelKind,
@@ -14453,18 +14725,25 @@ mod tests {
 
         fn new(field: AudioScalarDragField) -> Self {
             if matches!(field, AudioScalarDragField::Sidechain) {
-                let (host, _, route_id) =
-                    inspection_sidechain_host_fixture("audio-scalar-sidechain-drag");
-                let track_id =
-                    host.app_state().active_sequence().expect("Sequence").audio_tracks[0].id;
-                return Self {
-                    host,
-                    track_id,
-                    route_id,
-                    panel: PanelKind::Inspector,
-                    field,
-                };
+                return Self::new_sidechain();
             }
+            Self::new_mixer(field)
+        }
+
+        fn new_sidechain() -> Self {
+            let (host, _, route_id) =
+                inspection_sidechain_host_fixture("audio-scalar-sidechain-drag");
+            let track_id = host.app_state().active_sequence().expect("Sequence").audio_tracks[0].id;
+            Self {
+                host,
+                track_id,
+                route_id,
+                panel: PanelKind::Inspector,
+                field: AudioScalarDragField::Sidechain,
+            }
+        }
+
+        fn new_mixer(field: AudioScalarDragField) -> Self {
             let mut state = workspace_app_state_with_timed_solid();
             let track_id = state.active_sequence().expect("Sequence").audio_tracks[0].id;
             let localizer =
@@ -14494,7 +14773,7 @@ mod tests {
             }
             .expect("fresh canonical scalar action");
             state.dispatch_action(action).expect("canonical fixture gain");
-            let mut host = AppUiHost::new_with_preferences_path(
+            let mut host = Box::new(AppUiHost::new_with_preferences_path(
                 state,
                 AppUiPreferences {
                     workspace_preset: WorkspacePreset::Audio,
@@ -14502,7 +14781,7 @@ mod tests {
                     ..AppUiPreferences::default()
                 },
                 temp_preferences_path("audio-scalar-mixer-drag"),
-            );
+            ));
             host.preview_service.shutdown();
             host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
             Self {
@@ -14793,5 +15072,606 @@ mod tests {
     #[test]
     fn typed_audio_scalar_route_keyboard_steps_keep_two_canonical_undo_entries() {
         assert_audio_scalar_keyboard_stays_discrete(AudioScalarDragField::Route);
+    }
+
+    fn numeric_keyboard_inspector_pair(
+        widget: &dyn Widget,
+        in_inspector: bool,
+        scalar: &mondrian_core::PropertyValue,
+    ) -> Option<(mondrian_ui_core::WidgetId, mondrian_ui_core::WidgetId)> {
+        use mondrian_core::PropertyValue;
+        use mondrian_ui_core::{AccessibilityRole, AccessibilityValue};
+        let in_inspector = in_inspector || widget.panel_kind() == Some(PanelKind::Inspector);
+        if in_inspector && widget.child_count() == 2 {
+            let slider = widget.child(0)?;
+            let input = widget.child(1)?;
+            let matches = slider.accessibility().is_some_and(|node| {
+                node.role == AccessibilityRole::Slider
+                    && match (node.value.as_ref(), scalar) {
+                        (
+                            Some(AccessibilityValue::Number { value, .. }),
+                            PropertyValue::Double(expected),
+                        ) => value.to_bits() == expected.to_bits(),
+                        (
+                            Some(AccessibilityValue::Integer { value, .. }),
+                            PropertyValue::Int(expected),
+                        ) => value == expected,
+                        _ => false,
+                    }
+            });
+            if matches
+                && input
+                    .accessibility()
+                    .is_some_and(|node| node.role == AccessibilityRole::TextInput)
+            {
+                return Some((slider.id(), input.id()));
+            }
+        }
+        (0..widget.child_count()).find_map(|index| {
+            widget
+                .child(index)
+                .and_then(|child| numeric_keyboard_inspector_pair(child, in_inspector, scalar))
+        })
+    }
+
+    #[test]
+    fn numeric_keyboard_gain_steps_outside_soft_range_in_real_host() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-keyboard-outside-soft");
+        // Fixture preparation only: establish a valid hard-range author baseline
+        // before the first user operation, without a setup Undo entry.
+        {
+            let mut state = host.app_state.borrow_mut();
+            let scope = state
+                .active_sequence_mut_uncommitted()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope");
+            let processor = scope
+                .processors
+                .processors
+                .iter_mut()
+                .find(|processor| processor.id == processor_id)
+                .expect("Processor");
+            processor
+                .parameters
+                .get_mut(&mondrian_core::ParameterId::new_static(
+                    mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                ))
+                .expect("Gain")
+                .automation
+                .as_mut()
+                .expect("bound host curve")
+                .default_value = -100.0;
+        }
+        host.refresh_root_models();
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let (slider, input) = numeric_keyboard_inspector_pair(
+            host.active_root(),
+            false,
+            &mondrian_core::PropertyValue::Double(-100.0),
+        )
+        .expect("real valid hard-range Gain pair");
+        let slider_key = rack_static_gesture_control_key(&mut host, slider);
+        let input_key = rack_static_gesture_control_key(&mut host, input);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider, &pending);
+        let original = host.app_state().active_sequence().expect("origin").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let mut snapshots = Vec::new();
+        for (key, expected) in [
+            (mondrian_ui_core::KeyCode::Right, -99.9_f64),
+            (mondrian_ui_core::KeyCode::Left, -100.0_f64),
+        ] {
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown { key, modifiers: Modifiers::none() },
+            );
+            let actual = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+            assert!((actual - expected).abs() <= 1e-10, "keyboard must step the current hard-range scalar in author units, independently of pointer soft coordinates; expected={expected}, actual={actual}");
+            for key in [&slider_key, &input_key] {
+                let node = numeric_accessibility_current_node(&mut host, key);
+                assert_eq!(
+                    numeric_accessibility_author_value(&node).to_bits(),
+                    actual.to_bits(),
+                    "both live peers expose the actual author scalar after each keyboard command"
+                );
+            }
+            assert!(router.captured().is_none());
+            assert!(!host.app_state().parameter_gesture_is_current());
+            snapshots.push(host.app_state().active_sequence().expect("step").clone());
+        }
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 2,
+            "each domain step is one discrete canonical author command"
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo second"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo second")
+            .author_state_eq_ignoring_revision(&snapshots[0]));
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo first"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo first")
+            .author_state_eq_ignoring_revision(&original));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo first"));
+        assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo second"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Redo all")
+            .author_state_eq_ignoring_revision(&snapshots[1]));
+    }
+
+    fn numeric_keyboard_integer_host_fixture() -> (AppUiHost, mondrian_core::ClipId, String) {
+        use mondrian_core::automation::PropertyDescriptor;
+        use mondrian_core::{
+            ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange,
+            ParameterUnit, PropertyValue,
+        };
+        use mondrian_effects::{
+            instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
+            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+        };
+        let kind = EffectType::Plugin("plugin.test.numeric_keyboard_wide_integer_host".to_owned());
+        let path = "plugin.test.numeric_keyboard_wide_integer_host.integer".to_owned();
+        let range = ParameterNumericRange { min: i64::MIN as f64, max: i64::MAX as f64 };
+        let property = PropertyDescriptor::new(
+            path.clone(),
+            "Exact integer",
+            PropertyValue::Int(9_007_199_254_740_993),
+        )
+        .with_parameter_id(kind.parameter_id("integer").expect("ParameterId"))
+        .with_numeric_contract(
+            ParameterUnit::Unitless,
+            ParameterNumericContract {
+                hard_range: range,
+                soft_range: range,
+                step: Some(1.0),
+                invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+            },
+        );
+        let builder = EffectPluginDefinitionBuilder::new(
+            kind.key(),
+            "Exact keyboard integer",
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_branching_graph(|_, _, graph| {
+            graph.apply(EffectRenderOp::Sharpen { amount: 0.0 });
+        })
+        .property(property);
+        register_effect_definition(builder.build()).expect("valid exact-integer definition");
+        let mut state = workspace_app_state();
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        let track_id = sequence.video_tracks[0].id;
+        let mut clip =
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).expect("Clip");
+        let clip_id = clip.id;
+        let parameter_id = kind.parameter_id("integer").expect("ParameterId");
+        clip.add_effect_node(instantiate_effect_node(kind).expect("Effect"));
+        let path = clip.effects[0]
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &parameter_id)
+            .map(|(path, _)| path.to_owned())
+            .expect("materialized exact integer property alias");
+        sequence.video_tracks[0].add_clip(clip).expect("install effect Clip");
+        state.selection.selected_clips =
+            vec![crate::app::SelectedClipRef { track_id, clip_id, is_video_track: true }];
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("numeric-keyboard-wide-integer"),
+        );
+        host.preview_service.shutdown();
+        host.preview_service = WindowPreviewAdapter::new_without_workers_for_test();
+        (host, clip_id, path)
+    }
+
+    fn numeric_keyboard_integer_author(
+        host: &AppUiHost,
+        clip_id: mondrian_core::ClipId,
+        path: &str,
+    ) -> i64 {
+        let state = host.app_state();
+        let property = state
+            .active_sequence()
+            .expect("Sequence")
+            .find_clip(clip_id)
+            .expect("Clip")
+            .effects[0]
+            .properties
+            .property(path)
+            .expect("exact integer property");
+        let mondrian_core::PropertyValue::Int(value) = property.static_value() else {
+            panic!("declared i64 author storage")
+        };
+        *value
+    }
+
+    #[test]
+    fn numeric_keyboard_integer_slider_preserves_unit_steps_in_real_host() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let (mut host, clip_id, path) = numeric_keyboard_integer_host_fixture();
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        let original = host.app_state().active_sequence().expect("origin").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        let initial = 9_007_199_254_740_993_i64;
+        let mut snapshots = Vec::new();
+        for (key, modifiers, expected) in [
+            (
+                mondrian_ui_core::KeyCode::Right,
+                Modifiers::none(),
+                initial + 1,
+            ),
+            (mondrian_ui_core::KeyCode::Left, Modifiers::none(), initial),
+            (
+                mondrian_ui_core::KeyCode::Right,
+                Modifiers::shift(),
+                initial + 10,
+            ),
+            (
+                mondrian_ui_core::KeyCode::PageDown,
+                Modifiers::none(),
+                initial,
+            ),
+        ] {
+            let current = numeric_keyboard_integer_author(&host, clip_id, &path);
+            let (slider, _) = numeric_keyboard_inspector_pair(
+                host.active_root(),
+                false,
+                &mondrian_core::PropertyValue::Int(current),
+            )
+            .expect("real exact integer Slider");
+            // General Inspector controls do not yet adopt Rack's retained focus
+            // keys. Re-focus the freshly projected control through actual Tab;
+            // this regression isolates domain stepping, not focus retention.
+            inspection_focus_by_tab(&mut host, &mut router, slider, &pending);
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown { key, modifiers },
+            );
+            let actual = numeric_keyboard_integer_author(&host, clip_id, &path);
+            assert_eq!(actual, expected, "keyboard must preserve exact integer unit steps without a floating slider roundtrip");
+            let (slider, input) = numeric_keyboard_inspector_pair(
+                host.active_root(),
+                false,
+                &mondrian_core::PropertyValue::Int(actual),
+            )
+            .expect("fresh current integer pair");
+            assert!(
+                matches!(numeric_accessibility_node(&mut host, slider).value, Some(mondrian_ui_core::AccessibilityValue::Integer { value, .. }) if value == actual)
+            );
+            let Some(mondrian_ui_core::AccessibilityValue::Text(text)) =
+                numeric_accessibility_node(&mut host, input).value
+            else {
+                panic!("numeric entry")
+            };
+            assert_eq!(text.parse::<i64>().expect("exact entry"), actual);
+            assert!(router.captured().is_none());
+            assert!(!host.app_state().parameter_gesture_is_current());
+            snapshots.push(host.app_state().active_sequence().expect("step").clone());
+        }
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 4
+        );
+        for expected in snapshots[..3].iter().rev().chain(std::iter::once(&original)) {
+            assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo exact keyboard step"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Undo exact step")
+                .author_state_eq_ignoring_revision(expected));
+        }
+        for expected in &snapshots {
+            assert!(host.app_state.borrow_mut().redo_timeline().expect("Redo exact keyboard step"));
+            assert!(host
+                .app_state()
+                .active_sequence()
+                .expect("Redo exact step")
+                .author_state_eq_ignoring_revision(expected));
+        }
+    }
+
+    #[test]
+    fn numeric_keyboard_hard_bound_noop_locale_and_coarse_keys_keep_author_ownership() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let (mut host, scope_id, processor_id) = inspection_host_fixture("numeric-keyboard-bounds");
+        {
+            let mut state = host.app_state.borrow_mut();
+            let scope = state
+                .active_sequence_mut_uncommitted()
+                .expect("Sequence")
+                .audio_program
+                .processing_scopes
+                .iter_mut()
+                .find(|scope| scope.id == scope_id)
+                .expect("Scope");
+            scope
+                .processors
+                .processors
+                .iter_mut()
+                .find(|processor| processor.id == processor_id)
+                .expect("Processor")
+                .parameters
+                .get_mut(&mondrian_core::ParameterId::new_static(
+                    mondrian_timeline::audio::GAIN_DB_PARAMETER_ID,
+                ))
+                .expect("Gain")
+                .automation
+                .as_mut()
+                .expect("bound host curve")
+                .default_value = -120.0;
+        }
+        host.refresh_root_models();
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let (slider, _) = numeric_keyboard_inspector_pair(
+            host.active_root(),
+            false,
+            &mondrian_core::PropertyValue::Double(-120.0),
+        )
+        .expect("Gain pair");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider, &pending);
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        assert_eq!(
+            router.route(
+                UiEvent::KeyDown {
+                    key: mondrian_ui_core::KeyCode::Left,
+                    modifiers: Modifiers::none()
+                },
+                &mut WidgetTreeView::new(host.active_root_mut()),
+                &|action| pending.push(action)
+            ),
+            mondrian_ui_core::EventResult::Handled
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+            -120.0
+        );
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_locale_changed_action(
+                crate::app_ui::localization::AppUiLocalePreference::EnUs,
+            ),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        for (key, modifiers, expected) in [
+            (mondrian_ui_core::KeyCode::Right, Modifiers::shift(), -119.0),
+            (mondrian_ui_core::KeyCode::PageUp, Modifiers::none(), -118.0),
+            (mondrian_ui_core::KeyCode::Home, Modifiers::none(), -120.0),
+            (mondrian_ui_core::KeyCode::End, Modifiers::none(), 24.0),
+        ] {
+            inspection_key_event(
+                &mut host,
+                &mut router,
+                &pending,
+                bounds,
+                UiEvent::KeyDown { key, modifiers },
+            );
+            assert_eq!(
+                inspection_scope_gain(&host.app_state(), scope_id, processor_id),
+                expected,
+                "locale refresh retains the exact typed keyboard owner and hard endpoint"
+            );
+        }
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 4
+        );
+    }
+
+    #[test]
+    fn numeric_keyboard_seals_live_pointer_gesture_before_discrete_domain_step() {
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-keyboard-pointer-boundary");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let (slider, _) = numeric_keyboard_inspector_pair(
+            host.active_root(),
+            false,
+            &mondrian_core::PropertyValue::Double(-18.4),
+        )
+        .expect("Gain pair");
+        let positions = rack_static_gesture_pointer_positions(&mut host, slider, bounds);
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        let original = host.app_state().active_sequence().expect("origin").clone();
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        for event in [
+            UiEvent::MouseDown {
+                position: positions[0],
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            UiEvent::MouseMove {
+                position: positions[1],
+                modifiers: Modifiers::none(),
+            },
+        ] {
+            inspection_key_event(&mut host, &mut router, &pending, bounds, event);
+            assert_eq!(router.captured(), Some(slider));
+        }
+        let pointer_value = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        let pointer_state = host.app_state().active_sequence().expect("pointer state").clone();
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Right,
+                modifiers: Modifiers::none(),
+            },
+        );
+        let stepped = inspection_scope_gain(&host.app_state(), scope_id, processor_id);
+        assert!(
+            (stepped - (pointer_value + 0.1)).abs() <= 1e-10,
+            "the separate keyboard edit starts at the actual pointer endpoint in domain units"
+        );
+        assert!(router.captured().is_none());
+        assert!(!host.app_state().parameter_gesture_is_current());
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 2,
+            "one sealed drag and one discrete key are two author history entries"
+        );
+        inspection_key_event(
+            &mut host,
+            &mut router,
+            &pending,
+            bounds,
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Escape,
+                modifiers: Modifiers::none(),
+            },
+        );
+        assert_eq!(
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id).to_bits(),
+            stepped.to_bits(),
+            "Escape after the sealed boundary cannot cancel a past drag"
+        );
+        assert_eq!(
+            host.app_state()
+                .authoring_history()
+                .expect("history")
+                .diagnostics()
+                .undo_entries,
+            history.undo_entries + 2
+        );
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo key"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo key")
+            .author_state_eq_ignoring_revision(&pointer_state));
+        assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo drag"));
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("Undo drag")
+            .author_state_eq_ignoring_revision(&original));
+    }
+
+    #[test]
+    fn numeric_keyboard_queued_scalar_refuses_locked_author_then_projects_disabled_baseline() {
+        use mondrian_ui_core::tree::WidgetTreeView;
+        let _guard = crate::app_ui::test_utils::theme_test_guard();
+        let bounds = Rect::new(0.0, 0.0, 2560.0, 3600.0);
+        let (mut host, scope_id, processor_id) =
+            inspection_host_fixture("numeric-keyboard-stale-lock");
+        TreeWalker::layout(host.active_root_mut(), bounds);
+        let (slider, _) = numeric_keyboard_inspector_pair(
+            host.active_root(),
+            false,
+            &mondrian_core::PropertyValue::Double(-18.4),
+        )
+        .expect("Gain pair");
+        let pending = PendingUiActions::default();
+        let mut router = mondrian_ui_events::EventRouter::new(host.active_root().id());
+        inspection_focus_by_tab(&mut host, &mut router, slider, &pending);
+        let history = host.app_state().authoring_history().expect("history").diagnostics();
+        router.route(
+            UiEvent::KeyDown {
+                key: mondrian_ui_core::KeyCode::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut WidgetTreeView::new(host.active_root_mut()),
+            &|action| pending.push(action),
+        );
+        host.app_state
+            .borrow_mut()
+            .active_sequence_mut_uncommitted()
+            .expect("Sequence")
+            .audio_tracks[0]
+            .is_locked = true;
+        let locked = host.app_state().active_sequence().expect("locked author").clone();
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(
+            inspection_scope_gain(&host.app_state(), scope_id, processor_id).to_bits(),
+            (-18.4_f64).to_bits(),
+            "stale queued keyboard target cannot write through a newly locked binding"
+        );
+        assert!(host
+            .app_state()
+            .active_sequence()
+            .expect("after refusal")
+            .author_state_eq_ignoring_revision(&locked));
+        assert_eq!(
+            host.app_state().authoring_history().expect("history").diagnostics(),
+            history
+        );
+        let (slider, input) = numeric_keyboard_inspector_pair(
+            host.active_root(),
+            false,
+            &mondrian_core::PropertyValue::Double(-18.4),
+        )
+        .expect("fresh canonical disabled pair");
+        for id in [slider, input] {
+            let node = numeric_accessibility_node(&mut host, id);
+            assert!(
+                node.state.disabled && !node.state.focusable,
+                "the fresh disabled projection cannot advertise an editable stale scalar"
+            );
+            assert_eq!(
+                numeric_accessibility_author_value(&node).to_bits(),
+                (-18.4_f64).to_bits()
+            );
+        }
     }
 }

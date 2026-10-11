@@ -62,7 +62,7 @@
 #![allow(non_snake_case)]
 
 pub use com_scrape_types;
-pub use com_scrape_types::{Class, ComPtr, ComRef, ComWrapper, Interface};
+pub use com_scrape_types::{Class, ComPtr, ComRef, ComWeak, ComWrapper, Interface};
 
 mod support;
 

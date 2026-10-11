@@ -233,16 +233,29 @@ where
 /// One processor parameter definition snapshot and its exact author-time value.
 ///
 /// The schema remains editable and serializable when a plugin is unavailable.
-/// The curve owns both the current unkeyed value and any automation keys; there
-/// is no parallel static-value field that could disagree with it.
+/// A present curve owns the host unkeyed value and automation keys. An absent
+/// curve means that this native parameter has no host automation reference; its
+/// schema remains captured, and native state owns the value. There is no parallel
+/// static-value field or implicit definition-default write.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProcessorParameter {
     /// Stable, versioned definition contract captured for this instance.
     pub schema: ParameterSchema,
-    /// Exact owner-local parameter curve, including its unkeyed value.
-    pub automation: ExactAutomationCurve,
+    /// Exact host-owned curve, or explicit absence of a host automation reference.
+    /// `None` retains the parameter definition and emits no host parameter events.
+    #[serde(deserialize_with = "deserialize_parameter_automation")]
+    pub automation: Option<ExactAutomationCurve>,
     /// Captured plugin UI facts, separate from stable parameter identity and schema.
     pub ui: AudioProcessorParameterUiMetadata,
+}
+
+fn deserialize_parameter_automation<'de, D>(
+    deserializer: D,
+) -> Result<Option<ExactAutomationCurve>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<ExactAutomationCurve>::deserialize(deserializer)
 }
 
 /// Display facts captured from a native plugin for offline project inspection.
@@ -275,7 +288,7 @@ impl AudioProcessorParameter {
             })?;
         let parameter = Self {
             schema,
-            automation,
+            automation: Some(automation),
             ui: AudioProcessorParameterUiMetadata::default(),
         };
         parameter.validate()?;
@@ -299,7 +312,7 @@ impl AudioProcessorParameter {
     ) -> Result<(), AudioAuthoringError> {
         let candidate = Self {
             schema: self.schema.clone(),
-            automation,
+            automation: Some(automation),
             ui: self.ui.clone(),
         };
         candidate.validate()?;
@@ -309,7 +322,11 @@ impl AudioProcessorParameter {
 
     fn validate(&self) -> Result<(), AudioAuthoringError> {
         self.ui.validate()?;
-        validate_numeric_automation(&self.schema, &self.automation)
+        validate_numeric_parameter_schema(&self.schema)?;
+        if let Some(curve) = &self.automation {
+            validate_numeric_automation(&self.schema, curve)?;
+        }
+        Ok(())
     }
 }
 
@@ -347,7 +364,7 @@ impl AudioProcessorInstance {
                 parameter_id,
                 AudioProcessorParameter {
                     schema,
-                    automation,
+                    automation: Some(automation),
                     ui: AudioProcessorParameterUiMetadata::default(),
                 },
             );
@@ -363,7 +380,7 @@ impl AudioProcessorInstance {
                 parameter_id,
                 AudioProcessorParameter {
                     schema,
-                    automation,
+                    automation: Some(automation),
                     ui: AudioProcessorParameterUiMetadata::default(),
                 },
             );
@@ -392,7 +409,7 @@ impl AudioProcessorInstance {
                     parameter_id,
                     AudioProcessorParameter {
                         schema,
-                        automation,
+                        automation: Some(automation),
                         ui: AudioProcessorParameterUiMetadata::default(),
                     },
                 );
@@ -430,11 +447,19 @@ impl AudioProcessorInstance {
         }
         for (parameter_id, parameter) in &self.parameters {
             if parameter_id != &parameter.schema.parameter_id
-                || parameter_id != &parameter.automation.parameter_id
+                || parameter
+                    .automation
+                    .as_ref()
+                    .is_some_and(|curve| parameter_id != &curve.parameter_id)
             {
                 return Err(AudioAuthoringError::ParameterKeyMismatch);
             }
             parameter.validate()?;
+            if matches!(self.definition, AudioProcessorDefinitionRef::BuiltIn { .. })
+                && parameter.automation.is_none()
+            {
+                return Err(AudioAuthoringError::ParameterAutomationRequired);
+            }
         }
         Ok(())
     }
@@ -1654,11 +1679,7 @@ pub(crate) fn default_numeric_automation(
     Ok(curve)
 }
 
-/// Admit an exact audio curve against the same complete definition used by authoring.
-pub(crate) fn validate_numeric_automation(
-    schema: &ParameterSchema,
-    curve: &ExactAutomationCurve,
-) -> Result<(), AudioAuthoringError> {
+fn validate_numeric_parameter_schema(schema: &ParameterSchema) -> Result<(), AudioAuthoringError> {
     schema.validate().map_err(|error| AudioAuthoringError::InvalidParameterSchema {
         reason: error.to_string(),
     })?;
@@ -1668,6 +1689,18 @@ pub(crate) fn validate_numeric_automation(
     ) {
         return Err(AudioAuthoringError::UnsupportedProcessorParameterType);
     }
+    validate_parameter_value(
+        schema,
+        processor_parameter_default_value(&schema.default_value)?,
+    )
+}
+
+/// Admit an exact audio curve against the same complete definition used by authoring.
+pub(crate) fn validate_numeric_automation(
+    schema: &ParameterSchema,
+    curve: &ExactAutomationCurve,
+) -> Result<(), AudioAuthoringError> {
+    validate_numeric_parameter_schema(schema)?;
     if schema.parameter_id != curve.parameter_id {
         return Err(AudioAuthoringError::ParameterKeyMismatch);
     }
@@ -1721,7 +1754,9 @@ fn validate_parameter_value(
     Ok(())
 }
 
-fn processor_parameter_default_value(value: &PropertyValue) -> Result<f64, AudioAuthoringError> {
+pub(crate) fn processor_parameter_default_value(
+    value: &PropertyValue,
+) -> Result<f64, AudioAuthoringError> {
     match value {
         PropertyValue::Double(value) => Ok(*value),
         PropertyValue::Int(value) if value.unsigned_abs() <= 9_007_199_254_740_992_u64 => {
@@ -1986,6 +2021,9 @@ pub(crate) fn author_routing_graph(
 /// Invalid author state. Such state cannot enter an immutable execution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAuthoringError {
+    /// Built-in processors require a host value and cannot delegate it to native state.
+    #[error("built-in audio parameter requires a host automation reference")]
+    ParameterAutomationRequired,
     /// Track mixer state does not exactly match the Sequence audio Tracks.
     #[error("audio Track mixer channels do not match Sequence audio Tracks")]
     TrackChannelSetMismatch,
@@ -2357,6 +2395,8 @@ mod tests {
             .get_mut(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
             .expect("gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = 3.0;
         edited.processors[0].opaque_state.as_mut().expect("edited opaque state").push(5);
 
@@ -2379,6 +2419,8 @@ mod tests {
                 .get(&ParameterId::new_static(GAIN_DB_PARAMETER_ID))
                 .expect("original gain parameter")
                 .automation
+                .as_ref()
+                .expect("bound host curve")
                 .default_value,
             0.0
         );
@@ -2444,8 +2486,14 @@ mod tests {
         assert_eq!(processor.parameters.len(), 1);
         assert_eq!(parameter.schema, gain_parameter_schema());
         assert_eq!(parameter.schema.value_type, PropertyValueType::Double);
-        assert_eq!(parameter.automation.parameter_id, parameter_id);
-        assert_eq!(parameter.automation.default_value, 0.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").parameter_id,
+            parameter_id
+        );
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").default_value,
+            0.0
+        );
         processor.validate().expect("valid built-in definition snapshot");
     }
 
@@ -2464,7 +2512,10 @@ mod tests {
             parameter.schema.cache_impact,
             ParameterCacheImpact::Topology
         );
-        assert_eq!(parameter.automation.default_value, 0.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").default_value,
+            0.0
+        );
         assert_eq!(
             AudioProcessorParameter::from_schema(sample_delay_frames_parameter_schema())
                 .expect("integer schema bridge"),
@@ -2495,15 +2546,27 @@ mod tests {
             lookahead_limiter_release_parameter_schema()
         );
         assert_eq!(
-            processor.parameters[&ceiling_id].automation.default_value,
+            processor.parameters[&ceiling_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_CEILING_DB
         );
         assert_eq!(
-            processor.parameters[&lookahead_id].automation.default_value,
+            processor.parameters[&lookahead_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_LOOKAHEAD_MS
         );
         assert_eq!(
-            processor.parameters[&release_id].automation.default_value,
+            processor.parameters[&release_id]
+                .automation
+                .as_ref()
+                .expect("bound host curve")
+                .default_value,
             LOOKAHEAD_LIMITER_DEFAULT_RELEASE_MS
         );
         assert!(!processor.parameters[&lookahead_id].schema.is_animatable);
@@ -2636,7 +2699,7 @@ mod tests {
                 6.0,
             ))
             .expect("second key");
-        parameter.automation = curve;
+        parameter.automation = Some(curve);
 
         assert_eq!(
             processor.validate(),

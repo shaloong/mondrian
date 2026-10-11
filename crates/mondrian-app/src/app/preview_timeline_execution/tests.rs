@@ -165,6 +165,7 @@ fn ready_temporal_media_frame(
     std::hash::Hasher::write_u64(&mut identity, identity_salt);
     PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
         CpuColorFrame::working(WorkingRgbaF32Frame {
+            alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width: request.target_resolution.width,
             height: request.target_resolution.height,
             data: vec![
@@ -1806,6 +1807,7 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         PreviewTimelineMediaFrame::Ready(
             MediaPreviewFrame::from_working(
                 CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: request.target_resolution.width,
                     height: request.target_resolution.height,
                     data: vec![[0.25, 0.5, 0.75, 1.0]],
@@ -1874,6 +1876,7 @@ fn nested_child_source_change_rotates_root_render_cache_identity() {
             std::hash::Hasher::write_u64(&mut identity, salt);
             PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
                 CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
                     width: 1,
                     height: 1,
                     data: vec![[0.25, 0.5, 0.75, 1.0]],

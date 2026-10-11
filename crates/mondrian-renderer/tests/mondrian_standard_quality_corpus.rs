@@ -327,6 +327,7 @@ fn parse_corpus() -> QualityCorpus {
 fn render_standard(input: &[[f32; 4]], output: ColorSpace) -> Vec<[f32; 4]> {
     let width = u32::try_from(input.len()).expect("quality corpus width");
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
         width,
         height: 1,
         data: input.to_vec(),

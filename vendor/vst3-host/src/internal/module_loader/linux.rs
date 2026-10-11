@@ -136,6 +136,13 @@ impl LinuxModule {
 }
 
 impl VstModule for LinuxModule {
+    fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+        visitor.visit(crate::host_storage::HostStorageRef::path(&self.path)?)
+    }
+
     fn get_factory(&self) -> Result<*mut IPluginFactory> {
         let factory = unsafe { (self.get_factory_fn)() };
         if factory.is_null() {

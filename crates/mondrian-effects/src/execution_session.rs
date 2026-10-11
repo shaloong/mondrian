@@ -44,7 +44,9 @@ pub struct EffectExecutionSessionConfig {
     pub max_gpu_plan_bytes: usize,
     /// Maximum reusable Float32 processor instances retained by this owner.
     pub max_processor_instances: usize,
-    /// Conservative native/buffer byte grant for reusable processors.
+    /// Optional logical backing still owned by reusable processors between calls.
+    /// Temporary and handed-off output owners consume active working admission,
+    /// not this retained ceiling.
     pub max_processor_bytes: usize,
 }
 
@@ -129,11 +131,12 @@ pub struct EffectExecutionSession {
     generation: Option<u64>,
     encoded_outputs: BoundedLru<EffectOutputCacheKey, Vec<u8>>,
     encoded_nodes: BoundedLru<EffectNodeOutputCacheKey, Vec<u8>>,
-    float_outputs: BoundedLru<EffectFloatOutputCacheKey, Vec<[f32; 4]>>,
+    float_outputs: BoundedLru<EffectFloatOutputCacheKey, crate::EffectFloatFrame>,
     temporal_outputs: BoundedLru<[u8; 32], EffectTemporalCachedOutput>,
     topologies: EffectTopologyCache,
     gpu_plans: EffectGpuPlanCache,
     pub(crate) processors: crate::processor_residency::FloatProcessorResidency,
+    pub(crate) observation: crate::EffectProcessorObservation,
 }
 
 impl Default for EffectExecutionSession {
@@ -150,6 +153,7 @@ impl EffectExecutionSession {
             config,
             generation: None,
             processors: Default::default(),
+            observation: Default::default(),
             encoded_outputs: BoundedLru::new(
                 partitions.encoded_output_entries,
                 partitions.encoded_output_bytes,
@@ -163,7 +167,7 @@ impl EffectExecutionSession {
             float_outputs: BoundedLru::new(
                 partitions.float_output_entries,
                 partitions.float_output_bytes,
-                |frame| frame.len().saturating_mul(std::mem::size_of::<[f32; 4]>()),
+                crate::EffectFloatFrame::retained_bytes,
             ),
             temporal_outputs: BoundedLru::new(
                 partitions.temporal_output_entries,
@@ -179,6 +183,20 @@ impl EffectExecutionSession {
                 config.max_gpu_plan_bytes,
             ),
         }
+    }
+
+    /// Bind only the exact current task's bounded observations. Clear it after
+    /// that task; it carries no graph, processor or author state.
+    pub fn bind_processor_observation(&mut self, observation: crate::EffectProcessorObservation) {
+        self.observation = observation;
+    }
+
+    /// Reconcile actual closed native GUIs on this Session's exclusive worker.
+    /// Returns retired owner count and publishes bounded idle-action metadata
+    /// through an existing GUI lifetime. This operation produces no pixels,
+    /// author edits, provider quarantine or fabricated frame completion.
+    pub fn reconcile_processor_guis(&mut self) -> usize {
+        self.processors.reconcile_gui(self.config.max_working_bytes)
     }
 
     /// Apply a new product resource decision and trim synchronously.
@@ -335,14 +353,14 @@ impl EffectExecutionSession {
     pub(crate) fn get_float_output(
         &mut self,
         key: &EffectFloatOutputCacheKey,
-    ) -> Option<Vec<[f32; 4]>> {
+    ) -> Option<crate::EffectFloatFrame> {
         self.float_outputs.get(key)
     }
 
     pub(crate) fn put_float_output(
         &mut self,
         key: EffectFloatOutputCacheKey,
-        output: Vec<[f32; 4]>,
+        output: crate::EffectFloatFrame,
     ) {
         self.float_outputs.insert(key, output);
     }

@@ -16,6 +16,12 @@ pub(super) struct ClapParameterEvents {
     limit: usize,
 }
 
+// SAFETY: private events are admitted only with a null cookie. Every other
+// field is owned numeric SDK data; no event/Vec mutable reference is exposed.
+// Moving this specific carrier cannot move a borrowed plugin cookie. This does
+// not make the SDK's generic native event or PluginInstance Send.
+unsafe impl Send for ClapParameterEvents {}
+
 impl ClapParameterEvents {
     /// Reserve both owners before processing; `limit` is the admitted event count.
     pub(super) fn with_capacity(limit: usize) -> Self {
@@ -34,7 +40,7 @@ impl ClapParameterEvents {
 
     /// Append within the exact admission limit without growing either owner.
     pub(super) fn try_push(&mut self, event: ParamValueEvent) -> bool {
-        if self.events.len() >= self.limit {
+        if !event.cookie().as_raw().is_null() || self.events.len() >= self.limit {
             return false;
         }
         self.ordinals.push(self.events.len());
@@ -126,5 +132,42 @@ mod tests {
             0.0,
         )));
         assert!(empty.as_input().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod cross_thread_contract_tests {
+    use super::*;
+    use clack_host::prelude::{ClapId, Pckn};
+    use clack_host::utils::Cookie;
+    #[test]
+    fn null_cookie_typed_carrier_moves_only_owned_events_and_refuses_native_cookie() {
+        fn require_send<T: Send>() {}
+        require_send::<ClapParameterEvents>();
+        let mut storage = ClapParameterEvents::with_capacity(2);
+        let mut borrowed_cookie = 3_u8;
+        let event = ParamValueEvent::new(0, ClapId::new(17), Pckn::match_all(), 0.25);
+        // SAFETY: this never leaves the test or reaches a plugin. The specific
+        // carrier must reject this live nonnull cookie before owning the event.
+        let borrowed = unsafe {
+            event.with_cookie(Cookie::from_raw((&mut borrowed_cookie as *mut u8).cast()))
+        };
+        assert!(!storage.try_push(borrowed));
+        assert!(storage.as_input().is_empty());
+        assert!(storage.try_push(event));
+        storage.sort();
+        std::thread::spawn(move || {
+            let input = storage.as_input();
+            let event = input
+                .get(0)
+                .expect("owned event")
+                .as_event::<ParamValueEvent>()
+                .expect("SDK value");
+            assert!(event.cookie().as_raw().is_null());
+            assert_eq!(event.value(), 0.25);
+        })
+        .join()
+        .expect("typed carrier actual move");
+        assert_eq!(borrowed_cookie, 3);
     }
 }

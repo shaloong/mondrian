@@ -32,6 +32,14 @@ pub(super) fn run_worker(
             "parent preparation envelope failed version or nonce validation",
         ));
     }
+    let native_lane = prepare.native_lane.clone().realize()?;
+    if native_lane != factory.native_worker_lane_resources()? {
+        write_ready_rejected(
+            &mut control,
+            "parent and child native lane owner layouts differ".to_owned(),
+        )?;
+        return Ok(());
+    }
     let max_block_frames = usize::try_from(prepare.max_block_frames)
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
@@ -62,6 +70,7 @@ pub(super) fn run_worker(
         ));
     }
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        native_lane,
         payload: prepare.payload,
         plugin_execution_contract,
         auxiliary_inputs: auxiliary_inputs.clone(),
@@ -80,7 +89,9 @@ pub(super) fn run_worker(
             return Ok(());
         }
     };
-    if processor.execution_contract() != plugin_execution_contract
+    if processor.native_worker_lane_resources() != native_lane
+        || processor.uses_native_processing_split() != native_lane.is_some()
+        || processor.execution_contract() != plugin_execution_contract
         || processor.auxiliary_input_contract() != auxiliary_inputs
     {
         write_ready_rejected(
@@ -115,160 +126,193 @@ pub(super) fn run_worker(
     // creating any typed view, and never resizes the mapping.
     let mut shared = unsafe { MmapOptions::new().len(layout.total_bytes).map_mut(&shared_file) }
         .map_err(|error| worker_failed("startup", error))?;
-    write_json_frame(
-        &mut control,
-        &ReadyWire {
-            schema_version: PROTOCOL_VERSION,
-            result: ReadyResultWire::Ready {
-                execution_contract: prepare.execution_contract,
-                auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
-                input_names,
-            },
+    let ready = ReadyWire {
+        schema_version: PROTOCOL_VERSION,
+        result: ReadyResultWire::Ready {
+            execution_contract: prepare.execution_contract,
+            auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+            input_names,
         },
-    )
-    .map_err(|error| worker_failed("startup", error))?;
-
-    loop {
-        let command = WorkerCommand::read_from(&mut control)
-            .map_err(|error| worker_failed("command", error))?;
-        match command.kind {
-            CommandKind::Shutdown => {
-                WorkerResponse::Completed
-                    .write_to(&mut control)
-                    .map_err(|error| worker_failed("shutdown", error))?;
-                return Ok(());
-            }
-            CommandKind::EnterState => {
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    processor.enter_state(command.start_sample)
-                }));
-                if !write_operation_result(&mut control, result)? {
-                    return Ok(());
-                }
-            }
-            CommandKind::Process => {
-                let result = process_shared_block(
+    };
+    let context = WorkerProcessContext {
+        layout,
+        auxiliary_inputs: &auxiliary_inputs,
+        parameter_ids: &prepare.parameter_ids,
+        render_contract,
+    };
+    let result = if processor.uses_native_processing_split() {
+        run_native_command_service(
+            processor.as_mut(),
+            &mut control,
+            &mut shared,
+            context,
+            &ready,
+        )
+    } else {
+        (|| {
+            write_json_frame(&mut control, &ready)
+                .map_err(|error| worker_failed("startup", error))?;
+            loop {
+                let command = super::native_worker_command::decode(
+                    &mut control,
+                    prepare.parameter_ids.len(),
+                )?;
+                if !dispatch_native_owner_command(
                     processor.as_mut(),
-                    &mut shared,
-                    layout,
                     command,
-                    &auxiliary_inputs,
-                    &prepare.parameter_ids,
-                    render_contract,
-                );
-                if !write_operation_result(&mut control, Ok(result))? {
-                    return Ok(());
+                    &mut control,
+                    &mut shared,
+                    context,
+                )? {
+                    break Ok(());
                 }
             }
-        }
+        })()
+    };
+    // No native module may unwind/drop while its actual view remains attached.
+    let closed = catch_unwind(AssertUnwindSafe(|| processor.close_native_editor_owner()))
+        .unwrap_or(Err(AudioProcessorHostError::AdapterPanicked(
+            "native editor owner removal",
+        )));
+    if let Err(error) = closed {
+        let _ = WorkerResponse::Failed(error.to_string()).write_to(&mut control);
+        std::process::exit(1);
     }
+    result
 }
 
-#[allow(clippy::too_many_arguments)]
-fn process_shared_block(
-    processor: &mut dyn IsolatedAudioProcessorWorker,
-    shared: &mut [u8],
-    layout: SharedBlockLayout,
-    command: WorkerCommand,
-    auxiliary_inputs: &crate::AudioProcessorAuxiliaryInputContract,
-    parameter_ids: &[mondrian_core::ParameterId],
-    render_contract: AudioRenderContract,
-) -> Result<(), AudioProcessorHostError> {
-    let frames = usize::try_from(command.frames)
-        .map_err(|_| invalid_contract("block frame extent exceeds Worker address space"))?;
-    let event_count = usize::try_from(command.event_count)
-        .map_err(|_| invalid_contract("event count exceeds Worker address space"))?;
-    if frames > render_contract.max_block_frames || event_count > layout.event_capacity {
-        return Err(invalid_contract(
-            "Worker command exceeds prepared shared capacity",
-        ));
-    }
-    let samples = frames
-        .checked_mul(render_contract.channel_count())
-        .ok_or_else(|| invalid_contract("Worker block sample extent overflowed"))?;
-    let auxiliary_samples = samples
-        .checked_mul(auxiliary_inputs.buses.len())
-        .ok_or_else(|| invalid_contract("Worker auxiliary sample extent overflowed"))?;
-    let main_bytes = samples
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| invalid_contract("Worker main-bus bytes overflowed"))?;
-    let auxiliary_bytes = auxiliary_samples
-        .checked_mul(size_of::<f32>())
-        .ok_or_else(|| invalid_contract("Worker auxiliary bytes overflowed"))?;
-    let event_bytes = event_count
-        .checked_mul(size_of::<SharedParameterEvent>())
-        .ok_or_else(|| invalid_contract("Worker event bytes overflowed"))?;
-    let main_end = layout
-        .main_offset
-        .checked_add(main_bytes)
-        .ok_or_else(|| invalid_contract("Worker main range overflowed"))?;
-    let auxiliary_end = layout
-        .auxiliary_offset
-        .checked_add(auxiliary_bytes)
-        .ok_or_else(|| invalid_contract("Worker auxiliary range overflowed"))?;
-    let event_end = layout
-        .events_offset
-        .checked_add(event_bytes)
-        .ok_or_else(|| invalid_contract("Worker event range overflowed"))?;
-    if main_end > shared.len() || auxiliary_end > shared.len() || event_end > shared.len() {
-        return Err(invalid_contract(
-            "Worker shared ranges exceed the mapped extent",
-        ));
-    }
-    let (before_events, events_and_after) = shared.split_at_mut(layout.events_offset);
-    let event_storage = events_and_after
-        .get_mut(..event_bytes)
-        .ok_or_else(|| invalid_contract("Worker event range is unavailable"))?;
-    let events: &[SharedParameterEvent] = bytemuck::try_cast_slice(event_storage)
-        .map_err(|_| invalid_contract("Worker event storage is not aligned"))?;
-    if events.iter().any(|event| {
-        usize::try_from(event.lane).map_or(true, |lane| lane >= parameter_ids.len())
-            || usize::try_from(event.sample_offset).map_or(true, |offset| offset >= frames)
-            || !event.value.is_finite()
-    }) {
-        return Err(invalid_contract(
-            "Worker observed an invalid parameter event",
-        ));
-    }
-    let (main_and_gap, auxiliary_and_gap) = before_events.split_at_mut(layout.auxiliary_offset);
-    let main_storage = main_and_gap
-        .get_mut(layout.main_offset..main_end)
-        .ok_or_else(|| invalid_contract("Worker main range is unavailable"))?;
-    let auxiliary_storage = auxiliary_and_gap
-        .get_mut(..auxiliary_bytes)
-        .ok_or_else(|| invalid_contract("Worker auxiliary range is unavailable"))?;
-    let main: &mut [f32] = bytemuck::try_cast_slice_mut(main_storage)
-        .map_err(|_| invalid_contract("Worker main storage is not aligned"))?;
-    let auxiliary: &[f32] = bytemuck::try_cast_slice(auxiliary_storage)
-        .map_err(|_| invalid_contract("Worker auxiliary storage is not aligned"))?;
-    let block = IsolatedAudioProcessorWorkerBlock::new(
-        command.start_sample,
-        frames,
-        render_contract,
-        main,
-        auxiliary_inputs,
-        auxiliary,
-        parameter_ids,
-        events,
-    );
-    match catch_unwind(AssertUnwindSafe(|| processor.process(block))) {
-        Ok(result) => result,
-        Err(_) => Err(AudioProcessorHostError::AdapterPanicked(
-            "isolated Worker block processing",
-        )),
+/// The single admitted shared-frame interpretation, reused by inline and
+/// a future native scoped consumer. It carries borrowed schedule facts, no native
+/// object or alternate author/runtime owner.
+#[derive(Clone, Copy)]
+pub(super) struct WorkerProcessContext<'a> {
+    pub(super) layout: SharedBlockLayout,
+    pub(super) auxiliary_inputs: &'a crate::AudioProcessorAuxiliaryInputContract,
+    pub(super) parameter_ids: &'a [mondrian_core::ParameterId],
+    pub(super) render_contract: AudioRenderContract,
+}
+
+impl WorkerProcessContext<'_> {
+    pub(super) fn process(
+        &self,
+        mut process: impl FnMut(
+            IsolatedAudioProcessorWorkerBlock<'_>,
+        ) -> Result<(), AudioProcessorHostError>,
+        shared: &mut [u8],
+        command: WorkerCommand,
+    ) -> Result<(), AudioProcessorHostError> {
+        if command.kind != CommandKind::Process {
+            return Err(invalid_contract("non-Process command reached shared PCM"));
+        }
+        let frames = usize::try_from(command.frames)
+            .map_err(|_| invalid_contract("block frame extent exceeds Worker address space"))?;
+        let event_count = usize::try_from(command.event_count)
+            .map_err(|_| invalid_contract("event count exceeds Worker address space"))?;
+        if frames > self.render_contract.max_block_frames
+            || event_count > self.layout.event_capacity
+        {
+            return Err(invalid_contract(
+                "Worker command exceeds prepared shared capacity",
+            ));
+        }
+        let samples = frames
+            .checked_mul(self.render_contract.channel_count())
+            .ok_or_else(|| invalid_contract("Worker block sample extent overflowed"))?;
+        let auxiliary_samples = samples
+            .checked_mul(self.auxiliary_inputs.buses.len())
+            .ok_or_else(|| invalid_contract("Worker auxiliary sample extent overflowed"))?;
+        let main_bytes = samples
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| invalid_contract("Worker main-bus bytes overflowed"))?;
+        let auxiliary_bytes = auxiliary_samples
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| invalid_contract("Worker auxiliary bytes overflowed"))?;
+        let event_bytes = event_count
+            .checked_mul(size_of::<SharedParameterEvent>())
+            .ok_or_else(|| invalid_contract("Worker event bytes overflowed"))?;
+        let main_end = self
+            .layout
+            .main_offset
+            .checked_add(main_bytes)
+            .ok_or_else(|| invalid_contract("Worker main range overflowed"))?;
+        let auxiliary_end = self
+            .layout
+            .auxiliary_offset
+            .checked_add(auxiliary_bytes)
+            .ok_or_else(|| invalid_contract("Worker auxiliary range overflowed"))?;
+        let event_end = self
+            .layout
+            .events_offset
+            .checked_add(event_bytes)
+            .ok_or_else(|| invalid_contract("Worker event range overflowed"))?;
+        if main_end > shared.len() || auxiliary_end > shared.len() || event_end > shared.len() {
+            return Err(invalid_contract(
+                "Worker shared ranges exceed the mapped extent",
+            ));
+        }
+        let (before_events, events_and_after) = shared.split_at_mut(self.layout.events_offset);
+        let event_storage = events_and_after
+            .get_mut(..event_bytes)
+            .ok_or_else(|| invalid_contract("Worker event range is unavailable"))?;
+        let events: &[SharedParameterEvent] = bytemuck::try_cast_slice(event_storage)
+            .map_err(|_| invalid_contract("Worker event storage is not aligned"))?;
+        if events.iter().any(|event| {
+            usize::try_from(event.lane).map_or(true, |lane| lane >= self.parameter_ids.len())
+                || usize::try_from(event.sample_offset).map_or(true, |offset| offset >= frames)
+                || !event.value.is_finite()
+        }) {
+            return Err(invalid_contract(
+                "Worker observed an invalid parameter event",
+            ));
+        }
+        let (main_and_gap, auxiliary_and_gap) =
+            before_events.split_at_mut(self.layout.auxiliary_offset);
+        let main_storage = main_and_gap
+            .get_mut(self.layout.main_offset..main_end)
+            .ok_or_else(|| invalid_contract("Worker main range is unavailable"))?;
+        let auxiliary_storage = auxiliary_and_gap
+            .get_mut(..auxiliary_bytes)
+            .ok_or_else(|| invalid_contract("Worker auxiliary range is unavailable"))?;
+        let main: &mut [f32] = bytemuck::try_cast_slice_mut(main_storage)
+            .map_err(|_| invalid_contract("Worker main storage is not aligned"))?;
+        let auxiliary: &[f32] = bytemuck::try_cast_slice(auxiliary_storage)
+            .map_err(|_| invalid_contract("Worker auxiliary storage is not aligned"))?;
+        let block = IsolatedAudioProcessorWorkerBlock::new(
+            command.start_sample,
+            frames,
+            self.render_contract,
+            main,
+            self.auxiliary_inputs,
+            auxiliary,
+            self.parameter_ids,
+            events,
+        );
+        match catch_unwind(AssertUnwindSafe(|| process(block))) {
+            Ok(result) => result,
+            Err(_) => Err(AudioProcessorHostError::AdapterPanicked(
+                "isolated Worker block processing",
+            )),
+        }
     }
 }
 
 fn write_operation_result(
     control: &mut TcpStream,
     result: Result<Result<(), AudioProcessorHostError>, Box<dyn std::any::Any + Send>>,
+    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
 ) -> Result<bool, AudioProcessorHostError> {
     let response = match result {
-        Ok(Ok(())) => WorkerResponse::Completed,
+        Ok(Ok(())) => pending.map_or(
+            WorkerResponse::Completed,
+            WorkerResponse::CompletedWithPending,
+        ),
+        Ok(Err(AudioProcessorHostError::ReprepareRequired(request))) => {
+            WorkerResponse::DeferredForConfiguration(request)
+        }
         Ok(Err(error)) => WorkerResponse::Failed(error.to_string()),
         Err(_) => WorkerResponse::Failed("isolated Worker processor panicked".to_owned()),
     };
-    let success = response == WorkerResponse::Completed;
+    let success = !matches!(response, WorkerResponse::Failed(_));
     response.write_to(control).map_err(|error| worker_failed("response", error))?;
     Ok(success)
 }
@@ -300,4 +344,771 @@ fn worker_failed(
 
 fn worker_failed_detail(operation: &'static str, detail: &str) -> AudioProcessorHostError {
     AudioProcessorHostError::WorkerFailed { operation, detail: detail.to_owned() }
+}
+
+fn write_native_object_observation_result(
+    control: &mut TcpStream,
+    result: Result<
+        Result<crate::NativeAudioObservations, AudioProcessorHostError>,
+        Box<dyn std::any::Any + Send>,
+    >,
+) -> Result<bool, AudioProcessorHostError> {
+    use super::native_audio_object_wire::{write_reply, ObjectReply};
+    let success = matches!(&result, Ok(Ok(_)));
+    match result {
+        Ok(Ok(mut observations)) => {
+            observations.owner_process_id = std::process::id();
+            write_reply(control, ObjectReply::Observation(&observations))
+        }
+        Ok(Err(error)) => write_reply(control, ObjectReply::Failed(error.to_string())),
+        Err(_) => write_reply(
+            control,
+            ObjectReply::Failed("native observation panicked".into()),
+        ),
+    }
+    .map_err(|error| worker_failed("native observation reply", error))?;
+    Ok(success)
+}
+
+/// The sole lifecycle/control dispatcher of this authenticated native owner.
+/// Inline workers run it directly. A future scoped lane must end and join its
+/// borrowed DSP role before using this same dispatcher for native mutation.
+fn dispatch_native_owner_command(
+    processor: &mut dyn IsolatedAudioProcessorWorker,
+    command: super::native_worker_command::NativeCommand,
+    control: &mut TcpStream,
+    shared: &mut [u8],
+    context: WorkerProcessContext<'_>,
+) -> Result<bool, AudioProcessorHostError> {
+    use super::native_worker_command::NativeCommand;
+    let input_layout = command.owned_input_layout()?;
+    admit_native_control_storage(processor, input_layout, 0)?;
+    match command {
+        NativeCommand::Plain(command) => {
+            if command.kind == CommandKind::PollConfigurationCohort {
+                write_native_observation_reply(
+                    control,
+                    command.kind,
+                    processor.native_configuration_cohort(),
+                    None,
+                )?;
+                return Ok(true);
+            }
+            if command.kind == CommandKind::PollPending {
+                write_native_observation_reply(
+                    control,
+                    command.kind,
+                    None,
+                    processor.pending_reprepare(),
+                )?;
+                return Ok(true);
+            }
+            match command.kind {
+                CommandKind::Shutdown => {
+                    WorkerResponse::Completed
+                        .write_to(control)
+                        .map_err(|error| worker_failed("shutdown", error))?;
+                    Ok(false)
+                }
+                CommandKind::EnterState => {
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        processor.enter_state(command.start_sample)
+                    }));
+                    write_operation_result(control, result, processor.pending_reprepare())
+                }
+                CommandKind::Process => {
+                    let result = context.process(|block| processor.process(block), shared, command);
+                    write_operation_result(control, Ok(result), processor.pending_reprepare())
+                }
+                CommandKind::PollPending
+                | CommandKind::PollConfigurationCohort
+                | CommandKind::ServiceConfiguration
+                | CommandKind::StageConfigurationSeed
+                | CommandKind::CommitConfigurationSeed
+                | CommandKind::PollNativeObservations
+                | CommandKind::BindNativeObject
+                | CommandKind::EditorOpen
+                | CommandKind::EditorClose
+                | CommandKind::PrepareAuthorStateEntry => Err(invalid_contract(
+                    "decoded control kind does not match its sole payload variant",
+                )),
+            }
+        }
+        NativeCommand::PollObservations(consumption) => {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                let mut observations = processor.poll_native_observations(consumption)?;
+                observations.pending_reprepare = processor.pending_reprepare();
+                Ok(observations)
+            }));
+            write_native_object_observation_result(control, result)
+        }
+        NativeCommand::BindObject(request) => {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                processor.bind_native_audio_object(request)
+            }));
+            let reply = match result {
+                Ok(Ok(outcome)) => super::native_audio_object_wire::ObjectReply::Binding(outcome),
+                Ok(Err(error)) => {
+                    super::native_audio_object_wire::ObjectReply::Failed(error.to_string())
+                }
+                Err(_) => super::native_audio_object_wire::ObjectReply::Failed(
+                    "native object binding panicked".into(),
+                ),
+            };
+            let success = !matches!(
+                reply,
+                super::native_audio_object_wire::ObjectReply::Failed(_)
+            );
+            super::native_audio_object_wire::write_reply(control, reply)
+                .map_err(|error| worker_failed("native bind reply", error))?;
+            Ok(success)
+        }
+        NativeCommand::EditorOpen(request) => write_editor_operation_result(
+            control,
+            catch_unwind(AssertUnwindSafe(|| {
+                processor.open_native_audio_editor(request)
+            })),
+        ),
+        NativeCommand::EditorClose(binding) => write_editor_operation_result(
+            control,
+            catch_unwind(AssertUnwindSafe(|| {
+                processor.close_native_audio_editor(binding)
+            })),
+        ),
+        NativeCommand::AuthorStateEntry(request) => {
+            let outcome = match catch_unwind(AssertUnwindSafe(|| {
+                processor.prepare_native_author_state_entry(request.borrow())
+            })) {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(error)) => {
+                    super::native_audio_author_state_entry_wire::write_failed_reply(control)
+                        .map_err(|error| worker_failed("native state-entry failed reply", error))?;
+                    return Err(error);
+                }
+                Err(_) => {
+                    super::native_audio_author_state_entry_wire::write_failed_reply(control)
+                        .map_err(|error| worker_failed("native state-entry failed reply", error))?;
+                    return Err(worker_failed(
+                        "native state-entry preparation",
+                        "native adapter panicked",
+                    ));
+                }
+            };
+            super::native_audio_author_state_entry_wire::write_reply(control, outcome)
+                .map_err(|error| worker_failed("native state-entry reply", error))?;
+            Ok(true)
+        }
+        NativeCommand::Configuration(request) => {
+            use super::native_configuration_wire::{self as wire, ControlReply};
+            let value_bytes = request
+                .value_bytes()
+                .map_err(|error| worker_failed("configuration request capacity", error))?;
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                processor.service_native_configuration(
+                    request
+                        .borrow()
+                        .map_err(|error| worker_failed("configuration request grant", error))?,
+                )
+            }));
+            let reply = match result {
+                Ok(Ok(mut outcome)) => {
+                    if let super::NativeConfigurationControlOutcome::ReadyForInstall(candidate) =
+                        &mut outcome
+                    {
+                        candidate.buffers.request_value_capacity_bytes = value_bytes;
+                        admit_native_control_storage(
+                            processor,
+                            input_layout,
+                            candidate.configuration.capacity(),
+                        )?;
+                    }
+                    ControlReply::Outcome(outcome)
+                }
+                Ok(Err(error)) => ControlReply::Failed(error.to_string()),
+                Err(_) => ControlReply::Failed("native configuration control panicked".into()),
+            };
+            let success = !matches!(reply, ControlReply::Failed(_));
+            wire::write_reply(control, reply)
+                .map_err(|error| worker_failed("configuration reply", error))?;
+            Ok(success)
+        }
+        NativeCommand::StageSeed(stage) => {
+            use super::native_configuration_seed_wire::DecodedStage;
+            let result = match stage {
+                DecodedStage::Owned(seed) => catch_unwind(AssertUnwindSafe(|| {
+                    processor.stage_native_configuration_seed(seed)
+                })),
+                DecodedStage::Refused(refusal) => {
+                    Ok(Ok(super::NativeConfigurationSeedOutcome::Refused(refusal)))
+                }
+            };
+            admit_native_control_storage(
+                processor,
+                crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+                0,
+            )?;
+            write_seed_operation_result(control, result)
+        }
+        NativeCommand::CommitSeed(ticket) => {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                processor.commit_native_configuration_seed(ticket)
+            }));
+            write_seed_operation_result(control, result)
+        }
+    }
+}
+
+/// Admit actual simultaneous host-owned payloads against the one known lane request.
+/// Native/private plugin memory and error Strings remain separate declared frontiers.
+fn admit_native_control_storage(
+    processor: &dyn IsolatedAudioProcessorWorker,
+    decoded_input: crate::NativeHostBufferLayout,
+    reply_bytes: usize,
+) -> Result<(), AudioProcessorHostError> {
+    let Some(profile) = processor.native_worker_lane_resources() else {
+        return Ok(());
+    };
+    profile
+        .admit_observed_owners(
+            profile.owning_layouts(),
+            crate::NativeWorkerControlOverlapLayout {
+                decoded_input,
+                reply_storage: crate::NativeHostBufferLayout {
+                    bytes: reply_bytes,
+                    alignment: align_of::<u8>(),
+                },
+                staged_seed: processor.native_staged_seed_layout(),
+            },
+        )
+        .map_err(AudioProcessorHostError::from)
+}
+
+/// Pure observations use the same reply encoder in inline and scoped lanes.
+/// Pending data never installs configuration or truncates an admitted root
+/// audio window; the sole parent Runtime chooses its next pre-DSP boundary.
+fn write_native_observation_reply(
+    control: &mut TcpStream,
+    kind: CommandKind,
+    cohort: Option<super::NativeRequestCohort>,
+    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+) -> Result<bool, AudioProcessorHostError> {
+    match kind {
+        CommandKind::PollConfigurationCohort => {
+            super::native_configuration_wire::write_cohort_reply(control, cohort)
+                .map_err(|error| worker_failed("configuration cohort query", error))?;
+        }
+        CommandKind::PollPending => {
+            pending
+                .map_or(
+                    WorkerResponse::Completed,
+                    WorkerResponse::CompletedWithPending,
+                )
+                .write_to(control)
+                .map_err(|error| worker_failed("pending query", error))?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn write_editor_operation_result(
+    control: &mut TcpStream,
+    result: Result<
+        Result<crate::NativeAudioEditorOutcome, AudioProcessorHostError>,
+        Box<dyn std::any::Any + Send>,
+    >,
+) -> Result<bool, AudioProcessorHostError> {
+    use super::native_audio_editor_wire::{self as wire, EditorReply};
+    let reply = match result {
+        Ok(Ok(outcome)) => EditorReply::Outcome(outcome),
+        Ok(Err(error)) => EditorReply::Failed(error.to_string()),
+        Err(_) => EditorReply::Failed("native editor control panicked".into()),
+    };
+    let success = !matches!(reply, EditorReply::Failed(_));
+    wire::write_reply(control, reply)
+        .map_err(|error| worker_failed("native editor reply", error))?;
+    Ok(success)
+}
+
+fn write_seed_operation_result(
+    control: &mut TcpStream,
+    result: Result<
+        Result<super::NativeConfigurationSeedOutcome, AudioProcessorHostError>,
+        Box<dyn std::any::Any + Send>,
+    >,
+) -> Result<bool, AudioProcessorHostError> {
+    use super::native_configuration_seed_wire::{self as wire, SeedReply};
+    let reply = match result {
+        Ok(Ok(outcome)) => SeedReply::Outcome(outcome),
+        Ok(Err(error)) => SeedReply::Failed(error.to_string()),
+        Err(_) => SeedReply::Failed("native configuration seed control panicked".into()),
+    };
+    let success = !matches!(reply, SeedReply::Failed(_));
+    wire::write_reply(control, reply)
+        .map_err(|error| worker_failed("seed control reply", error))?;
+    Ok(success)
+}
+
+/// Keep the one admitted DSP scope alive while main services the same native
+/// owner and this existing connection. A lifecycle command is returned intact;
+/// the caller joins the scope before dispatching it, then acknowledges only
+/// after its correlated control response has actually been written.
+enum NativeScopeExit {
+    OwnerCommand(super::native_worker_command::NativeCommand),
+    UserCloseRequested,
+    Completed,
+}
+
+fn service_native_processing_scope(
+    main: &mut dyn super::IsolatedAudioProcessorMainRole,
+    dsp: &super::native_worker_processing::NativeDspDispatch<'_>,
+    ingress: &super::native_worker_ingress::NativeCommandIngress<'_>,
+    control: &mut TcpStream,
+) -> Result<NativeScopeExit, AudioProcessorHostError> {
+    use super::native_worker_command::NativeCommand;
+    loop {
+        main.service_native_main_thread()?;
+        if main.native_editor_close_requested()? {
+            return Ok(NativeScopeExit::UserCloseRequested);
+        }
+        let Some(command) = ingress.receive()? else {
+            continue;
+        };
+        if let NativeCommand::Plain(header) = &command {
+            if write_native_observation_reply(
+                control,
+                header.kind,
+                main.native_configuration_cohort()?,
+                main.pending_reprepare()?,
+            )? {
+                ingress.acknowledge()?;
+                continue;
+            }
+            if header.kind == CommandKind::Process {
+                dsp.submit(*header)?;
+                let result = dsp.complete(main);
+                if !write_operation_result(control, Ok(result), main.pending_reprepare()?)? {
+                    // No further native mutation or command is admitted after a
+                    // failed DSP response. Scope teardown still explicitly joins.
+                    ingress.acknowledge()?;
+                    return Ok(NativeScopeExit::Completed);
+                }
+                ingress.acknowledge()?;
+                continue;
+            }
+        }
+        if matches!(
+            &command,
+            NativeCommand::PollObservations(crate::NativeAudioObservationConsumption::Preserve)
+        ) {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                // The main role serviced prior serial control writes before
+                // this command. No DSP join, flag retirement or log drain occurs.
+                let mut observations = main.preserve_native_observations()?;
+                observations.pending_reprepare = main.pending_reprepare()?;
+                Ok(observations)
+            }));
+            let success = write_native_object_observation_result(control, result)?;
+            ingress.acknowledge()?;
+            if !success {
+                return Ok(NativeScopeExit::Completed);
+            }
+            continue;
+        }
+        if let NativeCommand::PollObservations(
+            crate::NativeAudioObservationConsumption::DrainAuthor(binding),
+        ) = &command
+            && main.native_author_binding_matches(*binding)?
+        {
+            // The sole slot settles this exact object's control DSP operation
+            // before its borrowed processor joins and main captures state.
+            // Source refusal stays in the actual source and full-owner reply;
+            // it never fabricates PCM or a successful author delivery.
+            dsp.submit_author_flush()?;
+            let _source_outcome = dsp.complete_author_flush(main)?;
+        }
+        return Ok(NativeScopeExit::OwnerCommand(command));
+    }
+}
+
+fn run_native_command_service(
+    processor: &mut dyn IsolatedAudioProcessorWorker,
+    control: &mut TcpStream,
+    shared: &mut [u8],
+    context: WorkerProcessContext<'_>,
+    ready: &ReadyWire,
+) -> Result<(), AudioProcessorHostError> {
+    use super::native_worker_ingress::with_native_ingress;
+    use super::native_worker_processing::with_processing_scope;
+    let profile = processor.native_worker_lane_resources().ok_or_else(|| {
+        invalid_contract("scoped native adapter lacks its admitted owning-layout request")
+    })?;
+    with_native_ingress(
+        control,
+        context.parameter_ids.len(),
+        Some(profile),
+        |control, ingress| {
+            let mut ready_sent = false;
+            loop {
+                if processor.native_editor_detach_stage().is_some() {
+                    // Canonical attachment failure admits control-only recovery.
+                    // Do not dispatch its still-live HWND or start a DSP borrow.
+                    // A typed state-entry retry performs the same exact Close
+                    // before any restore. Keep its named reply codec and peer
+                    // cohort intact while frame-clear cleanup is still pending.
+                    let Some(command) = ingress.receive()? else {
+                        continue;
+                    };
+                    let cleanup_control = matches!(
+                        &command,
+                        super::native_worker_command::NativeCommand::EditorClose(_)
+                            | super::native_worker_command::NativeCommand::AuthorStateEntry(_)
+                            | super::native_worker_command::NativeCommand::PollObservations(_)
+                            | super::native_worker_command::NativeCommand::Plain(WorkerCommand {
+                                kind: CommandKind::Shutdown,
+                                ..
+                            })
+                    );
+                    if !cleanup_control {
+                        WorkerResponse::Failed("native attachment cleanup admits only source observation, Close, state-entry retry or Shutdown".to_owned())
+                        .write_to(control).map_err(|error| worker_failed("native cleanup Process refusal", error))?;
+                        ingress.acknowledge()?;
+                        return Ok(());
+                    }
+                    let success = dispatch_native_owner_command(
+                        processor, command, control, shared, context,
+                    )?;
+                    ingress.acknowledge()?;
+                    if !success {
+                        return Ok(());
+                    }
+                    continue;
+                }
+                let split = processor.split_native_processing()?;
+                let outcome = with_processing_scope(
+                    split,
+                    profile,
+                    shared,
+                    context,
+                    |main, dsp| {
+                        match (context.render_contract.processing_mode, dsp.scheduling_entry()) {
+                    (AudioProcessingMode::Offline, None) => {}
+                    (AudioProcessingMode::Realtime, Some(evidence))
+                        if evidence.role() == mondrian_audio_scheduling::RealtimeAudioThreadRole::NativeDsp => {}
+                    _ => return Err(invalid_contract("native DSP scope readiness does not match its actual processing role")),
+                }
+                        if !ready_sent {
+                            // The parent may not observe Ready until this actual DSP
+                            // thread acquired its required scheduling role. No caller
+                            // manufactures native entry from the main thread's mode.
+                            write_json_frame(control, ready)
+                                .map_err(|error| worker_failed("native scope startup", error))?;
+                            ready_sent = true;
+                        }
+                        service_native_processing_scope(main, dsp, ingress, control)
+                    },
+                )?;
+                // Actual explicit scheduling restoration is retained in `outcome`.
+                // A later readiness/exit wire contract must carry these facts to
+                // the parent before claiming its native RT qualification.
+                let _scheduling_exit = outcome.scheduling_exit;
+                match outcome.value {
+                    NativeScopeExit::Completed => return Ok(()),
+                    NativeScopeExit::UserCloseRequested => {
+                        // This is an observed native window event, not a second
+                        // command queue or a synthetic author End gesture. The
+                        // same actual view/parent are removed only after DSP join.
+                        match processor.service_native_editor_close_request()? {
+                            crate::NativeAudioEditorOutcome::Closed { .. }
+                            | crate::NativeAudioEditorOutcome::ClosePending {
+                                stage: crate::NativeAudioEditorCloseStage::ClearHostFrame,
+                                ..
+                            } => {}
+                            _ => return Err(invalid_contract(
+                                "native Close source intent did not settle this actual attachment",
+                            )),
+                        }
+                    }
+                    NativeScopeExit::OwnerCommand(command) => {
+                        let success = dispatch_native_owner_command(
+                            processor, command, control, shared, context,
+                        )?;
+                        ingress.acknowledge()?;
+                        if !success {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(test)]
+mod inline_dispatch_contracts {
+    use super::super::native_configuration_control::{
+        NativeConfigurationControlRequest, NativeRequestCohort,
+    };
+    use super::super::native_configuration_seed::{
+        NativeConfigurationSeedRequest, NativeConfigurationSeedTicket,
+    };
+    use super::super::{NativeConfigurationFormat, NativeConfigurationSeedRefusal};
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::net::TcpListener;
+    use std::num::NonZeroU64;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingWorker {
+        entered: Vec<i64>,
+        processed: Vec<i64>,
+        staged: usize,
+        committed: usize,
+    }
+
+    impl IsolatedAudioProcessorWorker for RecordingWorker {
+        fn execution_contract(&self) -> crate::AudioProcessorExecutionContract {
+            crate::AudioProcessorExecutionContract::new(
+                0,
+                crate::AudioProcessorTail::None,
+                true,
+                true,
+                true,
+                0,
+            )
+            .expect("contract")
+        }
+        fn auxiliary_input_contract(&self) -> crate::AudioProcessorAuxiliaryInputContract {
+            crate::AudioProcessorAuxiliaryInputContract::default()
+        }
+        fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
+            self.entered.push(start_sample);
+            Ok(())
+        }
+        fn process(
+            &mut self,
+            mut block: IsolatedAudioProcessorWorkerBlock<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            self.processed.push(block.start_sample());
+            block.main_interleaved().fill(0.375);
+            Ok(())
+        }
+        fn stage_native_configuration_seed(
+            &mut self,
+            _: super::super::NativeConfigurationOwnedSeed,
+        ) -> Result<super::super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+            self.staged += 1;
+            Ok(super::super::NativeConfigurationSeedOutcome::Refused(
+                NativeConfigurationSeedRefusal::UnsupportedAdapter,
+            ))
+        }
+        fn commit_native_configuration_seed(
+            &mut self,
+            _: NativeConfigurationSeedTicket,
+        ) -> Result<super::super::NativeConfigurationSeedOutcome, AudioProcessorHostError> {
+            self.committed += 1;
+            Ok(super::super::NativeConfigurationSeedOutcome::Refused(
+                NativeConfigurationSeedRefusal::UnsupportedAdapter,
+            ))
+        }
+    }
+
+    #[test]
+    fn native_inline_dispatch_correlates_real_socket_controls_and_preserves_same_processor() {
+        use super::super::native_configuration_seed_wire::{read_reply, SeedReply};
+        use super::super::native_worker_command::decode;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener");
+        let mut parent = TcpStream::connect(listener.local_addr().expect("bound address"))
+            .expect("one control connection");
+        let (mut child, _) = listener.accept().expect("accepted control connection");
+        for socket in [&parent, &child] {
+            socket.set_read_timeout(Some(Duration::from_secs(2))).expect("test deadline");
+        }
+        let contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: mondrian_core::AudioChannelLayout::Mono,
+            max_block_frames: 2,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 0,
+            public_output_lookahead_budget_frames: 0,
+            compensation_delay_scratch_budget_bytes: 0,
+        };
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).expect("exact shared extent");
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            parameter_ids: &[],
+            render_contract: contract,
+        };
+        let mut storage = vec![0_u64; layout.total_bytes.div_ceil(size_of::<u64>())];
+        let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut storage);
+        let mut worker = RecordingWorker::default();
+        for (kind, start_sample, frames) in [
+            (CommandKind::EnterState, -11, 0),
+            (CommandKind::Process, -11, 2),
+            (CommandKind::PollPending, 0, 0),
+        ] {
+            WorkerCommand { kind, start_sample, frames, event_count: 0 }
+                .write_to(&mut parent)
+                .expect("real request");
+            let command = decode(&mut child, 0).expect("single decoder");
+            assert!(dispatch_native_owner_command(
+                &mut worker,
+                command,
+                &mut child,
+                shared,
+                context
+            )
+            .expect("inline consumer"));
+            assert_eq!(
+                WorkerResponse::read_from(&mut parent).expect("exact correlated response"),
+                WorkerResponse::Completed
+            );
+        }
+        assert_eq!(worker.entered, [-11]);
+        assert_eq!(worker.processed, [-11]);
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(&shared[..8]),
+            &[0.375, 0.375]
+        );
+        WorkerCommand {
+            kind: CommandKind::PollConfigurationCohort,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        }
+        .write_to(&mut parent)
+        .expect("pure query");
+        let command = decode(&mut child, 0).expect("pure query decoder");
+        assert!(
+            dispatch_native_owner_command(&mut worker, command, &mut child, shared, context)
+                .expect("pure query consumer")
+        );
+        assert_eq!(
+            super::super::native_configuration_wire::read_cohort_reply(&mut parent)
+                .expect("same query codec"),
+            None
+        );
+
+        let bytes = [7, 3, 1];
+        let ticket = NativeConfigurationSeedTicket {
+            serviced_cohort: NativeRequestCohort::new(
+                1,
+                mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+            )
+            .expect("cohort"),
+            control_token: NonZeroU64::new(17).expect("token"),
+            observed_contract: worker.execution_contract(),
+            format: NativeConfigurationFormat::ClapState,
+            configuration_bytes: bytes.len(),
+            configuration_sha256: Sha256::digest(bytes).into(),
+        };
+        let control = NativeConfigurationControlRequest {
+            expected_cohort: ticket.serviced_cohort,
+            control_token: ticket.control_token,
+            canonical_constant_values: &[],
+            configuration_limit_bytes: 32,
+            control_buffer_grant_bytes: 64,
+        };
+        WorkerCommand {
+            kind: CommandKind::ServiceConfiguration,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        }
+        .write_to(&mut parent)
+        .expect("control request header");
+        super::super::native_configuration_wire::write_request(&mut parent, &control)
+            .expect("control request body");
+        let command = decode(&mut child, 0).expect("owned exact control");
+        assert!(
+            dispatch_native_owner_command(&mut worker, command, &mut child, shared, context)
+                .expect("safe capability refusal keeps owner")
+        );
+        assert!(matches!(
+            super::super::native_configuration_wire::read_reply(&mut parent, &control)
+                .expect("control correlated reply"),
+            super::super::native_configuration_wire::ControlReply::Outcome(
+                super::super::NativeConfigurationControlOutcome::CapabilityRefused(
+                    super::super::NativeConfigurationRefusal::UnsupportedAdapter
+                )
+            )
+        ));
+        WorkerCommand {
+            kind: CommandKind::StageConfigurationSeed,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        }
+        .write_to(&mut parent)
+        .expect("stage header");
+        super::super::native_configuration_seed_wire::write_stage(
+            &mut parent,
+            &NativeConfigurationSeedRequest {
+                ticket,
+                configuration: &bytes,
+                seed_capacity_grant_bytes: 1,
+            },
+        )
+        .expect("below-size grant remains a typed resource refusal");
+        let command = decode(&mut child, 0).expect("consumed refused stage");
+        assert!(
+            dispatch_native_owner_command(&mut worker, command, &mut child, shared, context)
+                .expect("refusal retains native worker")
+        );
+        assert!(matches!(
+            read_reply(&mut parent, ticket, 1).expect("exact refusal reply"),
+            SeedReply::Outcome(super::super::NativeConfigurationSeedOutcome::Refused(
+                NativeConfigurationSeedRefusal::BufferGrantExceeded
+            ))
+        ));
+        assert_eq!(
+            worker.staged, 0,
+            "decoder refusal cannot dispatch a phantom native stage"
+        );
+        WorkerCommand {
+            kind: CommandKind::CommitConfigurationSeed,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        }
+        .write_to(&mut parent)
+        .expect("next exact commit header");
+        super::super::native_configuration_seed_wire::write_commit(&mut parent, ticket)
+            .expect("next exact commit body");
+        let command = decode(&mut child, 0).expect("framing survives consumed refusal");
+        assert!(
+            dispatch_native_owner_command(&mut worker, command, &mut child, shared, context)
+                .expect("safe unsupported commit")
+        );
+        assert!(matches!(
+            read_reply(&mut parent, ticket, 32).expect("commit correlated reply"),
+            SeedReply::Outcome(super::super::NativeConfigurationSeedOutcome::Refused(
+                NativeConfigurationSeedRefusal::UnsupportedAdapter
+            ))
+        ));
+        assert_eq!(worker.committed, 1);
+        WorkerCommand {
+            kind: CommandKind::Shutdown,
+            start_sample: 0,
+            frames: 0,
+            event_count: 0,
+        }
+        .write_to(&mut parent)
+        .expect("shutdown request");
+        let command = decode(&mut child, 0).expect("shutdown decoder");
+        assert!(
+            !dispatch_native_owner_command(&mut worker, command, &mut child, shared, context)
+                .expect("matched shutdown closes sole loop")
+        );
+        assert_eq!(
+            WorkerResponse::read_from(&mut parent)
+                .expect("shutdown completed before owner release"),
+            WorkerResponse::Completed
+        );
+        assert_eq!(worker.entered, [-11]);
+        assert_eq!(worker.processed, [-11]);
+    }
 }

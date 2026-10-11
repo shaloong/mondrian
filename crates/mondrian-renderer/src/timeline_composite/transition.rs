@@ -25,96 +25,83 @@ pub struct TimelineCrossDissolveLayer<'a> {
 }
 
 pub(super) fn composite_transition_input_f32(
-    canvas: &mut [[f32; 4]],
-    width: u32,
-    height: u32,
+    mut canvas: mondrian_effects::EffectFloatFrame,
     input: &TimelineTransitionInput<'_>,
     runtime: TimelineEffectColorRuntime<'_>,
     scratch: &mut TimelineCompositeScratch,
     control: &mut mondrian_effects::EffectProcessorControl<'_>,
-) -> Result<(), EffectFloatExecutionError> {
+) -> Result<mondrian_effects::EffectFloatFrame, EffectFloatExecutionError> {
     match input {
         TimelineTransitionInput::Transparent => {}
         TimelineTransitionInput::Media(layer) => {
             let frame = layer.frame.rgba_f32();
             let effect_output;
+            let input = working_float_view(frame);
             let source = if layer.effect_graph.graph().is_identity() {
-                frame.data.as_slice()
+                input
             } else {
                 effect_output = apply_effect_graph_f32(
                     &mut scratch.effect_execution,
                     &mut scratch.color_execution,
-                    &frame.data,
-                    frame.width,
-                    frame.height,
+                    input,
                     &layer.effect_graph,
                     layer.frame_seed,
                     runtime,
                     control,
                 )?;
-                effect_output.as_slice()
+                effect_output.view()
             };
-            alpha_blend_f32_layer(
+            canvas = alpha_blend_typed_float_layer(
                 canvas,
-                width as usize,
-                height as usize,
                 source,
-                frame.width as usize,
-                frame.height as usize,
                 layer.opacity,
                 layer.blend_mode,
                 layer.transform,
                 layer.frame_seed,
                 &mut scratch.cpu_visual_execution,
-            );
+                control,
+            )?
+            .0;
         }
         TimelineTransitionInput::SolidColor(layer) => {
-            let pixel_count = width as usize * height as usize;
-            let color = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
-            if layer.effect_graph.graph().is_identity() && is_identity_transform(layer.transform) {
-                alpha_blend_f32_solid(
-                    canvas,
-                    color,
-                    layer.opacity,
-                    layer.blend_mode,
-                    layer.frame_seed,
-                );
+            let extent = canvas.extent();
+            let pixel = [layer.color.r, layer.color.g, layer.color.b, layer.color.a];
+            scratch.solid_fill_f32.resize(canvas.len(), pixel);
+            scratch.solid_fill_f32.fill(pixel);
+            let input = mondrian_effects::EffectFloatFrameView::new(
+                extent,
+                scene_linear_float_format(ColorFrameAlpha::StraightCoverage),
+                &scratch.solid_fill_f32,
+            );
+            let effect_output;
+            let source = if layer.effect_graph.graph().is_identity() {
+                input
             } else {
-                scratch.solid_fill_f32.resize(pixel_count, color);
-                scratch.solid_fill_f32.fill(color);
-                let source = if layer.effect_graph.graph().is_identity() {
-                    scratch.solid_fill_f32.as_slice()
-                } else {
-                    scratch.solid_effect_f32 = apply_effect_graph_f32(
-                        &mut scratch.effect_execution,
-                        &mut scratch.color_execution,
-                        &scratch.solid_fill_f32,
-                        width,
-                        height,
-                        &layer.effect_graph,
-                        layer.frame_seed,
-                        runtime,
-                        control,
-                    )?;
-                    scratch.solid_effect_f32.as_slice()
-                };
-                alpha_blend_f32_layer(
-                    canvas,
-                    width as usize,
-                    height as usize,
-                    source,
-                    width as usize,
-                    height as usize,
-                    layer.opacity,
-                    layer.blend_mode,
-                    layer.transform,
+                effect_output = apply_effect_graph_f32(
+                    &mut scratch.effect_execution,
+                    &mut scratch.color_execution,
+                    input,
+                    &layer.effect_graph,
                     layer.frame_seed,
-                    &mut scratch.cpu_visual_execution,
-                );
-            }
+                    runtime,
+                    control,
+                )?;
+                effect_output.view()
+            };
+            canvas = alpha_blend_typed_float_layer(
+                canvas,
+                source,
+                layer.opacity,
+                layer.blend_mode,
+                layer.transform,
+                layer.frame_seed,
+                &mut scratch.cpu_visual_execution,
+                control,
+            )?
+            .0;
         }
     }
-    Ok(())
+    Ok(canvas)
 }
 
 #[cfg(test)]

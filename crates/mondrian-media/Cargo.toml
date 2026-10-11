@@ -12,6 +12,7 @@ default = []
 validation = ["dep:mondrian-platform-core", "dep:mondrian-validation-launcher"]
 
 [dependencies]
+mondrian-audio-scheduling.workspace = true
 mondrian-validation-launcher = { workspace = true, optional = true }
 mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }

@@ -3,6 +3,7 @@
 
 use clack_extensions::audio_ports::*;
 use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
+use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::thread_check::HostThreadCheck;
 use clack_extensions::state::{PluginState, PluginStateImpl};
@@ -42,6 +43,8 @@ impl DefaultPluginFactory for SidechainFixture {
             role_valid: AtomicBool::new(true),
             render_mode: AtomicU8::new(0),
             active: AtomicBool::new(false),
+            restart_seen: AtomicBool::new(false),
+            configured_latency: AtomicU32::new(3),
             mode: AtomicU8::new(0),
             gain: AtomicU32::new(1.0_f32.to_bits()),
         };
@@ -72,6 +75,8 @@ pub struct Shared<'a> {
     role_valid: AtomicBool,
     render_mode: AtomicU8,
     active: AtomicBool,
+    restart_seen: AtomicBool,
+    configured_latency: AtomicU32,
     mode: AtomicU8,
     gain: AtomicU32,
 }
@@ -88,8 +93,26 @@ impl Shared<'_> {
         else { Err(PluginError::Message("invalid host thread role")) }
     }
 
+    fn emit_logs(&self, message: &'static std::ffi::CStr) -> Result<(), PluginError> {
+        let logger=self.host.get_extension::<HostLog>()
+            .ok_or(PluginError::Message("standard host log extension unavailable"))?;
+        for severity in [LogSeverity::Debug,LogSeverity::Info,LogSeverity::Warning,
+            LogSeverity::Error,LogSeverity::Fatal,LogSeverity::HostMisbehaving,LogSeverity::PluginMisbehaving] {
+            logger.log(&self.host,severity,message);
+        }
+        Ok(())
+    }
+
     fn delay_frames(&self) -> usize {
-        if self.mode.load(Ordering::Relaxed) == 3 && self.render_mode.load(Ordering::Relaxed) == 1 { 5 } else { 3 }
+        self.configured_latency.load(Ordering::Relaxed) as usize
+    }
+
+    fn next_activation_delay_frames(&self) -> u32 {
+        match self.mode.load(Ordering::Relaxed) {
+            3 if self.render_mode.load(Ordering::Relaxed) == 1 => 5,
+            7..=9 if self.restart_seen.load(Ordering::Relaxed) => 7,
+            _ => 3,
+        }
     }
 }
 
@@ -108,6 +131,20 @@ impl PluginStateImpl for Main<'_> {
         self.0.check_role(false)?;
         output.write_all(&[self.0.mode.load(Ordering::Relaxed)])?;
         output.write_all(&self.0.gain.load(Ordering::Relaxed).to_le_bytes())?;
+        if (7..=9).contains(&self.0.mode.load(Ordering::Relaxed)) {
+            output.write_all(&[u8::from(self.0.restart_seen.load(Ordering::Relaxed))])?;
+        }
+        if self.0.restart_seen.load(Ordering::Relaxed)
+            && self.0.configured_latency.load(Ordering::Relaxed) == 7 {
+            match self.0.mode.load(Ordering::Relaxed) {
+                // A second same-bit callback arrives inside actual state capture.
+                8 => self.0.host.request_restart(),
+                // Deliberately ignore the failed native write. The host's own
+                // writer must prevent publication of truncated configuration.
+                9 => { let oversized = [0_u8; 70 * 1024]; let _ = output.write(&oversized); }
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -116,9 +153,16 @@ impl PluginStateImpl for Main<'_> {
         let mut bytes = [0; 5];
         input.read_exact(&mut bytes)?;
         let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        if bytes[0] > 6 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+        if bytes[0] > 10 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
             return Err(PluginError::Message("invalid fixture state"));
         }
+        let restart_seen = if (7..=9).contains(&bytes[0]) {
+            let mut flag = [0];
+            input.read_exact(&mut flag)?;
+            if flag[0] > 1 { return Err(PluginError::Message("invalid fixture restart flag")); }
+            flag[0] != 0
+        } else { false };
+        self.0.restart_seen.store(restart_seen, Ordering::Relaxed);
         self.0.mode.store(bytes[0], Ordering::Relaxed);
         self.0.gain.store(gain.to_bits(), Ordering::Relaxed);
         Ok(())
@@ -226,6 +270,14 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         if config.max_frames_count == 0 || config.max_frames_count > 65_536 {
             return Err(PluginError::Message("fixture block extent"));
         }
+        if shared.mode.load(Ordering::Relaxed)==10 {
+            shared.emit_logs(c"log:activate")?;
+            // Legal arbitrary-thread callbacks, joined before activation ends.
+            // No process callback creates, joins or waits for this thread.
+            std::thread::scope(|scope| scope.spawn(|| shared.emit_logs(c"log:background"))
+                .join().map_err(|_|PluginError::Message("background logger panicked")))??;
+        }
+        shared.configured_latency.store(shared.next_activation_delay_frames(), Ordering::Relaxed);
         shared.active.store(true, Ordering::Relaxed);
         Ok(Self {
             shared,
@@ -265,11 +317,12 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         _events: Events,
     ) -> Result<ProcessStatus, PluginError> {
         self.shared.check_role(true)?;
+        if self.mode==10 { self.shared.emit_logs(c"log:process")?; }
         self.shared.host.request_callback();
         let frames = audio.frames_count() as usize;
         // New state 6 is an independent ABI oracle. Other states retain their
         // original PCM, ports and mode-specific lifecycle requirements.
-        let timeline_start = if self.mode == 6 {
+        let timeline_start = if (6..=9).contains(&self.mode) {
             let transport = process.transport.ok_or(PluginError::Message("missing timeline transport"))?;
             if transport.flags != TransportFlags::HAS_SECONDS_TIMELINE
                 || transport.header.time() != 0 || process.steady_time.is_some()
@@ -308,7 +361,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             }
         }
         for (index, frame) in mix.iter_mut().enumerate() {
-            let tag = if let Some(start) = timeline_start {
+            let tag = if let Some(start) = timeline_start.filter(|_| self.mode == 6) {
                 let sample = start.checked_add(index as i64).ok_or(PluginError::Message("transport sample overflow"))?;
                 (sample % 251) as f32 / 1024.0
             } else { 0.0 };
@@ -328,6 +381,14 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             for (target, frame) in samples.iter_mut().zip(mix.iter()) {
                 *target = frame[channel];
             }
+        }
+        if (7..=9).contains(&self.mode) && timeline_start.is_some_and(|start| start.saturating_add(frames as i64) > 9)
+            && !self.shared.restart_seen.swap(true, Ordering::Relaxed)
+        {
+            // Core request_restart is thread-safe. This completed process block
+            // remains valid under the current active delay until the host stops,
+            // deactivates and activates at a later legal boundary.
+            self.shared.host.request_restart();
         }
         Ok(ProcessStatus::Continue)
     }

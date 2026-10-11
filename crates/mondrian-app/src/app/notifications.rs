@@ -21,6 +21,8 @@ impl AppNotificationId {
 /// Product urgency for a notification shown without blocking the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppNotificationSeverity {
+    /// Plugin or operation information without a success claim.
+    Information,
     /// A long-running operation completed successfully.
     Success,
     /// The operation completed but needs attention.

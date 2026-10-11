@@ -91,8 +91,8 @@ pub enum GpuVisualFrameElement {
         effect_plan: Arc<CompiledEffectGpuPlan>,
         /// Authored adjustment opacity.
         opacity: f32,
-        /// Authored adjustment blend mode.
-        blend_mode: BlendMode,
+        /// Authored adjustment pass policy.
+        blend_policy: mondrian_effects::EffectPassBlendPolicy,
         /// Stable Timeline seed.
         frame_seed: i64,
     },
@@ -402,16 +402,19 @@ impl GpuVisualFrameExecutor {
                 GpuVisualFrameElement::Adjustment {
                     effect_plan,
                     opacity,
-                    blend_mode,
+                    blend_policy,
                     frame_seed,
                 } => {
-                    if effect_plan.is_identity() || opacity.clamp(0.0, 1.0) == 0.0 {
+                    if (effect_plan.is_identity()
+                        && *blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
+                        || opacity.clamp(0.0, 1.0) == 0.0
+                    {
                         continue;
                     }
                     prepared.push(PreparedElement::Adjustment {
                         effect_plan: Arc::clone(effect_plan),
                         opacity: *opacity,
-                        blend_mode: *blend_mode,
+                        blend_policy: *blend_policy,
                         frame_seed: *frame_seed,
                     });
                 }
@@ -634,15 +637,28 @@ pub fn estimate_gpu_visual_frame_active_working_set(
         ..GpuVisualFrameActiveWorkingSetEstimate::default()
     };
     let mut external_adjustments = 0_u64;
+    let mut inline_mix_adjustments = 0_u64;
 
     for element in request.elements {
         match element {
             GpuVisualFrameElement::Source(source) => {
                 estimate_visual_source(request, source, &mut estimate)?;
             }
-            GpuVisualFrameElement::Adjustment { effect_plan, opacity, .. } => {
-                if effect_plan.is_identity() || opacity.clamp(0.0, 1.0) == 0.0 {
+            GpuVisualFrameElement::Adjustment { effect_plan, opacity, blend_policy, .. } => {
+                if (effect_plan.is_identity()
+                    && *blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix)
+                    || opacity.clamp(0.0, 1.0) == 0.0
+                {
                     continue;
+                }
+                if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb
+                    && *blend_policy == mondrian_effects::EffectPassBlendPolicy::Mix
+                {
+                    inline_mix_adjustments = inline_mix_adjustments.checked_add(1).ok_or(
+                        GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow {
+                            stage: GpuVisualFrameActiveWorkingSetStage::WorkingComposite,
+                        },
+                    )?;
                 }
                 if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
                     external_adjustments = external_adjustments.checked_add(1).ok_or(
@@ -686,6 +702,7 @@ pub fn estimate_gpu_visual_frame_active_working_set(
     let composite_textures = external_adjustments
         .checked_mul(3)
         .and_then(|extra| extra.checked_add(2))
+        .and_then(|textures| textures.checked_add(inline_mix_adjustments))
         .ok_or(
             GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow {
                 stage: GpuVisualFrameActiveWorkingSetStage::WorkingComposite,
@@ -795,7 +812,7 @@ enum PreparedElement {
     Adjustment {
         effect_plan: Arc<CompiledEffectGpuPlan>,
         opacity: f32,
-        blend_mode: BlendMode,
+        blend_policy: mondrian_effects::EffectPassBlendPolicy,
         frame_seed: i64,
     },
 }
@@ -804,11 +821,11 @@ impl PreparedElement {
     fn as_composite_layer(&self) -> GpuCompositeLayer<'_> {
         match self {
             Self::Source(source) => source.as_composite_layer(),
-            Self::Adjustment { effect_plan, opacity, blend_mode, frame_seed } => {
+            Self::Adjustment { effect_plan, opacity, blend_policy, frame_seed } => {
                 GpuCompositeLayer {
                     source: GpuCompositeLayerSource::Adjustment,
                     opacity: *opacity,
-                    blend_mode: *blend_mode,
+                    blend_policy: *blend_policy,
                     transform: IDENTITY_AFFINE,
                     effect_plan: Some(effect_plan),
                     frame_seed: *frame_seed,
@@ -839,7 +856,7 @@ impl PreparedSourceLayer {
                 GpuVisualFrameSource::Solid(color) => GpuCompositeLayerSource::SolidColor(*color),
             },
             opacity: self.opacity,
-            blend_mode: self.blend_mode,
+            blend_policy: mondrian_effects::EffectPassBlendPolicy::Blend(self.blend_mode),
             transform: self.transform,
             effect_plan: self.effect_plan.as_deref(),
             frame_seed: self.frame_seed,

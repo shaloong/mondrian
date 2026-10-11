@@ -3078,7 +3078,11 @@ mod tests {
         let track_id = sequence.audio_tracks[0].id;
         let mut processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
         let parameter_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
-        let mut curve = processor.parameters[&parameter_id].automation.clone();
+        let mut curve = processor.parameters[&parameter_id]
+            .automation
+            .as_ref()
+            .expect("bound host curve")
+            .clone();
         curve
             .set_keyframe(ExactAutomationKeyframe::linear(TimelineTime::ZERO, -6.0))
             .expect("gain key");
@@ -3131,20 +3135,29 @@ mod tests {
 
         assert_eq!(parameter.schema.parameter_id, parameter_id);
         assert_eq!(parameter.schema.default_value, PropertyValue::Double(0.0));
-        assert_eq!(parameter.automation.keyframes[0].value, -6.0);
+        assert_eq!(
+            parameter.automation.as_ref().expect("bound host curve").keyframes[0].value,
+            -6.0
+        );
         let delay = &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[1]
             .parameters[&delay_parameter_id];
         assert_eq!(delay.schema.default_value, PropertyValue::Int(0));
         assert_eq!(delay.schema.unit, ParameterUnit::Samples);
         assert!(!delay.schema.is_animatable);
-        assert_eq!(delay.automation.default_value, 128.0);
-        assert!(delay.automation.keyframes.is_empty());
+        assert_eq!(
+            delay.automation.as_ref().expect("bound host curve").default_value,
+            128.0
+        );
+        assert!(delay.automation.as_ref().expect("bound host curve").keyframes.is_empty());
         let lookahead =
             &sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[2]
                 .parameters[&ParameterId::new_static(LOOKAHEAD_LIMITER_LOOKAHEAD_MS_PARAMETER_ID)];
         assert_eq!(lookahead.schema.unit, ParameterUnit::Milliseconds);
         assert!(!lookahead.schema.is_animatable);
-        assert_eq!(lookahead.automation.default_value, 5.0);
+        assert_eq!(
+            lookahead.automation.as_ref().expect("bound host curve").default_value,
+            5.0
+        );
     }
 
     #[test]
@@ -3159,6 +3172,8 @@ mod tests {
             .get_mut(&parameter_id)
             .expect("gain parameter")
             .automation
+            .as_mut()
+            .expect("bound host curve")
             .default_value = 25.0;
         sequence
             .audio_program

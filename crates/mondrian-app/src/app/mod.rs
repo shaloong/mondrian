@@ -114,6 +114,7 @@ mod audio_curve_clipboard;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+mod native_audio_editor;
 mod resource_authoring;
 #[cfg(test)]
 pub(crate) mod test_curve_authoring;
@@ -235,6 +236,8 @@ pub(crate) mod preview_media_frame;
 mod preview_media_residency;
 pub(crate) mod preview_media_source;
 pub(crate) mod preview_media_task;
+pub(crate) mod preview_native_gui;
+pub(crate) mod preview_processor_feedback;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
 pub(crate) mod preview_render_cache;
@@ -478,6 +481,8 @@ pub struct AppState {
     /// navigation, author generations, and project-wide Undo/Redo.
     pub(crate) authoring: Option<AuthoringSession>,
     pub(crate) active_parameter_gesture: Option<parameter_gesture::ActiveParameterGesture>,
+    native_audio_editor: Option<native_audio_editor::NativeAudioEditorProductContext>,
+    native_audio_renderer: Option<std::sync::Weak<audio_rendering::TimelineAudioPcmRenderer>>,
     pub(super) parameter_gesture_command: Option<parameter_gesture::ParameterGestureCommand>,
     /// Kernel-backed exclusive authority for the open Project runtime.
     ///
@@ -571,6 +576,8 @@ pub struct AppState {
     status_log: Vec<StatusLogEntry>,
     /// Bounded, language-neutral facts for nonblocking terminal notifications.
     pub notifications: notifications::AppNotificationFeed,
+    /// Current bounded processor facts; this never owns native private state.
+    pub(crate) processor_feedback: preview_processor_feedback::PreviewProcessorFeedbackState,
 
     // 动画选择状态（timeline / inspector / future graph 共用）
     pub animation_selection: AnimationSelectionState,
@@ -700,6 +707,8 @@ impl AppState {
             event_bus: EventBus::new(),
             authoring: None,
             active_parameter_gesture: None,
+            native_audio_editor: None,
+            native_audio_renderer: None,
             parameter_gesture_command: None,
             project_runtime_lease: None,
             retired_project_libraries: Vec::new(),
@@ -736,6 +745,8 @@ impl AppState {
             status_publication_id: StatusPublicationId::new(),
             status_log: Vec::new(),
             notifications: notifications::AppNotificationFeed::default(),
+            processor_feedback: preview_processor_feedback::PreviewProcessorFeedbackState::default(
+            ),
             animation_selection: AnimationSelectionState::default(),
             clipboard: None,
             auto_proxy_enabled: false,
@@ -928,6 +939,30 @@ impl AppState {
             .as_ref()
             .map(|session| session.author_generation().get())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn native_visual_author_view(
+        &self,
+        sequence: SequenceId,
+        clip: ClipId,
+        effect: mondrian_core::EffectId,
+    ) -> mondrian_core::Result<mondrian_editor_state::NativeVisualAuthorView> {
+        let session = self.authoring.as_ref().ok_or_else(|| {
+            mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "native_visual_author_view".to_owned(),
+                reason: "no open authoring Session".to_owned(),
+            }
+        })?;
+        session.native_visual_author_view(sequence, clip, effect)
+    }
+
+    pub(crate) fn native_visual_author_view_is_current(
+        &self,
+        view: &mondrian_editor_state::NativeVisualAuthorView,
+    ) -> bool {
+        self.authoring
+            .as_ref()
+            .is_some_and(|session| session.native_visual_author_view_is_current(view))
     }
 
     /// Process-local identity of the currently open Authoring Session.

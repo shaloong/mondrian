@@ -1346,3 +1346,376 @@ impl AudioProcessorAudioIo for TestAudioIo {
 mod native_performance;
 
 mod native_transport;
+
+mod native_clap_restart;
+mod native_restart;
+
+mod native_configuration_service;
+
+mod native_owner_binding;
+
+#[path = "tests/native_host_log.rs"]
+mod native_host_log_tests;
+
+#[cfg(target_os = "windows")]
+mod native_editor_window;
+
+pub(super) fn pure_seed_factory(
+    format: NativeConfigurationFormat,
+    state: Option<&[u8]>,
+) -> IsolatedAudioProcessorFactory {
+    let payload = match format {
+        NativeConfigurationFormat::Vst3ComponentAndController => serde_json::json!({
+            "binary_path":"nonexistent-owned-plugin.vst3", "class_id":"00112233445566778899AABBCCDDEEFF",
+            "vendor":"Owned", "binary_sha256":vec![7_u8; 32], "state":state,
+            "parameters":[], "parameter_ids":[],
+        }),
+        NativeConfigurationFormat::ClapState => serde_json::json!({
+            "library_path":"nonexistent-owned-plugin.clap", "plugin_id":"owned-pure-seed",
+            "binary_sha256":vec![7_u8; 32], "state":state, "parameters":[], "parameter_ids":[],
+        }),
+    };
+    let mut spec = IsolatedAudioProcessorWorkerSpec::new(
+        PathBuf::from("a-worker-which-does-not-exist"),
+        serde_json::to_vec(&payload).expect("owned payload"),
+        AudioProcessorExecutionContract::new(
+            3,
+            AudioProcessorTail::Finite(17),
+            true,
+            true,
+            true,
+            71,
+        )
+        .expect("owned fixed contract"),
+        AudioProcessorAuxiliaryInputContract::default(),
+        Vec::new(),
+        test_render_contract(),
+    )
+    .expect("pure spec validation");
+    spec.helper_arguments = vec![OsString::from("preserve-helper-argument")];
+    spec.dispatch_argument = Some(OsString::from("preserve-dispatch"));
+    spec.startup_timeout = Duration::from_millis(301);
+    spec.state_entry_timeout = Duration::from_millis(401);
+    spec.operation_timeout = Duration::from_millis(501);
+    let layout = SharedBlockLayout::new(4, 2, 0, 0).expect("fixed mapping layout");
+    let execution_contract = spec
+        .plugin_execution_contract
+        .with_additional_session_scratch_bytes(layout.total_bytes)
+        .expect("fixed total contract");
+    IsolatedAudioProcessorFactory {
+        input_names: Vec::new(),
+        spec,
+        execution_contract,
+        layout,
+    }
+}
+
+#[test]
+fn native_factory_seed_pure_rebind_preserves_all_prepared_facts_without_loading() {
+    for format in [
+        NativeConfigurationFormat::Vst3ComponentAndController,
+        NativeConfigurationFormat::ClapState,
+    ] {
+        let original = pure_seed_factory(format, Some(&[11, 22, 33]));
+        let old_bytes = original.spec.preparation_payload.clone();
+        let replacement =
+            original.rebind_configuration_seed(format, &[44, 55, 255]).expect("pure rebind");
+        assert_eq!(replacement.execution_contract, original.execution_contract);
+        assert_eq!(replacement.layout, original.layout);
+        assert_eq!(replacement.input_names, original.input_names);
+        assert_eq!(
+            replacement.spec.helper_executable,
+            original.spec.helper_executable
+        );
+        assert_eq!(
+            replacement.spec.helper_arguments,
+            original.spec.helper_arguments
+        );
+        assert_eq!(
+            replacement.spec.dispatch_argument,
+            original.spec.dispatch_argument
+        );
+        assert_eq!(
+            replacement.spec.plugin_execution_contract,
+            original.spec.plugin_execution_contract
+        );
+        assert_eq!(
+            replacement.spec.auxiliary_inputs,
+            original.spec.auxiliary_inputs
+        );
+        assert_eq!(replacement.spec.parameter_ids, original.spec.parameter_ids);
+        assert_eq!(
+            replacement.spec.render_contract,
+            original.spec.render_contract
+        );
+        assert_eq!(
+            replacement.spec.startup_timeout,
+            original.spec.startup_timeout
+        );
+        assert_eq!(
+            replacement.spec.state_entry_timeout,
+            original.spec.state_entry_timeout
+        );
+        assert_eq!(
+            replacement.spec.operation_timeout,
+            original.spec.operation_timeout
+        );
+        assert_eq!(replacement.spec.native_lane, original.spec.native_lane);
+        let mut before: serde_json::Value =
+            serde_json::from_slice(&old_bytes).expect("before payload");
+        let mut after: serde_json::Value =
+            serde_json::from_slice(&replacement.spec.preparation_payload).expect("after payload");
+        assert_eq!(after["state"], serde_json::json!([44, 55, 255]));
+        before.as_object_mut().expect("object").remove("state");
+        after.as_object_mut().expect("object").remove("state");
+        assert_eq!(before, after);
+        assert_eq!(original.spec.preparation_payload, old_bytes);
+        // This helper path cannot launch. The public trait path must share it,
+        // and succeeds with deliberately nonexistent helper and plugin paths.
+        let rebound = original
+            .with_native_configuration_seed(format, &[44, 55, 255])
+            .expect("public pure path")
+            .expect("native capability");
+        assert_eq!(rebound.execution_contract(), original.execution_contract);
+        assert_eq!(
+            rebound.auxiliary_input_contract(),
+            original.spec.auxiliary_inputs
+        );
+    }
+}
+
+#[test]
+fn native_factory_seed_pure_rebind_keeps_explicit_empty_configuration() {
+    for format in [
+        NativeConfigurationFormat::Vst3ComponentAndController,
+        NativeConfigurationFormat::ClapState,
+    ] {
+        let original = pure_seed_factory(format, Some(&[9; 32]));
+        let replacement =
+            original.rebind_configuration_seed(format, &[]).expect("empty native seed");
+        let after: serde_json::Value =
+            serde_json::from_slice(&replacement.spec.preparation_payload).expect("payload");
+        assert_eq!(after["state"], serde_json::json!([]));
+        assert_ne!(
+            replacement.spec.preparation_payload,
+            original.spec.preparation_payload
+        );
+    }
+}
+
+#[test]
+fn native_factory_seed_pure_rebind_refuses_wrong_codec_and_extent_without_mutating_original() {
+    let original = pure_seed_factory(NativeConfigurationFormat::Vst3ComponentAndController, None);
+    let old_bytes = original.spec.preparation_payload.clone();
+    assert!(original
+        .rebind_configuration_seed(NativeConfigurationFormat::ClapState, &[1])
+        .is_err());
+    assert!(original
+        .rebind_configuration_seed(
+            NativeConfigurationFormat::Vst3ComponentAndController,
+            &vec![0; vst3_worker::MAX_STATE_BYTES + 1]
+        )
+        .is_err());
+    assert_eq!(original.spec.preparation_payload, old_bytes);
+    let original = pure_seed_factory(NativeConfigurationFormat::ClapState, None);
+    assert!(original
+        .rebind_configuration_seed(
+            NativeConfigurationFormat::ClapState,
+            &vec![255; MAX_CONTROL_FRAME_BYTES / 2]
+        )
+        .is_err());
+    assert!(
+        encode_native_configuration_payload(&vec![255_u8; MAX_CONTROL_FRAME_BYTES / 2]).is_err()
+    );
+}
+
+fn factory_storage_inventory(
+    factory: &IsolatedAudioProcessorFactory,
+) -> Vec<crate::AudioProcessorFactoryStorageBorrow<'_>> {
+    let mut values = Vec::with_capacity(64);
+    factory
+        .visit_host_owned_storage(&mut |storage| {
+            values.push(storage);
+            Ok(())
+        })
+        .expect("complete concrete nested inventory");
+    values
+}
+
+#[test]
+fn native_factory_storage_isolated_reports_each_actual_nested_capacity_and_coverage() {
+    use crate::AudioProcessorFactoryStorageKind as Kind;
+    let mut factory = pure_seed_factory(NativeConfigurationFormat::ClapState, Some(&[4, 8]));
+    let mut bus_key = String::with_capacity(71);
+    bus_key.push_str("sidechain");
+    let mut name = String::with_capacity(89);
+    name.push_str("Sidechain native label");
+    factory.input_names = Vec::with_capacity(5);
+    factory
+        .input_names
+        .push(crate::AudioProcessorInputName { bus_key: bus_key.clone(), name });
+    factory.spec.auxiliary_inputs.buses = Vec::with_capacity(3);
+    factory
+        .spec
+        .auxiliary_inputs
+        .buses
+        .push(crate::AudioProcessorAuxiliaryInputBusContract {
+            bus_key,
+            channel_layout: AudioChannelLayout::Stereo,
+        });
+    factory.spec.parameter_ids = Vec::with_capacity(7);
+    let mut id = String::with_capacity(113);
+    id.push_str("owned.gain");
+    let id_capacity = id.capacity();
+    factory.spec.parameter_ids.push(ParameterId::new(id).expect("stable exact ID"));
+    let inventory = factory_storage_inventory(&factory);
+    // Predict the complete owners from independent public container identity
+    // and actual capacity, not logical schema size or the production visitor.
+    let expected = [
+        (
+            factory.input_names.as_ptr().cast::<()>() as usize,
+            factory.input_names.capacity() * size_of::<crate::AudioProcessorInputName>(),
+        ),
+        (
+            factory.input_names[0].bus_key.as_ptr() as usize,
+            factory.input_names[0].bus_key.capacity(),
+        ),
+        (
+            factory.input_names[0].name.as_ptr() as usize,
+            factory.input_names[0].name.capacity(),
+        ),
+        (
+            factory.spec.helper_arguments.as_ptr().cast::<()>() as usize,
+            factory.spec.helper_arguments.capacity() * size_of::<OsString>(),
+        ),
+        (
+            factory.spec.preparation_payload.as_ptr() as usize,
+            factory.spec.preparation_payload.capacity(),
+        ),
+        (
+            factory.spec.auxiliary_inputs.buses.as_ptr().cast::<()>() as usize,
+            factory.spec.auxiliary_inputs.buses.capacity()
+                * size_of::<crate::AudioProcessorAuxiliaryInputBusContract>(),
+        ),
+        (
+            factory.spec.auxiliary_inputs.buses[0].bus_key.as_ptr() as usize,
+            factory.spec.auxiliary_inputs.buses[0].bus_key.capacity(),
+        ),
+        (
+            factory.spec.parameter_ids.as_ptr().cast::<()>() as usize,
+            factory.spec.parameter_ids.capacity() * size_of::<ParameterId>(),
+        ),
+        (
+            factory.spec.parameter_ids[0].as_str().as_ptr() as usize,
+            id_capacity,
+        ),
+    ];
+    for (address, bytes) in expected {
+        let found = inventory
+            .iter()
+            .filter(|value| value.address() == address && value.kind() == Kind::CompleteAllocation)
+            .collect::<Vec<_>>();
+        assert_eq!(found.len(), 1, "every concrete owner appears once");
+        assert_eq!(found[0].layout().size(), bytes);
+        assert!(found[0].complete_allocation().is_some());
+    }
+    let encoded = inventory
+        .iter()
+        .filter(|value| value.kind() == Kind::StdPlatformEncodedBuffer)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        encoded.len(),
+        3,
+        "real helper path, helper argument and optional dispatch"
+    );
+    assert!(encoded.iter().all(|value| value.complete_allocation().is_none()));
+}
+
+#[test]
+fn native_factory_storage_seeded_old_new_overlap_uses_real_distinct_payload_and_alias_union() {
+    let old = pure_seed_factory(NativeConfigurationFormat::ClapState, Some(&[4, 8]));
+    let next = old
+        .rebind_configuration_seed(NativeConfigurationFormat::ClapState, &[7; 63])
+        .expect("same concrete pure seed operation");
+    assert_ne!(
+        old.spec.preparation_payload.as_ptr(),
+        next.spec.preparation_payload.as_ptr()
+    );
+    let old_storage = factory_storage_inventory(&old);
+    let next_storage = factory_storage_inventory(&next);
+    let complete = old_storage
+        .iter()
+        .chain(next_storage.iter())
+        .filter_map(|storage| storage.complete_allocation())
+        .collect::<Vec<_>>();
+    let mut ledger = crate::NativeHostAllocationLedger::new(64, usize::MAX).expect("known union");
+    for &storage in &complete {
+        ledger.record(storage).expect("actual complete owner");
+    }
+    for &storage in &complete {
+        ledger.record(storage).expect("aliases charge once");
+    }
+    let result = ledger.finish().expect("known subset result");
+    let mut identities = std::collections::BTreeMap::new();
+    for storage in complete {
+        if storage.layout().size() != 0 {
+            identities.insert(storage.address(), storage.layout().size());
+        }
+    }
+    let expected = identities.values().sum::<usize>()
+        + crate::NativeHostAllocationLedger::storage_layout(64)
+            .expect("bookkeeping")
+            .bytes()
+            .expect("checked sum");
+    assert_eq!(result.allocation_bytes(), expected);
+    assert!(old_storage
+        .iter()
+        .any(|storage| storage.address() == old.spec.preparation_payload.as_ptr() as usize));
+    assert!(next_storage
+        .iter()
+        .any(|storage| storage.address() == next.spec.preparation_payload.as_ptr() as usize));
+}
+
+#[test]
+fn native_factory_storage_missing_adapter_is_explicit_and_cannot_report_successful_zero() {
+    struct Missing;
+    impl AudioProcessorFactory for Missing {
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, true, true, 0)
+                .expect("contract")
+        }
+        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            Err(invalid_contract(
+                "observation must never create a processor",
+            ))
+        }
+    }
+    let factory = Missing;
+    let mut calls = 0;
+    let result = factory.visit_host_owned_storage(&mut |_| {
+        calls += 1;
+        Ok(())
+    });
+    assert!(matches!(
+        result,
+        Err(crate::AudioProcessorFactoryStorageError::Unavailable)
+    ));
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn native_factory_storage_visitor_refusal_stops_without_loading_or_silently_omitting_owners() {
+    let factory = pure_seed_factory(NativeConfigurationFormat::ClapState, None);
+    let mut calls = 0;
+    let result = factory.visit_host_owned_storage(&mut |_| {
+        calls += 1;
+        Err(crate::NativeHostLedgerError::OwnerLimitExceeded { limit: 0 }.into())
+    });
+    assert!(matches!(
+        result,
+        Err(crate::AudioProcessorFactoryStorageError::Owner(
+            crate::NativeHostLedgerError::OwnerLimitExceeded { limit: 0 }
+        ))
+    ));
+    assert_eq!(calls, 1);
+}
