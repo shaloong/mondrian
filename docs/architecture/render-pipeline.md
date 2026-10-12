@@ -1001,6 +1001,12 @@ or prolong the other's LUT residency. The logical charge used here is
 cache-admission evidence, not allocator, GPU-memory, Working Set, or RSS
 measurement.
 
+Within one visual Program, cloned Clip Effect program handles charge their
+shared internal allocation once and each handle separately. Independently
+prepared allocations are charged separately even when their contents match;
+this accounting does not deduplicate across Preview and Export owners or
+change either owner's residency grant.
+
 The same ownership boundary applies to Effect pixels. Preview's retained
 `TimelineCompositeScratch` owns one `EffectExecutionSession` and binds it at the
 sole Preview generation activation/invalidation seam. Export's job-local
@@ -1786,10 +1792,23 @@ terminates the attempt, while only total-deadline expiry records
 backoff. Map, unpack, planning, admission, or recording failures remain
 route-local and cannot poison required heterogeneous execution.
 
+Export serialization borrows the completed mapped buffer under the existing
+readback lease. It does not first clone the entire mapped image into a CPU byte
+raster. The mapping view is released before unmap on success, rejection,
+cancellation or unwind; serialization cannot return a reference into that
+mapping. The caller still checks attempt cancellation before publication and
+consumes the same GPU/owner shutdown. High-depth UNORM serialization reads
+visible strided rows directly, rejects the first logical non-finite component,
+and packs fixed batches using the same single UNORM quantizer as scalar tails.
+Batch validation separates rejection from arithmetic so the compiler can
+vectorize without platform-specific intrinsics, alignment assumptions or a
+second color interpreter. Padding is not a sample. All sixteen-bit code points,
+rounding thresholds and neighboring Float32 values retain the same packed bytes.
+
 Export readback is serialized through one resolved export frame contract.
 Media-file delivery selects it from delivery sample depth: 8-bit delivery
 writes RGBA8 raw-video bytes, while
-10-bit and 12-bit delivery read the renderer GPU `Rgba16Float` boundary and
+10-bit and 12-bit delivery read the renderer GPU `Rgba32Float` boundary and
 pack normalized channels into the explicitly named `EncodedRgba16Unorm`
 contract and FFmpeg `rgba64le` pipe bytes. Renderer texture precision is not
 pipe sample encoding. The same deep contract module defines true
@@ -2916,7 +2935,7 @@ through `gpu_compositor.rs`. For supported layer stacks, the app window records:
 ```
 Resolved preview layers
   -> for each retained renderer-qualified native media layer:
-       ViewerNativeVideoImportRuntime
+       NativeVideoImportRuntime
        -> exact zero-copy or declared GPU-bridge Adapter route
        -> native YUV/RGB shader into encoded-float Rgba32Float source texture
        -> OCIO GPU input transform into Rgba32Float working texture

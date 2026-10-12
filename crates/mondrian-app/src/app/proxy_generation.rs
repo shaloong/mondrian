@@ -16,8 +16,8 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{AssetId, ProjectId};
 use mondrian_core::{ExecutionPriority, ExecutionTerminalEvidence};
 use mondrian_media::{
-    resolve_decoded_video_range, MediaFileFingerprint, ProxyColorContract, ProxyConfig,
-    ProxyPublicationEvidence, ProxyPublicationFailure, ProxyStatus,
+    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, ProxyColorContract,
+    ProxyConfig, ProxyPublicationEvidence, ProxyPublicationFailure, ProxyStatus,
 };
 use mondrian_timeline::sequence::{MediaInputColorContext, ResolvedInputColor};
 use parking_lot::{Condvar, Mutex};
@@ -640,9 +640,41 @@ pub(crate) fn resolve_asset_proxy_color_contract(
     let sampling = video.proven_sampling().ok_or_else(|| {
         "proxy generation requires proven, internally consistent video sampling facts".to_owned()
     })?;
-    let source_range = resolve_decoded_video_range(asset.interpretation.range, video.color_range);
-    ProxyColorContract::try_new(source_color_space, sampling.bit_depth, source_range)
-        .map_err(|error| error.to_string())
+    if sampling.has_alpha {
+        return Err(
+            "configured proxy encoders cannot preserve source alpha; use the original media"
+                .to_owned(),
+        );
+    }
+    let range_contract =
+        DecodedVideoRangeContract::from_video_stream(asset.interpretation.range, video);
+    let source_contract = mondrian_renderer::color::SourceColorModule::decode_contract(
+        source_color_space,
+        range_contract,
+        resolution.source,
+    )
+    .with_video_stream_sampling(video)
+    .with_matrix_interpretation(asset.interpretation.matrix);
+    let matrix = if sampling.pixel_format.is_rgb() {
+        DecodedVideoMatrix::Rgb
+    } else {
+        let raw = video.color_metadata.as_ref().map_or(DecodedVideoMatrix::Unknown, |metadata| {
+            if metadata.matrix.specified {
+                DecodedVideoMatrix::from_cicp_code(metadata.matrix.code)
+            } else {
+                DecodedVideoMatrix::Unknown
+            }
+        });
+        source_contract.resolve_yuv_matrix(raw)
+    };
+    ProxyColorContract::try_new(
+        video.index,
+        source_color_space,
+        sampling.bit_depth,
+        range_contract.baseline(),
+        matrix,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Resolve a proxy contract from the active Sequence input policy and Project

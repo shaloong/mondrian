@@ -306,7 +306,7 @@ pub struct RealtimeAudioOutputContract {
     pub sample_format: RealtimeAudioSampleFormat,
     /// Proof used to interpret the selected physical stream's channels.
     pub channel_semantics: RealtimeAudioChannelSemantics,
-    /// Supported buffer range behind the selected default-buffer stream.
+    /// Supported buffer range behind the selected stream.
     pub supported_buffer_size: RealtimeAudioSupportedBufferSize,
     /// Candidate narrowing evidence from the same device enumeration.
     pub candidates: RealtimeAudioCandidateCounts,
@@ -645,6 +645,18 @@ pub(crate) fn prepare_realtime_audio_output(
             "selected CPAL range no longer contains the requested sample rate",
         )
     })?;
+    #[cfg(target_os = "macos")]
+    let mut config = supported.config();
+    #[cfg(not(target_os = "macos"))]
+    let config = supported.config();
+    #[cfg(target_os = "macos")]
+    let fixed_buffer_frames = preferred_macos_buffer_frames(sample_rate, *range.buffer_size());
+    #[cfg(target_os = "macos")]
+    if let Some(frames) = fixed_buffer_frames {
+        config.buffer_size = cpal::BufferSize::Fixed(frames);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let fixed_buffer_frames = None;
     let backend = match channel_semantics {
         #[cfg(target_os = "windows")]
         RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask => {
@@ -665,7 +677,7 @@ pub(crate) fn prepare_realtime_audio_output(
         }
         _ => PreparedRealtimeAudioOutputBackend::Cpal {
             device,
-            config: supported.config(),
+            config,
             sample_format: supported.sample_format(),
         },
     };
@@ -704,7 +716,7 @@ pub(crate) fn prepare_realtime_audio_output(
             stream_container_bits: None,
             stream_valid_bits: None,
             stream_sample_rate: selected.contract.sample_rate,
-            buffer_frames: None,
+            buffer_frames: fixed_buffer_frames,
             period_100ns: None,
             was_system_default,
             device_name,
@@ -884,6 +896,26 @@ const fn supported_buffer_size(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn preferred_macos_buffer_frames(
+    sample_rate: u32,
+    value: cpal::SupportedBufferSize,
+) -> Option<u32> {
+    // A 256-frame callback bounds the conservative callback-span contribution
+    // to 5.33 ms at the qualified 48 kHz rate. Other rates keep the device
+    // default until their physical callback behavior has been measured.
+    const FRAMES: u32 = 256;
+    if sample_rate != 48_000 {
+        return None;
+    }
+    match value {
+        cpal::SupportedBufferSize::Range { min, max } if min <= FRAMES && FRAMES <= max => {
+            Some(FRAMES)
+        }
+        _ => None,
+    }
+}
+
 fn bounded_count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -891,6 +923,36 @@ fn bounded_count(value: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_callback_period_is_requested_only_within_device_range() {
+        assert_eq!(
+            preferred_macos_buffer_frames(
+                48_000,
+                cpal::SupportedBufferSize::Range { min: 15, max: 4096 }
+            ),
+            Some(256)
+        );
+        assert_eq!(
+            preferred_macos_buffer_frames(
+                48_000,
+                cpal::SupportedBufferSize::Range { min: 512, max: 4096 }
+            ),
+            None
+        );
+        assert_eq!(
+            preferred_macos_buffer_frames(48_000, cpal::SupportedBufferSize::Unknown),
+            None
+        );
+        assert_eq!(
+            preferred_macos_buffer_frames(
+                96_000,
+                cpal::SupportedBufferSize::Range { min: 15, max: 4096 }
+            ),
+            None
+        );
+    }
 
     #[test]
     fn stable_device_identity_roundtrips_without_requiring_local_hardware() {

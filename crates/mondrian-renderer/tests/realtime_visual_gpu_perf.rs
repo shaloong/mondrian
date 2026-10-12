@@ -9,8 +9,7 @@ use mondrian_effects::{
     EffectRenderOp,
 };
 use mondrian_renderer::profile::{
-    gpu_timestamp_query_device_features, GpuTimestampQueryRing, GpuTimestampStageMarker,
-    GpuTimestampToken,
+    gpu_timestamp_query_device_features, GpuTimestampQueryRing, GpuTimestampToken,
 };
 use mondrian_renderer::{
     color::ProgramOutputBoundary, evaluate_realtime_visual_performance,
@@ -76,27 +75,10 @@ struct TimestampStageBridge<'a> {
 impl ViewerGpuExecutionStageMarker for TimestampStageBridge<'_> {
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn mondrian_renderer::gpu_command::GpuCommandEncoder,
         stage: ViewerGpuExecutionGpuStage,
     ) -> Result<(), String> {
-        let marker = match stage {
-            ViewerGpuExecutionGpuStage::WorkingComposite => {
-                GpuTimestampStageMarker::AfterWorkingComposite
-            }
-            ViewerGpuExecutionGpuStage::Spatial => GpuTimestampStageMarker::AfterSpatial,
-            ViewerGpuExecutionGpuStage::ProgramOutputBoundary => {
-                GpuTimestampStageMarker::AfterProgramOutputBoundary
-            }
-            ViewerGpuExecutionGpuStage::MonitorAdaptation => {
-                GpuTimestampStageMarker::AfterMonitorAdaptation
-            }
-            ViewerGpuExecutionGpuStage::ProgramScopes => {
-                GpuTimestampStageMarker::AfterProgramScopes
-            }
-            ViewerGpuExecutionGpuStage::SignalMonitoring => {
-                GpuTimestampStageMarker::AfterSignalMonitoring
-            }
-        };
+        let marker = stage.timestamp_marker();
         self.ring
             .mark_stage(encoder, self.token, marker)
             .map_err(|error| error.to_string())

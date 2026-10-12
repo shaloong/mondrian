@@ -320,7 +320,7 @@ impl HeterogeneousGpuBatchId {
 pub struct HeterogeneousGpuRecordResources<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
-    encoder: &'a mut wgpu::CommandEncoder,
+    encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     ids: &'a mut GpuColorFrameIdAllocator,
     table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     compositor: &'a GpuFrameCompositor,
@@ -333,7 +333,7 @@ impl<'a> HeterogeneousGpuRecordResources<'a> {
     pub fn new(
         device: &'a wgpu::Device,
         queue: &'a wgpu::Queue,
-        encoder: &'a mut wgpu::CommandEncoder,
+        encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &'a mut GpuColorFrameIdAllocator,
         table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         compositor: &'a GpuFrameCompositor,

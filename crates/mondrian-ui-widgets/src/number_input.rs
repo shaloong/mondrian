@@ -231,7 +231,9 @@ mod tests {
     use mondrian_ui_core::{EventResult, UiEvent};
 
     use super::*;
-    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::test_utils::{
+        make_event_ctx, primary_text_modifiers, DummyFocus, DummyShortcut, DummyTooltip,
+    };
 
     fn number_action(value: f64) -> Action {
         assert!(value.is_finite());
@@ -274,7 +276,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("42".into()), &mut ctx);
@@ -297,7 +302,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
@@ -347,7 +355,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("0.62".into()), &mut ctx);
@@ -382,7 +393,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
@@ -414,7 +428,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
@@ -452,7 +469,10 @@ mod tests {
 
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("42".into()), &mut ctx);
@@ -460,7 +480,10 @@ mod tests {
         assert_eq!(actions.borrow().len(), 1);
 
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("abc".into()), &mut ctx);
@@ -563,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn arrow_keys_ignore_ctrl_alt_and_meta_chords() {
+    fn arrow_keys_ignore_unrelated_modified_chords() {
         let values = Rc::new(RefCell::new(Vec::new()));
         let actions = RefCell::new(Vec::new());
         let dispatch = |action: Action| actions.borrow_mut().push(action);
@@ -582,7 +605,7 @@ mod tests {
             (KeyCode::Up, Modifiers { alt: true, ..Default::default() }),
             (
                 KeyCode::Down,
-                Modifiers { meta: true, ..Default::default() },
+                Modifiers { ctrl: true, meta: true, ..Default::default() },
             ),
             (
                 KeyCode::PageDown,
@@ -601,6 +624,21 @@ mod tests {
 
         assert_eq!(input.text(), "10");
         assert!(values.borrow().is_empty());
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                input.event(
+                    &UiEvent::KeyDown {
+                        key: KeyCode::Down,
+                        modifiers: primary_text_modifiers(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(input.text(), "10");
+            assert!(values.borrow().is_empty());
+        }
     }
 
     #[test]
@@ -645,7 +683,10 @@ mod tests {
         layout(&mut input);
         click(&mut input, &mut ctx);
         input.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::A,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         input.event(&UiEvent::TextInput("abc".into()), &mut ctx);

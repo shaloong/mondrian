@@ -375,6 +375,10 @@ impl Widget for Button {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 fn paint_button_label(
@@ -517,6 +521,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
@@ -544,6 +549,7 @@ mod tests {
         b.layout(Rect::new(10.0, 20.0, 160.0, visual.height));
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 240.0, 120.0),
@@ -574,6 +580,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),

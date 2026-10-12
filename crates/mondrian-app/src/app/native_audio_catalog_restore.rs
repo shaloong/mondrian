@@ -43,14 +43,11 @@ impl AppState {
         if selections.is_empty() {
             return;
         }
-        let (Some(clap), Some(vst3)) = (self.clap_catalog.clone(), self.vst3_catalog.clone())
-        else {
-            self.set_status_hint("原生音频插件宿主不可用；已保存的插件无法恢复", true);
-            return;
-        };
         if self.native_audio_restore.is_some() {
             return;
         }
+        let clap = self.clap_catalog.clone();
+        let vst3 = self.vst3_catalog.clone();
         let (sender, receiver) = mpsc::channel();
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
@@ -132,8 +129,8 @@ impl AppState {
 
 fn restore_plugins(
     selections: Vec<NativeAudioPluginSelection>,
-    clap: Arc<InstalledClapAudioProcessorSpecResolver>,
-    vst3: Arc<InstalledVst3AudioProcessorSpecResolver>,
+    clap: Option<Arc<InstalledClapAudioProcessorSpecResolver>>,
+    vst3: Option<Arc<InstalledVst3AudioProcessorSpecResolver>>,
     canceled: Arc<AtomicBool>,
     sender: mpsc::Sender<RestoreResult>,
 ) {
@@ -143,13 +140,24 @@ fn restore_plugins(
         }
         let result = match selection.format {
             NativeAudioPluginFormat::Clap => clap
-                .install_library(selection.path.clone())
-                .map(|descriptors| descriptors.len()),
-            NativeAudioPluginFormat::Vst3 => {
-                vst3.install_plugin(selection.path.clone()).map(|descriptors| descriptors.len())
-            }
-        }
-        .map_err(|error| error.to_string());
+                .as_ref()
+                .ok_or_else(|| "CLAP catalog unavailable".to_owned())
+                .and_then(|catalog| {
+                    catalog
+                        .install_library(selection.path.clone())
+                        .map(|descriptors| descriptors.len())
+                        .map_err(|error| error.to_string())
+                }),
+            NativeAudioPluginFormat::Vst3 => vst3
+                .as_ref()
+                .ok_or_else(|| "VST3 catalog unavailable".to_owned())
+                .and_then(|catalog| {
+                    catalog
+                        .install_plugin(selection.path.clone())
+                        .map(|descriptors| descriptors.len())
+                        .map_err(|error| error.to_string())
+                }),
+        };
         if sender.send(RestoreResult { selection, result }).is_err() {
             break;
         }

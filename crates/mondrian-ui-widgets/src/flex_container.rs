@@ -99,7 +99,21 @@ impl Widget for FlexContainer {
         let mut main: f32 = 0.0;
         let mut cross: f32 = 0.0;
         for child in &self.children {
-            let measured = child.widget.measure(LayoutConstraint::LOOSE);
+            let child_constraint = if is_row {
+                LayoutConstraint::LOOSE
+            } else {
+                LayoutConstraint {
+                    min: Size::ZERO,
+                    max: Size::new(
+                        (constraint.max.width
+                            - self.layout.padding.left
+                            - self.layout.padding.right)
+                            .max(0.0),
+                        f32::MAX,
+                    ),
+                }
+            };
+            let measured = child.widget.measure(child_constraint);
             if is_row {
                 main += measured.width;
                 cross = cross.max(measured.height);
@@ -347,6 +361,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 40.0, 20.0),

@@ -32,8 +32,9 @@ use ocio_rs::{
     FixedFunctionStyle, GpuShaderDesc, GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
     GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, HueCurveType,
-    Interpolation as OcioRsInterpolation, Processor, ProcessorCacheFlags, RGBCurveType, RangeStyle,
-    ReferenceSpaceType, TransformDirection, ViewTransform, ViewTransformDirection,
+    Interpolation as OcioRsInterpolation, OptimizationFlags, Processor, ProcessorCacheFlags,
+    RGBCurveType, RangeStyle, ReferenceSpaceType, TransformDirection, ViewTransform,
+    ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -601,6 +602,8 @@ const MONDRIAN_STANDARD_V3_OCIO_RESOURCES: [MondrianDefaultOcioResource; 1] =
 
 /// OCIO GPU function name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
+/// OCIO-generated analytic PQ function used by proven GPU curve lowering.
+pub const MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME: &str = "mondrian_ocio_pq_oetf";
 /// OCIO GPU pixel variable name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_PIXEL_NAME: &str = "mondrian_ocio_pixel";
 /// OCIO GPU resource symbol prefix generated for Mondrian wrapper shaders.
@@ -3604,8 +3607,13 @@ fn cpu_processor_from_static(
     let processor = processor
         .lock()
         .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    // Preserve default graph optimizations and independent dynamic properties,
+    // but use precise native math and inverse-LUT evaluation. Approximate pow
+    // and rebaked forward LUTs introduce avoidable CPU error, amplified by PQ.
+    let approximate = OptimizationFlags::FAST_LOG_EXP_POW.0 | OptimizationFlags::LUT_INV_FAST.0;
+    let flags = OptimizationFlags::DEFAULT.0 & !approximate;
     let cpu = processor
-        .default_cpu_processor()
+        .optimized_cpu_processor(u64::from(flags))
         .map_err(|err| format!("OCIO CPU processor creation failed: {err}"))?;
     Ok((cpu, shared_hit))
 }
@@ -4069,6 +4077,33 @@ fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, St
     )
     .map_err(|e| format!("OCIO GPU shader descriptor binding: {e}"))?;
     Ok(desc)
+}
+
+/// Extract OCIO's own normalized-nits-to-PQ implementation, without authoring
+/// another transfer function. Callers must prove the curve and input domain
+/// before substituting this representation for an extracted half-domain LUT.
+pub fn extract_ocio_pq_oetf_gpu_function(language: GpuLanguage) -> Result<String, String> {
+    let config = Config::raw().map_err(|err| format!("OCIO PQ function config: {err}"))?;
+    let transform = FixedFunctionTransform::create(FixedFunctionStyle::LinToPq)
+        .map_err(|err| format!("OCIO PQ fixed function: {err}"))?;
+    let processor = config
+        .processor_from_transform(&transform, TransformDirection::Forward)
+        .map_err(|err| format!("OCIO PQ function processor: {err}"))?;
+    let gpu = processor
+        .default_gpu_processor()
+        .map_err(|err| format!("OCIO PQ function GPU processor: {err}"))?;
+    let mut desc = configured_gpu_shader_desc(language)?;
+    desc.set_function_name(MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME)
+        .map_err(|err| format!("OCIO PQ function name: {err}"))?;
+    gpu.try_extract_shader_info(&mut desc)
+        .map_err(|err| format!("OCIO PQ function extraction: {err}"))?;
+    if desc.try_num_textures().map_err(|err| err.to_string())? != 0
+        || desc.try_num_3d_textures().map_err(|err| err.to_string())? != 0
+        || desc.try_num_uniforms().map_err(|err| err.to_string())? != 0
+    {
+        return Err("OCIO PQ fixed function unexpectedly requires GPU resources".to_owned());
+    }
+    extracted_shader_text(&desc)
 }
 
 fn extracted_shader_text(desc: &GpuShaderDesc) -> Result<String, String> {

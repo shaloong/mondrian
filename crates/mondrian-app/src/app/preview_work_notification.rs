@@ -64,6 +64,11 @@ impl PreviewWorkNotificationState {
         let gate = lock_unpoisoned(&self.wait_gate);
         let next = self.revision.load(Ordering::Relaxed).saturating_add(1);
         self.revision.store(next, Ordering::Release);
+        // Publish under the wait gate, then release it before waking consumers.
+        // Their predicate sees this revision even if they acquire the gate
+        // before the notification; a woken realtime thread never waits for the
+        // publisher to finish its OS wake call while holding the same gate.
+        drop(gate);
         #[cfg(windows)]
         unsafe {
             // WaitOnAddress compares the value before sleeping, so this wake
@@ -71,7 +76,6 @@ impl PreviewWorkNotificationState {
             windows_sys::Win32::System::Threading::WakeByAddressAll(self.revision.as_ptr().cast());
         }
         self.changed.notify_all();
-        drop(gate);
         PreviewWorkRevision(next)
     }
 }
@@ -217,17 +221,79 @@ impl PreviewWorkWatch {
         }
         #[cfg(not(windows))]
         {
+            #[cfg(target_os = "macos")]
+            let thread_diagnostics = {
+                static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                *ENABLED.get_or_init(|| {
+                    std::env::var_os("MONDRIAN_PREVIEW_WAIT_DIAGNOSTICS")
+                        .is_some_and(|value| value == "1")
+                })
+            };
+            #[cfg(target_os = "macos")]
+            let diagnostic_started = thread_diagnostics.then(Instant::now);
+            #[cfg(target_os = "macos")]
+            let cpu_before =
+                thread_diagnostics.then(mondrian_platform::observe_macos_playback_thread);
+            let started = Instant::now();
             let gate = lock_unpoisoned(&self.shared.wait_gate);
-            if self.revision() != observed {
-                return self.revision();
+            let acquired = Instant::now();
+            let (revision, timed_out) = if self.revision() != observed {
+                let revision = self.revision();
+                drop(gate);
+                (revision, false)
+            } else {
+                let (gate, result) = self
+                    .shared
+                    .changed
+                    .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let revision = self.revision();
+                drop(gate);
+                (revision, result.timed_out())
+            };
+            let finished = Instant::now();
+            #[cfg(target_os = "macos")]
+            let cpu_after =
+                thread_diagnostics.then(mondrian_platform::observe_macos_playback_thread);
+            #[cfg(target_os = "macos")]
+            let diagnostic_finished = thread_diagnostics.then(Instant::now);
+            if finished.duration_since(started) > timeout.saturating_add(Duration::from_millis(10))
+            {
+                tracing::warn!(
+                    requested_wait_us = timeout.as_micros(),
+                    total_us = finished.duration_since(started).as_micros(),
+                    lock_acquisition_us = acquired.duration_since(started).as_micros(),
+                    wait_and_reacquire_us = finished.duration_since(acquired).as_micros(),
+                    revision_changed = revision != observed,
+                    timed_out,
+                    "Preview work revision wait exceeded requested timeout"
+                );
             }
-            let (gate, _) = self
-                .shared
-                .changed
-                .wait_timeout_while(gate, timeout, |_| self.revision() == observed)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            drop(gate);
-            self.revision()
+            #[cfg(target_os = "macos")]
+            if let (Some(diagnostic_started), Some(diagnostic_finished)) =
+                (diagnostic_started, diagnostic_finished)
+                && diagnostic_finished.duration_since(diagnostic_started)
+                    > timeout.saturating_add(Duration::from_millis(10))
+            {
+                let cpu_delta_ns = cpu_before
+                    .as_ref()
+                    .and_then(|value| value.as_ref().ok())
+                    .zip(cpu_after.as_ref().and_then(|value| value.as_ref().ok()))
+                    .and_then(|(before, after)| after.cpu_time_ns.checked_sub(before.cpu_time_ns));
+                tracing::warn!(
+                    requested_wait_us = timeout.as_micros(),
+                    wait_wall_us = finished.duration_since(started).as_micros(),
+                    diagnostic_setup_us = started.duration_since(diagnostic_started).as_micros(),
+                    diagnostic_finish_us = diagnostic_finished.duration_since(finished).as_micros(),
+                    cpu_delta_ns,
+                    ?cpu_before,
+                    ?cpu_after,
+                    revision_changed = revision != observed,
+                    timed_out,
+                    "macOS Preview wait thread observation; CPU time is not Playback Clock"
+                );
+            }
+            revision
         }
     }
 

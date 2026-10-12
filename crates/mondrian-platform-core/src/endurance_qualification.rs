@@ -904,7 +904,13 @@ impl EndurancePhaseOwnerReceipt {
         let Ok(app) = serde_json::from_str::<serde_json::Value>(json) else {
             return false;
         };
-        if app["schema_version"] != 1 || !app["app_owner_consumed"].is_boolean() {
+        if app["schema_version"] != 2
+            || !app["app_owner_consumed"].is_boolean()
+            || !app["project"]["pending_open_was_active"].is_boolean()
+            || !app["project"]["pending_open_released"].is_boolean()
+            || (status == EndurancePhaseTerminalStatus::Completed
+                && app["project"]["pending_open_released"] != true)
+        {
             return false;
         }
         for name in [

@@ -70,6 +70,16 @@ impl From<winit::error::EventLoopError> for AppUiEventLoopConstructionFailure {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<mondrian_platform::MacApplicationError> for AppUiEventLoopConstructionFailure {
+    fn from(error: mondrian_platform::MacApplicationError) -> Self {
+        Self {
+            kind: AppUiEventLoopConstructionFailureKind::OperatingSystem,
+            diagnostic: error.to_string(),
+        }
+    }
+}
+
 impl std::fmt::Display for AppUiEventLoopConstructionFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.diagnostic)

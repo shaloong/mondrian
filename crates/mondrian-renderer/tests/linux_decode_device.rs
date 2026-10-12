@@ -32,7 +32,7 @@ fn cuda_admission_binds_the_renderer_device() {
         0x10de,
         "NVIDIA fixture required"
     );
-    let runtime = mondrian_renderer::ViewerNativeVideoImportRuntime::new(
+    let runtime = mondrian_renderer::NativeVideoImportRuntime::new(
         &context.adapter,
         &context.device,
         &context.queue,
@@ -60,13 +60,13 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
     use mondrian_media::{DecodedVideoRange, MediaFileFingerprint};
     use mondrian_renderer::{
         GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackPlan,
-        RenderInputTransform, ViewerNativeVideoImportRuntime,
+        NativeVideoImportRuntime, RenderInputTransform,
     };
     let fixtures = std::env::var_os("MONDRIAN_CUDA_NATIVE_FIXTURES")
         .expect("explicit generated fixtures required");
     let context = pollster::block_on(GpuContext::new()).expect("real Vulkan context");
     let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
-    let mut runtime = ViewerNativeVideoImportRuntime::new_with_resource_pool(
+    let mut runtime = NativeVideoImportRuntime::new_with_resource_pool(
         &context.adapter,
         &context.device,
         &context.queue,
@@ -114,14 +114,14 @@ fn cuda_decoded_frames_enter_production_yuv_ocio_and_release_after_gpu_completio
                 PreviewDecodeOutcome::NativeGpuFrame(frame) => frame,
                 other => panic!("required native route returned {other:?}"),
             };
-            assert!(frame.diagnostics.hardware_decode_active);
+            assert!(frame.diagnostics.native_decoder_active);
             assert!(
                 !frame.diagnostics.zero_copy_active,
                 "FFmpeg safe CUDA output performs a GPU copy"
             );
             assert!(matches!(
                 frame.diagnostics.execution_path(),
-                PreviewDecodeExecutionPath::HardwareNative { .. }
+                PreviewDecodeExecutionPath::NativeSurface { .. }
             ));
             assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
             assert!(!frame.diagnostics.temporal_approximation);
@@ -228,7 +228,7 @@ fn cuda_safe_output_leases_do_not_exhaust_decoder_surfaces() {
     use mondrian_media::{DecodedVideoRange, MediaFileFingerprint};
     let fixtures = std::env::var_os("MONDRIAN_CUDA_NATIVE_FIXTURES").expect("fixtures");
     let context = pollster::block_on(GpuContext::new()).expect("GPU context");
-    let runtime = mondrian_renderer::ViewerNativeVideoImportRuntime::new(
+    let runtime = mondrian_renderer::NativeVideoImportRuntime::new(
         &context.adapter,
         &context.device,
         &context.queue,
@@ -287,7 +287,7 @@ fn cuda_production_decode_import_perf_smoke() {
     use mondrian_media::preview::*;
     use mondrian_media::{DecodedVideoRange, MediaFileFingerprint};
     use mondrian_renderer::{
-        GpuColorFrameIdAllocator, RenderInputTransform, ViewerNativeVideoImportRuntime,
+        GpuColorFrameIdAllocator, NativeVideoImportRuntime, RenderInputTransform,
     };
     use std::time::{Duration, Instant};
 
@@ -315,7 +315,7 @@ fn cuda_production_decode_import_perf_smoke() {
 
     let context = pollster::block_on(GpuContext::new()).expect("real Vulkan context");
     let pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
-    let mut runtime = ViewerNativeVideoImportRuntime::new_with_resource_pool(
+    let mut runtime = NativeVideoImportRuntime::new_with_resource_pool(
         &context.adapter,
         &context.device,
         &context.queue,
@@ -378,7 +378,7 @@ fn cuda_production_decode_import_perf_smoke() {
         };
         decode_samples_us
             .push(u64::try_from(decode_started.elapsed().as_micros()).unwrap_or(u64::MAX));
-        assert!(frame.diagnostics.hardware_decode_active);
+        assert!(frame.diagnostics.native_decoder_active);
         assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
         let import_started = Instant::now();
         runtime

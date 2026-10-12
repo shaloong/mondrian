@@ -4,9 +4,10 @@
 //! upload and surface-present path so renderer behavior does not drift between
 //! test windows and the real app shell.
 
+use mondrian_core::ColorSpace;
 use mondrian_ui_renderer::{
     DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
-    GlyphUpload, UiRenderer, UiSurfacePresentationError,
+    GlyphUpload, UiRenderer, UiSurfacePresentation, UiSurfacePresentationError,
 };
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
@@ -343,9 +344,19 @@ impl AppUiFrameRenderer {
         device: &wgpu::Device,
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
+        output_color_space: ColorSpace,
+        transparency: Option<(wgpu::CompositeAlphaMode, u32)>,
     ) -> Result<Self, UiSurfacePresentationError> {
+        let mut presentation = UiSurfacePresentation::for_surface(
+            surface_format,
+            surface_color_space,
+            output_color_space,
+        )?;
+        if let Some((alpha_mode, radius)) = transparency {
+            presentation = presentation.with_transparency(alpha_mode, radius)?;
+        }
         Ok(Self {
-            ui_renderer: UiRenderer::new_for_surface(device, surface_format, surface_color_space)?,
+            ui_renderer: UiRenderer::from_presentation(device, presentation),
             text_renderer: TextRenderer::new(),
         })
     }
@@ -386,19 +397,41 @@ impl AppUiFrameRenderer {
         config: &wgpu::SurfaceConfiguration,
         commands: Vec<DrawCommand>,
     ) -> AppUiFrameResult {
+        let acquired = observe_ui_frame_stage("acquire_surface", || surface.get_current_texture());
+        let result = self.render_acquired_draw_commands(device, queue, acquired, config, commands);
+        if matches!(result, AppUiFrameResult::Reconfigured { .. }) {
+            surface.configure(device, config);
+        }
+        result
+    }
+
+    /// Record and present through the same renderer with a caller-owned drawable.
+    /// The caller keeps configure/acquire excluded until this operation returns.
+    pub(crate) fn render_acquired_draw_commands(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        acquired: wgpu::CurrentSurfaceTexture,
+        config: &wgpu::SurfaceConfiguration,
+        commands: Vec<DrawCommand>,
+    ) -> AppUiFrameResult {
         let frame_started = Instant::now();
-        let resolved_text = resolve_text_commands(commands, &mut self.text_renderer);
+        let resolved_text = observe_ui_frame_stage("resolve_text", || {
+            resolve_text_commands(commands, &mut self.text_renderer)
+        });
         let text_stats = resolved_text.stats;
         let commands = resolved_text.commands;
         let pending = renderer_glyph_uploads(self.text_renderer.take_pending_uploads());
         let uploaded_glyphs = !pending.is_empty();
         let glyph_upload_stats = if uploaded_glyphs {
-            self.ui_renderer.upload_glyphs(queue, &pending)
+            observe_ui_frame_stage("upload_glyphs", || {
+                self.ui_renderer.upload_glyphs(queue, &pending)
+            })
         } else {
             mondrian_ui_renderer::GlyphUploadStats::default()
         };
 
-        let (output, backend_event) = match surface.get_current_texture() {
+        let (output, backend_event) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(output) => (output, None),
             wgpu::CurrentSurfaceTexture::Suboptimal(output) => {
                 (output, Some(AppUiBackendEvent::SurfaceSuboptimal))
@@ -414,13 +447,11 @@ impl AppUiFrameRenderer {
                 };
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                surface.configure(device, config);
                 return AppUiFrameResult::Reconfigured {
                     backend_event: AppUiBackendEvent::SurfaceOutdated,
                 };
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                surface.configure(device, config);
                 return AppUiFrameResult::Reconfigured {
                     backend_event: AppUiBackendEvent::SurfaceLost,
                 };
@@ -441,20 +472,21 @@ impl AppUiFrameRenderer {
                 "discarding an outdated surface extent before recording UI attachments"
             );
             drop(output);
-            surface.configure(device, config);
             return AppUiFrameResult::Reconfigured {
                 backend_event: AppUiBackendEvent::SurfaceOutdated,
             };
         }
         let view = output.texture.create_view(&Default::default());
-        let render_stats = self.ui_renderer.render_resolved_commands(
-            device,
-            queue,
-            &view,
-            &commands,
-            (extent.width, extent.height),
-        );
-        queue.present(output);
+        let render_stats = observe_ui_frame_stage("record_ui", || {
+            self.ui_renderer.render_resolved_commands(
+                device,
+                queue,
+                &view,
+                &commands,
+                (extent.width, extent.height),
+            )
+        });
+        observe_ui_frame_stage("present_surface", || queue.present(output));
         presented_result(
             frame_started,
             glyph_upload_stats.upload_bytes,
@@ -464,6 +496,16 @@ impl AppUiFrameRenderer {
             backend_event,
         )
     }
+}
+
+fn observe_ui_frame_stage<T>(stage: &'static str, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let result = operation();
+    let elapsed_us = started.elapsed().as_micros();
+    if elapsed_us >= 5_000 {
+        tracing::debug!(stage, elapsed_us, "slow app UI frame stage");
+    }
+    result
 }
 
 fn presented_result(

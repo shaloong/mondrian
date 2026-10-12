@@ -1542,7 +1542,8 @@ colorspaces:
         let mut imported = AppState::new();
         imported
             .dispatch_action(Action::OpenProject(moved.join("project.mdp")))
-            .expect("open moved package from dialog selection");
+            .expect("admit moved package from dialog selection");
+        imported.wait_for_project_open().expect("install verified portable candidate");
         let rebound = imported.portable_project_dependency_inventory().expect("rebound inventory");
         let imported_document = imported.authoring.as_ref().expect("Session").document();
         let actual = sample_document_lut(imported_document);
@@ -1893,7 +1894,7 @@ colorspaces:
             || false,
         )
         .expect("decode source video");
-        let PreviewDecodeOutcome::Frame(original) = original else {
+        let PreviewDecodeOutcome::FloatFrame(original) = original else {
             panic!("real video must yield a CPU RGBA preview frame");
         };
         clear_thread_local_preview_decode_session();
@@ -1965,7 +1966,7 @@ colorspaces:
             || false,
         )
         .expect("decode bundled video");
-        let PreviewDecodeOutcome::Frame(decoded) = decoded else {
+        let PreviewDecodeOutcome::FloatFrame(decoded) = decoded else {
             panic!("bundled video must yield a CPU RGBA preview frame");
         };
         assert_eq!(

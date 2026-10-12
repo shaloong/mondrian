@@ -22,6 +22,10 @@ mod cpu_yuv;
 mod creative_lut_gpu;
 pub mod cross_application_qualification;
 pub mod display_calibration;
+mod display_matte;
+pub use display_matte::GpuDisplayCalibrationBackdrop;
+pub mod gpu_command;
+pub mod gpu_completion_wake;
 pub mod gpu_composite_execution;
 pub mod gpu_compositor;
 pub mod gpu_memory_capacity;
@@ -52,6 +56,7 @@ pub mod timeline_composite;
 mod timeline_effect_routes;
 pub mod timeline_render_plan;
 pub mod timeline_temporal;
+mod viewer_backend_preparation;
 pub mod viewer_execution;
 mod viewer_retirement;
 pub mod viewer_runtime;
@@ -83,25 +88,26 @@ pub use color_accuracy::{
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace, CpuColorFrame, CpuEncodedColorFrame,
-    CpuEncodedFloatColorFrame, CpuSourceColorFrame, EncodedRgbaF32Frame,
-    GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
-    GpuColorFrameContract, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
-    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
-    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
-    GpuColorFrameWgpuResourcePoolDiagnostics, GpuColorFrameWgpuResourcePoolOptions,
-    GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportContract,
-    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportExecution,
-    GpuNativeDecodedFrameImportMode, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportRoute,
-    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameImportSupportError, GpuNativeDecodedFrameSourceDescriptor,
-    GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuNativeRgbDecodePlan, GpuNativeRgbDecodePlanError,
-    GpuResidentEncoderInputLease, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
-    SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
+    CpuEncodedFloatColorFrame, CpuEncodedUnorm16ColorFrame, CpuSourceColorFrame,
+    EncodedRgbaF32Frame, GpuColorFrameAllocationPlan,
+    GpuColorFrameBindGroupCacheKeyAllocationError, GpuColorFrameContract, GpuColorFrameHandle,
+    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocationError,
+    GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
+    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
+    GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
+    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics,
+    GpuColorFrameWgpuResourcePoolOptions, GpuNativeDecodedFrameImportBackend,
+    GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError,
+    GpuNativeDecodedFrameImportExecution, GpuNativeDecodedFrameImportMode,
+    GpuNativeDecodedFrameImportPlan, GpuNativeDecodedFrameImportPlanError,
+    GpuNativeDecodedFrameImportRoute, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameImportSupportError,
+    GpuNativeDecodedFrameSourceDescriptor, GpuNativeDecodedFrameSourceFormatError,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuNativeRgbDecodePlan,
+    GpuNativeRgbDecodePlanError, GpuResidentEncoderInputLease, GpuVideoChromaLocation,
+    GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
+    ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
     import_external_color_reference, import_external_color_reference_with_limits,
@@ -354,9 +360,8 @@ pub use realtime_performance::{
 };
 pub use reference_output::{ReferenceOutputProgram, ReferenceOutputProgramError};
 pub use resident_encode::{
-    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
-    D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
-    D3D12ResidentEncodeSubmissionError, ResidentEncodeAdapterContract,
+    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterDiagnostics,
+    ResidentEncodeAdapterContract, ResidentEncodeAdapterCreateError, ResidentEncodeSubmissionError,
 };
 #[cfg(target_os = "linux")]
 pub use resident_encode::{
@@ -407,21 +412,26 @@ pub use timeline_temporal::{
     TimelineTemporalDemandBatch, TimelineTemporalPreparationError, TimelineTemporalSource,
     TimelineTemporalSourceDemand,
 };
+pub use viewer_backend_preparation::{
+    ViewerBackendPreparationWorkerExit, ViewerGpuBackendPreparation,
+    ViewerGpuBackendPreparationError, ViewerGpuBackendPreparationStatus,
+};
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer,
-    ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
-    ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
+    NativeVideoImportRuntime, ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer,
+    ViewerGpuExecutionLayer, ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer,
+    ViewerGpuTransitionInput, ViewerHeterogeneousGpuInput,
 };
 pub use viewer_retirement::{
     ViewerCpuYuvUploadWorkerExit, ViewerGpuExecutionRetirement, ViewerGpuRetirementReceipt,
 };
 pub use viewer_runtime::{
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,
-    ViewerGpuExecutionRecord, ViewerGpuExecutionRequest, ViewerGpuExecutionResidency,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
-    ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputTakeError,
-    ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuSubmissionBatch,
+    ViewerGpuDisplayCalibration, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError,
+    ViewerGpuExecutionGpuStage, ViewerGpuExecutionRecord, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionResidency, ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError,
+    ViewerGpuExecutionStageMarker, ViewerGpuNativeVideoFacts, ViewerGpuOutputPrecision,
+    ViewerGpuPresentationOutputTakeError, ViewerHeterogeneousGpuCompletedBatch,
+    ViewerHeterogeneousGpuSubmissionBatch,
 };
 pub use viewer_spatial::{GpuViewerSpatialRuntimeDiagnostics, ViewerSourceRect};
 pub use viewer_working_set::{
@@ -460,3 +470,6 @@ pub use basic_title::{
 };
 
 pub use context::request_device_with_native_video_support;
+
+#[cfg(target_os = "macos")]
+pub use resident_encode::{MetalResidentEncodeAdapter, MetalResidentEncodeAdapterDiagnostics};

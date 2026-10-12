@@ -144,7 +144,7 @@ pub struct D3D12NativeVideoImportBackend {
     support: GpuNativeDecodedFrameImportSupport,
     decoder_device_root: RendererHwAccelDeviceContext,
     yuv_decoder: GpuNativeYuvDecoder,
-    color_runtime: RenderGpuOutputBoundaryRuntime,
+    color_runtime: Option<RenderGpuOutputBoundaryRuntime>,
     completion_fence: ID3D12Fence,
     next_completion_value: u64,
     pending_wgpu_sources: Vec<WgpuSubmissionResidency>,
@@ -330,7 +330,7 @@ impl D3D12NativeVideoImportBackend {
             support,
             decoder_device_root,
             yuv_decoder: GpuNativeYuvDecoder::new(device),
-            color_runtime,
+            color_runtime: Some(color_runtime),
             completion_fence,
             next_completion_value: 1,
             pending_wgpu_sources: Vec::new(),
@@ -372,13 +372,55 @@ impl D3D12NativeVideoImportBackend {
         self.frame_cpu_timings
     }
 
-    /// Materialize contract-specific OCIO backend objects before the native
-    /// decoder surface reaches its exact presentation opportunity.
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[crate::viewer_execution::NativeVideoInputBackendPreparation],
+    ) -> bool {
+        let Some(runtime) = &self.color_runtime else {
+            return false;
+        };
+        let source = self.yuv_decoder.fused_texture_input();
+        plans.iter().all(|plan| {
+            runtime.fused_yuv_descriptor_backend_is_cached(
+                &plan.transform,
+                plan.input,
+                plan.output,
+                source.0,
+            )
+        })
+    }
+
+    /// Loan only device caches; native surfaces and synchronization remain here.
+    pub(crate) fn take_input_backend_cache(
+        &mut self,
+    ) -> Option<crate::viewer_execution::NativeVideoInputBackendCache> {
+        let source = self.yuv_decoder.fused_texture_input();
+        Some(crate::viewer_execution::NativeVideoInputBackendCache {
+            runtime: self.color_runtime.take()?,
+            source: (source.0, source.1.clone()),
+        })
+    }
+
+    pub(crate) fn return_input_backend_cache(
+        &mut self,
+        cache: crate::viewer_execution::NativeVideoInputBackendCache,
+    ) {
+        assert!(
+            self.color_runtime.is_none(),
+            "input cache has one physical owner"
+        );
+        self.color_runtime = Some(cache.runtime);
+    }
+
     pub(crate) fn prepare_import_plan(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
     ) -> Result<(), GpuNativeDecodedFrameImportError> {
         self.color_runtime
+            .as_mut()
+            .ok_or_else(|| GpuNativeDecodedFrameImportError::Backpressure {
+                reason: "native input cache is being prepared".to_owned(),
+            })?
             .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
@@ -615,13 +657,25 @@ impl D3D12NativeVideoImportBackend {
         let (texture, luma, chroma) =
             adopt_wgpu_video_texture(&self.device, source.texture.clone(), source.inspection)
                 .map_err(native_texture_error)?;
-        let prepared_yuv = self.yuv_decoder.prepare_pass(
-            &self.device,
-            &yuv_plan,
-            GpuNativeYuvPlaneViews { luma: &luma, chroma: &chroma, chroma_v: &chroma },
-        );
+        let prepared_yuv = self
+            .yuv_decoder
+            .prepare_pass(
+                &self.device,
+                &yuv_plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma,
+                    chroma: &chroma,
+                    chroma_v: &chroma,
+                    alpha: None,
+                },
+            )
+            .map_err(|error| rejected(error.to_string()))?;
         let backend = self
             .color_runtime
+            .as_mut()
+            .ok_or_else(|| GpuNativeDecodedFrameImportError::Backpressure {
+                reason: "native input cache is being prepared".to_owned(),
+            })?
             .prepare_fused_yuv_input(
                 &plan.input_transform,
                 &plan.encoded_source_frame,
@@ -631,7 +685,11 @@ impl D3D12NativeVideoImportBackend {
                 &self.queue,
             )
             .map_err(|error| rejected(format!("native fused input preparation failed: {error}")))?;
-        let resource_pool = self.color_runtime.resource_pool();
+        let resource_pool = self
+            .color_runtime
+            .as_ref()
+            .expect("recording owns native input cache")
+            .resource_pool();
         let working = resource_pool.acquire(
             &self.device,
             &GpuColorFrameAllocationPlan::for_handle(plan.working_frame.clone()),
@@ -700,6 +758,7 @@ impl D3D12NativeVideoImportBackend {
             &mut encoder,
             &prepared_yuv.bind_group,
             &working.resource().texture_view,
+            None,
         );
         // The first marker bracket now contains fused YUV sampling and OCIO.
         // The second remains empty; no intermediate color pass is submitted.

@@ -179,8 +179,43 @@ pub struct ViewerGpuCpuYuvSource {
     pub materialization_height: u32,
 }
 
+/// Exact source/working device-object contract; no decoded surface or frame identity.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct NativeVideoInputBackendPreparation {
+    pub(crate) input: crate::ColorFrameDescriptor,
+    pub(crate) output: crate::ColorFrameDescriptor,
+    pub(crate) transform: RenderInputTransform,
+}
+
+/// Move-only loan of the original native input cache and its physical shader layout.
+pub(crate) struct NativeVideoInputBackendCache {
+    pub(crate) runtime: crate::RenderGpuOutputBoundaryRuntime,
+    pub(crate) source: (&'static str, wgpu::BindGroupLayout),
+}
+
+impl NativeVideoInputBackendCache {
+    pub(crate) fn prepare(
+        &mut self,
+        plans: &[NativeVideoInputBackendPreparation],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), crate::color_stage::RenderGpuFusedInputError> {
+        for plan in plans {
+            self.runtime.prepare_fused_yuv_descriptor_backend(
+                &plan.transform,
+                plan.input,
+                plan.output,
+                (self.source.0, &self.source.1),
+                device,
+                queue,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// Renderer backend lifetime for native decoded-frame import.
-pub struct ViewerNativeVideoImportRuntime {
+pub struct NativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
     pub(crate) cpu_yuv_decoder: GpuNativeYuvDecoder,
     #[cfg(target_os = "windows")]
@@ -191,7 +226,7 @@ pub struct ViewerNativeVideoImportRuntime {
     backend: Option<VulkanNativeVideoImportBackend>,
 }
 
-impl ViewerNativeVideoImportRuntime {
+impl NativeVideoImportRuntime {
     /// Create the backend implementation selected for one renderer device.
     pub fn new(adapter: &wgpu::Adapter, device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         Self::new_with_gpu_timing_policy(
@@ -268,12 +303,12 @@ impl ViewerNativeVideoImportRuntime {
         }
         #[cfg(target_os = "macos")]
         {
-            let _ = gpu_timing_policy;
             match MetalNativeVideoImportBackend::new_with_resource_pool(
                 adapter,
                 device,
                 queue,
                 resource_pool,
+                gpu_timing_policy,
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
@@ -344,7 +379,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Begin one explicit Viewer-candidate attribution scope.
     pub fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.begin_viewer_candidate();
         }
@@ -359,11 +394,11 @@ impl ViewerNativeVideoImportRuntime {
         candidate: Option<NativeVideoImportCandidateToken>,
         viewer_record_succeeded: bool,
     ) -> Option<NativeVideoImportCandidateTimingReceipt> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.end_viewer_candidate(candidate, viewer_record_succeeded);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = (candidate, viewer_record_succeeded);
         None
     }
@@ -387,7 +422,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Collect callbacks after the execution owner has polled the device.
     pub fn collect_gpu_timings_after_device_poll(&mut self) {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             backend.collect_gpu_timings_after_device_poll();
         }
@@ -395,7 +430,7 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Drain completed native-import hardware timestamp samples.
     pub fn take_completed_gpu_timings(&mut self) -> Vec<NativeVideoImportGpuTimingSample> {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_mut() {
             return backend.take_completed_gpu_timings();
         }
@@ -404,11 +439,11 @@ impl ViewerNativeVideoImportRuntime {
 
     /// Cumulative native-import GPU timing coverage and availability.
     pub fn gpu_timing_diagnostics(&self) -> NativeVideoImportGpuTimingDiagnostics {
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         if let Some(backend) = self.backend.as_ref() {
             return backend.gpu_timing_diagnostics();
         }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         if self.support.renderer_backend_ready {
             return NativeVideoImportGpuTimingDiagnostics::inactive(
                 false,
@@ -488,6 +523,56 @@ impl ViewerNativeVideoImportRuntime {
             return backend.wait_for_released_sources_until(_deadline);
         }
         self.retire_completed_source_residency()
+    }
+
+    pub(crate) fn input_backend_preparation(
+        &self,
+        source: &ViewerGpuNativeSource,
+    ) -> Result<NativeVideoInputBackendPreparation, GpuNativeDecodedFrameImportError> {
+        let contract = native_decoded_frame_import_contract(
+            source.source_color_space,
+            &source.input_transform,
+            source.materialization_width,
+            source.materialization_height,
+            &source.native_frame,
+        )?;
+        let (input, output) = contract.validated_frame_descriptors(&self.support)?;
+        Ok(NativeVideoInputBackendPreparation {
+            input,
+            output,
+            transform: contract.input_transform,
+        })
+    }
+
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[NativeVideoInputBackendPreparation],
+    ) -> bool {
+        if plans.is_empty() {
+            return true;
+        }
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &self.backend {
+            return backend.input_backends_are_prepared(plans);
+        }
+        false
+    }
+
+    pub(crate) fn take_input_backend_cache(&mut self) -> Option<NativeVideoInputBackendCache> {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &mut self.backend {
+            return backend.take_input_backend_cache();
+        }
+        None
+    }
+
+    pub(crate) fn return_input_backend_cache(&mut self, cache: NativeVideoInputBackendCache) {
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        if let Some(backend) = &mut self.backend {
+            backend.return_input_backend_cache(cache);
+            return;
+        }
+        unreachable!("a loaned input cache retains its device backend");
     }
 
     /// Prepare contract-specific native input color objects without adopting
@@ -671,7 +756,7 @@ fn native_decoded_frame_import_contract(
         handle_kind: native_frame.handle_kind(),
         source_texture_format,
         video_sampling,
-        label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
+        label: format!("native-working-{}", native_frame.handle.id().get()),
     })
 }
 

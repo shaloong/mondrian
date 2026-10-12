@@ -20,10 +20,12 @@ use mondrian_core::display_probe::{
     compute_display_blockers, resolve_hdr_status_with_monitor_evidence, MonitorHdrReadiness,
 };
 use mondrian_core::types::{ColorEngine, ColorSpace};
+#[cfg(test)]
+use mondrian_platform::DisplayHdrProbeDetails;
+#[cfg(any(test, target_os = "macos"))]
+use mondrian_platform::DisplayProbeBackend;
 #[cfg(not(test))]
 use mondrian_platform::{DisplayHdrProbe, DisplayProfileProbe, SystemPlatformService};
-#[cfg(test)]
-use mondrian_platform::{DisplayHdrProbeDetails, DisplayProbeBackend};
 use mondrian_platform::{
     DisplayHdrProbeResult, DisplayIccProfileProbeResult, DisplayProfileProbeTarget,
 };
@@ -119,6 +121,7 @@ pub fn resolve_display_snapshot(
         &monitor_profile_status,
         &hdr_status,
         &format!("{surface_format:?}"),
+        &format!("{surface_color_space:?}"),
         &format!("{resolved_output_color_space:?}"),
     );
     if let Some(blocker) = ocio_blocker {
@@ -285,10 +288,33 @@ pub(super) fn active_display_hdr_presentation_ready(
     let target = DisplayProfileProbeTarget::new(display_position, display_physical_size)
         .with_native_display_id(native_display_id);
     let probe = display_hdr_state_probe(target);
+    #[cfg(target_os = "macos")]
+    if macos_edr_request_eligible(&probe, native_display_id) {
+        // An AppKit screen can report current headroom 1.0 until this layer
+        // requests EDR. Potential headroom authorizes the request; the live
+        // current headroom remains a separate observation in the snapshot.
+        return true;
+    }
     matches!(
         resolve_monitor_hdr_capability(&probe, display_hdr_info),
         MonitorHdrReadiness::Ready { .. }
     )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_edr_request_eligible(
+    probe: &DisplayHdrProbeResult,
+    native_display_id: Option<u64>,
+) -> bool {
+    probe.discovery_available
+        && probe.backend == Some(DisplayProbeBackend::MacOsAppKit)
+        && probe.native_display_path_id.as_deref().and_then(|id| id.parse::<u64>().ok())
+            == native_display_id
+        && native_display_id.is_some()
+        && probe.details.hdr_supported == Some(true)
+        && probe.details.hdr_enabled != Some(false)
+        && probe.details.force_disabled != Some(true)
+        && probe.details.potential_headroom_ppm.is_some_and(|ppm| ppm > 1_000_000)
 }
 
 fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
@@ -864,6 +890,44 @@ mod tests {
             MonitorHdrReadiness::Unknown { ref reason }
                 if reason.contains("active compositor state is unknown")
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_edr_request_uses_potential_headroom_and_exact_display_identity() {
+        let probe = DisplayHdrProbeResult::found(
+            DisplayProbeBackend::MacOsAppKit,
+            Some("test display".to_owned()),
+            DisplayHdrProbeDetails {
+                hdr_supported: Some(true),
+                hdr_enabled: None,
+                force_disabled: Some(false),
+                current_headroom_ppm: Some(1_000_000),
+                potential_headroom_ppm: Some(2_000_000),
+                ..DisplayHdrProbeDetails::default()
+            },
+        )
+        .with_native_display_path_id(Some("42".to_owned()));
+        assert!(macos_edr_request_eligible(&probe, Some(42)));
+        assert!(matches!(
+            resolve_monitor_hdr_capability(&probe, no_hdr_info()),
+            MonitorHdrReadiness::Unknown { .. }
+        ));
+        let mut active = probe.clone();
+        active.details.current_headroom_ppm = Some(2_000_000);
+        active.details.hdr_enabled = Some(true);
+        assert!(matches!(
+            resolve_monitor_hdr_capability(&active, no_hdr_info()),
+            MonitorHdrReadiness::Ready { .. }
+        ));
+        assert!(!macos_edr_request_eligible(&probe, Some(43)));
+        assert!(!macos_edr_request_eligible(&probe, None));
+        let mut no_headroom = probe.clone();
+        no_headroom.details.potential_headroom_ppm = Some(1_000_000);
+        assert!(!macos_edr_request_eligible(&no_headroom, Some(42)));
+        let mut disabled = probe;
+        disabled.details.force_disabled = Some(true);
+        assert!(!macos_edr_request_eligible(&disabled, Some(42)));
     }
 
     #[test]

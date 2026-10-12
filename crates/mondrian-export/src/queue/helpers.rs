@@ -21,6 +21,15 @@ pub(crate) fn apply_external_filter_thread_args(
         .arg(threads);
 }
 
+/// Apply the frozen codec grant to the next FFmpeg input or output file.
+/// `-threads` is file-scoped, so each `-i` and the output need their own value.
+pub(crate) fn apply_external_codec_thread_args(
+    cmd: &mut Command,
+    policy: service::ExportExecutionResourcePolicy,
+) {
+    cmd.arg("-threads").arg(policy.ffmpeg_codec_threads.max(1).to_string());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportYuvMatrix {
     Bt709,
@@ -242,7 +251,22 @@ pub(crate) fn apply_export_video_signal_args(
             cmd.arg("-flags").arg("+ildct+ilme");
         }
     }
-    cmd.arg("-pix_fmt").arg(contract.pixel_format);
+    // VideoToolbox consumes packed 16-bit AYUV for ProRes 4444. Keep the
+    // delivery's decoded 12-bit 4:4:4 signal contract separate from this
+    // encoder input representation; prores_ks only accepts 10-bit planes.
+    let encoder_input_pixel_format = if cfg!(target_os = "macos")
+        && matches!(
+            &delivery.artifact,
+            ResolvedExportArtifactEncoding::MediaFile {
+                video: VideoCodecConfig::ProRes { profile },
+                ..
+            } if profile.is_4444()
+        ) {
+        "ayuv64le"
+    } else {
+        contract.pixel_format
+    };
+    cmd.arg("-pix_fmt").arg(encoder_input_pixel_format);
     if let Some(range) = contract.codec_range {
         cmd.arg("-color_range").arg(range);
     }

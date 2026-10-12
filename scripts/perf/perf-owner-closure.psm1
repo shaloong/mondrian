@@ -213,6 +213,20 @@ function Assert-CleanPreview {
     Assert-Bool $Preview.all_resources_released $true "$Context.all_resources_released"
 }
 
+# Mirror ViewerGpuRetirementReceipt and its is_healthy contract once for
+# Perf, phase ownership and both old/final campaign GPU generations.
+function Assert-MondrianRendererRetirement($Receipt, [string]$Context) {
+    Assert-ExactReceiptFields $Receipt @('backend_preparation', 'cpu_yuv_upload', 'native_device_removed') $Context
+    if ($Receipt.backend_preparation -isnot [string] -or
+        $Receipt.backend_preparation -cnotin @('not_started', 'returned')) {
+        throw "$Context has no healthy backend-preparation worker exit"
+    }
+    if ($Receipt.cpu_yuv_upload -isnot [string] -or $Receipt.cpu_yuv_upload -cne 'returned') {
+        throw "$Context did not observe a normally returned and joined YUV upload worker"
+    }
+    Assert-Bool $Receipt.native_device_removed $false "$Context.native_device_removed"
+}
+
 function Assert-CleanGpu {
     param($Gpu, [string]$Context)
     Assert-Fields $Gpu @(
@@ -237,11 +251,7 @@ function Assert-CleanGpu {
         Assert-Bool $Gpu.$leaf $false "$Context.$leaf"
     }
     Assert-Null $Gpu.generation_terminal_kind "$Context.generation_terminal_kind"
-    Assert-Fields $Gpu.renderer_retirement @("cpu_yuv_upload", "native_device_removed") "$Context.renderer_retirement"
-    if ($Gpu.renderer_retirement.cpu_yuv_upload -cne "returned") {
-        throw "$Context did not observe a normally returned and joined YUV upload worker"
-    }
-    Assert-Bool $Gpu.renderer_retirement.native_device_removed $false "$Context.renderer_retirement.native_device_removed"
+    Assert-MondrianRendererRetirement $Gpu.renderer_retirement "$Context.renderer_retirement"
 }
 
 function Assert-CleanProject {
@@ -679,11 +689,11 @@ function Assert-MondrianCanonicalAppClosure($Receipt) {
     $app = Read-CanonicalOwnerLeaf $Receipt 'Phase App' 'canonical_json'
     Assert-ExactReceiptFields $app @('schema_version','app_owner_consumed','project','reference_output','export','export_terminal_snapshot','audio','audio_source_cache','workers') 'Canonical App'
     Assert-UnsignedInteger $app.schema_version 'Canonical App schema'
-    if ($app.schema_version -ne 1) { throw 'Unknown canonical App schema' }
+    if ($app.schema_version -ne 2) { throw 'Unknown canonical App schema' }
     Assert-Bool $app.app_owner_consumed $true 'App consumed'
-    Assert-ExactReceiptFields $app.project @('session_was_open','pending_close_was_active','authoring_session_released','pending_close_released','runtime_lease_released','retired_library_generations_remaining','lifecycle_failure') 'Canonical project'
-    foreach ($field in @('session_was_open','pending_close_was_active')) { Assert-BoolType $app.project.$field "App project $field" }
-    foreach ($field in @('authoring_session_released','pending_close_released','runtime_lease_released')) { Assert-Bool $app.project.$field $true "App project $field" }
+    Assert-ExactReceiptFields $app.project @('session_was_open','pending_close_was_active','pending_open_was_active','pending_open_released','authoring_session_released','pending_close_released','runtime_lease_released','retired_library_generations_remaining','lifecycle_failure') 'Canonical project'
+    foreach ($field in @('session_was_open','pending_close_was_active','pending_open_was_active')) { Assert-BoolType $app.project.$field "App project $field" }
+    foreach ($field in @('pending_open_released','authoring_session_released','pending_close_released','runtime_lease_released')) { Assert-Bool $app.project.$field $true "App project $field" }
     Assert-Zero $app.project.retired_library_generations_remaining 'App retired libraries'
     Assert-Null $app.project.lifecycle_failure 'App project close failure'
     $projection = [pscustomobject]@{
@@ -724,7 +734,7 @@ function Assert-MondrianRawGpuClosure($Gpu) {
     Assert-CleanGpu $copy 'Phase GPU'
 }
 Export-ModuleMember -Function @(
-    "Assert-MondrianCanonicalAppClosure", "Assert-MondrianRawGpuClosure", "Assert-ExactReceiptFields", "Read-CanonicalOwnerLeaf",
+    "Assert-MondrianRendererRetirement", "Assert-MondrianCanonicalAppClosure", "Assert-MondrianRawGpuClosure", "Assert-ExactReceiptFields", "Read-CanonicalOwnerLeaf",
     "Assert-CleanAudioSourceCache",
     "Assert-CleanPreviewCallbacks",
     "Assert-MondrianPerfCases",

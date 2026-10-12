@@ -4,7 +4,7 @@
 //!
 //! Cursor navigation, backspace/delete, Home/End, mouse drag selection
 //! (extendable beyond widget bounds), Shift+Click/Shift+Arrow selection
-//! expansion, Ctrl+A/C/X/V clipboard, Ctrl+Left/Right word navigation,
+//! expansion, platform primary clipboard shortcuts and word navigation,
 //! grapheme-safe cursor (emoji / combining marks), IME multi-codepoint
 //! input, timed blinking cursor (500 ms cycle).
 //!
@@ -50,6 +50,7 @@ use geometry::{
 };
 use ime::{classify_ime_key, request_disabled_ime, request_enabled_ime, ImeKeyDisposition};
 pub use multiline::{MultilineTextEditState, TextPosition, TextSelection};
+use multiline_commands::PlatformKeymap;
 pub use multiline_commands::TabBehavior;
 pub use multiline_widget::MultilineTextInput;
 use paint::{paint_text_input, TextInputPaintSnapshot};
@@ -683,6 +684,9 @@ impl Widget for TextInput {
                     return EventResult::Ignored;
                 }
                 self.mouse_down = false;
+                if !self.has_selection() {
+                    self.clear_selection();
+                }
                 ctx.release_pointer_capture(self.id);
                 ctx.request_repaint();
                 EventResult::Handled
@@ -750,7 +754,7 @@ impl Widget for TextInput {
                 }
 
                 let before_text = self.edit.text.clone();
-                let result = classify_key_command(*key, *modifiers)
+                let result = classify_key_command(*key, *modifiers, PlatformKeymap::current())
                     .map_or(EventResult::Ignored, |command| {
                         self.execute_key_command(command, ctx)
                     });
@@ -860,6 +864,10 @@ impl Widget for TextInput {
         )
     }
 
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -872,7 +880,10 @@ impl Widget for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::test_utils::{
+        make_event_ctx, primary_text_modifiers, word_text_modifiers, DummyFocus, DummyShortcut,
+        DummyTooltip,
+    };
     use mondrian_editor_state::Action;
     use mondrian_platform_core::{
         ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
@@ -941,8 +952,17 @@ mod tests {
             ctx,
         );
     }
-    fn kd_ctrl(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
-        ti.event(&UiEvent::KeyDown { key, modifiers: Modifiers::ctrl() }, ctx);
+    fn kd_primary(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::KeyDown { key, modifiers: primary_text_modifiers() },
+            ctx,
+        );
+    }
+    fn kd_word(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
+        ti.event(
+            &UiEvent::KeyDown { key, modifiers: word_text_modifiers() },
+            ctx,
+        );
     }
     fn kd_mod(ti: &mut TextInput, key: KeyCode, modifiers: Modifiers, ctx: &mut EventContext) {
         ti.event(&UiEvent::KeyDown { key, modifiers }, ctx);
@@ -1450,7 +1470,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before first second third");
         assert_eq!(
@@ -1481,7 +1501,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before after");
         assert_eq!(ti.selection_byte_range(), Some((7, 12)));
@@ -1510,7 +1530,7 @@ mod tests {
             requests: &mut requests,
         };
 
-        kd_ctrl(&mut ti, KeyCode::V, &mut ctx);
+        kd_primary(&mut ti, KeyCode::V, &mut ctx);
 
         assert_eq!(ti.text(), "before after");
         assert_eq!(ti.selection_byte_range(), Some((7, 12)));
@@ -1899,7 +1919,7 @@ mod tests {
     // ── Word navigation ──────────────────────────────────────────────────
 
     #[test]
-    fn ctrl_left_word() {
+    fn platform_word_left() {
         let mut ti = TextInput::new("ph").with_text("hello world foo");
         ti.focused = true;
         // "hello world foo" = 15 graphemes: hello(5) + space(1) + world(5) + space(1) + foo(3)
@@ -1908,16 +1928,16 @@ mod tests {
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 12); // start of "foo"
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 6); // start of "world"
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 0); // start of "hello"
     }
 
     #[test]
-    fn ctrl_right_word() {
+    fn platform_word_right() {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
         // "hello world" = 11 graphemes: hello(5) + space(1) + world(5)
@@ -1926,14 +1946,14 @@ mod tests {
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 6); // past "hello" + space, at "world" start
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 11); // past "world", at end
     }
 
     #[test]
-    fn ctrl_shift_word_navigation_extends_selection() {
+    fn platform_word_navigation_extends_selection() {
         let mut ti = TextInput::new("ph").with_text("hello world");
         ti.focused = true;
         ti.edit.cursor = 11;
@@ -1945,7 +1965,7 @@ mod tests {
         kd_mod(
             &mut ti,
             KeyCode::Left,
-            Modifiers { ctrl: true, shift: true, ..Default::default() },
+            Modifiers { shift: true, ..word_text_modifiers() },
             &mut ctx,
         );
 
@@ -1955,7 +1975,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_word_navigation_uses_unicode_whitespace_boundaries() {
+    fn platform_word_navigation_uses_unicode_whitespace_boundaries() {
         let mut ti = TextInput::new("ph").with_text("alpha\tbeta\n\u{00A0}gamma");
         ti.focused = true;
         ti.edit.cursor = ti.len_graphemes();
@@ -1964,14 +1984,14 @@ mod tests {
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 12);
-        kd_ctrl(&mut ti, KeyCode::Left, &mut ctx);
+        kd_word(&mut ti, KeyCode::Left, &mut ctx);
         assert_eq!(ti.edit.cursor, 6);
-        kd_ctrl(&mut ti, KeyCode::Home, &mut ctx);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd(&mut ti, KeyCode::Home, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 6);
-        kd_ctrl(&mut ti, KeyCode::Right, &mut ctx);
+        kd_word(&mut ti, KeyCode::Right, &mut ctx);
         assert_eq!(ti.edit.cursor, 12);
     }
 
@@ -2051,23 +2071,23 @@ mod tests {
         assert_eq!(ti.selection_byte_range(), Some((1, 4)));
     }
 
-    // ── Ctrl shortcuts ───────────────────────────────────────────────────
+    // ── Platform primary shortcuts ───────────────────────────────────────
 
     #[test]
-    fn ctrl_a_select_all() {
+    fn platform_primary_a_selects_all() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
         let mut f = DummyFocus;
         let mut s = DummyShortcut;
         let mut t = DummyTooltip;
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
-        kd_ctrl(&mut ti, KeyCode::A, &mut ctx);
+        kd_primary(&mut ti, KeyCode::A, &mut ctx);
         assert_eq!(ti.edit.cursor, 5);
         assert_eq!(ti.edit.selection_start, Some(0));
     }
 
     #[test]
-    fn ctrl_x_cuts() {
+    fn platform_primary_x_cuts() {
         let platform = ClipboardPlatform::with_text("");
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
@@ -2089,14 +2109,14 @@ mod tests {
             platform: &platform,
             requests: &mut requests,
         };
-        kd_ctrl(&mut ti, KeyCode::X, &mut ctx);
+        kd_primary(&mut ti, KeyCode::X, &mut ctx);
         assert_eq!(ti.text(), "ho");
         assert_eq!(ti.edit.cursor, 1);
         assert!(!ti.has_selection());
     }
 
     #[test]
-    fn ctrl_x_preserves_selection_when_clipboard_copy_fails() {
+    fn platform_primary_x_preserves_selection_when_clipboard_copy_fails() {
         let platform = ClipboardPlatform::copy_failure();
         let mut ti = TextInput::new("ph").with_text("hello").on_change(change_action);
         ti.focused = true;
@@ -2118,7 +2138,10 @@ mod tests {
         };
 
         let result = ti.event(
-            &UiEvent::KeyDown { key: KeyCode::X, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::X,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
 
@@ -2129,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_without_selection_is_ignored_for_global_copy() {
+    fn platform_primary_c_without_selection_is_ignored_for_global_copy() {
         let mut ti = TextInput::new("ph").with_text("hello");
         ti.focused = true;
         let mut f = DummyFocus;
@@ -2138,7 +2161,10 @@ mod tests {
         let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
 
         let result = ti.event(
-            &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown {
+                key: KeyCode::C,
+                modifiers: primary_text_modifiers(),
+            },
             &mut ctx,
         );
         assert_eq!(result, EventResult::Ignored);
@@ -2183,18 +2209,31 @@ mod tests {
                 KeyCode::X,
                 Modifiers { ctrl: true, alt: true, ..Default::default() },
             ),
-            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Left,
+                Modifiers { alt: true, meta: true, ..Default::default() },
+            ),
             (
                 KeyCode::Right,
-                Modifiers { meta: true, ..Default::default() },
+                Modifiers { ctrl: true, meta: true, ..Default::default() },
             ),
             (
                 KeyCode::Home,
-                Modifiers { alt: true, shift: true, ..Default::default() },
+                Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::End,
-                Modifiers { meta: true, shift: true, ..Default::default() },
+                Modifiers {
+                    ctrl: true,
+                    meta: true,
+                    shift: true,
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::Backspace,
@@ -2239,6 +2278,26 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert!(ctx.requests.pointer_capture.is_none());
         assert!(!ti.mouse_down);
+    }
+
+    #[test]
+    fn click_with_stationary_mouse_move_does_not_select_first_typed_character() {
+        let mut ti = TextInput::new("ph");
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        md(&mut ti, 80.0, 14.0, &mut ctx);
+        mm(&mut ti, 80.0, 14.0, &mut ctx);
+        mu(&mut ti, &mut ctx);
+        assert_eq!(ti.edit.selection_start, None);
+
+        tp(&mut ti, "a", &mut ctx);
+        assert!(!ti.has_selection());
+        tp(&mut ti, "b", &mut ctx);
+        assert_eq!(ti.text(), "ab");
     }
 
     #[test]
@@ -2447,6 +2506,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 28.0),
@@ -2484,6 +2544,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 240.0, 30.0),
@@ -2556,6 +2617,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
@@ -2574,6 +2636,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),

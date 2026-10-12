@@ -114,6 +114,7 @@ $gpuFixture.owner_closure.gpu = [pscustomobject]@{
     retirement_completed = $true
     generation_terminal_kind = $null
     renderer_retirement = [pscustomobject]@{
+        backend_preparation = "not_started"
         cpu_yuv_upload = "returned"
         native_device_removed = $false
     }

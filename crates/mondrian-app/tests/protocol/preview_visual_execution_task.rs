@@ -159,7 +159,7 @@ fn payload_with_protections(
 }
 
 fn media_protection() -> PreviewMediaResidencyGuard {
-    type Store = mondrian_playback::PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, ()>;
+    type Store = mondrian_playback::PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (), String>;
     let mut store = Store::new(mondrian_playback::PreviewFrameStoreConfig::default());
     let demand = mondrian_playback::MediaWorkDemandId::for_preview_generation(epoch(), 1, 0);
     let work = match store.reserve_media_work(

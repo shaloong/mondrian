@@ -1,4 +1,7 @@
-use super::{DecodedRgbaFrameContract, PreviewSourceColorContract};
+use super::{
+    CpuYuvChromaPlaneLayout, CpuYuvChromaSubsampling, CpuYuvSampleFormat, DecodedRgbaFrameContract,
+    PreviewSourceColorContract,
+};
 use crate::decoder::{
     decoded_video_range_from_ffmpeg, DecodedVideoChromaLocation, DecodedVideoMatrix,
     DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -6,6 +9,108 @@ use crate::decoder::{
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MondrianError, Result};
 use std::path::Path;
+
+pub(super) fn compact_yuv_layout(
+    pixel: ffmpeg::util::format::pixel::Pixel,
+) -> Option<(
+    CpuYuvChromaSubsampling,
+    CpuYuvSampleFormat,
+    CpuYuvChromaPlaneLayout,
+)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    Some(match pixel {
+        Pixel::YUV420P | Pixel::YUVJ420P => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P10LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P12LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV420P16LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P10LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P12LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P16LE => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV422P | Pixel::YUVJ422P => (
+            CpuYuvChromaSubsampling::Cs422,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P | Pixel::YUVJ444P => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P10LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb10,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P12LE | Pixel::YUVA444P12LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16Lsb12,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::YUV444P16LE => (
+            CpuYuvChromaSubsampling::Cs444,
+            CpuYuvSampleFormat::Unorm16,
+            CpuYuvChromaPlaneLayout::Planar,
+        ),
+        Pixel::NV12 => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm8,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        Pixel::P010LE => (
+            CpuYuvChromaSubsampling::Cs420,
+            CpuYuvSampleFormat::Unorm16Msb10,
+            CpuYuvChromaPlaneLayout::Interleaved,
+        ),
+        _ => return None,
+    })
+}
+
+/// Resolve the existing compact CPU sampling policy without changing raw
+/// metadata or native decoder admission. Explicit stream siting always wins.
+pub(super) fn cpu_chroma_location_from_frame(
+    frame: &ffmpeg::util::frame::video::Video,
+) -> ffmpeg::util::chroma::Location {
+    use ffmpeg::util::chroma::Location;
+    let location = frame.chroma_location();
+    if location == Location::Unspecified
+        && compact_yuv_layout(frame.format())
+            .is_some_and(|(subsampling, _, _)| subsampling != CpuYuvChromaSubsampling::Cs444)
+    {
+        // Preserve the existing MPEG-family compact-layout Left fallback in
+        // every CPU representation. Other layouts keep FFmpeg's own default.
+        Location::Left
+    } else {
+        location
+    }
+}
 
 pub(super) fn decoded_surface_format_from_pixel(
     pixel: ffmpeg::util::format::pixel::Pixel,
@@ -25,15 +130,22 @@ pub(super) fn decoded_surface_format_from_pixel(
         ffmpeg::util::format::pixel::Pixel::Y212LE => DecodedVideoSurfaceFormat::Y212,
         ffmpeg::util::format::pixel::Pixel::XV30LE => DecodedVideoSurfaceFormat::Xv30,
         ffmpeg::util::format::pixel::Pixel::XV36LE => DecodedVideoSurfaceFormat::Xv36,
-        ffmpeg::util::format::pixel::Pixel::YUV420P => DecodedVideoSurfaceFormat::Yuv420p,
+        ffmpeg::util::format::pixel::Pixel::YUV420P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ420P => DecodedVideoSurfaceFormat::Yuv420p,
         ffmpeg::util::format::pixel::Pixel::YUV420P10LE => DecodedVideoSurfaceFormat::Yuv420p10le,
         ffmpeg::util::format::pixel::Pixel::YUV420P12LE => DecodedVideoSurfaceFormat::Yuv420p12le,
-        ffmpeg::util::format::pixel::Pixel::YUV422P => DecodedVideoSurfaceFormat::Yuv422p,
+        ffmpeg::util::format::pixel::Pixel::YUV420P16LE => DecodedVideoSurfaceFormat::Yuv420p16le,
+        ffmpeg::util::format::pixel::Pixel::YUV422P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ422P => DecodedVideoSurfaceFormat::Yuv422p,
         ffmpeg::util::format::pixel::Pixel::YUV422P10LE => DecodedVideoSurfaceFormat::Yuv422p10le,
         ffmpeg::util::format::pixel::Pixel::YUV422P12LE => DecodedVideoSurfaceFormat::Yuv422p12le,
-        ffmpeg::util::format::pixel::Pixel::YUV444P => DecodedVideoSurfaceFormat::Yuv444p,
+        ffmpeg::util::format::pixel::Pixel::YUV422P16LE => DecodedVideoSurfaceFormat::Yuv422p16le,
+        ffmpeg::util::format::pixel::Pixel::YUV444P
+        | ffmpeg::util::format::pixel::Pixel::YUVJ444P => DecodedVideoSurfaceFormat::Yuv444p,
         ffmpeg::util::format::pixel::Pixel::YUV444P10LE => DecodedVideoSurfaceFormat::Yuv444p10le,
         ffmpeg::util::format::pixel::Pixel::YUV444P12LE => DecodedVideoSurfaceFormat::Yuv444p12le,
+        ffmpeg::util::format::pixel::Pixel::YUV444P16LE => DecodedVideoSurfaceFormat::Yuv444p16le,
+        ffmpeg::util::format::pixel::Pixel::YUVA444P12LE => DecodedVideoSurfaceFormat::Yuva444p12le,
         ffmpeg::util::format::pixel::Pixel::RGBA => DecodedVideoSurfaceFormat::Rgba8,
         ffmpeg::util::format::pixel::Pixel::BGRA => DecodedVideoSurfaceFormat::Bgra8,
         ffmpeg::util::format::pixel::Pixel::RGBAF16LE => DecodedVideoSurfaceFormat::Rgba16Float,
@@ -84,7 +196,7 @@ fn decoded_bit_depth_from_pixel(pixel: ffmpeg::util::format::pixel::Pixel) -> Op
     u8::try_from(depth).ok().filter(|depth| *depth > 0)
 }
 
-fn decoded_chroma_location_from_ffmpeg(
+pub(super) fn decoded_chroma_location_from_ffmpeg(
     location: ffmpeg::util::chroma::Location,
 ) -> DecodedVideoChromaLocation {
     match location {
@@ -147,10 +259,49 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
     path: &Path,
 ) -> Result<DecodedRgbaFrameContract> {
     if pixel_format_is_rgb(pixel_format) {
+        let matrix = decoded_video_matrix_from_ffmpeg(decoded_color_space)
+            .ok()
+            .flatten()
+            .unwrap_or(DecodedVideoMatrix::Unknown);
+        let range_contract = match source.range {
+            // A YCbCr stream-level range must not expand already materialized
+            // RGB a second time. RGB integer frames own their local declaration;
+            // authored overrides and the VC-3 frame rule remain explicit.
+            crate::DecodedVideoRangeContract::Automatic { .. } => {
+                crate::DecodedVideoRangeContract::Automatic {
+                    probed_range: DecodedVideoRange::Unknown,
+                }
+            }
+            other => other,
+        };
+        let resolved = range_contract
+            .resolve_for_sampling(decoded_video_range_from_ffmpeg(decoded_color_range), matrix);
+        let is_float = pixel_format.descriptor().is_some_and(|descriptor| unsafe {
+            (*descriptor.as_ptr()).flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_FLOAT as u64 != 0
+        });
+        let range = if source.is_data_texture() || is_float {
+            DecodedVideoRange::Full
+        } else if resolved == DecodedVideoRange::Unknown {
+            if matches!(
+                source.range,
+                crate::DecodedVideoRangeContract::AutomaticWithConvention {
+                    convention: mondrian_core::VideoSamplingConvention::DnxColorVolume,
+                    ..
+                }
+            ) {
+                return Err(MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: "VC-3 RGB range is absent or conflicts with its in-band CLV; explicit interpretation required".to_owned(),
+                });
+            }
+            DecodedVideoRange::Full
+        } else {
+            resolved
+        };
         return Ok(DecodedRgbaFrameContract::source_encoded(
             source,
             DecodedVideoMatrix::Rgb,
-            DecodedVideoRange::Full,
+            range,
         ));
     }
     if source.is_data_texture() {
@@ -162,20 +313,26 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         });
     }
 
-    let decoded_matrix =
-        decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
-            MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
-        })?;
+    let decoded_matrix = match decoded_video_matrix_from_ffmpeg(decoded_color_space) {
+        Err(_) if source.yuv_matrix_override.is_some() => Some(DecodedVideoMatrix::Unsupported),
+        result => result.map_err(|reason| MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason,
+        })?,
+    };
     // CICP RGB colorimetry and YCbCr sampling matrices are independent facts.
     // A missing frame fact can only use a fallback already bound into the
     // immutable source contract by an authored/project policy.
-    let matrix = decoded_matrix.or(source.yuv_matrix_fallback).ok_or_else(|| MondrianError::DecodeFailed {
-        asset_id: path.display().to_string(),
-        reason: format!(
-            "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
-            source.color_space()
-        ),
-    })?;
+    let matrix = source.resolve_yuv_matrix(decoded_matrix.unwrap_or(DecodedVideoMatrix::Unknown));
+    if matrix == DecodedVideoMatrix::Unknown {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
+                source.color_space()
+            ),
+        });
+    }
     if matrix == DecodedVideoMatrix::Rgb {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -186,9 +343,10 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
     }
     // Auto accepts a more local frame fact; an authored range override remains
     // authoritative over incorrect source tags.
-    let range = source
-        .range
-        .resolve_for_frame(decoded_video_range_from_ffmpeg(decoded_color_range));
+    let range = source.range.resolve_for_sampling(
+        decoded_video_range_from_ffmpeg(decoded_color_range),
+        decoded_matrix.unwrap_or(DecodedVideoMatrix::Unknown),
+    );
     if range == DecodedVideoRange::Unknown {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
@@ -202,9 +360,18 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
 }
 
 pub(super) fn configure_preview_rgba_scaler(
-    scaler: &mut ffmpeg::software::scaling::Context,
+    scaler: &mut super::scaler::PreviewScaler,
     contract: DecodedRgbaFrameContract,
     path: &Path,
+) -> Result<()> {
+    configure_preview_scaler_range(scaler, contract, path, true)
+}
+
+pub(super) fn configure_preview_scaler_range(
+    scaler: &mut super::scaler::PreviewScaler,
+    contract: DecodedRgbaFrameContract,
+    path: &Path,
+    output_full_range: bool,
 ) -> Result<()> {
     let coefficient_id = match contract.applied_matrix {
         DecodedVideoMatrix::Bt709 => Some(ffmpeg::ffi::SWS_CS_ITU709),
@@ -236,7 +403,7 @@ pub(super) fn configure_preview_rgba_scaler(
             coefficients,
             source_full_range,
             coefficients,
-            1,
+            i32::from(output_full_range),
             0,
             1 << 16,
             1 << 16,

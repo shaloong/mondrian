@@ -69,7 +69,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         admission: PlaybackHardwareDecodeAdmission,
     ) {
         if self.hardware_decode_admission.get().observation() != Some(admission) {
-            self.future_media_window.borrow_mut().clear();
+            self.future_media_window.borrow_mut().clear_lowering_plans();
         }
         self.hardware_decode_admission
             .set(PreviewHardwareDecodeAdmissionState::reported(admission));

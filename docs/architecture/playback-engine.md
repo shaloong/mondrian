@@ -80,7 +80,23 @@ rebuilds monitor adaptation from the new contract.
 
 Priming also proves the next distinct physical source inside the bounded cold-open horizon before it releases the clock anchor. The shared preroll seam may overlap that future decode with GPU presentation only after the complete current-frame media closure is physically resident; a partial multi-input closure retains absolute admission priority. Distinct-source discovery uses the renderer's canonical inclusive range closure and a monotonic prefix binary search for the first Asset outside the current media set. The App then lowers and validates the exact returned frame before admission. The visible current owner admits the activation against the original preroll deadline and reports its residency as a separate Playback observation; the deadline is never renewed. Once Playing begins, current turns only replenish the same bounded window, while speculative successor and farther-lookahead turns cannot recursively scan it.
 
+A successfully retained Playback Prefetch completion in an active Playback transport requests one current-candidate retry even when no evaluation is waiting on that producer. The existing media retry owner retains that request across polls until an ordinary current evaluation acknowledges it; ticketless successor and lookahead evaluations cannot consume it. A Ready current binding still consumes this completion notification: the exact retained picture remains Current while its ordinary media planner replenishes the future window under the same physical reservation and Frame Store grants. Headless resolves this request through the same Preview current-candidate entry and its existing Current presentation branch; a physical already-visible shortcut cannot bypass that planner or consume the notification on its behalf. Waiting for another picture boundary would leave a multi-layer window permanently one frame ahead and postpone a shared-worker cold source until its decode can no longer fit before the cut. After acknowledgement an empty completion poll creates no retry; neither the notification nor the refill creates a Frame Delivery, changes Clock Master, or renews a deadline. Background completion without an active Playback transport cannot retain a future-window retry.
+
+The Window Adapter also treats a ticketless exact-current GPU candidate as an observation only when the same physical texture is already Ready and no pending Frame Demand exists. It performs no visibility commit, creates no Frame Delivery, and does not schedule another repaint. A stale slot, distinct texture, or replacement demand still requires the ordinary presentation authority.
+
+When a distinct cold source shares a near Playback worker and has finite observed preparation coverage, the scheduler first protects the immediate complete picture, then replenishes that worker's bounded source inputs. Other-worker distant holes cannot spend the cold source's physical reservation before its coverage settles. After the cold attempt owns its real Broker reservation and coverage guards, the independent worker may fill the first missing complete picture with the remaining grant. This ordering lets repeated completion polls converge at an unchanged Timeline coordinate without increasing capacity, changing quality, or claiming distant cache residency as presentation.
+
 Cold-activation GPU-object preparation has its own ticketless execution purpose. Its resolved evaluation lives only for that prewarm call and does not enter the ordinary four-entry evaluation LRU; dropping the frame releases its transient media protection after renderer backend objects are ready. This keeps the far activation coordinate outside the ordinary realtime evaluation set while the bounded staging owners protect the near horizon. The cold frame still uses the same Timeline resolver, exact media keys, GPU input preparation, deadlines, and cancellation policy.
+
+A far activation may also reuse a physical source that still contributes to
+the near pictures, including a repeated clip that restarts its source sample.
+Decoding that input changes the same worker-local cursor. Before admitting it
+out of presentation order, the scheduler proves residency of every intervening
+required sample from that source inside the existing temporal and physical
+budgets. Pending work is not residency. Those sample guards survive decoder
+completion and activation readiness until the cut or ordinary identity/resource
+invalidation. Independently covered distinct sources may still prepare while
+the shared cursor waits; no second decoder or Playback authority is created.
 
 The configured media-resident Priming prefix is at most six future frames, covering the complete 250ms temporal window at the canonical 24fps qualification rate. Physical frame planning reduces that near prefix when the current frame plus a complete multi-layer cold-source activation would exceed the Standard eight-surface grant; no ninth speculative surface is admitted and no partial frame closure is counted preservable. Exact Current work reuses its already-resident prefix entry, and rolling eviction releases past coordinates before admitting farther work. Playing keeps the rate-derived 250ms temporal window, with at most two queued or in-flight prefetch decodes.
 
@@ -548,11 +564,12 @@ absence, preroll, and recovery.
 Physical audio queue service and audio-clock observation are two explicit App
 Adapter stages. Ordinary product pumping performs both in order. The Headless
 AV coordinator may poll and refill the same concrete Audio Playback owner while
-an exact current picture is still resolving, but it holds the resulting clock
-snapshot until that picture has physical Ready evidence. Device lifecycle
-events are still applied immediately. This prevents callback starvation without
-allowing audio queue maintenance to advance transport past an unresolved video
-opportunity.
+an exact current picture is still resolving. Before Audio Device handoff, that
+operation fills PCM without publishing device-clock authority. After handoff,
+it refreshes the live Audio Device observation, which may advance transport
+past an unresolved picture. That expired picture is recorded as stale; its
+deadline is neither renewed nor used to freeze the Audio Device clock. Device
+lifecycle events are applied immediately in both cases.
 
 ### Time representation
 
@@ -605,7 +622,13 @@ point phase plus uncertainty at physical commit; generic late grace cannot
 authorize publication beyond the hard A/V phase budget. The same
 pending deadline participates in the Engine's next-wake result, so a scheduler
 cannot sleep until the successor frame boundary after phase authority has
-expired. The next-wake result also retains its typed reason (`PrimingDeadline`,
+expired without first observing that deadline. A clock tick records that
+observation for the exact demand identity. An unavailable result then waits on
+its producer notification or the ordinary Clock wake instead of rescheduling
+the same expired timer at zero delay. The demand and ticket retain their
+original deadline and grace; terminal classification, GPU completion ownership,
+and retirement deadlines are unchanged. A new demand identity independently
+rearms its presentation wake. The next-wake result also retains its typed reason (`PrimingDeadline`,
 `PresentationDeadline`, `FrameBoundary`, or `AudioDevicePoll`) so a host may
 select a suitable wait primitive without reconstructing Engine timing policy.
 
@@ -1047,7 +1070,11 @@ lease, or a candidate that has not completed canonical Timeline evaluation.
 Fresh candidates still run deadline preflight before recording GPU commands.
 
 A bounded Headless observation must close the exact sampled demand, not merely
-wait for `Ready`. If preflight or completion consumes that demand as `Late`,
+wait for `Ready`. Ordinary and callback-completed publication carry the accepted
+Playback presentation receipt, including its delivery kind and completion time.
+Publishing a usable output does not promote an accepted `Degraded` delivery to
+`Ready`; realtime observations and Golden capture retain that distinction. If
+preflight or completion consumes that demand as `Late`,
 the gate records a non-ready terminal sample and applies its unchanged quality
 threshold; it must not wait for an impossible no-ticket retry or relabel the
 sample as ready. Initial/preroll and paused-still probes still require an exact
@@ -1177,7 +1204,11 @@ or revive a newer prepared result.
 For Headless realtime playback, an exact semantic and physical prepared match
 is promoted immediately after the Clock advances across its frame boundary.
 That deadline-bound promotion precedes the general Preview result pump and GPU
-callback retirement. Native-memory observation and the next immutable resource
+callback retirement. A distinct prepared texture still commits its physical
+slot only inside the App's accepted publication closure at the real commit
+instant. Queue-order readiness proves preparation, not earlier visibility;
+only an exact continuously visible alias can inherit the boundary timestamp.
+Native-memory observation and the next immutable resource
 decision run after candidate arbitration on every successful turn, so resource
 maintenance cannot consume the presentation budget of an already-rendered
 successor.
@@ -1704,20 +1735,40 @@ Logging alone is not evidence.
 `PlaybackEvidenceCollector` is the shared bounded Interface for production UI
 and headless/perf Adapters. It consumes only Engine-created
 `FrameDeliveryApplication`; callers cannot separately supply acceptance,
-snapshot, target, or timestamp. Every fallible timestamp/phase calculation is
-preflighted before collector mutation. Schema v5 retains exact signed rate
+snapshot, consumed demand, or timestamp. Every fallible timestamp/phase calculation is
+preflighted before collector mutation. Schema v8 retains exact signed rate
 transitions and at most 4,096 detailed
-tail events and a deterministic 4,096-sample whole-run reservoir per
+events and a deterministic 4,096-sample whole-run reservoir per
 latency/phase-error metric.
 Each metric separately keeps its exact population count and exact all-run
 maximum; p50/p95/p99 are explicitly reservoir estimates. Clock Master and
 Transport State residency, single/multi-frame advancement and skipped-target
 counts, delivery counts, superseded demand/seek totals, and underrun totals are
 streaming aggregates and do not depend on retained detail.
+Accepted non-Ready Delivery receipts take priority over ordinary events within
+the same event capacity. The first such receipt survives ordinary traffic. If
+non-Ready receipts fill the ring, the first and a bounded recent tail remain;
+a one-slot ring retains only the first. Every discarded event remains counted.
 Detailed-event eviction is expected bounded retention, remains reported, and is
 not reclassified as observation loss. A gate may use the exact maximum, a
 declared reservoir percentile, or aggregate counters, but cannot infer failure
 merely because old diagnostic events were intentionally evicted.
+
+Each terminal Delivery event binds its submitted epoch and quality revision,
+exact consumed demand kind, and Engine transport state before and after the
+application. Rejected authority keeps its original identity and has no consumed
+demand kind. Each terminal Delivery event retains the signed nanosecond offset between its
+actual completion observation and the consumed Engine demand's deadline, plus
+the same-instant Clock Master, signed target phase error, uncertainty, and
+conservative proven error. Negative offsets precede the deadline; zero is its
+exact boundary. Untimed and rejected deliveries have no deadline offset, and
+rejected authority cannot borrow the replacement demand's Clock evidence.
+Late outcomes retain this detail without entering the accepted-presentable
+phase percentiles. This distinguishes deadline expiry from Clock uncertainty
+when investigating a rejected realtime picture. An already-visible artifact
+may have preceded its later terminal observation; the offset alone does not
+prove its physical visibility time. No Adapter supplies or recomputes this
+evidence, and no old-schema compatibility path is maintained during Alpha.
 
 For an accepted `Ready` or `Degraded` delivery, the exact target PTS and active
 Clock phase use the same checked floor-nanosecond grid. Evidence records
@@ -1834,11 +1885,11 @@ shorten it. Native decode therefore remains bounded by its machine-class
 surface-unit grant (eight on the Standard class), while a compact CPU-YUV
 source can use a longer 60 fps prefix when its actual retained planes fit. The
 Standard 640 MiB policy physically fits the current frame, all 16 compact 4K
-10-bit 4:2:2 future frames, and three in-flight decode reservations; the 250 ms
+10-bit 4:2:2 future frames, and the two steady decode reservations; the 250 ms
 software-decode promise therefore does not collapse to roughly 150 ms solely
 because each retained plane set is about 31.6 MiB. The App enforces this
 physical decomposition: Priming may fill the entire temporal prefix, but steady
-Running admits no more than three queued-plus-in-flight prefetch reservations
+Running admits no more than two queued-plus-in-flight prefetch reservations
 and tops them up as work completes. A
 media reservation includes current linear-float pixels, encoded source pixels,
 and the possible lazy working-frame allocation, so a deferred
@@ -1985,6 +2036,26 @@ only after that residency ends. This seam does not elevate decode/analysis
 workers, alter process priority, or change the system timer period, so resource
 arbitration and bounded domain queues remain authoritative.
 
+Before any owner starts, graphics executables call the same
+`prepare_graphics_process` entry policy. On macOS this observes the public Mach
+application role and assigns `TASK_DEFAULT_APPLICATION` only when it is
+unspecified. Existing roles are retained; AppKit owns subsequent visibility
+transitions. This process-lifetime admission is distinct from the thread-local
+Playback guard and has no restore-to-unspecified operation. Libraries cannot
+apply it from an already running session or an embedding worker. Native setter
+failure and mismatched role readback are structured startup errors.
+
+Apple's published [XNU task policy](https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/task_policy.c)
+limits application tasks without a role to legacy QoS, even when a pthread
+requests user-interactive QoS. A disposable probe on the audit M4 observed
+requested QoS 33 with base priority 31, then base priority 46 after the public
+default-role admission. This is evidence of the process ceiling, not a bounded
+wake guarantee or a stability qualification. No foreground role, realtime
+thread class, Audio clock, deadline, workload quality or qualification threshold
+is inferred from this policy. Fresh-process regression tests exercise native
+role readback, idempotence, stable PID and preservation of an existing background
+application role.
+
 Each coordinator turn applies the newest coherent Audio Device callback
 observation before advancing the video Clock and deriving a new Frame Demand.
 This ordering is part of the Clock-Master contract: deriving the demand first
@@ -1993,6 +2064,18 @@ mint an artificially early deadline, and then retain it under the correct
 no-deadline-renewal rule. The post-pump transport tick uses a newly sampled
 monotonic instant and still runs after a pump error, because a fail-closed audio
 event may already have handed authority continuously to Synthetic Clock.
+
+The Headless coordinator keeps an accepted `Degraded` physical presentation
+distinct from `Unavailable`. It remains non-Ready scheduling evidence, permits
+normal successor preparation, and cannot be republished as Ready after its
+ticket is consumed. A decode failure still fails closed. Device-recovery
+observation pumps the paired coordinator rather than independently committing
+an Audio clock between its intervals. The ignored
+`playback_cpal_av_physical_default_device_roundtrip` test uses the same production
+A/V owners while an external runner changes and restores the real CoreAudio
+default. It requires video, real Metal, frozen retired callback evidence, the
+original recovery deadline, full authored raster, and qualified consuming
+closure; a successful device round trip alone does not pass its video contract.
 
 During initial play and active seek recovery, the full video cold-start horizon
 remains the gate for physical Audio activation and Audio Device Clock handoff.
@@ -2007,8 +2090,8 @@ leave the Engine holding the earlier incomplete observation until the original
 recovery deadline. Reobservation carries the unchanged active Priming demand
 identity even after its terminal Ready delivery has consumed presentation
 authority.
-When a distinct-source activation exists, Preview reserves and retains its
-exact media dependency closure before pinning the near media prefix. The Frame
+During Priming, when a distinct-source activation exists, Preview reserves and
+retains its exact media dependency closure before pinning the near media prefix. The Frame
 Store charges the actual entry, byte, and decoder-resource units, including
 multi-layer activations. Priming's rolling scheduler services the immediate
 frame and that activation but leaves remaining near admission to the preroll
@@ -2017,19 +2100,95 @@ completed cold frame and the last near frame; the reported preservable prefix
 reflects the capacity left after the cold owner is fixed. Playing retains its
 ordinary time-derived rolling window. Within that running window, the exact
 immediate source continuation enters the Playback worker before any retained
-cold-source top-up. The cold activation keeps the next bounded reservation,
-but cannot block a millisecond-scale reuse decode behind a source-open path at
-the current presentation boundary. A retained cold-activation owner survives
+cold-source top-up. Its complete physical closure must fit and transfer all
+new requests into Broker ownership before farther activation can use remaining
+capacity. A blocked nearest closure is a frontier even when the farther frame
+needs fewer inputs; it cannot be bypassed by the separate cold-source plan.
+An idle opposite worker can still open the cold source in parallel. If the
+activation instead shares a worker with a different moving source in the
+immediate closure, the nearest missing complete picture gets first claim on the
+remaining bounded admissions. A resident immediate frame can cover the same
+decoded source sample as its predecessor, so it does not prove that the next
+physical sample is already available. Beyond that complete frontier, cold
+preparation protects only the canonical source inputs belonging to the worker
+that must open the new source. Missing farther inputs on an independent worker
+cannot indefinitely defer that open. This source projection uses the same
+canonical visual lowering and physical Frame Store admission; it is resource
+coverage, never evidence that a complete picture is Ready.
+The first-missing-picture plan retains the full closest picture and the full
+candidate frontier through admission. Already-ready intermediate pictures on
+other workers remain evictable Store entries; they cannot become an incidental
+reservation against cold headroom. Selected source coverage independently
+protects every source input needed while that worker opens the cold Session.
+An entirely ready window needs only its closest full-picture guards in this
+frontier plan. The ordinary complete-window planner keeps its full prefix guards.
+
+The coverage duration is the finite upper bound of the existing observed
+Playback Session open/replacement, reused-Session seek, and startup latency
+buckets, divided by the Playback Engine's exact active-rate frame period,
+rounded up with one additional presentation boundary. It remains within the
+existing temporal ceiling. Unknown
+cost, missing period, an open-ended latency bucket, or coverage beyond that
+ceiling retains conservative complete-window protection. This prediction neither
+renews a demand deadline nor guarantees that an unobserved future open meets it.
+Only resident coverage permits a cold admission. The existing cold-activation
+owner binds that coverage to the actual admitted Broker work keys. Before new
+rolling admission, it reconciles the Broker's active ownership, including canceled
+in-flight leases until their worker return. Completed cold inputs are retained
+before coverage is released; those inputs survive until the complete cold picture
+becomes resident, the activation expires, or decoded residency is trimmed.
+An independently admitted later input extends the same preparation and cannot
+discard an earlier worker's still-needed coverage. Near coverage ends when its
+physical work returns, not when the entire far picture finally becomes Ready.
+Preparation guards are reported separately and cannot publish cold readiness.
+If the remaining Broker grant cannot admit the complete cold picture, covered
+preparation may admit one canonical decode request for a distinct new moving
+source. A restart of an already-active source cannot require an extra slot
+before that cold Session can open. This is source work, not a partial picture:
+the rejected full-picture preservable/Ready counts stay zero, and the entire
+activation closure must subsequently become resident before cold readiness.
+The same actual Store reservation, worker affinity and Broker lease apply;
+no virtual capacity or additional queue is created.
+
+Cold-plan pixel guards are dropped before planning the nearer work. All plans
+use actual Frame Store and Broker ownership; an unadmitted cold proposal cannot
+spend headroom. Deducting such a proposal could reject a nearer complete picture
+that fits the remaining grant and then reject cold work at that same frontier,
+leaving no producer to make progress. Shared and already-owned keys are charged
+once. Cold work is replanned against remaining actual capacity, and only an
+actual admitted cold request can retain its preparation guards.
+The next missing rolling picture retains one admission frontier for both queue
+slots and physical entry, byte and decoder-resource grants. One spare slot or
+physical entry cannot go to a smaller far closure when that nearer picture needs
+two. A failure to fit previously planned near requests also closes this frontier;
+the scheduler cannot mistake physical refusal for an
+unblocked prefix and then admit the smaller cold plan independently.
+On a single-worker topology, opposite logical lanes share the same actual owner.
+These rules avoid placing a long source open ahead of the current source's next decode
+without changing worker affinity, physical grants, quality or Priming order.
+A retained cold-activation owner survives
 crossing into the ordinary rolling window; only reaching its exact Timeline
 coordinate, leaving the bounded horizon, or rotating the semantic execution
 identity releases it. The target therefore cannot slide forward one frame per
 clock tick and reopen the same physical source ahead of current-source work.
 The future-media owner also retains a bounded exact-source-to-worker map. The
-initial source defaults to Playback, each new cold activation uses the opposite
-worker from an already-owned persistent source or the next alternating lane,
+initial moving source defaults to Playback. Further unbound moving sources
+alternate between the two existing moving-source lanes when the topology is
+parallel; a single-worker topology retains the primary logical lane. Static
+sources use their existing receiver and do not consume a moving-source placement.
+An existing source lookup never advances the placement cursor or moves its
+worker-local decoder Session. Each new cold activation uses the opposite
+worker from an already-owned persistent source or the same placement cursor.
+That decision uses the activation's complete immutable physical closure,
+including resident/pending layers; the missing-request subset alone would
+omit a persistent layer precisely when it was already ready and could send a
+far cold open onto its active worker. Only newly missing sources are assigned,
 and all missing requests in that activation inherit the chosen owner. The map
 uses the immutable physical decode-source contract, not an authored clip or
-Asset alias, and expires with semantic-window identity or bounded LRU eviction.
+Asset alias. Lookahead's initial binding and author, output, proxy, or admission
+plan invalidation clear semantic lowerings and cold pixel guards without
+discarding compatible worker-local source ownership. A physical Runtime/session
+retirement clears both; bounded LRU eviction still limits the source map.
 An in-family frame/cache trim releases the cold-activation payload owner but
 preserves this map and the immutable lowering plan; decoded-frame residency is
 not Session ownership. While Priming, observing a retained activation memo
@@ -2069,7 +2228,14 @@ through the declared recovery path while preventing deadline renewal loops or
 multi-frame clock stalls.
 
 Realtime candidate, successor, and lookahead loops expose bounded aggregate
-stage timings and terminal diagnostics. They do not emit one log record per
+stage timings and terminal diagnostics. Each interval records the Playback
+Engine's frame period from its bound rational grid and active signed rate,
+rounded up once to a nanosecond. Stage durations are compared at nanosecond
+precision against that recorded period, not against a fixed nominal frame
+rate or the microsecond display value. The period is a diagnostic budget;
+Frame Demand deadlines and Clock Master observations remain the execution
+authority. Before any interval is observed, its period is absent rather than
+fabricated. They do not emit one log record per
 poll: synchronous stderr/file collectors can otherwise become part of the
 presentation critical path and fabricate the clock displacement that the
 qualification is intended to measure.
@@ -2192,7 +2358,18 @@ offers an atomic speculative batch reservation for one complete frame
 dependency closure. It evicts releasable Store-only LRU ownership first, then
 publishes one independently owned lease per request only when the complete
 entry/byte/decoder-unit aggregate fits. A multi-layer native cold activation
-therefore cannot retain one surface while waiting indefinitely for another.
+uses that complete batch for picture work. Covered cold-source preparation
+instead owns one exact decode reservation under the same aggregate limits;
+it cannot publish complete-picture readiness or reserve unadmitted inputs.
+Resident cold dependencies remain guarded while later activation work owns its
+real Broker leases, including an already-active source restart after cold open.
+Current admission retains completed inputs belonging to that same exact Demand
+while reserving or inserting its other inputs. Recycling one input to make room
+for another would prevent the complete picture from ever becoming Ready. Both
+reclamation boundaries use the existing allocation ledger's Demand identity;
+the existing hard aggregate and per-Demand grants remain unchanged. Independent
+old consumers remain charged. A different Demand or ordinary policy trimming
+can reclaim Store-only old inputs normally, so this is no permanent pin.
 The Store never contains a Widget payload. `app::preview_raster_frame` owns RGBA8 validation, encoded color
 identity, stable presentation-resource naming, and the CPU raster output
 contract. The Window presentation Adapter alone maps that value to
@@ -2408,10 +2585,12 @@ decode capability probes.
   backward time, controls remain responsive;
 - recovery handoff produces bounded phase evidence and no visible timeline jump;
 - 100 cross-region seeks with latest epoch only;
-- sustained 4K/Long-GOP pressure reaches bounded
-  `product_process_tree_private_commit_v2` memory and reports drops; every
-  cadence sample covers the App plus demux/FFmpeg descendants with complete
-  scope/count/inventory evidence, so current-process-only data fails closed;
+- sustained 4K/Long-GOP pressure reaches bounded native process-tree memory
+  (`product_process_tree_private_commit_v2` on Windows or
+  `macos_product_process_tree_physical_footprint_v1` on the 16 GiB macOS
+  qualification host) and reports drops; every cadence sample covers the App
+  plus demux/FFmpeg descendants with complete scope/count/inventory evidence,
+  so current-process-only data fails closed;
 - every planned Headless observation advances the complete execution-resource
   cycle before GPU completion, Prepared Successor, or exact-current reuse can
   return; fewer resource-policy applications than planned observations fails
@@ -2492,6 +2671,12 @@ into the pointer-only semantic and physical slot promotion, validates the exact
 prepared key and artifact, and then completes the demand against that prior
 publication time. A replacement without prepared publication proof still runs
 terminal preflight at the actual submission or promotion attempt.
+After a replacement passes preflight, its resolved output key also bounds
+prepared physical residency. A successor promoted into semantic current but
+rejected by Playback must not remain physically prepared solely because the
+previous semantic current key still names it. Retire that obsolete off-screen
+lease before recording the replacement, retaining the actual visible output,
+any still-relevant preparation, and every submitted completion owner.
 
 Non-playback lane eligibility diagnostics are produced under the Frame Work
 Broker's state lock using the same current failover, prefetch borrowing and
@@ -2581,6 +2766,14 @@ through completion without acquiring Current protection. Retiring an evaluation
 or evicting a Frame Store entry therefore cannot make in-flight source bytes
 disappear from the physical ledger; completion drops the same shared leases.
 
+An ordinary queue-published Headless picture releases its exact evaluation reuse
+owner when its real GPU completion is observed. That retirement uses the
+submitted frame's captured Playback Intent, even if the Clock Master already
+demands the next frame. Physical artifact identity and successful publication
+remain required; current transport eligibility does not extend the completed
+input lifetime. Frame Store entries and independent in-flight clones retain
+their own leases, and retirement cannot consume the successor's Frame Demand.
+
 The standalone `preview_visual_protocol` test target compiles the same
 `preview_media_residency` lease carrier as App and its visual worker. The carrier
 is independent of decoded-frame/color adaptation, so protocol tests retain real
@@ -2595,6 +2788,15 @@ CPU projection and GPU publication share the existing presentation-carrier
 discriminator and Playback commit seam. Already-visible timing is reusable
 only when the exact physical artifact was actually retained visibly; a new
 buffer observes the ordinary presentation deadline.
+
+A ready GPU picture with a running current Frame Demand does not synchronously
+plan optional future media before publication. Window and Headless first commit
+the actual output through the unchanged Playback ticket seam, then recapture an
+owner-derived snapshot and refill through the same production Preview planner,
+Broker, cold-activation horizon, and resource grants. A pending ticket cannot
+invoke that refill seam. Priming, demand-free observations, unresolved current
+work, and CPU fallback retain their existing planning paths; this ordering does
+not renew a deadline or backdate the picture's visibility.
 
 Linux NVIDIA native input uses the existing coherent Renderer admission snapshot
 and Media worker-family CUDA selector. The Window and Headless device creation
@@ -2657,3 +2859,21 @@ anchors, stopped synthetic handoff and natural-end clamping preserve authored
 frame identity this way. Reverse frame exit and conservative presentation phase
 error retain their distinct floor policy; measured audio device phase is not
 replaced by an authored-frame estimate.
+
+### Decoder-proved native picture reuse
+
+The App Frame Store adapter may serve another exact source target from a resident
+native picture only when the complete physical decode and presentation contract
+is unchanged. Media retains the concrete stream origin, time base and field
+selection scale. Covering and strict-predecessor targets use the same exact
+projection as decoder selection. Interior reuse requires an observed successor
+boundary; packet duration alone cannot establish a reusable VFR interval.
+Unknown clocks, approximations, incompatible metadata and exclusive-end targets
+continue through decode admission.
+
+The Playback Frame Store remains the sole residency owner. A compatible lookup
+returns the original payload and allocation lease, touches its existing LRU entry
+and protects that allocation for the new current demand. It creates no alias
+entry, pixel transfer or additional decoder resource charge. The App rebinds the
+complete request identity and temporal receipt using the existing media identity
+function; the native surface and its original decode provenance remain shared.

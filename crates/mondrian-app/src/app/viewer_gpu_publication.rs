@@ -166,12 +166,13 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
     /// recording the replacement current frame.
     pub(crate) fn retire_prepared_unless(
         &mut self,
-        expected_output_key: Option<&K>,
+        expected_prepared_key: Option<&K>,
+        expected_current_key: Option<&K>,
     ) -> Option<ViewerGpuPhysicalPublication<K, O, L>> {
-        let stale = self
-            .prepared
-            .as_ref()
-            .is_some_and(|prepared| expected_output_key != Some(prepared.output_key()));
+        let stale = self.prepared.as_ref().is_some_and(|prepared| {
+            expected_prepared_key != Some(prepared.output_key())
+                && expected_current_key != Some(prepared.output_key())
+        });
         stale.then(|| self.prepared.take()).flatten()
     }
 
@@ -411,7 +412,7 @@ mod tests {
         publish(&mut slots, false, 7, "current", "visible", &drops);
         publish(&mut slots, true, 8, "old-successor", "prepared", &drops);
 
-        let retired = slots.retire_prepared_unless(None);
+        let retired = slots.retire_prepared_unless(None, None);
 
         assert_eq!(
             retired.map(ViewerGpuPhysicalPublication::into_artifact),
@@ -422,5 +423,20 @@ mod tests {
             slots.current_artifact_for_key(&"current".to_owned()),
             Some(&"visible")
         );
+    }
+
+    #[test]
+    fn semantic_current_preserves_prepared_lease_until_exact_promotion() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut slots = ViewerGpuPublicationSlots::default();
+        publish(&mut slots, true, 8, "new-current", "prepared", &drops);
+
+        assert!(slots.retire_prepared_unless(None, Some(&"new-current".to_owned())).is_none());
+        assert!(slots.promote_prepared_exact(&"new-current".to_owned()).exact_output_available());
+        assert_eq!(
+            slots.current_artifact_for_key(&"new-current".to_owned()),
+            Some(&"prepared")
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
     }
 }

@@ -278,7 +278,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 220.0, 120.0);
 
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             widget.paint_overlay(&mut ctx);
         }
 
@@ -302,7 +307,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 220.0, 120.0);
 
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             widget.paint_overlay(&mut ctx);
         }
 
@@ -326,6 +336,7 @@ mod tests {
 
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 0.0, 120.0),
@@ -351,6 +362,7 @@ mod tests {
 
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, f32::INFINITY, 120.0),
@@ -413,7 +425,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 180.0, 200.0);
 
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             widget.paint_overlay(&mut ctx);
         }
 
@@ -434,7 +451,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 200.0);
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             widget.paint_overlay(&mut ctx);
         }
 
@@ -456,7 +478,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let clip_rect = Rect::new(0.0, 0.0, 220.0, 180.0);
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             widget.paint_overlay(&mut ctx);
         }
 
@@ -496,6 +523,7 @@ mod tests {
         let mut normal_encoder = RecordingEncoder::default();
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut normal_encoder,
                 theme: &theme,
                 clip_rect,
@@ -508,6 +536,7 @@ mod tests {
         let mut overlay_encoder = RecordingEncoder::default();
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut overlay_encoder,
                 theme: &theme,
                 clip_rect,
@@ -532,6 +561,7 @@ mod tests {
         let mut normal_encoder = RecordingEncoder::default();
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut normal_encoder,
                 theme: &theme,
                 clip_rect,
@@ -546,6 +576,7 @@ mod tests {
         let mut overlay_encoder = RecordingEncoder::default();
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut overlay_encoder,
                 theme: &theme,
                 clip_rect,

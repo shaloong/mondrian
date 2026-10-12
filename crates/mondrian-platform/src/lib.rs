@@ -11,6 +11,8 @@ mod eyedropper;
 mod global_pointer;
 mod graphics_process;
 mod memory;
+#[cfg(target_os = "macos")]
+mod native_application;
 mod playback_scheduling;
 mod process_memory;
 mod user_state_directory;
@@ -44,6 +46,15 @@ pub struct SystemPlatformService;
 
 pub use eyedropper::{DesktopEyedropper, DesktopPoint, DesktopRgba8};
 pub use graphics_process::{prepare_graphics_process, GraphicsProcessBootstrapError};
+#[cfg(target_os = "macos")]
+pub use native_application::{
+    install_macos_quit_handler, prepare_macos_application, MacApplicationError,
+    MacApplicationQuitHandler,
+};
+#[cfg(target_os = "macos")]
+pub use playback_scheduling::{
+    observe_macos_playback_task_role, observe_macos_playback_thread, MacPlaybackThreadObservation,
+};
 pub use playback_scheduling::{
     PlaybackThreadScheduling, PlaybackThreadSchedulingError, PlaybackThreadSchedulingStatus,
 };

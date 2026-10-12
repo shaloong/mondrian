@@ -255,6 +255,19 @@ pub fn resolve_export_delivery(
         validate_dimensions(resolution, chroma_sampling)?;
     }
     if let ExportArtifactEncoding::MediaFile(media) = &preset.artifact {
+        if matches!(
+            media.video,
+            VideoCodecConfig::ProRes {
+                profile: ProResProfile::FourFourFourFour | ProResProfile::FourFourFourFourXq
+            }
+        ) && bit_depth == DeliveryBitDepth::Twelve
+            && video_range != VideoRange::Legal
+        {
+            return Err(ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleVideoSignal,
+                "12-bit ProRes 4444/XQ encoder emits legal-range YUV; choose Legal to preserve the encoded signal contract",
+            ));
+        }
         validate_professional_mezzanine_delivery(
             &media.video,
             media.container,
@@ -1194,6 +1207,22 @@ mod tests {
                     if actual == container
             ));
         }
+    }
+
+    #[test]
+    fn twelve_bit_prores_alpha_rejects_full_range_before_encoding() {
+        let settings = SequenceSettings::default();
+        let mut preset = ExportPreset::prores_4444_alpha();
+        let legal =
+            resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
+                .expect("built-in 12-bit ProRes legal range");
+        assert_eq!(legal.video_range, VideoRange::Legal);
+
+        preset.video_signal.range = crate::preset::ExportParameter::Explicit(VideoRange::Full);
+        let error =
+            resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
+                .expect_err("encoder cannot emit full-range 12-bit ProRes YUV");
+        assert_eq!(error.code, ExportDeliveryIssueCode::IncompatibleVideoSignal);
     }
 
     #[test]

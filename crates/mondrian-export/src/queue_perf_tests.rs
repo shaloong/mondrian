@@ -152,8 +152,10 @@ fn generate_layer(
     let diagnostics = frame.stage_diagnostics();
     (
         Arc::new(DecodedVideoLayer {
-            frame: frame.into_frame(),
-            is_data_texture: false,
+            pixels: DecodedVideoLayerPixels::CpuWorking {
+                frame: frame.into_frame(),
+                is_data_texture: false,
+            },
             source_resolution: Resolution { width, height },
             picture_geometry: ResolvedPictureGeometry::square(Resolution { width, height })
                 .expect("non-empty perf picture geometry"),
@@ -204,7 +206,7 @@ fn compose_frame_layers_with_diagnostics(
         .iter()
         .map(|(layer, opacity)| {
             TimelineCompositeElement::Media(TimelineMediaLayer {
-                frame: &layer.frame,
+                frame: layer.cpu_frame().expect("CPU perf frame"),
                 opacity: *opacity,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -252,17 +254,19 @@ fn canonical_frame_layer_probe(
     pattern: OpacityPattern,
 ) -> [[f32; 4]; 3] {
     let first = layers.first().expect("export performance frame has a layer");
-    let pixels = &first.0.frame.rgba_f32().data;
+    let pixels = &first.0.cpu_frame().expect("CPU perf frame").rgba_f32().data;
     assert!(
         !pixels.is_empty(),
         "export performance source must contain pixels"
     );
     let indices = [0, pixels.len() / 2, pixels.len() - 1];
     indices.map(|index| match pattern {
-        OpacityPattern::Passthrough => first.0.frame.rgba_f32().data[index],
+        OpacityPattern::Passthrough => {
+            first.0.cpu_frame().expect("CPU perf frame").rgba_f32().data[index]
+        }
         OpacityPattern::Blend => {
             layers.iter().fold([0.0, 0.0, 0.0, 0.0], |base, (layer, opacity)| {
-                let source = layer.frame.rgba_f32().data[index];
+                let source = layer.cpu_frame().expect("CPU perf frame").rgba_f32().data[index];
                 blend_rgba_f32_pixel_seeded(base, source, *opacity, BlendMode::Normal, index as u32)
             })
         }

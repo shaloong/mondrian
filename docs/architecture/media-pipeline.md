@@ -16,16 +16,44 @@ Preview distinguishes CPU RGB consumers from CPU field processing whose output
 can remain compact YUV. BWDIF still belongs to the existing decode Session and
 runs before scaling/color/composition; its CPU requirement excludes native GPU
 surfaces without forcing RGB expansion. The canonical representation selector
-uses the existing compact CPU YUV representation only for proved supported opaque
-encoded layouts. CPU working/data consumers retain RGB, and required GPU
+uses the existing compact CPU YUV representation for proved supported opaque
+encoded layouts and straight-alpha `Yuva444p12le`. CPU working/data consumers
+and author alpha overrides retain RGB, and required GPU
 residency still fails when field processing needs CPU access.
 
 Media selects the FFmpeg binding features explicitly: codec, format, filter,
 software scaling, and software resampling. It does not register or link the
-unused libavdevice capture/output module through binding defaults. Hardware
-decoding and resident encoding continue to use libavutil hardware-device/frame
-contexts and libavcodec; field processing retains libavfilter. This dependency
+unused libavdevice capture/output module through binding defaults. FFmpeg-owned hardware
+decoding and resident encoding use libavutil hardware-device/frame contexts and
+libavcodec; the exclusive macOS codec adapter uses public VideoToolbox sessions
+and CoreVideo surfaces. Field processing retains libavfilter. This dependency
 boundary does not change CLI-provider admission or qualify physical devices.
+
+The direct macOS HEVC adapter requires agreement between source metadata and
+the coded SPS on both chroma sampling and component precision. Progressive
+limited-range Main/Main10 8-bit 4:2:0 retains an NV12 carrier; 10-bit Main10 or
+Range Extensions retains P010/P210/P410. The same packet ordering, color
+attachment checks and consuming session ownership apply to both precisions.
+Successful direct output additionally requires the actual VideoToolbox
+hardware-execution property after decoding; requesting hardware or obtaining
+a CVPixelBuffer alone cannot supply that evidence. Multilayer HEVC remains
+with the existing FFmpeg codec adapter; the direct adapter cannot discard
+auxiliary layers to manufacture a supported single-layer stream. FFmpeg's
+VideoToolbox output retains unknown hardware execution when not observed.
+
+The direct adapter submits compressed packets with public asynchronous
+decompression, without enabling temporal processing. The existing SPS reorder
+depth plus one bounds all submitted HEVC packets, including completed callbacks
+whose surfaces have not been taken; ProRes retains its single-packet bound.
+`PreviewCodec` selects the smallest exact packet PTS from all submissions and
+awaits only that callback. Later packets can decode while the existing downstream
+owners process the current output. Callback slots and compressed samples remain
+session-owned, and emitted CVPixelBuffers retain independent references.
+EOF, reset and consuming close join the native session before retiring callback
+storage; HEVC reset then recreates its temporal owner. Coded HEVC CICP must agree
+with the frozen source contract before session creation, and each output still
+requires matching color attachments and observed hardware execution. This
+transport adds no Timeline, cache, playback clock or color authority.
 
 Media metadata discovery and first-frame HDR supplements share one opened FFmpeg
 input. Stream discovery retains its packets; the HDR supplement dispatches that
@@ -51,10 +79,11 @@ Preview decode sources retain an explicit single-image fact only when the Asset'
 
 Preview CPU residency freezes component depth from the admitted stream sampling
 or proxy encoding in `PreviewDecodeSource`. Its source-byte estimate and the
-actual CPU materializer share the same greater-than-eight-bit precision rule:
-proven encoded eight-bit data retains RGBA8, while higher-depth data retains
-RGBA float. Unknown precision, scene-linear data and non-color data reserve
-float capacity. This bound describes retained source storage only; consumers
+actual CPU materializer reserve Float32 RGBA for YCbCr, limited-range integer
+RGB, scene-linear and unproven inputs. Automatic RGB reserves float capacity
+because a picture-local limited declaration may require expansion; explicitly
+full-range integer RGB retains RGBA8/16 according to component depth. This
+bound describes retained source storage only; consumers
 add their working-frame storage and keep compact YUV/native accounting separate.
 
 Approved BMX execution shares the approved provider capsule and native child
@@ -605,6 +634,14 @@ failure cache. A worker decodes through `PreviewDecodeRequest` with
 canonical source-to-working and working-to-sRGB output boundaries, and returns
 only a validated UI-independent `ThumbnailRasterFrame`.
 
+The representative target is not proof that the declared duration is readable.
+Only a typed temporal mismatch at a nonzero target permits one bounded attempt
+at source time zero. The raster retains the original failure, requested target,
+and selected target; both targets participate in raster identity. The Window
+Adapter displays a first-frame badge. Cancellation, color and decoder errors
+cannot authorize this attempt. Still, Playback and Export requests retain their
+exact selection rules and never inherit the thumbnail fallback.
+
 Thumbnail construction first prepares the complete inert owner and both bounded
 transports, then installs the actual native JoinHandle before later Host setup.
 Shutdown revokes shared admission, cancels pending/deferred requests, releases
@@ -838,13 +875,24 @@ matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
 part of Mondrian's color contract.
 
 CPU materialization selects its output precision from the actual decoded-frame
-pixel descriptor, not a short surface-format allow-list. Eight-bit encoded
-sources use RGBA8. Encoded 10/12/16-bit YUV or RGB sources scale to RGBA64LE and
-are normalized into a typed source-encoded f32 payload before OCIO, so software
-fallback cannot silently quantize a high-bit source. Scene-linear planar-f32
-remains a distinct direct float path. `DecodedVideoSampling.bit_depth` is also
+pixel descriptor, not a short surface-format allow-list. Integer YCbCr is
+resampled at its original 8/10/12/16-bit depth without changing its matrix or
+range, then converted using Core's shared `EncodedYuvToRgbParameters` into
+source-encoded Float32 RGBA. RGB UNORM scaling is not a headroom-preserving YUV
+conversion: it clips subblack and superwhite even when its destination is
+subsequently promoted to float. Explicitly limited integer RGB is expanded
+using nominal video black/white while alpha retains its full coverage range.
+Full-range integer RGB retains RGBA8/16, and planar-f32 remains a direct float
+path. `DecodedVideoSampling.bit_depth` is also
 derived from FFmpeg component descriptors; explicit native NV12/P010 surface
 contracts remain the fallback authority for opaque hardware formats.
+
+Source cadence and Sequence cadence are independent. An average frame rate is
+not a replacement for decoded PTS and duration. The external compatibility
+probe authors an explicit supported Sequence grid at source speed 1/1 and full
+source raster, samples only independently verified valid coordinates, and uses
+the existing production Preview/GPU owners. Its result is diagnostic evidence;
+it does not relax the existing fixed-cadence performance gate or pad short media.
 
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
@@ -2360,6 +2408,11 @@ equals the Playback Engine's still-pending demand. `CacheOnly`, `Stale`, and
 broker-current cleanup for a replaced/completed demand may be cached or
 discarded according to their completion contract, but cannot refresh visible
 state, create playback pressure, or publish another terminal delivery.
+Budget root causes use the same access-mode/work-class policy as the structured
+checks. A bounded rare Playback lookahead spike that satisfies both the hard
+maximum and p95 obligations cannot become a second aggregate-budget failure;
+actual hard-maximum and p95 violations remain failures. Raw timing and delivery
+quality evidence is retained independently.
 The versioned report must emit access-mode-specific latency checks and root
 causes, so perf tooling can fail on `PlaybackCursor`, `ScrubCursor`, or
 `RandomAccessStillFrame` regressions without reverse-engineering raw counters.
@@ -2484,16 +2537,16 @@ decoder actually produces a native surface admitted by the caller's exact media
 facts and device-scoped Renderer capability check.
 `HardwareDecodeCpuTransfer` means in-process FFmpeg hardware decode was
 configured and hardware frames are transferred back to CPU before RGBA preview;
-it is active hardware decode, but it is not zero-copy, GPU texture residency, or
+it is native decoder backend output, but it is not zero-copy, GPU texture residency, or
 a native renderer import contract. `GpuResidentNative` is valid only when the
-decoder probe reports active hardware decode, GPU texture residency, and a
+decoder probe reports native decoder activity, GPU texture residency, and a
 native handle kind. Whether Renderer consumption is zero-copy or uses one GPU
 bridge copy comes only from the device-scoped Renderer support contract.
 Renderer readiness is a separate app
 admission fact. External FFmpeg CPU RGBA
 is always a backend boundary, even if the CLI used platform hwaccel internally.
 `HwAccelProbe` reports the selected hardware backend, decoded frame residency,
-`hardware_decode_active`, `zero_copy_active`, optional
+`native_decoder_active`, `zero_copy_active`, optional
 `decoded_gpu_frame_handle_kind`, and a stable reason string. It also reports the
 platform candidate backend list in priority order,
 the candidate backend selected for the current stream plan, the candidate native
@@ -2509,7 +2562,7 @@ VideoToolbox, VA-API, VDPAU, DXVA2, or CUDA/NVDEC hardware frames are actually
 exported through a concrete media adapter and imported through the renderer
 native decoded-frame import contract,
 `HwAccelBackend::probe()` must keep `selected_backend=None`,
-`decoder_adapter_available=false`, `hardware_decode_active=false`,
+`decoder_adapter_available=false`, `native_decoder_active=false`,
 `zero_copy_active=false`, `DecodedFrameResidency::CpuRgba`, no active GPU
 handle kind. Platform preference alone is
 not a valid hardware decode signal. The media Module now has concrete retained
@@ -2882,6 +2935,49 @@ only after the same-device copy completes. Main10 still depends on the physical
 NVENC generation: an unsupported profile fails during admission and cannot
 inherit a Main8 or generic encoder probe result.
 
+On macOS, `VideoToolboxResidentVideoEncoderSession` owns one public video
+compression session and a threshold-bounded CVPixelBuffer/IOSurface pool on one
+exclusive codec worker. The renderer binds its actual unified-memory Metal
+registry identity. Main/Main10, SDR Rec.709 and limited-range PQ/HLG enter the
+same existing frozen Timeline Export executor. The native layer receives sealed
+CICP and pixel layout facts; it does not interpret Timeline or color policy.
+Hardware is required at open, but admission diagnostics remain unobserved until
+actual encoded output reports `UsingHardwareAcceleratedVideoEncoder=true`.
+A returned encoder GPU registry identity must match; built-in media engines may
+return no GPU identity. Absence is not represented as a fabricated registry ID.
+
+The immutable `ResidentVideoEncoderConfig` carries `ResidentEncodeCodec`.
+macOS uses that same owner for HEVC Main/Main10 and H.264 High8: native
+codec/profile, parameter-set API and compressed mux identity follow the exact
+value. H.264 ten-bit is rejected before native creation; D3D12VA and CUDA/NVENC
+currently reject non-HEVC resident contracts explicitly. H.264 sync packets
+must contain an observed IDR picture, so a key flag cannot stand in for an
+independently decodable GOP. Hardware observation, GPU completion and consuming
+source/codec retirement remain shared. Constrained rate/VBV contracts are
+rejected before this route; no alternate quality or software fallback is hidden
+after execution starts.
+
+The public minimum and maximum frame-QP bounds are set to the requested native
+quantizer and read back before prepare. `Quality` and low-latency encoder
+selection are not substituted for that quantizer. This is frame-QP control,
+not proof of uniform coding-unit QP or equivalence to software CRF. Frame
+reordering and open GOP are disabled. Zero B frames obey the delivery's maximum
+B-frame constraint; this does not qualify B-frame support. Each frame is drained
+through its exact rational PTS without ending the session. A missing, dropped,
+extra or wrong-PTS callback, unexpected keyframe cadence, or unobserved hardware
+output is terminal. Compressed NAL bytes alone pass through FFmpeg's MPEG-TS
+muxer and the normal final stream-copy/audio path.
+
+The move-only input carries a +1 CVPixelBuffer reference and its exact codec
+owner identity. GPU completion precedes native submission. The worker invalidates
+the compression session before releasing callback storage, then emits its closed
+receipt and is joined. The Export owner explicitly consumes it on success,
+cancellation and failure before returning an outcome. A canceled staging video
+never becomes a final artifact or input to a new attempt. A driver timeout is
+an unproven shutdown, not zero residual: the worker retains live native parents
+until the call actually returns. This remains in-process driver-hang containment,
+not a killable process boundary.
+
 The Renderer compositor is the sole authority for opaque working-frame
 evidence. A full-canvas, identity, opaque solid base proves `Opaque`; partial or
 transformed bases remain `StraightCoverage`. OCIO input, output, and intermediate
@@ -3020,8 +3116,19 @@ descriptor-qualified families above; unknown and ordinary CPU planar formats
 fail closed before reaching the app or renderer. They must also carry
 `DecodedVideoSampling` at construction time: range must be explicit, bit depth
 must match the native surface contract, and subsampled YCbCr payloads must have
-explicit chroma location. 4:4:4 permits unspecified chroma location because no
-subsampled grid origin exists. This remains
+explicit chroma location. HEVC 4:2:2 (H.265 clause 6.2) and ProRes 4:2:2
+(the left-co-sited grid shown in Apple's June 2014 ProRes White Paper, page 8)
+resolve an unspecified location to `Left` in the shared media codec adapter;
+conflicting explicit locations are rejected. This rule is confined to the
+actual 4:2:2 sampling grid, not inferred from a platform or filename. ProRes
+Proxy/LT/Standard/HQ with a proven 10-bit 4:2:2 format may enter the existing
+native codec/device/import capability checks. This is candidate admission,
+not hardware-execution evidence. On macOS, progressive ProRes 422
+Proxy/LT/Standard/HQ and ProRes 4444/4444 XQ with an explicit limited-range
+source contract may enter the direct
+VideoToolbox codec adapter described below. Other profiles and platforms retain
+their existing admission checks. 4:4:4 permits unspecified chroma location
+because no subsampled grid origin exists. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but
 missing sampling facts must not escape the media native-frame constructor.
@@ -3160,7 +3267,7 @@ The same diagnostics carry the current hardware decode contract:
 `hardware_decode_ffmpeg_device_context_created`,
 `hardware_decode_ffmpeg_device_context_error_code`,
 `hardware_decode_cpu_transfer_configured`,
-`hardware_decode_cpu_transfer_observed`, `hardware_decode_active`,
+`hardware_decode_cpu_transfer_observed`, `native_decoder_active`,
 `zero_copy_active`, `decoded_frame_residency`, `gpu_frame_handle_kind`,
 `hardware_decode_blocker`, and `native_decode_fallback`, plus
 `decoded_surface_format` for the decoder output
@@ -3268,6 +3375,14 @@ codec CPU cost. This codec-specific default adds no conversion, decoder, queue,
 or fallback; explicit qualification overrides and the EXR shutdown policy remain
 intact. These short generated-source results are not physical HDR qualification
 or a general machine/codec throughput guarantee.
+Threading is selected for each concrete decoder context. VideoToolbox defaults
+to slice threading to avoid a second FFmpeg coded-picture pipeline in front of
+its asynchronous native decoder; intrinsic codec reordering remains intact.
+Software geometry probes and fallbacks retain the software codec's policy, and
+every hardware candidate retry resolves its own backend. The existing per-worker
+thread budget, explicit qualification overrides and EXR shutdown policy still
+apply. Native output and actual threading diagnostics do not prove Apple's
+`UsingHardwareAcceleratedVideoDecoder` property or commercial realtime cadence.
 Output resolution pressure (Full -> Half -> Quarter) reduces renderer work but
 does not falsely claim to reduce codec work; a source that still cannot meet
 cadence requires hardware decode or a separately admitted proxy/optimized-media
@@ -3763,14 +3878,15 @@ sampling. Fused YUV reconstruction and OCIO allocate one Renderer-owned Working
 texture; no encoded RGB intermediate is allocated. Linux CUDA imports additionally
 charge their padded interop storage buffer to the active working-set budget.
 
-An exact probed planar 8/10/12-bit 4:2:0, 4:2:2, or 4:4:4 source, or
+An exact probed planar 8/10/12/16-bit 4:2:0, 4:2:2, or 4:4:4 source, or
 semiplanar `Nv12`/`P010` source, may instead resolve to the explicit
 `CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU
 materialization. Media retains an independently reference-counted immutable
 FFmpeg `AVFrame` with its native luma/chroma planes and explicit row strides.
 Planar samples retain separate Cb/Cr planes; NV12/P010 retain their interleaved
-plane. P010 preserves most-significant-bit alignment, while planar ten/twelve-bit
-samples remain least-significant-bit aligned. Both use the existing Renderer
+plane. P010 preserves most-significant-bit alignment, planar ten/twelve-bit
+samples remain least-significant-bit aligned, and planar sixteen-bit samples
+retain their complete component words. All use the existing Renderer
 YUV sampling and OCIO input transform, with no parallel color interpretation. It does not repack or interleave roughly 33 MiB for every UHD frame.
 The reservation includes conservative FFmpeg row alignment and rounded-up
 4:2:0 chroma extents, while actual Frame Store accounting uses retained plane
@@ -3930,8 +4046,13 @@ with one separate precedence rule: explicit asset range override, then probed
 range, otherwise `Unknown`. `Unknown` continues to fail closed at YUV conversion
 or proxy-generation boundaries.
 YUV matrix authority is likewise independent: the decoded frame must carry an
-explicit supported matrix. Source `ColorSpace` is never used to infer a missing
-matrix; proven RGB sampling has no YCbCr matrix requirement.
+explicit supported matrix, or the decode contract must carry the Sequence's
+explicit `MissingPolicyAssumeRec709` BT.709 fallback. Preview and Export lower
+the resolved decision through `SourceColorModule::decode_contract`, which binds
+that fallback into the existing decode/cache identity. Explicit decoded matrix
+metadata wins; unsupported or contradictory frame metadata still fails closed.
+Source `ColorSpace`, including an RGB color-space override, never independently
+authorizes a missing matrix; proven RGB sampling has no YCbCr matrix requirement.
 
 Unknown/missing metadata policy is resolved from the Sequence input-color
 settings, not by UI panels. A nested Sequence keeps its own media
@@ -4170,23 +4291,82 @@ Required native requests fail before this fallback; CPU-addressable requests
 continue to receive their typed RGBA/float payload. This reduces pixel
 materialization without altering quality, deadlines, or cache budgets.
 
-The compact software route retains FFmpeg planar 8/10/12-bit 4:2:0, 4:2:2,
+The compact software route retains FFmpeg planar 8/10/12/16-bit 4:2:0, 4:2:2,
 and 4:4:4 without an intermediate CPU RGB image. Probe admission and decoded
 surface validation agree on these layouts. Full-resolution 4:4:4 chroma does
 not acquire an invented subsampled chroma location. Planning charges each
 aligned plane row and its actual chroma extent; retained allocation accounting
 remains authoritative. These CPU layouts do not advertise native GPU residency
-or hardware codec support. Alpha and scene-linear inputs retain their existing
-separate contracts. Twelve-bit planar samples retain their original right-aligned
+or hardware codec support. Straight-alpha `Yuva444p12le` retains a fourth
+full-resolution, right-aligned twelve-bit plane. Coverage is normalized by 4095
+independently of the video range, and uses the same source-grid interpolation as
+luma. The shared YUV shader produces unbounded encoded-float RGB before the sole
+OCIO input stage; transparent pixels retain their independent RGB. The existing
+upload worker, slot cache, GPU completion lifetime, and working-set estimate own
+this fourth plane. It is included in aligned upload storage, retained allocation
+bytes, and the physical texture count. An absent alpha plane cannot prepare a
+straight-coverage pass, and an unexpected alpha plane cannot prepare an opaque
+pass. Ignore/Premultiplied author overrides keep the shared CPU normalization
+path; scene-linear and CPU RGB consumers retain their separate contracts.
+For CPU-addressable YUVA12 (including CPU Export and author alpha overrides), the
+materializer emits source-encoded Float32 rather than clipping through RGBA16
+UNORM. CPU and GPU resolve the same `EncodedYuvToRgbParameters` from Core;
+Media retains matrix/range provenance and Renderer owns only texture-code
+recovery and sampling. CPU scaling uses the same planar materializer before
+conversion. CPU payload admission reserves sixteen bytes per pixel, while
+compact admission accounts for four two-byte planes. This preserves Preview /
+Export input semantics without adding another color interpreter.
+Twelve-bit planar samples retain their original right-aligned
 16-bit words, including ProRes 4444 decoder output. The source hint, physical
 surface descriptor, and compact payload agree on the effective twelve-bit depth;
 no ten-bit quantization or CPU RGBA conversion is introduced.
+Sixteen-bit planar sources similarly retain all component bits in their
+original FFmpeg planes. The same CPU upload worker uses R16/Rg16 texture
+storage and the existing shared YUV/OCIO stages; a probed sixteen-bit source
+does not acquire a second matrix, range, or transfer interpretation. A
+CPU-addressable consumer still receives its typed high-precision RGBA path.
 
 Compact CPU payload accounting charges the retained FFmpeg image buffer
 references, including vertical allocation alignment and inter-plane padding.
 Visible strided plane slices remain the upload contract but are not allocation
 size evidence. The existing Playback ring and Preview frame store consume this
 same byte count; an image exceeding the ring's unchanged budget is rejected.
+
+Within one recorded Viewer candidate, repeated layers of the same retained
+compact frame share its immutable uploaded plane textures. A distinct retained
+frame uses a different slot even when extent and format match. Candidate finish,
+discard, and generation clear retire this content identity; reusable allocations
+do not establish content validity in the next candidate. Each distinct transfer
+buffer is remapped once after actual submission completion through the existing
+upload owner. Materialization returns stage diagnostics at the recording site:
+one upload stage covers all source-picture planes, and one GPU color stage covers
+each fused YUV/OCIO working output. Repeated layers count their separate working
+conversion but cannot count an upload they did not record. Viewer accumulates
+these records into its existing candidate evidence. Compact software input is
+therefore visible as CPU-to-GPU transfer, never inferred to be hardware-resident
+from a zero upload count.
+
+The offline Export visual owner requests the same full-resolution compact
+representation for progressive, straight-alpha, non-RAW encoded YUV sources
+admitted by Media's single format table. `GpuVisualFrameSource::CompactYuv`
+enters the existing fused YUV/OCIO input, Effect, composite and Program Output
+path. CPU consumers, interlaced processing, scene-linear/data sources and author
+alpha overrides retain their typed CPU normalization contracts. Visible YUVA12
+coverage codes above 4095 fail admission; row padding is not a sample.
+
+Export uses ordered queue writes of the retained planes, sharing the Viewer
+plane texture factory, binding cache and shader. It starts no upload worker and
+creates no second Preview, Playback, Export or color authority. Distinct source
+identities retain distinct slots through the complete visual closure; repeated
+identities share one recorded transfer. Queue submission orders those writes
+before sampling, and consuming GPU completion precedes reuse in the next frame.
+Admission includes plane textures, separate conservative queue transfer storage,
+fused working outputs and cached plane residency after content invalidation.
+These are distinct allocations in unified memory; the original retained CPU
+image is not charged again as a full RGB GPU allocation. Completed Export
+diagnostics expose compact source records and the actual upload/color stages.
+This route is software decode followed by CPU-to-GPU plane transfer, and does
+not claim hardware decode, native residency or resident encoding.
 
 The NVIDIA Vulkan consumer publishes a CUDA ordinal only after matching CUDA and
 Vulkan device UUIDs and checking external-memory/semaphore support on the actual
@@ -4232,3 +4412,153 @@ CUDA handle validation, Vulkan allocation/adoption, and the device-to-device
 plane copy; this work must not be recorded as source-contract validation or as
 a zero-cost bridge. A generated fixture proves this software route and timing
 only, not original-native-media qualification.
+
+### macOS ProRes 422 direct decode evidence
+
+The same exclusive `PreviewCodec`/VideoToolbox adapter now accepts the four
+progressive ProRes 422 variants. It requests a two-plane 16-bit `sv22` CVPixelBuffer,
+validates real plane extents, strides, IOSurface identity and color attachments,
+and publishes P216 only when the session reports actual hardware decoding.
+Every compressed intra packet must prove 4:2:2 chroma, no alpha, progressive
+scan, unchanged extent and matching CICP before it reaches VideoToolbox.
+Conflicting packet metadata poisons the decoder, and seek reset cannot unpoison
+it. This reuses the sole Preview candidate/session owner and the shared Metal
+YUV/OCIO/Program Output path; it creates no platform color interpretation.
+
+On the M4/macOS 26.4.1 development host, the direct path rendered Proxy
+SDR/PQ/HLG and HQ SDR hardware samples with zero Float16 pixel difference
+against byte-exact compact CPU captures of those same `sv22` words. The App
+short Preview gate observed hardware decode, GPU completion, color contract,
+zero CPU pixel transfer and consuming closure for 1080p Proxy SDR/PQ/HLG.
+Independent FFmpeg software reconstruction still differs from VideoToolbox
+in the existing ProRes 422 test. That unresolved comparison does not become
+Passed from the matched-sample or short Preview results.
+
+### macOS ProRes 4444 admission evidence
+
+The macOS production adapter now admits progressive ProRes 4444/4444 XQ
+(`ap4h`/`ap4x`) with explicit limited range and supported CICP values. It uses
+public `VTDecompressionSession` APIs through `PreviewCodec` within the existing
+`PreviewDecodeSession`; packet selection, seek, cancellation, retained candidates
+and materialization remain in that shared owner. The adapter does not create a
+second Preview, Playback or color interpreter.
+
+The decoder requests `s4as`: three 16-bit planes containing Y, interleaved Cb/Cr
+and straight alpha. The earlier packed `y416` diagnostic reproduced localized
+chroma differences and remains failed evidence; RGBA Half did not remedy them.
+The production tri-planar route was admitted after full-frame CPU/native Viewer
+pixel comparisons for SDR, PQ and HLG, across seeks and alpha cases, including
+4444 XQ. Maximum differences remained within the existing `1/1024` threshold;
+alpha-zero hidden RGB and GPU resource retirement were checked separately.
+These local M4/macOS 26.4.1 results do not qualify other devices, physical HDR
+Viewer behavior or the complete commercial workload matrix.
+
+Each compressed intra packet is checked for frame bounds, version, extent,
+progressive scan, 4:4:4 chroma, alpha mode and matching CICP header values before
+submission. Missing or contradictory source facts fail closed. The native
+adapter owns compressed bytes through callback completion, verifies output
+plane geometry, IOSurface identity and color attachments, and queries the actual
+session's public `UsingHardwareAcceleratedVideoDecoder` property before
+publishing a frame. Decode failure poisons the session; consuming close joins
+callbacks. An `AVBufferRef` owns the retained CVPixelBuffer in the shared AVFrame
+materialization path, without a fabricated FFmpeg hardware-frame context.
+Renderer retirement retains this source through real GPU completion. Unified
+allocation accounting uses the native buffer allocation once.
+
+### macOS ten-bit HEVC admission evidence
+
+The same private VideoToolbox adapter admits progressive, single-layer HEVC
+Main10 4:2:0 and ten-bit Range Extensions 4:2:2/4:4:4 with explicit limited
+range and supported CICP. Source profile/pixel metadata and the coded SPS must
+agree on the actual sampling grid. The SPS conformance window uses that grid's
+crop units; separate color planes, other bit depths and unproved scan contracts
+fail closed. Subsampled 4:2:0 requires explicit chroma location; 4:2:2 uses the
+existing H.265-defined left grid and 4:4:4 has no subsampled chroma phase.
+CoreMedia creates the format description from the source VPS/SPS/PPS, without
+overwriting coded color metadata with the caller's expected values. Successful
+output requires actual `x420`, `x422` or `x444` ten-bit bi-planar geometry,
+matching plane extent/stride, IOSurface ownership,
+matching CVPixelBuffer color attachments and the session's observed hardware
+property. Other HEVC sampling families retain their separately admitted FFmpeg
+path and its explicit unobserved execution state. Native source samples still
+use the shared color/effect/composite pipeline; the platform adapter owns only
+codec and physical-surface facts.
+
+A bounded SPS prefix supplies the coded reorder capacity; it is never inferred
+from a short sample or a fixed number of B frames. The shared `PreviewCodec`
+orders the returned owning frames by exact stream PTS and drains the remaining
+tail at EOF. Each access unit must contain one picture with valid length framing;
+changed in-band parameter sets or new extradata fail closed. Native failure
+poisons the session. Seek flush consumes the old temporal session before creating
+another from the same frozen source description; old retained frame owners
+remain valid independently. Demux, seek policy, candidate selection, cancellation
+and materialization stay in `PreviewDecodeSession`.
+
+Physical tests compare every Y/Cb/Cr sample of sixty distinct motion/B frames to
+software decode, including EOF, temporal reset and buffers retained after close.
+Those tests explicitly read native pixels as an oracle; they do not establish
+production zero-copy residency or sustained playback qualification by themselves.
+The separate production Viewer comparison uses isolated demux, real Metal imports,
+GOP seeks and the unchanged half-float tolerance.
+
+### Source temporal intervals after field processing
+
+Automatic field processing uses half-picture selection ticks even for an
+observed progressive source. PTS, duration and AVFrame time base are converted
+together: a progressive tail retains its full proven interval at EOF. An
+unknown duration remains unknown, overflow fails closed, and the processor
+never invents a successor beyond the source's final picture.
+
+Decoder contexts receive the stream packet time base before codec open, so
+FFmpeg can preserve decoded picture durations. Field-rate BWDIF owns the
+actual decoded picture intervals: each proven duration divides into two
+half-duration fields, including a one-picture source at EOF. Its temporal
+neighborhood is a decode dependency. An interlaced seek starts from the
+preceding decode root while the requested selection coordinate stays exact;
+the existing forward-work budget remains enforced. Unknown durations are not
+replaced by an average-rate EOF estimate.
+
+A container positioning failure is distinct from an unreadable packet stream.
+The private demux protocol returns the actual FFmpeg seek error code. For a
+revision-verified local source, the decoder can consume the rejected packet
+owner, prove child and pipe closure, and reopen the same physical stream at
+its origin. Forward decode retains the original requested coordinate and work
+budget. `origin_restart_seek_error` records the recovery; it is not an indexed
+seek receipt. Cancellation, changed source identity, protocol/pipe failure,
+decode failure and an exhausted budget still fail closed. Reopening never
+repairs a container or accepts missing pictures.
+
+Successful codec receive is not proof that a picture is intact. The shared
+Preview packet/decoded-picture boundary rejects demux-marked corrupt video
+packets, `AV_FRAME_FLAG_CORRUPT` and nonzero `decode_error_flags` before field
+processing, cache admission or publication. Error-concealed pixels are not
+qualified clean-feed samples. The original error retains PTS and the public
+FFmpeg flags; previously valid pictures remain distinct from damaged requests.
+
+### Native decoder output and observed hardware execution
+
+`native_decoder_active` proves output through the selected FFmpeg native decoder
+backend. `hardware_decode_observed` independently records `Some(true)` for
+observed hardware execution, `Some(false)` for observed software execution, or
+`None` when execution has not been observed. Neither requested acceleration nor
+GPU residency converts an unobserved execution into hardware proof. The explicit
+hardware-only FFmpeg acceleration backends establish hardware work from their
+decoder output; VideoToolbox can also output CVPixelBuffer from software decode.
+The FFmpeg AVHWDeviceContext route therefore retains `None`: its supported
+hardware-device interface does not expose the owning session's public
+UsingHardware property. In [FFmpeg 8.1.2](https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/videotoolbox.c#L845),
+HEVC session creation requests
+`EnableHardwareAcceleratedVideoDecoder`, not the require-hardware property,
+and successful output does not independently query execution. The adapter must
+not inspect private decoder storage to obtain that property. In contrast, the
+direct macOS ProRes/ten-bit HEVC adapter above publishes native output only after its actual
+session property proves hardware execution; that observation is `Some(true)`.
+
+`PreviewDecodeExecutionPath::NativeSurface` and `NativeCpuTransfer` preserve this
+observation with the original physical frame, including cache/ring reuse. Viewer
+provenance counts native surface/transfer layers independently of observed hardware
+layers. Only `Some(true)` contributes to hardware coverage or P010 hardware coverage;
+unobserved native output produces `hardware_execution_unobserved` at the existing
+hardware qualification gate. Backend-path recovery still uses native output and
+import readiness, so an observation gap does not invent a CPU transfer or change
+Preview quality. Alpha diagnostic names change directly, with no legacy aliases.

@@ -192,8 +192,15 @@ jobs:
       - name: 安装 FFmpeg 与系统依赖 (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg@8 pkg-config dylibbundler
-          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          brew install pkg-config x264 x265 aom dav1d openjpeg freetype harfbuzz fontconfig libass openssl@3 zlib dylibbundler
+          brew_prefix="$(brew --prefix)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          zlib_prefix="$(brew --prefix zlib)"
+          export PKG_CONFIG_PATH="$openssl_prefix/lib/pkgconfig:$zlib_prefix/lib/pkgconfig:$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LDFLAGS="-L$brew_prefix/lib -Wl,-rpath,$brew_prefix/lib -L$openssl_prefix/lib -Wl,-rpath,$openssl_prefix/lib -L$zlib_prefix/lib -Wl,-rpath,$zlib_prefix/lib"
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
+          echo "MONDRIAN_FFMPEG_SOURCE_DIR=$ffmpeg_prefix/share/mondrian-ffmpeg-source" >> "$GITHUB_ENV"
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
@@ -300,6 +307,15 @@ jobs:
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
 
+      - name: Install supported DX12 shader compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = ./scripts/install-windows-dxc.ps1 -DestinationPath (Join-Path $env:RUNNER_TEMP 'mondrian-dxc')
+          "MONDRIAN_DXC_ROOT=$($runtime.RootDirectory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONDRIAN_DXC_RELEASE=$($runtime.Release)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MONDRIAN_DXC_ARCHIVE_SHA256=$($runtime.ArchiveSha256)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 计算包名与路径
         id: artifact_meta
         shell: pwsh
@@ -354,6 +370,8 @@ jobs:
             native_dependency_registry = [ordered]@{
               vcpkg_ref = '${{ env.VCPKG_REF }}'
               overlay_sha256 = '${{ hashFiles('vcpkg-overlay/**') }}'
+              windows_dxc_release = $env:MONDRIAN_DXC_RELEASE
+              windows_dxc_archive_sha256 = $env:MONDRIAN_DXC_ARCHIVE_SHA256
             }
           }
           $provenance | ConvertTo-Json -Depth 8 |
@@ -404,6 +422,16 @@ jobs:
           }
           Copy-Item -LiteralPath 'LICENSE' -Destination $stageDir -Force
           Copy-Item -LiteralPath 'LICENSES' -Destination $stageDir -Recurse -Force
+          # Auto selects app-local DXC before considering legacy system FXC.
+          # Ship the same compiler/validator pair verified by hosted DX12 CI.
+          foreach ($name in @('dxcompiler.dll', 'dxil.dll')) {
+            Copy-Item -LiteralPath (Join-Path $env:MONDRIAN_DXC_ROOT "bin/x64/$name") -Destination $stageDir -ErrorAction Stop
+          }
+          $dxcLicenses = Join-Path $stageDir 'LICENSES/dxc'
+          New-Item -ItemType Directory -Path $dxcLicenses -Force | Out-Null
+          foreach ($name in @('LICENSE-LLVM.txt', 'LICENSE-MIT.txt', 'LICENSE-MS.txt')) {
+            Copy-Item -LiteralPath (Join-Path $env:MONDRIAN_DXC_ROOT $name) -Destination $dxcLicenses -ErrorAction Stop
+          }
           Copy-Item -LiteralPath 'RELEASE_PROVENANCE.json' -Destination $stageDir -Force
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -version |
             Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8
@@ -505,60 +533,16 @@ jobs:
           stage_dir="$PACKAGE_NAME"
           app_dir="$stage_dir/Mondrian.app"
           executable_dir="$app_dir/Contents/MacOS"
-          frameworks_dir="$app_dir/Contents/Frameworks"
-          mkdir -p "$executable_dir" "$frameworks_dir"
-          cp "$BIN_PATH" "$executable_dir/mondrian"
-          cp -L "$(command -v ffmpeg)" "$executable_dir/ffmpeg"
-          cp -L "$(command -v ffprobe)" "$executable_dir/ffprobe"
+          version="$(cargo pkgid --locked -p mondrian-app | awk -F '[@#]' '{print $NF}')"
+          bash scripts/package-macos-app.sh "$BIN_PATH" "$app_dir" "$version" \
+            "$(brew --prefix)/lib" "$(brew --prefix openssl@3)/lib" "$(brew --prefix zlib)/lib"
           cp LICENSE "$stage_dir/LICENSE"
           cp -R LICENSES "$stage_dir/LICENSES"
           cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
-          # One invocation is required: `-od` recreates the destination, so
-          # invoking it once per executable would leave only the final tool's
-          # dependency closure. Multiple `-x` inputs produce the union closure.
-          dylibbundler \
-            -od -b \
-            -x "$executable_dir/mondrian" \
-            -x "$executable_dir/ffmpeg" \
-            -x "$executable_dir/ffprobe" \
-            -d "$frameworks_dir" \
-            -p '@executable_path/../Frameworks/'
-          for executable in "$executable_dir/mondrian" "$executable_dir/ffmpeg" "$executable_dir/ffprobe"; do
-            if otool -L "$executable" | grep -E '/(opt/homebrew|usr/local)/'; then
-              echo "Packaged macOS executable still references Homebrew libraries: $executable"
-              exit 1
-            fi
-          done
-          # Verify the complete rewritten graph, not only direct executable
-          # edges. A nested Homebrew or unresolved @rpath reference can appear
-          # healthy on the build host and fail on an end-user machine.
-          while IFS= read -r image; do
-            while IFS= read -r dependency; do
-              case "$dependency" in
-                /usr/lib/*|/System/Library/*)
-                  ;;
-                @executable_path/../Frameworks/*)
-                  relative="${dependency#@executable_path/../Frameworks/}"
-                  if [ ! -e "$frameworks_dir/$relative" ]; then
-                    echo "Packaged macOS runtime references a missing private dylib: $dependency from $image"
-                    exit 1
-                  fi
-                  ;;
-                *)
-                  echo "Packaged macOS runtime retains a non-system dependency: $dependency from $image"
-                  exit 1
-                  ;;
-              esac
-            done < <(otool -L "$image" | tail -n +2 | awk '{print $1}')
-          done < <(printf '%s\n' \
-            "$executable_dir/mondrian" \
-            "$executable_dir/ffmpeg" \
-            "$executable_dir/ffprobe"; \
-            find "$frameworks_dir" -type f -print)
+          cp -R "$MONDRIAN_FFMPEG_SOURCE_DIR" "$stage_dir/FFMPEG_SOURCE"
           "$executable_dir/ffmpeg" -hide_banner -version > "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
           "$executable_dir/ffmpeg" -hide_banner -buildconf >> "$stage_dir/MEDIA_RUNTIME_BUILD.txt"
           "$executable_dir/ffmpeg" -hide_banner -L > "$stage_dir/FFMPEG_LICENSE.txt"
-          env -i PATH=/usr/bin:/bin HOME="$HOME" "$executable_dir/mondrian" --verify-runtime
           tar -czf "$PACKAGE_PATH" "$stage_dir"
 
       - name: 生成 Windows 候选包身份

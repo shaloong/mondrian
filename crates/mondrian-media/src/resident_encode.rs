@@ -8,10 +8,19 @@ use std::path::PathBuf;
 
 use crate::{HwAccelBackend, RendererHwAccelDeviceContext};
 
-/// Native surface precision admitted by the resident HEVC encoder path.
+/// Exact coded-video identity admitted by a resident platform encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentEncodeCodec {
+    /// HEVC Main/Main10, selected by the surface bit depth.
+    Hevc,
+    /// H.264 High, eight-bit 4:2:0 only.
+    H264High,
+}
+
+/// Native surface precision admitted by the resident video encoder path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentEncodeBitDepth {
-    /// NV12 4:2:0 surface and HEVC Main profile.
+    /// NV12 eight-bit 4:2:0 surface.
     Eight,
     /// P010 4:2:0 surface and HEVC Main 10 profile.
     Ten,
@@ -37,9 +46,11 @@ pub enum ResidentEncodeChromaLocation {
     Center,
 }
 
-/// Immutable contract for one video-only resident HEVC elementary encode/mux Session.
+/// Immutable contract for one video-only resident hardware elementary encode/mux Session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResidentHevcEncoderConfig {
+pub struct ResidentVideoEncoderConfig {
+    /// Exact bitstream codec/profile; no platform substitution.
+    pub codec: ResidentEncodeCodec,
     /// Video-only temporary artifact. Export may later stream-copy it while muxing audio.
     pub output_path: PathBuf,
     /// Coded width; must be non-zero and even for 4:2:0.
@@ -66,14 +77,22 @@ pub struct ResidentHevcEncoderConfig {
     pub keyframe_interval_frames: u32,
     /// Maximum B-frame count.
     pub max_b_frames: u32,
-    /// Constant-quantizer quality value accepted by the D3D12VA encoder.
+    /// Constant base-frame quantizer requested from the native encoder.
     pub quantizer: u8,
     /// Maximum codec-owned input surfaces.
     pub surface_pool_size: u32,
 }
 
-impl ResidentHevcEncoderConfig {
+impl ResidentVideoEncoderConfig {
     fn validate(&self) -> Result<(), ResidentEncodeError> {
+        if self.codec == ResidentEncodeCodec::H264High
+            && self.bit_depth != ResidentEncodeBitDepth::Eight
+        {
+            return Err(ResidentEncodeError::UnsupportedCodecContract {
+                codec: self.codec,
+                bit_depth: self.bit_depth,
+            });
+        }
         if self.width == 0
             || self.height == 0
             || !self.width.is_multiple_of(2)
@@ -114,6 +133,18 @@ impl ResidentHevcEncoderConfig {
 /// Stable failure from resident hardware-frame creation, encoding, or muxing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ResidentEncodeError {
+    /// The exact codec/precision contract is not supported.
+    #[error("resident codec {codec:?} does not support {bit_depth:?}-bit surfaces")]
+    UnsupportedCodecContract {
+        codec: ResidentEncodeCodec,
+        bit_depth: ResidentEncodeBitDepth,
+    },
+    /// This concrete encoder has not implemented the requested codec.
+    #[error("resident {backend} does not support codec {codec:?}")]
+    UnsupportedBackendCodec {
+        backend: &'static str,
+        codec: ResidentEncodeCodec,
+    },
     /// The Session received a renderer root for a different hardware backend.
     #[error("resident HEVC encode requires a renderer-qualified device root for its backend")]
     WrongDeviceBackend,
@@ -121,13 +152,13 @@ pub enum ResidentEncodeError {
     #[error("linked FFmpeg does not expose the 7.1 D3D12 HEVC encoder surface")]
     FfmpegD3D12EncodeUnavailable,
     /// 4:2:0 hardware surfaces require non-zero even dimensions.
-    #[error("resident HEVC encode requires non-zero even dimensions, got {width}x{height}")]
+    #[error("resident video encode requires non-zero even dimensions, got {width}x{height}")]
     InvalidDimensions { width: u32, height: u32 },
     /// Frame cadence must be a positive rational.
-    #[error("resident HEVC encode has invalid frame rate {numerator}/{denominator}")]
+    #[error("resident video encode has invalid frame rate {numerator}/{denominator}")]
     InvalidFrameRate { numerator: u32, denominator: u32 },
     /// Sample aspect ratio must be a positive rational.
-    #[error("resident HEVC encode has invalid sample aspect ratio {numerator}/{denominator}")]
+    #[error("resident video encode has invalid sample aspect ratio {numerator}/{denominator}")]
     InvalidSampleAspectRatio { numerator: u32, denominator: u32 },
     /// GOP construction requires a positive interval.
     #[error("resident HEVC encode requires a positive keyframe interval")]
@@ -136,7 +167,7 @@ pub enum ResidentEncodeError {
     #[error("resident HEVC encode surface pool size {value} is below two")]
     InvalidSurfacePoolSize { value: u32 },
     /// HEVC CQP accepts the normative 1..=51 interval.
-    #[error("resident HEVC quantizer {value} is outside 1..=51")]
+    #[error("resident video quantizer {value} is outside 1..=51")]
     InvalidQuantizer { value: u8 },
     /// A frame index could not be represented as an FFmpeg timestamp.
     #[error("resident HEVC frame index {frame_index} exceeds FFmpeg timestamp range")]
@@ -144,6 +175,9 @@ pub enum ResidentEncodeError {
     /// Surface readiness fence values must remain strictly monotonic.
     #[error("resident HEVC input-surface fence value is exhausted")]
     FenceValueExhausted,
+    /// The native platform encoder rejected or timed out its exact contract.
+    #[error("resident encode native stage {stage} failed: {reason}")]
+    Native { stage: &'static str, reason: String },
     /// FFmpeg returned an incomplete object or rejected the exact contract.
     #[error("resident HEVC FFmpeg stage {stage} failed: {reason}")]
     Ffmpeg { stage: &'static str, reason: String },
@@ -151,7 +185,7 @@ pub enum ResidentEncodeError {
     #[error("resident HEVC FFmpeg surface is missing {object}")]
     MissingNativeSurface { object: &'static str },
     /// No further frames may be submitted after finalization.
-    #[error("resident HEVC encoder Session is already finalized")]
+    #[error("resident video encoder Session is already finalized")]
     AlreadyFinished,
     /// Error cleanup could not prove the producer finished with the surface.
     #[error("resident HEVC producer fence did not complete during bounded error cleanup")]
@@ -190,7 +224,7 @@ mod linux_cuda_impl {
     impl SessionInner {
         pub(super) fn open(
             device_root: &RendererHwAccelDeviceContext,
-            config: ResidentHevcEncoderConfig,
+            config: ResidentVideoEncoderConfig,
         ) -> Result<Self, ResidentEncodeError> {
             ffmpeg::init().map_err(|error| ffmpeg_error("initialize", error))?;
             let codec =
@@ -459,7 +493,7 @@ mod linux_cuda_impl {
 
     fn create_frames_context(
         device_ref: NonNull<ffmpeg::ffi::AVBufferRef>,
-        config: &ResidentHevcEncoderConfig,
+        config: &ResidentVideoEncoderConfig,
     ) -> Result<FramesContextRef, ResidentEncodeError> {
         let raw = unsafe { ffmpeg::ffi::av_hwframe_ctx_alloc(device_ref.as_ptr()) };
         let Some(frames_ref) = NonNull::new(raw) else {
@@ -812,9 +846,15 @@ impl D3D12ResidentHevcEncoderSession {
     /// Open an exact-device D3D12VA HEVC Session.
     pub fn open(
         device_root: &RendererHwAccelDeviceContext,
-        config: ResidentHevcEncoderConfig,
+        config: ResidentVideoEncoderConfig,
     ) -> Result<Self, ResidentEncodeError> {
         config.validate()?;
+        if config.codec != ResidentEncodeCodec::Hevc {
+            return Err(ResidentEncodeError::UnsupportedBackendCodec {
+                backend: "D3D12VA",
+                codec: config.codec,
+            });
+        }
         if device_root.backend() != HwAccelBackend::D3D12VA {
             return Err(ResidentEncodeError::WrongDeviceBackend);
         }
@@ -904,9 +944,15 @@ impl CudaResidentHevcEncoderSession {
     /// Open an exact-device CUDA/NVENC HEVC Session.
     pub fn open(
         device_root: &RendererHwAccelDeviceContext,
-        config: ResidentHevcEncoderConfig,
+        config: ResidentVideoEncoderConfig,
     ) -> Result<Self, ResidentEncodeError> {
         config.validate()?;
+        if config.codec != ResidentEncodeCodec::Hevc {
+            return Err(ResidentEncodeError::UnsupportedBackendCodec {
+                backend: "CUDA/NVENC",
+                codec: config.codec,
+            });
+        }
         if device_root.backend() != HwAccelBackend::Cuda {
             return Err(ResidentEncodeError::WrongDeviceBackend);
         }
@@ -1018,7 +1064,7 @@ mod windows_impl {
     impl SessionInner {
         pub(super) fn open(
             device_root: &RendererHwAccelDeviceContext,
-            config: ResidentHevcEncoderConfig,
+            config: ResidentVideoEncoderConfig,
         ) -> Result<Self, ResidentEncodeError> {
             ffmpeg::init().map_err(|error| ffmpeg_error("initialize", error))?;
             let codec = encoder::find_by_name("hevc_d3d12va").ok_or_else(|| {
@@ -1239,7 +1285,7 @@ mod windows_impl {
 
     fn create_frames_context(
         device_ref: NonNull<ffmpeg::ffi::AVBufferRef>,
-        config: &ResidentHevcEncoderConfig,
+        config: &ResidentVideoEncoderConfig,
     ) -> Result<FramesContextRef, ResidentEncodeError> {
         let raw = unsafe { ffmpeg::ffi::av_hwframe_ctx_alloc(device_ref.as_ptr()) };
         let Some(frames_ref) = NonNull::new(raw) else {
@@ -1409,7 +1455,8 @@ mod tests {
 
     #[test]
     fn resident_contract_rejects_non_420_dimensions_and_unbounded_surface_pool() {
-        let base = ResidentHevcEncoderConfig {
+        let base = ResidentVideoEncoderConfig {
+            codec: ResidentEncodeCodec::Hevc,
             output_path: PathBuf::from("resident.mkv"),
             width: 1920,
             height: 1080,
@@ -1438,6 +1485,15 @@ mod tests {
             invalid_sar.validate(),
             Err(ResidentEncodeError::InvalidSampleAspectRatio { numerator: 1, denominator: 0 })
         );
+        let mut h264_ten = base.clone();
+        h264_ten.codec = ResidentEncodeCodec::H264High;
+        assert_eq!(
+            h264_ten.validate(),
+            Err(ResidentEncodeError::UnsupportedCodecContract {
+                codec: ResidentEncodeCodec::H264High,
+                bit_depth: ResidentEncodeBitDepth::Ten
+            })
+        );
         let mut shallow = base;
         shallow.surface_pool_size = 1;
         assert_eq!(
@@ -1446,3 +1502,8 @@ mod tests {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+mod videotoolbox_encode;
+#[cfg(target_os = "macos")]
+pub use videotoolbox_encode::*;

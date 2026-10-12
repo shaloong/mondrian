@@ -1199,6 +1199,10 @@ pub(crate) fn terminate_and_reap(
         match child.try_wait() {
             Ok(Some(_)) => {
                 receipt.native_exit_observed = true;
+                // The owned child checks its process group before reporting
+                // exit. A failed signal that raced with natural group exit is
+                // no longer an unresolved cleanup failure.
+                receipt.kill_error = None;
                 break;
             }
             Ok(None) => {}

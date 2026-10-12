@@ -573,8 +573,9 @@ fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
         std::env::var_os("MONDRIAN_BMX_TOOL_DIR")
             .expect("explicit official BMX 1.7 tool directory"),
     );
-    let raw2bmx = tool_root.join("raw2bmx.exe");
-    let mxf2raw = tool_root.join("mxf2raw.exe");
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let raw2bmx = tool_root.join(format!("raw2bmx{suffix}"));
+    let mxf2raw = tool_root.join(format!("mxf2raw{suffix}"));
     assert!(
         raw2bmx.is_file(),
         "missing official raw2bmx: {}",
@@ -699,22 +700,12 @@ fn run_qualification_command(
 }
 
 fn run_dcp_validation_command(command: &mut Command, label: &str) -> String {
-    let output = command.output().unwrap_or_else(|error| panic!("{label} spawn failed: {error}"));
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    assert!(
-        output.status.success()
-            || text.lines().all(|line| {
-                let line = line.trim_start();
-                line.is_empty()
-                    || line.starts_with("Bv2.1 error:")
-                    || line.starts_with("Warning:")
-                    || line.starts_with('┣')
-                    || line.starts_with('┗')
-            }),
-        "{label} failed: {text}"
-    );
-    text
+    crate::queue::run_dcp_package_validator(
+        command,
+        &mondrian_core::ExecutionCancellationToken::new(),
+        std::time::Instant::now() + std::time::Duration::from_secs(120),
+    )
+    .unwrap_or_else(|outcome| panic!("{label} failed: {outcome:?}"))
 }
 
 fn find_qualification_track(root: &Path, prefix: &str) -> (PathBuf, PackageAssetId) {

@@ -1470,11 +1470,16 @@ fn prepared_visual_program_retained_bytes_estimate(
                 .transition_intervals
                 .saturating_mul(std::mem::size_of::<usize>().saturating_mul(24)),
         );
+    retained = retained.saturating_add(PreparedEffectProgram::retained_bytes_estimate_for_owner(
+        clip_effects.values().filter_map(|prepared| match prepared {
+            PreparedClipEffects::Ready { program, .. } => Some(program),
+            PreparedClipEffects::Blocked { .. } => None,
+        }),
+    ));
     for prepared in clip_effects.values() {
         retained = retained.saturating_add(match prepared {
-            PreparedClipEffects::Ready { program, author_fingerprint } => program
-                .retained_bytes_estimate()
-                .saturating_add(author_fingerprint.len())
+            PreparedClipEffects::Ready { author_fingerprint, .. } => author_fingerprint
+                .len()
                 .saturating_add(std::mem::size_of::<PreparedClipEffects>()),
             PreparedClipEffects::Blocked { reason, .. } => {
                 reason.len().saturating_add(std::mem::size_of::<PreparedClipEffects>())
@@ -2640,6 +2645,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_clip_effect_payload_is_charged_once_per_visual_program() {
+        let mut sequence = single_solid_sequence(None);
+        let mut second = sequence.video_tracks[0].clips[0].clone();
+        second.id = ClipId::new();
+        second.position = sequence.video_tracks[0].clips[0].end_position().unwrap();
+        sequence.video_tracks[0].add_clip(second).unwrap();
+        let mut prepared = prepare_stable(&sequence);
+        let shared_bytes = prepared.retained_bytes_estimate();
+        let independent =
+            PreparedEffectProgram::prepare(&[], &[], sequence.settings.color.working_color_space)
+                .unwrap();
+        let additional_allocation = independent
+            .retained_bytes_estimate()
+            .saturating_sub(std::mem::size_of::<PreparedEffectProgram>());
+        let PreparedClipEffects::Ready { program, .. } =
+            prepared.clip_effects.values_mut().next().unwrap()
+        else {
+            panic!("identity program must be ready");
+        };
+        *program = independent;
+        let independent_bytes = prepared_visual_program_retained_bytes_estimate(
+            &sequence,
+            prepared.schedule.diagnostics(),
+            &prepared.clip_effects,
+            &prepared.transitions,
+        );
+        assert!(additional_allocation > 0);
+        assert_eq!(independent_bytes, shared_bytes + additional_allocation);
+    }
+
+    #[test]
     fn author_snapshot_binding_fingerprints_once_per_generation() {
         let sequence = single_solid_sequence(None);
         let (first, reused, second, first_diagnostics, second_diagnostics) =
@@ -2888,29 +2924,39 @@ mod tests {
 
     #[test]
     fn new_sequence_revision_reuses_only_exact_clip_effect_author_fingerprints() {
-        let mut sequence =
-            single_solid_sequence(Some(EffectNode::with_defaults(EffectType::GaussianBlur)));
-        let rate = sequence.time_base();
-        sequence.video_tracks[0]
-            .add_clip(
-                Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(30, rate), tt(10, rate))
-                    .expect("second Clip"),
-            )
-            .expect("add second Clip");
-        let mut cache = PreparedVisualProgramCache::new(4);
-        cache.prepare(&sequence).expect("initial program");
+        let (placement_only, effect_changed) = with_stable_effect_registry(|| {
+            let mut sequence =
+                single_solid_sequence(Some(EffectNode::with_defaults(EffectType::GaussianBlur)));
+            let rate = sequence.time_base();
+            sequence.video_tracks[0]
+                .add_clip(
+                    Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(30, rate), tt(10, rate))
+                        .expect("second Clip"),
+                )
+                .expect("add second Clip");
+            let mut cache = PreparedVisualProgramCache::new(4);
+            let prepare = |cache: &mut PreparedVisualProgramCache, sequence: &Sequence| match cache
+                .prepare(sequence)
+            {
+                Ok(program) => Some(program),
+                Err(PreparedVisualProgramError::EffectRegistryChanged { .. }) => None,
+                Err(error) => panic!("unexpected visual preparation failure: {error}"),
+            };
+            prepare(&mut cache, &sequence)?;
 
-        sequence.video_tracks[0].clips[0].position = tt(1, rate);
-        sequence.revision = sequence.revision.checked_next().expect("placement revision");
-        let placement_only = cache.prepare(&sequence).expect("placement-only replacement");
-        assert_eq!(placement_only.diagnostics().prepared_clips, 2);
-        assert_eq!(placement_only.diagnostics().reused_clips, 2);
+            sequence.video_tracks[0].clips[0].position = tt(1, rate);
+            sequence.revision = sequence.revision.checked_next().expect("placement revision");
+            let placement_only = prepare(&mut cache, &sequence)?.diagnostics();
 
-        sequence.video_tracks[0].clips[0].effects[0].is_enabled = false;
-        sequence.revision = sequence.revision.checked_next().expect("Effect revision");
-        let effect_changed = cache.prepare(&sequence).expect("Effect replacement");
-        assert_eq!(effect_changed.diagnostics().prepared_clips, 2);
-        assert_eq!(effect_changed.diagnostics().reused_clips, 1);
+            sequence.video_tracks[0].clips[0].effects[0].is_enabled = false;
+            sequence.revision = sequence.revision.checked_next().expect("Effect revision");
+            let effect_changed = prepare(&mut cache, &sequence)?.diagnostics();
+            Some((placement_only, effect_changed))
+        });
+        assert_eq!(placement_only.prepared_clips, 2);
+        assert_eq!(placement_only.reused_clips, 2);
+        assert_eq!(effect_changed.prepared_clips, 2);
+        assert_eq!(effect_changed.reused_clips, 1);
     }
 
     #[test]

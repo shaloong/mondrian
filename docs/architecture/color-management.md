@@ -53,6 +53,14 @@ and monitor remain separate semantic stages; the CPU presentation path moves
 one Float32 raster through both and quantizes once, while GPU recording keeps
 the Program Output handle available for scopes and diagnostics.
 
+The shared Core CPU execution processor uses OCIO's native default optimization
+flags with `FAST_LOG_EXP_POW` and `LUT_INV_FAST` disabled. Other default graph
+and LUT optimizations and independent dynamic properties remain enabled.
+Approximate SIMD log/exp/pow and replacement forward LUTs for inverse evaluation
+introduce avoidable CPU error; PQ can amplify it beyond the CPU/GPU parity
+contract. Accurate native CPU math and inverse evaluation preserve the same
+OCIO transform graph, color interpretation, fixtures, and error bounds.
+
 CPU presentation retains a separate pre-monitor Float32 frame only when the
 caller requests the Program Output signal-classification tap. Ordinary Viewer
 presentation consumes that raster through monitor adaptation; retaining an
@@ -160,11 +168,17 @@ For the package-pinned PQ View, OCIO represents the HLG-to-display-reference
 inverse OETF as a half-domain 1D texture. The wgpu compiler replaces only that
 fingerprinted texture operation with the normative inverse HLG expression after
 proving the selected package, View, shader language, LUT identity, and the
-preceding formation LUT's normalized output domain. The PQ OETF remains the
-OCIO-authored LUT. A changed package, custom config, resource payload, source
-identity, or domain retains the unmodified OCIO program. This removes three
-texture fetches per output pixel without moving the nonlinear operation across
-the tetrahedral formation LUT.
+preceding formation LUT's normalized output domain. The final PQ half-domain
+LUT is also fingerprinted and replaced at that same curve boundary by shader
+code extracted from OCIO's own `LinToPq` fixed function. Its input remains the
+same normalized-nits value after HLG decoding, surround and scale; the formation
+LUT, CPU reference processor and authored rendering semantics are unchanged.
+The production Float16 output must satisfy the original CPU channel-error and
+Delta E ITP budgets; the two GPU representations are not claimed bit-identical.
+A changed package, custom config, resource payload, source identity, or domain
+retains the unmodified OCIO program. This removes three
+texture fetches for HLG decoding and three for PQ encoding per output pixel,
+without moving either nonlinear operation across the tetrahedral formation LUT.
 
 Output-target resolution maps Rec.2100 HLG and PQ to that HDR View while SDR
 targets map to the SDR View. A display without its target-class Standard View
@@ -626,7 +640,7 @@ deliberately has no ACES-branded variant.
 
 Media probing keeps raw facts, diagnostic candidates, executable identity, and
 user overrides separate. CICP/container tags, camera/log metadata hints,
-complete transfer-and-gamut pairs in file names, HDR side data, and embedded ICC
+HDR side data, and embedded ICC
 profiles are retained with confidence and warnings. `candidate_color_space` is
 never pixel authority. `VideoStreamInfo::executable_color_space()` delegates to
 the only metadata-derived Auto execution seam, which simultaneously consumes
@@ -649,8 +663,8 @@ parser. Stream scope outranks container scope; agreeing declarations at the
 winning scope merge, while different executable identities at the same winning
 scope are ambiguous and fail closed independent of dictionary enumeration
 order. Lower-scope and conflicting records remain diagnostics and warnings, not
-pixel authority. File names and free-form descriptive fields remain suggestions
-regardless of confidence. Partial CICP and the current profile-name-only ICC
+pixel authority. The physical media probe does not parse file names for color information.
+Free-form descriptive fields remain suggestions regardless of confidence. Partial CICP and the current profile-name-only ICC
 mapping likewise remain diagnostic: they may help Interpret Footage, but cannot
 affect pixels without an explicit author override.
 Before selection and persistence, raw hint records are canonicalized by scope,
@@ -834,6 +848,41 @@ authority and baseline range, so changing a range override cannot reuse pixels
 created under the old sampling contract. Proxy generation retains its own
 versioned source-range contract and fingerprint.
 
+Codec conventions are typed sampling evidence, never RGB colorimetry evidence.
+A validated SD DV DIF profile supplies BT.601 coefficients and video levels.
+Its missing-matrix fallback stays independent of an authored range override.
+VC-3/DNx uses each decoded picture's CLV-derived matrix: in-band BT.709/BT.2020
+color volumes imply nominal video levels, including RGB coding. Out-of-band
+CLV requires an authored range interpretation; the unqualified FFmpeg range
+field does not prove the external digital representation. A conflicting
+full-range tag fails closed. A first-packet header
+cannot declare the range of every subsequent picture. Untagged 8-bit SDR
+MPEG-4/MSMPEG4/FLV1/Theora may use the explicit legacy video-level assumption;
+the raw probe range stays Unknown, the assumption is displayed, and an authored
+override remains authoritative. HDR, high-bit and unrelated codecs cannot
+inherit that assumption. These rules enter Preview, thumbnails and Export
+through `DecodedVideoRangeContract::from_video_stream`.
+
+Asset RGB color identity, YCbCr coefficient interpretation and quantization
+range are independent persistent intents. Interpret Footage can override the
+matrix explicitly when metadata is missing or incorrect; selecting RGB
+primaries/transfer alone never invents YCbCr coefficients. The same immutable
+decode contract binds these intents for Preview, thumbnails, Proxy, Export and
+picture tracking, including their cache identities. RGB/data payloads do not
+apply a YCbCr correction. Smart Render cannot bypass an authored sample
+correction or reuse encoded pixels under different matrix tags.
+
+CPU YCbCr and limited integer RGB preserve negative and extended encoded RGB
+in Float32 before the shared OCIO input boundary. Ordinary float RGB and data
+remain unchanged. Proxy color identity includes the actual sampling matrix
+independently of RGB primaries/transfer: scaling preserves that matrix and its
+range, and output tags describe the resulting samples. The same contract binds
+the original absolute picture-stream index; FFmpeg maps that stream rather than
+assuming the first video stream, which may be an attached cover or another angle.
+Unsupported matrices,
+unresolved whole-source range, and limited RGB requiring explicit materialization
+are rejected before proxy execution rather than retagged as BT.709/full RGB.
+
 Alpha is coverage, not color, and never passes through an OCIO RGB processor.
 Decoded source frames are normalized to the renderer's straight-alpha working
 contract before the source-to-working transform: straight input is shared
@@ -950,6 +999,21 @@ records this pass only between the OCIO display/view output and the UI
 presentation carrier. ICC paths keep the OCIO encoded output and device output
 in `Rgba16Float`; LUT storage and interpolation math remain 32F. Uncalibrated,
 stale, or fingerprint-mismatched profiles remain fail-closed.
+
+The Viewer ICC request binds an explicit opaque canvas backdrop to the LUT.
+After Program Output, scope analysis, monitor adaptation and optional signal
+monitoring, the existing Mondrian Standard identity processors decode the
+standard monitor signal into display-linear Rec.709, then re-encode the opaque
+linear-light matte for calibration. This is a presentation operation, without a
+creative View or changes to Program Output, clean feed, Scopes or Export alpha.
+Canvas and checker colors come from the widget's paint description; logical
+crop offsets and points per output pixel keep Retina scale applied once.
+Backdrop colors and geometry participate in Window publication identity, so a
+background/theme change retires the old output and renews the existing still
+demand. The linear input and matte use `Rgba32Float`; the re-encoded ICC input
+uses `Rgba16Float`. All three allocations are admitted in the existing Viewer
+working-set budget and retained through actual GPU completion. No CPU frame
+transfer or independent color, Preview or Playback authority is introduced.
 
 GPU-resident color frames use `GpuColorFrameHandle`, a renderer resource-table
 handle with the same `ColorFrameDescriptor` contract. CPU/GPU transfers are
@@ -1240,10 +1304,11 @@ by current codecs. H.264 High requires 8-bit 4:2:0; HEVC Main/Main10 require
 8/10-bit 4:2:0 respectively; ProRes 422 profiles require 10-bit 4:2:2; ProRes
 4444 profiles require 12-bit 4:4:4. A 10/12-bit delivery uses the internal
 `EncodedRgba16Unorm` export frame contract and `rgba64le` FFmpeg pipe. Its GPU
-output boundary is `Rgba16Float` so the renderer transform is not quantized
-until the single explicit UNORM16 pack, but the pipe itself is never described
-as Float16. `ExportFrameContract` separately defines true Float16 and Float32
-master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
+output boundary is `Rgba32Float`, preserving normalized 12/16-bit code values
+until the single explicit UNORM16 pack. Float16 cannot preserve every such
+code value. Direct padded Float32 readback packing avoids a second full-frame
+Float32 raster; the pipe itself remains integer UNORM16. `ExportFrameContract`
+separately defines true Float16 and Float32 master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
 Those float seams preserve finite extended-range values without normalized
 clamping; UNORM seams validate finite input, clamp once to `[0, 1]`, and
 quantize. Non-finite samples and finite values outside Float16 range fail
@@ -1468,12 +1533,16 @@ unavailability.
 When executable media color identity is missing, `MissingColorMetadataPolicy` resolves it as:
 
 - Assume Rec.709
-- Assume sequence working space
 - Reject media
 
 Clip-level `MediaInterpretation.color_space_override` takes precedence over executable metadata.
 Preview and export both follow override -> executable metadata -> missing-policy
 resolution through `MissingColorMetadataPolicy::resolve_input_decision(...)`.
+Their resolved color inputs share `SourceColorModule::decode_contract` when
+lowered for Media: only `MissingPolicyAssumeRec709` binds a BT.709 fallback for a
+missing decoded YCbCr matrix. An RGB color-space override does not authorize a
+matrix; present decoder matrix metadata remains authoritative. Range is resolved
+independently and remains part of the same immutable decode/cache contract.
 The returned `InputColorResolution` is the shared diagnostic record for the
 decision branch, including override, executable metadata, policy, sequence working
 space, and whether the media was rejected. Each Export
@@ -1614,7 +1683,32 @@ measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
 path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
-generates display density textures on-device. CPU/GPU tests compare exact bin
+generates display density textures on-device. Both Scope taps sample the full
+Sequence raster, independent of Viewer zoom, crop and presentation size. When
+Scopes are active, the shared Preview owner preserves the logical root and every
+nested Sequence raster and resolves original full-source representations. Authored
+Preview scale, Playback recovery and proxy selection cannot reduce this analysis
+input. Consumer raster requirements participate in execution identity without
+rewriting the owner-derived Playback snapshot; insufficient resource admission
+remains a structured blocker. When
+that raster differs from presentation, the existing color execution Session
+materializes an additional float Program Output from the complete working
+composite; Monitor Output analysis adapts that same full raster before ICC.
+Viewer reconstruction still filters in working-linear space before its own
+Program Output materialization. An uncropped full-size Viewer shares the float
+Program texture with Scope analysis. Scope demand preserves a float carrier
+even for an SDR 8-bit display, so monitor policy cannot introduce an 8-bit
+quantization boundary into Program analysis. The active working-set estimator
+accounts for each additional raster before recording; no extra color authority,
+CPU pixel transfer or per-frame readback is introduced.
+Non-finite RGB invalidates the
+entire GPU scope frame: IEEE exponent bits are checked before aggregation,
+on-device status retains the first invalid row-major RGB sample, and all three
+plots display a red cross instead of partial density data. Alpha does not hide
+invalid RGB. The next frame clears this status; recording success means commands
+were accepted, not that completed samples are valid. Visualization reads the
+completed count buffer as immutable storage, without CPU feedback or a new pass.
+CPU/GPU tests compare exact bin
 counts for both encoded-signal and nits execution.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
@@ -1885,8 +1979,12 @@ The native Viewer presentation seam never blends machine UI in PQ/HLG code
 space. Renderer output remains encoded target code values, while the UI carrier
 decodes it into target-primary display-linear values using a 100-nit reference
 white, composites linearized UI there, and applies the final PQ/HLG encoding at
-the swapchain store. Display P3 follows the same target-primary linear rule with
-the sRGB transfer. ICC-calibrated output is not relabelled as one of these
+the swapchain store. Straight coverage survives this seam: bilinear sampling
+associates RGB with Alpha in display-linear light before interpolation, then
+restores straight RGB for coverage blending over the Viewer canvas. Transparent
+pixels cannot expose hidden RGB or obscure the checkerboard/black background.
+Display P3 follows the same target-primary linear rule with the sRGB transfer.
+ICC-calibrated output is not relabelled as one of these
 standard targets; it uses the separately typed opaque device-code carrier.
 ## OCIO Engine Identity Contract
 
@@ -2022,3 +2120,29 @@ most-significant alignment; planar ten-bit uses least-significant alignment.
 This avoids CPU RGB expansion without changing the working domain, alpha
 contract, output transform, or CPU-addressable consumer requirements. A compact
 CPU payload still requires upload and is never evidence of GPU-resident decode.
+
+### H.264 sequence quantization range
+
+The physical Media probe reads bounded avcC or Annex B SPS RBSPs when FFmpeg
+leaves range unspecified. Complete, agreeing sequence headers prove an explicit
+`video_full_range_flag`, or its normative zero default under H.264 Annex E.
+`H264SequenceRange` records both range and whether that flag was absent.
+Malformed, truncated, unsupported or conflicting SPS sets authorize no range.
+An explicit container/decoder range retains precedence; decoded-frame evidence
+and author overrides continue through the shared `DecodedVideoRangeContract`.
+The inference supplies no primaries, transfer or matrix. Missing colorimetry
+still reaches the explicit project policy or author interpretation.
+
+Terminal Preview decode failures retain the original explanation in the
+playback-owned bounded failure store. App projects that same evidence to the
+Viewer instead of replacing it with a generic negative-cache message.
+
+Both CPU and resident native materialization apply the immutable source
+contract's missing-matrix policy. Explicit or unsupported decoder matrices are
+never replaced by that policy. Native import therefore consumes the same
+resolved sampling facts as CPU conversion without reading back hardware pixels.
+
+Asset thumbnails select one deterministic covering source sample at ten percent
+of the stream duration, capped at thirty seconds. Proven stills and unknown
+durations use zero. The exact target participates in request, failure and raster
+cache identities; selection does not infer color from pixels or file names.

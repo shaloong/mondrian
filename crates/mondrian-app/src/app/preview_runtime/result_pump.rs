@@ -42,6 +42,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if expired.is_empty() {
             return PreviewWorkPoll::default();
         }
+        // Observe the exact retired bindings before the next candidate can
+        // replace their loading reason or move to another frame coordinate.
+        tracing::debug!(
+            ?pending_playback_demand,
+            ?expired,
+            worker_queue = ?self.jobs.diagnostics(),
+            "expired current Preview media publication bindings"
+        );
         // Expiration synchronously removes the Broker publication owner. Any
         // retained Timeline evaluation that names that exact producer can no
         // longer make progress, even when an in-flight attempt is retained
@@ -166,6 +174,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 && (result.access_mode != PreviewDecodeAccessMode::PlaybackCursor
                     || owns_pending_playback_demand);
             tracing::debug!(
+                execution_id = ?result.execution_id,
                 asset_id = %result.key.asset_id,
                 path = %result.key.decode.source().path().display(),
                 source_sample = ?result.key.source_sample(),
@@ -322,6 +331,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         if !residency_admission
                             .is_some_and(mondrian_playback::FrameStoreAdmission::is_admitted)
                         {
+                            // The Broker producer has resolved, but no resident
+                            // frame can satisfy its dependents. Release that
+                            // exact wait even when optional Prefetch retirement
+                            // is not an authoritative source failure.
+                            outcome.candidate_retry_required |=
+                                self.invalidate_evaluations_for_media_key(&result.key);
                             tracing::warn!(
                                 asset_id = %result.key.asset_id,
                                 source_sample = ?result.key.source_sample(),
@@ -384,6 +399,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         }
                         self.frame_store.borrow_mut().forget_failure(&result.key);
                         self.media_execution_failures.borrow_mut().remove(&result.key);
+                        // The visible current may already be satisfied while
+                        // these ticketless inputs release future-work capacity.
+                        // Retain the refill until an ordinary current request
+                        // acknowledges it; a boundary poll or ticketless
+                        // successor cannot consume that planner's opportunity.
+                        if result.priority == MediaPreviewRequestPriority::Prefetch
+                            && result.access_mode == PreviewDecodeAccessMode::PlaybackCursor
+                            && self.transport_playing.get()
+                        {
+                            self.media_retry_pending.set(true);
+                        }
                     }
                     outcome.visible_change |= presentation_current;
                     // A decoded frame became available; only evaluations that
@@ -421,7 +447,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.remember_media_execution_failure(&result.key, generation, reason);
                     }
                     self.record_preview_decode_failure(result.access_mode, result.failure_reason);
-                    if let Some(error) = result.error {
+                    if let Some(error) = result.error.as_ref() {
                         tracing::debug!(
                             asset_id = %result.key.asset_id,
                             path = %result.key.decode.source().path().display(),
@@ -432,7 +458,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         continue;
                     }
                     if completion.should_cache() && terminal_failure {
-                        self.frame_store.borrow_mut().remember_failure(result.key);
+                        let failure = PreviewUnavailability::failed(
+                            PreviewOutputStage::MediaDecode,
+                            result.error.unwrap_or_else(|| {
+                                "Source decoder failed without an explanation".to_owned()
+                            }),
+                        );
+                        self.frame_store.borrow_mut().remember_failure(result.key, failure);
                     }
                     // Publish the current failure once. Adaptive failures may
                     // retry through a changed decode policy; deterministic

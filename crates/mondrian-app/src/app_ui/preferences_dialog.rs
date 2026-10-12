@@ -3082,6 +3082,7 @@ mod tests {
                     dialog.paint(&mut PaintContext {
                         encoder: &mut encoder,
                         theme: &theme,
+                        pixels_per_point: 1.0,
                         clip_rect: dialog.bounds,
                     });
                     let commands = encoder.finish();

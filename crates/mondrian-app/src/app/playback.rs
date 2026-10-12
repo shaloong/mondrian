@@ -21,6 +21,15 @@ struct PreparedTimelineAudioSource {
     sequence_id: SequenceId,
 }
 
+/// Derived execution binding, never a second authoring or clock authority.
+#[derive(Debug, PartialEq)]
+pub(super) struct AudioPlaybackAuthorBinding {
+    session_id: AuthoringSessionId,
+    closure: mondrian_audio::AudioDependencyClosure,
+    asset_library_revision: Option<u64>,
+    sample_rate: u32,
+}
+
 pub(super) enum AppAudioPlayback {
     Available(Box<AudioPlayback>),
     Unavailable { sample_rate: u32, reason: String },
@@ -419,6 +428,40 @@ impl AppState {
         self.active_sequence().map(Sequence::time_base).unwrap_or(Rational::new(1, 25))
     }
 
+    /// Project author generation changes invalidate execution snapshots, even
+    /// when the active root revision is unchanged (nested edits or proxy mode).
+    /// Playback alone issues the replacement presentation authority.
+    pub(super) fn synchronize_playback_authoring_binding(&mut self) -> mondrian_core::Result<()> {
+        if self.active_sequence().is_none() {
+            return Ok(());
+        }
+        let end_frame = self.last_content_frame()?;
+        let snapshot = self.playback_engine.snapshot();
+        if self.playback_engine.sequence_id() != self.active_sequence_id()
+            || snapshot.position.time_base != self.playback_time_base()
+            || snapshot.position.frame > end_frame
+        {
+            return self.seek_with_source(
+                snapshot.position.frame.min(end_frame),
+                TimelineSeekSource::Settled,
+            );
+        }
+        let observed_at = Instant::now();
+        let now = self
+            .playback_timestamp_for_observation(observed_at)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?
+            .max(self.playback_engine.monotonic_high_water());
+        let binding = self
+            .playback_timeline_binding(end_frame)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?;
+        self.playback_engine
+            .revise_timeline(binding, now)
+            .map_err(|error| transport_action_error("authoring_timeline_binding", error))?;
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        Ok(())
+    }
+
     fn authoritative_audio_anchor(
         &self,
         engine: &PlaybackEngine,
@@ -444,6 +487,35 @@ impl AppState {
         if let Err(error) = self.playback_evidence.observe_snapshot(observed_at, snapshot, demand) {
             tracing::warn!(%error, "rejected Playback Evidence snapshot");
         }
+    }
+
+    fn trace_playback_preview_scale_change(
+        &self,
+        cause: &'static str,
+        before: mondrian_playback::PlaybackSnapshot,
+        after: mondrian_playback::PlaybackSnapshot,
+    ) {
+        if before.preview_scale == after.preview_scale || !tracing::enabled!(tracing::Level::DEBUG)
+        {
+            return;
+        }
+        let evidence = self.playback_evidence_report();
+        let resources = self.execution_resource_decision();
+        tracing::debug!(
+            cause,
+            ?before,
+            ?after,
+            deliveries = ?evidence.deliveries,
+            demand_latency = ?evidence.demand_latency,
+            delivery_phase_error = ?evidence.delivery_phase_error,
+            audio_underrun_frames = evidence.audio_underrun_frames,
+            preview_scale_reductions = ?evidence.preview_scale_reductions,
+            resource_revision = resources.revision,
+            resource_pressure = ?resources.pressure,
+            resource_pressure_source = ?resources.pressure_source,
+            viewer_gpu_grant = ?resources.preview.viewer_gpu.grant,
+            "Playback preview scale transition"
+        );
     }
 
     fn synchronize_playback_observation_clock(&mut self, observed_at: Instant) {
@@ -1162,6 +1234,7 @@ impl AppState {
         anchor: AudioSamplePosition,
         source: Option<PreparedTimelineAudioSource>,
     ) -> mondrian_core::Result<()> {
+        let binding = self.current_audio_playback_author_binding()?;
         if let Some(source) = source {
             self.audio_playback
                 .prepare(anchor, source.renderer, source.continuity_model)
@@ -1178,7 +1251,61 @@ impl AppState {
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.clear_meter();
         }
+        self.audio_playback_author_binding = binding;
         Ok(())
+    }
+
+    fn current_audio_playback_author_binding(
+        &self,
+    ) -> mondrian_core::Result<Option<AudioPlaybackAuthorBinding>> {
+        let Some((session_id, sequence)) = self.authoring_session_id().zip(self.active_sequence())
+        else {
+            return Ok(None);
+        };
+        let output_id =
+            sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
+                transport_action_error("audio_author_binding", "Sequence has no Program Output")
+            })?;
+        let request = mondrian_audio::AudioCompileRequest {
+            output_id,
+            audition: self.audio_monitoring.audition_overlay(session_id, sequence),
+        };
+        let closure = mondrian_audio::compile_full_audio_dependency_closure(
+            sequence,
+            self.sequences(),
+            request,
+        )
+        .map_err(|error| transport_action_error("audio_author_binding", error))?;
+        let asset_library_revision = if closure.media_components().is_empty() {
+            None
+        } else {
+            self.asset_library_handle()
+                .map(|library| library.database_revision())
+                .transpose()
+                .map_err(|error| transport_action_error("audio_author_binding", error))?
+        };
+        Ok(Some(AudioPlaybackAuthorBinding {
+            session_id,
+            closure,
+            asset_library_revision,
+            sample_rate: self.audio_sample_rate,
+        }))
+    }
+
+    /// Every author transaction reaches this seam. Only changes to the compiled
+    /// audible closure retire queued PCM; opacity, visibility and author-only
+    /// metadata do not restart audio or destroy processor history.
+    pub(super) fn reconcile_audio_after_authoring_commit(&mut self) {
+        if !self.is_playing() || !self.playback_engine.snapshot().rate.supports_realtime_audio() {
+            return;
+        }
+        if self
+            .current_audio_playback_author_binding()
+            .is_ok_and(|binding| binding == self.audio_playback_author_binding)
+        {
+            return;
+        }
+        self.reconcile_audio_after_committed_authoring_change("authoring_commit");
     }
 
     fn prepare_audio_playback(&mut self, anchor: AudioSamplePosition) -> mondrian_core::Result<()> {
@@ -1209,6 +1336,7 @@ impl AppState {
     /// Sequence, then records both the primary and cleanup outcome explicitly.
     pub(super) fn reconcile_audio_after_committed_authoring_change(&mut self, context: &str) {
         if let Err(error) = self.refresh_audio_playback_after_program_change() {
+            self.audio_playback_author_binding = None;
             tracing::error!(%error, context, "failed to prepare audio after committed authoring change");
             let cleanup = self
                 .authoritative_audio_anchor(
@@ -1534,6 +1662,7 @@ impl AppState {
                 };
             }
         };
+        let before = self.playback_engine.snapshot();
         let mut engine = self.playback_engine.clone();
         let snapshot = match engine.tick(observed_timestamp) {
             Ok(snapshot) => snapshot,
@@ -1550,6 +1679,7 @@ impl AppState {
         self.playback_engine = engine;
         self.reanchor_playback_observation_projection(observed_at);
         self.capture_playback_evidence();
+        self.trace_playback_preview_scale_change("clock_tick", before, snapshot);
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
@@ -1595,9 +1725,20 @@ impl AppState {
         }
     }
 
-    /// Estimate how long an execution loop can wait before advancing playback.
-    pub fn playback_next_wake_delay(&self) -> Option<Duration> {
-        self.playback_next_wake().map(|wake| clamp_playback_wake_delay(wake.after()))
+    /// Project the next Engine wake into the existing absolute observation clock.
+    ///
+    /// Adapter processing can age the last observation. Adding its relative
+    /// delay to a later `Instant::now()` would renew the wake past its original
+    /// phase or presentation boundary. An already-due wake remains in the past.
+    pub fn playback_next_wake_deadline(&self) -> Option<Instant> {
+        let wake = self.playback_next_wake()?;
+        let offset = self
+            .playback_engine
+            .monotonic_high_water()
+            .duration_since_origin()
+            .checked_sub(self.playback_observation_time_anchor.duration_since_origin())?
+            .checked_add(clamp_playback_wake_delay(wake.after()))?;
+        self.playback_observation_instant_anchor.checked_add(offset)
     }
 
     /// Return the next Engine wake together with its authoritative reason.
@@ -1942,6 +2083,12 @@ impl AppState {
         if !applied.accepted {
             return FramePresentationDisposition::LostAuthority;
         }
+        trace_non_ready_frame_presentation(
+            ticket,
+            visibility_timestamp,
+            "already_visible",
+            delivery,
+        );
         commit();
         FramePresentationDisposition::Presented(FramePresentationCompletion {
             delivery,
@@ -1996,10 +2143,15 @@ impl AppState {
                     completion.delivery().identity() == ticket.identity()
                         && completion.delivery().kind() == FrameDeliveryKind::Late
                 })
-                .map_or(
-                    FramePresentationDisposition::LostAuthority,
-                    FramePresentationDisposition::DroppedLate,
-                );
+                .map_or(FramePresentationDisposition::LostAuthority, |completion| {
+                    trace_non_ready_frame_presentation(
+                        ticket,
+                        completion_timestamp,
+                        "new_output",
+                        completion.delivery(),
+                    );
+                    FramePresentationDisposition::DroppedLate(completion)
+                });
         }
         if !matches!(kind, FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded) {
             return FramePresentationDisposition::LostAuthority;
@@ -2019,6 +2171,12 @@ impl AppState {
         {
             return FramePresentationDisposition::LostAuthority;
         }
+        trace_non_ready_frame_presentation(
+            ticket,
+            completion_timestamp,
+            "new_output",
+            completion.delivery(),
+        );
         commit();
         FramePresentationDisposition::Presented(completion)
     }
@@ -2186,11 +2344,21 @@ impl AppState {
             }
         };
         let accepted = application.accepted();
+        if accepted && application.delivery().kind() != FrameDeliveryKind::Ready {
+            tracing::debug!(
+                delivery = ?application.delivery(),
+                demand = ?application.demand(),
+                clock_phase = ?application.clock_phase(),
+                transport_before = ?application.transport_state_before(),
+                "Engine accepted a non-Ready Frame Delivery"
+            );
+        }
         let after = application.snapshot();
         if let Err(error) = self.playback_evidence.observe_delivery(application) {
             tracing::warn!(%error, "rejected Playback Evidence Frame Delivery");
         }
         self.capture_playback_evidence();
+        self.trace_playback_preview_scale_change("frame_delivery", before, after);
         if accepted {
             self.reanchor_playback_observation_projection_at(observed_at, completed_at);
         }
@@ -2272,6 +2440,28 @@ impl AppState {
             })
             .transpose()
             .map_err(Into::into)
+    }
+}
+
+/// Preserve the owner-issued ticket and real terminal timestamp when a
+/// presentation misses its contract. This diagnostic never reclassifies a
+/// delivery or supplies timing authority to an Adapter.
+fn trace_non_ready_frame_presentation(
+    ticket: FramePresentationTicket,
+    classified_at: MonotonicTimestamp,
+    publication_origin: &'static str,
+    delivery: FrameDelivery,
+) {
+    if delivery.kind() != FrameDeliveryKind::Ready {
+        tracing::debug!(
+            target: "mondrian_app::frame_presentation",
+            ?ticket,
+            ?classified_at,
+            carried_kind = ?ticket.delivery_kind_at(classified_at),
+            ?delivery,
+            publication_origin,
+            "accepted non-Ready presentation timing"
+        );
     }
 }
 
@@ -2558,6 +2748,431 @@ mod tests {
             FrameDeliveryCandidate::for_demand(identity, kind),
             state.playback_observation_instant_anchor,
         )
+    }
+
+    fn live_audio_fixture(seconds: u32) -> (AppState, std::path::PathBuf, TrackId) {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("mondrian-live-audio-{}", ProjectId::new()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tone.wav");
+        let data_bytes = seconds * 48_000_u32 * 2 * 4;
+        let mut wave = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        wave.write_all(b"RIFF").unwrap();
+        wave.write_all(&(36 + data_bytes).to_le_bytes()).unwrap();
+        wave.write_all(b"WAVEfmt ").unwrap();
+        wave.write_all(&16_u32.to_le_bytes()).unwrap();
+        wave.write_all(&3_u16.to_le_bytes()).unwrap();
+        wave.write_all(&2_u16.to_le_bytes()).unwrap();
+        wave.write_all(&48_000_u32.to_le_bytes()).unwrap();
+        wave.write_all(&384_000_u32.to_le_bytes()).unwrap();
+        wave.write_all(&8_u16.to_le_bytes()).unwrap();
+        wave.write_all(&32_u16.to_le_bytes()).unwrap();
+        wave.write_all(b"data").unwrap();
+        wave.write_all(&data_bytes.to_le_bytes()).unwrap();
+        for frame in 0..seconds * 48_000 {
+            let sample = 0.05 * (std::f32::consts::TAU * 440.0 * frame as f32 / 48_000.0).sin();
+            for _ in 0..2 {
+                wave.write_all(&sample.to_le_bytes()).unwrap();
+            }
+        }
+        drop(wave);
+        let library = AssetLibrary::open(root.join("library")).unwrap();
+        let asset = library
+            .commit_media_probe(
+                mondrian_assets::AssetMediaProbeCandidate::new(
+                    path.clone(),
+                    mondrian_core::MediaFileFingerprint::capture(&path),
+                    mondrian_media::probe_media_info(&path).unwrap(),
+                )
+                .unwrap(),
+                None,
+            )
+            .unwrap();
+        let mut sequence = Sequence::new("live audio");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence
+            .add_media_audio_clip(
+                track_id,
+                mondrian_timeline::Clip::new(
+                    asset,
+                    TimelineTime::ZERO,
+                    TimelineTime::new(i64::from(seconds), 1).unwrap(),
+                )
+                .unwrap(),
+                AudioSourceComponentId::primary(),
+            )
+            .unwrap();
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
+        (state, root, track_id)
+    }
+
+    fn set_live_audio_fader(state: &mut AppState, track_id: TrackId) {
+        state
+            .dispatch_action(
+                super::super::product_action::ProductAction::Audio(
+                    super::super::product_action::AudioProductAction::EditChannelStrip(
+                        mondrian_timeline::AudioChannelStripEditRequest {
+                            owner: mondrian_timeline::AudioChannelStripOwner::Track { track_id },
+                            edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb {
+                                value: -6.0,
+                            },
+                        },
+                    ),
+                )
+                .into_external_action(),
+            )
+            .expect("typed fader edit");
+    }
+
+    #[test]
+    fn committed_track_mute_replaces_running_pcm_without_restarting_transport() {
+        let (mut state, root, track_id) = live_audio_fixture(1);
+        state.play().expect("prepare running PCM");
+        let before = state.playback_engine.snapshot();
+        let generation = state.audio_playback_snapshot().generation;
+        assert!(state.active_audio_delivery_evidence().is_some());
+        state.set_track_muted(track_id, true).expect("author mute");
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert!(
+            state.audio_playback_snapshot().generation > generation,
+            "committed mute must retire old PCM rather than leave the old source prepared"
+        );
+        assert!(
+            state.active_audio_delivery_evidence().is_none(),
+            "muted Program is proven silent"
+        );
+        let muted_generation = state.audio_playback_snapshot().generation;
+        let video_track_id = state.active_sequence().unwrap().video_tracks[0].id;
+        state.set_track_visible(video_track_id, false).expect("visual-only edit");
+        assert_eq!(state.audio_playback_snapshot().generation, muted_generation);
+        state.set_track_muted(track_id, false).expect("author unmute");
+        assert_eq!(
+            state.audio_playback_snapshot().generation,
+            muted_generation + 1
+        );
+        assert!(state.active_audio_delivery_evidence().is_some());
+        let audible_generation = state.audio_playback_snapshot().generation;
+        set_live_audio_fader(&mut state, track_id);
+        assert_eq!(
+            state.audio_playback_snapshot().generation,
+            audible_generation + 1,
+            "one transaction must not rotate PCM twice through per-action refreshes"
+        );
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_audio_commit_refreshes_pcm_when_root_revision_is_unchanged() {
+        let (mut state, root, child_track) = live_audio_fixture(1);
+        let child = state.active_sequence().unwrap().clone();
+        let mut parent = Sequence::new("nested audio parent");
+        parent
+            .add_nested_audio_clip(
+                parent.audio_tracks[0].id,
+                mondrian_timeline::Clip::new_nested_sequence(
+                    child.id,
+                    TimelineTime::ZERO,
+                    TimelineTime::ONE,
+                    None,
+                )
+                .unwrap(),
+                child.audio_program.outputs[0].id,
+            )
+            .unwrap();
+        state.test_set_sequence(Some(parent));
+        state.test_add_sequence(child.clone());
+        state.play().expect("prepare nested PCM");
+        let root_revision = state.active_sequence().unwrap().revision;
+        let before = state.playback_engine.snapshot();
+        let generation = state.audio_playback_snapshot().generation;
+        state
+            .commit_sequence_edit(child.id, "mute nested Track", |sequence| {
+                sequence
+                    .audio_tracks
+                    .iter_mut()
+                    .find(|track| track.id == child_track)
+                    .unwrap()
+                    .is_muted = true;
+                Ok(())
+            })
+            .expect("commit child author edit");
+        assert_eq!(state.active_sequence().unwrap().revision, root_revision);
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.audio_playback_snapshot().generation, generation + 1);
+        // The root still executes its nested source; the child now renders silence.
+        assert!(state.active_audio_delivery_evidence().is_some());
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_audio_edit_clears_old_pcm_when_new_source_cannot_prepare() {
+        let (mut state, root, track_id) = live_audio_fixture(1);
+        state.play().expect("prepare initial PCM");
+        let generation = state.audio_playback_snapshot().generation;
+        state.test_set_asset_library(Some(
+            AssetLibrary::open(root.join("unbound-library")).unwrap(),
+        ));
+        set_live_audio_fader(&mut state, track_id);
+        assert_eq!(
+            mondrian_timeline::audio_channel_strip(
+                state.active_sequence().unwrap(),
+                mondrian_timeline::AudioChannelStripOwner::Track { track_id },
+            )
+            .unwrap()
+            .fader_db,
+            -6.0
+        );
+        assert!(state.audio_playback_snapshot().generation > generation);
+        assert!(state.active_audio_delivery_evidence().is_none());
+        assert!(state.latest_audio_meter_frame().is_none());
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a physical CoreAudio output device; emits a quiet test tone"]
+    fn physical_coreaudio_live_authoring_retires_pcm_and_reacquires_clock() {
+        fn wait_for_audio(state: &mut AppState, expected_peak: f32) -> serde_json::Value {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("physical Audio poll");
+                let audio = state.audio_playback_snapshot();
+                let peak = state.latest_audio_meter_frame().and_then(|frame| {
+                    frame.targets.iter().find_map(|target| {
+                        matches!(
+                            target.target,
+                            mondrian_audio::AudioMeterTarget::ProgramOutput(_)
+                        )
+                        .then(|| target.channels[0].sample_peak_linear)
+                    })
+                });
+                if let Some(output) = audio.output.filter(|output| {
+                    output.active
+                        && !output.stream_failed
+                        && output.active_callback_consumed_frames >= 4_800
+                        && state.playback_clock_master() == Some(ClockMaster::AudioDevice)
+                        && peak.is_some_and(|peak| (peak - expected_peak).abs() < 0.001)
+                }) {
+                    return serde_json::json!({
+                        "pcm_generation": audio.generation,
+                        "stream_generation": output.stream_generation,
+                        "callback_count": output.callback_count,
+                        "consumed_frames": output.active_callback_consumed_frames,
+                        "underrun_frames": output.underrun_frames,
+                        "sample_rate": output.contract.sample_rate,
+                        "channels": output.contract.channels(),
+                        "program_peak": peak,
+                        "clock_master": "AudioDevice",
+                        "device": format!("{:?}", state.latest_audio_output_device_evidence()),
+                        "snapshot": format!("{audio:?}"),
+                    });
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "physical audio did not converge: {audio:?}, peak={peak:?}, clock={:?}",
+                    state.playback_clock_master()
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let (mut state, root, track_id) = live_audio_fixture(30);
+        let mut observations = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.play().expect("physical play");
+            observations.push(wait_for_audio(&mut state, 0.05));
+            let before = state.playback_engine.snapshot();
+            state.set_track_muted(track_id, true).expect("live mute");
+            assert_eq!(state.playback_engine.snapshot(), before);
+            let until = Instant::now() + Duration::from_millis(150);
+            while Instant::now() < until {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("muted poll");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(state.active_audio_delivery_evidence().is_none());
+            assert!(state.latest_audio_meter_frame().is_none());
+            let muted = state.audio_playback_snapshot();
+            assert!(muted
+                .output
+                .is_some_and(|output| !output.active && output.buffered_frames == 0));
+            observations.push(serde_json::json!({"muted": true, "snapshot": format!("{muted:?}"), "clock": format!("{:?}", state.playback_clock_master())}));
+            state.set_track_muted(track_id, false).expect("live unmute");
+            observations.push(wait_for_audio(&mut state, 0.05));
+            let before = state.playback_engine.snapshot();
+            set_live_audio_fader(&mut state, track_id);
+            assert_eq!(state.playback_engine.snapshot(), before);
+            observations.push(wait_for_audio(&mut state, 0.05 * 10_f32.powf(-6.0 / 20.0)));
+        }));
+        let shutdown = state.shutdown_audio_playback_and_wait();
+        let report = serde_json::json!({
+            "classification": "DiagnosticOnly", "passed": result.is_ok() && shutdown.all_workers_terminated(),
+            "observations": observations, "shutdown": shutdown,
+            "limitation": "short physical Audio callback/PCM/clock test, no video or commercial endurance qualification",
+        });
+        println!("{}", serde_json::to_string(&report).unwrap());
+        if let Some(path) = std::env::var_os("MONDRIAN_LIVE_AUDIO_EVIDENCE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(shutdown.all_workers_terminated(), "{shutdown:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires two physical CoreAudio outputs and operator default-device changes; emits a quiet test tone"]
+    fn physical_coreaudio_default_device_change_retires_stream_and_restores_clock() {
+        fn wait_for_device(
+            state: &mut AppState,
+            previous_generation: Option<u64>,
+            original_device: Option<&mondrian_media::RealtimeAudioOutputDeviceId>,
+            returning: bool,
+        ) -> (
+            u64,
+            mondrian_media::RealtimeAudioOutputDeviceId,
+            serde_json::Value,
+        ) {
+            let timeout = if previous_generation.is_some() { 60 } else { 5 };
+            let deadline = Instant::now() + Duration::from_secs(timeout);
+            let mut previous_callback = None;
+            let mut stable_since = None;
+            let mut frozen_loss = None;
+            loop {
+                state.advance_playback_clock_at(Instant::now());
+                state.pump_audio_output().expect("physical default-device poll");
+                let audio = state.audio_playback_snapshot();
+                if let Some(output) = audio.output {
+                    if let Some((generation, count)) = previous_callback
+                        && generation == output.stream_generation
+                    {
+                        assert!(output.callback_count >= count, "callback counter regressed");
+                    }
+                    previous_callback = Some((output.stream_generation, output.callback_count));
+                    let device = state.latest_audio_output_device_evidence().unwrap();
+                    let expected_device = original_device
+                        .is_none_or(|original| (device.device_id == *original) == returning);
+                    let recovered = output.active
+                        && !output.stream_failed
+                        && output.active_callback_consumed_frames >= 4_800
+                        && previous_generation.is_none_or(|old| output.stream_generation > old)
+                        && expected_device
+                        && state.playback_clock_master() == Some(ClockMaster::AudioDevice);
+                    if recovered {
+                        let since = *stable_since.get_or_insert_with(Instant::now);
+                        if previous_generation.is_some() {
+                            let loss =
+                                audio.output_lifecycle.last_loss.expect("retired stream receipt");
+                            // CoreAudio may fail the old native stream before
+                            // the owner's periodic default-identity poll. The
+                            // production owner preserves that observed failure;
+                            // the new physical device ID proves this transition.
+                            match loss.reason {
+                                mondrian_media::RealtimeAudioOutputLossReason::DefaultDeviceChanged => {}
+                                mondrian_media::RealtimeAudioOutputLossReason::BackendFailure => {
+                                    assert!(loss.final_output.stream_failed, "backend loss lacks a native failure");
+                                }
+                                reason => panic!("unexpected default-device retirement: {reason:?}"),
+                            }
+                            assert_eq!(
+                                Some(loss.final_output.stream_generation),
+                                previous_generation
+                            );
+                            assert!(!loss.final_output.active);
+                            if let Some(frozen) = frozen_loss {
+                                assert_eq!(loss, frozen, "retired callback evidence changed");
+                            }
+                            frozen_loss = Some(loss);
+                        }
+                        if since.elapsed() >= Duration::from_secs(1) {
+                            assert_eq!(audio.active_interval_underrun_frames, 0);
+                            return (
+                                output.stream_generation,
+                                device.device_id.clone(),
+                                serde_json::json!({
+                                    "device_id": device.device_id,
+                                    "device_name": device.device_name,
+                                    "host": device.host_name,
+                                    "sample_rate": output.contract.sample_rate,
+                                    "channels": output.contract.channels(),
+                                    "stream_generation": output.stream_generation,
+                                    "callback_count": output.callback_count,
+                                    "consumed_frames": output.active_callback_consumed_frames,
+                                    "default_device_change_count": audio.output_lifecycle.default_device_change_count,
+                                    "clock_master": "AudioDevice",
+                                    "snapshot": format!("{audio:?}"),
+                                }),
+                            );
+                        }
+                    } else {
+                        stable_since = None;
+                        frozen_loss = None;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "default-device recovery timed out: {audio:?}"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let (mut state, root, _) = live_audio_fixture(150);
+        let mut observations = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state.play().expect("physical play");
+            let (first_generation, original, evidence) =
+                wait_for_device(&mut state, None, None, false);
+            observations.push(evidence);
+            println!("COREAUDIO_DEFAULT_CHANGE_READY: select a different system default output");
+            let (second_generation, changed, evidence) =
+                wait_for_device(&mut state, Some(first_generation), Some(&original), false);
+            assert_ne!(changed, original);
+            observations.push(evidence);
+            println!("COREAUDIO_DEFAULT_RETURN_READY: restore the original system default output");
+            let (_, restored, evidence) =
+                wait_for_device(&mut state, Some(second_generation), Some(&original), true);
+            assert_eq!(restored, original);
+            observations.push(evidence);
+            let lifecycle = state.audio_playback_snapshot().output_lifecycle;
+            assert_eq!(lifecycle.lost_count, 2);
+            assert_eq!(
+                lifecycle.default_device_change_count + lifecycle.backend_loss_count,
+                2
+            );
+            assert_eq!(lifecycle.controlled_recycle_count, 0);
+            assert_eq!(lifecycle.device_selection_change_count, 0);
+            assert_eq!(lifecycle.deactivation_failed_count, 0);
+        }));
+        let final_audio_snapshot = state.audio_playback_snapshot();
+        let shutdown = state.shutdown_audio_playback_and_wait();
+        let report = serde_json::json!({
+            "classification": if result.is_ok() && shutdown.all_workers_terminated() { "Passed" } else { "Failed" },
+            "observations": observations,
+            "final_audio_snapshot": format!("{final_audio_snapshot:?}"),
+            "shutdown": shutdown,
+            "limitation": "physical default-output round trip; no video or endurance qualification",
+        });
+        println!("{}", serde_json::to_string(&report).unwrap());
+        if let Some(path) = std::env::var_os("MONDRIAN_LIVE_AUDIO_EVIDENCE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(shutdown.all_workers_terminated(), "{shutdown:?}");
     }
 
     #[test]
@@ -3880,25 +4495,59 @@ mod tests {
     }
 
     #[test]
-    fn playback_next_wake_delay_is_bounded_while_playing() {
+    fn playback_next_wake_deadline_is_bounded_while_playing() {
         let mut state = state_with_sequence(30);
         play_ready(&mut state);
 
-        let delay = state.playback_next_wake_delay().expect("next playback wake");
+        let deadline = state.playback_next_wake_deadline().expect("next playback wake");
 
-        assert!(delay <= MAX_PLAYBACK_WAKE_DELAY);
+        assert!(deadline - state.playback_observation_instant_anchor <= MAX_PLAYBACK_WAKE_DELAY);
     }
 
     #[test]
-    fn playback_next_wake_delay_keeps_unpresented_priming_bounded() {
+    fn playback_next_wake_deadline_keeps_unpresented_priming_bounded() {
         let mut state = state_with_sequence(30);
         state.play().expect("play");
         assert!(state.is_playback_priming());
 
-        let delay =
-            state.playback_next_wake_delay().expect("priming fallback must schedule a wake");
+        let deadline = state
+            .playback_next_wake_deadline()
+            .expect("priming fallback must schedule a wake");
 
-        assert!(delay <= MAX_PLAYBACK_WAKE_DELAY);
+        assert!(deadline - state.playback_observation_instant_anchor <= MAX_PLAYBACK_WAKE_DELAY);
+    }
+
+    #[test]
+    fn playback_wake_stays_due_when_adapter_processing_ages_the_observation() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        let anchor = state.playback_observation_instant_anchor;
+        let deadline = state.playback_next_wake_deadline().expect("frame boundary wake");
+        let delayed_adapter_now = deadline + Duration::from_millis(25);
+        let relative = state.playback_next_wake().expect("same Engine wake").after();
+        assert!(delayed_adapter_now + relative > deadline);
+        assert_eq!(state.playback_next_wake_deadline(), Some(deadline));
+        assert!(deadline < delayed_adapter_now);
+        assert_eq!(state.playback_observation_instant_anchor, anchor);
+        state.pause().expect("pause");
+        assert_eq!(state.playback_next_wake_deadline(), None);
+    }
+
+    #[test]
+    fn playback_wake_uses_the_complete_owner_observation_mapping() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        let origin = state.playback_observation_instant_anchor;
+        let deadline = state.playback_next_wake_deadline().expect("frame wake");
+        state.advance_playback_clock_at(origin + Duration::from_millis(10));
+        let high_water = state.playback_engine.monotonic_high_water().duration_since_origin();
+        // The same clock mapping represented by an earlier observation pair.
+        // Engine high-water and the projection anchor need not be identical.
+        state.reanchor_playback_observation_projection_at(
+            origin + Duration::from_millis(5),
+            MonotonicTimestamp::from_duration(high_water - Duration::from_millis(5)),
+        );
+        assert_eq!(state.playback_next_wake_deadline(), Some(deadline));
     }
 
     #[test]
@@ -3995,16 +4644,16 @@ mod tests {
             MonotonicTimestamp::from_duration(Duration::from_millis(17))
         );
         assert_eq!(
-            state.playback_next_wake_delay(),
-            Some(Duration::from_millis(40))
+            state.playback_next_wake_deadline(),
+            Some(priming_completed_at + Duration::from_millis(40))
         );
 
         let subframe =
             state.advance_playback_clock_at(priming_completed_at + Duration::from_millis(3));
         assert_eq!(subframe.status, PlaybackAdvanceStatus::WaitingForFrame);
         assert_eq!(
-            state.playback_next_wake_delay(),
-            Some(Duration::from_millis(37))
+            state.playback_next_wake_deadline(),
+            Some(priming_completed_at + Duration::from_millis(40))
         );
 
         let boundary =

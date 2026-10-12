@@ -206,6 +206,8 @@ pub struct PreviewFutureMediaWindowDiagnostics {
     pub retained_cold_activation_frame: Option<i64>,
     /// Media frames physically retained for the bounded cold activation closure.
     pub retained_cold_activation_media_frames: usize,
+    /// Physical near/cold guards retained while the shared worker prepares a source.
+    pub retained_cold_preparation_media_frames: usize,
 }
 
 /// Point-in-time preview service counters for local performance diagnostics.
@@ -934,7 +936,7 @@ pub struct PreviewDecodeWorkLatencyBuckets {
 }
 
 impl PreviewDecodeWorkLatencyBuckets {
-    fn record(&mut self, duration_us: u64) {
+    pub(super) fn record(&mut self, duration_us: u64) {
         match duration_us {
             0..=10_000 => self.le_10ms = self.le_10ms.saturating_add(1),
             10_001..=16_000 => self.le_16ms = self.le_16ms.saturating_add(1),
@@ -975,11 +977,19 @@ impl PreviewDecodeWorkLatencyBuckets {
     }
 
     pub(super) fn p95_upper_bound_us(self) -> Option<u64> {
+        self.quantile_upper_bound_us(95)
+    }
+
+    pub(super) fn max_upper_bound_us(self) -> Option<u64> {
+        self.quantile_upper_bound_us(100)
+    }
+
+    fn quantile_upper_bound_us(self, percentile: u64) -> Option<u64> {
         let total = self.total();
         if total == 0 {
             return None;
         }
-        let rank = total.saturating_mul(95).saturating_add(99) / 100;
+        let rank = total.saturating_mul(percentile).saturating_add(99) / 100;
         let mut cumulative = 0_u64;
         for (count, upper_bound_us) in [
             (self.le_10ms, Some(10_000)),
@@ -1224,8 +1234,14 @@ pub struct PreviewDecodeAccessModeProfile {
     pub seek_index_probe_backed_frames: u64,
     /// Decode results whose keyframe index was learned from packets decoded in-session.
     pub seek_index_session_observed_frames: u64,
-    /// Decode results that reported active hardware decode at the media boundary.
-    pub hardware_decode_active_frames: u64,
+    /// Decode results that reported active native decoder output at the media boundary.
+    pub native_decoder_active_frames: u64,
+    /// Frames whose decoder established actual hardware execution.
+    pub hardware_decode_observed_frames: u64,
+    /// Native decoder frames without hardware/software execution observation.
+    pub hardware_decode_unobserved_frames: u64,
+    /// Native decoder frames whose decoder established software execution.
+    pub software_native_decode_observed_frames: u64,
     /// Decode results that reported zero-copy decoded-frame residency.
     pub zero_copy_active_frames: u64,
     /// Decode results whose media frame residency was GPU texture backed.
@@ -1398,14 +1414,14 @@ impl PreviewDecodeAccessModeProfile {
             .saturating_add(self.hardware_decode_require_gpu_requested_frames)
     }
 
-    fn hardware_decode_effective_frames(self) -> u64 {
+    fn native_decode_effective_frames(self) -> u64 {
         self.hardware_decode_cpu_transfer_observed_frames
             .saturating_add(self.hardware_decode_gpu_resident_native_frames)
     }
 
     fn hardware_decode_fallback_not_engaged_frames(self) -> u64 {
         self.hardware_decode_requested_frames()
-            .saturating_sub(self.hardware_decode_effective_frames())
+            .saturating_sub(self.native_decode_effective_frames())
     }
 
     pub(super) fn record(&mut self, diagnostics: PreviewDecodeDiagnostics, queue_wait_us: u64) {
@@ -1413,11 +1429,13 @@ impl PreviewDecodeAccessModeProfile {
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
             | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessFfmpegCpuUnorm16
             | PreviewDecodePath::InProcessCameraRawDng
             | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 self.in_process_cpu_frames = self.in_process_cpu_frames.saturating_add(1);
             }
-            PreviewDecodePath::InProcessFfmpegNative => {}
+            PreviewDecodePath::InProcessFfmpegNative
+            | PreviewDecodePath::InProcessVideoToolboxNative => {}
             PreviewDecodePath::ExternalFfmpegCpuRgba => {
                 self.external_ffmpeg_cpu_rgba_frames =
                     self.external_ffmpeg_cpu_rgba_frames.saturating_add(1);
@@ -1511,9 +1529,22 @@ impl PreviewDecodeAccessModeProfile {
                     self.seek_index_session_observed_frames.saturating_add(1);
             }
         }
-        if diagnostics.hardware_decode_active {
-            self.hardware_decode_active_frames =
-                self.hardware_decode_active_frames.saturating_add(1);
+        if diagnostics.native_decoder_active {
+            self.native_decoder_active_frames = self.native_decoder_active_frames.saturating_add(1);
+            match diagnostics.hardware_decode_observed {
+                Some(true) => {
+                    self.hardware_decode_observed_frames =
+                        self.hardware_decode_observed_frames.saturating_add(1)
+                }
+                None => {
+                    self.hardware_decode_unobserved_frames =
+                        self.hardware_decode_unobserved_frames.saturating_add(1)
+                }
+                Some(false) => {
+                    self.software_native_decode_observed_frames =
+                        self.software_native_decode_observed_frames.saturating_add(1)
+                }
+            }
         }
         if diagnostics.zero_copy_active {
             self.zero_copy_active_frames = self.zero_copy_active_frames.saturating_add(1);

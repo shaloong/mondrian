@@ -184,7 +184,12 @@ mod platform {
     use super::*;
 
     unsafe extern "C" {
+        static mach_task_self_: libc::mach_port_t;
         fn mach_host_self() -> libc::mach_port_t;
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
     }
 
     pub(super) fn physical_memory_capacity() -> PhysicalMemoryCapacityProbeResult {
@@ -217,17 +222,27 @@ mod platform {
         let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
         let mut count = libc::HOST_VM_INFO64_COUNT;
         // SAFETY: `statistics` is a correctly sized writable vm_statistics64
-        // buffer and Mach retains no pointer after returning.
-        let result = unsafe {
-            libc::host_statistics64(
-                mach_host_self(),
+        // buffer and Mach retains no pointer after returning. host_self returns
+        // an owned send right; task_self is borrowed. Retire the host right
+        // immediately after the call, including when statistics collection fails.
+        let (result, retirement) = unsafe {
+            let host = mach_host_self();
+            let result = libc::host_statistics64(
+                host,
                 libc::HOST_VM_INFO64,
                 statistics.as_mut_ptr().cast(),
                 &mut count,
-            )
+            );
+            let retirement = mach_port_deallocate(mach_task_self_, host);
+            (result, retirement)
         };
         if result != libc::KERN_SUCCESS {
             return Err(format!("host_statistics64 failed with Mach code {result}"));
+        }
+        if retirement != libc::KERN_SUCCESS {
+            return Err(format!(
+                "host send-right retirement failed with Mach code {retirement}"
+            ));
         }
         if count < libc::HOST_VM_INFO64_COUNT {
             return Err(format!(
@@ -237,17 +252,25 @@ mod platform {
         }
         // SAFETY: Mach reported a complete structure.
         let statistics = unsafe { statistics.assume_init() };
-        let available_pages = u64::from(statistics.free_count)
-            .checked_add(u64::from(statistics.inactive_count))
-            .and_then(|value| value.checked_add(u64::from(statistics.speculative_count)))
-            .ok_or_else(|| String::from("available-page count overflowed"))?;
-        let available = available_pages
-            .checked_mul(page_size)
-            .ok_or_else(|| String::from("available-memory byte count overflowed"))?
-            .min(total);
+        let available = available_memory_bytes(&statistics, page_size, total)?;
         let load = u32::try_from(total.saturating_sub(available).saturating_mul(100) / total)
             .unwrap_or(100);
         Ok((total, available, load))
+    }
+
+    fn available_memory_bytes(
+        statistics: &libc::vm_statistics64,
+        page_size: u64,
+        total: u64,
+    ) -> Result<u64, String> {
+        // Mach free_count already includes speculative_count.
+        let available_pages = u64::from(statistics.free_count)
+            .checked_add(u64::from(statistics.inactive_count))
+            .ok_or_else(|| String::from("available-page count overflowed"))?;
+        available_pages
+            .checked_mul(page_size)
+            .map(|bytes| bytes.min(total))
+            .ok_or_else(|| String::from("available-memory byte count overflowed"))
     }
 
     fn sysctl_u64(name: &CStr) -> Result<u64, String> {
@@ -278,6 +301,70 @@ mod platform {
             ));
         }
         Ok(value)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "requires isolated native Mach send-right ownership observation"]
+        fn memory_sampling_releases_host_send_right() {
+            unsafe extern "C" {
+                fn mach_port_get_refs(
+                    task: libc::mach_port_t,
+                    name: libc::mach_port_t,
+                    right: u32,
+                    refs: *mut u32,
+                ) -> libc::kern_return_t;
+            }
+
+            // SAFETY: The host send right is owned by this test; task_self is
+            // borrowed. Mach writes only to the valid counter pointers.
+            let (before, after) = unsafe {
+                let task = mach_task_self_;
+                let host = mach_host_self();
+                let mut before = 0;
+                assert_eq!(
+                    mach_port_get_refs(task, host, 0, &mut before),
+                    libc::KERN_SUCCESS
+                );
+                for _ in 0..8 {
+                    mach_memory().expect("native memory sample");
+                }
+                let mut after = 0;
+                assert_eq!(
+                    mach_port_get_refs(task, host, 0, &mut after),
+                    libc::KERN_SUCCESS
+                );
+                assert_eq!(mach_port_deallocate(task, host), libc::KERN_SUCCESS);
+                (before, after)
+            };
+            assert_eq!(
+                after, before,
+                "each memory sample must retire its host send right"
+            );
+        }
+
+        #[test]
+        fn speculative_pages_are_not_counted_twice() {
+            // SAFETY: vm_statistics64 contains only integer counters.
+            let mut statistics: libc::vm_statistics64 = unsafe { mem::zeroed() };
+            statistics.free_count = 32_000;
+            statistics.inactive_count = 20_000;
+            statistics.speculative_count = 20_000;
+            let available = available_memory_bytes(&statistics, 16_384, 17_179_869_184)
+                .expect("valid Mach page counters");
+            assert_eq!(available, 851_968_000);
+
+            // Speculative pages are a subset of the same reported free_count.
+            statistics.speculative_count = 0;
+            assert_eq!(
+                available_memory_bytes(&statistics, 16_384, 17_179_869_184)
+                    .expect("same available pages"),
+                available
+            );
+        }
     }
 }
 

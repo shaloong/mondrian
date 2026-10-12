@@ -61,6 +61,8 @@ pub enum ExportVideoEncoderImplementation {
     LibaomAv1,
     /// FFmpeg prores_ks software encoder.
     ProResKs,
+    /// FFmpeg VideoToolbox ProRes encoder with software fallback disabled.
+    ProResVideoToolbox,
     /// FFmpeg GIF encoder.
     Gif,
     /// Qualified professional mezzanine adapter.
@@ -73,6 +75,10 @@ pub enum ExportVideoEncoderImplementation {
     AmdAmf,
     /// In-process FFmpeg D3D12VA HEVC encoder.
     HevcD3d12Va,
+    /// Owned public VideoToolbox HEVC session on native Metal IOSurfaces.
+    HevcVideoToolbox,
+    /// Owned public VideoToolbox H.264 High session on native Metal IOSurfaces.
+    H264VideoToolbox,
 }
 
 /// Stable renderer backend bound to hardware-encoder candidate admission.
@@ -127,6 +133,7 @@ pub(crate) enum ResolvedVideoEncoder {
     Libx265,
     LibaomAv1,
     ProResKs,
+    ProResVideoToolbox,
     Gif,
     Professional(crate::mezzanine::MezzanineEncoderAdapter),
     NvidiaNvenc,
@@ -137,7 +144,10 @@ pub(crate) enum ResolvedVideoEncoder {
 impl ResolvedVideoEncoder {
     /// Return whether encoded frames execute on a hardware video engine.
     pub(crate) const fn is_hardware(self) -> bool {
-        matches!(self, Self::NvidiaNvenc | Self::IntelQsv | Self::AmdAmf)
+        matches!(
+            self,
+            Self::NvidiaNvenc | Self::IntelQsv | Self::AmdAmf | Self::ProResVideoToolbox
+        )
     }
 
     const fn diagnostic_implementation(self) -> ExportVideoEncoderImplementation {
@@ -146,6 +156,7 @@ impl ResolvedVideoEncoder {
             Self::Libx265 => ExportVideoEncoderImplementation::Libx265,
             Self::LibaomAv1 => ExportVideoEncoderImplementation::LibaomAv1,
             Self::ProResKs => ExportVideoEncoderImplementation::ProResKs,
+            Self::ProResVideoToolbox => ExportVideoEncoderImplementation::ProResVideoToolbox,
             Self::Gif => ExportVideoEncoderImplementation::Gif,
             Self::Professional(_) => ExportVideoEncoderImplementation::Professional,
             Self::NvidiaNvenc => ExportVideoEncoderImplementation::NvidiaNvenc,
@@ -160,6 +171,7 @@ impl ResolvedVideoEncoder {
             (Self::Libx265, VideoCodecConfig::Hevc { .. }) => "libx265",
             (Self::LibaomAv1, VideoCodecConfig::Av1 { .. }) => "libaom-av1",
             (Self::ProResKs, VideoCodecConfig::ProRes { .. }) => "prores_ks",
+            (Self::ProResVideoToolbox, VideoCodecConfig::ProRes { .. }) => "prores_videotoolbox",
             (Self::Gif, VideoCodecConfig::Gif { .. }) => "gif",
             (Self::Professional(adapter), _) => adapter.ffmpeg_name(),
             (Self::NvidiaNvenc, VideoCodecConfig::H264 { .. }) => "h264_nvenc",
@@ -226,7 +238,14 @@ fn resolve_video_encoder_with_probe(
         return Err(mondrian_core::MondrianError::Cancelled);
     }
     let software = software_encoder(codec);
+    let requires_twelve_bit_prores =
+        matches!(codec, VideoCodecConfig::ProRes { profile } if profile.is_4444());
     if static_hdr_metadata {
+        if requires_twelve_bit_prores {
+            return Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                "authored static HDR metadata has no qualified 12-bit ProRes 4444 lowering"
+            )));
+        }
         tracing::info!(
             encoder = software.ffmpeg_name(codec),
             "hardware encoder bypassed because authored static HDR metadata has an exact libx265 lowering only"
@@ -239,6 +258,11 @@ fn resolve_video_encoder_with_probe(
         ));
     }
     let Some(adapter) = adapter else {
+        if requires_twelve_bit_prores {
+            return Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                "12-bit ProRes 4444 requires an observed capable encoder; prores_ks only accepts 10-bit input"
+            )));
+        }
         tracing::info!(
             encoder = software.ffmpeg_name(codec),
             "hardware encoder unavailable because no active renderer adapter evidence was acquired"
@@ -250,7 +274,18 @@ fn resolve_video_encoder_with_probe(
             ExportHardwareEncoderAdmission::NoActiveRendererAdapter,
         ));
     };
-    let Some(candidate) = hardware_candidate(codec, adapter.vendor) else {
+    let candidate =
+        if cfg!(target_os = "macos") && adapter.backend == "Metal" && requires_twelve_bit_prores {
+            Some(ResolvedVideoEncoder::ProResVideoToolbox)
+        } else {
+            hardware_candidate(codec, adapter.vendor)
+        };
+    let Some(candidate) = candidate else {
+        if requires_twelve_bit_prores {
+            return Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                "12-bit ProRes 4444 requires a capable encoder on the active renderer platform; prores_ks only accepts 10-bit input"
+            )));
+        }
         let admission = if matches!(
             codec,
             VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. }
@@ -293,6 +328,11 @@ fn resolve_video_encoder_with_probe(
         }
         Err(error @ mondrian_core::MondrianError::Cancelled) => Err(error),
         Err(error) => {
+            if requires_twelve_bit_prores {
+                return Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                    "12-bit ProRes 4444 VideoToolbox admission failed; refusing 10-bit prores_ks fallback: {error}"
+                )));
+            }
             tracing::warn!(
                 encoder = candidate.ffmpeg_name(codec),
                 fallback_encoder = software.ffmpeg_name(codec),
@@ -368,6 +408,32 @@ pub(crate) fn resident_hevc_cuda_diagnostics(
         frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
         hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
         hardware_candidate: Some(ExportVideoEncoderImplementation::NvidiaNvenc),
+        renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
+        renderer_adapter_device: adapter.map(|adapter| adapter.device),
+        renderer_adapter_backend: adapter.map(renderer_backend),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn resident_videotoolbox_diagnostics(
+    codec: mondrian_media::ResidentEncodeCodec,
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+    hardware_observed: bool,
+) -> ExportVideoEncoderDiagnostics {
+    let selected_encoder = match codec {
+        mondrian_media::ResidentEncodeCodec::Hevc => {
+            ExportVideoEncoderImplementation::HevcVideoToolbox
+        }
+        mondrian_media::ResidentEncodeCodec::H264High => {
+            ExportVideoEncoderImplementation::H264VideoToolbox
+        }
+    };
+    ExportVideoEncoderDiagnostics {
+        selected_encoder,
+        hardware_selected: hardware_observed,
+        frame_transport: ExportVideoEncoderFrameTransport::SameDeviceGpuSurface,
+        hardware_admission: ExportHardwareEncoderAdmission::SameDeviceSessionOpened,
+        hardware_candidate: Some(selected_encoder),
         renderer_adapter_vendor: adapter.map(|adapter| adapter.vendor),
         renderer_adapter_device: adapter.map(|adapter| adapter.device),
         renderer_adapter_backend: adapter.map(renderer_backend),
@@ -508,9 +574,12 @@ pub(crate) fn apply_video_encoder_args(
             command.arg("-profile:v").arg("0").arg("-b:v").arg("0");
             apply_software_quality(command, codec);
         }
-        ResolvedVideoEncoder::ProResKs => {
+        ResolvedVideoEncoder::ProResKs | ResolvedVideoEncoder::ProResVideoToolbox => {
             if let VideoCodecConfig::ProRes { profile } = codec {
                 command.arg("-profile:v").arg(super::queue::prores_profile_variant(*profile));
+            }
+            if encoder == ResolvedVideoEncoder::ProResVideoToolbox {
+                command.arg("-allow_sw").arg("0");
             }
         }
         ResolvedVideoEncoder::Gif => {}
@@ -635,13 +704,93 @@ fn apply_coding_structure(command: &mut Command, coding: ResolvedVideoCodingStru
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset::VideoRateControl;
+    use crate::preset::{ProResProfile, VideoRateControl};
 
     fn h264() -> VideoCodecConfig {
         VideoCodecConfig::H264 {
             profile: H264Profile::High,
             rate_control: VideoRateControl::constant_quality(18),
         }
+    }
+
+    fn prores_xq() -> VideoCodecConfig {
+        VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq }
+    }
+
+    #[test]
+    fn twelve_bit_prores_never_selects_the_ten_bit_software_encoder() {
+        let error = resolve_video_encoder_with_probe(
+            &prores_xq(),
+            None,
+            false,
+            &ExecutionCancellationToken::new(),
+            || panic!("an absent adapter must not start a probe"),
+            |_, _| panic!("an absent adapter must not encode"),
+        )
+        .expect_err("12-bit ProRes requires a capable encoder");
+        assert!(error.to_string().contains("prores_ks only accepts 10-bit input"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_prores_xq_requires_a_successful_hardware_only_probe() {
+        let adapter = ActiveGraphicsAdapterIdentity {
+            name: "protocol-only Metal adapter".to_owned(),
+            vendor: 0,
+            device: 0,
+            backend: "Metal".to_owned(),
+        };
+        let selected = resolve_video_encoder_with_probe(
+            &prores_xq(),
+            Some(&adapter),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Ok(Command::new("protocol-only-not-spawned")),
+            |_, candidate| {
+                assert_eq!(candidate, ResolvedVideoEncoder::ProResVideoToolbox);
+                Ok(())
+            },
+        )
+        .expect("hardware-only VideoToolbox probe passed");
+        assert_eq!(selected.encoder, ResolvedVideoEncoder::ProResVideoToolbox);
+        assert_eq!(
+            selected.diagnostics.hardware_admission,
+            ExportHardwareEncoderAdmission::ProbePassed
+        );
+        assert_eq!(
+            selected.diagnostics.frame_transport,
+            ExportVideoEncoderFrameTransport::CpuRawvideoPipe
+        );
+
+        let error = resolve_video_encoder_with_probe(
+            &prores_xq(),
+            Some(&adapter),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Ok(Command::new("protocol-only-not-spawned")),
+            |_, _| {
+                Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                    "no hardware encoder"
+                )))
+            },
+        )
+        .expect_err("failed hardware probe must not silently choose prores_ks");
+        assert!(error.to_string().contains("refusing 10-bit prores_ks fallback"));
+
+        let mut command = Command::new("ffmpeg");
+        apply_video_encoder_args(
+            &mut command,
+            &prores_xq(),
+            ResolvedVideoCodingStructure::IntraOnly,
+            ResolvedVideoEncoder::ProResVideoToolbox,
+        );
+        let args = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-c:v", "prores_videotoolbox"]));
+        assert!(args.windows(2).any(|pair| pair == ["-profile:v", "5"]));
+        assert!(args.windows(2).any(|pair| pair == ["-allow_sw", "0"]));
     }
 
     fn test_adapter() -> ActiveGraphicsAdapterIdentity {

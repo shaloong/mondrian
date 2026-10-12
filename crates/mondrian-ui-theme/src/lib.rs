@@ -8,7 +8,7 @@ pub mod colors;
 pub mod spacing;
 pub mod typography;
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub use accessibility::AccessibilityPreferences;
 use colors::ColorTokens;
@@ -99,17 +99,19 @@ impl From<ThemePreset> for ThemePreference {
 }
 
 /// 活跃主题的全局存储
-static ACTIVE_THEME: std::sync::OnceLock<RwLock<Theme>> = std::sync::OnceLock::new();
+static ACTIVE_THEME: std::sync::OnceLock<RwLock<Arc<Theme>>> = std::sync::OnceLock::new();
 
-fn ensure_initialized() -> &'static RwLock<Theme> {
-    ACTIVE_THEME.get_or_init(|| RwLock::new(ThemePreset::Dark.build()))
+fn ensure_initialized() -> &'static RwLock<Arc<Theme>> {
+    ACTIVE_THEME.get_or_init(|| RwLock::new(Arc::new(ThemePreset::Dark.build())))
 }
 
-pub fn current_theme() -> std::sync::RwLockReadGuard<'static, Theme> {
-    ensure_initialized().read().unwrap_or_else(|e| e.into_inner())
+/// Return a stable theme snapshot without keeping the global lock held by UI code.
+pub fn current_theme() -> Arc<Theme> {
+    Arc::clone(&ensure_initialized().read().unwrap_or_else(|e| e.into_inner()))
 }
 
 pub fn set_theme(theme: Theme) {
+    let theme = Arc::new(theme);
     if let Some(lock) = ACTIVE_THEME.get() {
         *lock.write().unwrap_or_else(|e| e.into_inner()) = theme;
     } else {
@@ -155,7 +157,10 @@ mod tests {
 
     #[test]
     fn global_theme_can_be_read_and_switched() {
+        set_theme_preset(ThemePreset::Dark);
+        let previous = current_theme();
         set_theme_preset(ThemePreset::Light);
+        assert_eq!(previous.name, "Dark");
         assert_eq!(current_theme().name, "Light");
         set_theme_preset(ThemePreset::Dark);
     }

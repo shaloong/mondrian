@@ -574,7 +574,7 @@ pub struct RenderGpuOutputBoundaryBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Prepared OCIO fullscreen render pipeline.
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
@@ -600,7 +600,7 @@ pub struct RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Load operation for the output color attachment.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
@@ -648,6 +648,11 @@ pub enum RenderGpuOutputBoundaryRuntimeRecordError {
 pub enum RenderGpuInputStageRuntimeRecordError {
     /// The input transform could not be planned.
     Plan(RenderColorTransformError),
+    /// The active device cannot sample the decoded source texture format.
+    UnsupportedSourceTextureFormat {
+        /// Texture format required by the decoded source payload.
+        texture_format: GpuColorFrameTextureFormat,
+    },
     /// The planned input stage could not produce GPU resources.
     ResourcePlan(RenderGpuInputStageResourcePlanError),
     /// Pure OCIO backend contracts could not be prepared.
@@ -680,12 +685,20 @@ pub(crate) struct RenderGpuFusedInputBackend {
 impl RenderGpuFusedInputBackend {
     pub(crate) fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::BindGroup,
         output: &wgpu::TextureView,
+        timestamp_query: Option<(&wgpu::QuerySet, u32)>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mondrian.native-video.fused-working-input"),
+            timestamp_writes: timestamp_query.map(|(query_set, start_index)| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(start_index),
+                    end_of_pass_write_index: Some(start_index + 1),
+                }
+            }),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output,
                 depth_slice: None,
@@ -882,6 +895,7 @@ impl RenderGpuOutputBoundaryRuntime {
             .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
         let output_format = match output_texture_format {
             GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+            GpuColorFrameTextureFormat::Rgba16Unorm => OcioGpuWgpuColorTargetFormat::Rgba16Unorm,
             GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
             GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
         };
@@ -953,6 +967,54 @@ impl RenderGpuOutputBoundaryRuntime {
         &mut self,
     ) -> &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource> {
         &mut self.frame_table
+    }
+
+    /// Import a decoder-native source into this owner's frame identity/table.
+    /// Platform sampling and input color use the same native import contract
+    /// for Viewer and Export; no CPU pixel materialization is permitted here.
+    pub fn import_native_frame(
+        &mut self,
+        native_runtime: &mut crate::NativeVideoImportRuntime,
+        source_color_space: mondrian_core::ColorSpace,
+        input_transform: &crate::RenderInputTransform,
+        output_extent: mondrian_core::Resolution,
+        native_frame: &mondrian_media::PreviewNativeDecodedFrame,
+    ) -> Result<
+        RenderColorStageExecution<GpuColorFrameHandle>,
+        crate::GpuNativeDecodedFrameImportError,
+    > {
+        let resource = native_runtime.import(
+            &mut self.frame_ids,
+            source_color_space,
+            input_transform,
+            output_extent.width,
+            output_extent.height,
+            native_frame,
+        )?;
+        let handle = resource.handle().clone();
+        if self
+            .frame_table
+            .insert(resource)
+            .map_err(
+                |error| crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: format!("native working resource insertion failed: {error:?}"),
+                },
+            )?
+            .is_some()
+        {
+            return Err(crate::GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: "native working frame unexpectedly replaced a live resource".to_owned(),
+            });
+        }
+        Ok(RenderColorStageExecution {
+            result: handle,
+            stage_diagnostics: RenderColorStageDiagnostics {
+                total_stages: 1,
+                gpu_color_stages: 1,
+                stage_pixels: u64::from(output_extent.width) * u64::from(output_extent.height),
+                ..RenderColorStageDiagnostics::default()
+            },
+        })
     }
 
     /// Detach one exact output resource from this runtime's frame table.
@@ -1040,7 +1102,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let Self { frame_ids, frame_table, resource_pool, .. } = self;
@@ -1062,7 +1124,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         width: u32,
         height: u32,
         working_color_space: WorkingColorSpace,
@@ -1090,7 +1152,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         left: &GpuColorFrameHandle,
         right: &GpuColorFrameHandle,
         progress: f32,
@@ -1352,7 +1414,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         request: GpuCompositeRequest<'_>,
         engine: ColorEngine,
         gpu_options: RenderColorTransformGpuOptions,
@@ -1461,7 +1523,7 @@ impl RenderGpuOutputBoundaryRuntime {
         compositor: &GpuFrameCompositor,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         width: u32,
         height: u32,
         working_color_space: WorkingColorSpace,
@@ -1505,6 +1567,16 @@ impl RenderGpuOutputBoundaryRuntime {
         gpu_options: RenderColorTransformGpuOptions,
         backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
     ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let source_texture_format = frame.gpu_upload_texture_format();
+        if source_texture_format == GpuColorFrameTextureFormat::Rgba16Unorm
+            && !backend.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
+            return Err(
+                RenderGpuInputStageRuntimeRecordError::UnsupportedSourceTextureFormat {
+                    texture_format: source_texture_format,
+                },
+            );
+        }
         let Self {
             shader_cache,
             backend_prep,
@@ -1640,18 +1712,111 @@ impl RenderGpuOutputBoundaryRuntime {
             &stage_plan,
         )
         .map_err(RenderGpuFusedInputError::ResourcePlan)?;
-        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        self.prepare_fused_yuv_shader_backend(
+            &resources.transform.wgpu.shader_plan,
+            color_target_format_for_gpu_frame(output),
+            source,
+            device,
+            queue,
+        )
+    }
+
+    /// Inspect the physical owner caches without extraction, compilation, or LRU mutation.
+    pub(crate) fn fused_yuv_descriptor_backend_is_cached(
+        &self,
+        transform: &RenderInputTransform,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        input_source: &str,
+    ) -> bool {
+        let Ok((planned_output, request)) = crate::color_transform::input_to_working_gpu_contract(
+            input,
+            transform,
+            RenderColorTransformGpuOptions::default(),
+        ) else {
+            return false;
+        };
+        if planned_output != output {
+            return false;
+        }
+        let Some(shader) = self.shader_cache.cached(&request) else {
+            return false;
+        };
+        let format = match product_gpu_working_texture_format() {
+            GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
+            GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
+            _ => unreachable!("product working format must be floating point"),
+        };
+        self.backend_prep
+            .cached_static_pipeline(shader, format)
+            .is_some_and(|pipeline| {
+                self.backend_objects.fused_input_is_cached(shader, pipeline, input_source)
+            })
+    }
+
+    /// Device-cache preparation from a validated native contract, without frame identities.
+    pub(crate) fn prepare_fused_yuv_descriptor_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: ColorFrameDescriptor,
+        output: ColorFrameDescriptor,
+        source: (&str, &wgpu::BindGroupLayout),
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut self.shader_cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_input_to_working(input, transform)
+            .map_err(RenderGpuFusedInputError::Plan)?;
+        let planned = planned_gpu_source_transform(&stage_plan)
+            .map_err(RenderGpuFusedInputError::ResourcePlan)?;
+        if planned.gpu_output != output {
+            return Err(RenderGpuFusedInputError::ResourcePlan(
+                RenderGpuInputStageResourcePlanError::OutputDescriptorMismatch {
+                    expected: planned.gpu_output,
+                    actual: output,
+                },
+            ));
+        }
+        self.prepare_fused_yuv_shader_backend(
+            &planned.transform.wgpu.shader_plan,
+            match product_gpu_working_texture_format() {
+                GpuColorFrameTextureFormat::Rgba16Float => {
+                    OcioGpuWgpuColorTargetFormat::Rgba16Float
+                }
+                GpuColorFrameTextureFormat::Rgba32Float => {
+                    OcioGpuWgpuColorTargetFormat::Rgba32Float
+                }
+                _ => unreachable!("product working format must be floating point"),
+            },
+            source,
+            device,
+            queue,
+        )
+    }
+
+    fn prepare_fused_yuv_shader_backend(
+        &mut self,
+        shader_plan: &crate::OcioGpuShaderPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+        source: (&str, &wgpu::BindGroupLayout),
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<RenderGpuFusedInputBackend, RenderGpuFusedInputError> {
         let static_pipeline = self
             .backend_prep
-            .prepare_static_pipeline(&shader_plan, color_target_format_for_gpu_frame(output))
+            .prepare_static_pipeline(shader_plan, output_format)
             .map_err(RenderGpuFusedInputError::BackendPrep)?;
         let backend = self
             .backend_objects
-            .prepare_backend_objects(device, queue, &shader_plan, &static_pipeline)
+            .prepare_backend_objects(device, queue, shader_plan, &static_pipeline)
             .map_err(RenderGpuFusedInputError::BackendObjects)?;
         let pipeline = self.backend_objects.prepare_fused_input_pipeline(
             device,
-            &shader_plan,
+            shader_plan,
             &backend,
             source.0,
             source.1,
@@ -2596,6 +2761,11 @@ impl<'a> RenderOutputColorBoundaryPlanner<'a> {
             GpuColorFrameTextureFormat::Rgba8Unorm => {
                 self.stage_planner.plan_output_transform(descriptor, &transform)?
             }
+            GpuColorFrameTextureFormat::Rgba16Unorm => {
+                return Err(RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "RGBA16 UNORM is a source upload format, not a Program Output target",
+                });
+            }
             GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
                 self.stage_planner.plan_output_transform_float(descriptor, &transform)?
             }
@@ -2880,6 +3050,7 @@ fn validate_gpu_color_target_encoding(
 ) -> Result<(), RenderGpuColorTransformResourcePlanError> {
     let matches = match texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Unorm => encoding == ColorFrameEncoding::EncodedRgba16,
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             encoding != ColorFrameEncoding::EncodedRgba8
         }
@@ -2986,7 +3157,7 @@ pub struct RenderGpuOutputStageBackendContext<'a> {
     /// wgpu queue used for upload writes.
     pub queue: &'a wgpu::Queue,
     /// Command encoder receiving the color pass and optional readback copy.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Prepared OCIO fullscreen render pipeline.
     pub pipeline: &'a OcioGpuWgpuRenderPipeline,
     /// Prepared OCIO resource bind group.
@@ -3332,7 +3503,7 @@ impl RenderGpuOutputStageResourcePlan {
     pub fn record_readback_wgpu(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     ) -> Result<Option<wgpu::Buffer>, RenderGpuOutputStageReadbackError> {
         let Some(readback) = &self.readback else {
@@ -3355,6 +3526,7 @@ fn validate_output_texture_encoding(
 ) -> Result<(), RenderGpuOutputStageResourcePlanError> {
     let matches = match texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Unorm => false,
         GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
             encoding == ColorFrameEncoding::EncodedFloat
         }
@@ -3376,6 +3548,13 @@ fn output_readback_plan(
 ) -> Result<GpuColorFrameReadbackPlan, RenderGpuOutputStageResourcePlanError> {
     match output.texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => GpuColorFrameReadbackPlan::encoded_rgba8(output),
+        GpuColorFrameTextureFormat::Rgba16Unorm => {
+            return Err(RenderGpuOutputStageResourcePlanError::OutputReadback(
+                crate::GpuColorFrameReadbackError::UnsupportedTextureFormat {
+                    texture_format: GpuColorFrameTextureFormat::Rgba16Unorm,
+                },
+            ));
+        }
         GpuColorFrameTextureFormat::Rgba16Float => {
             GpuColorFrameReadbackPlan::encoded_rgba16float(output)
         }
@@ -3435,6 +3614,13 @@ impl RenderGpuInputStageResourcePlan {
                     frame,
                     GpuColorFrameTextureFormat::Rgba8Unorm,
                     "color-stage-source-rgba8-input",
+                )
+            }
+            CpuSourceColorFrame::EncodedUnorm16(frame) => {
+                GpuColorFrameUploadPlan::from_cpu_encoded_unorm16_frame(
+                    ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+                    frame,
+                    "color-stage-source-encoded-rgba16unorm-input",
                 )
             }
             CpuSourceColorFrame::EncodedFloat(frame) => {
@@ -3977,7 +4163,7 @@ impl RenderGpuColorPassSchedule {
 
     fn record_wgpu(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
@@ -4004,7 +4190,7 @@ impl RenderGpuColorPassSchedule {
     pub fn record_wgpu_from_resources(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
         wrapper_input_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
@@ -4397,6 +4583,41 @@ pub fn execute_cpu_source_input_stage_with_session(
     match frame {
         CpuSourceColorFrame::EncodedRgba8(frame) => {
             execute_cpu_input_stage_with_session(frame, transform, session)
+        }
+        CpuSourceColorFrame::EncodedUnorm16(frame) => {
+            let descriptor = frame.descriptor();
+            let mut planner = RenderColorStagePlanner::cpu_only();
+            let plan = planner.plan_input_to_working(descriptor, transform)?;
+            let source_color = descriptor.color_space.color().ok_or(
+                RenderColorTransformError::UnsupportedStagePlan {
+                    reason: "encoded RGBA16 source has no source color identity",
+                },
+            )?;
+            let samples = frame
+                .rgba()
+                .iter()
+                .map(|sample| f32::from(*sample) / f32::from(u16::MAX))
+                .collect();
+            let mut float = crate::CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                descriptor.width,
+                descriptor.height,
+                source_color,
+                samples,
+            );
+            float.set_alpha_contract(descriptor.alpha);
+            let mut result =
+                CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+                    &float, transform, session,
+                )
+                .map_err(|error| match error {
+                    RenderColorTransformError::ExecutionFailed(mut failure) => {
+                        failure.input = descriptor;
+                        RenderColorTransformError::ExecutionFailed(failure)
+                    }
+                    other => other,
+                })?;
+            result.diagnostics.input = descriptor;
+            Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
         }
         CpuSourceColorFrame::EncodedFloat(frame) => {
             let mut planner = RenderColorStagePlanner::cpu_only();
@@ -5088,6 +5309,7 @@ fn validate_descriptor(
 fn color_target_format_for_gpu_frame(frame: &GpuColorFrameHandle) -> OcioGpuWgpuColorTargetFormat {
     match frame.texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+        GpuColorFrameTextureFormat::Rgba16Unorm => OcioGpuWgpuColorTargetFormat::Rgba16Unorm,
         GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
         GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
     }
@@ -5160,6 +5382,7 @@ fn planned_gpu_source_upload_transform(
     let supported_source_encoding = matches!(
         upload_input.encoding,
         ColorFrameEncoding::EncodedRgba8
+            | ColorFrameEncoding::EncodedRgba16
             | ColorFrameEncoding::EncodedFloat
             | ColorFrameEncoding::LinearFloat
     );
@@ -5168,7 +5391,7 @@ fn planned_gpu_source_upload_transform(
         || upload_input.residency != ColorFrameResidency::Cpu
     {
         return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
-            reason: "GPU input upload must consume CPU RGBA8, source-encoded float, or scene-linear float source data",
+            reason: "GPU input upload requires source-encoded RGBA8/RGBA16/float or scene-linear float data",
         });
     }
     if gpu_output.domain != ColorFrameDomain::Working
@@ -6311,6 +6534,153 @@ mod tests {
         assert_eq!(diagnostics.shader_cache.entries, 1);
         assert_eq!(diagnostics.backend_prep.resources.entries, 1);
         assert_eq!(diagnostics.backend_objects.entries, 1);
+    }
+
+    #[tokio::test]
+    async fn encoded_unorm16_input_matches_cpu_color_on_real_gpu() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping RGBA16 GPU parity: no adapter");
+            return;
+        };
+        if !context.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+            eprintln!("skipping RGBA16 GPU parity: adapter lacks 16-bit normalized textures");
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(context.adapter.get_info().backend, wgpu::Backend::Metal);
+
+        let mut samples = Vec::with_capacity(4 * 4 * 4);
+        for index in 0..16_u16 {
+            samples.extend_from_slice(&[
+                index * 3_001,
+                u16::MAX - index * 2_103,
+                index * 1_313,
+                [0, 32_768, u16::MAX, 16_384][usize::from(index % 4)],
+            ]);
+        }
+        for color_space in [
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ] {
+            let source =
+                CpuSourceColorFrame::from(crate::CpuEncodedUnorm16ColorFrame::source_shared(
+                    4,
+                    4,
+                    color_space,
+                    Arc::new(samples.clone()),
+                ));
+            let transform = RenderInputTransform::to_working(
+                WorkingColorSpace::LinearRec709,
+                false,
+                ColorEngine::mondrian_standard(),
+            );
+            let expected = execute_cpu_source_input_stage(&source, &transform)
+                .expect("CPU reference")
+                .result
+                .frame;
+            // The float control uses the exact CPU normalization of the same
+            // sixteen-bit fixture, isolating texture conversion from OCIO math.
+            let float_control =
+                CpuSourceColorFrame::from(crate::CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                    4,
+                    4,
+                    color_space,
+                    samples.iter().map(|sample| f32::from(*sample) / f32::from(u16::MAX)).collect(),
+                ));
+            let mut violations = Vec::new();
+            for (source, input_format) in [
+                (&float_control, GpuColorFrameTextureFormat::Rgba32Float),
+                (&source, GpuColorFrameTextureFormat::Rgba16Unorm),
+            ] {
+                let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_310)
+                    .expect("GPU runtime");
+                let mut encoder =
+                    context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("mondrian-test-rgba16-input-parity"),
+                    });
+                let record = runtime
+                    .record_wgpu_input_stage_owned_backend(
+                        &transform,
+                        source,
+                        RenderColorTransformGpuOptions::default(),
+                        RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                            device: &context.device,
+                            queue: &context.queue,
+                            encoder: &mut encoder,
+                            load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        },
+                    )
+                    .expect("RGBA16 source records through production OCIO input stage");
+                assert_eq!(record.materialized.input.texture_format(), input_format);
+                assert_eq!(record.stage_diagnostics.upload_stages, 1);
+                assert_eq!(record.stage_diagnostics.readback_stages, 0);
+
+                let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mondrian-test-rgba16-working-readback"),
+                    size: 256 * 4,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                });
+                let output = runtime
+                    .frame_table()
+                    .get(&record.materialized.output)
+                    .expect("working output exists");
+                encoder.copy_texture_to_buffer(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &output.resource().texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &readback,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: Some(4),
+                        },
+                    },
+                    wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                );
+                context.queue.submit(std::iter::once(encoder.finish()));
+                let mapped = map_readback_buffer(&context.device, &readback);
+                let actual = mapped
+                    .chunks_exact(256)
+                    .take(4)
+                    .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+                    .collect::<Vec<_>>();
+                readback.unmap();
+                let expected = expected.rgba_f32().data.as_flattened();
+                let max_delta = actual
+                    .iter()
+                    .zip(expected)
+                    .map(|(actual, expected)| (actual - expected).abs())
+                    .fold(0.0_f32, f32::max);
+                assert_eq!(actual.len(), expected.len());
+                assert!(
+                    actual.iter().all(|sample| sample.is_finite()),
+                    "{input_format:?} {color_space:?} produced nonfinite working samples"
+                );
+                let mut differences = actual.iter().zip(expected).enumerate().collect::<Vec<_>>();
+                differences.sort_by(|(_, (actual_a, expected_a)), (_, (actual_b, expected_b))| {
+                    (*actual_b - *expected_b).abs().total_cmp(&(*actual_a - *expected_a).abs())
+                });
+                eprintln!(
+                    "{input_format:?} {color_space:?} max delta {max_delta}; worst samples {:?}",
+                    &differences[..3]
+                );
+                if max_delta > 1.0e-3 {
+                    violations.push((input_format, max_delta));
+                }
+            }
+            assert!(
+                violations.is_empty(),
+                "{color_space:?} GPU/CPU working parity failures: {violations:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8481,7 +8851,7 @@ mod tests {
     }
 
     fn standard_view_parity_working_frame() -> CpuColorFrame {
-        let data = vec![
+        let mut data = vec![
             [-0.05, 0.0, 0.001, 1.0],
             [0.001, 0.001, 0.001, 0.875],
             [0.18, 0.18, 0.18, 0.75],
@@ -8491,7 +8861,11 @@ mod tests {
             [0.0, 0.0, 1.0, 0.25],
             [4.0, 2.0, 0.5, 0.125],
             [16.0, 16.0, 16.0, 1.0],
+            [0.4, 0.3, 0.2, 0.0],
         ];
+        // Reuse the dense finite HDR/negative/partial-alpha corpus for every
+        // Standard target, including SDR; the original precision budgets apply.
+        data.extend_from_slice(&pq_accuracy_working_frame().rgba_f32().data);
         CpuColorFrame::working(WorkingRgbaF32Frame {
             width: u32::try_from(data.len()).expect("parity corpus width"),
             height: 1,
@@ -8921,7 +9295,7 @@ mod tests {
         assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 2);
         assert_eq!(record.color_stage_diagnostics.upload_stages, 0);
         assert_eq!(record.color_stage_diagnostics.readback_stages, 0);
-        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 2);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 4);
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("external-adjustment-readback"),
             size: 256 * 4,
@@ -9620,11 +9994,12 @@ mod tests {
             )
             .expect("record zero-opacity adjustment graph");
 
-        assert_eq!(record.output.id(), input.id());
+        assert_ne!(record.output.id(), input.id());
         assert_eq!(record.external_adjustment_passes, 0);
         assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 0);
-        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
-        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 1);
     }
 
     #[test]

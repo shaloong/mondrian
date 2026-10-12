@@ -432,6 +432,10 @@ impl Widget for StatusBar {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 pub(super) fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
@@ -2273,12 +2277,16 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
 
 pub(crate) fn viewer_presentation_geometry(
     widget: &dyn Widget,
+    pixels_per_point: f32,
 ) -> Option<ViewerPresentationGeometry> {
     if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
-        return viewer.presentation_geometry();
+        return viewer.presentation_geometry(pixels_per_point);
     }
     for index in 0..widget.child_count() {
-        if let Some(geometry) = widget.child(index).and_then(viewer_presentation_geometry) {
+        if let Some(geometry) = widget
+            .child(index)
+            .and_then(|child| viewer_presentation_geometry(child, pixels_per_point))
+        {
             return Some(geometry);
         }
     }
@@ -4657,6 +4665,55 @@ mod tests {
     }
 
     #[test]
+    fn narrow_preview_refresh_installs_and_retires_scope_textures_in_the_live_dock() {
+        struct ReadyPreview;
+        impl ViewerPreviewSource for ReadyPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Ready(mondrian_ui_widgets::ViewerFrameContent::ExternalTexture(
+                    mondrian_ui_widgets::ViewerExternalTextureFrame::new("current", 1920, 1080)
+                        .expect("valid GPU frame"),
+                ))
+            }
+        }
+        struct LoadingPreview;
+        impl ViewerPreviewSource for LoadingPreview {
+            fn viewer_preview_for_state(&self, _state: &AppState) -> ViewerPreviewState {
+                ViewerPreviewState::Loading
+            }
+        }
+        let mut state = AppState::new();
+        state.test_set_sequence(Some(Sequence::new("scopes")));
+        let preferences = AppUiPreferences {
+            workspace_preset: WorkspacePreset::Color,
+            ..AppUiPreferences::default()
+        };
+        let mut root = AppUiAppRoot::from_app_state_with_preferences(&state, &preferences);
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        root.layout(bounds);
+        assert!(root.is_panel_active(PanelKind::Scopes));
+        let theme = ThemePreset::Dark.build();
+        for (preview, waiting) in [
+            (&ReadyPreview as &dyn ViewerPreviewSource, false),
+            (&LoadingPreview as &dyn ViewerPreviewSource, true),
+            (&ReadyPreview as &dyn ViewerPreviewSource, false),
+        ] {
+            root.refresh_playback_frame_from_app_state(&state, Some(preview));
+            let mut encoder = PaintOrderRecorder::default();
+            root.paint(&mut PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect: bounds,
+            });
+            assert_eq!(
+                encoder.texts.iter().any(|text| text == "等待 Scopes tap"),
+                waiting,
+                "live scope widget must follow the admitted preview snapshot",
+            );
+        }
+    }
+
+    #[test]
     fn transport_only_refresh_preserves_the_installed_viewer_output() {
         struct ReadyPreview;
 
@@ -4834,6 +4891,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -5351,6 +5409,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),
@@ -5384,6 +5443,7 @@ mod tests {
         root.layout(Rect::new(0.0, 0.0, 1280.0, 720.0));
         let mut encoder = PaintOrderRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 1280.0, 720.0),

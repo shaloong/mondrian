@@ -51,7 +51,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ));
         };
         let frame = transport.current_frame().max(0);
-        let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
+        let (width, height) =
+            preview_dimensions_for_snapshot(snapshot, sequence, self.raster_requirement.get());
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
@@ -84,15 +85,33 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ));
                 }
             };
-        self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
-            snapshot,
-            sequence,
-            frame,
-            width,
-            height,
-            display_color_space,
-            self.display_snapshot_identity.get(),
-        ));
+        let generation_binding =
+            self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
+                snapshot,
+                sequence,
+                frame,
+                width,
+                height,
+                display_color_space,
+                self.display_snapshot_identity.get(),
+                self.raster_requirement.get(),
+            ));
+        if carrier == PreviewPresentationCarrier::ExternalGpu
+            && !transport.is_playing()
+            && matches!(generation_binding, PreviewGenerationBinding::Current(_))
+            && let Some((_, output)) = self.registered_exact_current_gpu_output_artifact()
+        {
+            // The Window already owns the final output for this exact still
+            // generation. Resolving its retired decoder inputs again would
+            // start a new media request on every UI projection.
+            self.try_release_settled_transport_media_residency();
+            return self.observe_preview_state(PreviewPresentationState::Ready(
+                PreviewPresentationCandidate::new(
+                    PreviewPresentationContent::Gpu(output),
+                    self.playback_presentation_ticket(snapshot),
+                ),
+            ));
+        }
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
         let evaluation_key = FrameEvaluationKey {
@@ -105,7 +124,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             width,
             height,
-            runtime_scale: transport.runtime_scale(),
+            runtime_scale: self.execution_scale(snapshot),
+            raster_requirement: self.raster_requirement.get(),
             display_color_space,
             display_contract_identity: self.display_snapshot_identity.get(),
         };

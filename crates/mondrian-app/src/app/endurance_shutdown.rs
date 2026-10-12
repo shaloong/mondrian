@@ -226,6 +226,10 @@ pub struct AppProjectShutdownEvidence {
     pub session_was_open: bool,
     /// Whether an asynchronous Project close was already active.
     pub pending_close_was_active: bool,
+    /// Whether shutdown began with an uninstalled Open candidate or barrier.
+    pub pending_open_was_active: bool,
+    /// Whether the candidate/result ticket and its lease capabilities were released.
+    pub pending_open_released: bool,
     /// Whether no authoring Session remains in the consumed App owner.
     pub authoring_session_released: bool,
     /// Whether no persistence close ticket remains installed.
@@ -243,6 +247,7 @@ impl AppProjectShutdownEvidence {
     pub const fn all_resources_released(&self) -> bool {
         self.authoring_session_released
             && self.pending_close_released
+            && self.pending_open_released
             && self.runtime_lease_released
             && self.retired_library_generations_remaining == 0
             && self.lifecycle_failure.is_none()
@@ -370,13 +375,17 @@ impl AppEnduranceShutdownEvidence {
             )?
             .checked_add(AppBackgroundDomainSnapshot::terminal_from_worker(
                 self.execution_memory_observer,
-            )?)?,
+            )?)?
+            .checked_add(AppBackgroundDomainSnapshot {
+                owned_resource_units: u64::from(!self.project.pending_open_released),
+                ..AppBackgroundDomainSnapshot::default()
+            })?,
         })
     }
 }
 
 #[cfg(any(test, feature = "validation"))]
-const APP_SHUTDOWN_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const APP_SHUTDOWN_RECEIPT_SCHEMA_VERSION: u32 = 2;
 #[cfg(any(test, feature = "validation"))]
 const MAXIMUM_APP_SHUTDOWN_LEAF_JSON_BYTES: usize = 512 * 1024;
 #[cfg(any(test, feature = "validation"))]
@@ -546,6 +555,8 @@ impl CanonicalAppEnduranceShutdownEvidence {
 struct CanonicalAppProjectShutdownEvidence {
     session_was_open: bool,
     pending_close_was_active: bool,
+    pending_open_was_active: bool,
+    pending_open_released: bool,
     authoring_session_released: bool,
     pending_close_released: bool,
     runtime_lease_released: bool,
@@ -559,6 +570,8 @@ impl From<&AppProjectShutdownEvidence> for CanonicalAppProjectShutdownEvidence {
         Self {
             session_was_open: evidence.session_was_open,
             pending_close_was_active: evidence.pending_close_was_active,
+            pending_open_was_active: evidence.pending_open_was_active,
+            pending_open_released: evidence.pending_open_released,
             authoring_session_released: evidence.authoring_session_released,
             pending_close_released: evidence.pending_close_released,
             runtime_lease_released: evidence.runtime_lease_released,
@@ -573,6 +586,7 @@ impl CanonicalAppProjectShutdownEvidence {
     fn all_resources_released(&self) -> bool {
         self.authoring_session_released
             && self.pending_close_released
+            && self.pending_open_released
             && self.runtime_lease_released
             && self.retired_library_generations_remaining == 0
             && self.lifecycle_failure.is_none()
@@ -911,6 +925,7 @@ impl AppState {
         let infrastructure_owned_resources = persistence
             .owned_resources
             .checked_add(native_memory.owned_resources)
+            .and_then(|value| value.checked_add(u64::from(self.pending_project_open.is_some())))
             .ok_or_else(|| "Infrastructure resource inventory overflowed u64".to_owned())?;
         let infrastructure_failures = persistence
             .cumulative_failures
@@ -982,7 +997,7 @@ impl AppState {
     /// Close admission and broadcast cooperative cancellation to every App-owned
     /// domain that can be signaled without consuming its terminal receipt.
     pub(crate) fn begin_endurance_shutdown(&mut self) {
-        if self.authoring.is_some()
+        if (self.authoring.is_some() || self.pending_project_open.is_some())
             && self.pending_project_close.is_none()
             && self.project_close_fault.is_none()
             && let Err(error) = self.begin_project_close()
@@ -1014,8 +1029,11 @@ impl AppState {
         let reference_output = self.reference_output.finish_endurance_shutdown(deadline);
         let session_was_open = self.authoring.is_some();
         let pending_close_was_active = self.pending_project_close.is_some();
+        let pending_open_was_active = self.pending_project_open.is_some();
         let mut lifecycle_failure = None;
-        if session_was_open && self.pending_project_close.is_none() {
+        if (session_was_open || self.pending_project_open.is_some())
+            && self.pending_project_close.is_none()
+        {
             if self.project_close_fault.is_some() {
                 lifecycle_failure = Some(
                     "Project close entered endurance shutdown with poisoned persistence authority"
@@ -1025,7 +1043,9 @@ impl AppState {
                 lifecycle_failure = Some(error.to_string());
             }
         }
-        while lifecycle_failure.is_none() && self.pending_project_close.is_some() {
+        while lifecycle_failure.is_none()
+            && (self.pending_project_close.is_some() || self.pending_project_open.is_some())
+        {
             match self.poll_project_close() {
                 ProjectClosePoll::Pending => {
                     if Instant::now() >= deadline {
@@ -1095,6 +1115,8 @@ impl AppState {
         let project = AppProjectShutdownEvidence {
             session_was_open,
             pending_close_was_active,
+            pending_open_was_active,
+            pending_open_released: self.pending_project_open.is_none(),
             authoring_session_released: self.authoring.is_none(),
             pending_close_released: self.pending_project_close.is_none(),
             runtime_lease_released: self.project_runtime_lease.is_none(),
@@ -1269,6 +1291,28 @@ mod tests {
                 clean_receipt.sha256(),
             ),
             Ok(true)
+        );
+
+        let mut retained_open = clean.clone();
+        retained_open.project.pending_open_was_active = true;
+        retained_open.project.pending_open_released = false;
+        assert_eq!(
+            retained_open
+                .background_terminal_snapshot()
+                .expect("terminal ownership")
+                .infrastructure
+                .owned_resource_units,
+            1
+        );
+        let retained_receipt = AppEnduranceShutdownReceipt::seal(&retained_open)
+            .expect("dirty candidate receipt remains reportable");
+        assert!(!retained_receipt.all_resources_released());
+        assert_eq!(
+            AppEnduranceShutdownReceipt::verify_integrity(
+                retained_receipt.canonical_json(),
+                retained_receipt.sha256(),
+            ),
+            Ok(false)
         );
 
         let mut dirty = clean;

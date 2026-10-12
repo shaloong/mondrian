@@ -14,8 +14,8 @@ use crate::gpu_composite_execution::{
     GpuCompositeRect, GpuCompositeSourceCrop,
 };
 use crate::{
-    product_gpu_working_texture_format, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
+    product_gpu_working_texture_format, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
     GpuColorFrameBindGroupCacheKeyAllocationError, GpuColorFrameHandle,
     GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameResourceTable, GpuColorFrameTextureFormat, GpuColorFrameUploadPlan,
@@ -1223,7 +1223,7 @@ pub struct GpuCompositorUniformArenaDiagnostics {
     pub high_watermark_slots: u32,
     /// Peak reusable uniform-buffer pages required by one frame lifetime.
     pub high_watermark_pages: u32,
-    /// Frame-lifetime resets after ordered submission.
+    /// Frame-lifetime resets after ordered submission or abandonment.
     pub frame_resets: u64,
 }
 
@@ -1687,7 +1687,8 @@ impl GpuFrameCompositor {
         })
     }
 
-    /// Reset frame-local uniform slots after the caller has ordered submission.
+    /// Reset frame-local uniform slots after ordered submission or abandonment.
+    /// An abandoned encoder must be discarded before another frame is recorded.
     pub fn clear_frame_resources(&self) {
         let mut arena = self.uniform_arena.lock();
         arena.next_slot = 0;
@@ -1718,7 +1719,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -1776,7 +1777,10 @@ impl GpuFrameCompositor {
                 resource_pool,
             )?)
         };
-        if !opaque_normal_accumulator {
+        // A first layer blends over canonical transparent black. Use the
+        // existing immutable zero texture instead of clearing an accumulator
+        // that is otherwise unused until a later layer writes it.
+        if !opaque_normal_accumulator && execution.layers.is_empty() {
             clear_working_texture(
                 encoder,
                 &target_a.resource().texture_view,
@@ -1890,7 +1894,7 @@ impl GpuFrameCompositor {
                 device,
                 queue,
                 encoder,
-                if opaque_normal_accumulator {
+                if opaque_normal_accumulator || layer_execution.initializes_accumulator {
                     GpuCompositeTextureBinding::ProceduralDummy
                 } else {
                     GpuCompositeTextureBinding::Resource(accum.resource())
@@ -1980,7 +1984,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2041,7 +2045,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2177,7 +2181,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2272,7 +2276,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2340,7 +2344,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2406,7 +2410,7 @@ impl GpuFrameCompositor {
     pub fn record_matte_mix_pass(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2495,7 +2499,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2577,7 +2581,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2650,7 +2654,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
         resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
@@ -2712,7 +2716,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         accum_binding: GpuCompositeTextureBinding<'_>,
         dst_view: &wgpu::TextureView,
         layer_binding: GpuCompositeTextureBinding<'_>,
@@ -2750,7 +2754,7 @@ impl GpuFrameCompositor {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         accum_binding: GpuCompositeTextureBinding<'_>,
         dst_view: &wgpu::TextureView,
         layer_binding: GpuCompositeTextureBinding<'_>,
@@ -3224,10 +3228,12 @@ fn single_layer_gpu_passthrough<'a>(
         return None;
     };
     let descriptor = handle.descriptor();
+    // Straight coverage must still composite over transparent black at exact zero alpha.
     let preserves_pixels = layer.opacity.clamp(0.0, 1.0) == 1.0
         && layer.blend_mode == BlendMode::Normal
         && is_identity_transform(layer.transform)
         && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
+        && descriptor.alpha == ColorFrameAlpha::Opaque
         && descriptor.width == request.width
         && descriptor.height == request.height
         && handle.texture_format() == product_gpu_working_texture_format();
@@ -3700,7 +3706,7 @@ fn composite_source_crop(effect_plan: Option<&CompiledEffectGpuPlan>) -> GpuComp
 }
 
 fn record_preserved_regions(
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     source: &wgpu::Texture,
     destination: &wgpu::Texture,
     regions: &[GpuCompositeRect],
@@ -3828,7 +3834,7 @@ fn create_working_resource(
 }
 
 fn clear_working_texture(
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     view: &wgpu::TextureView,
     color: wgpu::Color,
 ) {
@@ -3973,7 +3979,7 @@ mod tests {
                 domain: ColorFrameDomain::Working,
                 encoding: ColorFrameEncoding::LinearFloat,
                 residency: ColorFrameResidency::Gpu,
-                alpha: crate::ColorFrameAlpha::StraightCoverage,
+                alpha: crate::ColorFrameAlpha::Opaque,
             },
             GpuColorFrameTextureFormat::Rgba32Float,
             "passthrough-test",
@@ -3996,6 +4002,23 @@ mod tests {
             layers: &layers,
         };
         assert_eq!(single_layer_gpu_passthrough(&request), Some(&handle));
+
+        let straight = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(100),
+            ColorFrameDescriptor {
+                alpha: ColorFrameAlpha::StraightCoverage,
+                ..handle.descriptor()
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "straight-coverage-source",
+        )
+        .expect("valid straight coverage handle");
+        let straight_layers = [GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&straight),
+            ..layer
+        }];
+        let straight_request = GpuCompositeRequest { layers: &straight_layers, ..request };
+        assert_eq!(single_layer_gpu_passthrough(&straight_request), None);
 
         layer.opacity = 0.5;
         let layers = [layer];
@@ -5375,13 +5398,13 @@ mod tests {
         let after_second = compositor.texture_binding_diagnostics();
         assert_eq!(
             after_second.bind_group_creations - after_first.bind_group_creations,
-            2,
-            "only the two new accumulator textures should need bindings"
+            1,
+            "only the accumulator read by the second layer needs a new binding"
         );
         assert_eq!(
             after_second.cache_hits - after_first.cache_hits,
-            2,
-            "both pooled input textures should reuse their layer bindings"
+            3,
+            "both pooled inputs and the immutable zero texture reuse their bindings"
         );
         assert_eq!(pool.diagnostics().hits, 2);
     }

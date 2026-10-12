@@ -85,7 +85,7 @@ impl GpuSignalMonitorRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         signal_input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         presentation_input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         request: GpuSignalMonitorRequest,
@@ -160,6 +160,11 @@ impl GpuSignalMonitorRuntime {
         if let Some(output) = self.output.take() {
             self.resource_pool.release(output);
         }
+    }
+
+    /// Abandon an unsubmitted output without making its texture reusable.
+    pub(crate) fn discard_frame_resources(&mut self) {
+        self.output = None;
     }
 
     pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
@@ -257,7 +262,7 @@ impl GpuSignalMonitorPipeline {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         signal_input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         presentation_input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,

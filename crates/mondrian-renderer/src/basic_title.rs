@@ -1171,8 +1171,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn linux_default_title_renders_authored_chinese_without_undeclared_fallback() {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn platform_default_title_renders_authored_chinese_without_undeclared_fallback() {
         let mut rasterizer = BasicTitleRasterizer::new();
         let output = rasterizer
             .rasterize(

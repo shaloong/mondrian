@@ -8,7 +8,6 @@ use std::sync::{Arc, OnceLock};
 
 use mondrian_core::types::{ColorSpace, Resolution};
 use mondrian_core::{compose_picture_affine, ResolvedPictureGeometry};
-#[cfg(any(test, feature = "validation"))]
 use mondrian_media::PreviewDecodeTemporalSelection;
 use mondrian_media::{
     CpuYuvFrame, DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoSampling,
@@ -143,6 +142,53 @@ impl MediaPreviewFrame {
             residency_protection: None,
         }
     }
+    /// Exact decoder extent lookup without cloning pixels, surfaces or leases.
+    pub(crate) fn native_target_selection(
+        &self,
+        target: mondrian_core::SourceSampleTarget,
+    ) -> Option<PreviewDecodeTemporalSelection> {
+        if !self.cross_call_reusable || self.presentation_quality != FramePresentationQuality::Ready
+        {
+            return None;
+        }
+        let MediaPreviewPayload::Native(source) = &self.payload else {
+            return None;
+        };
+        source.temporal_selection.as_deref()?.covering_target(target)
+    }
+
+    /// Reuse one native picture only for a decoder-proved exact covering target.
+    /// The physical surface and its Store allocation remain shared by clones.
+    pub(crate) fn for_native_target(
+        &self,
+        key: &super::preview_access_mode::MediaPreviewKey,
+    ) -> Option<Self> {
+        let selection = self.native_target_selection(key.source_sample())?;
+        let MediaPreviewPayload::Native(source) = &self.payload else {
+            return None;
+        };
+        let native = &source.native_frame;
+        let evidence = super::preview_media_task::MediaPreviewDecodedFrameEvidence::NativeGpu {
+            width: native.width,
+            height: native.height,
+            selected_pts: Some(selection.selected_pts),
+            surface_format: native.surface_format,
+            sampling: native.diagnostics.decoded_video_sampling,
+            handle_kind: native.handle_kind(),
+            execution: native.diagnostics.execution_path(),
+        };
+        let mut frame = self.clone();
+        let MediaPreviewPayload::Native(source) = &mut frame.payload else {
+            unreachable!();
+        };
+        source.temporal_selection = Some(Arc::new(selection));
+        frame.identity = super::preview_media_task::media_preview_frame_identity(key, evidence);
+        frame.render_cache_source_fingerprint = Some(Arc::new(
+            super::preview_render_cache_identity::canonical_media_source_fingerprint(key).ok()?,
+        ));
+        Some(frame)
+    }
+
     pub(crate) fn reserved_cpu_bytes(&self) -> usize {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => {
@@ -184,6 +230,19 @@ impl MediaPreviewFrame {
     ) -> Self {
         self.residency_resource = Some(resource);
         self
+    }
+
+    /// Protect the existing allocation without creating another physical charge.
+    pub(crate) fn protect_for_demand(
+        self,
+        demand_id: mondrian_playback::MediaWorkDemandId,
+    ) -> Result<Self, mondrian_playback::MediaFrameProtectionError> {
+        let resource = self
+            .residency_resource
+            .as_ref()
+            .expect("Store fetch retains its physical allocation");
+        let protection = resource.try_protect(demand_id)?;
+        Ok(self.with_residency_protection(protection))
     }
 
     /// Strip caller-held residency before this payload enters Store ownership.
@@ -249,9 +308,10 @@ impl MediaPreviewFrame {
         self
     }
 
-    /// Whether this frame may participate in semantic cross-call cache reuse.
+    /// Approximate scrub pictures cannot satisfy a later exact source sample.
     pub(crate) const fn permits_cross_call_reuse(&self) -> bool {
         self.cross_call_reusable
+            && matches!(self.presentation_quality, FramePresentationQuality::Ready)
     }
 
     /// Restrict this frame to one concrete execution when an upstream nested
@@ -312,9 +372,9 @@ impl MediaPreviewFrame {
     pub(crate) fn temporal_selection(&self) -> Option<PreviewDecodeTemporalSelection> {
         match &self.payload {
             MediaPreviewPayload::Working(_) => None,
-            MediaPreviewPayload::Source(source) => source.temporal_selection,
-            MediaPreviewPayload::CpuYuv(source) => source.temporal_selection,
-            MediaPreviewPayload::Native(source) => source.temporal_selection,
+            MediaPreviewPayload::Source(source) => source.temporal_selection.as_deref().copied(),
+            MediaPreviewPayload::CpuYuv(source) => source.temporal_selection.as_deref().copied(),
+            MediaPreviewPayload::Native(source) => source.temporal_selection.as_deref().copied(),
         }
     }
 
@@ -471,7 +531,7 @@ pub(crate) struct MediaPreviewGpuSourceFrame {
     pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
     pub(crate) decoded_video_sampling: DecodedVideoSampling,
     #[cfg(any(test, feature = "validation"))]
-    temporal_selection: Option<PreviewDecodeTemporalSelection>,
+    temporal_selection: Option<Arc<PreviewDecodeTemporalSelection>>,
     working_cache:
         Arc<OnceLock<Result<MediaPreviewWorkingFrameCacheEntry, Arc<RenderColorTransformError>>>>,
 }
@@ -481,8 +541,7 @@ pub(crate) struct MediaPreviewNativeSourceFrame {
     pub(crate) source_color_space: ColorSpace,
     pub(crate) input_transform: RenderInputTransform,
     pub(crate) native_frame: Arc<PreviewNativeDecodedFrame>,
-    #[cfg(any(test, feature = "validation"))]
-    temporal_selection: Option<PreviewDecodeTemporalSelection>,
+    temporal_selection: Option<Arc<PreviewDecodeTemporalSelection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -490,13 +549,13 @@ pub(crate) struct MediaPreviewCpuYuvSourceFrame {
     pub(crate) frame: Arc<CpuYuvFrame>,
     pub(crate) input_transform: RenderInputTransform,
     #[cfg(any(test, feature = "validation"))]
-    temporal_selection: Option<PreviewDecodeTemporalSelection>,
+    temporal_selection: Option<Arc<PreviewDecodeTemporalSelection>>,
 }
 
 impl MediaPreviewCpuYuvSourceFrame {
     pub(crate) fn from_decode(frame: CpuYuvFrame, input_transform: RenderInputTransform) -> Self {
         #[cfg(any(test, feature = "validation"))]
-        let temporal_selection = frame.diagnostics.temporal_selection();
+        let temporal_selection = frame.diagnostics.temporal_selection().map(Arc::new);
         Self {
             frame: Arc::new(frame),
             input_transform,
@@ -512,13 +571,11 @@ impl MediaPreviewNativeSourceFrame {
         source_color_space: ColorSpace,
         input_transform: RenderInputTransform,
     ) -> Self {
-        #[cfg(any(test, feature = "validation"))]
-        let temporal_selection = native_frame.diagnostics.temporal_selection();
+        let temporal_selection = native_frame.diagnostics.temporal_selection().map(Arc::new);
         Self {
             source_color_space,
             input_transform,
             native_frame: Arc::new(native_frame),
-            #[cfg(any(test, feature = "validation"))]
             temporal_selection,
         }
     }
@@ -564,7 +621,7 @@ impl MediaPreviewGpuSourceFrame {
         diagnostics: PreviewDecodeDiagnostics,
     ) -> Self {
         #[cfg(any(test, feature = "validation"))]
-        let temporal_selection = diagnostics.temporal_selection();
+        let temporal_selection = diagnostics.temporal_selection().map(Arc::new);
         Self {
             prepared_source,
             decoder_residency: diagnostics.decoded_frame_residency,

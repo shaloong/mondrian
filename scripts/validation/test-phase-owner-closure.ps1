@@ -120,7 +120,7 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
             Assert-Rejected $raw $kind "verifier $mutation"
         }
     }
-    foreach ($mutation in @('schema','ordinal','phase','run','extra','missing','failed','bool-string','child-string','failures','export','raw-app','app-hash','app-worker','app-extra','app-export-join')) {
+    foreach ($mutation in @('schema','ordinal','phase','run','extra','missing','failed','bool-string','child-string','failures','export','raw-app','app-hash','app-worker','app-extra','app-export-join','app-old-schema','app-pending-open-retained','app-pending-open-type','app-pending-open-missing','app-pending-open-active-type')) {
         $raw = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
         switch ($mutation) {
             'schema' {$raw.schema_version='1'}
@@ -143,6 +143,11 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
                         'raw-app' {$body.app_owner_consumed=$false}
                         'app-worker' {$body.workers.project_persistence.detached_workers=1}
                         'app-extra' {$body | Add-Member invented_resource_closed $true}
+                        'app-old-schema' {$body.schema_version=1}
+                        'app-pending-open-retained' {$body.project.pending_open_released=$false}
+                        'app-pending-open-type' {$body.project.pending_open_released='true'}
+                        'app-pending-open-missing' {$body.project.PSObject.Properties.Remove('pending_open_released')}
+                        'app-pending-open-active-type' {$body.project.pending_open_was_active='false'}
                         'app-export-join' {
                             $leaf = $body.export.json | ConvertFrom-Json
                             $leaf.worker_terminated=$false
@@ -158,9 +163,18 @@ foreach ($kind in @('continuous_export','playback_reference','concurrent_recover
         Assert-Rejected $raw $kind "$kind $mutation"
     }
     if ($kind -cne 'continuous_export') {
-        foreach ($mutation in @('gpu-wake','gpu-join','preview','waveform','snapshot')) {
+        $returned = $original | ConvertTo-Json -Depth 80 -Compress | ConvertFrom-Json
+        $returned.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation = 'returned'
+        Assert-MondrianPhaseOwnerReceipt (Seal-Report $returned) fixture-run fixture-phase 0 $kind
+        foreach ($mutation in @('gpu-wake','gpu-join','preview','waveform','snapshot',
+            'backend-panic','backend-unknown','backend-type','backend-missing','renderer-extra')) {
             $raw=$original|ConvertTo-Json -Depth 80 -Compress|ConvertFrom-Json
             switch($mutation) {
+                'backend-panic' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation='panicked'}
+                'backend-unknown' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation='assumed_idle'}
+                'backend-type' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.backend_preparation=0}
+                'backend-missing' {$raw.terminal.owners.Realtime.gpu.renderer_retirement.PSObject.Properties.Remove('backend_preparation')}
+                'renderer-extra' {$raw.terminal.owners.Realtime.gpu.renderer_retirement | Add-Member unexpected_owner $false}
                 'gpu-wake' {$raw.terminal.owners.Realtime.gpu.wake_callbacks.registrations_retained=1}
                 'gpu-join' {$raw.terminal.owners.Realtime.gpu.worker_shutdown='timed_out_detached'}
                 'preview' {$raw.terminal.owners.Realtime.preview.workers_terminated=0}

@@ -42,6 +42,13 @@ fn ui_output(value: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(ui_linear_to_surface_linear(value.rgb), value.a);
 }
 
+// The caller proves sharp Shape coverage and alpha=1 for every vertex.
+// Keep the same primary conversion without unreachable texture/SDF branches.
+@fragment
+fn main_opaque_shape(in: VertexOutput) -> @location(0) vec4<f32> {
+    return ui_output(in.color);
+}
+
 /// Uniform corner radius (original path for shadows & lines).
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
     let half = size * 0.5;
@@ -171,7 +178,17 @@ fn surface_code_to_linear(value: vec3<f32>) -> vec3<f32> {
     return srgb_carrier_to_linear(value);
 }
 
-fn sample_surface_code_linear(uv: vec2<f32>) -> vec3<f32> {
+fn surface_code_texel_premultiplied(position: vec2<i32>) -> vec4<f32> {
+    let sample = textureLoad(glyph_texture, position, 0);
+    let alpha = clamp(sample.a, 0.0, 1.0);
+    if !(alpha > 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let linear = surface_code_to_linear(clamp(sample.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    return vec4<f32>(linear * alpha, alpha);
+}
+
+fn sample_surface_code_linear(uv: vec2<f32>) -> vec4<f32> {
     let dimensions = vec2<i32>(textureDimensions(glyph_texture));
     let texel_position = uv * vec2<f32>(dimensions) - vec2<f32>(0.5);
     let base = vec2<i32>(floor(texel_position));
@@ -181,18 +198,23 @@ fn sample_surface_code_linear(uv: vec2<f32>) -> vec3<f32> {
     let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), maximum);
     let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), maximum);
     let p11 = clamp(base + vec2<i32>(1, 1), vec2<i32>(0), maximum);
-    let c00 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p00, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
-    let c10 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p10, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
-    let c01 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p01, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
-    let c11 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p11, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
-    return mix(mix(c00, c10, fraction.x), mix(c01, c11, fraction.x), fraction.y);
+    let c00 = surface_code_texel_premultiplied(p00);
+    let c10 = surface_code_texel_premultiplied(p10);
+    let c01 = surface_code_texel_premultiplied(p01);
+    let c11 = surface_code_texel_premultiplied(p11);
+    let filtered = mix(mix(c00, c10, fraction.x), mix(c01, c11, fraction.x), fraction.y);
+    if !(filtered.a > 0.0) {
+        return vec4<f32>(0.0);
+    }
+    return vec4<f32>(filtered.rgb / filtered.a, filtered.a);
 }
 
-// Decode opaque Viewer target code values into the target-primary linear
-// composition. This path deliberately does not apply the UI-primary matrix.
+// Decode Viewer target code values into target-primary linear light. Filter
+// associated coverage before restoring straight RGB for fixed-function blend.
+// This path deliberately does not apply the UI-primary matrix.
 @fragment
 fn main_encoded_code_values(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(sample_surface_code_linear(in.tex_coord), 1.0);
+    return sample_surface_code_linear(in.tex_coord);
 }
 
 // ICC/device code values have no target-colorimetry transfer to invert. The

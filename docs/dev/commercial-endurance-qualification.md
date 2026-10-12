@@ -567,3 +567,95 @@ and the single program hash across started phases. A frame outside the selected
 attachment is intentionally empty on physical output; no replay/looping of cues
 is inferred. No-device native bridge tests and software parser tests do not
 qualify the physical SDI/Genlock/caption wire or 72-hour campaign.
+
+## Bounded local production validation (not COL-047)
+
+The `local_media_smoke` validation example uses the existing production App,
+Persistent Timeline Playback, Headless Preview/GPU, CoreAudio and Frozen
+Repeated Export owners. It does not qualify physical Viewer/HDR, Reference
+Output, the 32 GiB project scale, or commercial performance/endurance gates.
+
+Build with `cargo build --locked --profile validation -p mondrian-app
+--all-features --bin mondrian --example local_media_smoke -j 2`. Read the resulting executable's
+`--help` before running. Supply explicit fixture root, create-only output,
+seconds, output resolution, output frame rate, selected phases, video-layer count
+Program Output (`rec709`, `pq` or `hlg`) and source selection (`mixed` or
+`single60`). Source-build
+examples may use the existing `MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` and
+`MONDRIAN_MEDIA_PROBE_WORKER_PATH` overrides to select that same-profile
+`mondrian` worker executable. This does not qualify a packaged sealed runtime.
+
+```text
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 all 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 1800 1920x1080 60 playback 1 rec709 mixed
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 export 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 300 1920x1080 60 recovery 2 rec709 mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 rec709 mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 pq mixed
+local_media_smoke <fixtures> <new-output> 30 3840x2160 30 playback 1 hlg mixed
+local_media_smoke <fixtures> <new-output> 15 3840x2160 60 playback 1 rec709 single60
+```
+
+Output resolution accepts 640x360, 1920x1080 or 3840x2160; output cadence
+accepts 24, 30 or 60 fps. The same authored cadence binds Playback, two-second
+Timeline segments and frozen Export sampling. Each Export keeps the existing
+120-frame workload (five, four or two seconds respectively). Source cadence
+remains independent. A short single-layer 4K60 run does not qualify the full sealed
+HDR/effects/scopes matrix.
+
+`mixed` rotates the three source cadences. `single60` selects the source whose
+ordinary probe proves HEVC Main10, 3840x2160 and exact 60/1; it requires one video
+layer and 60 fps output. Both modes retain the same two-second clip repetitions,
+seek/cache operations, Full quality, deadlines and consuming production owners.
+Reports identify the selected source and its existing probe/hash. Source
+provenance remains an independent requirement: a timestamp-scaled 24 fps file
+can probe as 60/1 and does not qualify original 60 fps source content. Never
+replace provenance verification with the `single60` label.
+
+The color argument authors the ordinary Sequence Program Output contract;
+it does not reinterpret source metadata or install a validation color transform.
+Reports retain both the requested output and the actual owner-derived Sequence
+color settings. Headless PQ/HLG playback does not qualify an HDR display surface
+or physical Viewer observations. Frozen Export keeps its independently authored
+delivery target.
+
+`all` runs the three production phases for 15–900 measured seconds each;
+`playback` runs Preview/Audio with seek/cache for 15–1800 seconds.
+`export` runs the same second phase alone, and `recovery` runs the same third
+phase alone for focused diagnosis. The layer argument selects one video source
+or that source plus an overlay: ordinary playback/export phases use the PNG
+alpha overlay, while recovery uses the moving video overlay. Record the actual
+probe and representation rather than treating the layer count as a count of
+moving video decoders. The Sequence authored
+Preview scale is explicitly 1.0; completed GPU output dimensions and the
+runtime Full quality are checked after each accepted interval. Original
+source decode resolution remains unchanged; output resolution is explicit in
+the report. The exact six fixture identities and media probes are recorded.
+Derived/generator fixtures must be labelled DiagnosticOnly, not native-source
+or commercial qualification. Ordinary profiles disable project proxies, bind
+all four original video paths/hashes through the production source resolver,
+and use a phase-local media cache. Only the explicit proxy-control profile
+enables proxies. Source file names do not prove alpha or exact cadence: retain
+the actual production probe and decoded representation.
+
+Export admission continues through the measured window. Every new complete
+artifact is independently fully decoded before its successor; cancellation
+uses a distinct newer retry job and path. A 256-artifact or 2 GiB retained
+artifact budget **fails** the phase instead of ending Export early and passing
+continued Playback. The 6 GiB product process-tree memory stop remains.
+Preparations and consuming shutdown share the duration-derived outer safety
+deadline; picture/frame-period acceptance contracts are unchanged. Failed
+phases remain Failed. Later independent phases run only after all actual
+execution and verifier owners prove consuming closure.
+
+Playback-only observation has no Export completion grace. Its measured finish
+is distinct from the phase safety deadline: the final complete interval and
+queued native memory samples may close after the measured finish, while still
+bounded by that original phase deadline. Local report schema 2 serializes
+`playback_before_close.evidence` directly as the production
+`PlaybackEvidenceReport` object (currently schema 7), including exact per-event
+deadline offsets and terminal Clock phase evidence. It is not a Debug string,
+and Alpha consumers do not retain an old-string parser or compatibility alias.
+Preview worker and coordinator
+diagnostics are captured once before consuming shutdown; they are separate
+owner observations, not a globally atomic failure-frame snapshot.

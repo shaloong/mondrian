@@ -370,6 +370,8 @@ pub enum PixelFormat {
     BayerGrbg16le,
     /// Planar YUV 4:2:0, 8-bit.
     Yuv420p,
+    /// Planar YUV 4:1:1, 8-bit (for example NTSC DV).
+    Yuv411p,
     /// Planar YUV 4:2:2, 8-bit.
     Yuv422p,
     /// Planar YUV 4:4:4, 8-bit.
@@ -386,6 +388,8 @@ pub enum PixelFormat {
     Yuv422p12le,
     /// Planar YUV 4:4:4, 12-bit little-endian.
     Yuv444p12le,
+    /// Planar YUV 4:4:4 with Alpha, 12-bit little-endian.
+    Yuva444p12le,
     /// Planar YUV 4:2:0, 16-bit little-endian.
     Yuv420p16le,
     /// Planar YUV 4:2:2, 16-bit little-endian.
@@ -414,8 +418,16 @@ pub enum PixelFormat {
     Gbrapf32be,
     /// Packed RGB24.
     Rgb24,
+    /// Packed BGR24.
+    Bgr24,
     /// Packed RGBA8.
     Rgba,
+    /// Packed BGRA8.
+    Bgra,
+    /// Packed ARGB8.
+    Argb,
+    /// Packed ABGR8.
+    Abgr,
     /// Packed RGBA16 little-endian.
     Rgba64le,
     /// Two-plane 8-bit NV12.
@@ -442,6 +454,7 @@ impl PixelFormat {
             Self::Yuv420p12le
             | Self::Yuv422p12le
             | Self::Yuv444p12le
+            | Self::Yuva444p12le
             | Self::Gbrp12le
             | Self::Gbrap12le
             | Self::P012 => 12,
@@ -461,12 +474,16 @@ impl PixelFormat {
         matches!(
             self,
             Self::Rgba
+                | Self::Bgra
+                | Self::Argb
+                | Self::Abgr
                 | Self::Rgba64le
                 | Self::Gbrap10le
                 | Self::Gbrap12le
                 | Self::Gbrap16le
                 | Self::Gbrapf32le
                 | Self::Gbrapf32be
+                | Self::Yuva444p12le
         )
     }
 
@@ -475,7 +492,11 @@ impl PixelFormat {
         matches!(
             self,
             Self::Rgb24
+                | Self::Bgr24
                 | Self::Rgba
+                | Self::Bgra
+                | Self::Argb
+                | Self::Abgr
                 | Self::Rgba64le
                 | Self::Gbrp10le
                 | Self::Gbrp12le
@@ -868,9 +889,46 @@ fn video_color_metadata_scope_priority(scope: VideoColorMetadataHintScope) -> u8
     }
 }
 
+/// Source sampling convention, independent of RGB colorimetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VideoSamplingConvention {
+    /// A validated SD DV DIF profile uses BT.601 coefficients and video levels,
+    /// including headroom. It does not prove RGB primaries or transfer.
+    SdDv,
+    /// ST 2019-1 CLV is interpreted on each successfully decoded VC-3 picture.
+    /// In-band BT.709/BT.2020 uses video levels; out-of-band remains unknown.
+    DnxColorVolume,
+    /// Explicit product default for legacy SDR codecs lacking a range declaration.
+    /// This is an assumption, never detected or normative range evidence.
+    LegacyVideoLevels,
+}
+
 /// Evidence contributing to an automatic color interpretation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoColorInterpretationEvidence {
+    /// A codec-specific sampling rule; this cannot authorize RGB colorimetry.
+    SamplingConvention {
+        /// Actual codec identity, independent of the file extension.
+        codec: VideoCodec,
+        /// Normative frame rule or explicitly identified product assumption.
+        convention: VideoSamplingConvention,
+    },
+    /// Fixed quantization prescribed by the admitted codec standard, without
+    /// authorizing primaries, transfer or matrix. Currently H.263 section 4.1.
+    CodecDefinedRange {
+        /// Codec whose fixed sample convention supplies the evidence.
+        codec: VideoCodec,
+        /// Normative encoded quantization range.
+        range: DecodedVideoRange,
+    },
+    /// Quantization range proved by complete, agreeing H.264 sequence headers.
+    /// This evidence cannot authorize primaries, transfer, or matrix semantics.
+    H264SequenceRange {
+        /// Encoded quantization range.
+        range: DecodedVideoRange,
+        /// Whether Annex E inferred an absent video_full_range_flag as zero.
+        defaulted: bool,
+    },
     /// An acquisition metadata hint identified the input.
     MetadataHint {
         /// Metadata scope.
@@ -1195,7 +1253,10 @@ fn exact_cicp_evidence_matches_raw(
             | VideoColorInterpretationEvidence::UnsupportedCicpTags { .. } => return false,
             VideoColorInterpretationEvidence::MetadataHint { .. }
             | VideoColorInterpretationEvidence::DecoderUnavailable
-            | VideoColorInterpretationEvidence::IccProfile { .. } => {}
+            | VideoColorInterpretationEvidence::IccProfile { .. }
+            | VideoColorInterpretationEvidence::CodecDefinedRange { .. }
+            | VideoColorInterpretationEvidence::SamplingConvention { .. }
+            | VideoColorInterpretationEvidence::H264SequenceRange { .. } => {}
         }
     }
     exact_evidence_found
@@ -1514,7 +1575,7 @@ pub struct AudioStreamInfo {
     pub channels: u8,
     /// Native semantic channel layout evidence.
     pub channel_layout: ChannelLayout,
-    /// Nominal encoded sample bit depth.
+    /// Nominal encoded sample bit depth; zero when the codec does not report it.
     pub bit_depth: u16,
     /// Average encoded bitrate in bits per second.
     pub avg_bitrate: u64,

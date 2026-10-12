@@ -252,6 +252,13 @@ impl Widget for Slider {
                 }
                 EventResult::Handled
             }
+            UiEvent::SetNumericValue(value) if self.focused && value.is_finite() => {
+                if self.set_value_from_input(*value, ctx) {
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
             UiEvent::KeyDown { key, modifiers } if self.focused => {
                 if modifiers.ctrl || modifiers.alt || modifiers.meta {
                     return EventResult::Ignored;
@@ -351,6 +358,10 @@ impl Widget for Slider {
                     max: self.model.max(),
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 }
 
@@ -956,6 +967,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 100.0, 10.0),
@@ -987,6 +999,7 @@ mod tests {
         ));
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 260.0, 100.0),

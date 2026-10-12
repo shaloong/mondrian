@@ -56,6 +56,7 @@ pub(super) struct IsolatedDemuxOpen {
 
 pub(super) enum IsolatedDemuxSeek {
     Complete,
+    Unavailable(i32),
     Canceled,
 }
 
@@ -283,11 +284,15 @@ impl IsolatedDemuxSession {
             flags,
         })?;
         match self.wait_for_message(should_cancel) {
-            Ok(DemuxProtocolMessage::SeekComplete { command_id: observed })
+            Ok(DemuxProtocolMessage::SeekComplete { command_id: observed, error_code })
                 if observed == command_id =>
             {
-                self.lifecycle.record_seek_complete();
-                Ok(IsolatedDemuxSeek::Complete)
+                if error_code < 0 {
+                    Ok(IsolatedDemuxSeek::Unavailable(error_code))
+                } else {
+                    self.lifecycle.record_seek_complete();
+                    Ok(IsolatedDemuxSeek::Complete)
+                }
             }
             Ok(DemuxProtocolMessage::Error { command_id: observed, message })
                 if observed == command_id =>
@@ -438,6 +443,16 @@ impl IsolatedDemuxSession {
         *self.cleanup_deadline.get_or_insert_with(|| Instant::now() + CLEAN_CLOSE_GRACE)
     }
 
+    pub(super) fn close_for_origin_restart(&mut self) -> Result<(), String> {
+        self.close();
+        match self.cleanup_receipt.as_ref() {
+            Some(receipt) if receipt.all_resources_released() => Ok(()),
+            receipt => Err(format!(
+                "demux origin restart lacks consuming closure: {receipt:?}"
+            )),
+        }
+    }
+
     fn close(&mut self) {
         if self.cleanup_receipt.is_some() {
             return;
@@ -552,7 +567,7 @@ impl Drop for IsolatedDemuxSession {
 fn message_command_id(message: &DemuxProtocolMessage) -> Option<u64> {
     match message {
         DemuxProtocolMessage::OpenPhase(_) | DemuxProtocolMessage::Stream(_) => None,
-        DemuxProtocolMessage::SeekComplete { command_id }
+        DemuxProtocolMessage::SeekComplete { command_id, .. }
         | DemuxProtocolMessage::End { command_id }
         | DemuxProtocolMessage::Closed { command_id }
         | DemuxProtocolMessage::Error { command_id, .. } => Some(*command_id),

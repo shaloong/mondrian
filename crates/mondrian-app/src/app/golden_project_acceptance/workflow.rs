@@ -372,6 +372,7 @@ impl GoldenProductWorkflowDriver {
             "close retained the created Authoring Session"
         );
         self.state.dispatch_action(Action::OpenProject(self.project_path.clone()))?;
+        self.state.wait_for_project_open()?;
         self.verify_binding()?;
         let opened_session = author_checkpoint(&self.state)?;
         ensure!(

@@ -672,7 +672,7 @@ impl ExportPreset {
             frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Twelve,
-                VideoRange::Full,
+                VideoRange::Legal,
                 ExportChromaSampling::Yuv444,
             ),
             alpha_mode: ExportAlphaMode::Preserve,

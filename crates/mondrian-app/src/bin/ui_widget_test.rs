@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let mut enc = DrawEncoder::new();
                 let theme = mondrian_ui_theme::current_theme();
-                TreeWalker::paint_clipped(&root, &mut enc, &theme, bounds);
+                TreeWalker::paint_clipped(&root, &mut enc, &theme, bounds, 1.0);
                 let cmds = enc.finish();
                 if frame_renderer
                     .render_draw_commands(&dev, &q, &surf, &cfg, cmds)

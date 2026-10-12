@@ -312,6 +312,11 @@ pub enum AssetThumbnailState {
     Failed(AssetThumbnailFailure),
     /// A render-ready thumbnail is available.
     Ready(RasterImage),
+    /// An alternate representative sample is shown with its original failure.
+    Degraded {
+        image: RasterImage,
+        failure: AssetThumbnailFailure,
+    },
 }
 
 /// Complete set of view models needed by the app UI panel shell.
@@ -4095,6 +4100,12 @@ fn asset_grid_item_from_asset(
             AssetThumbnailState::Loading => item.with_thumbnail_loading(),
             AssetThumbnailState::Failed(_) => item.with_thumbnail_failed(),
             AssetThumbnailState::Ready(thumbnail) => item.with_thumbnail(thumbnail),
+            AssetThumbnailState::Degraded { image, .. } => {
+                item.with_thumbnail(image).with_badge_tone(
+                    asset_text(localizer, "asset-thumbnail-alternate", "首帧预览"),
+                    AssetGridBadgeTone::Warning,
+                )
+            }
         };
     }
     with_asset_icon(item, icon)
@@ -6754,10 +6765,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_section(
             PropertySection::new("输出")
                 .with_row(PropertyRow::new("路径", Box::new(output_row)))
-                .with_row(PropertyRow::new(
-                    "Status",
-                    Box::new(Label::new(status_text).muted()),
-                ))
+                .with_row(
+                    PropertyRow::new(
+                        "Status",
+                        Box::new(Label::new(status_text).muted().wrapped()),
+                    )
+                    .with_content_height(),
+                )
                 .with_row(PropertyRow::new("", Box::new(enqueue_button))),
         )
         .with_section(queue_section)
@@ -6766,7 +6780,7 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     let mut summary_children = vec![
         FlexChild::fixed(Box::new(
-            Label::new(job.title.clone()).with_padding(0.0, 0.0),
+            Label::new(job.title.clone()).wrapped().with_padding(0.0, 0.0),
         )),
         FlexChild::fixed(Box::new(
             Label::new(format!("{} / {}%", job.status, job.progress_percent))
@@ -6785,28 +6799,14 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
             Label::new(broadcast_qc.clone()).muted().wrapped().with_padding(0.0, 0.0),
         )));
     }
-    let summary = FlexContainer::column(summary_children).with_gap(4.0);
-
-    let content: Box<dyn Widget> = if job.can_cancel {
+    if job.can_cancel {
         let cancel = AppIcon::Trash
             .text_button_or_label("取消")
             .on_click(export_cancel_action(job.id));
-        Box::new(
-            FlexContainer::row(vec![
-                FlexChild::flex(Box::new(summary), 1.0),
-                FlexChild::fixed(Box::new(cancel)),
-            ])
-            .with_gap(8.0),
-        )
-    } else {
-        Box::new(summary)
-    };
-
-    let base_height = if job.can_cancel { 48.0 } else { 42.0 };
-    let detail_rows =
-        usize::from(job.color_diagnostics.is_some()) + usize::from(job.broadcast_qc.is_some());
-    let height = base_height + detail_rows as f32 * 18.0;
-    PropertyRow::new("任务", content).with_height(height)
+        summary_children.insert(2, FlexChild::fixed(Box::new(cancel)));
+    }
+    let summary = FlexContainer::column(summary_children).with_gap(4.0);
+    PropertyRow::new("任务", Box::new(summary)).with_content_height()
 }
 
 fn export_job_broadcast_qc_label(
