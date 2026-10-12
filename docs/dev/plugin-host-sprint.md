@@ -2382,3 +2382,259 @@ MSVC/StaticDXC enter script. The decoded invocation hash uses its actual
 UTF16LE encoding; no script or check was changed. All review streams are
 released. Final exact-scope code/document review gates the local commit;
 these checks do not qualify plugin compatibility or performance.
+
+## Develop alignment — 2026-10-12
+
+Status: integration in progress. The merged-source Core suite passed 501 tests
+(zero failures, one ignored). The full workspace/all-targets/all-features check
+passed with 1903 unchanged source inputs. Strict Clippy and the normal product
+configuration check passed; affected-module runtime regressions and the normal
+product build are pending. None of the historical
+Source44/47 executables qualifies this source.
+
+The recoverable checkpoint is `fd9d32124ba2f67fede8cb85d931c8c7f2be53fa`, also
+retained as `feature/plugin-host-sprint-pre-develop-20261012`. The actual fetched
+`origin/develop` revision is `294b5ab0657dcceac6aaa854752011df8d31ecb6`;
+its merge into `feature/plugin-host-sprint` produced 30 conflicted paths.
+All 30 conflicts are resolved. A fresh successful fetch on 2026-10-12 confirmed
+that `origin/develop`, `FETCH_HEAD` and `MERGE_HEAD` still name this revision.
+The upstream macOS qualification remains upstream evidence; this machine's
+checks do not qualify macOS or Linux.
+
+UI conflict resolution uses an isolated Git worktree and an explicit 14-file
+owner. A second worktree creation failed for lack of space; the Playback owner
+instead uses an exclusive five-file scope in the integration worktree. Root
+owns the shared commit policy, project preparation, manifests, integration and
+all builds. The OCIO owner migrated only Core's `ocio.rs`; a separate reviewer
+checks that migration. No Agent runs competing Cargo/native builds.
+
+The existing native parameter transaction and serial handoff remain the audio
+installation authority. Native author commits publish through the shared
+commit consumer while retaining the exact pending proposal before fallible
+runtime binding. Their explicit policy leaves PCM installation to the captured
+renderer. Ordinary commits compare the full audible closure. An unchanged
+closure can refresh author snapshot metadata without replacing the renderer;
+only a matched, current native acknowledgement advances its derived binding.
+Visual edits must retain native snapshot admission as well as PCM continuity.
+
+`ocio-rs` and `ocio-sys` are pinned to
+`61a557330d49b7e494eb18beebca0c7b47907680`; Cargo update changed only those
+two dependency source entries. `bundled` and `v2_5` are both enabled. GPU shader
+bindings and uniform offsets are checked through the existing Result path:
+missing metadata is an error and legitimate zero metadata is retained.
+The actual updated bridge and Core test executable were built and run. A
+separate probe using the Cargo-produced OCIO RLIB and its actual native link
+paths reports `stub=false`, version `2.5.2`, and version hex `02050200`.
+Its compile and execution exits are both zero, with unchanged input hashes.
+The three new missing/zero/nonzero GPU metadata regression tests passed within
+Core's 501 tests. This does not qualify GPU interoperability or other platforms.
+The root and vendored native license blobs are unchanged (BSD-3-Clause).
+
+C: reached zero free space during worktree preparation. One old root RLIB
+placement alias was copied to E:, checked before/after literal removal, and
+retained with its immutable SHA256. Current deps, executables and source were
+preserved. The direct build locations are now
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-cargo-home-r1`
+and `.../develop-alignment-target-r1`; no target junction was introduced.
+Registry archives/index and Git databases were copied as cache seeds without
+credentials or deletion of the originals. Logs, temporary files and receipts
+use `.../develop-alignment-evidence-r1`. These cache seeds are not independent
+production artifacts. New Cargo producers and executions must supply the
+merged-source evidence.
+
+The first complete merged-source workspace check (`workspace-check-r7`) reached
+Rust compilation after the official DXC build script's release/archive gates.
+It failed with three renderer merge errors: a concrete encoder helper left
+behind the shared encoder migration, and a float-only payload match missing
+the incoming 16-bit payload. Its 1903 source bindings remained unchanged and
+all source leases closed. The failure remains in the evidence directory;
+The subsequent failures through `workspace-check-r13` were retained while
+renderer, Playback, text-owner, App lifecycle/message and test-fixture adapters
+were repaired. Existing assertions were retained. Independent review required
+separate physical-device and published-floor clock oracles; both are now
+compiled, with runtime acceptance still pending. `workspace-check-r14` passed
+the original complete command with Cargo exit zero, unchanged source bindings,
+and no cleanup failures. Its source freeze is
+`F18B5A92A4740E899B810DBF367077E7A555FE1C1F2691ADCA12E285F1C800E6`.
+Two later Clippy style repairs preserve the original Option exchange/drop order
+and remove an unnecessary reference. `strict-clippy-r3` passed the full
+workspace/all-targets/all-features command with `-D warnings`; it and
+`normal-check-r1` bind the current source freeze
+`6170AA135146E56DBE43A69DBFE82BFBA5EAB5972C2E09D3059EFF7A94880632`.
+The normal check retains ten warnings from existing OFX diagnostic-only APIs;
+the three affected diagnostic files are byte-unchanged from the checkpoint.
+This normal configuration is not claimed warning-free.
+The fixed DXC archive transport is confined to that SDK build script's directory;
+it leaves the SDK's immutable release, SHA256, extraction and link checks intact.
+It is a build input, not a product runtime feature.
+
+Ordinary regression execution will use newly built library test executables
+and a newly built native Job runner from this same source freeze. The runner
+build (`lab-runner-build-r1`) passed at the current 6170 source freeze. The first
+library-test build stopped in the official DXC archive download; its failed
+Cargo receipt and unchanged source inputs are retained. Only its verified
+download child was stopped. The same validated archive transport was placed
+in that test configuration's separately identified SDK directory, preserving
+the official release, archive hash and extraction checks. The second build
+passed with 30 newly produced library test executables, unchanged 1903-source
+bindings and no cleanup errors. Its 25 default-test warnings are retained;
+the all-features strict Clippy gate is a separate configuration. No runtime
+test pass is inferred from this build. The existing
+lab controller retains exact counts and native owner/reaping checks. Ignored
+tests are enumerated and explicitly skipped, with no new qualification claim.
+The new outer inventory controller has bounded runner settlement and preserves
+cleanup errors. Its first execution failed during App `--list`: the native
+owner retained `0xC0000135`, zero child output and complete descendant reaping.
+The MSVC-only test environment omitted the selected FFmpeg DLL search path;
+the App PE imports the existing installation's libavcodec 61 dependencies.
+A controller correction pins that installation's DLLs/tools and changes only
+the test process environment. It does not update the native SDK or qualify
+develop's FFmpeg 8 release profile; that pre-existing limitation remains.
+
+The corrected environment admitted all 60 library inventories: 8579 tests,
+8290 ordinary and 289 ignored. Ordinary execution then stopped at App with
+2852 passed, 14 failed and 131 filtered in 711.60 seconds. The native Job
+reaped the complete tree without timeout. These failures remain retained.
+Seven failures require the newly built sibling `mondrian` worker; five also
+expose real user preferences loaded by the unisolated test environment. The
+remaining failures concern native author handoff and settled GPU projection.
+The skipped-name substring rule also excluded one ordinary serialization
+test whose name contains an ignored test's name. The controller correction
+uses the pinned Rust libtest's exact skip rule and isolated App data/cache
+directories; it remains preparatory until current helper/build admission.
+
+The native handoff fixture now reanchors its accepted simulated high-water
+before a real wall-clock author action, retaining all existing assertions.
+A new four-case Engine regression then reproduced `revise_timeline` turning
+the native hold's `PersistentStill` into `TimedPlayback`. The minimal repair
+keeps native hold on the existing untimed-demand path and preserves the other
+running states' original deadlines. The exact regression and all 262 Playback
+tests passed through the original controller at source freeze
+`22B7AE8C3AC91EB899C9360CB5E816911FF15FDDB53B0A976D87D157C6CD4F22`.
+Both native/runner exits were zero, with complete reaping and no timeout.
+Independent review preserves the prior failed and zero-selector runs; this
+is a pure Playback qualification, not physical audio or full App acceptance.
+
+Independent diagnosis of settled GPU projection found the first native visual
+GUI registry bind occurring after an admitted output. The existing owner-change
+rule correctly invalidates the generation, but the current GPU candidate getter
+had not synchronized that owner first. The getter now uses the existing registry
+sync before raster and candidate preparation. Legitimate owner/revision changes
+still invalidate; the original settled-loop pixel, evidence and no-dirty
+assertions remain intact. This repair has not yet passed current App execution.
+The current 1903-source snapshot, including both runtime repairs and their
+fixture/diagnostic changes, passed `cargo fmt --all -- --check` with unchanged
+inputs and no cleanup errors. Its source freeze is
+`2F1CDE44EBBF0EE4B4E9C236F8D3601E7271A5045FEDF6817DC55E44C0D797DD`.
+
+The user authorized upgrading the Windows FFmpeg SDK. The independent E-drive
+vcpkg checkout is fixed at `9e593bb18ea69cc5095e012465dcd675a822ed0d`
+(tag `2026.07.29`); its actual FFmpeg port is `8.1.2#3`. Official bootstrap
+completed with signature validation. The existing Windows CI GPL-enabled
+profile, pkgconf and x265 high-bit-depth overlay completed an independent
+Release and Debug installation with exit zero and unchanged inputs. Runtime
+SDK inspection passed:
+both tools report 8.1.2, all six library header/runtime version pairs agree,
+and the selected feature/license profile passed with 433 pinned inputs unchanged.
+The prior SDK and artifacts are retained. Repository-specific
+FFmpeg patches currently belong to the macOS builder; their macOS evidence
+does not qualify this Windows installation. Current-source helper/test
+producers and the final Mondrian Product require separate acceptance, recorded
+below; SDK tool inspection does not qualify Mondrian processing or hardware
+acceleration.
+Independent review accepted the prepared R11 build driver and R8 execution
+controller statically. R8 requires the library tests, normal sibling worker
+and native runner to share the full source freeze, actual SDK commit/setup,
+selected FFmpeg prefix and target directory. Runtime inputs include DLLs in
+both the SDK's bin and tools directories. This does not imply execution passed.
+The actual `ffmpeg-sys-next` 8.1.0 build script does not track `FFMPEG_DIR`
+in its direct prebuilt-SDK branch. The two pre-upgrade generated binding sets
+declared libavcodec 61 and linked the previous SDK; both binding files and build
+outputs are retained separately. An SDK environment change alone cannot prove
+the ABI upgrade. Package-scoped Cargo clean dry-run refused the pre-created
+target because it has no `CACHEDIR.TAG`, and deleted nothing. That ownership
+gate is retained. The independently reviewed reversible archive completed:
+15 identified package cache entries and all 53 files were moved with original
+bytes verified, no deletion and no source change. Current-source builds must
+still prove fresh libavcodec 62 bindings, the selected link path and actual
+executable imports. No registry source patch or whole-target clean is planned.
+Independently reviewed R12/R9 successors now require actual generated ABI 8
+bindings and the SDK's native link path before build acceptance, retain the
+binding bytes, and pin the helper/library binding snapshots in the execution
+manifest. The normal helper prerequisite completed with Cargo exit zero at
+the current `2F1CDE44...` source freeze, unchanged inputs and no cleanup errors.
+Its retained generated bindings declare libavcodec 62 and libavutil 60, and
+its native link path selects the new SDK. The receipt is
+`ffmpeg8-helper-build-r1.receipt.json` (SHA-256
+`B081399CED73C60A716FACE92F7BE2899963BE04B20F67B0C9C9F1C957F2683D`).
+Independent review accepted the closed receipt, all 1903 current source hashes,
+both binding snapshots and the actual normal executable. Its direct FFmpeg
+imports use avcodec 62, avfilter 11, avformat 62, avutil 60 and swscale 9, with
+no prior ABI imports. The report is
+`.scratch/plugin-host-sprint/develop-ffmpeg8-helper-independent-review-r1.md`
+(SHA-256 `00398B77E4A03FF919B9C3D0EE451A44B93F24094BABB18D9C2C9D2A37029DB4`).
+The current workspace library test producer completed with Cargo exit zero,
+30 actual library test executables, unchanged source and no cleanup errors.
+Its generated and retained FFI bindings match the helper's new ABI. Independent
+review accepted all 30 current PE hashes and the four FFmpeg-dependent test
+executables' new ABI imports, plus the same-source LabRunner build. This is
+no-run build acceptance; prior FFmpeg 7 test artifacts remain historical.
+The independently reviewed R10 execution successor additionally binds and
+holds read leases on selected-SDK DLL copies already present in the actual
+helper, runner and test executable directories. All 12 SDK-name copies in
+`debug` currently match the selected SDK; `debug/deps` has none. This preserves
+the original test and process-ownership gates and is not a complete Windows
+loader or CRT closure claim. R10 execution completed: all 60 inventories
+were accepted, identifying 8580 tests (8291 ordinary and 289 ignored), with 29
+ordinary groups and 2867 ordinary App tests. The AI group passed. Previously
+failed background and settled/reused GPU model controls and the ordinary
+serialization control now pass in the current App log. App and the remaining
+groups subsequently completed successfully. The closed R10 result accepts all
+8291 ordinary library tests in 29 groups; App is 2867/0 with 130 exact ignored
+filters, and UI Widgets is 1200/0. All native owners exited zero and reaped
+their descendants without deadline/error reports. The outer postcheck accepts
+unchanged inputs and no cleanup failures. Its receipt SHA-256 is
+`3F18407A5AF5F35E7C66F86F1F01E6A1B55D953FE2F557903DDED210A6620585`;
+the inner receipt is `51CA1F67A6FF7CDDDED19672841BCA5217F8AD7480872D9C1BF9EA9F26B0F57A`.
+Independent full-run review accepted the exact 8291 tally, all 60 inventories,
+29 zero-exit/reaped native owners and 1985 unchanged inputs. The review SHA-256
+is `7CB15D280ADD400C75E3FDA8B6596EC61670640CA7B2D027D213695A0C9D2F2A`.
+Current SDK/source strict Clippy passed all targets/features with `-D warnings`,
+and the normal product check passed. The final normal Product build completed
+with the required explicit `-C debuginfo=2`, source `2F1CDE44...` unchanged and
+no cleanup errors. Its actual PE SHA-256 is
+`15630DDEB65193A7676EBB63FE557860907E15142807C37CF4A816F8A0742D37`.
+Normal builds retain the same ten existing OFX diagnostics; strict all-feature
+Clippy is warning-free. The final `15630DDE...` PE also passed the existing
+`--verify-runtime` route in the native owned Job: exactly one packaged-runtime
+ready line, native/runner exit zero, complete reaping, no timeout and no cleanup
+errors. Its 1949 input hashes remain unchanged. The closed smoke receipt is
+`89B752125C89E635257F6A138B2D89B5805AE00A92D5E9377700AD0F25406F0C`.
+This startup scope covers package-local FFmpeg tools/APIs and default OCIO;
+it does not qualify GUI, media processing workloads or hardware. The initial
+ancestor/hash preflight took longer than the native check and completed normally.
+Both adjacent packaged FFmpeg tools were created from the accepted SDK with
+exact matching hashes, without overwrites or deletions. This qualifies ordinary
+Windows library regression, not all integration/hardware cases or full standard
+compatibility.
+Independent review accepted the final Product startup receipt and all 1949
+input hashes. The report is
+`.scratch/plugin-host-sprint/develop-ffmpeg8-product-runtime-independent-review-r1.md`
+(SHA-256 `920F87DB749D6DA52233AB4F9CBD987A090FDCAD82B03EF201CD4CF4E19B7E53`).
+The final build-gate review is
+`.scratch/plugin-host-sprint/develop-ffmpeg8-final-build-gates-independent-review-r1.md`
+(SHA-256 `48671CA97EEA52A7CBFB11E6E707CD0C3D0EC0A93106439911A6E125F85FED96`).
+
+The prior Airwindows CLAP result remains failed: both Source47 selected gates
+failed before any complete PCM partition, and only one startup mismatch detail
+was captured. Alignment does not change that conclusion. No measured host
+performance improvement or new third-party compatibility is claimed here.
+
+Two independently identified CLAP issues remain for subsequent slices: the
+discovery probe does not update the existing host active marker around its
+successful activate/deactivate calls, and the discovery subprocess discards
+stderr that could distinguish failures. A scoped active-marker repair and
+owned ABI fixture are prepared but are not installed or verified. That marker
+issue does not explain the earlier pre-activation Airwindows default mismatch;
+causal diagnostics must preserve raw metadata, callback order and rescan flags
+without extra plugin queries or changed admission predicates.

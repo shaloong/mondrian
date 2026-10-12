@@ -74,7 +74,7 @@ fn visual_working_set_estimate_includes_retained_closure_and_numeric_upload() {
 
     assert_eq!(estimate.retained_closure.bytes, 10);
     let working_bpp = u64::from(product_gpu_working_bytes_per_pixel());
-    assert_eq!(estimate.source_uploads.bytes, 2 * working_bpp);
+    assert_eq!(estimate.source_materialization.bytes, 2 * working_bpp);
     assert_eq!(estimate.working_composite.bytes, 2 * 2 * working_bpp);
     assert_eq!(
         estimate.total().bytes,
@@ -122,6 +122,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             &context.device,
             &context.queue,
             &mut rejected_encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 2,
                 height: 1,
@@ -149,6 +150,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             &context.device,
             &context.queue,
             &mut encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 2,
                 height: 1,
@@ -254,6 +256,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
             &context.device,
             &context.queue,
             &mut encoder,
+            None,
             GpuVisualFrameRequest {
                 width: 4,
                 height: 4,
@@ -285,4 +288,192 @@ fn data_frame() -> CpuColorFrame {
         data: vec![[0.125, 0.5, 1.25, 1.0], [-0.25, 0.75, 2.0, 0.5]],
         color_space: WorkingColorSpace::LinearRec709,
     })
+}
+
+#[tokio::test]
+#[ignore = "requires a real GPU"]
+async fn compact_yuv_visual_sources_reuse_uploads_without_aliasing_and_retire_per_frame() {
+    use mondrian_media::preview::*;
+    use mondrian_media::{DecodedVideoMatrix, DecodedVideoRange};
+    use mondrian_renderer::RenderInputTransform;
+    mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO");
+    let context = GpuContext::new().await.expect("required physical adapter");
+    eprintln!("compact visual adapter: {:?}", context.adapter.get_info());
+    let fixture = tempfile::tempdir().expect("temporary fixture");
+    let path = fixture.path().join("distinct.y4m");
+    let codes = [64_u8, 192];
+    let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\n".to_vec();
+    for code in codes {
+        bytes.extend_from_slice(b"FRAME\n");
+        bytes.extend_from_slice(&[code; 8]);
+        bytes.extend_from_slice(&[128; 4]);
+    }
+    std::fs::write(&path, bytes).expect("fixture");
+    let mut decoder = PreviewDecodeSessionContext::new();
+    let mut frames = Vec::new();
+    for index in 0..2 {
+        let mut request = PreviewDecodeRequest::new(
+            &path,
+            mondrian_core::SourceSampleTarget::covering(
+                mondrian_core::TimelineTime::new(index, 25).expect("sample time"),
+            ),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited,
+            )
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        );
+        request.representation = PreviewDecodeRepresentation::CompactCpuYuv;
+        let PreviewDecodeOutcome::CpuYuvFrame(frame) =
+            decoder.decode_cancellable(request, || false).expect("software frame")
+        else {
+            panic!("compact frame required")
+        };
+        frames.push(Arc::new(frame));
+    }
+    decoder.clear();
+    drop(decoder);
+    let identity = Arc::new(
+        lower_effect_graph_to_gpu_plan(
+            &identity_compiled_effect_graph().expect("identity Effect graph"),
+        )
+        .expect("identity GPU plan"),
+    );
+    let mut runtime = GpuColorExecutionSession::new().expect("color owner");
+    let executor = GpuVisualFrameExecutor::new(&context.device).expect("visual owner");
+    // Multiple records precede a submission. Queue writes must not overwrite
+    // another immutable source's planes; the same Arc needs only one upload.
+    for (cycle, order) in [[0, 0, 1], [1, 1, 0]].into_iter().enumerate() {
+        let mut encoder = context.device.create_command_encoder(&Default::default());
+        let mut reads = Vec::new();
+        for (position, index) in order.into_iter().enumerate() {
+            let elements = [GpuVisualFrameElement::Source(Box::new(
+                GpuVisualSourceLayer {
+                    source: GpuVisualFrameSource::CompactYuv {
+                        frame: Arc::clone(&frames[index]),
+                        transform: RenderInputTransform::to_working_gpu(
+                            WorkingColorSpace::LinearRec2020,
+                            false,
+                            ColorEngine::mondrian_standard(),
+                        ),
+                    },
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: IDENTITY_AFFINE,
+                    effect_plan: Arc::clone(&identity),
+                    frame_seed: 0,
+                },
+            ))];
+            let request = GpuVisualFrameRequest {
+                width: 4,
+                height: 2,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+                color_engine: ColorEngine::mondrian_standard(),
+                elements: &elements,
+            };
+            if position == 0 {
+                let rejected = GpuVisualFrameExecutor::with_resource_grant(
+                    &context.device,
+                    GpuVisualFrameExecutionResourceGrant::new(1, 1),
+                )
+                .expect("rejected owner");
+                assert!(matches!(
+                    rejected.record(
+                        &mut runtime,
+                        &context.device,
+                        &context.queue,
+                        &mut encoder,
+                        None,
+                        GpuVisualFrameRequest {
+                            color_engine: request.color_engine.clone(),
+                            ..request
+                        },
+                    ),
+                    Err(GpuVisualFrameExecutionError::ActiveWorkingSet(_))
+                ));
+                assert_eq!(runtime.retained_frame_count(), 0);
+            }
+            let record = executor
+                .record(
+                    &mut runtime,
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    None,
+                    request,
+                )
+                .expect("shared production YUV/color/composite");
+            if cycle > 0 && position == 0 {
+                assert_eq!(
+                    record.active_working_set.retained_closure.textures, 6,
+                    "both cached plane allocations remain charged after content invalidation"
+                );
+            }
+            assert_eq!(record.compact_yuv_sources, 1);
+            assert_eq!(
+                record.color_stage_diagnostics.upload_stages,
+                u64::from(position != 1)
+            );
+            assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 1);
+            assert_eq!(record.color_stage_diagnostics.cpu_input_stages, 0);
+            if position > 0 {
+                assert!(record.active_working_set.retained_closure.textures >= 3);
+            }
+            let plan = GpuColorFrameReadbackPlan::encoded_rgba32float(record.output)
+                .expect("working Float32 readback");
+            let read = runtime
+                .record_readback(&context.device, &mut encoder, &plan)
+                .expect("record diagnostic copy");
+            reads.push((index, plan, read));
+        }
+        context.queue.submit([encoder.finish()]);
+        for (index, plan, read) in reads {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            read.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+            context
+                .device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .expect("GPU completion");
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("callback")
+                .expect("map");
+            let actual = plan
+                .unpack_mapped_rgba32float(
+                    &read.slice(..).get_mapped_range().expect("mapped bytes"),
+                )
+                .expect("working pixels");
+            read.unmap();
+            let encoded = (f32::from(codes[index]) - 16.0) / 219.0;
+            let mut expected = [encoded, encoded, encoded, 1.0];
+            ColorEngine::mondrian_standard()
+                .convert_identity_float(
+                    &mut expected,
+                    mondrian_core::ColorSpace::Rec709.into(),
+                    WorkingColorSpace::LinearRec2020.into(),
+                )
+                .expect("independent CPU reference");
+            for pixel in actual.chunks_exact(4) {
+                for channel in 0..4 {
+                    assert!(
+                        pixel[channel].is_finite()
+                            && (pixel[channel] - expected[channel]).abs() <= 1.0e-3,
+                        "source {index}: {pixel:?} vs {expected:?}"
+                    );
+                }
+            }
+        }
+        runtime.clear_frame_resources();
+        executor.clear_frame_resources();
+        // Export clears after completed readback and before the next frame.
+        // Repeated invalidation must not drop reusable, still-charged slots.
+        executor.clear_frame_resources();
+    }
+    assert_eq!(runtime.retained_frame_count(), 0);
 }

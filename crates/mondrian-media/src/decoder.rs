@@ -1111,6 +1111,8 @@ pub enum DecodedFrameResidency {
     CpuRgba,
     /// Decoder output is CPU RGBA f32 memory.
     CpuFloat,
+    /// Decoder output is CPU source-encoded RGBA16 UNORM memory.
+    CpuUnorm16,
     /// Decoder output is compact CPU YUV planes awaiting GPU materialization.
     CpuYuv,
     /// Decoder output is a GPU texture or hardware frame.
@@ -1148,6 +1150,8 @@ pub enum DecodedVideoSurfaceFormat {
     P412,
     /// 16-bit P416 two-plane YUV 4:4:4 surface.
     P416,
+    /// Full-resolution sixteen-bit Y, interleaved CbCr, and straight alpha planes.
+    Yuva444sp16,
     /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
     Y210,
     /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
@@ -1162,18 +1166,26 @@ pub enum DecodedVideoSurfaceFormat {
     Yuv420p10le,
     /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
     Yuv420p12le,
+    /// Planar little-endian sixteen-bit YUV 4:2:0.
+    Yuv420p16le,
     /// Planar 8-bit YUV 4:2:2.
     Yuv422p,
     /// Planar 10-bit YUV 4:2:2.
     Yuv422p10le,
     /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
     Yuv422p12le,
+    /// Planar little-endian sixteen-bit YUV 4:2:2.
+    Yuv422p16le,
     /// Planar eight-bit CPU YUV 4:4:4.
     Yuv444p,
     /// Planar little-endian ten-bit CPU YUV 4:4:4 with right-aligned samples.
     Yuv444p10le,
     /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
     Yuv444p12le,
+    /// Planar little-endian sixteen-bit YUV 4:4:4.
+    Yuv444p16le,
+    /// Planar little-endian twelve-bit YUV 4:4:4 with an Alpha plane.
+    Yuva444p12le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
@@ -1209,9 +1221,9 @@ pub enum DecodedVideoSurfaceChromaSubsampling {
 /// Shader-visible plane organization of a decoded surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecodedVideoSurfacePlaneLayout {
-    /// Luma and an interleaved CbCr plane.
+    /// Luma and an interleaved CbCr plane, optionally followed by full-resolution alpha.
     SemiPlanar,
-    /// Independent luma, Cb, and Cr planes.
+    /// Independent luma, Cb, and Cr planes, optionally followed by Alpha.
     Planar,
     /// Packed YCbCr 4:2:2 words requiring an explicit GPU unpack Adapter.
     PackedYuv422,
@@ -1268,6 +1280,13 @@ pub struct DecodedVideoSurfaceDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case")]
 pub enum DecodedVideoRangeContract {
+    /// Follow frame facts and an explicitly retained source convention.
+    AutomaticWithConvention {
+        /// Raw stream range, without replacing Unknown with a policy guess.
+        probed_range: DecodedVideoRange,
+        /// Format rule or identifiable legacy SDR assumption.
+        convention: mondrian_core::VideoSamplingConvention,
+    },
     /// Follow frame metadata, falling back to the latest stream probe.
     Automatic {
         /// Stream-level range reported while probing the asset.
@@ -1280,6 +1299,95 @@ pub enum DecodedVideoRangeContract {
 }
 
 impl DecodedVideoRangeContract {
+    /// Bind the same persisted probe evidence for Preview, thumbnails and Export.
+    pub fn from_video_stream(
+        interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+        stream: &mondrian_core::VideoStreamInfo,
+    ) -> Self {
+        let base = Self::from_interpretation(interpretation, stream.color_range);
+        if !matches!(base, Self::Automatic { .. }) || stream.proven_sampling().is_none() {
+            return base;
+        }
+        let mut conventions =
+            stream.color_interpretation.evidence.iter().filter_map(|entry| match entry {
+                mondrian_core::VideoColorInterpretationEvidence::SamplingConvention {
+                    codec,
+                    convention,
+                } if *codec == stream.codec => Some(*convention),
+                _ => None,
+            });
+        let Some(convention) = conventions.next() else {
+            return base;
+        };
+        if conventions.any(|other| other != convention) {
+            return base;
+        }
+        use mondrian_core::{VideoCodec, VideoSamplingConvention};
+        let allowed = match convention {
+            VideoSamplingConvention::DnxColorVolume => {
+                matches!(stream.codec, VideoCodec::DnxHd | VideoCodec::DnxHr)
+            }
+            VideoSamplingConvention::SdDv => {
+                stream.codec == VideoCodec::Other("DVVIDEO".to_owned())
+                    && stream.width == 720
+                    && matches!(stream.height, 480 | 576)
+                    && stream.bit_depth == 8
+                    && !stream.pixel_format.is_rgb()
+                    && !stream.has_alpha
+            }
+            VideoSamplingConvention::LegacyVideoLevels => {
+                matches!(&stream.codec,
+                VideoCodec::Other(name) if matches!(name.as_str(), "MPEG4" | "MSMPEG4V1" | "MSMPEG4V2" | "MSMPEG4V3" | "FLV1" | "THEORA"))
+                    && stream.bit_depth == 8
+                    && !stream.pixel_format.is_rgb()
+                    && stream
+                        .color_metadata
+                        .as_ref()
+                        .is_none_or(|metadata| !matches!(metadata.transfer.code, 16 | 18))
+                    && stream
+                        .hdr_metadata
+                        .iter()
+                        .all(|entry| entry.kind == mondrian_core::VideoHdrSideDataKind::IccProfile)
+            }
+        };
+        if !allowed {
+            return base;
+        }
+        Self::AutomaticWithConvention { probed_range: stream.color_range, convention }
+    }
+
+    /// Resolve a frame's independent matrix/range facts. FFmpeg's VC-3 decoder
+    /// validates each coding unit and publishes CLV as the frame colorspace.
+    /// CLV=11 yields Unknown and cannot inherit an earlier picture's range.
+    pub const fn resolve_for_sampling(
+        self,
+        frame_range: DecodedVideoRange,
+        matrix: DecodedVideoMatrix,
+    ) -> DecodedVideoRange {
+        if let Self::AutomaticWithConvention {
+            probed_range,
+            convention: mondrian_core::VideoSamplingConvention::DnxColorVolume,
+        } = self
+        {
+            let fact = match frame_range {
+                DecodedVideoRange::Unknown => probed_range,
+                explicit => explicit,
+            };
+            return match matrix {
+                DecodedVideoMatrix::Bt709 | DecodedVideoMatrix::Bt2020NonConstant => match fact {
+                    // A contradictory container/frame tag cannot silently
+                    // replace ST 2019-1's in-band digital representation.
+                    DecodedVideoRange::Full => DecodedVideoRange::Unknown,
+                    _ => DecodedVideoRange::Limited,
+                },
+                // Decoder/container range fields lack provenance here. They
+                // cannot prove the external representation required by CLV=11.
+                // An authored range remains available through Override*.
+                _ => DecodedVideoRange::Unknown,
+            };
+        }
+        self.resolve_for_frame(frame_range)
+    }
     /// Build the decode contract from persistent asset interpretation and probe facts.
     pub const fn from_interpretation(
         interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
@@ -1301,6 +1409,31 @@ impl DecodedVideoRangeContract {
     /// Resolve the range to apply to one decoded frame.
     pub const fn resolve_for_frame(self, frame_range: DecodedVideoRange) -> DecodedVideoRange {
         match self {
+            Self::AutomaticWithConvention {
+                probed_range,
+                convention: mondrian_core::VideoSamplingConvention::SdDv,
+            } => match (frame_range, probed_range) {
+                (DecodedVideoRange::Full, _)
+                | (DecodedVideoRange::Unknown, DecodedVideoRange::Full) => {
+                    DecodedVideoRange::Unknown
+                }
+                _ => DecodedVideoRange::Limited,
+            },
+            Self::AutomaticWithConvention { probed_range, convention } => match frame_range {
+                DecodedVideoRange::Unknown => match probed_range {
+                    DecodedVideoRange::Unknown => match convention {
+                        mondrian_core::VideoSamplingConvention::SdDv
+                        | mondrian_core::VideoSamplingConvention::LegacyVideoLevels => {
+                            DecodedVideoRange::Limited
+                        }
+                        mondrian_core::VideoSamplingConvention::DnxColorVolume => {
+                            DecodedVideoRange::Unknown
+                        }
+                    },
+                    explicit => explicit,
+                },
+                explicit => explicit,
+            },
             Self::Automatic { probed_range } => match frame_range {
                 DecodedVideoRange::Unknown => probed_range,
                 explicit => explicit,
@@ -1405,6 +1538,36 @@ pub enum DecodedVideoMatrix {
     Smpte240M,
     /// Source pixels were already RGB, so no YUV matrix was applied.
     Rgb,
+}
+
+impl DecodedVideoMatrix {
+    /// Lower the numeric sampling fact independently of RGB colorimetry.
+    pub const fn from_cicp_code(code: i32) -> Self {
+        match code {
+            0 => Self::Rgb,
+            1 => Self::Bt709,
+            2 => Self::Unknown,
+            4 => Self::Fcc,
+            5 => Self::Bt470Bg,
+            6 => Self::Smpte170M,
+            7 => Self::Smpte240M,
+            9 => Self::Bt2020NonConstant,
+            _ => Self::Unsupported,
+        }
+    }
+
+    /// FFmpeg coefficient name for an admitted nonconstant YCbCr matrix.
+    pub const fn ffmpeg_yuv_name(self) -> Option<&'static str> {
+        match self {
+            Self::Bt709 => Some("bt709"),
+            Self::Bt2020NonConstant => Some("bt2020nc"),
+            Self::Fcc => Some("fcc"),
+            Self::Bt470Bg => Some("bt470bg"),
+            Self::Smpte170M => Some("smpte170m"),
+            Self::Smpte240M => Some("smpte240m"),
+            _ => None,
+        }
+    }
 }
 
 /// Native hardware-frame handle family produced by a decoder.
@@ -1796,8 +1959,12 @@ pub struct HwAccelProbe {
     pub decoder_adapter_available: bool,
     /// Backend that is actually active for the media decode boundary.
     pub selected_backend: HwAccelBackend,
-    /// Whether the media decode boundary currently uses a hardware decoder.
-    pub hardware_decode_active: bool,
+    /// Whether the decoder produced a frame through the selected native backend.
+    /// Backend activity and surface residency do not imply hardware execution.
+    pub native_decoder_active: bool,
+    /// Observed hardware execution: true for hardware, false for software,
+    /// None when the selected decoder cannot expose that observation.
+    pub hardware_decode_observed: Option<bool>,
     /// Whether decoded frames currently remain GPU-resident through the media boundary.
     pub zero_copy_active: bool,
     /// Residency produced by the active decode path.
@@ -1832,7 +1999,8 @@ impl HwAccelBackend {
                 .unwrap_or_default(),
             decoder_adapter_available: false,
             selected_backend: Self::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: None,
             zero_copy_active: false,
             frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -2123,6 +2291,7 @@ impl DecodedFrameResidency {
         match self {
             Self::CpuRgba => "CpuRgba",
             Self::CpuFloat => "CpuFloat",
+            Self::CpuUnorm16 => "CpuUnorm16",
             Self::CpuYuv => "CpuYuv",
             Self::GpuTexture => "GpuTexture",
         }
@@ -2144,6 +2313,7 @@ impl DecodedVideoSurfaceFormat {
             Self::P410 => "P410",
             Self::P412 => "P412",
             Self::P416 => "P416",
+            Self::Yuva444sp16 => "Yuva444sp16",
             Self::Y210 => "Y210",
             Self::Y212 => "Y212",
             Self::Xv30 => "Xv30",
@@ -2151,12 +2321,16 @@ impl DecodedVideoSurfaceFormat {
             Self::Yuv420p => "Yuv420p",
             Self::Yuv420p10le => "Yuv420p10le",
             Self::Yuv420p12le => "Yuv420p12le",
+            Self::Yuv420p16le => "Yuv420p16le",
             Self::Yuv422p => "Yuv422p",
             Self::Yuv422p10le => "Yuv422p10le",
             Self::Yuv422p12le => "Yuv422p12le",
+            Self::Yuv422p16le => "Yuv422p16le",
             Self::Yuv444p => "Yuv444p",
             Self::Yuv444p10le => "Yuv444p10le",
             Self::Yuv444p12le => "Yuv444p12le",
+            Self::Yuv444p16le => "Yuv444p16le",
+            Self::Yuva444p12le => "Yuva444p12le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
             Self::Rgba16Float => "Rgba16Float",
@@ -2218,6 +2392,15 @@ impl DecodedVideoSurfaceFormat {
                     native_gpu_payload: true,
                 }
             }
+            Self::Yuva444sp16 => DecodedVideoSurfaceDescriptor {
+                color_model: Ycbcr,
+                chroma_subsampling: Some(Cs444),
+                plane_layout: SemiPlanar,
+                numeric_encoding: Unorm16 { most_significant_bits: false },
+                component_bit_depth: 16,
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
             Self::Y210 | Self::Y212 | Self::Xv30 | Self::Xv36 => {
                 let (chroma_subsampling, plane_layout, component_bit_depth) = match self {
                     Self::Y210 => (Cs422, PackedYuv422, 10),
@@ -2243,22 +2426,31 @@ impl DecodedVideoSurfaceFormat {
             Self::Yuv420p
             | Self::Yuv420p10le
             | Self::Yuv420p12le
+            | Self::Yuv420p16le
             | Self::Yuv422p
             | Self::Yuv422p10le
             | Self::Yuv422p12le
+            | Self::Yuv422p16le
             | Self::Yuv444p
             | Self::Yuv444p10le
-            | Self::Yuv444p12le => {
+            | Self::Yuv444p12le
+            | Self::Yuv444p16le
+            | Self::Yuva444p12le => {
                 let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
                     Self::Yuv420p => (Cs420, 8, Unorm8),
                     Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
                     Self::Yuv420p12le => (Cs420, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv420p16le => (Cs420, 16, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p => (Cs422, 8, Unorm8),
                     Self::Yuv444p => (Cs444, 8, Unorm8),
                     Self::Yuv444p10le => (Cs444, 10, Unorm16 { most_significant_bits: false }),
-                    Self::Yuv444p12le => (Cs444, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv444p12le | Self::Yuva444p12le => {
+                        (Cs444, 12, Unorm16 { most_significant_bits: false })
+                    }
+                    Self::Yuv444p16le => (Cs444, 16, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
                     Self::Yuv422p12le => (Cs422, 12, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p16le => (Cs422, 16, Unorm16 { most_significant_bits: false }),
                     _ => unreachable!(),
                 };
                 DecodedVideoSurfaceDescriptor {
@@ -2267,7 +2459,7 @@ impl DecodedVideoSurfaceFormat {
                     plane_layout: Planar,
                     numeric_encoding,
                     component_bit_depth,
-                    has_alpha: false,
+                    has_alpha: matches!(self, Self::Yuva444p12le),
                     native_gpu_payload: false,
                 }
             }
@@ -2354,6 +2546,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_conventions_preserve_frame_authority_and_dnx_out_of_band() {
+        use mondrian_core::VideoSamplingConvention;
+        for convention in [
+            VideoSamplingConvention::SdDv,
+            VideoSamplingConvention::LegacyVideoLevels,
+        ] {
+            let contract = DecodedVideoRangeContract::AutomaticWithConvention {
+                probed_range: DecodedVideoRange::Unknown,
+                convention,
+            };
+            assert_eq!(contract.baseline(), DecodedVideoRange::Limited);
+            assert_eq!(
+                contract.resolve_for_frame(DecodedVideoRange::Full),
+                if convention == VideoSamplingConvention::SdDv {
+                    DecodedVideoRange::Unknown
+                } else {
+                    DecodedVideoRange::Full
+                }
+            );
+        }
+        let dnx = DecodedVideoRangeContract::AutomaticWithConvention {
+            probed_range: DecodedVideoRange::Unknown,
+            convention: VideoSamplingConvention::DnxColorVolume,
+        };
+        for matrix in [
+            DecodedVideoMatrix::Bt709,
+            DecodedVideoMatrix::Bt2020NonConstant,
+        ] {
+            assert_eq!(
+                dnx.resolve_for_sampling(DecodedVideoRange::Unknown, matrix),
+                DecodedVideoRange::Limited
+            );
+            assert_eq!(
+                dnx.resolve_for_sampling(DecodedVideoRange::Full, matrix),
+                DecodedVideoRange::Unknown
+            );
+        }
+        assert_eq!(dnx.baseline(), DecodedVideoRange::Unknown);
+        for range in [DecodedVideoRange::Full, DecodedVideoRange::Limited] {
+            assert_eq!(
+                dnx.resolve_for_sampling(range, DecodedVideoMatrix::Unknown),
+                DecodedVideoRange::Unknown
+            );
+        }
+        assert_eq!(
+            dnx.resolve_for_sampling(DecodedVideoRange::Unknown, DecodedVideoMatrix::Unknown),
+            DecodedVideoRange::Unknown
+        );
+    }
+
+    #[test]
     fn decoded_video_range_resolution_keeps_auto_and_honors_override() {
         use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
 
@@ -2416,7 +2659,7 @@ mod tests {
         );
         assert!(!probe.decoder_adapter_available);
         assert_eq!(probe.selected_backend, HwAccelBackend::None);
-        assert!(!probe.hardware_decode_active);
+        assert!(!probe.native_decoder_active);
         assert!(!probe.zero_copy_active);
         assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
         assert_eq!(probe.gpu_frame_handle_kind, None);

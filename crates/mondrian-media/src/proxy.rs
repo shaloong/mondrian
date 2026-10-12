@@ -5,8 +5,8 @@
 
 use crate::FfmpegCommand as Command;
 use crate::{
-    DecodedVideoRange, MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity,
-    SupervisedProcessPolicy, SupervisedStreamCapture,
+    DecodedVideoMatrix, DecodedVideoRange, MediaFileChangeStamp, MediaFileFingerprint,
+    MediaFileObjectIdentity, SupervisedProcessPolicy, SupervisedStreamCapture,
 };
 use mondrian_core::{
     types::AssetId, types::ColorSpace, ExecutionCancellationToken, MondrianError, Result,
@@ -97,7 +97,7 @@ impl ProxyConfig {
     }
 }
 
-const PROXY_COLOR_CONTRACT_VERSION: u16 = 2;
+const PROXY_COLOR_CONTRACT_VERSION: u16 = 3;
 pub(crate) const PROXY_MANIFEST_VERSION: u16 = 3;
 /// Generated proxy commands map their sole picture stream before optional audio.
 ///
@@ -108,6 +108,12 @@ pub(crate) const PROXY_PRIMARY_VIDEO_STREAM_INDEX: u32 = 0;
 /// Invalid source sampling metadata for proxy generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProxyColorContractError {
+    /// Input sampling coefficients are absent or unsupported.
+    #[error("proxy generation requires a supported source sampling matrix")]
+    UnsupportedSourceMatrix,
+    /// Ordinary FFmpeg RGB packing does not expand integer video levels.
+    #[error("limited RGB proxy generation requires production float materialization")]
+    LimitedRgbRequiresMaterialization,
     /// Ingest did not resolve the encoded video range.
     #[error("proxy generation requires an explicit source video range")]
     UnknownSourceRange,
@@ -125,26 +131,34 @@ pub enum ProxyColorContractError {
 pub struct ProxyColorContract {
     /// Contract schema version used in persistent proxy identity.
     version: u16,
+    /// Exact original picture-stream index selected by the admitted probe.
+    source_video_stream_index: u32,
     /// Effective source/input color space resolved by the application.
     source_color_space: ColorSpace,
     /// Nominal source component precision reported by ingest.
     source_bit_depth: u8,
     /// Encoded video range when the decoder reported it reliably.
     source_range: DecodedVideoRange,
+    /// Actual source sampling coefficients, independent of RGB colorimetry.
+    source_matrix: DecodedVideoMatrix,
 }
 
 impl ProxyColorContract {
     /// Build the current proxy color contract for an ingested video stream.
     pub fn try_new(
+        source_video_stream_index: u32,
         source_color_space: ColorSpace,
         source_bit_depth: u8,
         source_range: DecodedVideoRange,
+        source_matrix: DecodedVideoMatrix,
     ) -> std::result::Result<Self, ProxyColorContractError> {
         let contract = Self {
             version: PROXY_COLOR_CONTRACT_VERSION,
+            source_video_stream_index,
             source_color_space,
             source_bit_depth,
             source_range,
+            source_matrix,
         };
         contract.validate()?;
         Ok(contract)
@@ -165,7 +179,27 @@ impl ProxyColorContract {
         self.source_range
     }
 
+    /// Source sampling coefficients retained by the proxy contract.
+    pub const fn source_matrix(self) -> DecodedVideoMatrix {
+        self.source_matrix
+    }
+
+    /// Original stream selection included in proxy execution and cache identity.
+    pub const fn source_video_stream_index(self) -> u32 {
+        self.source_video_stream_index
+    }
+
     fn validate(self) -> std::result::Result<(), ProxyColorContractError> {
+        if self.source_matrix != DecodedVideoMatrix::Rgb
+            && self.source_matrix.ffmpeg_yuv_name().is_none()
+        {
+            return Err(ProxyColorContractError::UnsupportedSourceMatrix);
+        }
+        if self.source_matrix == DecodedVideoMatrix::Rgb
+            && self.source_range == DecodedVideoRange::Limited
+        {
+            return Err(ProxyColorContractError::LimitedRgbRequiresMaterialization);
+        }
         if self.source_range == DecodedVideoRange::Unknown {
             return Err(ProxyColorContractError::UnknownSourceRange);
         }
@@ -1134,15 +1168,18 @@ fn ffmpeg_proxy_command(
         }
     };
     let tags = color.source_color_space.ffmpeg_tags();
+    // Preserve actual YCbCr coefficients. RGB is explicitly encoded with
+    // BT.709 coefficients without changing its primaries or transfer function.
+    let matrix = color.source_matrix.ffmpeg_yuv_name().unwrap_or("bt709");
     let mut setparams = format!("setparams=range={frame_range}");
     if let Some(tags) = tags {
         setparams.push_str(&format!(
-            ":color_primaries={}:color_trc={}:colorspace={}",
-            tags.color_primaries, tags.color_trc, tags.colorspace
+            ":color_primaries={}:color_trc={}",
+            tags.color_primaries, tags.color_trc
         ));
     }
     let filter_graph = format!(
-        "{setparams},setsar=1,scale=-2:{height}:flags=lanczos:in_range={scale_range}:out_range={scale_range}"
+        "{setparams},setsar=1,scale=-2:{height}:flags=lanczos:in_color_matrix={matrix}:out_color_matrix={matrix}:in_range={scale_range}:out_range={scale_range}"
     );
     let mut cmd = crate::ffmpeg_command()?;
     cmd.arg("-y")
@@ -1153,7 +1190,7 @@ fn ffmpeg_proxy_command(
         .arg("-i")
         .arg(source_path)
         .arg("-map")
-        .arg("0:v:0")
+        .arg(format!("0:{}", color.source_video_stream_index))
         .arg("-map")
         .arg("0:a?")
         .arg("-vf")
@@ -1167,9 +1204,7 @@ fn ffmpeg_proxy_command(
         cmd.arg("-color_primaries")
             .arg(tags.color_primaries)
             .arg("-color_trc")
-            .arg(tags.color_trc)
-            .arg("-colorspace")
-            .arg(tags.colorspace);
+            .arg(tags.color_trc);
     } else {
         tracing::warn!(
             source_color_space = ?color.source_color_space,
@@ -1177,6 +1212,7 @@ fn ffmpeg_proxy_command(
         );
     }
     cmd.arg("-color_range").arg(output_range);
+    cmd.arg("-colorspace").arg(matrix);
 
     match encoding {
         ProxyEncodingProfile::H264High8 => {
@@ -1260,33 +1296,186 @@ mod tests {
     }
 
     fn rec709_contract() -> ProxyColorContract {
-        ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
-            .expect("valid Rec.709 proxy contract")
+        ProxyColorContract::try_new(
+            0,
+            ColorSpace::Rec709,
+            8,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Bt709,
+        )
+        .expect("valid Rec.709 proxy contract")
     }
 
     #[test]
     fn proxy_color_contract_rejects_implicit_range_and_invalid_precision() {
         assert_eq!(
-            ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Unknown),
+            ProxyColorContract::try_new(
+                0,
+                ColorSpace::Rec709,
+                8,
+                DecodedVideoRange::Unknown,
+                crate::DecodedVideoMatrix::Bt709
+            ),
             Err(ProxyColorContractError::UnknownSourceRange)
         );
         assert_eq!(
-            ProxyColorContract::try_new(ColorSpace::Rec709, 0, DecodedVideoRange::Limited),
+            ProxyColorContract::try_new(
+                0,
+                ColorSpace::Rec709,
+                0,
+                DecodedVideoRange::Limited,
+                crate::DecodedVideoMatrix::Bt709
+            ),
             Err(ProxyColorContractError::UnsupportedSourceBitDepth(0))
         );
         assert_eq!(
-            ProxyColorContract::try_new(ColorSpace::Rec709, 17, DecodedVideoRange::Limited),
+            ProxyColorContract::try_new(
+                0,
+                ColorSpace::Rec709,
+                17,
+                DecodedVideoRange::Limited,
+                crate::DecodedVideoMatrix::Bt709
+            ),
             Err(ProxyColorContractError::UnsupportedSourceBitDepth(17))
         );
+    }
+
+    #[test]
+    #[ignore = "requires the production FFmpeg runtime with FFV1 and libx264"]
+    fn proxy_roundtrip_preserves_sampling_matrix_independently_of_rgb_color_space() {
+        let root = tempfile::tempdir().expect("proxy matrix fixture");
+        let raw = root.path().join("source.yuv");
+        let source = root.path().join("source.mkv");
+        let mut samples = vec![100_u8; 64 * 32];
+        samples.extend(vec![100_u8; 64 * 32]);
+        samples.extend(vec![160_u8; 64 * 32]);
+        std::fs::write(&raw, samples).unwrap();
+        let encoded = crate::ffmpeg_command()
+            .unwrap()
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:size=64x32:rate=25",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "yuv444p",
+                "-video_size",
+                "64x32",
+                "-framerate",
+                "25",
+                "-i",
+            ])
+            .arg(&raw)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:v:0",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "ffv1",
+                "-color_range",
+                "tv",
+                "-colorspace",
+                "smpte170m",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            encoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&encoded.stderr)
+        );
+        let color = ProxyColorContract::try_new(
+            1,
+            ColorSpace::Rec709,
+            8,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Smpte170M,
+        )
+        .unwrap();
+        let generator = ProxyGenerator::new(ProxyConfig {
+            resolution: super::ProxyResolution::P360,
+            crf: 1,
+            ..test_proxy_config(root.path().join("proxy"))
+        });
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let path = runtime
+            .block_on(generator.generate(mondrian_core::AssetId::new(), source, color, tx))
+            .expect("production proxy publication");
+        assert_eq!(
+            generator.proxy_status(root.path().join("source.mkv").as_path(), color),
+            ProxyStatus::Fresh
+        );
+        let info = crate::probe_media_info(&path).expect("probe generated artifact");
+        let video = info.primary_video().unwrap();
+        assert_eq!(video.color_metadata.as_ref().unwrap().matrix.code, 6);
+        assert_eq!(video.color_range, DecodedVideoRange::Limited);
+        let decoded = crate::ffmpeg_command()
+            .unwrap()
+            .args(["-v", "error", "-nostdin", "-i"])
+            .arg(&path)
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(
+            decoded.stdout.len(),
+            video.width as usize * video.height as usize * 3
+        );
+        // Independent BT.601 equations: a Rec.709 RGB interpretation must not
+        // silently relabel the source's SMPTE 170M YCbCr sample coefficients.
+        let y = (100.0_f32 - 16.0) / 219.0;
+        let cb = (100.0_f32 - 128.0) / 224.0;
+        let cr = (160.0_f32 - 128.0) / 224.0;
+        let expected = [
+            y + 1.402 * cr,
+            y - 0.344_136 * cb - 0.714_136 * cr,
+            y + 1.772 * cb,
+        ];
+        for pixel in decoded.stdout.chunks_exact(3) {
+            for (actual, expected) in pixel.iter().zip(expected) {
+                assert!(
+                    (f32::from(*actual) / 255.0 - expected).abs() < 3.0 / 255.0,
+                    "matrix changed during proxy roundtrip: {pixel:?}, expected {expected}"
+                );
+            }
+        }
     }
 
     #[test]
     fn generator_revalidates_deserialized_proxy_contracts() {
         let invalid = serde_json::from_value::<ProxyColorContract>(serde_json::json!({
             "version": PROXY_COLOR_CONTRACT_VERSION,
+            "source_video_stream_index": 0,
             "source_color_space": "Rec709",
             "source_bit_depth": 8,
-            "source_range": "Unknown"
+            "source_range": "Unknown",
+            "source_matrix": "Bt709"
         }))
         .expect("schema-valid proxy contract");
 
@@ -1352,12 +1541,20 @@ mod tests {
     #[test]
     fn automatic_profile_preserves_hdr_and_log_precision() {
         let generator = ProxyGenerator::new(ProxyConfig::default());
-        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
-            .expect("valid PQ contract");
+        let pq = ProxyColorContract::try_new(
+            0,
+            ColorSpace::Rec2100Pq,
+            10,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Bt2020NonConstant,
+        )
+        .expect("valid PQ contract");
         let log = ProxyColorContract::try_new(
+            0,
             ColorSpace::SonySLog3SGamut3Cine,
             10,
             DecodedVideoRange::Full,
+            crate::DecodedVideoMatrix::Bt709,
         )
         .expect("valid log contract");
 
@@ -1375,8 +1572,14 @@ mod tests {
     fn forced_h264_rejects_high_precision_source() {
         let config = ProxyConfig { codec: ProxyCodec::H264, ..ProxyConfig::default() };
         let generator = ProxyGenerator::new(config);
-        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
-            .expect("valid PQ contract");
+        let pq = ProxyColorContract::try_new(
+            0,
+            ColorSpace::Rec2100Pq,
+            10,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Bt2020NonConstant,
+        )
+        .expect("valid PQ contract");
 
         let error = generator.encoding_profile(pq).expect_err("H.264 must reject PQ");
 
@@ -1388,8 +1591,14 @@ mod tests {
         let generator = ProxyGenerator::new(ProxyConfig::default());
         let source = std::path::Path::new("E:/media/source.mov");
         let rec709 = rec709_contract();
-        let pq = ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
-            .expect("valid PQ contract");
+        let pq = ProxyColorContract::try_new(
+            0,
+            ColorSpace::Rec2100Pq,
+            10,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Bt2020NonConstant,
+        )
+        .expect("valid PQ contract");
 
         assert_ne!(
             generator.proxy_path(source, rec709).expect("Rec.709 path"),
@@ -1456,9 +1665,14 @@ mod tests {
 
     #[test]
     fn hdr_proxy_command_declares_main10_and_cicp_tags() {
-        let color =
-            ProxyColorContract::try_new(ColorSpace::Rec2100Pq, 10, DecodedVideoRange::Limited)
-                .expect("valid PQ contract");
+        let color = ProxyColorContract::try_new(
+            0,
+            ColorSpace::Rec2100Pq,
+            10,
+            DecodedVideoRange::Limited,
+            crate::DecodedVideoMatrix::Bt2020NonConstant,
+        )
+        .expect("valid PQ contract");
         let command = ffmpeg_proxy_command(
             ProxyEncodingProfile::H265Main10,
             20,
@@ -1485,7 +1699,8 @@ mod tests {
         assert!(filter.contains("setparams=range=limited"));
         assert!(filter.contains("color_primaries=bt2020"));
         assert!(filter.contains("color_trc=smpte2084"));
-        assert!(filter.contains("colorspace=bt2020nc"));
+        assert!(args.windows(2).any(|pair| pair == ["-colorspace", "bt2020nc"]));
+        assert!(filter.contains("in_color_matrix=bt2020nc:out_color_matrix=bt2020nc"));
         assert!(filter.contains("in_range=tv:out_range=tv"));
     }
 
@@ -1505,7 +1720,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert!(args.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:0"]));
         assert!(args.iter().any(|arg| arg == "-noautorotate"));
         assert_eq!(PROXY_PRIMARY_VIDEO_STREAM_INDEX, 0);
     }
@@ -1513,9 +1728,11 @@ mod tests {
     #[test]
     fn log_proxy_command_does_not_emit_false_standardized_tags() {
         let color = ProxyColorContract::try_new(
+            0,
             ColorSpace::SonySLog3SGamut3Cine,
             10,
             DecodedVideoRange::Full,
+            crate::DecodedVideoMatrix::Bt709,
         )
         .expect("valid log contract");
         let command = ffmpeg_proxy_command(
@@ -1534,7 +1751,7 @@ mod tests {
 
         assert!(!args.iter().any(|arg| arg == "-color_primaries"));
         assert!(!args.iter().any(|arg| arg == "-color_trc"));
-        assert!(!args.iter().any(|arg| arg == "-colorspace"));
+        assert!(args.windows(2).any(|pair| pair == ["-colorspace", "bt709"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "pc"]));
         assert!(args.windows(2).any(|pair| pair == ["-f", "mp4"]));
         let filter = args
@@ -1543,7 +1760,7 @@ mod tests {
             .expect("video filter graph");
         assert_eq!(
             filter,
-            "setparams=range=full,setsar=1,scale=-2:720:flags=lanczos:in_range=pc:out_range=pc"
+            "setparams=range=full,setsar=1,scale=-2:720:flags=lanczos:in_color_matrix=bt709:out_color_matrix=bt709:in_range=pc:out_range=pc"
         );
     }
 

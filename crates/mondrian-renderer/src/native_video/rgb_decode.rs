@@ -224,7 +224,7 @@ impl GpuNativeRgbDecoder {
     /// Record native RGB scaling/materialization without changing source values or alpha.
     pub fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuNativeRgbDecodePlan,
         prepared: &GpuNativeRgbPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,

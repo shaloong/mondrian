@@ -29,6 +29,7 @@ pub mod decoder;
 mod ffmpeg_command;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
+mod h264_metadata;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
@@ -129,15 +130,15 @@ pub use preview::{
     DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegD3D12TextureView,
     FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
     MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity, PreviewCompactCpuYuvHint,
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence,
-    PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
-    PreviewDecodeCancellationCheckpointEvidence, PreviewDecodeCancellationEvidence,
-    PreviewDecodeCancellationSource, PreviewDecodeContractError, PreviewDecodeCpuBudget,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath,
-    PreviewDecodeExecutionProgress, PreviewDecodeExecutionStage, PreviewDecodeKey,
-    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodePayloadRequirement,
+    PreviewCvPixelBuffer, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeAlphaPresence, PreviewDecodeBackend, PreviewDecodeCancellation,
+    PreviewDecodeCancellationCheckpoint, PreviewDecodeCancellationCheckpointEvidence,
+    PreviewDecodeCancellationEvidence, PreviewDecodeCancellationSource, PreviewDecodeContractError,
+    PreviewDecodeCpuBudget, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
+    PreviewDecodeExecutionPath, PreviewDecodeExecutionProgress, PreviewDecodeExecutionStage,
+    PreviewDecodeKey, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodePayloadRequirement,
     PreviewDecodeRepresentation, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
-    PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
+    PreviewDecodeSelectionClock, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
     PreviewDecodeSessionDisposition, PreviewDecodeSessionFamily,
     PreviewDecodeSessionResidencyConfig, PreviewDecodeSource, PreviewDecodeStageDurations,
     PreviewDecodeTemporalSelection, PreviewDecodeThreadingKind, PreviewDecodeWorkerResources,
@@ -149,7 +150,7 @@ pub use preview::{
     PreviewRepresentationQuality, PreviewScrubAdaptiveClass, PreviewSeekIndexCache,
     PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy, PreviewSeekIndexSource,
     PreviewSourceColorContract, PreviewSourceFieldProcessing, PreviewSourceSampleIdentity,
-    PreviewTemporalExtentSource, RgbaFrame,
+    PreviewTemporalExtentSource, RgbaFrame, Unorm16RgbaFrame,
 };
 #[cfg(target_os = "linux")]
 pub use preview::{
@@ -184,8 +185,8 @@ pub use resident_encode::{
 pub use resident_encode::{
     D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,
     D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth,
-    ResidentEncodeChromaLocation, ResidentEncodeColorimetry, ResidentEncodeError,
-    ResidentHevcEncoderConfig,
+    ResidentEncodeChromaLocation, ResidentEncodeCodec, ResidentEncodeColorimetry,
+    ResidentEncodeError, ResidentVideoEncoderConfig,
 };
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,
@@ -199,3 +200,10 @@ mod pcm_allocation_probe;
 
 mod pcm_journal;
 pub use pcm_journal::{AudioRetainedPcmError, AudioRetainedPcmEvidence, AudioRetainedPcmWindow};
+
+#[cfg(target_os = "macos")]
+pub use resident_encode::{
+    MetalResidentEncodeDeviceRoot, MetalResidentEncodeInputFrame, MetalResidentEncodeReadyFrame,
+    MetalResidentEncodeSurfaceView, VideoToolboxResidentVideoEncoderSession,
+    VideoToolboxResidentVideoEncoderSessionDiagnostics,
+};

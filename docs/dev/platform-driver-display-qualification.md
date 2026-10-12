@@ -228,6 +228,160 @@ binds the row/source/release/build identity, target artifact metadata, one
 machine report, before/after environment snapshots, and exactly one normalized
 report/raw-evidence/source-replay set for every required owner lane.
 
+## macOS ten-bit HEVC Range Extensions diagnostic
+
+The production-linked Media and Renderer tests below require six 1080p30
+motion/B-frame fixtures, at least 60 frames each, explicit limited range/CICP,
+and ten-bit planar source sampling. Set `MONDRIAN_MACOS_HEVC_REXT_FIXTURES` to
+colon-separated paths ordered 4:2:2 SDR Rec.709/PQ/HLG, then 4:4:4
+SDR Rec.709/PQ/HLG. Renderer also requires `WGPU_BACKEND=metal` and
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` pointing to the current production worker.
+
+```sh
+cargo test --locked -p mondrian-media --all-features -j 2 --lib \
+  direct_hevc_range_extensions_sessions_preserve_seek_cancel_and_reopen_authority \
+  -- --ignored --nocapture --test-threads=1
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  cpu_and_native_hevc_range_extensions_viewer_pixels_agree_across_gop_seeks \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The Media test checks seven seeks plus cancellation before/mid execution,
+retry, reopen and zero native output residual per fixture. The Renderer test
+requires the actual direct VideoToolbox path and observed hardware execution,
+P210/P410 import and the unchanged `1/1024` CPU/native Viewer pixel tolerance.
+Hardware capability, full-source pixel fidelity, residency and lifecycle
+receipts are separate requirements. Readback in this comparison is an oracle;
+production zero-readback/performance claims require the separate owner counters.
+These short development tests do not replace physical HDR, sustained playback
+or sealed commercial qualification. Ignored tests remain NotRun unless invoked.
+
+## macOS sixteen-bit planar CPU YUV diagnostic
+
+The opt-in `sixteen_bit_planar_420_422_444_share_compact_viewer_color_path`
+test requires nine lossless FFV1 fixtures ordered SDR 4:2:0/4:2:2/4:4:4,
+then PQ in the same grid order, then HLG. Each needs at least 31 frames with
+identical Y samples and constant identical Cb/Cr values across the three
+grids. Source and decoded raw planes must match byte-for-byte, including
+nonzero low component bits. Bind full range/matrix/primaries/transfer CICP
+before FFV1 encoding and verify all four fields in each demuxed stream;
+FFmpeg `setparams` can attach them without a pixel transform. Bind
+`MONDRIAN_PLANAR_16_FIXTURES` to these nine colon-separated paths and
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to the current production worker. The
+test passes matching resolved SDR/PQ/HLG identity into the Viewer; it does
+not independently qualify App-level automatic interpretation.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  sixteen_bit_planar_420_422_444_share_compact_viewer_color_path \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+The test uses actual FFmpeg software decode, compact immutable CPU planes,
+the production CPU upload worker, Metal YUV/OCIO/composite/monitor stages,
+six seek samples per fixture, and consuming demux/renderer teardown. It
+checks that no CPU working-frame fallback or native hardware claim replaces
+the compact path. Encoded Float16 Viewer readback compares each chroma grid
+with the same full-precision source, retaining the existing `1/1024` bound.
+This short diagnostic is not a hardware decode, physical HDR, or sustained
+performance qualification. Default ignored status remains NotRun.
+
+## macOS ProRes 422 reconstruction diagnostic
+
+The opt-in Renderer test
+`cpu_and_native_prores422_viewer_pixels_agree_across_seeks` exercises the
+production CPU and VideoToolbox/CVPixelBuffer/Metal Viewer paths at the existing
+`1/1024` float-output tolerance. Set `WGPU_BACKEND=metal`,
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to the built production worker, and
+`MONDRIAN_MACOS_PRORES422_FIXTURES` to twelve colon-separated motion fixtures.
+Order the fixtures by Proxy, LT, Standard, HQ, with SDR Rec.709, PQ, HLG within
+each profile. Use 1080p30, at least 60 frames, 10-bit 4:2:2, explicit CICP and
+limited range; preserve source extent and include reconstruction overshoot.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  cpu_and_native_prores422_viewer_pixels_agree_across_seeks \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+On the 16 GB M4/macOS 26.4.1 development machine, the 2026-09-30 diagnostic
+failed all 72 profile/color/seek comparisons through the existing P210 path.
+Observed maximum component errors were about 0.0068–0.0095. That path reports
+hardware execution as unknown; native surface residency is not proof of
+hardware decode. A separate public-API hardware-observed P216 candidate also
+failed the unchanged tolerance and was removed. Neither route is qualified by
+successful decode or lifecycle receipts alone.
+
+The subsequent direct VideoToolbox `x422` route preserved P210 sampling and
+reported the decoder session's observed hardware property. The unchanged
+twelve-fixture comparison still failed all 72 seeks (maximum 0.009521484),
+with 72 observed hardware frames. The production route now requests 16-bit
+bi-planar `sv22` and imports P216, retaining the full decoded words through
+the shared Metal Viewer path. The independent comparison still fails all 72
+seeks (maximum 0.010742188) with observed hardware on every sample. Neither
+proof of hardware execution nor increased surface precision resolves that
+cross-decoder disagreement.
+
+FFmpeg 8.1.2's ProRes software reconstruction clips ten-bit samples to
+4–1019; the observed native outputs extend beyond that interval. Diagnostic
+clipping before GPU interpolation reduced, but did not eliminate, the Viewer
+disagreement. The clipping experiment was removed; no production sample bounds,
+quality settings or acceptance thresholds were changed. See the
+[FFmpeg reconstruction implementation](https://ffmpeg.org/doxygen/8.1/proresdsp_8c_source.html).
+This is an implementation comparison, not a claim that Apple's reconstruction
+violates the codec specification.
+
+The separate opt-in `prores422_matched_reconstruction_uses_the_same_viewer_color_path`
+test isolates the renderer from decoder reconstruction. Supply one original
+ProRes 422 MOV and a lossless FFV1 MOV made from the **same observed
+VideoToolbox `sv22` output words** in
+`MONDRIAN_MACOS_PRORES422_MATCHED_RECONSTRUCTION`, separated by a colon. Set
+`MONDRIAN_MACOS_PRORES422_MATCHED_COLOR` to `sdr`, `pq`, or `hlg`. The capture
+must retain at least 31 frames, retain each 16-bit decoded word without a
+shift in planar YUV422P16LE, preserve the original per-frame timestamps and
+primaries/transfer/matrix, and decode byte-for-byte to the captured raw planes.
+For the 30 fps development fixtures, the FFV1 MOV track timescale is 15360.
+Matroska's 1/1000 timebase can select a different frame at an exact seek and
+invalidates this matched comparison. The source's limited range remains an
+explicit decode request when MOV does not expose FFV1 range metadata.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_decode_pixel_parity \
+  prores422_matched_reconstruction_uses_the_same_viewer_color_path \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+On the M4, four observed-hardware 16-bit captures (Proxy SDR/PQ/HLG and HQ SDR)
+passed all six seeks with zero encoded Float16 Viewer pixel difference. The
+direct production owner now independently reports `Some(true)` for each
+sample. This shows that the two production Viewer input paths agree for
+identical decoded codes. It does not prove which independent ProRes decoder is
+the reference or erase the existing cross-decoder failure. Keep the
+source/capture provenance and raw byte hashes with the external test evidence.
+
+The 2026-10-10 repeat with the repository's private FFmpeg 8.1.2
+`mondrian-prores12` runtime passed all 72 profile/color/seek comparisons at the
+unchanged `1/1024` tolerance (maximum difference `0.0009765625`). Every native
+sample reported observed hardware execution. The runtime preserves twelve-bit
+software reconstruction and the full component interval instead of clipping
+that reconstruction to the earlier ten-bit bounds. All twelve new 1080p30
+fixtures had sixty distinct motion frames and matching container/coded-frame
+CICP; their hashes, complete decode checks and raw native evidence are retained
+in the external macOS audit `phase770` evidence. These are new functional
+fixtures, not a claim of identity with the original failed corpus or a sustained
+performance qualification. Keep those earlier failed records intact.
+
+Classify the independent-decoder test from the actual runtime and fixture-bound
+execution. Its ignored default state is NotRun, never Passed.
+Record all individual seek
+differences, exact worst RGBA components, actual path/hardware evidence, fixture
+hashes and complete logs. These development diagnostics do not qualify physical
+HDR presentation, relative performance or the sealed commercial matrix.
+
 ## Matrix resolution
 
 After all rows are collected, construct one strict
@@ -325,3 +479,46 @@ This workstation cannot produce macOS/Metal, Linux/Vulkan Wayland HDR, or the
 required physical P3/PQ/ICC rows. Until the exact real-device campaign is
 captured, COL-046 remains hardware HITL and no macOS/Linux commercial display
 claim is implied.
+
+## macOS resident HEVC development qualification
+
+Use the existing physical production filters with the pinned native runtime and
+an external `CARGO_TARGET_DIR`. They are ignored by the ordinary workspace run;
+absence of these explicit runs is NotRun, not a hardware pass.
+
+```sh
+cargo test --locked -p mondrian-renderer --all-features -j 2 \
+  --test native_resident_encode -- --ignored --nocapture
+MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES=64 \
+MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION=1080p \
+MONDRIAN_RESIDENT_ENCODE_TEST_SIGNAL=pq \
+cargo test --locked -p mondrian-export --all-features -j 2 \
+  production_export_queue_runs_same_device_metal_resident_hevc -- --ignored --nocapture
+MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES=64 \
+MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION=1080p \
+MONDRIAN_RESIDENT_ENCODE_TEST_SIGNAL=pq \
+cargo test --locked -p mondrian-export --all-features -j 2 \
+  production_resident_export_cancel_consumes_codec_before_retry -- --ignored --nocapture
+```
+
+The color filter independently decodes Main8/Main10 SDR, PQ and HLG outputs,
+compares them to the shared CPU Program Output with the existing 12-code-value
+lossy-encode bound, and verifies native pool exhaustion/consuming shutdown.
+Its input includes an intentional CPU working-frame upload; zero transport
+counters apply to the resident encoder adapter, not that entire fixture.
+
+The Export filter renders the canonical solid Timeline through the frozen
+production visual owner and existing Export executor. Signals are
+`rec709-eight`, `rec709-ten`, `pq`, `hlg`; resolutions are the default 320x180,
+`1080p`, or `4k`; frame count is 1..600, default 3. The cancellation filter needs
+at least 3 frames: it cancels after the second real submission, proves native
+worker join and no final artifact, then renders a fresh complete attempt.
+Every successful artifact is probed, packet-counted and fully decoded. Temporary
+artifacts are scoped outside Git and removed by the test owner.
+
+These are bounded physical transport/color/lifecycle tests. Solid frames,
+29.97-fps cadence and a fresh encoder attempt do not qualify real-media decode,
+all effects, queue job identity, audio, physical HDR, sustained throughput,
+4K60/8K, or the commercial performance matrix. Re-run those distinct contracts
+through their existing production-linked entry points. No threshold or source
+precision reduction is allowed to obtain a pass.

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use mondrian_core::{ColorSpace, WaveformMode};
-use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
+use mondrian_renderer::profile::GpuTimestampPassIntervalTimer;
 use mondrian_renderer::{
     request_adapter_with_native_video_preference, GpuProgramScopesRequest, GpuProgramScopesRuntime,
 };
@@ -35,7 +35,7 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
             return Ok(());
         }
     };
-    let timestamp_features = gpu_timestamp_query_device_features(adapter.features());
+    let timestamp_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
     if timestamp_features.is_empty() {
         eprintln!("skipping 4K GPU scopes gate: adapter has no timestamp queries");
         return Ok(());
@@ -95,7 +95,8 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
 
     let request = GpuProgramScopesRequest::new(ColorSpace::Rec709, WaveformMode::Luma, 256, 512)
         .context("construct 4K scope request")?;
-    let timer = GpuTimestampFrameTimer::new(&device, &queue)
+    // Three production scope passes plus the measured anchor enclosing clear.
+    let mut timer = GpuTimestampPassIntervalTimer::new(&device, &queue, 4)
         .context("construct scopes hardware timestamp timer")?;
     let mut runtime = GpuProgramScopesRuntime::default();
     let mut gpu_samples_us = Vec::with_capacity(SAMPLE_COUNT);
@@ -105,25 +106,42 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-program-scopes-4k-gate-sample"),
         });
-        timer.begin(&mut encoder);
         let record_started = Instant::now();
-        let record = runtime
-            .record(
-                &device,
-                &queue,
-                &mut encoder,
-                &input_view,
-                WIDTH,
-                HEIGHT,
-                request,
-            )
-            .context("record 4K Program Output scopes")?;
+        let (record, receipt) = timer
+            .record(&mut encoder, |measured| {
+                runtime.record(
+                    &device,
+                    &queue,
+                    measured,
+                    &input_view,
+                    WIDTH,
+                    HEIGHT,
+                    request,
+                )
+            })
+            .map_err(|error| anyhow::anyhow!("incomplete scope timestamp coverage: {error:?}"))?;
+        let record = record.context("record 4K Program Output scopes")?;
         let cpu_record_us = saturating_u64(record_started.elapsed().as_micros());
-        timer.finish(&mut encoder);
+        let wait_started = Instant::now();
         let submission = queue.submit(std::iter::once(encoder.finish()));
-        let gpu_us = timer
-            .read_elapsed_us_after_submission(&device, submission)
+        let timing = timer
+            .read_sample_after_submission(&device, submission, receipt)
             .context("read 4K scopes hardware timestamp")?;
+        let gpu_us = timing.elapsed_us;
+        eprintln!(
+            "MONDRIAN_SCOPES_PASS_TIMING_JSON={}",
+            serde_json::json!({
+                "sample_index": sample_index, "warmup": sample_index < WARMUP_COUNT,
+                "elapsed_us": gpu_us, "timestamp_period_ns": timing.timestamp_period_ns,
+                "pass_counters": timing.pass_counters,
+                "pass_order": ["leading_copy_anchor", "aggregate", "histogram_reduce", "display"],
+                "submit_wait_and_query_readback_us": saturating_u64(wait_started.elapsed().as_micros()),
+            })
+        );
+        assert!(
+            gpu_us > 0,
+            "real 4K scope commands yielded no elapsed GPU time"
+        );
         drop(record);
         if sample_index >= WARMUP_COUNT {
             gpu_samples_us.push(gpu_us);
@@ -150,6 +168,7 @@ async fn program_scopes_4k_warm_path_stays_pooled_and_within_budget() -> Result<
         DEFAULT_CPU_RECORD_P95_BUDGET_US,
     );
     let info = adapter.get_info();
+    eprintln!("4K scopes hardware samples: gpu_us={gpu_samples_us:?} cpu_record_us={cpu_record_samples_us:?}");
     eprintln!(
         "4K GPU scopes: adapter={} backend={:?} samples={} gpu_p95={}us cpu_record_p95={}us",
         info.name, info.backend, SAMPLE_COUNT, gpu_p95_us, cpu_record_p95_us

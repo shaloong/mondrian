@@ -16,14 +16,14 @@ use mondrian_core::{
     PictureInterpretationOverrides, Resolution, ResolvedPictureGeometry, TimelineTime,
 };
 use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
-    PreviewDecodeSource, PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract,
-    ProxyConfig, ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
+    DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
+    PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
+    ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
 use mondrian_renderer::{color::SourceColorModule, SourceFramePreparationIntent};
 use mondrian_timeline::sequence::{
-    InputColorResolution, InputColorResolutionSource, MediaInputColorContext, ResolvedInputColor,
+    InputColorResolution, MediaInputColorContext, ResolvedInputColor,
 };
 
 use super::preview_access_mode::MediaPreviewKey;
@@ -206,14 +206,20 @@ pub(crate) fn resolve_preview_media_source(
     let input_video_range = if primary_video.camera_raw.is_some() {
         DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
     } else {
-        DecodedVideoRangeContract::from_interpretation(
+        DecodedVideoRangeContract::from_video_stream(
             request.asset.interpretation.range,
-            primary_video.color_range,
+            primary_video,
         )
     };
-    let (mut source_color, mut preparation_intent) = match input_color_resolution.resolved {
+    let (source_color, mut preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
-            PreviewSourceColorContract::new(color_space, input_video_range),
+            SourceColorModule::decode_contract(
+                color_space,
+                input_video_range,
+                input_color_resolution.source,
+            )
+            .with_video_stream_sampling(primary_video)
+            .with_matrix_interpretation(request.asset.interpretation.matrix),
             SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
                 request.input_color,
             )),
@@ -241,12 +247,6 @@ pub(crate) fn resolve_preview_media_source(
             });
         }
     };
-    if input_color_resolution.source == InputColorResolutionSource::MissingPolicyAssumeRec709 {
-        // "Assume Rec.709" must authorize the complete YUV-to-RGB
-        // interpretation. Binding BT.709 here makes the fallback explicit in
-        // the decode/cache identity instead of relying on swscale defaults.
-        source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
-    }
     let source_has_alpha = proven_sampling.has_alpha;
     let source_resolution = Resolution {
         width: primary_video.width,
@@ -303,7 +303,12 @@ pub(crate) fn resolve_preview_media_source(
 
     let field_processing =
         mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan());
-    let payload_requirement = if request.cpu_working_required || source_color.is_data_texture() {
+    let payload_requirement = if request.cpu_working_required
+        || source_color.is_data_texture()
+        // The compact carrier preserves straight coverage. Author overrides
+        // continue through the shared CPU alpha-normalization contract.
+        || (source_has_alpha && request.alpha_interpretation != AlphaInterpretation::Straight)
+    {
         PreviewDecodePayloadRequirement::CpuAddressable
     } else if field_processing.requires_cpu_decode() {
         PreviewDecodePayloadRequirement::CpuYuvAllowed
@@ -428,6 +433,7 @@ fn resolve_preview_media_decode_path(
         return source_decode_path(source_path, source_fingerprint, primary_video);
     };
     if Some(proxy_color.source_color_space()) != source_color.color_space()
+        || proxy_color.source_video_stream_index() != primary_video.index
         || proxy_color.source_range() != source_color.range.baseline()
     {
         return source_decode_path_with_resolution(

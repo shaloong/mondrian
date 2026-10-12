@@ -1,20 +1,18 @@
-#![allow(deprecated)]
 //! Mondrian app UI winit/wgpu product window.
 //!
 //! Binary entrypoints stay thin and call this module. The product shell owns
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
+#[cfg(feature = "validation")]
+use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(feature = "validation")]
-use std::sync::Mutex;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-#[cfg(feature = "validation")]
-use std::{cell::RefCell, rc::Rc};
 
 #[cfg(feature = "validation")]
 use crate::app::endurance_recovery::EnduranceRecoveryOperationReceipt;
@@ -80,10 +78,13 @@ use crate::app_ui::rendering::{
 };
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
-    winit_mouse_button_to_ui_button, winit_scroll_delta_to_ui_delta, WinitUiRuntime,
+    winit_mouse_button_to_ui_button, UiWindowCoordinates, WinitUiRuntime,
 };
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
+use crate::app_ui::surface_acquisition::{
+    SurfaceAcquisition, SurfaceAcquisitionShutdown, SurfaceAcquisitionsShutdown,
+};
 #[cfg(feature = "validation")]
 use crate::app_ui::window_outer_receipt::AppUiWindowNativeReturnEvidence;
 #[cfg(feature = "validation")]
@@ -123,6 +124,8 @@ use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation
 use sha2::{Digest, Sha256};
 
 const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(target_os = "macos")]
+const APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD: Duration = Duration::from_secs(1);
 
 // The external surface-reopen deadline is a caller-owned consuming budget.
 // A Question's operation deadline is not a consuming-shutdown deadline.
@@ -573,6 +576,8 @@ struct AppUiViewerGpuShutdownContract {
     device_generation: u64,
     worker_shutdown: crate::app::owned_worker_lifecycle::OwnedWorkerShutdown,
     wake_callbacks: crate::app::preview_work_notification::PreviewWorkCallbackEvidence,
+    native_completion_wake_captures_pending: Option<usize>,
+    native_completion_wake_registrations: Option<u64>,
     native_wake_failures: u64,
     wake_registration_rejections: u64,
     worker_started: bool,
@@ -584,6 +589,7 @@ struct AppUiViewerGpuShutdownContract {
     retirement_completed: bool,
     renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     generation_terminal_kind: Option<&'static str>,
+    surface_acquisitions: SurfaceAcquisitionsShutdown,
 }
 
 #[cfg(feature = "validation")]
@@ -627,15 +633,26 @@ fn exact_presented_surface_picture(
     if diagnostics.external_texture_failures != 0
         || metrics.external_texture_batches == 0
         || metrics.external_texture_failures != 0
-        || session.viewer_gpu_presentation.published_output().is_none()
-        || !matches!(
-            session.viewer_gpu_output_telemetry.health_summary().status,
-            AppUiViewerGpuOutputHealthStatus::Ready | AppUiViewerGpuOutputHealthStatus::Degraded
+        || session.viewer_gpu_device_progress.generation_terminal().is_some()
+    {
+        return None;
+    }
+    // The physical publication retains the frame contract that created its
+    // move-only GPU lease. A later Current prepare can clear per-invocation
+    // telemetry before the Window becomes visible and actually presents it.
+    let published = session.viewer_gpu_presentation.published_output()?;
+    if host.exact_current_viewer_gpu_output_key().as_ref() != Some(published.output_key())
+        || !host.has_external_viewer_frame_artifact(
+            published.output_key(),
+            published.artifact().texture_key().as_str(),
         )
     {
         return None;
     }
-    let context = session.viewer_gpu_output_telemetry.last_frame_context.as_ref()?;
+    let context = published.artifact().frame_context();
+    if context.external_texture_key != published.artifact().texture_key().as_str() {
+        return None;
+    }
     let state = host.app_state();
     let sequence = state.active_sequence()?;
     if context.sequence_id != sequence.id.to_string()
@@ -674,10 +691,12 @@ fn seal_clean_viewer_gpu_shutdown(
     evidence: ViewerGpuDeviceProgressShutdownEvidence,
     surface_generation: u64,
     device_generation: u64,
+    surface_acquisitions: SurfaceAcquisitionsShutdown,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     if surface_generation == 0
         || device_generation == 0
         || !evidence.qualifies_normal_runtime()
+        || !surface_acquisitions.qualifies_for(surface_generation, true)
         || evidence.wake_callbacks.registrations_accepted == 0
     {
         return Err(
@@ -685,11 +704,13 @@ fn seal_clean_viewer_gpu_shutdown(
         );
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
-        schema_version: 4,
+        schema_version: 5,
         surface_generation,
         device_generation,
         worker_shutdown: evidence.worker_shutdown,
         wake_callbacks: evidence.wake_callbacks,
+        native_completion_wake_captures_pending: evidence.native_completion_wake_captures_pending,
+        native_completion_wake_registrations: evidence.native_completion_wake_registrations,
         native_wake_failures: evidence.native_wake_failures,
         wake_registration_rejections: evidence.wake_registration_rejections,
         worker_started: evidence.worker_started,
@@ -705,6 +726,7 @@ fn seal_clean_viewer_gpu_shutdown(
             ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => "device_destroyed",
             ViewerGpuDeviceGenerationTerminalKind::ProgressFailure => "progress_failure",
         }),
+        surface_acquisitions,
     })
     .map_err(Into::into)
 }
@@ -715,10 +737,25 @@ enum AppUiWindowRole {
     Workspace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum AppUiUserEvent {
-    PreviewWorkAvailable,
-    ViewerGpuCompletionAvailable,
+    #[cfg(target_os = "macos")]
+    NativeAction,
+    PreviewWork,
+    ViewerGpuCompletion,
+    ViewerBackendPreparation,
+    Surface {
+        surface_generation: u64,
+    },
+    #[cfg(target_os = "macos")]
+    Accessibility(accesskit_winit::Event),
+}
+
+#[cfg(target_os = "macos")]
+impl From<accesskit_winit::Event> for AppUiUserEvent {
+    fn from(event: accesskit_winit::Event) -> Self {
+        Self::Accessibility(event)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -867,6 +904,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
+    /// Actual Viewer preparation outcomes; redraw snapshots do not advance them.
+    #[serde(rename = "outcome_counts")]
     health_counts: AppUiViewerGpuOutputHealthCounts,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
@@ -1011,6 +1050,8 @@ enum AppUiDisplayContractRefreshReasonDiagnostic {
     RoleChanged,
     WindowMoved,
     DisplayPolicyChanged,
+    #[cfg(target_os = "macos")]
+    NativeDisplayObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -1518,11 +1559,16 @@ impl AppUiDisplayIssueSummary {
             desired_surface_encoding: target_display_surface_color_space(
                 blocker.output_color_space,
             )
-            .map(app_ui_surface_color_space_diagnostic_to_encoding),
+            .map(|_| {
+                app_ui_surface_encoding_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
+                    blocker.output_color_space,
+                ))
+            })
+            .map(app_ui_surface_encoding_diagnostic),
             desired_surface_hdr_mode: target_display_surface_color_space(
                 blocker.output_color_space,
             )
-            .map(app_ui_surface_hdr_mode_from_diagnostic),
+            .map(|_| app_ui_surface_hdr_mode_for_output(blocker.output_color_space)),
             payload_blocker: None,
             supported_surface_color_space_count: Some(blocker.supported_surface_color_space_count),
             target_surface_color_space_supported: Some(
@@ -1681,6 +1727,8 @@ enum DisplayOutputContractRefreshReason {
     SurfaceLifecycle(SurfaceLifecycleReason),
     WindowMoved,
     DisplayPolicyChanged,
+    #[cfg(target_os = "macos")]
+    NativeDisplayObservation,
 }
 
 impl AppUiDisplayContractRefreshReasonDiagnostic {
@@ -1697,6 +1745,10 @@ impl AppUiDisplayContractRefreshReasonDiagnostic {
             ) => Self::RoleChanged,
             DisplayOutputContractRefreshReason::WindowMoved => Self::WindowMoved,
             DisplayOutputContractRefreshReason::DisplayPolicyChanged => Self::DisplayPolicyChanged,
+            #[cfg(target_os = "macos")]
+            DisplayOutputContractRefreshReason::NativeDisplayObservation => {
+                Self::NativeDisplayObservation
+            }
         }
     }
 }
@@ -1800,11 +1852,21 @@ struct AppUiWindowSession {
     surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
     workspace_placement: WorkspaceWindowPlacement,
+    #[cfg(target_os = "macos")]
+    accessibility: Option<super::accessibility::MacAccessibility>,
+    #[cfg(target_os = "macos")]
+    accessibility_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
+    viewer_backend_event_proxy: Option<winit::event_loop::EventLoopProxy<AppUiUserEvent>>,
     window: Arc<winit::window::Window>,
-    surface: wgpu::Surface<'static>,
+    surface: Arc<wgpu::Surface<'static>>,
+    surface_acquisition: Option<SurfaceAcquisition>,
+    retiring_surface_acquisitions: Vec<SurfaceAcquisition>,
+    surface_acquisition_receipts: Vec<SurfaceAcquisitionShutdown>,
     config: wgpu::SurfaceConfiguration,
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    #[cfg(target_os = "macos")]
+    next_native_display_observation: Instant,
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
     renderer_adapter: AppUiRendererAdapterDiagnostics,
     color_engine: mondrian_core::ColorEngine,
@@ -1813,6 +1875,7 @@ struct AppUiWindowSession {
     renderer_device: wgpu::Device,
     renderer_queue: wgpu::Queue,
     viewer_gpu_execution: ViewerGpuDeviceGenerationMember<ViewerGpuExecutionRuntime>,
+    viewer_gpu_profile: Option<mondrian_renderer::profile::GpuTimestampQueryRing>,
     viewer_gpu_presentation: WindowViewerGpuPresentationState,
     viewer_gpu_submissions: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
@@ -1822,8 +1885,12 @@ struct AppUiWindowSession {
     /// presentation lease; an exact entry may either become the immediate
     /// successor or acquire the current Frame Demand after a clock jump.
     staged_viewer_gpu_successors: PreviewGpuFrameStaging,
+    /// Capacity-one current candidate waiting for device cache preparation.
+    /// Retains the original ticket, Broker lease and media guards locally.
+    pending_viewer_backend_frame: Option<Box<PreviewGpuFrame>>,
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
+    program_scopes_submission_id: Option<ViewerGpuSubmissionId>,
     program_scopes_refresh_requested: bool,
     program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
@@ -1838,6 +1905,23 @@ struct AppUiWindowSession {
     event_loop_failure: Option<String>,
     event_loop_telemetry: AppUiEventLoopTelemetry,
     playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling,
+}
+
+#[cfg(target_os = "macos")]
+fn attach_mac_accessibility(
+    session: &mut AppUiWindowSession,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+) {
+    let proxy = session
+        .accessibility_proxy
+        .as_ref()
+        .expect("active macOS window has an accessibility event proxy")
+        .clone();
+    session.accessibility = Some(super::accessibility::MacAccessibility::new(
+        event_loop,
+        &session.window,
+        proxy,
+    ));
 }
 
 fn synchronize_playback_thread_scheduling(host: &AppUiHost, session: &mut AppUiWindowSession) {
@@ -1878,6 +1962,8 @@ fn poll_window_background_tasks(
 /// protects the physical decoder object but cannot replace those leases.
 struct WindowViewerGpuSubmissionOwner {
     frame: Box<PreviewGpuFrame>,
+    #[cfg(feature = "validation")]
+    frame_context: AppUiViewerGpuOutputFrameContext,
     terminal: Option<PreviewGpuHeterogeneousExecution>,
     texture_key: ExternalTextureKey,
     texture_registered: bool,
@@ -1889,6 +1975,19 @@ struct WindowViewerGpuSubmissionOwner {
     program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 }
 
+impl WindowViewerGpuSubmissionOwner {
+    fn publication_artifact(&self) -> WindowViewerGpuArtifact {
+        WindowViewerGpuArtifact {
+            texture_key: self.texture_key.clone(),
+            program_scopes: self.program_scopes.clone(),
+            program_scopes_requested: self.program_scopes_requested,
+            program_scopes_analysis_identity: self.program_scopes_analysis_identity,
+            #[cfg(feature = "validation")]
+            frame_context: self.frame_context.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum WindowViewerGpuDeferredCleanup {
     #[default]
@@ -1897,15 +1996,35 @@ enum WindowViewerGpuDeferredCleanup {
     Reset,
 }
 
+struct WindowViewerGpuArtifact {
+    texture_key: ExternalTextureKey,
+    program_scopes: Option<mondrian_renderer::GpuProgramScopesRecord>,
+    program_scopes_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
+    #[cfg(feature = "validation")]
+    frame_context: AppUiViewerGpuOutputFrameContext,
+}
+
+impl WindowViewerGpuArtifact {
+    fn texture_key(&self) -> &ExternalTextureKey {
+        &self.texture_key
+    }
+
+    #[cfg(feature = "validation")]
+    fn frame_context(&self) -> &AppUiViewerGpuOutputFrameContext {
+        &self.frame_context
+    }
+}
+
 type WindowViewerGpuPublishedOutput = ViewerGpuPhysicalPublication<
     crate::app::preview_execution::PreviewOutputKey,
-    ExternalTextureKey,
+    WindowViewerGpuArtifact,
     ViewerGpuPresentationOutputLease,
 >;
 
 type WindowViewerGpuPublicationSlots = ViewerGpuPublicationSlots<
     crate::app::preview_execution::PreviewOutputKey,
-    ExternalTextureKey,
+    WindowViewerGpuArtifact,
     ViewerGpuPresentationOutputLease,
 >;
 
@@ -1914,6 +2033,7 @@ type WindowViewerGpuPublicationSlots = ViewerGpuPublicationSlots<
 struct WindowViewerGpuPresentationState {
     publications: WindowViewerGpuPublicationSlots,
     presentation: Option<ViewerExternalTexturePresentation>,
+    backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
 }
 
 impl WindowViewerGpuPresentationState {
@@ -1932,22 +2052,31 @@ impl WindowViewerGpuPresentationState {
         self.presentation
     }
 
-    fn set_presentation(&mut self, presentation: ViewerExternalTexturePresentation) {
+    fn set_presentation(
+        &mut self,
+        presentation: ViewerExternalTexturePresentation,
+        backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
+    ) {
         self.presentation = Some(presentation);
+        self.backdrop = backdrop;
     }
 
     fn take_presentation(&mut self) -> bool {
+        self.backdrop = None;
         self.presentation.take().is_some()
     }
 
     fn clear(&mut self) -> [Option<WindowViewerGpuPublishedOutput>; 2] {
         self.presentation = None;
+        self.backdrop = None;
         self.publications.drain()
     }
 }
 
 struct WindowViewerGpuGenerationRetirement {
     runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
+    profile: Option<mondrian_renderer::profile::GpuTimestampQueryRing>,
+    device_generation: ViewerGpuDeviceGenerationId,
     lifecycle: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
@@ -1964,6 +2093,7 @@ struct WindowViewerGpuGenerationRetirement {
     >,
     _lost_submission_owners: Vec<WindowViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
+    profiling_retirement_error_logged: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2026,6 +2156,27 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                 .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
+        // Actual device loss invalidates query work as it does other wgpu
+        // work. Do not submit counter resolution to a lost device. Ordinary
+        // progress/telemetry errors still require a real retirement receipt.
+        if let Some(profile) = &mut self.profile
+            && !terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+        {
+            let ready = match profile.poll_after_device_progress() {
+                Ok(ready) => ready,
+                Err(error) => {
+                    if !self.profiling_retirement_error_logged {
+                        tracing::error!(%error, "Window GPU profiling retirement failed");
+                        self.profiling_retirement_error_logged = true;
+                    }
+                    false
+                }
+            };
+            trace_window_gpu_profile_samples(profile, Some(self.device_generation));
+            if !ready {
+                return None;
+            }
+        }
         if self.lifecycle.is_occupied() {
             return None;
         }
@@ -2061,6 +2212,7 @@ pub(crate) struct AppUiActiveWindowGpuShutdownEvidence {
     device_generation: Option<u64>,
     publication_cleanup: Result<(), String>,
     retirement: AppUiWindowGpuRetirementEvidence,
+    surface_acquisitions: Result<SurfaceAcquisitionsShutdown, String>,
 }
 
 impl AppUiActiveWindowGpuShutdownEvidence {
@@ -2068,6 +2220,10 @@ impl AppUiActiveWindowGpuShutdownEvidence {
         self.surface_generation != 0
             && self.device_generation.is_some_and(|generation| generation != 0)
             && self.publication_cleanup.is_ok()
+            && self
+                .surface_acquisitions
+                .as_ref()
+                .is_ok_and(|evidence| evidence.qualifies_for(self.surface_generation, false))
             && matches!(
                 &self.retirement,
                 AppUiWindowGpuRetirementEvidence::Retired(evidence)
@@ -2128,7 +2284,12 @@ fn request_app_ui_device(
         required_features: native_video_texture_device_features(adapter.features())
             | ocio_lut_filtering_device_features(adapter.features())
             | mondrian_renderer::program_scopes_device_features(adapter.features())
-            | working_texture_features,
+            | working_texture_features
+            | if mondrian_renderer::profile::profiling_enabled() {
+                adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
         ..wgpu::DeviceDescriptor::default()
     };
     pollster::block_on(mondrian_renderer::request_device_with_native_video_support(
@@ -2192,7 +2353,6 @@ struct AppUiInitialWindowCandidate {
     preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
     preview_work_watch: PreviewWorkWatch,
     preview_work_event_pending: Arc<AtomicBool>,
-    #[cfg(feature = "validation")]
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -2202,7 +2362,8 @@ struct AppUiInitialWindowCandidate {
 }
 
 fn prepare_initial_window_candidate(
-    event_loop: &winit::event_loop::EventLoop<AppUiUserEvent>,
+    event_loop: &winit::event_loop::ActiveEventLoop,
+    preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
     host: &AppUiHost,
     deadline: Instant,
 ) -> Result<AppUiInitialWindowCandidate, AppUiPreActiveWindowStartupFailure> {
@@ -2210,7 +2371,6 @@ fn prepare_initial_window_candidate(
     // An opened Project must not allocate and immediately replace a Startup surface.
     let role = window_role_for_mode(host.mode());
     catch_pre_active_window_construction(deadline, |last_stage, viewer_gpu_startup| {
-        let preview_work_event_proxy = event_loop.create_proxy();
         let startup_window = Arc::new(
             event_loop
                 .create_window(window_attributes_for_role(role))
@@ -2279,7 +2439,7 @@ fn prepare_initial_window_candidate(
             .ok_or("startup GPU owner missing")?
             .install_native_waker(move || {
                 viewer_gpu_completion_event_proxy
-                    .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
+                    .send_event(AppUiUserEvent::ViewerGpuCompletion)
                     .is_ok()
             });
 
@@ -2289,7 +2449,7 @@ fn prepare_initial_window_candidate(
         let worker_event_proxy = preview_work_event_proxy.clone();
         if let Err(failure) = preview_work_watch.install_waker(move || {
             queue_preview_work_event(&worker_event_pending, || {
-                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+                worker_event_proxy.send_event(AppUiUserEvent::PreviewWork).is_ok()
             });
         }) {
             let (reason, callback) = failure.into_parts();
@@ -2322,7 +2482,6 @@ fn prepare_initial_window_candidate(
             preview_work_event_proxy,
             preview_work_watch,
             preview_work_event_pending,
-            #[cfg(feature = "validation")]
             instance,
             adapter,
             device,
@@ -2331,6 +2490,42 @@ fn prepare_initial_window_candidate(
             session_bounds,
         })
     })
+}
+
+fn publish_initial_window_candidate(
+    host: &mut AppUiHost,
+    candidate: &AppUiInitialWindowCandidate,
+) -> Result<(), String> {
+    let session = &candidate.session;
+    let session_bounds = candidate.session_bounds;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_active_window_session(host, session, session_bounds)
+            .map_err(|error| error.to_string())?;
+        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+        tracing::info!(
+            surface_generation = session.surface_generation_id.get(),
+            device_generation = session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            "UI initialized — {}x{}",
+            session.config.width,
+            session.config.height
+        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            session.window.set_visible(true);
+            session.window.request_redraw();
+        }
+        Ok::<_, String>(())
+    }))
+    .map_err(|payload| {
+        crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+            payload,
+            "initial Window Host publication",
+        )
+        .to_string()
+    })?
 }
 
 fn catch_pre_active_window_construction<T>(
@@ -2459,9 +2654,7 @@ fn reopen_window_surface_and_device(
         let startup = startup_owner.as_mut().ok_or("candidate GPU startup owner missing")?;
         let completion_proxy = event_proxy.clone();
         startup.install_native_waker(move || {
-            completion_proxy
-                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable)
-                .is_ok()
+            completion_proxy.send_event(AppUiUserEvent::ViewerGpuCompletion).is_ok()
         });
         let prepared = AppUiPreparedWindowSession::prepare(
             session.role,
@@ -2525,13 +2718,21 @@ fn reopen_window_surface_and_device(
                 raw,
                 surface_generation_before,
                 device_generation_before,
+                shutdown.surface_acquisitions.map_err(|error| {
+                    format!("old Surface acquisition shutdown missing: {error}")
+                })?,
             )?;
             retired_session.window.set_visible(false);
-            host.renew_still_frame_demand_after_output_retirement()?;
-            publish_active_window_session(host, active_session, bounds);
+            publish_active_window_session(host, active_session, bounds)?;
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
     )?;
+    session.viewer_backend_event_proxy = retired_session.viewer_backend_event_proxy.take();
+    #[cfg(target_os = "macos")]
+    {
+        session.accessibility_proxy = retired_session.accessibility_proxy.take();
+        attach_mac_accessibility(session, elwt);
+    }
     session.window.set_visible(true);
     session.window.request_redraw();
     *device = next_device;
@@ -2891,6 +3092,8 @@ pub(crate) struct AppUiReusableEventLoop {
 #[cfg(feature = "validation")]
 impl AppUiReusableEventLoop {
     pub(crate) fn new() -> Result<Self, AppUiEventLoopConstructionFailure> {
+        #[cfg(target_os = "macos")]
+        mondrian_platform::prepare_macos_application()?;
         Ok(Self {
             event_loop: winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event()
                 .build()
@@ -3748,7 +3951,7 @@ fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) 
     }
 }
 
-#[cfg(any(test, feature = "validation"))]
+#[cfg(any(not(target_os = "windows"), test, feature = "validation"))]
 fn with_window_candidate_installed<T, R>(
     active: &mut T,
     candidate: &mut T,
@@ -3826,6 +4029,9 @@ fn catch_window_viewer_gpu_shutdown(
                 retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
                     diagnostic.to_string(),
                 ),
+                surface_acquisitions: Err(
+                    "Window shutdown panicked before complete surface closure evidence".into(),
+                ),
             }
         }
     }
@@ -3838,6 +4044,8 @@ fn run_app_ui_with_initial_state(
     >,
     #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "macos")]
+    mondrian_platform::prepare_macos_application()?;
     let mut event_loop =
         winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event().build()?;
     run_app_ui_with_initial_state_on_event_loop(
@@ -3865,6 +4073,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let platform = SystemPlatformService;
     let tracing_guard = init_product_tracing(&platform);
+    mondrian_renderer::profile::init_profiling();
     #[cfg(feature = "validation")]
     let validation_shutdown_deadline =
         surface_reopen_validation.as_ref().map(|validation| validation.deadline);
@@ -3876,6 +4085,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
         .unwrap_or_else(product_startup_deadline);
     #[cfg(not(feature = "validation"))]
     let host_startup_deadline = product_startup_deadline();
+    // Evidence identity is immutable process startup work. Reading and hashing
+    // the executable must finish before live Window callbacks collect a frame.
+    if viewer_gpu_output_diagnostics_output_path().is_some() {
+        let _ = viewer_runtime_image_sha256();
+    }
     #[cfg(feature = "validation")]
     let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
         Ok(owner) => owner,
@@ -3949,134 +4163,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
             .into());
         }
     };
-    let mut host = host;
-
     tracing::info!("Mondrian app UI starting");
 
-    let initial_candidate = match prepare_initial_window_candidate(
-        event_loop,
-        &host,
-        host_startup_deadline,
-    ) {
-        Ok(candidate) => candidate,
-        Err(failure) => {
-            let native_cleanup_released = failure.shutdown.all_created_resources_released();
-            let native_cleanup = *failure.shutdown;
-            let primary = failure.primary;
-            let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
-            let ui_failure = (!ui_shutdown.all_resources_released())
-                .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
-            drop(background_runtime_guard);
-            let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
-            let runtime_failure = runtime_shutdown.qualification_failure();
-            #[cfg(feature = "validation")]
-            if let Some(return_slot) = validation_return.as_ref() {
-                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
-                    app_state,
-                    shutdown_deadline: host_startup_deadline,
-                    shutdown: AppUiValidationWindowShutdown::Complete(
-                        AppUiWindowOuterShutdownEvidence::pre_active_failed(
-                            runtime_shutdown,
-                            ui_shutdown,
-                            native_cleanup.clone(),
-                        ),
-                    ),
-                });
-            }
-            #[cfg(not(feature = "validation"))]
-            drop(app_state);
-            let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
-            let native_context = format!(
-                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
-            );
-            return match cleanup_failure {
-                Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
-                None => Err(format!("{primary}; {native_context}").into()),
-            };
-        }
-    };
-    let AppUiInitialWindowCandidate {
-        preview_work_event_proxy,
-        preview_work_watch,
-        preview_work_event_pending,
-        #[cfg(feature = "validation")]
-        instance,
-        adapter,
-        device: initial_device,
-        queue: initial_queue,
-        mut session,
-        session_bounds,
-    } = initial_candidate;
-    #[cfg(feature = "validation")]
-    let (mut device, mut queue) = (initial_device, initial_queue);
-    #[cfg(not(feature = "validation"))]
-    let (device, queue) = (initial_device, initial_queue);
-    let pending_actions = PendingUiActions::default();
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        #[cfg(feature = "validation")]
-        if question_validation.is_some() {
-            host.root_mut().focus_panel(PanelKind::Inspector);
-            host.mark_dirty();
-            host.refresh_if_dirty(session_bounds);
-        }
-        publish_active_window_session(&mut host, &session, session_bounds);
-        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
-        tracing::info!(
-            surface_generation = session.surface_generation_id.get(),
-            device_generation = session
-                .viewer_gpu_device_progress
-                .generation_id()
-                .map(ViewerGpuDeviceGenerationId::get),
-            "UI initialized — {}x{}",
-            session.config.width,
-            session.config.height
-        );
-        session.window.set_visible(true);
-        session.window.request_redraw();
-    })) {
-        let primary = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
-            payload,
-            "initial Window Host publication",
-        )
-        .to_string();
-        let gpu_shutdown =
-            catch_window_viewer_gpu_shutdown(&mut session, &host, host_startup_deadline);
-        let gpu_failure = gpu_shutdown.qualification_failure();
-        let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
-        let ui_failure = (!ui_shutdown.all_resources_released())
-            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
-        drop(background_runtime_guard);
-        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
-        let runtime_failure = runtime_shutdown.qualification_failure();
-        #[cfg(feature = "validation")]
-        if let Some(return_slot) = validation_return.as_ref() {
-            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
-                app_state,
-                shutdown_deadline: host_startup_deadline,
-                shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
-                    runtime: runtime_shutdown,
-                    host: ui_shutdown,
-                    gpu: gpu_shutdown,
-                },
-            });
-        }
-        #[cfg(not(feature = "validation"))]
-        {
-            drop(app_state);
-            drop(gpu_shutdown);
-        }
-        let cleanup_failure = merge_window_cleanup_failures(
-            merge_window_cleanup_failures(gpu_failure, ui_failure),
-            runtime_failure,
-        );
-        return match cleanup_failure {
-            Some(cleanup) => Err(format!(
-                "{primary}; initial Window publication cleanup also failed: {cleanup}"
-            )
-            .into()),
-            None => Err(primary.into()),
-        };
-    }
+    // Native Window/Surface creation must run while winit owns its callback.
+    // macOS can emit focus/resize events as soon as a Window is constructed.
+    let preview_work_event_proxy = event_loop.create_proxy();
+    let mut initial_candidate: Option<AppUiInitialWindowCandidate> = None;
+    let mut startup_failure: Option<AppUiPreActiveWindowStartupFailure> = None;
+    let mut publication_failure: Option<String> = None;
+    let pending_actions = Rc::new(PendingUiActions::default());
 
     let mut host = AppUiHostSessionOwner::new(
         host,
@@ -4085,6 +4180,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
         #[cfg(feature = "validation")]
         validation_shutdown_deadline,
     );
+    #[cfg(target_os = "macos")]
+    let _native_quit_handler = {
+        let pending_actions = Rc::clone(&pending_actions);
+        let event_proxy = preview_work_event_proxy.clone();
+        mondrian_platform::install_macos_quit_handler(move || {
+            pending_actions.push(native_close_request_action());
+            if event_proxy.send_event(AppUiUserEvent::NativeAction).is_err() {
+                tracing::error!("native quit requested after event-loop admission closed");
+            }
+        })?
+    };
 
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let event_loop_result = catch_app_ui_event_loop(|| {
@@ -4094,23 +4200,129 @@ fn run_app_ui_with_initial_state_on_event_loop(
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
         elwt.set_control_flow(ControlFlow::Wait);
+        if startup_failure.is_some() || publication_failure.is_some() {
+            elwt.exit();
+            return;
+        }
+        if initial_candidate.is_none() {
+            if !matches!(event, Event::Resumed) {
+                return;
+            }
+            let candidate = match prepare_initial_window_candidate(
+                elwt, preview_work_event_proxy.clone(), &host, host_startup_deadline,
+            ) {
+                Ok(candidate) => candidate,
+                Err(failure) => {
+                    startup_failure = Some(failure);
+                    elwt.exit();
+                    return;
+                }
+            };
+            // Install the activated native owner before any fallible Host publication.
+            initial_candidate = Some(candidate);
+            #[cfg(feature = "validation")]
+            if question_validation.is_some() {
+                host.root_mut().focus_panel(PanelKind::Inspector);
+                host.mark_dirty();
+                host.refresh_if_dirty(initial_candidate.as_ref().expect("installed Window candidate").session_bounds);
+            }
+            publication_failure = publish_initial_window_candidate(
+                &mut host, initial_candidate.as_ref().expect("installed Window candidate"),
+            ).err();
+            if publication_failure.is_some() {
+                elwt.exit();
+                return;
+            }
+        }
+        let AppUiInitialWindowCandidate {
+            preview_work_event_proxy,
+            preview_work_watch,
+            preview_work_event_pending,
+            instance,
+            adapter,
+            device,
+            queue,
+            session,
+            ..
+        } = initial_candidate.as_mut().expect("resumed Window candidate");
         let dispatch_action = |action| pending_actions.push(action);
+        session.viewer_backend_event_proxy.get_or_insert_with(|| preview_work_event_proxy.clone());
+
+        #[cfg(target_os = "macos")]
+        {
+            if session.accessibility.is_none() {
+                session.accessibility_proxy = Some(preview_work_event_proxy.clone());
+                attach_mac_accessibility(session, elwt);
+                session.window.set_visible(true);
+                session.window.request_redraw();
+            }
+            if let Event::WindowEvent { window_id, event } = &event
+                && *window_id == session.window.id()
+                && let Some(accessibility) = &mut session.accessibility
+            {
+                accessibility.process_event(&session.window, event);
+            }
+        }
 
         match event {
-            Event::UserEvent(AppUiUserEvent::PreviewWorkAvailable) => {
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(AppUiUserEvent::Accessibility(event)) => {
+                if event.window_id == session.window.id()
+                    && let Some(bridge) = &mut session.accessibility
+                {
+                    bridge.note_user_event(&event.window_event);
+                }
+                if event.window_id == session.window.id()
+                    && let accesskit_winit::WindowEvent::ActionRequested(request) = event.window_event
+                    && session.accessibility.as_ref().is_some_and(|bridge| {
+                        bridge.route_action(
+                            &request,
+                            &session.window,
+                            host.active_root_mut(),
+                            &mut session.router,
+                            &mut session.ui_runtime,
+                            &dispatch_action,
+                        )
+                    })
+                {
+                    drain_actions_and_sync_window_session(
+                        &mut host,
+                        &pending_actions,
+                        &platform,
+                        elwt,
+                        instance,
+                        adapter,
+                        device,
+                        session,
+                    );
+                    session.window.request_redraw();
+                }
+            }
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(AppUiUserEvent::NativeAction) => {
+                // The event only wakes this run's queue. A wake left by a
+                // retired run cannot carry its former action or state authority.
+                if drain_actions_and_sync_window_session(
+                    &mut host, &pending_actions, &platform, elwt,
+                    instance, adapter, device, session,
+                ) {
+                    session.window.request_redraw();
+                }
+            }
+            Event::UserEvent(AppUiUserEvent::PreviewWork) => {
                 let drain_target_revision = preview_work_watch.revision();
                 let background_tasks =
-                    poll_window_background_tasks(&mut host, &mut session);
+                    poll_window_background_tasks(&mut host, session);
                 if background_tasks.quit_requested {
                     elwt.exit();
                 }
                 rearm_preview_work_event(
-                    &preview_work_event_pending,
+                    preview_work_event_pending,
                     drain_target_revision,
-                    &preview_work_watch,
+                    preview_work_watch,
                     || {
                         preview_work_event_proxy
-                            .send_event(AppUiUserEvent::PreviewWorkAvailable)
+                            .send_event(AppUiUserEvent::PreviewWork)
                             .is_ok()
                     },
                 );
@@ -4118,9 +4330,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4128,16 +4341,29 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
             }
-            Event::UserEvent(AppUiUserEvent::ViewerGpuCompletionAvailable) => {
-                if poll_viewer_heterogeneous_completion(&device, &mut session, &host)
+            Event::UserEvent(AppUiUserEvent::Surface { surface_generation }) => {
+                if surface_generation == session.surface_generation_id.get() {
+                    session.window.request_redraw();
+                }
+            }
+            Event::UserEvent(AppUiUserEvent::ViewerBackendPreparation) => {
+                // Only a wake hint. The current Renderer cache and canonical
+                // contract authorize readiness on the next recording turn;
+                // a late hint from a retired generation carries no authority.
+                session.window.request_redraw();
+            }
+            Event::UserEvent(AppUiUserEvent::ViewerGpuCompletion) => {
+                if poll_viewer_heterogeneous_completion(device, session, &host)
                     == ViewerHeterogeneousCompletionPoll::TerminalChange
+                    && host.has_pending_ui_refresh()
                 {
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4151,9 +4377,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if should_redraw {
                             session.window.request_redraw();
@@ -4169,6 +4396,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             host.refresh_if_dirty(session.current_bounds.get());
                         }
                         session.window.request_redraw();
+                    }
+
+                    WindowEvent::Occluded(occluded) => {
+                        tracing::debug!(occluded, "app UI window occlusion changed");
+                        if !occluded {
+                            session.window.request_redraw();
+                        }
                     }
 
                     WindowEvent::Focused(false) => {
@@ -4187,9 +4421,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                             host.sync_workspace_layout_from_root();
                         } else {
@@ -4212,9 +4447,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if result == EventResult::Ignored
                             && should_exit_on_ignored_keyboard_input(
@@ -4224,7 +4460,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         {
                             elwt.exit();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                         session.window.request_redraw();
                     }
 
@@ -4241,9 +4477,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         session.window.request_redraw();
                     }
@@ -4253,20 +4490,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         sync_window_session_role(
                             &mut host,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
-                        );
-                        let prepare_started = Instant::now();
-                        prepare_viewer_gpu_preview(
-                            &device,
-                            &queue,
-                            &mut session,
-                            &host,
-                        );
-                        session.event_loop_telemetry.record_stage_duration(
-                            AppUiEventLoopStage::PrepareViewerGpuPreview,
-                            prepare_started.elapsed(),
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         let refresh_started = Instant::now();
                         host.refresh_if_dirty(session.current_bounds.get());
@@ -4274,42 +4501,88 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             AppUiEventLoopStage::RefreshIfDirty,
                             refresh_started.elapsed(),
                         );
+                        // Native drawable acquisition must not suspend Clock/producer
+                        // observation on the event-loop thread. The worker has no
+                        // picture authority; paint uses the current production slots.
+                        if session.surface_acquisition.is_none() {
+                            let proxy = preview_work_event_proxy.clone();
+                            let surface_generation = session.surface_generation_id.get();
+                            match SurfaceAcquisition::start(
+                                surface_generation,
+                                Arc::clone(&session.surface),
+                                device.clone(),
+                                session.config.clone(),
+                                move || proxy.send_event(AppUiUserEvent::Surface {
+                                    surface_generation,
+                                }).is_ok(),
+                            ) {
+                                Ok(owner) => session.surface_acquisition = Some(owner),
+                                Err(error) => {
+                                    session.event_loop_failure = Some(format!("native surface worker could not start: {error}"));
+                                    elwt.exit();
+                                    return;
+                                }
+                            }
+                        }
+                        let frame = match session.surface_acquisition.as_ref().expect("started surface owner").poll() {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => return,
+                            Err(error) => {
+                                session.event_loop_failure = Some(error.into());
+                                elwt.exit();
+                                return;
+                            }
+                        };
                         let paint_started = Instant::now();
                         let mut encoder = DrawEncoder::new();
                         let theme = mondrian_ui_theme::current_theme();
                         let b = session.current_bounds.get();
+                        let pixels_per_point =
+                            UiWindowCoordinates::from_window(&session.window).pixels_per_point();
                         if session.role == AppUiWindowRole::Workspace {
                             encoder.draw_rect(b, theme.colors.background, 0.0);
                         }
-                        TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b);
+                        TreeWalker::paint_clipped(host.active_root(), &mut encoder, &theme, b, pixels_per_point);
                         session.ui_runtime.paint_shell_overlays(
                             &mut encoder,
                             &theme,
                             b,
                             session.last_cursor,
                             &session.router,
+                            pixels_per_point,
                         );
                         let painted_native_question = host.painted_native_visual_question();
-                        let frame_result = session.frame_renderer.render_draw_commands(
-                            &device,
-                            &queue,
-                            &session.surface,
-                            &session.config,
-                            encoder.finish(),
-                        );
                         #[cfg(feature = "validation")]
                         let question_validation_painted = painted_native_question.clone();
                         #[cfg(feature = "validation")]
                         let question_validation_before = question_validation_painted
                             .as_ref().map(|question| question.validation_state());
+                        let frame_result = frame.paint(|acquired| {
+                            session.frame_renderer.render_acquired_draw_commands(
+                                device,
+                                queue,
+                                acquired,
+                                &session.config,
+                                encoder.finish_scaled(pixels_per_point),
+                            )
+                        });
                         host.finish_native_visual_question_surface(painted_native_question, frame_result);
                         #[cfg(feature = "validation")]
                         if let Some(validation) = question_validation.as_ref() {
                             validation.borrow_mut().observe_surface(
-                                &host, question_validation_painted, super::native_question_validation::NativeQuestionSurfaceFrame { state_before: question_validation_before, result: frame_result },
+                                &host, question_validation_painted, super::native_question_validation::NativeQuestionSurfaceFrame { state_before: question_validation_before, result: frame_result, pixels_per_point },
                                 format!("{:?}", session.window.id()), session.surface_generation_id.get(),
                                 format!("{:?}", session.renderer_adapter),
                             );
+                        }
+                        if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Reconfigured { .. }) {
+                            session.configure_surface(device);
+                        } else if matches!(frame_result, crate::app_ui::rendering::AppUiFrameResult::Skipped {
+                            backend_event: AppUiBackendEvent::SurfaceTimeout,
+                        }) {
+                            // Retry native admission through the same capacity-one
+                            // owner; no busy UI wait or renewed Playback deadline.
+                            session.window.request_redraw();
                         }
                         if let Some(diagnostics) =
                             session.render_diagnostic_reporter.changed_failure(frame_result)
@@ -4334,6 +4607,20 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         {
                             log_frame_pressure(pressure);
                         }
+                        if mondrian_renderer::profile::profiling_enabled()
+                            && matches!(
+                                frame_result,
+                                crate::app_ui::rendering::AppUiFrameResult::Presented { .. }
+                            )
+                        {
+                            tracing::info!(
+                                target: "mondrian_app::gpu_profile",
+                                width = session.config.width,
+                                height = session.config.height,
+                                metrics = ?frame_result.metrics(),
+                                "Window UI production submission metrics"
+                            );
+                        }
                         trace_color_output_runtime(
                             session.viewer_gpu_execution.color_output_diagnostics(),
                             &session.display_output_contract,
@@ -4356,13 +4643,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 validation,
                                 frame_result,
                                 elwt,
-                                &instance,
-                                &adapter,
-                                &mut device,
-                                &mut queue,
+                                instance,
+                                adapter,
+                                device,
+                                queue,
                                 &mut host,
-                                &mut session,
-                                &preview_work_event_proxy,
+                                session,
+                                preview_work_event_proxy,
                             ) {
                                 Ok(true) => {
                                     elwt.exit();
@@ -4409,9 +4696,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::Resize,
                             (new_size.width, new_size.height),
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4427,9 +4714,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         apply_surface_lifecycle_update(
                             SurfaceLifecycleReason::ScaleFactorChanged,
                             (size.width, size.height),
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4442,9 +4729,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         );
                         refresh_display_output_contract(
                             DisplayOutputContractRefreshReason::WindowMoved,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            adapter,
+                            device,
+                            session,
                             &mut host,
                         );
                     }
@@ -4504,15 +4791,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                         }
                     }
 
                     WindowEvent::CursorMoved { position, .. } => {
-                        session.last_cursor = Point::new(position.x as f32, position.y as f32);
+                        session.last_cursor =
+                            UiWindowCoordinates::from_window(&session.window).point(position);
                         session
                             .ui_runtime
                             .update_eyedropper_preview_at_window_point(
@@ -4529,27 +4818,29 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             },
                             &dispatch_action,
                         );
-                        // Skip tree rebuild while pointer capture is active (drag in progress)
-                        if session.router.captured().is_none() {
+                        // Timeline keeps its widget instance during capture, so
+                        // dispatch its live seek actions while the pointer moves.
+                        if session.router.captured().is_none() || host.has_transient_interaction() {
                             drain_actions_and_sync_window_session(
                                 &mut host,
                                 &pending_actions,
                                 &platform,
                                 elwt,
-                                &adapter,
-                                &device,
-                                &mut session,
+                                instance,
+                                adapter,
+                                device,
+                                session,
                             );
                         } else {
                             session.window.request_redraw();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                     }
 
                     WindowEvent::MouseInput { state, button, .. } => {
                         if state == ElementState::Pressed
                             && button == winit::event::MouseButton::Left
-                            && let Some(direction) = window_resize_direction(&session)
+                            && let Some(direction) = window_resize_direction(session)
                         {
                             match session.window.drag_resize_window(direction) {
                                 Ok(()) => return,
@@ -4594,14 +4885,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         if sync_workspace_layout {
                             host.sync_workspace_layout_from_root();
                         }
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                         session.window.request_redraw();
                     }
 
@@ -4611,7 +4903,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &mut session.router,
                             host.active_root_mut(),
                             UiEvent::MouseWheel {
-                                delta: winit_scroll_delta_to_ui_delta(delta),
+                                delta: UiWindowCoordinates::from_window(&session.window)
+                                    .scroll_delta(delta),
                                 position: session.last_cursor,
                                 modifiers: session.modifiers_state,
                             },
@@ -4622,9 +4915,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &pending_actions,
                             &platform,
                             elwt,
-                            &adapter,
-                            &device,
-                            &mut session,
+                            instance,
+                            adapter,
+                            device,
+                            session,
                         );
                         session.window.request_redraw();
                     }
@@ -4634,6 +4928,32 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
 
             Event::AboutToWait => {
+                if let Err(error) = session.observe_surface_acquisitions() {
+                    session.event_loop_failure = Some(error);
+                    elwt.exit();
+                    return;
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    if Instant::now() >= session.next_native_display_observation
+                        && session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending())
+                    {
+                        // AppKit activates EDR asynchronously after CAMetalLayer configuration.
+                        // OS HDR/profile changes also need observation when the window is idle.
+                        // Metal capability queries share the Surface lock held by nextDrawable.
+                        // The existing acquisition completion wakes this loop; observe only
+                        // after it returns, without making the playback thread wait for it.
+                        refresh_display_output_contract(
+                            DisplayOutputContractRefreshReason::NativeDisplayObservation,
+                            adapter,
+                            device,
+                            session,
+                            &mut host,
+                        );
+                        session.next_native_display_observation =
+                            Instant::now() + APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD;
+                    }
+                }
                 #[cfg(feature = "validation")]
                 if let Some(validation) = surface_reopen_validation.as_mut() {
                     if Instant::now() >= validation.deadline {
@@ -4683,22 +5003,22 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 ) {
                     false
                 } else {
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     let changed = host.advance_playback_clock(
                         Instant::now(),
                         session.current_bounds.get(),
                     );
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     changed
                 };
                 #[cfg(not(feature = "validation"))]
                 let playback_changed = {
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     let changed = host.advance_playback_clock(
                         Instant::now(),
                         session.current_bounds.get(),
                     );
-                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    synchronize_playback_thread_scheduling(&host, session);
                     changed
                 };
                 session.event_loop_telemetry.record_stage_duration(
@@ -4706,7 +5026,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     playback_clock_started.elapsed(),
                 );
                 let background_tasks =
-                    poll_window_background_tasks(&mut host, &mut session);
+                    poll_window_background_tasks(&mut host, session);
                 if background_tasks.quit_requested {
                     elwt.exit();
                 }
@@ -4714,9 +5034,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4731,10 +5052,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                             &session.window, &mut session.router, host.active_root_mut(), event, &dispatch_action,
                         );
                         drain_actions_and_sync_window_session(
-                            &mut host, &pending_actions, &platform, elwt, &adapter, &device, &mut session,
+                            &mut host, &pending_actions, &platform, elwt, instance, adapter, device, session,
                         );
                         validation.borrow_mut().after_event(&host, session.router.focused());
-                        update_window_cursor_icon(&host, &mut session);
+                        update_window_cursor_icon(&host, session);
                         session.window.request_redraw();
                     }
                     if validation.borrow().finished() { elwt.exit(); }
@@ -4742,9 +5063,21 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), validation.borrow().wake()));
                     }
                 }
+                // Preview execution follows owner clock/results directly. It
+                // must not wait for a repaint (and a native drawable) before
+                // satisfying an already-bound presentation ticket. Paint only
+                // consumes the existing published physical slot.
+                let prepare_started = Instant::now();
+                prepare_viewer_gpu_preview(device, queue, session, &host);
+                session.event_loop_telemetry.record_stage_duration(
+                    AppUiEventLoopStage::PrepareViewerGpuPreview,
+                    prepare_started.elapsed(),
+                );
+                // Include any newly submitted owner's original completion
+                // deadline in this same event-loop wait.
                 let heterogeneous_completion = drive_viewer_heterogeneous_completion(
-                    &device,
-                    &mut session,
+                    device,
+                    session,
                     &host,
                     Instant::now(),
                 );
@@ -4752,9 +5085,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     sync_window_session_role(
                         &mut host,
                         elwt,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                 }
@@ -4770,13 +5104,22 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 if let Some(delay) = host.resource_inspection_next_wake_delay() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(elwt.control_flow(), Instant::now() + delay));
                 }
-                if let Some(delay) = host.playback_next_wake_delay() {
+                if host.has_pending_ui_refresh() {
+                    session.window.request_redraw();
+                }
+                if let Some(deadline) = host.playback_next_wake_deadline() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(
                         elwt.control_flow(),
-                        Instant::now() + app_ui_interactive_playback_wake_delay(&host, delay),
+                        app_ui_interactive_playback_wake_deadline(
+                            deadline,
+                            Instant::now(),
+                            host.is_playback_frame_pending(),
+                        ),
                     ));
                 }
-                if session.pending_initial_redraw {
+                if session.pending_initial_redraw
+                    && session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending())
+                {
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
                 }
@@ -4794,9 +5137,10 @@ fn run_app_ui_with_initial_state_on_event_loop(
                         &pending_actions,
                         &platform,
                         elwt,
-                        &adapter,
-                        &device,
-                        &mut session,
+                        instance,
+                        adapter,
+                        device,
+                        session,
                     );
                     session.window.request_redraw();
                     elwt.set_control_flow(ControlFlow::Poll);
@@ -4805,6 +5149,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     elwt.control_flow(),
                     host.next_execution_resource_observation_deadline(),
                 ));
+                #[cfg(target_os = "macos")]
+                if session.surface_acquisition.as_ref().is_none_or(|owner| !owner.is_pending()) {
+                    elwt.set_control_flow(control_flow_wake_no_later_than(
+                        elwt.control_flow(),
+                        session.next_native_display_observation,
+                    ));
+                }
                 #[cfg(feature = "validation")]
                 if let Some(validation) = surface_reopen_validation.as_ref() {
                     elwt.set_control_flow(control_flow_wake_no_later_than(
@@ -4815,8 +5166,114 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
                 _ => {}
             }
+            #[cfg(target_os = "macos")]
+            if let Some(accessibility) = &mut session.accessibility {
+                accessibility.update(
+                    &session.window,
+                    host.active_root(),
+                    session.router.focused(),
+                    session.current_bounds.get(),
+                );
+            }
         })
     });
+    let Some(mut initial_candidate) = initial_candidate else {
+        let mut failure = startup_failure.unwrap_or_else(|| {
+            close_pre_active_native_construction(
+                "event loop returned before the initial Window was created".to_owned(),
+                AppUiPreActiveWindowStartupStage::HostOwned,
+                None,
+                host_startup_deadline,
+            )
+        });
+        if let Err(error) = &event_loop_result {
+            failure.primary = format!("{}; {error}", failure.primary);
+        }
+        let native_cleanup_released = failure.shutdown.all_created_resources_released();
+        let native_cleanup = *failure.shutdown;
+        let primary = failure.primary;
+        let (app_state, ui_shutdown) = host
+            .host
+            .take()
+            .expect("pre-active Host owner")
+            .into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+        drop(background_runtime_guard);
+        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+        let runtime_failure = runtime_shutdown.qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = host.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown_deadline: host_startup_deadline,
+                shutdown: AppUiValidationWindowShutdown::Complete(
+                    AppUiWindowOuterShutdownEvidence::pre_active_failed(
+                        runtime_shutdown,
+                        ui_shutdown,
+                        native_cleanup.clone(),
+                    ),
+                ),
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        drop(app_state);
+        let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
+        let native_context = format!(
+                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
+            );
+        return match cleanup_failure {
+            Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
+            None => Err(format!("{primary}; {native_context}").into()),
+        };
+    };
+    let session = &mut initial_candidate.session;
+    if let Some(mut primary) = publication_failure {
+        if let Err(error) = &event_loop_result {
+            primary = format!("{primary}; {error}");
+        }
+        let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, host_startup_deadline);
+        let gpu_failure = gpu_shutdown.qualification_failure();
+        let (app_state, ui_shutdown) = host
+            .host
+            .take()
+            .expect("publication Host owner")
+            .into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+        drop(background_runtime_guard);
+        let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+        let runtime_failure = runtime_shutdown.qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = host.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                shutdown_deadline: host_startup_deadline,
+                shutdown: AppUiValidationWindowShutdown::PendingActivePublicationFailure {
+                    runtime: runtime_shutdown,
+                    host: ui_shutdown,
+                    gpu: gpu_shutdown,
+                },
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            drop(app_state);
+            drop(gpu_shutdown);
+        }
+        let cleanup_failure = merge_window_cleanup_failures(
+            merge_window_cleanup_failures(gpu_failure, ui_failure),
+            runtime_failure,
+        );
+        return match cleanup_failure {
+            Some(cleanup) => Err(format!(
+                "{primary}; initial Window publication cleanup also failed: {cleanup}"
+            )
+            .into()),
+            None => Err(primary.into()),
+        };
+    }
+
     let event_loop_result =
         merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
     #[cfg(feature = "validation")]
@@ -4830,8 +5287,15 @@ fn run_app_ui_with_initial_state_on_event_loop(
         // A fallback during this consuming pass shares its already-frozen budget.
         host.validation_shutdown_deadline = Some(shutdown_deadline);
     }
-    let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
+    let gpu_shutdown = catch_window_viewer_gpu_shutdown(session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
+    if mondrian_renderer::profile::profiling_enabled() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            shutdown_json = %serde_json::to_string(&gpu_shutdown).expect("GPU owner shutdown receipt"),
+            "Window consumed GPU generation shutdown receipt"
+        );
+    }
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
         Ok(evidence) if evidence.all_resources_released() => None,
         Ok(evidence) => Some(format!(
@@ -4851,6 +5315,17 @@ fn run_app_ui_with_initial_state_on_event_loop(
     });
     #[cfg(not(feature = "validation"))]
     let outer_record_failure: Option<String> = None;
+    if mondrian_renderer::profile::profiling_enabled() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            gpu_qualified = gpu_failure.is_none(),
+            ui_qualified = ui_failure.is_none(),
+            runtime_qualified = runtime_failure.is_none(),
+            outer_receipt_qualified = outer_record_failure.is_none(),
+            event_loop_returned = event_loop_result.is_ok(),
+            "Window consuming shutdown authority results"
+        );
+    }
     tracing::info!("Mondrian app UI stopped");
     drop(tracing_guard);
 
@@ -4974,13 +5449,31 @@ fn app_ui_surface_presentation_intent_for_role(
     }
     let (engine, policy) = host.resolved_display_color_management();
     match policy.resolve_output_color_space(&engine, host.active_program_output_color_space()) {
-        Ok(output_color_space) => AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+        Ok(output_color_space) => {
+            app_ui_surface_presentation_intent(output_color_space, policy.calibration())
+        }
         Err(error) => {
             tracing::warn!(
                 "display policy cannot resolve a monitor target; retaining fail-closed SDR UI carrier: {error}"
             );
             AppUiSurfacePresentationIntent::SdrSrgb
         }
+    }
+}
+
+fn app_ui_surface_presentation_intent(
+    output_color_space: ColorSpace,
+    calibration: &mondrian_core::color_models::DisplayCalibrationPolicy,
+) -> AppUiSurfacePresentationIntent {
+    // ICC produces opaque device code values, not standard target-primary RGB.
+    // Preserve the existing direct sRGB carrier without relabelling the payload.
+    if !matches!(
+        calibration,
+        mondrian_core::color_models::DisplayCalibrationPolicy::Disabled
+    ) {
+        AppUiSurfacePresentationIntent::SdrSrgb
+    } else {
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space)
     }
 }
 
@@ -4995,6 +5488,7 @@ struct AppUiSurfaceColorContract {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppUiSurfaceEncoding {
     Srgb,
+    ExtendedLinear,
     Pq,
     Hlg,
 }
@@ -5041,18 +5535,15 @@ struct AppUiDisplayTarget {
 }
 
 impl AppUiDisplayOutputContract {
-    fn presentation_readiness_for_color_space(
+    fn presentation_readiness_for_intent(
         &self,
         output_color_space: ColorSpace,
+        intent: AppUiSurfacePresentationIntent,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if app_ui_surface_color_space_matches_display_output(
-            self.surface_color.color_space,
-            output_color_space,
-        ) {
+        if app_ui_surface_color_space_matches_intent(self.surface_color, intent) {
             return self.display_presentation_readiness_current(output_color_space);
         }
 
-        let intent = AppUiSurfacePresentationIntent::DisplayOutput(output_color_space);
         let desired =
             choose_app_ui_surface_color_contract(&self.surface_capabilities_snapshot(), intent);
         match desired {
@@ -5101,7 +5592,10 @@ impl AppUiDisplayOutputContract {
         if boundary.target() != ProgramOutputRole::Display {
             return self.display_presentation_readiness_current(boundary.output_color_space());
         }
-        self.presentation_readiness_for_color_space(boundary.output_color_space())
+        self.presentation_readiness_for_intent(
+            boundary.output_color_space(),
+            AppUiSurfacePresentationIntent::DisplayOutput(boundary.output_color_space()),
+        )
     }
 
     fn display_presentation_readiness_current(
@@ -5154,9 +5648,14 @@ impl AppUiDisplayOutputContract {
             desired_surface_color_space: desired_color_space
                 .map(app_ui_surface_color_space_diagnostic),
             desired_surface_encoding: desired_color_space
-                .map(app_ui_surface_encoding)
+                .map(|_| {
+                    app_ui_surface_encoding_for_intent(
+                        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+                    )
+                })
                 .map(app_ui_surface_encoding_diagnostic),
-            desired_surface_hdr_mode: desired_color_space.map(app_ui_surface_hdr_mode),
+            desired_surface_hdr_mode: desired_color_space
+                .map(|_| app_ui_surface_hdr_mode_for_output(output_color_space)),
             payload_blocker: None,
         }
     }
@@ -5169,16 +5668,20 @@ impl AppUiDisplayOutputContract {
         if boundary.target() != ProgramOutputRole::Display {
             return None;
         }
-        self.boundary_blocker_for_color_space(boundary.output_color_space())
+        self.boundary_blocker_for_intent(
+            boundary.output_color_space(),
+            AppUiSurfacePresentationIntent::DisplayOutput(boundary.output_color_space()),
+        )
     }
 
-    fn boundary_blocker_for_color_space(
+    fn boundary_blocker_for_intent(
         &self,
         output_color_space: ColorSpace,
+        intent: AppUiSurfacePresentationIntent,
     ) -> Option<AppUiDisplayBoundaryBlocker> {
         let supported_surface_color_spaces =
             self.supported_surface_color_spaces_for_selected_format();
-        if output_color_space.is_hdr()
+        if app_ui_surface_hdr_mode_for_intent(intent) != AppUiSurfaceHdrMode::SdrOnly
             && self.surface_color.hdr_mode == AppUiSurfaceHdrMode::SdrOnly
         {
             return Some(AppUiDisplayBoundaryBlocker::HdrOutputRequiresHdrSurface {
@@ -5191,10 +5694,7 @@ impl AppUiDisplayOutputContract {
             });
         }
 
-        if app_ui_surface_color_space_matches_display_output(
-            self.surface_color.color_space,
-            output_color_space,
-        ) {
+        if app_ui_surface_color_space_matches_intent(self.surface_color, intent) {
             return None;
         }
 
@@ -5246,6 +5746,8 @@ fn display_output_contract_requires_renderer_rebuild(
 ) -> bool {
     previous.surface_color.format != next.surface_color.format
         || previous.surface_color.color_space != next.surface_color.color_space
+        || previous.surface_color.encoding != next.surface_color.encoding
+        || previous.surface_color.hdr_mode != next.surface_color.hdr_mode
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5298,6 +5800,7 @@ enum AppUiSurfaceFormatDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiSurfaceEncodingDiagnostic {
     Srgb,
+    ExtendedLinear,
     Pq,
     Hlg,
 }
@@ -5519,6 +6022,7 @@ fn app_ui_surface_encoding_diagnostic(
 ) -> AppUiSurfaceEncodingDiagnostic {
     match encoding {
         AppUiSurfaceEncoding::Srgb => AppUiSurfaceEncodingDiagnostic::Srgb,
+        AppUiSurfaceEncoding::ExtendedLinear => AppUiSurfaceEncodingDiagnostic::ExtendedLinear,
         AppUiSurfaceEncoding::Pq => AppUiSurfaceEncodingDiagnostic::Pq,
         AppUiSurfaceEncoding::Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
     }
@@ -5555,13 +6059,24 @@ fn app_ui_display_tone_map_headroom_ppm(display_hdr_info: &wgpu::DisplayHdrInfo)
     })
 }
 
+fn app_ui_surface_color_space_matches_intent(
+    surface_color: AppUiSurfaceColorContract,
+    intent: AppUiSurfacePresentationIntent,
+) -> bool {
+    app_ui_surface_color_space_for_intent(intent) == Some(surface_color.color_space)
+        && surface_color.hdr_mode == app_ui_surface_hdr_mode_for_intent(intent)
+        && surface_color.encoding == app_ui_surface_encoding_for_intent(intent)
+}
+
+#[cfg(all(test, target_os = "macos"))]
 fn app_ui_surface_color_space_matches_display_output(
-    surface_color_space: wgpu::SurfaceColorSpace,
+    surface_color: AppUiSurfaceColorContract,
     output_color_space: ColorSpace,
 ) -> bool {
-    app_ui_surface_color_space_for_intent(AppUiSurfacePresentationIntent::DisplayOutput(
-        output_color_space,
-    )) == Some(surface_color_space)
+    app_ui_surface_color_space_matches_intent(
+        surface_color,
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+    )
 }
 
 fn target_display_surface_color_space(
@@ -5573,33 +6088,19 @@ fn target_display_surface_color_space(
     .map(app_ui_surface_color_space_diagnostic)
 }
 
-fn app_ui_surface_hdr_mode_from_diagnostic(
-    color_space: AppUiSurfaceColorSpaceDiagnostic,
-) -> AppUiSurfaceHdrMode {
-    match color_space {
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq => AppUiSurfaceHdrMode::HdrPq,
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
-        AppUiSurfaceColorSpaceDiagnostic::Srgb
-        | AppUiSurfaceColorSpaceDiagnostic::DisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceHdrMode::SdrOnly,
+fn app_ui_surface_encoding_for_output(output: ColorSpace) -> AppUiSurfaceEncoding {
+    match output {
+        ColorSpace::Rec2100Pq => AppUiSurfaceEncoding::Pq,
+        ColorSpace::Rec2100Hlg => AppUiSurfaceEncoding::Hlg,
+        _ => AppUiSurfaceEncoding::Srgb,
     }
 }
 
-fn app_ui_surface_color_space_diagnostic_to_encoding(
-    color_space: AppUiSurfaceColorSpaceDiagnostic,
-) -> AppUiSurfaceEncodingDiagnostic {
-    match color_space {
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq => AppUiSurfaceEncodingDiagnostic::Pq,
-        AppUiSurfaceColorSpaceDiagnostic::Bt2100Hlg => AppUiSurfaceEncodingDiagnostic::Hlg,
-        AppUiSurfaceColorSpaceDiagnostic::Srgb
-        | AppUiSurfaceColorSpaceDiagnostic::DisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgb
-        | AppUiSurfaceColorSpaceDiagnostic::ExtendedDisplayP3
-        | AppUiSurfaceColorSpaceDiagnostic::Other => AppUiSurfaceEncodingDiagnostic::Srgb,
+fn app_ui_surface_hdr_mode_for_output(output: ColorSpace) -> AppUiSurfaceHdrMode {
+    match output {
+        ColorSpace::Rec2100Pq => AppUiSurfaceHdrMode::HdrPq,
+        ColorSpace::Rec2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
+        _ => AppUiSurfaceHdrMode::SdrOnly,
     }
 }
 
@@ -5651,8 +6152,8 @@ fn choose_app_ui_surface_color_contract(
         return Ok(AppUiSurfaceColorContract {
             format,
             color_space: required_color_space,
-            encoding: app_ui_surface_encoding(required_color_space),
-            hdr_mode: app_ui_surface_hdr_mode(required_color_space),
+            encoding: app_ui_surface_encoding_for_intent(intent),
+            hdr_mode: app_ui_surface_hdr_mode_for_intent(intent),
         });
     }
 
@@ -5674,6 +6175,9 @@ fn app_ui_surface_color_space_for_intent(
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::DisplayP3) => {
             Some(wgpu::SurfaceColorSpace::DisplayP3)
         }
+        AppUiSurfacePresentationIntent::DisplayOutput(
+            ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg,
+        ) if cfg!(target_os = "macos") => Some(wgpu::SurfaceColorSpace::ExtendedSrgbLinear),
         AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Pq) => {
             Some(wgpu::SurfaceColorSpace::Bt2100Pq)
         }
@@ -5771,19 +6275,41 @@ fn app_ui_surface_format_matches_color_space_encoding(
     }
 }
 
-fn app_ui_surface_encoding(color_space: wgpu::SurfaceColorSpace) -> AppUiSurfaceEncoding {
-    match color_space {
-        wgpu::SurfaceColorSpace::Bt2100Pq => AppUiSurfaceEncoding::Pq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => AppUiSurfaceEncoding::Hlg,
-        _ => AppUiSurfaceEncoding::Srgb,
+fn app_ui_surface_encoding_for_intent(
+    intent: AppUiSurfacePresentationIntent,
+) -> AppUiSurfaceEncoding {
+    match intent {
+        AppUiSurfacePresentationIntent::SdrSrgb => AppUiSurfaceEncoding::Srgb,
+        AppUiSurfacePresentationIntent::DisplayOutput(
+            ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg,
+        ) if cfg!(target_os = "macos") => AppUiSurfaceEncoding::ExtendedLinear,
+        AppUiSurfacePresentationIntent::DisplayOutput(output) => {
+            app_ui_surface_encoding_for_output(output)
+        }
     }
 }
 
-fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurfaceHdrMode {
-    match color_space {
-        wgpu::SurfaceColorSpace::Bt2100Pq => AppUiSurfaceHdrMode::HdrPq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => AppUiSurfaceHdrMode::HdrHlg,
-        _ => AppUiSurfaceHdrMode::SdrOnly,
+fn app_ui_surface_hdr_mode_for_intent(
+    intent: AppUiSurfacePresentationIntent,
+) -> AppUiSurfaceHdrMode {
+    match intent {
+        AppUiSurfacePresentationIntent::SdrSrgb => AppUiSurfaceHdrMode::SdrOnly,
+        AppUiSurfacePresentationIntent::DisplayOutput(output) => {
+            app_ui_surface_hdr_mode_for_output(output)
+        }
+    }
+}
+
+fn app_ui_surface_output_color_space(surface: AppUiSurfaceColorContract) -> ColorSpace {
+    match surface.hdr_mode {
+        AppUiSurfaceHdrMode::HdrPq => ColorSpace::Rec2100Pq,
+        AppUiSurfaceHdrMode::HdrHlg => ColorSpace::Rec2100Hlg,
+        AppUiSurfaceHdrMode::SdrOnly
+            if surface.color_space == wgpu::SurfaceColorSpace::DisplayP3 =>
+        {
+            ColorSpace::DisplayP3
+        }
+        AppUiSurfaceHdrMode::SdrOnly => ColorSpace::Srgb,
     }
 }
 
@@ -6148,11 +6674,42 @@ fn trace_viewer_gpu_output_telemetry(
     write_viewer_gpu_output_diagnostics_if_needed(&diagnostics);
 }
 
+/// One process-owned diagnostic stream, independent of Window/Device generations.
+/// Counts describe published health observations, not unique frames or GPU work.
+struct ViewerGpuOutputDiagnosticStream {
+    path: PathBuf,
+    counts: AppUiViewerGpuOutputHealthCounts,
+}
+
+impl ViewerGpuOutputDiagnosticStream {
+    fn write(&mut self, diagnostics: &AppUiViewerGpuOutputDiagnostics) -> anyhow::Result<()> {
+        // Advance before I/O: a lost observation remains detectable by replay.
+        self.counts.record(diagnostics.health.status);
+        write_viewer_gpu_output_diagnostics_to_path(&self.path, diagnostics, self.counts)
+    }
+}
+
 fn write_viewer_gpu_output_diagnostics_if_needed(diagnostics: &AppUiViewerGpuOutputDiagnostics) {
     let Some(path) = viewer_gpu_output_diagnostics_output_path() else {
         return;
     };
-    let result = write_viewer_gpu_output_diagnostics_to_path(&path, diagnostics);
+    static STREAM: OnceLock<Mutex<ViewerGpuOutputDiagnosticStream>> = OnceLock::new();
+    let stream = STREAM.get_or_init(|| {
+        Mutex::new(ViewerGpuOutputDiagnosticStream {
+            path: path.clone(),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        })
+    });
+    let result = (|| {
+        let mut stream = stream
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Viewer diagnostic stream poisoned"))?;
+        anyhow::ensure!(
+            stream.path == path,
+            "Viewer diagnostic destination changed within a process"
+        );
+        stream.write(diagnostics)
+    })();
     if let Err(err) = result {
         tracing::warn!(
             output_path = %path.display(),
@@ -6164,11 +6721,18 @@ fn write_viewer_gpu_output_diagnostics_if_needed(diagnostics: &AppUiViewerGpuOut
 fn write_viewer_gpu_output_diagnostics_to_path(
     path: &Path,
     diagnostics: &AppUiViewerGpuOutputDiagnostics,
+    health_counts: AppUiViewerGpuOutputHealthCounts,
 ) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Record<'a> {
+        #[serde(flatten)]
+        snapshot: &'a AppUiViewerGpuOutputDiagnostics,
+        health_counts: AppUiViewerGpuOutputHealthCounts,
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let report_json = serde_json::to_string(diagnostics)?;
+    let report_json = serde_json::to_string(&Record { snapshot: diagnostics, health_counts })?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{report_json}")?;
     Ok(())
@@ -6198,6 +6762,7 @@ fn viewer_runtime_image_sha256() -> Option<String> {
     static RUNTIME_IMAGE_SHA256: OnceLock<Option<String>> = OnceLock::new();
     RUNTIME_IMAGE_SHA256
         .get_or_init(|| {
+            let started = Instant::now();
             #[cfg(target_os = "linux")]
             let mut file = File::open("/proc/self/exe").ok()?;
             #[cfg(not(target_os = "linux"))]
@@ -6211,16 +6776,26 @@ fn viewer_runtime_image_sha256() -> Option<String> {
                 }
                 hasher.update(&buffer[..read]);
             }
-            Some(format!("{:x}", hasher.finalize()))
+            let identity = format!("{:x}", hasher.finalize());
+            tracing::debug!(
+                elapsed_us = started.elapsed().as_micros(),
+                "Viewer runtime image identity initialized"
+            );
+            Some(identity)
         })
         .clone()
 }
 
-fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
-    if host.is_playback_frame_pending() {
-        delay.min(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
+fn app_ui_interactive_playback_wake_deadline(
+    deadline: Instant,
+    now: Instant,
+    frame_pending: bool,
+) -> Instant {
+    if frame_pending {
+        now.checked_add(APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY)
+            .map_or(deadline, |interactive| deadline.min(interactive))
     } else {
-        delay
+        deadline
     }
 }
 
@@ -6261,7 +6836,9 @@ fn apply_deferred_viewer_gpu_cleanup(session: &mut AppUiWindowSession) {
         WindowViewerGpuDeferredCleanup::ClearFrameResources => {
             session.viewer_gpu_execution.clear_frame_resources();
         }
-        WindowViewerGpuDeferredCleanup::Reset => session.viewer_gpu_execution.reset(),
+        WindowViewerGpuDeferredCleanup::Reset => {
+            session.viewer_gpu_execution.invalidate_frame_generation()
+        }
     }
 }
 
@@ -6277,14 +6854,17 @@ fn retire_window_viewer_gpu_registration(
 }
 
 fn retire_window_published_gpu_output(session: &mut AppUiWindowSession, host: &AppUiHost) -> bool {
+    unregister_program_scopes_textures(session);
     let outputs = session.viewer_gpu_presentation.publications.drain();
     let mut retired = false;
     for published in outputs.into_iter().flatten() {
         retired = true;
-        session.frame_renderer.unregister_external_texture(published.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(published.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             published.output_key(),
-            published.artifact().as_str(),
+            published.artifact().texture_key().as_str(),
         );
         drop(published);
     }
@@ -6301,10 +6881,15 @@ fn begin_window_viewer_gpu_quarantine(
         .viewer_gpu_presentation
         .take_published_output_for_submission(quarantine.submission_id)
     {
-        session.frame_renderer.unregister_external_texture(published.artifact());
+        if session.program_scopes_submission_id == Some(published.source_submission_id()) {
+            unregister_program_scopes_textures(session);
+        }
+        session
+            .frame_renderer
+            .unregister_external_texture(published.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             published.output_key(),
-            published.artifact().as_str(),
+            published.artifact().texture_key().as_str(),
         );
         drop(published);
     }
@@ -6328,6 +6913,7 @@ fn begin_window_viewer_gpu_quarantine(
 fn publish_completed_window_viewer_gpu_owner(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
+    device: &wgpu::Device,
     submission_id: ViewerGpuSubmissionId,
     owner: &mut WindowViewerGpuSubmissionOwner,
 ) -> bool {
@@ -6379,12 +6965,15 @@ fn publish_completed_window_viewer_gpu_owner(
             let previous = session.viewer_gpu_presentation.publications.publish_current(
                 submission_id,
                 owner.frame.output_key.clone(),
-                owner.texture_key.clone(),
+                owner.publication_artifact(),
                 output_lease,
             );
             owner.texture_registered = false;
+            register_current_window_program_scopes(session, device);
             if let Some(previous) = previous {
-                session.frame_renderer.unregister_external_texture(previous.artifact());
+                session
+                    .frame_renderer
+                    .unregister_external_texture(previous.artifact().texture_key());
                 drop(previous);
             }
             session
@@ -6620,9 +7209,20 @@ fn complete_window_viewer_gpu_submission(
         submission_id,
         mut owner,
         completion,
+        completion_observed_at,
         mut quarantine_reason,
-        ..
     } = completed;
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        frame = owner.frame.frame,
+        candidate_id = owner.frame.candidate_id(),
+        generation = owner.frame.generation(),
+        playback_intent = ?owner.frame.playback_intent(),
+        callback_consumption_delay_us = completion_observed_at.elapsed().as_micros(),
+        ?quarantine_reason,
+        "Window Viewer consumed exact GPU completion"
+    );
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
         quarantine_reason.get_or_insert_with(|| {
             ViewerGpuSubmissionQuarantineReason::DevicePollFailed(format!(
@@ -6637,10 +7237,15 @@ fn complete_window_viewer_gpu_submission(
             .viewer_gpu_presentation
             .take_published_output_for_submission(submission_id)
         {
-            session.frame_renderer.unregister_external_texture(published.artifact());
+            if session.program_scopes_submission_id == Some(published.source_submission_id()) {
+                unregister_program_scopes_textures(session);
+            }
+            session
+                .frame_renderer
+                .unregister_external_texture(published.artifact().texture_key());
             let _ = host.clear_external_viewer_frame_for_artifact(
                 published.output_key(),
-                published.artifact().as_str(),
+                published.artifact().texture_key().as_str(),
             );
             drop(published);
         }
@@ -6663,23 +7268,13 @@ fn complete_window_viewer_gpu_submission(
         owner.frame.is_successor_preparation(),
     ) {
         Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
-            if let Some(scopes) = owner.program_scopes.as_ref() {
-                if let Err(error) = register_program_scopes_textures(
-                    session,
-                    device,
-                    scopes,
-                    owner.program_scopes_analysis_identity,
-                ) {
-                    unregister_program_scopes_textures(session);
-                    session.program_scopes_refresh_requested = true;
-                    tracing::warn!(%error, "heterogeneous GPU scope registration failed");
-                }
-            } else {
-                unregister_program_scopes_textures(session);
-                session.program_scopes_refresh_requested = owner.program_scopes_requested;
-            }
-            let _ =
-                publish_completed_window_viewer_gpu_owner(session, host, submission_id, &mut owner);
+            let _ = publish_completed_window_viewer_gpu_owner(
+                session,
+                host,
+                device,
+                submission_id,
+                &mut owner,
+            );
         }
         Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor) => {
             let _ = retain_completed_window_viewer_gpu_successor(
@@ -6731,6 +7326,8 @@ fn retain_completed_window_viewer_gpu_successor(
     };
     let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
         owner.texture_key.as_str().to_owned(),
+        owner.frame.width,
+        owner.frame.height,
         owner.presentation,
     ) else {
         retire_window_viewer_gpu_registration(session, host, owner);
@@ -6751,13 +7348,15 @@ fn retain_completed_window_viewer_gpu_successor(
     if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
         submission_id,
         owner.frame.output_key.clone(),
-        owner.texture_key.clone(),
+        owner.publication_artifact(),
         output_lease,
     ) {
-        session.frame_renderer.unregister_external_texture(previous.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(previous.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             previous.output_key(),
-            previous.artifact().as_str(),
+            previous.artifact().texture_key().as_str(),
         );
         drop(previous);
     }
@@ -6776,8 +7375,76 @@ fn drive_viewer_heterogeneous_completion(
 ) -> ViewerHeterogeneousCompletionDrive {
     let poll = poll_viewer_heterogeneous_completion(device, session, host);
     ViewerHeterogeneousCompletionDrive {
-        redraw_required: poll == ViewerHeterogeneousCompletionPoll::TerminalChange,
+        redraw_required: poll == ViewerHeterogeneousCompletionPoll::TerminalChange
+            && host.has_pending_ui_refresh(),
         next_wake: session.viewer_gpu_submissions.next_wake().map(|wake| wake.max(now)),
+    }
+}
+
+fn trace_window_gpu_profile_samples(
+    profile: &mut mondrian_renderer::profile::GpuTimestampQueryRing,
+    generation: Option<ViewerGpuDeviceGenerationId>,
+) {
+    for sample in profile.take_completed() {
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            device_generation = ?generation.map(ViewerGpuDeviceGenerationId::get),
+            sample_id = sample.token.id(),
+            gpu_execution_us = sample.elapsed_us,
+            stages_json = %serde_json::to_string(&sample.stages).expect("integer GPU stage timings"),
+            discarded_samples = profile.discarded_samples(),
+            "Window GPU hardware timestamp sample"
+        );
+    }
+}
+
+fn record_window_viewer_gpu_profile(
+    runtime: &mut ViewerGpuExecutionRuntime,
+    profile: Option<&mut mondrian_renderer::profile::GpuTimestampQueryRing>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    request: ViewerGpuExecutionRequest<'_>,
+    generation: Option<ViewerGpuDeviceGenerationId>,
+) -> (
+    Result<mondrian_renderer::ViewerGpuExecutionRecord, ViewerGpuExecutionError>,
+    Option<mondrian_renderer::profile::GpuTimestampToken>,
+) {
+    let Some(profile) = profile else {
+        return (runtime.record(device, queue, encoder, request), None);
+    };
+    let scope = match profile.begin_pass_frame(device, encoder) {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::error!(%error, "Window GPU timestamp observation failed before recording");
+            trace_window_gpu_profile_samples(profile, generation);
+            return (runtime.record(device, queue, encoder, request), None);
+        }
+    };
+    let Some((token, mut recorder)) = scope else {
+        trace_window_gpu_profile_samples(profile, generation);
+        return (runtime.record(device, queue, encoder, request), None);
+    };
+    let result = runtime.record(device, queue, &mut recorder, request);
+    let receipt = recorder.finish();
+    let coverage = profile.finish_pass_frame(receipt);
+    trace_window_gpu_profile_samples(profile, generation);
+    match coverage {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!("Window GPU timestamp scope has incomplete command coverage"),
+        Err(error) => {
+            // Recording already happened. A diagnostic failure cannot replace
+            // its result or free queries that submitted commands may reference.
+            tracing::error!(%error, "Window GPU timestamp recording receipt rejected");
+        }
+    }
+    if result.is_err() {
+        if let Err(error) = profile.abandon_frame(token) {
+            tracing::error!(%error, "Window GPU timestamp failed-frame abandonment failed");
+        }
+        (result, None)
+    } else {
+        (result, Some(token))
     }
 }
 
@@ -6794,6 +7461,93 @@ fn report_successful_viewer_gpu_fallbacks(
     for reason in reasons {
         record_diagnostic(reason);
     }
+}
+
+fn retain_viewer_backend_candidate(
+    pending: &mut Option<Box<PreviewGpuFrame>>,
+    staged: &mut PreviewGpuFrameStaging,
+    frame: Box<PreviewGpuFrame>,
+) {
+    if frame.is_successor_preparation() {
+        staged.stage(frame);
+    } else {
+        debug_assert!(pending.is_none());
+        *pending = Some(frame);
+    }
+}
+
+pub(super) fn take_window_viewer_gpu_candidate(
+    host: &AppUiHost,
+    preparation: ViewerGpuPreparation,
+    pending: &mut Option<Box<PreviewGpuFrame>>,
+    staged: &mut PreviewGpuFrameStaging,
+    submission_capacity_full: bool,
+) -> Option<PreviewGpuFrameState> {
+    let pending_current =
+        pending.take().and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
+    let candidate = match preparation {
+        ViewerGpuPreparation::Current => {
+            let retained_current = pending_current.or_else(|| {
+                staged
+                    .take_exact(host.viewer_gpu_current_intent())
+                    .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame))
+            });
+            retained_current.map_or_else(
+                || host.gpu_preview_frame_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+        ViewerGpuPreparation::Successor => {
+            let successor =
+                host.viewer_gpu_successor_intent().and_then(|intent| staged.take_exact(intent));
+            successor.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            )
+        }
+    };
+    // Submitted owners retain media until real GPU completion. Their capacity
+    // gates new work, not consumption of an already registered physical output
+    // or a transparent canvas through the existing presentation ticket.
+    if submission_capacity_full && let PreviewGpuFrameState::Ready(frame) = candidate {
+        retain_viewer_backend_candidate(pending, staged, frame);
+        return None;
+    }
+    Some(candidate)
+}
+
+fn viewer_program_backend_preparation(
+    host: &AppUiHost,
+    session: &AppUiWindowSession,
+) -> Result<mondrian_renderer::ViewerGpuBackendPreparation, String> {
+    // Resolve only the canonical Program and existing machine-local monitor
+    // policy. This is a device-object plan, never a second color interpretation.
+    let context = host.active_program_color_context().map_err(|error| error.to_string())?;
+    let boundary = crate::app::preview_cpu_execution::output_boundary_from_color_context(&context)
+        .map_err(|error| error.to_string())?;
+    let monitor = session
+        .display_management_policy
+        .resolve_output_color_space(&session.color_engine, boundary.output_color_space())
+        .map_err(|error| error.to_string())?;
+    let adaptation = RenderMonitorAdaptation::new(
+        boundary.output_color_space(),
+        monitor,
+        session.color_engine.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(mondrian_renderer::ViewerGpuBackendPreparation {
+        working_color_space: context.working_color_space(),
+        program_output_boundary: boundary,
+        monitor_adaptation: adaptation,
+        output_precision: ViewerGpuOutputPrecision::minimum_for_display(
+            monitor,
+            session.display_calibration.is_some(),
+        ),
+        signal_monitoring_active: host.video_scopes_settings().monitoring.is_active(),
+        waveform_mode: (session.role == AppUiWindowRole::Workspace
+            && host.is_panel_active(PanelKind::Scopes))
+        .then_some(host.video_scopes_settings().waveform_mode),
+    })
 }
 
 fn prepare_viewer_gpu_preview(
@@ -6838,40 +7592,101 @@ fn prepare_viewer_gpu_preview(
         host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
-    let Some(presentation_geometry) = host.viewer_presentation_geometry() else {
+    let pixels_per_point = UiWindowCoordinates::from_window(&session.window).pixels_per_point();
+    let Some(presentation_geometry) = host.viewer_presentation_geometry(pixels_per_point) else {
         clear_viewer_spatial_presentation(session, host);
         session.viewer_gpu_output_telemetry.record_unavailable_skip();
         finish_prepare!();
     };
-    if let Err(error) =
-        synchronize_viewer_spatial_presentation(session, host, presentation_geometry.presentation)
-    {
+    let backdrop = session.display_calibration.as_ref().map(|_| {
+        let colors = host
+            .preferences()
+            .viewer_canvas_background
+            .paint_colors(&mondrian_ui_theme::current_theme());
+        mondrian_renderer::GpuDisplayCalibrationBackdrop {
+            canvas: colors[0],
+            dark: colors[1],
+            light: colors[2],
+            tile_size: mondrian_ui_widgets::ViewerCanvasBackground::CHECKER_TILE_SIZE,
+            offset: [
+                presentation_geometry.visible_rect.x - presentation_geometry.canvas_rect.x,
+                presentation_geometry.visible_rect.y - presentation_geometry.canvas_rect.y,
+            ],
+            pixel_step: [
+                presentation_geometry.visible_rect.width
+                    / presentation_geometry.presentation.output_width as f32,
+                presentation_geometry.visible_rect.height
+                    / presentation_geometry.presentation.output_height as f32,
+            ],
+        }
+    });
+    if let Err(error) = synchronize_viewer_spatial_presentation(
+        session,
+        host,
+        presentation_geometry.presentation,
+        backdrop,
+    ) {
         tracing::error!(%error, "Window spatial output retirement could not bind a new still ticket");
         finish_prepare!();
     }
     let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
-    if session.viewer_gpu_submissions.is_at_capacity() {
-        stage_window_viewer_gpu_lookahead(session, host);
-        session
-            .viewer_gpu_output_telemetry
-            .record_prepare_duration(prepare_started.elapsed());
-        return;
-    }
     let expected_prepared_output = host.exact_prepared_viewer_gpu_output_key();
-    if let Some(stale) = session
-        .viewer_gpu_presentation
-        .publications
-        .retire_prepared_unless(expected_prepared_output.as_ref())
-    {
+    let expected_current_output = host.exact_current_viewer_gpu_output_key();
+    if let Some(stale) = session.viewer_gpu_presentation.publications.retire_prepared_unless(
+        expected_prepared_output.as_ref(),
+        expected_current_output.as_ref(),
+    ) {
         let _ = host.clear_external_viewer_frame_for_artifact(
             stale.output_key(),
-            stale.artifact().as_str(),
+            stale.artifact().texture_key().as_str(),
         );
-        session.frame_renderer.unregister_external_texture(stale.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(stale.artifact().texture_key());
         drop(stale);
     }
-    let Some(preparation) = host.viewer_gpu_preparation() else {
+    let program_scopes_requested =
+        session.role == AppUiWindowRole::Workspace && host.is_panel_active(PanelKind::Scopes);
+    let scopes_settings = host.video_scopes_settings();
+    let program_scopes_analysis_identity =
+        program_scopes_requested.then_some(scopes_settings.analysis_identity());
+    if !program_scopes_requested {
+        unregister_program_scopes_textures(session);
+        session.program_scopes_refresh_requested = false;
+    } else if (session.program_scopes_registered
+        && session.program_scopes_analysis_identity != program_scopes_analysis_identity)
+        || (!session.program_scopes_registered && !session.program_scopes_refresh_requested)
+    {
+        // Opening/changing Scopes must renew an already consumed still ticket
+        // before admission. Retire the old physical output first; Playback
+        // remains the sole authority and preserves timed playback deadlines.
+        tracing::debug!(
+            previous = ?session.program_scopes_analysis_identity,
+            requested = ?program_scopes_analysis_identity,
+            "Window Scopes analysis contract changed"
+        );
+        unregister_program_scopes_textures(session);
+        if !retire_window_published_gpu_output(session, host) {
+            host.clear_external_viewer_frame();
+        }
+        if let Err(error) = host.renew_still_frame_demand_after_output_retirement() {
+            tracing::error!(%error, "Window Scopes could not bind a new still ticket");
+            finish_prepare!();
+        }
+        session.program_scopes_refresh_requested = true;
+    }
+    let Some(preparation) = host.viewer_gpu_preparation(Instant::now()) else {
         finish_prepare!();
+    };
+    let backend_plan = match viewer_program_backend_preparation(host, session) {
+        Ok(plan) => plan,
+        Err(error) => {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_program_backend_preparation".to_owned(),
+                reason: error,
+            });
+            finish_prepare!();
+        }
     };
     if !submission_in_flight {
         host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
@@ -6906,53 +7721,18 @@ fn prepare_viewer_gpu_preview(
         session.viewer_gpu_output_telemetry.record_non_workspace_skip();
         finish_prepare!();
     }
-    let program_scopes_requested = host.is_panel_active(PanelKind::Scopes);
-    let scopes_settings = host.video_scopes_settings();
-    let program_scopes_analysis_identity =
-        program_scopes_requested.then_some(scopes_settings.analysis_identity());
-    if !program_scopes_requested {
-        unregister_program_scopes_textures(session);
-        session.program_scopes_refresh_requested = false;
+    let current_candidate = take_window_viewer_gpu_candidate(
+        host,
+        preparation,
+        &mut session.pending_viewer_backend_frame,
+        &mut session.staged_viewer_gpu_successors,
+        session.viewer_gpu_submissions.is_at_capacity(),
+    );
+    if preparation == ViewerGpuPreparation::Successor || current_candidate.is_none() {
+        stage_window_viewer_gpu_lookahead(session, host);
     }
-    if session.program_scopes_registered
-        && session.program_scopes_analysis_identity != program_scopes_analysis_identity
-    {
-        unregister_program_scopes_textures(session);
-        host.clear_external_viewer_frame();
-        session.program_scopes_refresh_requested = true;
-    }
-    if program_scopes_requested
-        && !session.program_scopes_registered
-        && !session.program_scopes_refresh_requested
-    {
-        // A Viewer frame may already be current when the user opens Scopes.
-        // Reissue that same candidate once so Program Output is still resident
-        // at the renderer boundary instead of measuring monitor output.
-        host.clear_external_viewer_frame();
-        session.program_scopes_refresh_requested = true;
-    }
-    let current_candidate = match preparation {
-        ViewerGpuPreparation::Current => {
-            let staged_current = session
-                .staged_viewer_gpu_successors
-                .take_exact(host.viewer_gpu_current_intent())
-                .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
-            staged_current.map_or_else(
-                || host.gpu_preview_frame_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            )
-        }
-        ViewerGpuPreparation::Successor => {
-            let staged = host
-                .viewer_gpu_successor_intent()
-                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
-            let candidate = staged.map_or_else(
-                || host.gpu_preview_successor_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            );
-            stage_window_viewer_gpu_lookahead(session, host);
-            candidate
-        }
+    let Some(current_candidate) = current_candidate else {
+        finish_prepare!();
     };
     let mut frame = match current_candidate {
         PreviewGpuFrameState::Ready(frame) => frame,
@@ -6967,9 +7747,11 @@ fn prepare_viewer_gpu_preview(
                     if let Some(previous) = promotion.into_retired() {
                         let _ = host.clear_external_viewer_frame_for_artifact(
                             previous.output_key(),
-                            previous.artifact().as_str(),
+                            previous.artifact().texture_key().as_str(),
                         );
-                        session.frame_renderer.unregister_external_texture(previous.artifact());
+                        session
+                            .frame_renderer
+                            .unregister_external_texture(previous.artifact().texture_key());
                         drop(previous);
                     }
                     exact_output_available
@@ -6980,16 +7762,35 @@ fn prepare_viewer_gpu_preview(
                 && session.viewer_gpu_presentation.published_output().is_some_and(|physical| {
                     host.has_external_viewer_frame_artifact(
                         physical.output_key(),
-                        physical.artifact().as_str(),
+                        physical.artifact().texture_key().as_str(),
                     )
                 });
             if physical_is_exact
                 && session.viewer_gpu_device_progress.generation_terminal().is_none()
             {
-                let _ = host.present_current_viewer_output(
+                let ticket = candidate.presentation_ticket();
+                let disposition = host.present_current_viewer_output(
                     candidate,
                     crate::app::preview_runtime::PreviewPresentationCarrier::ExternalGpu,
                 );
+                if !matches!(disposition, FramePresentationDisposition::NoDemand) {
+                    tracing::debug!(
+                        target: "mondrian_app::viewer_submission",
+                        ?ticket,
+                        ?disposition,
+                        "Window Viewer consumed exact current physical output"
+                    );
+                }
+                if matches!(
+                    disposition,
+                    FramePresentationDisposition::Presented(_)
+                        | FramePresentationDisposition::NoDemand
+                ) {
+                    register_current_window_program_scopes(session, device);
+                } else {
+                    unregister_program_scopes_textures(session);
+                    session.program_scopes_refresh_requested = program_scopes_requested;
+                }
             } else {
                 let _ = retire_window_published_gpu_output(session, host);
                 host.clear_external_viewer_frame();
@@ -7002,16 +7803,18 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_current_skip();
-            if program_scopes_requested {
+            let successor = take_window_viewer_gpu_candidate(
+                host,
+                ViewerGpuPreparation::Successor,
+                &mut session.pending_viewer_backend_frame,
+                &mut session.staged_viewer_gpu_successors,
+                session.viewer_gpu_submissions.is_at_capacity(),
+            );
+            let Some(successor) = successor else {
+                stage_window_viewer_gpu_lookahead(session, host);
                 finish_prepare!();
-            }
-            let staged = host
-                .viewer_gpu_successor_intent()
-                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
-            match staged.map_or_else(
-                || host.gpu_preview_successor_for_current_state(),
-                PreviewGpuFrameState::Ready,
-            ) {
+            };
+            match successor {
                 PreviewGpuFrameState::Ready(frame) => {
                     stage_window_viewer_gpu_lookahead(session, host);
                     frame
@@ -7077,10 +7880,91 @@ fn prepare_viewer_gpu_preview(
     {
         finish_prepare!();
     }
+    let exact_backend_plan = mondrian_renderer::ViewerGpuBackendPreparation {
+        working_color_space: frame.working_color_space,
+        program_output_boundary: frame.program_output_boundary.clone(),
+        monitor_adaptation: frame.monitor_adaptation.clone(),
+        output_precision: ViewerGpuOutputPrecision::minimum_for_display(
+            frame.monitor_adaptation.monitor_color_space(),
+            session.display_calibration.is_some(),
+        ),
+        signal_monitoring_active: scopes_settings.monitoring.is_active(),
+        waveform_mode: program_scopes_requested.then_some(scopes_settings.waveform_mode),
+    };
+    if exact_backend_plan != backend_plan {
+        // A stale/foreign candidate cannot authorize an unprepared contract or
+        // silently compile it on the UI path. Its original deadline remains.
+        fail_viewer_gpu_frame(host, &mut frame);
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+            feature: "viewer_program_backend_preparation_contract".to_owned(),
+            reason:
+                "candidate Program/monitor contract differs from the canonical prepared backend"
+                    .to_owned(),
+        });
+        finish_prepare!();
+    }
+    {
+        let Some(event_proxy) = session.viewer_backend_event_proxy.clone() else {
+            host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "viewer_program_backend_preparation".to_owned(),
+                reason: "native Window preparation wake route is unavailable".to_owned(),
+            });
+            finish_prepare!();
+        };
+        let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+        // Warm device objects need no cache loan. Record through the existing
+        // queue-ordered turnover even while earlier submitted owners retire.
+        // A cold contract still waits for their exact completion before the
+        // worker may clear/loan caches; neither path renews a picture ticket.
+        let preparation = session
+            .viewer_gpu_execution
+            .backend_is_prepared_for(&backend_plan, layers)
+            .and_then(|prepared| {
+                if prepared {
+                    Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready)
+                } else if submission_in_flight {
+                    Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending)
+                } else {
+                    session.viewer_gpu_execution.prepare_backend_async(
+                        device,
+                        queue,
+                        backend_plan.clone(),
+                        layers,
+                        move || {
+                            let _ =
+                                event_proxy.send_event(AppUiUserEvent::ViewerBackendPreparation);
+                        },
+                    )
+                }
+            });
+        match preparation {
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Ready) => {}
+            Ok(mondrian_renderer::ViewerGpuBackendPreparationStatus::Pending) => {
+                session.viewer_gpu_output_telemetry.record_loading_skip();
+                retain_viewer_backend_candidate(
+                    &mut session.pending_viewer_backend_frame,
+                    &mut session.staged_viewer_gpu_successors,
+                    frame,
+                );
+                finish_prepare!();
+            }
+            Err(error) => {
+                fail_viewer_gpu_frame(host, &mut frame);
+                host.record_preview_gpu_output_blocker(
+                    &PreviewGpuOutputBlocker::UnsupportedFeature {
+                        feature: "viewer_program_backend_preparation".to_owned(),
+                        reason: error.to_string(),
+                    },
+                );
+                finish_prepare!();
+            }
+        }
+    }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
-        "{}:{}",
+        "{}:{}:{}",
         frame.external_texture_key(),
-        presentation_geometry.presentation.key_suffix()
+        presentation_geometry.presentation.key_suffix(),
+        backdrop.map(|background| background.key_suffix()).unwrap_or_default()
     )) else {
         session.viewer_gpu_output_telemetry.record_invalid_texture_key();
         tracing::warn!(
@@ -7102,9 +7986,15 @@ fn prepare_viewer_gpu_preview(
         AppUiViewerGpuOutputPreviewCandidateState::Ready,
         Some(frame.candidate_id()),
     );
+    let monitor_color_space = frame.monitor_adaptation.monitor_color_space();
+    let presentation_intent = if session.display_calibration.is_some() {
+        AppUiSurfacePresentationIntent::SdrSrgb
+    } else {
+        AppUiSurfacePresentationIntent::DisplayOutput(monitor_color_space)
+    };
     let presentation_readiness = session
         .display_output_contract
-        .presentation_readiness_for_color_space(frame.monitor_adaptation.monitor_color_space());
+        .presentation_readiness_for_intent(monitor_color_space, presentation_intent);
     session
         .viewer_gpu_output_telemetry
         .record_display_presentation_readiness(presentation_readiness);
@@ -7153,7 +8043,7 @@ fn prepare_viewer_gpu_preview(
 
     if let Some(blocker) = session
         .display_output_contract
-        .boundary_blocker_for_color_space(frame.monitor_adaptation.monitor_color_space())
+        .boundary_blocker_for_intent(monitor_color_space, presentation_intent)
     {
         unregister_program_scopes_textures(session);
         session.viewer_gpu_output_telemetry.record_display_contract_blocker(&blocker);
@@ -7209,7 +8099,7 @@ fn prepare_viewer_gpu_preview(
     // Progress capacity is part of submission admission, not fallible
     // post-submit bookkeeping. Once `Queue::submit` returns, committing its
     // exact index through this move-only permit cannot reject the batch.
-    let progress_permit = match session.viewer_gpu_device_progress.reserve_submission() {
+    let mut progress_permit = match session.viewer_gpu_device_progress.reserve_submission() {
         Ok(permit) => permit,
         Err(ViewerGpuDeviceProgressReserveError::Backpressured) => finish_prepare!(),
         Err(error) => {
@@ -7288,7 +8178,9 @@ fn prepare_viewer_gpu_preview(
     );
     let source_rect = presentation_geometry.presentation.normalized_source_rect();
     let renderer_record_started = Instant::now();
-    let mut record = match session.viewer_gpu_execution.record(
+    let (record_result, timestamp_token) = record_window_viewer_gpu_profile(
+        &mut session.viewer_gpu_execution,
+        session.viewer_gpu_profile.as_mut(),
         device,
         queue,
         &mut encoder,
@@ -7311,7 +8203,12 @@ fn prepare_viewer_gpu_preview(
             output_width: presentation_geometry.presentation.output_width,
             output_height: presentation_geometry.presentation.output_height,
             output_precision,
-            display_calibration,
+            display_calibration: display_calibration.map(|lut| {
+                mondrian_renderer::ViewerGpuDisplayCalibration {
+                    lut,
+                    backdrop: backdrop.expect("ICC presentation owns its canvas backdrop"),
+                }
+            }),
             program_scopes: viewer_program_scopes_request(
                 program_scopes_requested,
                 frame.program_output_boundary.output_color_space(),
@@ -7342,7 +8239,9 @@ fn prepare_viewer_gpu_preview(
                 None
             }),
         },
-    ) {
+        session.viewer_gpu_device_progress.generation_id(),
+    );
+    let mut record = match record_result {
         Ok(record) => record,
         Err(error) => {
             if let ViewerGpuExecutionError::Backpressure(reason) = &error {
@@ -7423,12 +8322,19 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
-    session.viewer_gpu_output_telemetry.record_actual_frame_residency(
-        preview_gpu_composite_frame_residency(
-            record.residency,
-            session.viewer_gpu_execution.native_import_support(),
-        ),
+    let actual_frame_residency = preview_gpu_composite_frame_residency(
+        record.residency,
+        session.viewer_gpu_execution.native_import_support(),
     );
+    #[cfg(feature = "validation")]
+    let frame_context = AppUiViewerGpuOutputFrameContext::from_frame(
+        &frame,
+        texture_key.as_str().to_owned(),
+        actual_frame_residency.clone(),
+    );
+    session
+        .viewer_gpu_output_telemetry
+        .record_actual_frame_residency(actual_frame_residency);
     report_successful_viewer_gpu_fallbacks(&record.fallback_reasons, |reason| {
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
             reason: reason.to_owned(),
@@ -7443,6 +8349,11 @@ fn prepare_viewer_gpu_preview(
         );
         drop(record);
         drop(encoder);
+        if let (Some(profile), Some(token)) = (&mut session.viewer_gpu_profile, timestamp_token)
+            && let Err(error) = profile.abandon_frame(token)
+        {
+            tracing::error!(%error, "Window GPU profiling pre-submit abandonment failed");
+        }
         session.viewer_gpu_execution.clear_frame_resources();
         drop(progress_permit);
         fail_viewer_gpu_frame(host, &mut frame);
@@ -7456,7 +8367,36 @@ fn prepare_viewer_gpu_preview(
         tracing::error!(%reason, "Window Viewer rejected terminal-generation submission");
         finish_prepare!();
     }
+    progress_permit.arm_native_completion_wake(queue);
     let submission_index = queue.submit(std::iter::once(encoder.finish()));
+    if let (Some(profile), Some(token)) = (&mut session.viewer_gpu_profile, timestamp_token) {
+        if let Err(error) = profile.after_submit(token) {
+            tracing::error!(%error, "Window GPU profiling submission tracking failed");
+        }
+        tracing::info!(
+            target: "mondrian_app::gpu_profile",
+            device_generation = ?session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            sample_id = token.id(),
+            submission_id = submission_id.get(),
+            frame = frame.frame,
+            "Window GPU profiling submission"
+        );
+    }
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        frame = frame.frame,
+        candidate_id = frame.candidate_id(),
+        generation = frame.generation(),
+        playback_intent = ?frame.playback_intent(),
+        ticket = ?frame.presentation_ticket(),
+        successor = frame.is_successor_preparation(),
+        prepare_duration_us = prepare_started.elapsed().as_micros(),
+        "Window Viewer submitted exact GPU candidate"
+    );
     let heterogeneous_submission = record.assert_adapter_submission(submission_index.clone());
     let output_lease = match session.viewer_gpu_execution.take_presentation_output(&mut record) {
         Ok(lease) => lease,
@@ -7475,6 +8415,8 @@ fn prepare_viewer_gpu_preview(
                 .unwrap_or(submitted_at);
             let owner = WindowViewerGpuSubmissionOwner {
                 frame,
+                #[cfg(feature = "validation")]
+                frame_context,
                 terminal,
                 texture_key,
                 texture_registered: false,
@@ -7531,6 +8473,8 @@ fn prepare_viewer_gpu_preview(
         .unwrap_or(submitted_at);
     let owner = WindowViewerGpuSubmissionOwner {
         frame,
+        #[cfg(feature = "validation")]
+        frame_context,
         terminal,
         texture_key,
         texture_registered: false,
@@ -7570,7 +8514,7 @@ fn prepare_viewer_gpu_preview(
                         if session.display_calibration.is_some() {
                             ExternalTextureTransfer::DeviceCodeValuesOpaque
                         } else {
-                            ExternalTextureTransfer::SurfaceCodeValuesOpaque
+                            ExternalTextureTransfer::SurfaceCodeValues
                         },
                     )
                     .map_err(|error| error.to_string())
@@ -7620,8 +8564,7 @@ fn prepare_viewer_gpu_preview(
     if heterogeneous_recorded {
         finish_prepare!();
     }
-    register_ordinary_window_program_scopes(session, device, submission_id);
-    publish_ordinary_window_viewer_gpu_submission(session, host, submission_id);
+    publish_ordinary_window_viewer_gpu_submission(session, host, device, submission_id);
     finish_prepare!();
 }
 
@@ -7670,31 +8613,29 @@ fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &Ap
     }
 }
 
-fn register_ordinary_window_program_scopes(
-    session: &mut AppUiWindowSession,
-    device: &wgpu::Device,
-    submission_id: ViewerGpuSubmissionId,
-) {
-    let scopes = session
-        .viewer_gpu_submissions
-        .owner_mut(submission_id)
-        .and_then(|owner| owner.program_scopes.take());
+fn register_current_window_program_scopes(session: &mut AppUiWindowSession, device: &wgpu::Device) {
+    let Some(current) = session.viewer_gpu_presentation.published_output() else {
+        unregister_program_scopes_textures(session);
+        return;
+    };
+    let submission_id = current.source_submission_id();
+    if session.program_scopes_submission_id == Some(submission_id) {
+        return;
+    }
+    let artifact = current.artifact();
+    let scopes = artifact.program_scopes.clone();
+    let identity = artifact.program_scopes_analysis_identity;
+    let requested = artifact.program_scopes_requested;
     if let Some(scopes) = scopes {
-        let identity = session
-            .viewer_gpu_submissions
-            .owner(submission_id)
-            .and_then(|owner| owner.program_scopes_analysis_identity);
         if let Err(error) = register_program_scopes_textures(session, device, &scopes, identity) {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = true;
-            tracing::warn!(%error, "ordinary GPU Program Output scope registration failed");
+            tracing::warn!(%error, "current GPU Program Output scope registration failed");
+        } else {
+            session.program_scopes_submission_id = Some(submission_id);
         }
     } else {
         unregister_program_scopes_textures(session);
-        let requested = session
-            .viewer_gpu_submissions
-            .owner(submission_id)
-            .is_some_and(|owner| owner.program_scopes_requested);
         session.program_scopes_refresh_requested = requested;
     }
 }
@@ -7702,6 +8643,7 @@ fn register_ordinary_window_program_scopes(
 fn publish_ordinary_window_viewer_gpu_submission(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
+    device: &wgpu::Device,
     submission_id: ViewerGpuSubmissionId,
 ) {
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
@@ -7712,7 +8654,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
         );
         return;
     }
-    let Some((output_key, texture_key, presentation, output_lease)) =
+    let Some((output_key, texture_key, artifact, presentation, output_lease)) =
         session.viewer_gpu_submissions.owner_mut(submission_id).and_then(|owner| {
             if !owner.texture_registered {
                 return None;
@@ -7720,6 +8662,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
             Some((
                 owner.frame.output_key.clone(),
                 owner.texture_key.clone(),
+                owner.publication_artifact(),
                 owner.presentation,
                 owner.output_lease.take()?,
             ))
@@ -7736,15 +8679,17 @@ fn publish_ordinary_window_viewer_gpu_submission(
         .owner(submission_id)
         .is_some_and(|owner| owner.frame.is_successor_preparation());
     if successor_preparation {
-        let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
-            texture_key.as_str().to_owned(),
-            presentation,
-        ) else {
+        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
             session.frame_renderer.unregister_external_texture(&texture_key);
             drop(output_lease);
             return;
         };
-        let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) else {
+        let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+            texture_key.as_str().to_owned(),
+            owner.frame.width,
+            owner.frame.height,
+            presentation,
+        ) else {
             session.frame_renderer.unregister_external_texture(&texture_key);
             drop(output_lease);
             return;
@@ -7763,13 +8708,15 @@ fn publish_ordinary_window_viewer_gpu_submission(
         if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
             submission_id,
             output_key,
-            texture_key,
+            artifact,
             output_lease,
         ) {
-            session.frame_renderer.unregister_external_texture(previous.artifact());
+            session
+                .frame_renderer
+                .unregister_external_texture(previous.artifact().texture_key());
             let _ = host.clear_external_viewer_frame_for_artifact(
                 previous.output_key(),
-                previous.artifact().as_str(),
+                previous.artifact().texture_key().as_str(),
             );
             drop(previous);
         }
@@ -7779,6 +8726,12 @@ fn publish_ordinary_window_viewer_gpu_submission(
                 .record_registered_frame(owner.stage_diagnostics);
         }
         let _ = host.observe_prepared_viewer_gpu_preroll();
+        tracing::debug!(
+            target: "mondrian_app::viewer_submission",
+            submission_id = submission_id.get(),
+            capacity_full = session.viewer_gpu_submissions.is_at_capacity(),
+            "Window Viewer published queue-ordered prepared physical output"
+        );
         return;
     }
     let disposition = {
@@ -7793,6 +8746,13 @@ fn publish_ordinary_window_viewer_gpu_submission(
         };
         host.set_external_viewer_frame(&owner.frame, texture_key.as_str().to_owned(), presentation)
     };
+    tracing::debug!(
+        target: "mondrian_app::viewer_submission",
+        submission_id = submission_id.get(),
+        capacity_full = session.viewer_gpu_submissions.is_at_capacity(),
+        ?disposition,
+        "Window Viewer arbitrated queue-ordered current physical output"
+    );
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
         let _ = host.clear_external_viewer_frame_for_artifact(&output_key, texture_key.as_str());
         if let Some(owner) = session.viewer_gpu_submissions.owner_mut(submission_id)
@@ -7830,11 +8790,14 @@ fn publish_ordinary_window_viewer_gpu_submission(
             let previous = session.viewer_gpu_presentation.publications.publish_current(
                 submission_id,
                 output_key,
-                texture_key,
+                artifact,
                 output_lease,
             );
+            register_current_window_program_scopes(session, device);
             if let Some(previous) = previous {
-                session.frame_renderer.unregister_external_texture(previous.artifact());
+                session
+                    .frame_renderer
+                    .unregister_external_texture(previous.artifact().texture_key());
                 drop(previous);
             }
             if let Some(owner) = session.viewer_gpu_submissions.owner(submission_id) {
@@ -7916,8 +8879,11 @@ fn synchronize_viewer_spatial_presentation(
     session: &mut AppUiWindowSession,
     host: &AppUiHost,
     presentation: ViewerExternalTexturePresentation,
+    backdrop: Option<mondrian_renderer::GpuDisplayCalibrationBackdrop>,
 ) -> Result<(), mondrian_playback::PlaybackError> {
-    if session.viewer_gpu_presentation.presentation() == Some(presentation) {
+    if session.viewer_gpu_presentation.presentation() == Some(presentation)
+        && session.viewer_gpu_presentation.backdrop == backdrop
+    {
         return Ok(());
     }
     let replaced_carrier = session.viewer_gpu_presentation.presentation().is_some();
@@ -7928,11 +8894,17 @@ fn synchronize_viewer_spatial_presentation(
         // ticket; timed playback demands keep their original deadlines.
         host.renew_still_frame_demand_after_output_retirement()?;
     }
-    session.viewer_gpu_presentation.set_presentation(presentation);
+    session.viewer_gpu_presentation.set_presentation(presentation, backdrop);
     Ok(())
 }
 
 fn clear_viewer_spatial_presentation(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    // These candidates have not crossed Window GPU submission. Retire their
+    // source leases with the old presentation even when backend preparation is
+    // pending or the next root has no Viewer geometry. Submitted owners remain
+    // in the existing completion/quarantine lifecycle below.
+    session.pending_viewer_backend_frame = None;
+    session.staged_viewer_gpu_successors.retain_only(&[]);
     let cleanup_deferred = cancel_viewer_gpu_submission(
         session,
         host,
@@ -8001,14 +8973,20 @@ fn register_program_scopes_textures(
     }
     session.program_scopes_refresh_requested = false;
     session.program_scopes_analysis_identity = analysis_identity;
+    tracing::debug!(
+        ?analysis_identity,
+        "Window Program Output scopes registered"
+    );
     Ok(())
 }
 
 fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
+    session.program_scopes_submission_id = None;
     session.program_scopes_analysis_identity = None;
     if !session.program_scopes_registered {
         return;
     }
+    tracing::debug!("Window Program Output scopes unregistered");
     for raw_key in [
         crate::app_ui::scopes::HISTOGRAM_TEXTURE_KEY,
         crate::app_ui::scopes::WAVEFORM_TEXTURE_KEY,
@@ -8078,7 +9056,10 @@ fn current_native_file_point(window: &winit::window::Window, fallback: Point) ->
     if unsafe { GetCursorPos(&mut cursor) } == 0 {
         return fallback;
     }
-    Point::new((cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32)
+    UiWindowCoordinates::from_window(window).point(winit::dpi::PhysicalPosition::new(
+        f64::from(cursor.x - origin.x),
+        f64::from(cursor.y - origin.y),
+    ))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -8148,6 +9129,7 @@ fn surface_lifecycle_update(
     reason: SurfaceLifecycleReason,
     current_size: (u32, u32),
     next_size: (u32, u32),
+    coordinates: UiWindowCoordinates,
 ) -> SurfaceLifecycleUpdate {
     if next_size.0 == 0 || next_size.1 == 0 {
         return SurfaceLifecycleUpdate {
@@ -8160,7 +9142,8 @@ fn surface_lifecycle_update(
 
     let size_changed = current_size != next_size;
     let relayout_root = size_changed || reason != SurfaceLifecycleReason::Resize;
-    let bounds = relayout_root.then(|| Rect::new(0.0, 0.0, next_size.0 as f32, next_size.1 as f32));
+    let bounds = relayout_root
+        .then(|| coordinates.bounds(winit::dpi::PhysicalSize::new(next_size.0, next_size.1)));
 
     SurfaceLifecycleUpdate {
         reconfigure_surface: size_changed,
@@ -8182,11 +9165,12 @@ fn apply_surface_lifecycle_update(
         reason,
         (session.config.width, session.config.height),
         next_size,
+        UiWindowCoordinates::from_window(&session.window),
     );
     if update.reconfigure_surface {
         session.config.width = next_size.0;
         session.config.height = next_size.1;
-        session.surface.configure(device, &session.config);
+        session.configure_surface(device);
     }
     refresh_display_output_contract(
         DisplayOutputContractRefreshReason::SurfaceLifecycle(reason),
@@ -8234,17 +9218,38 @@ fn refresh_display_output_contract(
         reason,
         DisplayOutputContractRefreshReason::DisplayPolicyChanged
     );
-    if !contract_requires_invalidation && !policy_requires_snapshot_refresh {
+    let transparency_requires_refresh = window_uses_compositor_alpha(session.role)
+        && matches!(
+            reason,
+            DisplayOutputContractRefreshReason::SurfaceLifecycle(
+                SurfaceLifecycleReason::ScaleFactorChanged
+            )
+        );
+    #[cfg(target_os = "macos")]
+    let native_observation = matches!(
+        reason,
+        DisplayOutputContractRefreshReason::NativeDisplayObservation
+    );
+    #[cfg(not(target_os = "macos"))]
+    let native_observation = false;
+    if !contract_requires_invalidation
+        && !policy_requires_snapshot_refresh
+        && !native_observation
+        && !transparency_requires_refresh
+    {
         return;
     }
 
-    let renderer_rebuilt = contract_requires_invalidation
-        && display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let renderer_rebuilt = transparency_requires_refresh
+        || (contract_requires_invalidation
+            && display_output_contract_requires_renderer_rebuild(&previous, &next));
     let replacement_renderer = if renderer_rebuilt {
         match AppUiFrameRenderer::new_for_surface(
             device,
             next.surface_color.format,
             next.surface_color.color_space,
+            app_ui_surface_output_color_space(next.surface_color),
+            window_surface_transparency(session.role, &session.window, session.config.alpha_mode),
         ) {
             Ok(renderer) => Some(renderer),
             Err(error) => {
@@ -8286,6 +9291,14 @@ fn refresh_display_output_contract(
         &reason_str,
     );
     let snapshot = display_resolution.snapshot;
+    let previous_identity = session.display_snapshot.as_ref().map(|s| s.contract_identity());
+    let new_identity = snapshot.contract_identity();
+    if native_observation
+        && !contract_requires_invalidation
+        && previous_identity == Some(new_identity)
+    {
+        return;
+    }
 
     if let Some(ref prev_snapshot) = session.display_snapshot
         && prev_snapshot.display_id != snapshot.display_id
@@ -8302,9 +9315,6 @@ fn refresh_display_output_contract(
     for blocker in &snapshot_blockers {
         host.record_preview_gpu_output_blocker(blocker);
     }
-
-    let previous_identity = session.display_snapshot.as_ref().map(|s| s.contract_identity());
-    let new_identity = snapshot.contract_identity();
 
     session.display_snapshot = Some(snapshot);
     session.display_calibration = display_resolution.calibration;
@@ -8329,7 +9339,7 @@ fn refresh_display_output_contract(
         invalidate_display_dependent_gpu_preview(session, host);
     }
     if renderer_rebuilt {
-        session.surface.configure(device, &session.config);
+        session.configure_surface(device);
         if let Some(renderer) = replacement_renderer {
             session.frame_renderer = renderer;
         }
@@ -8358,16 +9368,18 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     let cleanup_deferred =
         cancel_viewer_gpu_submission(session, host, WindowViewerGpuDeferredCleanup::Reset);
     for previous in session.viewer_gpu_presentation.clear().into_iter().flatten() {
-        session.frame_renderer.unregister_external_texture(previous.artifact());
+        session
+            .frame_renderer
+            .unregister_external_texture(previous.artifact().texture_key());
         let _ = host.clear_external_viewer_frame_for_artifact(
             previous.output_key(),
-            previous.artifact().as_str(),
+            previous.artifact().texture_key().as_str(),
         );
         drop(previous);
     }
     unregister_program_scopes_textures(session);
     if !cleanup_deferred {
-        session.viewer_gpu_execution.reset();
+        session.viewer_gpu_execution.invalidate_frame_generation();
     }
     host.clear_external_viewer_frame();
     host.mark_dirty();
@@ -8401,6 +9413,7 @@ impl AppUiPreparedWindowSession {
         host: &AppUiHost,
         viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let owns_new_device_generation = viewer_gpu_startup.is_some();
         let surface_generation_id = AppUiSurfaceGenerationId::next()?;
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
 
@@ -8414,6 +9427,7 @@ impl AppUiPreparedWindowSession {
         let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
         config.color_space = surface_color_contract.color_space;
+        config.alpha_mode = window_surface_alpha_mode(role, &display_output_contract.alpha_modes)?;
         surface.configure(device, &config);
         tracing::info!(
             format = ?surface_color_contract.format,
@@ -8428,10 +9442,11 @@ impl AppUiPreparedWindowSession {
             format_color_spaces = ?display_output_contract.format_color_spaces,
             present_modes = ?display_output_contract.present_modes,
             alpha_modes = ?display_output_contract.alpha_modes,
+            selected_alpha_mode = ?config.alpha_mode,
             "app UI surface color contract"
         );
 
-        let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        let bounds = UiWindowCoordinates::from_window(&window).bounds(size);
         let (color_engine, display_management_policy) = host.resolved_display_color_management();
         let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
             super::display_probe_impl::DisplaySnapshotTarget {
@@ -8454,8 +9469,13 @@ impl AppUiPreparedWindowSession {
         );
         let initial_snapshot = initial_display_resolution.snapshot;
         let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
-        let frame_renderer =
-            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
+        let frame_renderer = AppUiFrameRenderer::new_for_surface(
+            device,
+            config.format,
+            config.color_space,
+            app_ui_surface_output_color_space(display_output_contract.surface_color),
+            window_surface_transparency(role, &window, config.alpha_mode),
+        )?;
         if let Some(startup) = viewer_gpu_startup {
             let mut viewer_runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
             match host.active_program_color_context() {
@@ -8533,11 +9553,22 @@ impl AppUiPreparedWindowSession {
             surface_generation_id,
             role,
             workspace_placement: WorkspaceWindowPlacement::default(),
+            #[cfg(target_os = "macos")]
+            accessibility: None,
+            #[cfg(target_os = "macos")]
+            accessibility_proxy: None,
+            viewer_backend_event_proxy: None,
             window,
-            surface,
+            surface: Arc::new(surface),
+            surface_acquisition: None,
+            retiring_surface_acquisitions: Vec::new(),
+            surface_acquisition_receipts: Vec::new(),
             config: config.clone(),
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
+            #[cfg(target_os = "macos")]
+            next_native_display_observation: Instant::now()
+                + APP_UI_NATIVE_DISPLAY_OBSERVATION_PERIOD,
             display_calibration: initial_display_resolution.calibration,
             renderer_adapter,
             color_engine,
@@ -8546,11 +9577,22 @@ impl AppUiPreparedWindowSession {
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
             viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
+            viewer_gpu_profile: if owns_new_device_generation
+                && mondrian_renderer::profile::profiling_enabled()
+            {
+                mondrian_renderer::profile::GpuTimestampQueryRing::new_for_passes(
+                    device, queue, 8, 64,
+                )
+            } else {
+                None
+            },
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions: ViewerGpuSubmissionLifecycle::new(),
             staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
+            pending_viewer_backend_frame: None,
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
+            program_scopes_submission_id: None,
             program_scopes_refresh_requested: false,
             program_scopes_analysis_identity: None,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
@@ -8594,10 +9636,16 @@ impl AppUiActivatedWindowSession {
     }
 }
 
-fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSession, bounds: Rect) {
+fn publish_active_window_session(
+    host: &mut AppUiHost,
+    session: &AppUiWindowSession,
+    bounds: Rect,
+) -> Result<(), mondrian_playback::PlaybackError> {
     // These are the only Host-visible candidate mutations. Callers first place
     // an activated GPU generation in an outer active-session owner so a panic
-    // here cannot strand it in a temporary candidate Drop.
+    // here cannot strand it in a temporary candidate Drop. A mode transition
+    // projects the new root without laying it out in the retired Window; only
+    // these actual activated Window bounds may establish its geometry.
     TreeWalker::layout(host.active_root_mut(), bounds);
     host.set_display_output_snapshot(session.display_snapshot.as_ref());
     host.clear_viewer_cpu_fallback();
@@ -8607,9 +9655,72 @@ fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSess
             session.viewer_gpu_execution.native_decode_device_root(),
         );
     }
+    // A new native carrier has no surviving picture from the previous Window.
+    // Only Playback may renew its persistent obligation; timed demands retain
+    // their original deadlines. This also covers a returned App owner whose
+    // former Window already consumed the still ticket before closing.
+    host.renew_still_frame_demand_after_output_retirement()?;
+    Ok(())
 }
 
 impl AppUiWindowSession {
+    fn configure_surface(&mut self, device: &wgpu::Device) {
+        if let Some(owner) = &self.surface_acquisition {
+            if let Err(error) = owner.configure(self.config.clone()) {
+                owner.close_admission();
+                self.event_loop_failure = Some(error.into());
+            } else {
+                self.window.request_redraw();
+            }
+        } else {
+            self.surface.configure(device, &self.config);
+        }
+    }
+
+    fn observe_surface_acquisitions(&mut self) -> Result<(), String> {
+        if let Some(owner) = &self.surface_acquisition {
+            owner.health().map_err(str::to_owned)?;
+        }
+        let mut index = 0;
+        while index < self.retiring_surface_acquisitions.len() {
+            if let Some(receipt) = self.retiring_surface_acquisitions[index].try_finish() {
+                let failed = !receipt.qualifies();
+                self.surface_acquisition_receipts.push(receipt.clone());
+                self.retiring_surface_acquisitions.swap_remove(index);
+                if failed {
+                    return Err(format!("retired native surface did not close: {receipt:?}"));
+                }
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown_surface_acquisitions_until(
+        &mut self,
+        deadline: Instant,
+    ) -> SurfaceAcquisitionsShutdown {
+        if let Some(owner) = &self.surface_acquisition {
+            owner.close_admission();
+        }
+        for owner in &self.retiring_surface_acquisitions {
+            owner.close_admission();
+        }
+        let active = self.surface_acquisition.as_mut().map_or_else(
+            || SurfaceAcquisitionShutdown::not_started(self.surface_generation_id.get()),
+            |owner| owner.shutdown_until(deadline),
+        );
+        for owner in &mut self.retiring_surface_acquisitions {
+            self.surface_acquisition_receipts.push(owner.shutdown_until(deadline));
+        }
+        self.retiring_surface_acquisitions.clear();
+        SurfaceAcquisitionsShutdown {
+            active,
+            retired: self.surface_acquisition_receipts.clone(),
+        }
+    }
+
     fn shutdown_viewer_gpu_until(
         &mut self,
         host: &AppUiHost,
@@ -8620,6 +9731,7 @@ impl AppUiWindowSession {
             .viewer_gpu_device_progress
             .generation_id()
             .map(ViewerGpuDeviceGenerationId::get);
+        let surface_acquisitions = Ok(self.shutdown_surface_acquisitions_until(deadline));
         let publication_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             clear_viewer_spatial_presentation(self, host);
         }))
@@ -8650,6 +9762,7 @@ impl AppUiWindowSession {
             device_generation,
             publication_cleanup,
             retirement,
+            surface_acquisitions,
         }
     }
 
@@ -8677,10 +9790,13 @@ impl AppUiWindowSession {
             &mut self.viewer_gpu_submissions,
             ViewerGpuSubmissionLifecycle::new(),
         );
+        let device_generation = progress.generation_id();
         Ok((
             progress,
             WindowViewerGpuGenerationRetirement {
                 runtime: runtime.into_retirement(),
+                profile: self.viewer_gpu_profile.take(),
+                device_generation,
                 lifecycle,
                 _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
                 _renderer_device: self.renderer_device.clone(),
@@ -8689,6 +9805,7 @@ impl AppUiWindowSession {
                 _completed_submissions: Vec::new(),
                 _lost_submission_owners: Vec::new(),
                 native_retirement_error_logged: false,
+                profiling_retirement_error_logged: false,
             },
         ))
     }
@@ -8712,6 +9829,7 @@ fn drain_actions_and_sync_window_session(
     pending_actions: &PendingUiActions,
     platform: &dyn mondrian_platform::PlatformService,
     elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
@@ -8726,7 +9844,7 @@ fn drain_actions_and_sync_window_session(
     let should_sync_window = shell_commands_should_sync_window_session(commands);
     apply_shell_commands(commands, &session.window, elwt);
     if should_sync_window {
-        sync_window_session_role(host, elwt, adapter, device, session);
+        sync_window_session_role(host, elwt, instance, adapter, device, session);
         if session.role == AppUiWindowRole::Workspace {
             let (next_color_engine, next_display_policy) = host.resolved_display_color_management();
             if display_color_management_changed(
@@ -8776,6 +9894,7 @@ fn rebuild_global_shortcuts(
 fn sync_window_session_role(
     host: &mut AppUiHost,
     elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
@@ -8784,51 +9903,70 @@ fn sync_window_session_role(
     if session.role == target_role {
         return;
     }
-    let old_role = session.role;
-    if old_role == AppUiWindowRole::Workspace {
-        session.workspace_placement.observe(&session.window);
-    }
-    // Publication is revoked, but in-flight device owners and callback receivers
-    // remain in this session until their existing completion gates release them.
-    clear_viewer_spatial_presentation(session, host);
-    // Ticketless CPU candidates belong to the retired project, not the retained
-    // device generation. Their owners have never crossed GPU submission.
-    session.staged_viewer_gpu_successors.retain_only(&[]);
-    session.ui_runtime.reset_for_root_change(&session.window);
-    session.router = build_event_router(
-        host.active_root().id(),
-        &host.preferences().shortcut_overrides,
-    );
-    session.last_window_cursor_icon = None;
-    session.role = target_role;
-    apply_window_role_chrome(&session.window, target_role, session.workspace_placement);
-    let size = session.window.inner_size();
-    apply_surface_lifecycle_update(
-        SurfaceLifecycleReason::RoleChanged,
-        (size.width, size.height),
-        adapter,
-        device,
-        session,
-        host,
-    );
-    // The active root changes even when the native size has not changed yet.
-    publish_active_window_session(host, session, session.current_bounds.get());
-    if let Err(err) = host.renew_still_frame_demand_after_output_retirement() {
-        let failure = format!("failed to renew app UI window role demand: {err}");
-        tracing::error!("{failure}");
-        if session.event_loop_failure.is_none() {
-            session.event_loop_failure = Some(failure);
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Err(err) =
+            replace_window_session(target_role, elwt, instance, adapter, device, host, session)
+        {
+            let failure = format!("failed to replace app UI native window: {err}");
+            tracing::error!("{failure}");
+            session.event_loop_failure.get_or_insert(failure);
+            elwt.exit();
         }
-        elwt.exit();
-        return;
     }
-    tracing::info!(
-        ?old_role,
-        ?target_role,
-        surface_generation = session.surface_generation_id.get(),
-        "app UI role changed on retained native window"
-    );
-    session.window.request_redraw();
+    #[cfg(target_os = "windows")]
+    {
+        let _ = instance;
+        let old_role = session.role;
+        if old_role == AppUiWindowRole::Workspace {
+            session.workspace_placement.observe(&session.window);
+        }
+        // Publication is revoked, but in-flight device owners and callback receivers
+        // remain in this session until their existing completion gates release them.
+        clear_viewer_spatial_presentation(session, host);
+        session.ui_runtime.reset_for_root_change(&session.window);
+        session.router = build_event_router(
+            host.active_root().id(),
+            &host.preferences().shortcut_overrides,
+        );
+        session.last_window_cursor_icon = None;
+        session.role = target_role;
+        apply_window_role_chrome(&session.window, target_role, session.workspace_placement);
+        let size = session.window.inner_size();
+        apply_surface_lifecycle_update(
+            SurfaceLifecycleReason::RoleChanged,
+            (size.width, size.height),
+            adapter,
+            device,
+            session,
+            host,
+        );
+        // The active root changes even when the native size has not changed yet.
+        if let Err(err) = publish_active_window_session(host, session, session.current_bounds.get())
+        {
+            let failure = format!("failed to publish retained app UI window role: {err}");
+            tracing::error!("{failure}");
+            session.event_loop_failure.get_or_insert(failure);
+            elwt.exit();
+            return;
+        }
+        if let Err(err) = host.renew_still_frame_demand_after_output_retirement() {
+            let failure = format!("failed to renew app UI window role demand: {err}");
+            tracing::error!("{failure}");
+            if session.event_loop_failure.is_none() {
+                session.event_loop_failure = Some(failure);
+            }
+            elwt.exit();
+            return;
+        }
+        tracing::info!(
+            ?old_role,
+            ?target_role,
+            surface_generation = session.surface_generation_id.get(),
+            "app UI role changed on retained native window"
+        );
+        session.window.request_redraw();
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8866,6 +10004,7 @@ impl WorkspaceWindowPlacement {
     }
 }
 
+#[cfg(windows)]
 fn apply_window_role_chrome(
     window: &winit::window::Window,
     role: AppUiWindowRole,
@@ -8891,6 +10030,115 @@ fn apply_window_role_chrome(
     if role == AppUiWindowRole::Workspace && workspace.maximized {
         window.set_maximized(true);
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_window_session(
+    role: AppUiWindowRole,
+    elwt: &winit::event_loop::ActiveEventLoop,
+    instance: &wgpu::Instance,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    host: &mut AppUiHost,
+    session: &mut AppUiWindowSession,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let old_role = session.role;
+    let old_surface_generation = session.surface_generation_id;
+    let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
+    let surface = instance.create_surface(window.clone())?;
+    let queue = session.renderer_queue.clone();
+    let prepared = AppUiPreparedWindowSession::prepare(
+        role, window, surface, adapter, device, &queue, host, None,
+    )?;
+    let activated = prepared.activate(None)?;
+    let (mut next_session, bounds) = activated.into_parts();
+    // Native-window replacement does not replace the wgpu device generation.
+    // The complete candidate is prepared before the active Window is hidden or
+    // its publication authority is revoked.
+    clear_viewer_spatial_presentation(session, host);
+    session.window.set_visible(false);
+    next_session
+        .retiring_surface_acquisitions
+        .append(&mut session.retiring_surface_acquisitions);
+    next_session
+        .surface_acquisition_receipts
+        .append(&mut session.surface_acquisition_receipts);
+    if let Some(owner) = session.surface_acquisition.take() {
+        owner.close_admission();
+        next_session.retiring_surface_acquisitions.push(owner);
+    } else {
+        next_session
+            .surface_acquisition_receipts
+            .push(SurfaceAcquisitionShutdown::not_started(
+                session.surface_generation_id.get(),
+            ));
+    }
+    handoff_window_viewer_gpu_device_generation(
+        &mut session.viewer_gpu_device_progress,
+        &mut next_session.viewer_gpu_device_progress,
+        &mut session.viewer_gpu_execution,
+        &mut next_session.viewer_gpu_execution,
+        &mut session.viewer_gpu_profile,
+        &mut next_session.viewer_gpu_profile,
+        &mut session.viewer_gpu_submissions,
+        &mut next_session.viewer_gpu_submissions,
+        &mut session.viewer_gpu_deferred_cleanup,
+        &mut next_session.viewer_gpu_deferred_cleanup,
+    );
+    with_window_candidate_installed(
+        session,
+        &mut next_session,
+        |active_session, _retired_session| {
+            publish_active_window_session(host, active_session, bounds)
+        },
+    )?;
+    tracing::info!(
+        ?old_role,
+        ?role,
+        surface_generation_before = old_surface_generation.get(),
+        surface_generation_after = session.surface_generation_id.get(),
+        device_generation = session
+            .viewer_gpu_device_progress
+            .generation_id()
+            .map(ViewerGpuDeviceGenerationId::get),
+        "app UI native window replaced"
+    );
+    session.viewer_backend_event_proxy = next_session.viewer_backend_event_proxy.take();
+    #[cfg(target_os = "macos")]
+    {
+        session.accessibility_proxy = next_session.accessibility_proxy.take();
+        attach_mac_accessibility(session, elwt);
+    }
+    session.window.set_visible(true);
+    session.window.request_redraw();
+    drop(next_session);
+    Ok(())
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+#[allow(clippy::too_many_arguments)]
+fn handoff_window_viewer_gpu_device_generation<P, E, Q, O, C>(
+    retiring_progress: &mut P,
+    replacement_progress: &mut P,
+    retiring_execution: &mut E,
+    replacement_execution: &mut E,
+    retiring_profile: &mut Q,
+    replacement_profile: &mut Q,
+    retiring_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
+    replacement_submissions: &mut ViewerGpuSubmissionLifecycle<O, C>,
+    retiring_cleanup: &mut WindowViewerGpuDeferredCleanup,
+    replacement_cleanup: &mut WindowViewerGpuDeferredCleanup,
+) {
+    // The surface/window generation is replaceable; the device-progress
+    // worker, execution runtime, callback receiver, retained owners, and their
+    // pending cleanup form one indivisible device-generation authority. In
+    // particular, an in-flight owner may still protect native decoder
+    // resources allocated by the retiring execution runtime.
+    std::mem::swap(retiring_progress, replacement_progress);
+    std::mem::swap(retiring_execution, replacement_execution);
+    std::mem::swap(retiring_profile, replacement_profile);
+    std::mem::swap(retiring_submissions, replacement_submissions);
+    std::mem::swap(retiring_cleanup, replacement_cleanup);
 }
 
 fn window_role_for_mode(mode: AppUiMode) -> AppUiWindowRole {
@@ -8929,6 +10177,42 @@ fn window_chrome_for_role(role: AppUiWindowRole) -> WindowChrome {
 
 fn logical_size(width: f32, height: f32) -> winit::dpi::LogicalSize<f64> {
     winit::dpi::LogicalSize::new(width as f64, height as f64)
+}
+
+fn window_surface_alpha_mode(
+    role: AppUiWindowRole,
+    available: &[wgpu::CompositeAlphaMode],
+) -> Result<wgpu::CompositeAlphaMode, &'static str> {
+    if !window_uses_compositor_alpha(role) {
+        return Ok(wgpu::CompositeAlphaMode::Auto);
+    }
+    [
+        wgpu::CompositeAlphaMode::PostMultiplied,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+    ]
+    .into_iter()
+    .find(|mode| available.contains(mode))
+    .ok_or("startup surface cannot preserve window transparency")
+}
+
+fn window_uses_compositor_alpha(role: AppUiWindowRole) -> bool {
+    // macOS uses CAMetalLayer alpha for the borderless startup window. Windows
+    // HWND swapchains expose only Opaque and retain their native DWM shape.
+    cfg!(target_os = "macos") && window_chrome_for_role(role).transparent
+}
+
+fn window_surface_transparency(
+    role: AppUiWindowRole,
+    window: &winit::window::Window,
+    alpha_mode: wgpu::CompositeAlphaMode,
+) -> Option<(wgpu::CompositeAlphaMode, u32)> {
+    window_uses_compositor_alpha(role).then(|| {
+        let radius = mondrian_ui_theme::current_theme().spacing.radius_lg;
+        (
+            alpha_mode,
+            (f64::from(radius) * window.scale_factor()).round() as u32,
+        )
+    })
 }
 
 fn winit_theme_to_theme_preset(theme: Option<winit::window::Theme>) -> ThemePreset {
@@ -8987,7 +10271,7 @@ fn apply_window_corner_preference(
 fn update_window_cursor_icon(host: &AppUiHost, session: &mut AppUiWindowSession) {
     let next = window_cursor_icon(host, session);
     if session.last_window_cursor_icon != Some(next) {
-        session.window.set_cursor_icon(next);
+        session.window.set_cursor(next);
         session.last_window_cursor_icon = Some(next);
     }
 }
@@ -9478,6 +10762,18 @@ mod tests {
             surface_generation: 2,
             device_generation: Some(4),
             publication_cleanup: Ok(()),
+            surface_acquisitions: Ok(SurfaceAcquisitionsShutdown {
+                active: SurfaceAcquisitionShutdown {
+                    surface_generation: 2,
+                    worker_shutdown:
+                        crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::Terminated,
+                    ready_outputs: 0,
+                    in_use_outputs: 0,
+                    acquisition_in_flight: false,
+                    wake_failures: 0,
+                },
+                retired: Vec::new(),
+            }),
             retirement: AppUiWindowGpuRetirementEvidence::Retired(
                 ViewerGpuDeviceProgressShutdownEvidence {
                     worker_shutdown:
@@ -9490,6 +10786,8 @@ mod tests {
                             .clone(),
                     )
                     .expect("callback fixture"),
+                    native_completion_wake_captures_pending: Some(0),
+                    native_completion_wake_registrations: Some(0),
                     native_wake_failures: 0,
                     wake_registration_rejections: 0,
                     worker_started: true,
@@ -9500,6 +10798,8 @@ mod tests {
                     retirement_handoff_accepted: true,
                     retirement_completed: true,
                     renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                        backend_preparation:
+                            mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                         cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
                         native_device_removed: false,
                     }),
@@ -9624,12 +10924,8 @@ mod tests {
         let mut builder = winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event();
         builder.with_any_thread(true);
         let mut event_loop = builder.build().expect("native role event loop");
-        let mut candidate = prepare_initial_window_candidate(&event_loop, &host, deadline)
-            .unwrap_or_else(|failure| panic!("native candidate: {}", failure.primary));
-        let id = candidate.session.window.id();
-        let surface_generation = candidate.session.surface_generation_id;
-        let device_generation = candidate.session.viewer_gpu_device_progress.generation_id();
-        assert!(device_generation.is_some());
+        let event_proxy = event_loop.create_proxy();
+        let mut candidate: Option<AppUiInitialWindowCandidate> = None;
         let mut exercised = false;
         let result = catch_app_ui_event_loop(|| {
             #[allow(deprecated)]
@@ -9638,6 +10934,16 @@ mod tests {
                     return;
                 }
                 exercised = true;
+                candidate = Some(
+                    prepare_initial_window_candidate(elwt, event_proxy.clone(), &host, deadline)
+                        .unwrap_or_else(|failure| panic!("native candidate: {}", failure.primary)),
+                );
+                let candidate = candidate.as_mut().expect("Resumed native candidate");
+                let id = candidate.session.window.id();
+                let surface_generation = candidate.session.surface_generation_id;
+                let device_generation =
+                    candidate.session.viewer_gpu_device_progress.generation_id();
+                assert!(device_generation.is_some());
                 assert!(!candidate.session.window.is_resizable());
                 host.with_validation_app_state_mut(|app| {
                     app.create_new_project_at(
@@ -9655,6 +10961,7 @@ mod tests {
                 sync_window_session_role(
                     &mut host,
                     elwt,
+                    &candidate.instance,
                     &candidate.adapter,
                     &candidate.device,
                     &mut candidate.session,
@@ -9696,6 +11003,7 @@ mod tests {
                 sync_window_session_role(
                     &mut host,
                     elwt,
+                    &candidate.instance,
                     &candidate.adapter,
                     &candidate.device,
                     &mut candidate.session,
@@ -9722,6 +11030,7 @@ mod tests {
                 sync_window_session_role(
                     &mut host,
                     elwt,
+                    &candidate.instance,
                     &candidate.adapter,
                     &candidate.device,
                     &mut candidate.session,
@@ -9747,6 +11056,7 @@ mod tests {
                 elwt.exit();
             })
         });
+        let mut candidate = candidate.expect("native candidate created");
         let gpu = candidate.session.shutdown_viewer_gpu_until(&host, deadline);
         assert!(gpu.qualification_failure().is_none(), "{gpu:?}");
         drop(candidate);
@@ -9766,6 +11076,7 @@ mod tests {
             SurfaceLifecycleReason::RoleChanged,
             (1280, 720),
             (1280, 720),
+            UiWindowCoordinates::new(1.0),
         );
         assert!(!update.reconfigure_surface);
         assert!(update.relayout_root);
@@ -9868,6 +11179,31 @@ mod tests {
         assert!(panic.is_err());
         assert!(!pending.load(Ordering::Acquire));
         assert!(queue_preview_work_event(&pending, || true));
+    }
+
+    #[test]
+    fn interactive_playback_poll_never_renews_an_owner_wake() {
+        let now = Instant::now();
+        for deadline in [
+            now - Duration::from_millis(25),
+            now + Duration::from_micros(250),
+        ] {
+            for pending in [false, true] {
+                assert_eq!(
+                    app_ui_interactive_playback_wake_deadline(deadline, now, pending),
+                    deadline
+                );
+            }
+        }
+        let later = now + Duration::from_millis(100);
+        assert_eq!(
+            app_ui_interactive_playback_wake_deadline(later, now, false),
+            later
+        );
+        assert_eq!(
+            app_ui_interactive_playback_wake_deadline(later, now, true),
+            now + APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY
+        );
     }
 
     #[test]
@@ -10201,7 +11537,8 @@ mod tests {
                 },
                 wgpu::SurfaceFormatCapabilities {
                     format: wgpu::TextureFormat::Rgba16Float,
-                    color_spaces: wgpu::SurfaceColorSpaces::BT2100_PQ,
+                    color_spaces: wgpu::SurfaceColorSpaces::BT2100_PQ
+                        | wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR,
                 },
                 wgpu::SurfaceFormatCapabilities {
                     format: wgpu::TextureFormat::Rgb10a2Unorm,
@@ -10217,8 +11554,16 @@ mod tests {
             ),
             Ok(AppUiSurfaceColorContract {
                 format: wgpu::TextureFormat::Rgba16Float,
-                color_space: wgpu::SurfaceColorSpace::Bt2100Pq,
-                encoding: AppUiSurfaceEncoding::Pq,
+                color_space: if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Pq
+                },
+                encoding: if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncoding::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncoding::Pq
+                },
                 hdr_mode: AppUiSurfaceHdrMode::HdrPq,
             })
         );
@@ -10237,6 +11582,10 @@ mod tests {
                     format: wgpu::TextureFormat::Rgb10a2Unorm,
                     color_spaces: wgpu::SurfaceColorSpaces::BT2100_HLG,
                 },
+                wgpu::SurfaceFormatCapabilities {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    color_spaces: wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR,
+                },
             ],
         );
 
@@ -10246,9 +11595,21 @@ mod tests {
                 AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Hlg),
             ),
             Ok(AppUiSurfaceColorContract {
-                format: wgpu::TextureFormat::Rgb10a2Unorm,
-                color_space: wgpu::SurfaceColorSpace::Bt2100Hlg,
-                encoding: AppUiSurfaceEncoding::Hlg,
+                format: if cfg!(target_os = "macos") {
+                    wgpu::TextureFormat::Rgba16Float
+                } else {
+                    wgpu::TextureFormat::Rgb10a2Unorm
+                },
+                color_space: if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Hlg
+                },
+                encoding: if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncoding::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncoding::Hlg
+                },
                 hdr_mode: AppUiSurfaceHdrMode::HdrHlg,
             })
         );
@@ -10271,7 +11632,11 @@ mod tests {
             ),
             Err(AppUiSurfaceColorContractError {
                 intent: AppUiSurfacePresentationIntent::DisplayOutput(ColorSpace::Rec2100Hlg),
-                required_color_space: Some(wgpu::SurfaceColorSpace::Bt2100Hlg),
+                required_color_space: Some(if cfg!(target_os = "macos") {
+                    wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                } else {
+                    wgpu::SurfaceColorSpace::Bt2100Hlg
+                }),
                 available_formats: vec![wgpu::TextureFormat::Bgra8UnormSrgb],
             })
         );
@@ -10501,10 +11866,22 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_pq_boundary_on_pq_surface() {
         let mut contract = test_display_output_contract();
-        contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Pq;
-        contract.surface_color.encoding = AppUiSurfaceEncoding::Pq;
+        contract.surface_color.color_space = if cfg!(target_os = "macos") {
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+        } else {
+            wgpu::SurfaceColorSpace::Bt2100Pq
+        };
+        contract.surface_color.encoding = if cfg!(target_os = "macos") {
+            AppUiSurfaceEncoding::ExtendedLinear
+        } else {
+            AppUiSurfaceEncoding::Pq
+        };
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
-        contract.format_color_spaces[0].bt2100_pq = true;
+        if cfg!(target_os = "macos") {
+            contract.format_color_spaces[0].extended_srgb_linear = true;
+        } else {
+            contract.format_color_spaces[0].bt2100_pq = true;
+        }
         let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
@@ -10514,14 +11891,49 @@ mod tests {
         assert_eq!(contract.boundary_blocker(&boundary), None);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn switching_pq_to_hlg_on_the_same_edr_surface_rebuilds_the_ui_carrier() {
+        let mut pq = test_display_output_contract();
+        pq.surface_color.format = wgpu::TextureFormat::Rgba16Float;
+        pq.surface_color.color_space = wgpu::SurfaceColorSpace::ExtendedSrgbLinear;
+        pq.surface_color.encoding = AppUiSurfaceEncoding::ExtendedLinear;
+        pq.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
+        let mut hlg = pq.clone();
+        hlg.surface_color.encoding = AppUiSurfaceEncoding::ExtendedLinear;
+        hlg.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
+
+        assert!(app_ui_surface_color_space_matches_display_output(
+            pq.surface_color,
+            ColorSpace::Rec2100Pq
+        ));
+        assert!(!app_ui_surface_color_space_matches_display_output(
+            pq.surface_color,
+            ColorSpace::Rec2100Hlg
+        ));
+        assert!(display_output_contract_requires_gpu_preview_invalidation(
+            &pq, &hlg
+        ));
+        assert!(display_output_contract_requires_renderer_rebuild(&pq, &hlg));
+    }
+
     #[test]
     fn display_output_contract_blocks_pq_boundary_on_hlg_surface_as_color_space_mismatch() {
         let mut contract = test_display_output_contract();
-        contract.surface_color.color_space = wgpu::SurfaceColorSpace::Bt2100Hlg;
-        contract.surface_color.encoding = AppUiSurfaceEncoding::Hlg;
+        contract.surface_color.color_space = if cfg!(target_os = "macos") {
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+        } else {
+            wgpu::SurfaceColorSpace::Bt2100Hlg
+        };
+        contract.surface_color.encoding = if cfg!(target_os = "macos") {
+            AppUiSurfaceEncoding::ExtendedLinear
+        } else {
+            AppUiSurfaceEncoding::Hlg
+        };
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
+        contract.format_color_spaces[0].extended_srgb_linear = cfg!(target_os = "macos");
         let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
@@ -10534,11 +11946,21 @@ mod tests {
                 AppUiDisplayBoundaryBlocker::OutputColorSpaceRequiresSurfaceColorSpace {
                     output_color_space: ColorSpace::Rec2100Pq,
                     selected_surface_format: wgpu::TextureFormat::Bgra8UnormSrgb,
-                    selected_surface_color_space: wgpu::SurfaceColorSpace::Bt2100Hlg,
-                    selected_surface_encoding: AppUiSurfaceEncoding::Hlg,
+                    selected_surface_color_space: if cfg!(target_os = "macos") {
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                    } else {
+                        wgpu::SurfaceColorSpace::Bt2100Hlg
+                    },
+                    selected_surface_encoding: if cfg!(target_os = "macos") {
+                        AppUiSurfaceEncoding::ExtendedLinear
+                    } else {
+                        AppUiSurfaceEncoding::Hlg
+                    },
                     surface_hdr_mode: AppUiSurfaceHdrMode::HdrHlg,
                     supported_surface_color_spaces: vec![
                         wgpu::SurfaceColorSpace::Srgb,
+                        #[cfg(target_os = "macos")]
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
                         wgpu::SurfaceColorSpace::Bt2100Pq,
                         wgpu::SurfaceColorSpace::Bt2100Hlg,
                     ],
@@ -10932,7 +12354,11 @@ mod tests {
                 surface_hdr_mode: AppUiSurfaceHdrMode::SdrOnly,
                 supported_surface_color_spaces: vec![
                     wgpu::SurfaceColorSpace::Srgb,
-                    wgpu::SurfaceColorSpace::Bt2100Pq,
+                    if cfg!(target_os = "macos") {
+                        wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                    } else {
+                        wgpu::SurfaceColorSpace::Bt2100Pq
+                    },
                 ],
             },
         );
@@ -10954,8 +12380,16 @@ mod tests {
                 selected_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                 desired_surface_format: None,
-                desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq),
-                desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Pq),
+                desired_surface_color_space: Some(if cfg!(target_os = "macos") {
+                    AppUiSurfaceColorSpaceDiagnostic::ExtendedSrgbLinear
+                } else {
+                    AppUiSurfaceColorSpaceDiagnostic::Bt2100Pq
+                }),
+                desired_surface_encoding: Some(if cfg!(target_os = "macos") {
+                    AppUiSurfaceEncodingDiagnostic::ExtendedLinear
+                } else {
+                    AppUiSurfaceEncodingDiagnostic::Pq
+                }),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::HdrPq),
                 payload_blocker: None,
                 supported_surface_color_space_count: Some(2),
@@ -11688,6 +13122,69 @@ mod tests {
     }
 
     #[test]
+    fn viewer_health_stream_replays_redraws_and_retains_failed_observations() {
+        use crate::app::viewer_gpu_output_health::{evaluate_jsonl, ViewerGpuOutputBudget};
+        let root = tempfile::tempdir().expect("stream directory");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: root.path().join("health.jsonl"),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        for status in [
+            AppUiViewerGpuOutputHealthStatus::NoInvocation,
+            AppUiViewerGpuOutputHealthStatus::Waiting,
+            AppUiViewerGpuOutputHealthStatus::Blocked,
+            AppUiViewerGpuOutputHealthStatus::Failed,
+            AppUiViewerGpuOutputHealthStatus::Ready,
+            AppUiViewerGpuOutputHealthStatus::Ready,
+        ] {
+            let diagnostics = AppUiViewerGpuOutputDiagnostics {
+                health: AppUiViewerGpuOutputHealthSummary { status, ..Default::default() },
+                health_counts: AppUiViewerGpuOutputHealthCounts { ready: 1, ..Default::default() },
+                ..Default::default()
+            };
+            stream.write(&diagnostics).expect("publish observation");
+        }
+        let contents = std::fs::read_to_string(&stream.path).expect("stream");
+        let summary = evaluate_jsonl(&contents, &ViewerGpuOutputBudget::default()).expect("replay");
+        assert!(summary.reported_counts_match_replay);
+        assert_eq!(summary.counts, stream.counts);
+        assert_eq!(summary.counts.ready, 2);
+        assert_eq!(summary.counts.blocked, 1);
+        assert_eq!(summary.counts.failed, 1);
+        assert!(!summary.passed);
+        let records = contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("record"));
+        for record in records {
+            assert_eq!(record["outcome_counts"]["ready"], 1);
+        }
+    }
+
+    #[test]
+    fn viewer_health_stream_lost_write_remains_a_replay_failure() {
+        use crate::app::viewer_gpu_output_health::{evaluate_jsonl, ViewerGpuOutputBudget};
+        let root = tempfile::tempdir().expect("stream directory");
+        let parent = root.path().join("blocked-parent");
+        std::fs::write(&parent, b"not a directory").expect("block writer");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: parent.join("health.jsonl"),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        let diagnostics = AppUiViewerGpuOutputDiagnostics::default();
+        assert!(stream.write(&diagnostics).is_err());
+        std::fs::remove_file(&parent).expect("release test-owned blocker");
+        stream.write(&diagnostics).expect("publish later observation");
+        let contents = std::fs::read_to_string(&stream.path).expect("stream");
+        let summary = evaluate_jsonl(&contents, &ViewerGpuOutputBudget::default()).expect("replay");
+        assert!(!summary.reported_counts_match_replay);
+        assert_eq!(summary.count_mismatches.len(), 1);
+        assert!(summary
+            .failures
+            .iter()
+            .any(|failure| failure.metric == "health_counts_match_replay"));
+    }
+
+    #[test]
     fn viewer_gpu_output_diagnostics_jsonl_includes_health_summary() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let previous_contract = test_display_output_contract();
@@ -11828,8 +13325,11 @@ mod tests {
                 .as_nanos()
         ));
 
-        write_viewer_gpu_output_diagnostics_to_path(&output_path, &diagnostics)
-            .expect("write viewer GPU output JSONL");
+        let mut stream = ViewerGpuOutputDiagnosticStream {
+            path: output_path.clone(),
+            counts: AppUiViewerGpuOutputHealthCounts::default(),
+        };
+        stream.write(&diagnostics).expect("write viewer GPU output JSONL");
         let contents = std::fs::read_to_string(&output_path).expect("read viewer GPU output JSONL");
         let _ = std::fs::remove_file(&output_path);
         let json: serde_json::Value =
@@ -11959,6 +13459,49 @@ mod tests {
         assert!(display_output_contract_requires_renderer_rebuild(
             &first, &second
         ));
+    }
+
+    #[test]
+    fn icc_device_output_selects_direct_carrier_without_relabelling_p3() {
+        use mondrian_core::color_models::DisplayCalibrationPolicy;
+        for calibration in [
+            DisplayCalibrationPolicy::OsDefault,
+            DisplayCalibrationPolicy::IccProfilePath("display.icc".to_owned()),
+        ] {
+            let intent = app_ui_surface_presentation_intent(ColorSpace::DisplayP3, &calibration);
+            assert_eq!(
+                app_ui_surface_color_space_for_intent(intent),
+                Some(wgpu::SurfaceColorSpace::Srgb)
+            );
+            assert_eq!(
+                app_ui_surface_encoding_for_intent(intent),
+                AppUiSurfaceEncoding::Srgb
+            );
+        }
+        let contract = test_display_output_contract();
+        let readiness = contract.presentation_readiness_for_intent(
+            ColorSpace::DisplayP3,
+            AppUiSurfacePresentationIntent::SdrSrgb,
+        );
+        assert_eq!(
+            readiness.status,
+            AppUiDisplayPresentationReadinessStatus::Current
+        );
+        assert_eq!(readiness.output_color_space, ColorSpace::DisplayP3);
+        assert!(contract
+            .boundary_blocker_for_intent(
+                ColorSpace::DisplayP3,
+                AppUiSurfacePresentationIntent::SdrSrgb,
+            )
+            .is_none());
+        let uncalibrated = app_ui_surface_presentation_intent(
+            ColorSpace::DisplayP3,
+            &DisplayCalibrationPolicy::Disabled,
+        );
+        assert_eq!(
+            app_ui_surface_color_space_for_intent(uncalibrated),
+            Some(wgpu::SurfaceColorSpace::DisplayP3)
+        );
     }
 
     #[test]
@@ -12148,7 +13691,12 @@ mod tests {
             SurfaceLifecycleReason::RoleChanged,
         ] {
             assert_eq!(
-                surface_lifecycle_update(reason, (1280, 720), (0, 720)),
+                surface_lifecycle_update(
+                    reason,
+                    (1280, 720),
+                    (0, 720),
+                    UiWindowCoordinates::new(1.0),
+                ),
                 SurfaceLifecycleUpdate {
                     reconfigure_surface: false,
                     relayout_root: false,
@@ -12157,7 +13705,12 @@ mod tests {
                 }
             );
             assert_eq!(
-                surface_lifecycle_update(reason, (1280, 720), (1280, 0)),
+                surface_lifecycle_update(
+                    reason,
+                    (1280, 720),
+                    (1280, 0),
+                    UiWindowCoordinates::new(1.0),
+                ),
                 SurfaceLifecycleUpdate {
                     reconfigure_surface: false,
                     relayout_root: false,
@@ -12171,7 +13724,12 @@ mod tests {
     #[test]
     fn surface_lifecycle_reconfigures_and_relayouts_on_real_resize() {
         assert_eq!(
-            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1600, 900)),
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::Resize,
+                (1280, 720),
+                (1600, 900),
+                UiWindowCoordinates::new(1.0),
+            ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: true,
                 relayout_root: true,
@@ -12184,7 +13742,12 @@ mod tests {
     #[test]
     fn surface_lifecycle_skips_redundant_same_size_resize() {
         assert_eq!(
-            surface_lifecycle_update(SurfaceLifecycleReason::Resize, (1280, 720), (1280, 720)),
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::Resize,
+                (1280, 720),
+                (1280, 720),
+                UiWindowCoordinates::new(1.0),
+            ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: false,
                 relayout_root: false,
@@ -12201,6 +13764,7 @@ mod tests {
                 SurfaceLifecycleReason::ScaleFactorChanged,
                 (1280, 720),
                 (1280, 720),
+                UiWindowCoordinates::new(1.0),
             ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: false,
@@ -12218,12 +13782,31 @@ mod tests {
                 SurfaceLifecycleReason::ScaleFactorChanged,
                 (1280, 720),
                 (1920, 1080),
+                UiWindowCoordinates::new(1.0),
             ),
             SurfaceLifecycleUpdate {
                 reconfigure_surface: true,
                 relayout_root: true,
                 request_redraw: true,
                 bounds: Some(Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            }
+        );
+    }
+
+    #[test]
+    fn surface_lifecycle_keeps_physical_surface_and_logical_ui_bounds_distinct() {
+        assert_eq!(
+            surface_lifecycle_update(
+                SurfaceLifecycleReason::ScaleFactorChanged,
+                (2880, 1720),
+                (2880, 1720),
+                UiWindowCoordinates::new(2.0),
+            ),
+            SurfaceLifecycleUpdate {
+                reconfigure_surface: false,
+                relayout_root: true,
+                request_redraw: true,
+                bounds: Some(Rect::new(0.0, 0.0, 1440.0, 860.0)),
             }
         );
     }
@@ -12313,6 +13896,25 @@ mod tests {
         assert_eq!(
             chrome.max_size,
             Some((STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT))
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn startup_surface_requires_explicit_transparency_without_opaque_fallback() {
+        use wgpu::CompositeAlphaMode::{Auto, Opaque, PostMultiplied, PreMultiplied};
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Startup, &[Opaque, PostMultiplied]),
+            Ok(PostMultiplied)
+        );
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Startup, &[Opaque, PreMultiplied]),
+            Ok(PreMultiplied)
+        );
+        assert!(window_surface_alpha_mode(AppUiWindowRole::Startup, &[Auto, Opaque]).is_err());
+        assert_eq!(
+            window_surface_alpha_mode(AppUiWindowRole::Workspace, &[Opaque]),
+            Ok(Auto)
         );
     }
 
@@ -12544,5 +14146,66 @@ mod tests {
             .expect("construction failure has no EventLoop shutdown receipt")
             .is_none());
         assert!(error.all_returned_authority_released(), "{error:#?}");
+    }
+
+    #[test]
+    fn delayed_viewer_callback_survives_native_window_replacement() {
+        type CompletionCallback = Box<dyn FnOnce(u64) + Send + 'static>;
+
+        let now = Instant::now();
+        let callback = Arc::new(Mutex::new(None::<CompletionCallback>));
+        let mut retiring_progress = "active-device-generation".to_owned();
+        let mut replacement_progress = "unused-replacement-worker".to_owned();
+        let mut retiring_execution = "retained-frame-resource-runtime".to_owned();
+        let mut replacement_execution = "unused-replacement-runtime".to_owned();
+        let mut retiring_profile = Some("in-flight-device-query-ring");
+        let mut replacement_profile = None;
+        let mut retiring_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut replacement_submissions = ViewerGpuSubmissionLifecycle::<String, u64>::new();
+        let mut retiring_cleanup = WindowViewerGpuDeferredCleanup::Reset;
+        let mut replacement_cleanup = WindowViewerGpuDeferredCleanup::None;
+
+        let reservation = retiring_submissions.reserve().expect("reserve old Window submission");
+        let submission_id = reservation.submission_id();
+        let callback_slot = Arc::clone(&callback);
+        reservation.commit(
+            "retained-media-owner".to_owned(),
+            now + Duration::from_secs(1),
+            move |registered| {
+                *callback_slot.lock().expect("callback slot") = Some(registered);
+            },
+            || {},
+        );
+
+        handoff_window_viewer_gpu_device_generation(
+            &mut retiring_progress,
+            &mut replacement_progress,
+            &mut retiring_execution,
+            &mut replacement_execution,
+            &mut retiring_profile,
+            &mut replacement_profile,
+            &mut retiring_submissions,
+            &mut replacement_submissions,
+            &mut retiring_cleanup,
+            &mut replacement_cleanup,
+        );
+
+        assert_eq!(replacement_progress, "active-device-generation");
+        assert_eq!(replacement_execution, "retained-frame-resource-runtime");
+        assert_eq!(replacement_profile, Some("in-flight-device-query-ring"));
+        assert_eq!(retiring_profile, None);
+        assert_eq!(replacement_cleanup, WindowViewerGpuDeferredCleanup::Reset);
+        assert!(matches!(
+            retiring_submissions.poll(now),
+            ViewerGpuSubmissionPoll::Idle
+        ));
+        callback.lock().expect("callback slot").take().expect("registered callback")(73);
+        let completed = match replacement_submissions.poll(now) {
+            ViewerGpuSubmissionPoll::Completed(completed) => completed,
+            _ => panic!("replacement must retain the exact in-flight lifecycle"),
+        };
+        assert_eq!(completed.submission_id, submission_id);
+        assert_eq!(completed.owner, "retained-media-owner");
+        assert_eq!(completed.completion, 73);
     }
 }

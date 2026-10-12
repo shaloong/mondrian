@@ -256,6 +256,7 @@ mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+mod project_open;
 mod project_packaging;
 #[cfg(any(test, feature = "validation"))]
 pub use project_lifecycle::PreparedEnduranceProjectFixture;
@@ -501,6 +502,7 @@ pub struct AppState {
     /// While present, the Authoring Session remains readable for projection,
     /// but no new product Action may mutate or enqueue work against it.
     pending_project_close: Option<project_lifecycle::PendingProjectClose>,
+    pending_project_open: Option<project_lifecycle::PendingProjectOpen>,
     /// Fail-closed lifecycle fault after a quiescence protocol violation.
     /// The in-memory Project is retained for diagnosis; mutation and further
     /// persistence remain disabled because worker ownership is unproven.
@@ -596,6 +598,7 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     audio_playback: playback::AppAudioPlayback,
+    audio_playback_author_binding: Option<playback::AudioPlaybackAuthorBinding>,
     /// Cumulative Audio failure facts retained when a terminal owner is replaced.
     #[cfg(any(test, feature = "validation"))]
     audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger,
@@ -715,6 +718,7 @@ impl AppState {
             project_persistence: ProjectPersistenceService::new(),
             portable_package_export: None,
             pending_project_close: None,
+            pending_project_open: None,
             project_close_fault: None,
             manual_project_file_destination: None,
             manual_project_file_applied_request: None,
@@ -754,6 +758,7 @@ impl AppState {
             proxy_terminal_observed_sequence: 0,
             audio_sample_rate,
             audio_playback: playback::AppAudioPlayback::product_default(audio_sample_rate),
+            audio_playback_author_binding: None,
             #[cfg(any(test, feature = "validation"))]
             audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger::default(),
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
@@ -1382,7 +1387,15 @@ impl AppState {
             .map(|session| session.set_asset_proxy_mode(asset_id, enabled))
         {
             match result {
-                Ok(Some(commit)) => self.consume_authoring_commit(commit),
+                Ok(Some(commit)) => {
+                    if let Err(error) = self.consume_authoring_commit(commit) {
+                        self.set_status_hint(
+                            AppMessage::new("status-proxy-binding-failed")
+                                .with_text("error", error.to_string()),
+                            true,
+                        );
+                    }
+                }
                 Ok(None) => {}
                 Err(error) => {
                     self.set_status_hint(

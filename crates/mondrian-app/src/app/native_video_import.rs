@@ -321,6 +321,7 @@ pub(crate) const fn native_surface_hint_bit(hint: PreviewNativeSurfaceHint) -> u
         PreviewNativeSurfaceHint::Yuv444p10 => 1 << 7,
         PreviewNativeSurfaceHint::Yuv444p12 => 1 << 8,
         PreviewNativeSurfaceHint::Yuv444p16 => 1 << 9,
+        PreviewNativeSurfaceHint::Yuva444p12 => 1 << 10,
     }
 }
 
@@ -356,6 +357,9 @@ const fn native_surface_hint_bit_for_format(format: GpuNativeDecodedFrameTexture
         GpuNativeDecodedFrameTextureFormat::P416 => {
             native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv444p16)
         }
+        GpuNativeDecodedFrameTextureFormat::Yuva444sp16 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuva444p12)
+        }
         GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
         | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm
         | GpuNativeDecodedFrameTextureFormat::Rgba16Float
@@ -370,6 +374,26 @@ fn saturated_u8_len(len: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_native_admission_requires_renderer_alpha_surface_support() {
+        let alpha_bit = native_surface_hint_bit(PreviewNativeSurfaceHint::Yuva444p12);
+        for (format, expected) in [
+            (GpuNativeDecodedFrameTextureFormat::Yuva444sp16, true),
+            (GpuNativeDecodedFrameTextureFormat::P416, false),
+            (GpuNativeDecodedFrameTextureFormat::P412, false),
+        ] {
+            let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+                vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
+                vec![format],
+            );
+            let admission = resolve_playback_hardware_decode_admission(&support);
+            assert_eq!(
+                admission.renderer_supported_surface_hint_mask & alpha_bit != 0,
+                expected
+            );
+        }
+    }
 
     #[test]
     fn playback_hardware_decode_admission_requires_device_bound_renderer_import() {

@@ -187,10 +187,12 @@ $assetReportPath = Join-Path $runDirectory "reference-assets.json"
 $buildLogPath = Join-Path $runDirectory "build.log"
 $aggregateReportPath = Join-Path $runDirectory "complete-golden-consecutive-report.json"
 $cargoTargetDirectory = Resolve-CargoTargetDirectory -RepositoryRoot $repositoryRoot
-$productExecutable = Join-Path $cargoTargetDirectory "debug/mondrian.exe"
-$goldenExecutable = Join-Path $cargoTargetDirectory "debug/mondrian-golden.exe"
+$executableSuffix = if ($IsWindows) { ".exe" } else { "" }
+$productExecutable = Join-Path $cargoTargetDirectory "debug/mondrian$executableSuffix"
+$goldenExecutable = Join-Path $cargoTargetDirectory "debug/mondrian-golden$executableSuffix"
 $buildArguments = @(
     "build",
+    "--locked",
     "-p", "mondrian-app",
     "--features", "validation",
     "--target-dir", $cargoTargetDirectory,

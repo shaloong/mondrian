@@ -261,6 +261,23 @@ impl Modifiers {
         Self { ctrl: true, ..Default::default() }
     }
 
+    /// The platform's primary selection and document-shortcut modifier.
+    pub fn primary() -> Self {
+        if cfg!(target_os = "macos") {
+            Self { meta: true, ..Default::default() }
+        } else {
+            Self::ctrl()
+        }
+    }
+
+    pub fn primary_down(self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.meta
+        } else {
+            self.ctrl
+        }
+    }
+
     pub fn shift() -> Self {
         Self { shift: true, ..Default::default() }
     }
@@ -437,6 +454,8 @@ pub enum UiEvent {
         modifiers: Modifiers,
     },
     TextInput(String),
+    /// Numeric control value requested by a native accessibility client.
+    SetNumericValue(f32),
     /// IME composition preview (underlined text shown during composition)
     ImePreedit(String),
     /// IME committed text (final result of composition)

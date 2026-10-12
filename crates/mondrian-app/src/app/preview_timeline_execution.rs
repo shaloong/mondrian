@@ -55,6 +55,7 @@ use super::preview_execution::{
     PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::{project_preview_media_transform, MediaPreviewFrame};
+use super::preview_quality::PreviewRasterRequirement;
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::{
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
@@ -191,6 +192,7 @@ pub(crate) struct PreviewTimelineFrameRequest<'a> {
     frame: i64,
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
+    raster_requirement: PreviewRasterRequirement,
     color_context: ProgramColorContext,
 }
 
@@ -210,8 +212,14 @@ impl<'a> PreviewTimelineFrameRequest<'a> {
             frame,
             target_resolution,
             runtime_scale,
+            raster_requirement: PreviewRasterRequirement::Viewer,
             color_context,
         }
+    }
+
+    pub(crate) fn with_raster_requirement(mut self, requirement: PreviewRasterRequirement) -> Self {
+        self.raster_requirement = requirement;
+        self
     }
 }
 
@@ -283,6 +291,7 @@ pub(crate) fn collect_preview_timeline_media_demands(
         frame,
         target_resolution,
         runtime_scale,
+        PreviewRasterRequirement::Viewer,
         color_context,
         &programs,
         &scratch,
@@ -297,6 +306,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
     frame: i64,
     target_resolution: Resolution,
     runtime_scale: PreviewResolutionScale,
+    raster_requirement: PreviewRasterRequirement,
     color_context: ProgramColorContext,
     programs: &RefCell<PreparedVisualProgramCache>,
     scratch: &RefCell<TimelineCompositeScratch>,
@@ -321,6 +331,7 @@ pub(crate) fn collect_preview_timeline_media_demands_with_programs(
         target_resolution,
         color_context,
         runtime_scale,
+        raster_requirement,
     )?;
     collect_prepared_visual_media_demands(&closure)
 }
@@ -427,6 +438,7 @@ where
         frame,
         target_resolution,
         runtime_scale,
+        raster_requirement,
         color_context,
     } = request;
     let PreviewTimelineSourceAdapters { media_frame, title_frame } = adapters;
@@ -439,6 +451,7 @@ where
         target_resolution,
         color_context.clone(),
         runtime_scale,
+        raster_requirement,
     ) {
         Ok(closure) => closure,
         Err(reason) => return PreviewTimelineResolution::Unavailable { reason },
@@ -1310,16 +1323,21 @@ fn prepare_preview_frame_closure(
     root_resolution: Resolution,
     root_color_context: ProgramColorContext,
     runtime_scale: PreviewResolutionScale,
+    raster_requirement: PreviewRasterRequirement,
 ) -> Result<PreparedVisualFrameClosure<PreparedTimelinePreviewEffectRoutes>, PreviewUnavailability>
 {
-    let child_canvas_policy =
-        PreparedVisualChildCanvasPolicy::preview_scaled(runtime_scale.dimension_divisor())
-            .map_err(|error| {
-                PreviewUnavailability::blocked(
-                    PreviewOutputStage::TimelineEvaluation,
-                    error.to_string(),
-                )
-            })?;
+    let child_canvas_policy = match raster_requirement {
+        PreviewRasterRequirement::CanonicalProgram => PreparedVisualChildCanvasPolicy::Authored,
+        PreviewRasterRequirement::Viewer => {
+            PreparedVisualChildCanvasPolicy::preview_scaled(runtime_scale.dimension_divisor())
+                .map_err(|error| {
+                    PreviewUnavailability::blocked(
+                        PreviewOutputStage::TimelineEvaluation,
+                        error.to_string(),
+                    )
+                })?
+        }
+    };
     let closure = prepare_bound_visual_frame_closure(
         PreparedVisualFrameClosureRequest {
             root_sequence,

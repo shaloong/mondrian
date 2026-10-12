@@ -8,12 +8,15 @@
 
 const COMPOSITION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+use mondrian_core::types::ColorSpace;
+
 /// Validated color carrier used by one configured native surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiSurfacePresentation {
     surface_format: wgpu::TextureFormat,
     surface_color_space: Option<wgpu::SurfaceColorSpace>,
     path: UiSurfacePresentationPath,
+    transparency: Option<(wgpu::CompositeAlphaMode, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,11 +31,17 @@ enum UiSurfacePresentationPath {
     Rec2100Pq,
     /// Linear Rec.2020 composition in 100-nit units followed by HLG OETF/OOTF.
     Rec2100Hlg,
+    /// Linear Rec.2020 composition converted to extended linear sRGB for AppKit EDR.
+    Rec2100PqEdr,
+    /// HLG Viewer code values decoded into the same AppKit EDR composition.
+    Rec2100HlgEdr,
 }
 
 /// A native surface cannot carry the requested UI/Viewer presentation contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiSurfacePresentationError {
+    /// Transparent windows require an explicit alpha mode and an sRGB carrier.
+    UnsupportedTransparency,
     /// The selected texture format and surface color space are not one of the
     /// qualified carrier pairs.
     UnsupportedSurfaceContract {
@@ -40,15 +49,20 @@ pub enum UiSurfacePresentationError {
         surface_format: wgpu::TextureFormat,
         /// Configured swapchain color space.
         surface_color_space: wgpu::SurfaceColorSpace,
+        /// Logical monitor target carried by the Viewer texture.
+        output_color_space: ColorSpace,
     },
 }
 
 impl std::fmt::Display for UiSurfacePresentationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedSurfaceContract { surface_format, surface_color_space } => write!(
+            Self::UnsupportedTransparency => formatter.write_str(
+                "transparent UI requires an sRGB surface and explicit pre/post multiplied alpha",
+            ),
+            Self::UnsupportedSurfaceContract { surface_format, surface_color_space, output_color_space } => write!(
                 formatter,
-                "UI surface carrier does not support {surface_format:?} / {surface_color_space:?}"
+                "UI surface carrier does not support {surface_format:?} / {surface_color_space:?} for {output_color_space:?}"
             ),
         }
     }
@@ -61,24 +75,44 @@ impl UiSurfacePresentation {
     pub fn for_surface(
         surface_format: wgpu::TextureFormat,
         surface_color_space: wgpu::SurfaceColorSpace,
+        output_color_space: ColorSpace,
     ) -> Result<Self, UiSurfacePresentationError> {
-        let path = match surface_color_space {
-            wgpu::SurfaceColorSpace::Srgb if surface_format.is_srgb() => {
+        let path = match (surface_color_space, output_color_space) {
+            (wgpu::SurfaceColorSpace::Srgb, ColorSpace::Srgb | ColorSpace::Rec709)
+                if surface_format.is_srgb() =>
+            {
                 UiSurfacePresentationPath::DirectSrgb
             }
-            wgpu::SurfaceColorSpace::DisplayP3 if surface_format.is_srgb() => {
+            (wgpu::SurfaceColorSpace::DisplayP3, ColorSpace::DisplayP3)
+                if surface_format.is_srgb() =>
+            {
                 UiSurfacePresentationPath::DisplayP3
             }
-            wgpu::SurfaceColorSpace::Bt2100Pq if is_hdr_surface_format(surface_format) => {
+            (wgpu::SurfaceColorSpace::Bt2100Pq, ColorSpace::Rec2100Pq)
+                if is_hdr_surface_format(surface_format) =>
+            {
                 UiSurfacePresentationPath::Rec2100Pq
             }
-            wgpu::SurfaceColorSpace::Bt2100Hlg if is_hdr_surface_format(surface_format) => {
+            (wgpu::SurfaceColorSpace::Bt2100Hlg, ColorSpace::Rec2100Hlg)
+                if is_hdr_surface_format(surface_format) =>
+            {
                 UiSurfacePresentationPath::Rec2100Hlg
+            }
+            (wgpu::SurfaceColorSpace::ExtendedSrgbLinear, ColorSpace::Rec2100Pq)
+                if surface_format == wgpu::TextureFormat::Rgba16Float =>
+            {
+                UiSurfacePresentationPath::Rec2100PqEdr
+            }
+            (wgpu::SurfaceColorSpace::ExtendedSrgbLinear, ColorSpace::Rec2100Hlg)
+                if surface_format == wgpu::TextureFormat::Rgba16Float =>
+            {
+                UiSurfacePresentationPath::Rec2100HlgEdr
             }
             _ => {
                 return Err(UiSurfacePresentationError::UnsupportedSurfaceContract {
                     surface_format,
                     surface_color_space,
+                    output_color_space,
                 });
             }
         };
@@ -86,7 +120,28 @@ impl UiSurfacePresentation {
             surface_format,
             surface_color_space: Some(surface_color_space),
             path,
+            transparency: None,
         })
+    }
+
+    /// Bind native compositor alpha and the physical-pixel outer window radius.
+    /// UI painter composition stays premultiplied in linear light; only the
+    /// final carrier adapts it to the compositor's declared representation.
+    pub fn with_transparency(
+        mut self,
+        alpha_mode: wgpu::CompositeAlphaMode,
+        corner_radius: u32,
+    ) -> Result<Self, UiSurfacePresentationError> {
+        if self.path != UiSurfacePresentationPath::DirectSrgb
+            || !matches!(
+                alpha_mode,
+                wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::PostMultiplied
+            )
+        {
+            return Err(UiSurfacePresentationError::UnsupportedTransparency);
+        }
+        self.transparency = Some((alpha_mode, corner_radius));
+        Ok(self)
     }
 
     pub(crate) fn legacy_for_attachment(surface_format: wgpu::TextureFormat) -> Self {
@@ -95,12 +150,14 @@ impl UiSurfacePresentation {
                 surface_format,
                 surface_color_space: Some(wgpu::SurfaceColorSpace::Srgb),
                 path: UiSurfacePresentationPath::DirectSrgb,
+                transparency: None,
             }
         } else {
             Self {
                 surface_format,
                 surface_color_space: None,
                 path: UiSurfacePresentationPath::LinearAttachment,
+                transparency: None,
             }
         }
     }
@@ -124,12 +181,15 @@ impl UiSurfacePresentation {
     }
 
     pub(crate) fn requires_carrier(self) -> bool {
-        matches!(
-            self.path,
-            UiSurfacePresentationPath::DisplayP3
-                | UiSurfacePresentationPath::Rec2100Pq
-                | UiSurfacePresentationPath::Rec2100Hlg
-        )
+        self.transparency.is_some()
+            || matches!(
+                self.path,
+                UiSurfacePresentationPath::DisplayP3
+                    | UiSurfacePresentationPath::Rec2100Pq
+                    | UiSurfacePresentationPath::Rec2100Hlg
+                    | UiSurfacePresentationPath::Rec2100PqEdr
+                    | UiSurfacePresentationPath::Rec2100HlgEdr
+            )
     }
 
     pub(crate) fn supports_surface_code_values(self) -> bool {
@@ -150,7 +210,10 @@ impl UiSurfacePresentation {
                 [0.033_199_5, 0.966_783_5, 0.0],
                 [0.017_085_3, 0.072_395_7, 0.910_301_5],
             ],
-            UiSurfacePresentationPath::Rec2100Pq | UiSurfacePresentationPath::Rec2100Hlg => [
+            UiSurfacePresentationPath::Rec2100Pq
+            | UiSurfacePresentationPath::Rec2100Hlg
+            | UiSurfacePresentationPath::Rec2100PqEdr
+            | UiSurfacePresentationPath::Rec2100HlgEdr => [
                 [0.627_403_9, 0.329_283, 0.043_313_1],
                 [0.069_097_3, 0.919_540_4, 0.011_362_3],
                 [0.016_391_4, 0.088_013_3, 0.895_595_3],
@@ -163,16 +226,22 @@ impl UiSurfacePresentation {
         match self.path {
             UiSurfacePresentationPath::LinearAttachment => 3,
             UiSurfacePresentationPath::DirectSrgb | UiSurfacePresentationPath::DisplayP3 => 0,
-            UiSurfacePresentationPath::Rec2100Pq => 1,
-            UiSurfacePresentationPath::Rec2100Hlg => 2,
+            UiSurfacePresentationPath::Rec2100Pq | UiSurfacePresentationPath::Rec2100PqEdr => 1,
+            UiSurfacePresentationPath::Rec2100Hlg | UiSurfacePresentationPath::Rec2100HlgEdr => 2,
         }
     }
 
     fn carrier_fragment_entry(self) -> Option<&'static str> {
+        if self.transparency.is_some() {
+            return Some("fs_transparent_srgb");
+        }
         match self.path {
             UiSurfacePresentationPath::DisplayP3 => Some("fs_linear"),
             UiSurfacePresentationPath::Rec2100Pq => Some("fs_pq"),
             UiSurfacePresentationPath::Rec2100Hlg => Some("fs_hlg"),
+            UiSurfacePresentationPath::Rec2100PqEdr | UiSurfacePresentationPath::Rec2100HlgEdr => {
+                Some("fs_edr")
+            }
             UiSurfacePresentationPath::LinearAttachment | UiSurfacePresentationPath::DirectSrgb => {
                 None
             }
@@ -247,7 +316,21 @@ impl UiSurfaceCarrier {
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[
+                        (
+                            "window_corner_radius",
+                            presentation.transparency.map_or(0.0, |(_, radius)| radius as f64),
+                        ),
+                        (
+                            "window_premultiplied",
+                            f64::from(presentation.transparency.is_some_and(|(mode, _)| {
+                                mode == wgpu::CompositeAlphaMode::PreMultiplied
+                            })),
+                        ),
+                    ],
+                    ..Default::default()
+                },
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -299,7 +382,9 @@ impl UiSurfaceCarrier {
             sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: COMPOSITION_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Keep the sampled composition persistent; only MSAA is pass-local.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TRANSIENT_ATTACHMENT,
             view_formats: &[],
         });
         let msaa_view = msaa_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -374,30 +459,47 @@ mod tests {
 
     #[test]
     fn production_surface_pairs_are_closed_and_typed() {
-        for (format, color_space, carrier) in [
+        for (format, color_space, output_color_space, carrier) in [
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::Srgb,
+                ColorSpace::Srgb,
                 false,
             ),
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
                 true,
             ),
             (
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
                 true,
             ),
             (
                 wgpu::TextureFormat::Rgb10a2Unorm,
                 wgpu::SurfaceColorSpace::Bt2100Hlg,
+                ColorSpace::Rec2100Hlg,
+                true,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::Rec2100Pq,
+                true,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::Rec2100Hlg,
                 true,
             ),
         ] {
             let presentation =
-                UiSurfacePresentation::for_surface(format, color_space).expect("surface pair");
+                UiSurfacePresentation::for_surface(format, color_space, output_color_space)
+                    .expect("surface pair");
             assert_eq!(presentation.requires_carrier(), carrier);
             assert_eq!(presentation.surface_format(), format);
             assert_eq!(presentation.surface_color_space(), Some(color_space));
@@ -406,21 +508,37 @@ mod tests {
 
     #[test]
     fn mismatched_surface_transfer_and_storage_fail_closed() {
-        for (format, color_space) in [
+        for (format, color_space, output_color_space) in [
             (
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
             ),
             (
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
             ),
             (
                 wgpu::TextureFormat::Rgb10a2Unorm,
                 wgpu::SurfaceColorSpace::Srgb,
+                ColorSpace::Srgb,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::ExtendedSrgbLinear,
+                ColorSpace::DisplayP3,
+            ),
+            (
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Hlg,
             ),
         ] {
-            assert!(UiSurfacePresentation::for_surface(format, color_space).is_err());
+            assert!(
+                UiSurfacePresentation::for_surface(format, color_space, output_color_space)
+                    .is_err()
+            );
         }
     }
 
@@ -430,11 +548,13 @@ mod tests {
             UiSurfacePresentation::for_surface(
                 wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu::SurfaceColorSpace::DisplayP3,
+                ColorSpace::DisplayP3,
             )
             .unwrap(),
             UiSurfacePresentation::for_surface(
                 wgpu::TextureFormat::Rgba16Float,
                 wgpu::SurfaceColorSpace::Bt2100Pq,
+                ColorSpace::Rec2100Pq,
             )
             .unwrap(),
         ] {

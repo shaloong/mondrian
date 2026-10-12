@@ -212,6 +212,7 @@ pub(super) fn durable_save_reopen(
         "close retained the saved Authoring Session"
     );
     state.dispatch_action(Action::OpenProject(project_path.to_path_buf()))?;
+    state.wait_for_project_open()?;
     let reopened_session = author_checkpoint(state)?;
     ensure!(
         saved_session.session_id != reopened_session.session_id,

@@ -230,6 +230,14 @@ impl MediaFrameResourceLease {
         Arc::strong_count(&self.allocation) == 1
     }
 
+    // Admission must retain the other completed inputs of this exact Current
+    // closure. Other demands and ordinary trimming may reclaim them normally.
+    fn store_is_releasable_for(&self, retaining_demand: Option<MediaWorkDemandId>) -> bool {
+        self.store_is_exclusive_owner()
+            && retaining_demand
+                .is_none_or(|demand| self.allocation.current_demand_id() != Some(demand))
+    }
+
     /// Protect this allocation for one exact current Viewer demand.
     pub fn try_protect(
         &self,
@@ -999,6 +1007,16 @@ struct MediaResourceAllocation {
     ledger: Arc<Mutex<MediaResourceLedger>>,
 }
 
+impl MediaResourceAllocation {
+    fn current_demand_id(&self) -> Option<MediaWorkDemandId> {
+        if self.class != MediaWorkReservationClass::Current {
+            return None;
+        }
+        let ledger = lock_media_ledger(&self.ledger);
+        ledger.records.get(&self.id)?.demand_id
+    }
+}
+
 impl Drop for MediaResourceAllocation {
     fn drop(&mut self) {
         lock_media_ledger(&self.ledger).remove(self.id);
@@ -1148,38 +1166,40 @@ impl Drop for ViewerFrameAllocation {
 }
 
 /// Deep Module owning Preview Frame Store residency and failure invariants.
-pub struct PreviewFrameStore<MK, M, VK, V, S> {
+pub struct PreviewFrameStore<MK, M, VK, V, S, F> {
     media: WeightedLruCache<MK, M>,
     media_ledger: Arc<Mutex<MediaResourceLedger>>,
     viewer: WeightedLruCache<VK, V>,
     viewer_ledger: Arc<Mutex<usize>>,
-    failures: BoundedLruSet<MK>,
+    failures: BoundedLruMap<MK, F>,
     current_media_overflow: HashMap<MK, CurrentMediaOverflow<M>>,
     current_media_overflow_lru: VecDeque<MK>,
     pinned_viewer: Option<PinnedViewer<S, V>>,
     media_work_reservation_evictions: u64,
 }
 
-impl<MK, M, VK, V, S> Default for PreviewFrameStore<MK, M, VK, V, S>
+impl<MK, M, VK, V, S, F> Default for PreviewFrameStore<MK, M, VK, V, S, F>
 where
     MK: Clone + Eq + Hash,
     M: Clone,
     VK: Clone + Eq + Hash,
     V: Clone,
     S: Eq,
+    F: Clone,
 {
     fn default() -> Self {
         Self::new(PreviewFrameStoreConfig::default())
     }
 }
 
-impl<MK, M, VK, V, S> PreviewFrameStore<MK, M, VK, V, S>
+impl<MK, M, VK, V, S, F> PreviewFrameStore<MK, M, VK, V, S, F>
 where
     MK: Clone + Eq + Hash,
     M: Clone,
     VK: Clone + Eq + Hash,
     V: Clone,
     S: Eq,
+    F: Clone,
 {
     /// Create a store with explicit budgets.
     ///
@@ -1200,7 +1220,7 @@ where
                 usize::MAX,
             ),
             viewer_ledger: Arc::new(Mutex::new(0)),
-            failures: BoundedLruSet::new(config.failure_entry_capacity),
+            failures: BoundedLruMap::new(config.failure_entry_capacity),
             current_media_overflow: HashMap::new(),
             current_media_overflow_lru: VecDeque::new(),
             pinned_viewer: None,
@@ -1230,7 +1250,7 @@ where
             if !exceeds_prospective_policy {
                 break;
             }
-            if !self.evict_one_releasable_media_for_work() {
+            if !self.evict_one_releasable_media_for_work(None) {
                 break;
             }
         }
@@ -1244,7 +1264,7 @@ where
             usize::MAX,
         );
         while self.viewer_aggregate_reserved_bytes() > self.viewer.byte_budget {
-            if !self.viewer.evict_oldest_releasable() {
+            if !self.viewer.evict_oldest_releasable(None) {
                 break;
             }
         }
@@ -1262,6 +1282,29 @@ where
             .map(|pinned| (pinned.payload.clone(), pinned.resource.clone()))?;
         self.touch_current_media_overflow(key);
         Some(result)
+    }
+
+    /// Find a caller-proved compatible payload while retaining its one physical allocation.
+    /// The caller owns media semantics; the Store owns lookup, LRU and leases.
+    pub fn media_frame_matching(
+        &mut self,
+        mut matches: impl FnMut(&MK, &M) -> bool,
+    ) -> Option<(M, MediaFrameResourceLease)> {
+        let key = self
+            .media
+            .lru
+            .iter()
+            .rev()
+            .find_map(|key| {
+                let entry = self.media.entries.get(key)?;
+                matches(key, &entry.payload).then(|| key.clone())
+            })
+            .or_else(|| {
+                self.current_media_overflow
+                    .iter()
+                    .find_map(|(key, entry)| matches(key, &entry.payload).then(|| key.clone()))
+            })?;
+        self.media_frame(&key)
     }
 
     /// Return and protect one decoded-media payload for current-frame execution.
@@ -1316,7 +1359,7 @@ where
         }
 
         while !lock_media_ledger(&self.media_ledger).can_reserve_optional(charge) {
-            if !self.evict_one_releasable_media_for_work() {
+            if !self.evict_one_releasable_media_for_work(demand_id) {
                 break;
             }
         }
@@ -1384,7 +1427,7 @@ where
             }
         }
         while !lock_media_ledger(&self.media_ledger).can_reserve_optional(aggregate_charge) {
-            if !self.evict_one_releasable_media_for_work() {
+            if !self.evict_one_releasable_media_for_work(None) {
                 break;
             }
         }
@@ -1442,7 +1485,7 @@ where
             if work.can_commit(reserved_bytes, resource_units) {
                 break work;
             }
-            if !self.evict_one_releasable_media_for_work() {
+            if !self.evict_one_releasable_media_for_work(work.allocation.current_demand_id()) {
                 return FrameStoreAdmission::RejectedCapacity;
             }
         };
@@ -1588,15 +1631,15 @@ where
             {
                 return true;
             }
-            if !self.viewer.evict_oldest_releasable() {
+            if !self.viewer.evict_oldest_releasable(None) {
                 return false;
             }
         }
     }
 
     /// Remember one terminal media failure.
-    pub fn remember_failure(&mut self, key: MK) {
-        self.failures.insert(key);
+    pub fn remember_failure(&mut self, key: MK, failure: F) {
+        self.failures.insert(key, failure);
     }
 
     /// Remove failure memory after a successful completion.
@@ -1606,7 +1649,12 @@ where
 
     /// Return whether a key has a remembered failure and touch its recency.
     pub fn contains_failure(&mut self, key: &MK) -> bool {
-        self.failures.contains(key)
+        self.failures.get(key).is_some()
+    }
+
+    /// Return the original terminal failure and touch its bounded recency.
+    pub fn failure(&mut self, key: &MK) -> Option<F> {
+        self.failures.get(key)
     }
 
     /// Replace the non-evictable current/stale Viewer payload and its scope.
@@ -1650,6 +1698,25 @@ where
         self.media.clear();
         self.current_media_overflow.clear();
         self.current_media_overflow_lru.clear();
+    }
+
+    /// Retire caller-classified media payloads from optional residency.
+    /// Independent candidate/submission leases keep their physical allocation
+    /// charged until their last owner releases it. Viewer output is retained.
+    pub fn clear_media_frames_matching(&mut self, mut matches: impl FnMut(&MK, &M) -> bool) {
+        let keys = self
+            .media
+            .entries
+            .iter()
+            .filter(|&(key, entry)| matches(key, &entry.payload))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.media.remove_entry(&key);
+        }
+        self.current_media_overflow.retain(|key, entry| !matches(key, &entry.payload));
+        self.current_media_overflow_lru
+            .retain(|key| self.current_media_overflow.contains_key(key));
     }
 
     /// Release only media payloads that retain decoder-owned resources.
@@ -1792,8 +1859,11 @@ where
         }
     }
 
-    fn evict_one_releasable_media_for_work(&mut self) -> bool {
-        if self.media.evict_oldest_releasable() {
+    fn evict_one_releasable_media_for_work(
+        &mut self,
+        retaining_demand: Option<MediaWorkDemandId>,
+    ) -> bool {
+        if self.media.evict_oldest_releasable(retaining_demand) {
             self.media_work_reservation_evictions =
                 self.media_work_reservation_evictions.saturating_add(1);
             return true;
@@ -1803,10 +1873,9 @@ where
             let Some(key) = self.current_media_overflow_lru.pop_front() else {
                 return false;
             };
-            let releasable = self
-                .current_media_overflow
-                .get(&key)
-                .is_some_and(|overflow| overflow.resource.store_is_exclusive_owner());
+            let releasable = self.current_media_overflow.get(&key).is_some_and(|overflow| {
+                overflow.resource.store_is_releasable_for(retaining_demand)
+            });
             if !releasable {
                 self.current_media_overflow_lru.push_back(key);
                 continue;
@@ -1938,8 +2007,14 @@ where
             }
             return Err((payload, media_resource));
         }
-        let Some(evictions) = self.plan_insert_evictions(&key, reserved_bytes, resource_units)
-        else {
+        let Some(evictions) = self.plan_insert_evictions(
+            &key,
+            reserved_bytes,
+            resource_units,
+            media_resource
+                .as_ref()
+                .and_then(|resource| resource.allocation.current_demand_id()),
+        ) else {
             return Err((payload, media_resource));
         };
         self.remove_entry(&key);
@@ -1968,7 +2043,7 @@ where
             || self.reserved_bytes > self.byte_budget
             || self.resource_units > self.resource_unit_budget
         {
-            if !self.evict_oldest_releasable() {
+            if !self.evict_oldest_releasable(None) {
                 break;
             }
         }
@@ -1979,6 +2054,7 @@ where
         replacement_key: &K,
         added_bytes: usize,
         added_resource_units: usize,
+        retaining_demand: Option<MediaWorkDemandId>,
     ) -> Option<Vec<K>> {
         if self
             .entries
@@ -2013,7 +2089,7 @@ where
             let Some(entry) = self.entries.get(key) else {
                 continue;
             };
-            if !entry_is_releasable(entry) {
+            if !entry_is_releasable_for(entry, retaining_demand) {
                 continue;
             }
             retained = retained.saturating_sub(MediaResourceCharge::one(
@@ -2028,13 +2104,17 @@ where
         None
     }
 
-    fn evict_oldest_releasable(&mut self) -> bool {
+    fn evict_oldest_releasable(&mut self, retaining_demand: Option<MediaWorkDemandId>) -> bool {
         let candidates = self.lru.len();
         for _ in 0..candidates {
             let Some(key) = self.lru.pop_front() else {
                 return false;
             };
-            if self.entries.get(&key).is_some_and(|entry| !entry_is_releasable(entry)) {
+            if self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| !entry_is_releasable_for(entry, retaining_demand))
+            {
                 self.lru.push_back(key);
             } else {
                 self.remove_entry(&key);
@@ -2107,53 +2187,61 @@ where
     }
 }
 
-fn entry_is_releasable<V>(entry: &WeightedEntry<V>) -> bool {
+fn entry_is_releasable_for<V>(
+    entry: &WeightedEntry<V>,
+    retaining_demand: Option<MediaWorkDemandId>,
+) -> bool {
     entry
         .media_resource
         .as_ref()
-        .is_none_or(MediaFrameResourceLease::store_is_exclusive_owner)
+        .is_none_or(|resource| resource.store_is_releasable_for(retaining_demand))
         && entry
             .viewer_resource
             .as_ref()
             .is_none_or(ViewerFrameResourceLease::store_is_exclusive_owner)
 }
 
-struct BoundedLruSet<K> {
+fn entry_is_releasable<V>(entry: &WeightedEntry<V>) -> bool {
+    entry_is_releasable_for(entry, None)
+}
+
+struct BoundedLruMap<K, V> {
     capacity: usize,
-    entries: HashSet<K>,
+    entries: HashMap<K, V>,
     lru: VecDeque<K>,
     evictions: u64,
 }
 
-impl<K> BoundedLruSet<K>
+impl<K, V> BoundedLruMap<K, V>
 where
     K: Clone + Eq + Hash,
+    V: Clone,
 {
     fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
-            entries: HashSet::new(),
+            entries: HashMap::new(),
             lru: VecDeque::new(),
             evictions: 0,
         }
     }
 
-    fn contains(&mut self, key: &K) -> bool {
-        let contains = self.entries.contains(key);
-        if contains {
+    fn get(&mut self, key: &K) -> Option<V> {
+        let value = self.entries.get(key).cloned();
+        if value.is_some() {
             self.touch(key);
         }
-        contains
+        value
     }
 
-    fn insert(&mut self, key: K) {
-        self.entries.insert(key.clone());
+    fn insert(&mut self, key: K, value: V) {
+        self.entries.insert(key.clone(), value);
         self.touch(&key);
         while self.entries.len() > self.capacity {
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            if self.entries.remove(&oldest) {
+            if self.entries.remove(&oldest).is_some() {
                 self.evictions = self.evictions.saturating_add(1);
             }
         }
@@ -2165,7 +2253,7 @@ where
             let Some(oldest) = self.lru.pop_front() else {
                 break;
             };
-            if self.entries.remove(&oldest) {
+            if self.entries.remove(&oldest).is_some() {
                 self.evictions = self.evictions.saturating_add(1);
             }
         }
@@ -2195,7 +2283,86 @@ where
 mod tests {
     use super::*;
 
-    type TestStore = PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (u64, u32, u32)>;
+    type TestStore = PreviewFrameStore<u64, Vec<u8>, u64, Vec<u8>, (u64, u32, u32), String>;
+
+    #[test]
+    fn same_current_closure_keeps_completed_inputs_during_other_input_admission() {
+        // These are opaque resource-unit owners, not a hardware decode fixture.
+        // The independent old consumer must remain charged while a two-input
+        // Current Demand uses the existing hard working-set grant.
+        let mut policy = config(128);
+        policy.media_resource_unit_budget = 2;
+        policy.current_media_working_set_resource_unit_limit = 4;
+        let mut store = TestStore::new(policy);
+        assert_eq!(
+            admit(
+                &mut store,
+                0,
+                10,
+                MediaWorkReservationClass::Prefetch,
+                0,
+                0,
+                1
+            ),
+            FrameStoreAdmission::Resident
+        );
+        let (_, old_consumer) = store.media_frame(&0).expect("independent old input owner");
+        assert!(admit(
+            &mut store,
+            1,
+            20,
+            MediaWorkReservationClass::Current,
+            7,
+            0,
+            1
+        )
+        .is_admitted());
+        assert!(payload(&mut store, 1).is_some());
+        assert!(admit(
+            &mut store,
+            2,
+            30,
+            MediaWorkReservationClass::Current,
+            7,
+            0,
+            1
+        )
+        .is_admitted());
+        let first_resident = payload(&mut store, 1).is_some();
+        let second_resident = payload(&mut store, 2).is_some();
+        let both = store.diagnostics();
+        // A later demand can reclaim both old completed inputs. Retention is
+        // demand-relative, not a permanent pin or a second lifetime registry.
+        assert!(admit(
+            &mut store,
+            3,
+            40,
+            MediaWorkReservationClass::Current,
+            8,
+            0,
+            1
+        )
+        .is_admitted());
+        let old_inputs_reclaimed =
+            payload(&mut store, 1).is_none() && payload(&mut store, 2).is_none();
+        let ledger = Arc::clone(&store.media_ledger);
+        drop(store);
+        assert_eq!(lock_media_ledger(&ledger).aggregate.resource_units, 1);
+        drop(old_consumer);
+        assert_eq!(lock_media_ledger(&ledger).aggregate.resource_units, 0);
+        assert!(
+            first_resident,
+            "second input admission cannot evict the same incomplete Current closure's first input"
+        );
+        assert!(second_resident);
+        assert!(old_inputs_reclaimed);
+        assert_eq!(both.media_aggregate_resource_units, 3);
+        assert_eq!(both.media_aggregate_hard_resource_unit_limit, 4);
+        assert_eq!(both.media_resource_unit_budget, 2);
+        assert_eq!(both.current_media_overflow_resource_units, 1);
+        assert_eq!(both.media_current_working_set_resource_unit_high_water, 2);
+        assert!(!both.media_capacity_overcommitted);
+    }
 
     fn config(media_bytes: usize) -> PreviewFrameStoreConfig {
         PreviewFrameStoreConfig {
@@ -2939,14 +3106,14 @@ mod tests {
         let mut store = TestStore::new(config(16));
         store.admit_viewer_frame(1, vec![3; 8], 8);
         store.pin_viewer_frame((7, 1920, 1080), vec![9; 4], 4);
-        store.remember_failure(3);
+        store.remember_failure(3, "original decoder error".to_owned());
         assert_eq!(store.stale_viewer_frame(&(7, 1920, 1080)), Some(vec![9; 4]));
         assert_eq!(store.stale_viewer_frame(&(8, 1920, 1080)), None);
 
         store.clear_media_frames();
         assert_eq!(store.viewer_frame(&1), Some(vec![3; 8]));
         assert_eq!(store.stale_viewer_frame(&(7, 1920, 1080)), Some(vec![9; 4]));
-        assert!(store.contains_failure(&3));
+        assert_eq!(store.failure(&3).as_deref(), Some("original decoder error"));
 
         store.clear_all();
         let cleared = store.diagnostics();
@@ -2955,7 +3122,8 @@ mod tests {
         assert_eq!(cleared.failure_entries, 0);
     }
 
-    type OwnedViewerStore = PreviewFrameStore<u64, Vec<u8>, u64, Arc<[u8]>, (u64, u32, u32)>;
+    type OwnedViewerStore =
+        PreviewFrameStore<u64, Vec<u8>, u64, Arc<[u8]>, (u64, u32, u32), String>;
 
     #[test]
     fn viewer_owned_work_detach_retains_shared_budget_until_last_retirement() {
@@ -3081,8 +3249,14 @@ mod tests {
 
     #[test]
     fn viewer_owned_work_refusal_retires_pixels_before_the_last_charge() {
-        type ObservedStore =
-            PreviewFrameStore<u64, Vec<u8>, u64, ViewerRetirementObservedPixels, (u64, u32, u32)>;
+        type ObservedStore = PreviewFrameStore<
+            u64,
+            Vec<u8>,
+            u64,
+            ViewerRetirementObservedPixels,
+            (u64, u32, u32),
+            String,
+        >;
         let mut source = OwnedViewerStore::new(config(32));
         let mut foreign = ObservedStore::new(config(32));
         let observed = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));

@@ -109,6 +109,48 @@ fn measurement_origin_excludes_startup_and_cannot_be_removed_or_overlapped() {
 }
 
 #[test]
+fn pending_project_open_must_be_released_in_completed_phase() {
+    let (_, run, _) = qualified_fixture();
+    let original = &run.phase_owner_history[0];
+    for mutation in 0..4 {
+        let mut owner: serde_json::Value =
+            serde_json::from_str(&original.canonical_json).expect("phase owner");
+        let app_receipt = &mut owner["terminal"]["owners"]["Realtime"]["app"];
+        let mut app: serde_json::Value = serde_json::from_str(
+            app_receipt["canonical_json"].as_str().expect("App canonical bytes"),
+        )
+        .expect("App evidence");
+        match mutation {
+            0 => app["project"]["pending_open_released"] = serde_json::json!(false),
+            1 => app["project"]["pending_open_released"] = serde_json::json!("true"),
+            2 => {
+                app["project"]
+                    .as_object_mut()
+                    .expect("Project evidence")
+                    .remove("pending_open_released");
+            }
+            _ => app["schema_version"] = serde_json::json!(1),
+        }
+        let bytes = serde_json::to_string(&app).expect("App canonical bytes");
+        app_receipt["sha256"] =
+            serde_json::json!(format!("{:x}", Sha256::digest(bytes.as_bytes())));
+        app_receipt["canonical_json"] = serde_json::json!(bytes);
+        let mut receipt = original.clone();
+        receipt.canonical_json = serde_json::to_string(&owner).expect("phase bytes");
+        receipt.sha256 = format!("{:x}", Sha256::digest(receipt.canonical_json.as_bytes()));
+        assert!(
+            !receipt.validates_binding(
+                &run.run_id,
+                &run.phases[0].phase_id,
+                0,
+                EndurancePhaseTerminalStatus::Completed,
+            ),
+            "rehash-all mutation {mutation} must not qualify a retained or unproved Open"
+        );
+    }
+}
+
+#[test]
 fn bmx_owner_requires_complete_clean_receipt_without_erasing_failed_cleanup() {
     let (_, run, _) = qualified_fixture();
     let original = &run.phase_owner_history[1];
@@ -1117,6 +1159,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                             "retirement_handoff_accepted": true,
                             "retirement_completed": true,
                             "renderer_retirement": {
+                                "backend_preparation": "not_started",
                                 "cpu_yuv_upload": "returned",
                                 "native_device_removed": false,
                             },
@@ -1246,6 +1289,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                                 "retirement_handoff_accepted": true,
                                 "retirement_completed": true,
                                 "renderer_retirement": {
+                                    "backend_preparation": "not_started",
                                     "cpu_yuv_upload": "returned",
                                     "native_device_removed": false,
                                 },

@@ -2,7 +2,7 @@
 
 use mondrian_media::{
     CudaResidentHevcEncoderSession, RendererHwAccelDeviceContext, ResidentEncodeBitDepth,
-    ResidentEncodeColorimetry, ResidentHevcEncoderConfig,
+    ResidentEncodeColorimetry, ResidentVideoEncoderConfig,
 };
 
 #[test]
@@ -13,7 +13,8 @@ fn exact_cuda_device_root_opens_nvenc_and_allocates_native_surface() {
         .expect("renderer-qualified CUDA root");
     let mut session = CudaResidentHevcEncoderSession::open(
         &root,
-        ResidentHevcEncoderConfig {
+        ResidentVideoEncoderConfig {
+            codec: mondrian_media::ResidentEncodeCodec::Hevc,
             output_path: directory.path().join("resident-hevc.mkv"),
             width: 320,
             height: 180,

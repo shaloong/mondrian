@@ -1453,28 +1453,56 @@ QC now passes one exact Instant through picture rescan and regulatory analysis.
 
 ### Short local real-media smoke
 
-`cargo run -p mondrian-app --features validation --example local_media_smoke --
-"E:/Video Projects/Mondrian Test" "<new-output-directory>" 30` runs three local
-software stages. Thirty seconds per stage is the default practical minimum;
-15–60 seconds is accepted for focused investigation. Fixture import, initial
-warming, recovery, independent full-decode verification and consuming shutdown
-add time beyond the three observation periods. The run has a 15-minute stop
-deadline, 6 GiB product-process-tree private-memory stop threshold, fixed bounded
-histories and at most eight verified exports per export stage.
+`cargo run --locked --profile validation -p mondrian-app --all-features
+--example local_media_smoke -j 2 -- "<fixture-root>" "<new-output-directory>"
+30 640x360 60 all 2 rec709 mixed` runs three bounded local production stages. Resolution,
+output cadence, phase selection, layer count and Program Output (`rec709`, `pq`,
+`hlg`) are explicit. The color selection authors the existing Sequence contract,
+with no source reinterpretation or independent color authority. The same cadence
+binds the authored Sequence, Playback, two-second clips and frozen Export
+sampling; Export retains its existing 120-frame workload at every cadence.
+It never changes original source decode dimensions or cadence.
+Source selection is explicit: `mixed` rotates three cadences; `single60` uses only
+the source whose ordinary probe proves 3840x2160 Main10 at 60/1, with one video
+layer and 60 fps output. Both use the same two-second clip authoring and execution
+owners. Independent provenance must rule out timestamp-scaled source derivatives;
+the selector establishes neither original acquisition cadence nor hardware decode.
+Output supports 640x360, 1920x1080 and 3840x2160 at 24, 30 or 60 fps. This includes
+short 4K output diagnostics, not the complete sealed 4K60 matrix.
+`all` and focused `export`/`recovery` accept
+15–900 measured seconds per phase; `playback` accepts 15–1800 seconds for
+Preview/Audio stability. See the [local validation runbook](../dev/commercial-endurance-qualification.md#bounded-local-production-validation-not-col-047)
+for same-profile worker preparation and exact arguments. Preparation, recovery,
+independent verification and consuming shutdown remain outside the measured
+minimum and inside one duration-derived original safety deadline. The 6 GiB
+product-process-tree private-memory stop remains. Export admission continues
+through the observation window; 256 artifacts or 2 GiB retained artifact bytes
+fail the phase rather than ending Export early and passing continued Playback.
 
-The harness uses real 24/25/60 fps 4K HEVC 10-bit clips, HEVC alpha, a PNG overlay,
-and WAV source audio through ordinary media import and Timeline drop/trim. The
-Sequence explicitly uses 60/1 and 640×360 output. Each stage creates fresh App,
-Preview/GPU and Waveform owners after the preceding group has consumed shutdown.
-The shared persistent Playback owner provides real Audio Device clock intervals,
-seek and cache-pressure receipts; the repeated Export owner provides actual
-cancellation/distinct retry, publication and independent decoding. No physical
-Reference Output, Window surface, HDR display or 72-hour qualification is implied.
+The fixed fixture layout supplies three HEVC 10-bit cadences, an additional
+HEVC layer, PNG and WAV through ordinary import and Timeline drop/trim.
+Recorded probes and hashes, rather than file names, establish executable
+source cadence, alpha and color contracts. A file labelled HEVC alpha that
+probes as opaque does not qualify alpha; timestamp-derived 25/60 fps fixtures
+do not qualify original native-source cadence. The Sequence uses the explicitly
+requested cadence and 640×360, 1920×1080 or 3840×2160 Program output. Its authored Preview scale is
+1.0; actual completed GPU dimensions and runtime Full quality are checked.
+Each stage creates fresh App, Preview/GPU and Waveform owners after the prior
+group consumes shutdown. The existing persistent Playback owner supplies real
+Audio Device clock intervals, seek and cache receipts; Frozen Repeated Export
+supplies cancellation, distinct retry, publication and independent full decode.
+Ordinary profiles disable project proxies before import, prove all four
+original video path/hash selections through the production resolver, and keep
+media cache beneath the phase output. Only proxy-control enables proxies.
+Actual decode/import/export paths remain explicit evidence. No physical
+Reference Output, Window surface, HDR or commercial endurance qualification is
+implied. Failed phases remain Failed, and later independent phases run only
+after actual owner/verifier closure is proved.
 Missing or oversized fixture files produce admission-time `NotRun` before an App
 owner is created. Every started stage writes complete raw shutdown and job/event
 history on completion, failure or unwind; failed cleanup retains its runtime files.
 The authored Timeline repeats genuine two-second source contributions to a
-checked, fixed maximum of 512 segments. Its exact extent covers the full phase,
+checked, fixed maximum of 1,024 segments. Its exact extent covers the full phase,
 the profile's maximum Export completion grace, recovery seek displacement, and
 a ten-second terminal guard, preventing slow independent verification from
 silently converting the transport to `Ended`.
@@ -1484,7 +1512,7 @@ clock), binds the resulting exact coordinate and proves that old frame Ready,
 consumes old Preview/GPU against one deadline, installs a fresh shared session,
 and verifies the unchanged Sequence/frame Ready under the resumed Audio Device
 clock. Both old raw shutdown and any partial new-start inventory are preserved.
-This software receipt remains distinct from the physical Window surface receipt.
+This Headless receipt remains distinct from the physical Window surface receipt.
 The repeated Export backend now writes create-new, flushed
 `<artifact>.independent-verification.json` sidecars at its actual verifier call,
 including request identity and full success/failure native evidence. A failed or

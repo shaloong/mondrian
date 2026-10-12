@@ -702,6 +702,10 @@ pub(crate) enum PreviewGpuHeterogeneousCompletionError {
 pub(crate) struct PreviewDecodeExecutionSummary {
     pub(crate) media_layers: u32,
     pub(crate) software_cpu_layers: u32,
+    pub(crate) native_cpu_transfer_layers: u32,
+    pub(crate) native_surface_layers: u32,
+    pub(crate) unobserved_hardware_layers: u32,
+    pub(crate) observed_software_native_layers: u32,
     pub(crate) hardware_cpu_transfer_layers: u32,
     pub(crate) hardware_native_layers: u32,
     pub(crate) p010_10_bit_hardware_layers: u32,
@@ -713,15 +717,36 @@ impl PreviewDecodeExecutionSummary {
         let mut summary = Self { media_layers: 1, ..Self::default() };
         match path {
             PreviewDecodeExecutionPath::SoftwareCpu => summary.software_cpu_layers = 1,
-            PreviewDecodeExecutionPath::HardwareCpuTransfer { surface, sampling, .. } => {
-                summary.hardware_cpu_transfer_layers = 1;
-                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
+            PreviewDecodeExecutionPath::NativeCpuTransfer {
+                surface,
+                sampling,
+                hardware_decode_observed,
+                ..
+            } => {
+                summary.native_cpu_transfer_layers = 1;
+                summary.record_native_execution_observation(hardware_decode_observed);
+                summary.hardware_cpu_transfer_layers =
+                    u32::from(hardware_decode_observed == Some(true));
+                if hardware_decode_observed == Some(true)
+                    && surface == DecodedVideoSurfaceFormat::P010
+                    && sampling.bit_depth == 10
+                {
                     summary.p010_10_bit_hardware_layers = 1;
                 }
             }
-            PreviewDecodeExecutionPath::HardwareNative { surface, sampling, .. } => {
-                summary.hardware_native_layers = 1;
-                if surface == DecodedVideoSurfaceFormat::P010 && sampling.bit_depth == 10 {
+            PreviewDecodeExecutionPath::NativeSurface {
+                surface,
+                sampling,
+                hardware_decode_observed,
+                ..
+            } => {
+                summary.native_surface_layers = 1;
+                summary.record_native_execution_observation(hardware_decode_observed);
+                summary.hardware_native_layers = u32::from(hardware_decode_observed == Some(true));
+                if hardware_decode_observed == Some(true)
+                    && surface == DecodedVideoSurfaceFormat::P010
+                    && sampling.bit_depth == 10
+                {
                     summary.p010_10_bit_hardware_layers = 1;
                 }
             }
@@ -729,11 +754,28 @@ impl PreviewDecodeExecutionSummary {
         summary
     }
 
+    fn record_native_execution_observation(&mut self, observed: Option<bool>) {
+        match observed {
+            None => self.unobserved_hardware_layers = 1,
+            Some(false) => self.observed_software_native_layers = 1,
+            Some(true) => {}
+        }
+    }
+
     /// Merge another layer summary without losing whole-candidate provenance.
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.media_layers = self.media_layers.saturating_add(other.media_layers);
         self.software_cpu_layers =
             self.software_cpu_layers.saturating_add(other.software_cpu_layers);
+        self.native_cpu_transfer_layers =
+            self.native_cpu_transfer_layers.saturating_add(other.native_cpu_transfer_layers);
+        self.native_surface_layers =
+            self.native_surface_layers.saturating_add(other.native_surface_layers);
+        self.unobserved_hardware_layers =
+            self.unobserved_hardware_layers.saturating_add(other.unobserved_hardware_layers);
+        self.observed_software_native_layers = self
+            .observed_software_native_layers
+            .saturating_add(other.observed_software_native_layers);
         self.hardware_cpu_transfer_layers = self
             .hardware_cpu_transfer_layers
             .saturating_add(other.hardware_cpu_transfer_layers);
@@ -1187,6 +1229,51 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn videotoolbox_native_surface_is_not_observed_hardware_execution() {
+        let summary =
+            PreviewDecodeExecutionSummary::from_path(PreviewDecodeExecutionPath::NativeSurface {
+                backend: mondrian_media::HwAccelBackend::VideoToolbox,
+                hardware_decode_observed: None,
+                handle_kind: mondrian_media::DecodedGpuFrameHandleKind::CVPixelBuffer,
+                surface: DecodedVideoSurfaceFormat::P010,
+                sampling: mondrian_media::DecodedVideoSampling {
+                    bit_depth: 10,
+                    ..Default::default()
+                },
+            });
+        assert_eq!(summary.media_layers, 1);
+        assert_eq!(summary.native_surface_layers, 1);
+        assert_eq!(summary.unobserved_hardware_layers, 1);
+        assert_eq!(summary.hardware_native_layers, 0);
+        assert_eq!(summary.p010_10_bit_hardware_layers, 0);
+    }
+
+    #[test]
+    fn native_residency_keeps_hardware_software_and_unobserved_execution_distinct() {
+        let mut aggregate = PreviewDecodeExecutionSummary::default();
+        for observed in [None, Some(false), Some(true)] {
+            let summary = PreviewDecodeExecutionSummary::from_path(
+                PreviewDecodeExecutionPath::NativeCpuTransfer {
+                    backend: mondrian_media::HwAccelBackend::VideoToolbox,
+                    hardware_decode_observed: observed,
+                    surface: DecodedVideoSurfaceFormat::P010,
+                    sampling: mondrian_media::DecodedVideoSampling {
+                        bit_depth: 10,
+                        ..Default::default()
+                    },
+                },
+            );
+            aggregate.accumulate(summary);
+        }
+        assert_eq!(aggregate.media_layers, 3);
+        assert_eq!(aggregate.native_cpu_transfer_layers, 3);
+        assert_eq!(aggregate.unobserved_hardware_layers, 1);
+        assert_eq!(aggregate.observed_software_native_layers, 1);
+        assert_eq!(aggregate.hardware_cpu_transfer_layers, 1);
+        assert_eq!(aggregate.p010_10_bit_hardware_layers, 1);
+    }
 
     #[test]
     fn active_signal_monitoring_is_part_of_final_presentation_identity_only() {

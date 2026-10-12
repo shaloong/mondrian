@@ -111,6 +111,18 @@ handoff does the gate reset its Viewer counters and measure 30 continuous
 minutes on the final generation, so recovery work cannot satisfy the final
 callback or headless-GPU duration requirement.
 
+On macOS, the CPAL external smoke and professional A/V gate run their exact
+test in a fresh child process. Before creating App, Preview, GPU or Audio owners,
+the child calls the product's `prepare_graphics_process` entry policy. The parent
+retains the performance lock while waiting and verifies that its own native role
+is unchanged. This avoids testing under libtest's unspecified application role,
+which caps the requested playback QoS. Child failure still fails the original
+test; the two libtest success records represent one probe and its launcher.
+The existing `MONDRIAN_PREVIEW_WAIT_DIAGNOSTICS=1` and
+`MONDRIAN_PLAYBACK_CPU_DIAGNOSTICS=1` switches enable scoped warning capture in
+these tests. The professional report also retains raw coordinator stage timing;
+none of these diagnostics changes the qualification policy.
+
 Playback Evidence schema 4 replaces the old target-versus-latest-clock drift
 aggregate with completion-time phase evidence partitioned by Clock Master. The
 CPAL recovery gate requires Audio Device and Synthetic point-error,
@@ -128,15 +140,19 @@ positive `-ProcessTimeoutSeconds` parameter), drains both output streams, and
 terminates the complete descendant process tree on timeout. Per-child logs are
 retained under the run's `cargo-logs` directory, and a timeout is always an
 explicit suite failure rather than a missing report interpreted as success.
-Long Preview and CPAL reports use `product_process_tree_private_commit_v2`.
-Their JSON evidence must identify `product-process-tree` scope, the Windows
-Tool Help/Process Status Backend, a non-zero observed member-count range, and a
-complete inventory for every cadence and post-stress sample. This intentionally
-charges isolated demux and FFmpeg audio children to the same 4 GiB/plateau
-contract. `CurrentProcess`, an unsupported Adapter, a changing inventory after
-bounded retries, or one failed member query is a failed gate—not a zero-byte or
-smaller sample. Working Set and summed member lifetime peaks remain diagnostic;
-aggregate Private Commit is the acceptance metric.
+Long Preview and CPAL reports use an explicit native process-tree memory
+profile. Windows uses `product_process_tree_private_commit_v2`, with Tool Help
+inventory and aggregate Private Commit. macOS uses
+`macos_product_process_tree_physical_footprint_v1`, with two matching libproc
+PID/start-time inventories and aggregate `ri_phys_footprint`. Both profiles
+require `product-process-tree` scope, a non-zero member-count range, complete
+inventory for every cadence and post-stress sample, a 4 GiB peak cap, and at
+most 256 MiB settled growth. The macOS footprint cap is a separate budget for
+the 16 GiB qualification host; its readings are not Windows Private Commit.
+Isolated demux and FFmpeg audio children contribute to the same product-tree
+sample. `CurrentProcess`, a mismatched native backend or metric, a changing
+inventory after bounded retries, or one failed member query fails the gate.
+Resident Set and summed member lifetime peaks remain diagnostic.
 For `app_ui_scale`, both `preview_color_report` and
 `preview_playback_color_report` must be present and carry a recognized non-Fail
 verdict; the Rust producer also writes both structured reports before rejecting
@@ -340,7 +356,7 @@ current bounded-any seek window could not use the known anchors; inspect
 `seek_us`, `packet_decode_us`, and the seek-window policy before increasing
 worker counts.
 Access-mode profiles also aggregate the hardware decode contract:
-`hardware_decode_active_frames`, `zero_copy_active_frames`,
+`native_decoder_active_frames`, `zero_copy_active_frames`,
 `gpu_texture_resident_frames`, `decoded_nv12_surface_frames`,
 `decoded_p010_surface_frames`, and
 `hardware_decode_texture_residency_blocker_frames`. Renderer/platform native
@@ -642,7 +658,13 @@ $env:MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT='target/perf/viewer-gpu-output.jsonl'; ca
 The budget command prints a versioned health report and exits non-zero when the
 health stream violates the thresholds or when reported cumulative
 `health_counts` do not match the statuses replayed from the JSONL records.
-Empty JSONL streams fail with a `records` budget failure. The report's embedded
+Empty JSONL streams fail with a `records` budget failure.
+`health_counts` counts health observations submitted to the process diagnostic stream,
+including redraws of the same candidate and Window/Device reopen. The original
+preparation outcome counters are retained as `outcome_counts`; they do not count
+redraw observations or unique media frames. The process binds one diagnostic
+destination and advances observation counts before I/O so a lost write remains
+a replay mismatch. Neither counter establishes new rendered-frame throughput. The report's embedded
 summary now fails closed on missing renderer-owned stage/runtime evidence and on
 preview-candidate discontinuity unless explicitly tolerated:
 `MONDRIAN_VIEWER_GPU_OUTPUT_MAX_MISSING_RUNTIME_REPORTS`,
@@ -856,3 +878,11 @@ an attested fixture is `unqualified`; an attempted gate that fails is
 The current development machine must not be described as qualified merely
 because the contract and test targets compile. Physical execution evidence is
 produced only by the supervisor on a machine satisfying the sealed profile.
+
+Native decoder activity and hardware execution are separate observations.
+`native_decoder_active_frames` counts frames from the selected native backend;
+`hardware_decode_observed_frames`, `hardware_decode_unobserved_frames`, and
+`software_native_decode_observed_frames` distinguish its execution evidence.
+VideoToolbox CVPixelBuffer/P010 residency is valid native-path evidence while its
+current execution observation remains unavailable. Native-frame counts must not
+be reported as observed hardware decode counts.

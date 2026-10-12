@@ -8013,6 +8013,7 @@ mod tests {
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: bounds,
+                pixels_per_point: 1.0,
             });
             for (text, font, point) in &encoder.texts {
                 let (width, _) = crate::text_metrics::measure_single_line(text, *font);
@@ -8051,6 +8052,7 @@ mod tests {
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: editor.bounds,
+            pixels_per_point: 1.0,
         });
         let values = encoder
             .texts
@@ -8070,6 +8072,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 220.0, 104.0),

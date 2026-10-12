@@ -4,7 +4,8 @@ use crate::{
     CpuColorFrame, CpuSourceColorFrame, RenderColorStageDiagnostics,
     RenderColorTransformDiagnostics, RenderCpuColorExecutionSession, RenderInputTransform,
 };
-use mondrian_timeline::sequence::MediaInputColorContext;
+use mondrian_media::{DecodedVideoMatrix, DecodedVideoRangeContract, PreviewSourceColorContract};
+use mondrian_timeline::sequence::{InputColorResolutionSource, MediaInputColorContext};
 
 /// Working-space source preparation result with generic stage IR hidden.
 pub struct SourceColorRecord {
@@ -39,6 +40,25 @@ impl SourceColorRecord {
 pub struct SourceColorModule;
 
 impl SourceColorModule {
+    /// Lower an already resolved color input into the shared Media decode contract.
+    ///
+    /// Only the Sequence's missing-metadata assumption authorizes a missing
+    /// YCbCr matrix. An RGB color-space override or detected color identity
+    /// alone cannot do so. Explicit decoder matrix metadata still wins.
+    pub fn decode_contract(
+        color_space: mondrian_core::ColorSpace,
+        range: DecodedVideoRangeContract,
+        resolution_source: InputColorResolutionSource,
+    ) -> PreviewSourceColorContract {
+        let contract = PreviewSourceColorContract::new(color_space, range);
+        match resolution_source {
+            InputColorResolutionSource::MissingPolicyAssumeRec709 => {
+                contract.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709)
+            }
+            _ => contract,
+        }
+    }
+
     /// Resolve a media-input context for CPU source preparation.
     pub fn cpu_intent(context: &MediaInputColorContext) -> RenderInputTransform {
         RenderInputTransform::to_working(

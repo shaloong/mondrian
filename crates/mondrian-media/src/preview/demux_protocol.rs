@@ -13,15 +13,15 @@ use super::MediaFileFingerprint;
 use ffmpeg::codec::packet::{Mut as PacketMut, Ref as PacketRef};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::{MediaFileChangeStamp, MediaFileObjectIdentity};
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 
-const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX04";
-const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR4";
-pub(super) const PROTOCOL_VERSION: u32 = 4;
+const PROTOCOL_MAGIC: [u8; 8] = *b"MDPDMX05";
+const REQUEST_MAGIC: [u8; 8] = *b"MDPDMXR5";
+pub(super) const PROTOCOL_VERSION: u32 = 5;
 const BUILD_IDENTITY: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 const MESSAGE_OPEN_PHASE: u8 = 1;
@@ -94,7 +94,7 @@ impl DemuxWorkerCommand {
 pub(super) enum DemuxProtocolMessage {
     OpenPhase(DemuxOpenPhase),
     Stream(DemuxStreamContract),
-    SeekComplete { command_id: u64 },
+    SeekComplete { command_id: u64, error_code: i32 },
     Packet(DemuxPacket),
     End { command_id: u64 },
     Closed { command_id: u64 },
@@ -482,10 +482,12 @@ pub(super) fn write_open_phase_message(
 pub(super) fn write_seek_complete_message(
     writer: &mut impl Write,
     command_id: u64,
+    error_code: i32,
 ) -> io::Result<()> {
     validate_command_id(command_id)?;
     writer.write_all(&[MESSAGE_SEEK_COMPLETE])?;
-    write_u64(writer, command_id)
+    write_u64(writer, command_id)?;
+    write_i32(writer, error_code.min(0))
 }
 
 pub(super) fn write_packet_message(
@@ -569,7 +571,11 @@ pub(super) fn read_message(reader: &mut impl Read) -> io::Result<DemuxProtocolMe
         MESSAGE_SEEK_COMPLETE => {
             let command_id = read_u64(reader)?;
             validate_command_id(command_id)?;
-            Ok(DemuxProtocolMessage::SeekComplete { command_id })
+            let error_code = read_i32(reader)?;
+            if error_code > 0 {
+                return Err(invalid_data("invalid positive seek failure code"));
+            }
+            Ok(DemuxProtocolMessage::SeekComplete { command_id, error_code })
         }
         MESSAGE_PACKET => Ok(DemuxProtocolMessage::Packet(DemuxPacket {
             command_id: {
@@ -731,17 +737,31 @@ impl WireCodecParameters {
     }
 
     fn into_ffmpeg(self) -> io::Result<ffmpeg::codec::Parameters> {
-        let codec = ffmpeg::codec::decoder::find_by_name(&self.codec_name).ok_or_else(|| {
-            invalid_data(format!(
-                "Preview demux worker codec '{}' is unavailable in the parent runtime",
+        let name = CString::new(self.codec_name.as_str())
+            .map_err(|_| invalid_data("codec descriptor name contains NUL"))?;
+        // Descriptor identity names the encoded format, not an implementation.
+        // For example msmpeg4v3 is decoded by msmpeg4 and flv1 by flv. Validate
+        // the sealed numeric/name pair before asking the runtime for a decoder.
+        // SAFETY: name is a live NUL-terminated string; FFmpeg owns the static
+        // descriptor returned here. No wire integer is cast into a Rust enum.
+        let descriptor = unsafe { ffmpeg::ffi::avcodec_descriptor_get_by_name(name.as_ptr()) };
+        if descriptor.is_null() {
+            return Err(invalid_data(format!(
+                "codec descriptor '{}' is unavailable in the parent runtime",
                 self.codec_name
-            ))
-        })?;
-        let resolved_codec_id: ffmpeg::ffi::AVCodecID = codec.id().into();
+            )));
+        }
+        let resolved_codec_id = unsafe { (*descriptor).id };
         if resolved_codec_id as i32 != self.codec_id {
             return Err(invalid_data(format!(
                 "codec identity mismatch: numeric {}, descriptor '{}' resolves to {}",
                 self.codec_id, self.codec_name, resolved_codec_id as i32
+            )));
+        }
+        if ffmpeg::codec::decoder::find(ffmpeg::codec::Id::from(resolved_codec_id)).is_none() {
+            return Err(invalid_data(format!(
+                "codec '{}' has no registered decoder in the parent runtime",
+                self.codec_name
             )));
         }
         let mut parameters = ffmpeg::codec::Parameters::new();
@@ -1346,6 +1366,26 @@ mod tests {
     const TEST_NONCE: [u8; 16] = [0x5a; 16];
 
     #[test]
+    fn seek_receipt_preserves_failure_code_without_poisoning_the_protocol() {
+        let mut bytes = Vec::new();
+        write_seek_complete_message(&mut bytes, 1, -1).unwrap();
+        write_seek_complete_message(&mut bytes, 2, 0).unwrap();
+        let mut reader = Cursor::new(bytes);
+        assert!(matches!(
+            read_message(&mut reader).unwrap(),
+            DemuxProtocolMessage::SeekComplete { command_id: 1, error_code: -1 }
+        ));
+        assert!(matches!(
+            read_message(&mut reader).unwrap(),
+            DemuxProtocolMessage::SeekComplete { command_id: 2, error_code: 0 }
+        ));
+        let mut malformed = vec![MESSAGE_SEEK_COMPLETE];
+        malformed.extend_from_slice(&1_u64.to_le_bytes());
+        malformed.extend_from_slice(&1_i32.to_le_bytes());
+        assert!(read_message(&mut Cursor::new(malformed)).is_err());
+    }
+
+    #[test]
     fn protocol_rejects_oversized_message_before_allocation() {
         let mut bytes = Vec::new();
         write_protocol_preamble(&mut bytes, TEST_NONCE).expect("preamble");
@@ -1511,5 +1551,37 @@ mod tests {
         };
         assert_eq!(stream.keyframe_pts, [42, 3_045, 6_048]);
         assert!(stream.keyframe_index_truncated);
+    }
+
+    #[test]
+    fn stream_codec_identity_is_not_a_decoder_implementation_name() {
+        for id in [
+            ffmpeg::codec::Id::MSMPEG4V3,
+            ffmpeg::codec::Id::FLV1,
+            ffmpeg::codec::Id::AV1,
+        ] {
+            let mut parameters = ffmpeg::codec::Parameters::new();
+            unsafe {
+                (*parameters.as_mut_ptr()).codec_id = id.into();
+                (*parameters.as_mut_ptr()).codec_type =
+                    ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            }
+            let wire = WireCodecParameters::from_ffmpeg(&parameters).expect("descriptor facts");
+            let restored =
+                wire.clone().into_ffmpeg().expect("registered decoder for the encoded format");
+            assert_eq!(restored.id(), id);
+            let mut conflicting = wire.clone();
+            conflicting.codec_id = ffmpeg::ffi::AVCodecID::AV_CODEC_ID_H264 as i32;
+            assert!(
+                conflicting.into_ffmpeg().is_err(),
+                "a valid name must not authorize a different numeric codec"
+            );
+            let mut invalid = wire;
+            invalid.codec_name.push('\0');
+            assert!(
+                invalid.into_ffmpeg().is_err(),
+                "untrusted descriptor bytes must fail without a CString panic"
+            );
+        }
     }
 }

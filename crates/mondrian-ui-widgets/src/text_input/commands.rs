@@ -28,7 +28,6 @@ pub(super) fn classify_key_command(
     let exact_primary = keymap.is_exact_primary(modifiers);
     let primary_history = keymap.is_exact_primary(Modifiers { shift: false, ..modifiers });
     let word_navigation = keymap.is_word_nav(modifiers);
-    let local_navigation = keymap.is_local_nav(modifiers);
     let command_navigation = keymap.is_command_nav(modifiers);
     let plain_delete = modifiers == Modifiers::none();
 
@@ -45,10 +44,10 @@ pub(super) fn classify_key_command(
         KeyCode::C if exact_primary => Some(TextInputKeyCommand::Copy),
         KeyCode::V if exact_primary => Some(TextInputKeyCommand::Paste),
         KeyCode::X if exact_primary => Some(TextInputKeyCommand::Cut),
-        KeyCode::Left if command_navigation => {
+        KeyCode::Left | KeyCode::Up if command_navigation => {
             Some(TextInputKeyCommand::MoveHome { extend_selection: shift })
         }
-        KeyCode::Right if command_navigation => {
+        KeyCode::Right | KeyCode::Down if command_navigation => {
             Some(TextInputKeyCommand::MoveEnd { extend_selection: shift })
         }
         KeyCode::Left if word_navigation => {
@@ -65,16 +64,16 @@ pub(super) fn classify_key_command(
         }
         KeyCode::Backspace if plain_delete => Some(TextInputKeyCommand::DeleteBackward),
         KeyCode::Delete if plain_delete => Some(TextInputKeyCommand::DeleteForward),
-        KeyCode::Left if local_navigation => {
+        KeyCode::Left if keymap.is_local_nav(modifiers) => {
             Some(TextInputKeyCommand::MoveLeft { word: false, extend_selection: shift })
         }
-        KeyCode::Right if local_navigation => {
+        KeyCode::Right if keymap.is_local_nav(modifiers) => {
             Some(TextInputKeyCommand::MoveRight { word: false, extend_selection: shift })
         }
-        KeyCode::Home if local_navigation => {
+        KeyCode::Home if keymap.is_local_nav(modifiers) => {
             Some(TextInputKeyCommand::MoveHome { extend_selection: shift })
         }
-        KeyCode::End if local_navigation => {
+        KeyCode::End if keymap.is_local_nav(modifiers) => {
             Some(TextInputKeyCommand::MoveEnd { extend_selection: shift })
         }
         _ => None,
@@ -91,6 +90,46 @@ mod tests {
 
     fn ctrl_alt() -> Modifiers {
         Modifiers { ctrl: true, alt: true, ..Modifiers::none() }
+    }
+
+    #[test]
+    fn unrelated_modified_navigation_is_left_for_shortcuts_or_system() {
+        assert_eq!(
+            classify_key_command(
+                KeyCode::Left,
+                Modifiers { alt: true, ..Modifiers::none() },
+                PlatformKeymap::Windows
+            ),
+            None
+        );
+        assert_eq!(
+            classify_key_command(
+                KeyCode::Right,
+                Modifiers { meta: true, alt: true, ..Modifiers::none() },
+                PlatformKeymap::MacOs
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn delete_commands_require_no_modifiers() {
+        assert_eq!(
+            classify_key_command(KeyCode::Backspace, Modifiers::none(), PlatformKeymap::MacOs),
+            Some(TextInputKeyCommand::DeleteBackward)
+        );
+        assert_eq!(
+            classify_key_command(KeyCode::Delete, Modifiers::none(), PlatformKeymap::MacOs),
+            Some(TextInputKeyCommand::DeleteForward)
+        );
+        assert_eq!(
+            classify_key_command(KeyCode::Backspace, Modifiers::ctrl(), PlatformKeymap::MacOs),
+            None
+        );
+        assert_eq!(
+            classify_key_command(KeyCode::Delete, Modifiers::shift(), PlatformKeymap::MacOs),
+            None
+        );
     }
 
     #[test]
@@ -151,6 +190,48 @@ mod tests {
             classify_key_command(KeyCode::Right, ctrl_shift(), PlatformKeymap::Windows),
             Some(TextInputKeyCommand::MoveRight { word: true, extend_selection: true })
         );
+        assert_eq!(
+            classify_key_command(
+                KeyCode::Left,
+                Modifiers { alt: true, ..Modifiers::none() },
+                PlatformKeymap::MacOs
+            ),
+            Some(TextInputKeyCommand::MoveLeft { word: true, extend_selection: false })
+        );
+    }
+
+    #[test]
+    fn mac_command_arrows_reach_single_line_edges_and_extend_selection() {
+        let command = Modifiers { meta: true, ..Modifiers::none() };
+        let command_shift = Modifiers { meta: true, shift: true, ..Modifiers::none() };
+        for key in [KeyCode::Left, KeyCode::Up] {
+            assert_eq!(
+                classify_key_command(key, command, PlatformKeymap::MacOs),
+                Some(TextInputKeyCommand::MoveHome { extend_selection: false })
+            );
+            assert_eq!(
+                classify_key_command(key, command_shift, PlatformKeymap::MacOs),
+                Some(TextInputKeyCommand::MoveHome { extend_selection: true })
+            );
+            assert_eq!(
+                classify_key_command(key, command, PlatformKeymap::Windows),
+                None
+            );
+        }
+        for key in [KeyCode::Right, KeyCode::Down] {
+            assert_eq!(
+                classify_key_command(key, command, PlatformKeymap::MacOs),
+                Some(TextInputKeyCommand::MoveEnd { extend_selection: false })
+            );
+            assert_eq!(
+                classify_key_command(key, command_shift, PlatformKeymap::MacOs),
+                Some(TextInputKeyCommand::MoveEnd { extend_selection: true })
+            );
+            assert_eq!(
+                classify_key_command(key, command, PlatformKeymap::Linux),
+                None
+            );
+        }
     }
 
     #[test]
@@ -323,6 +404,37 @@ mod tests {
                 assert!(
                     classify_key_command(key, Modifiers { meta: true, ..word }, keymap).is_none()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn clipboard_shortcuts_use_the_platform_primary_modifier() {
+        for (keymap, primary, secondary) in [
+            (
+                PlatformKeymap::Windows,
+                Modifiers::ctrl(),
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+            (
+                PlatformKeymap::Linux,
+                Modifiers::ctrl(),
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+            (
+                PlatformKeymap::MacOs,
+                Modifiers { meta: true, ..Modifiers::none() },
+                Modifiers::ctrl(),
+            ),
+        ] {
+            for (key, expected) in [
+                (KeyCode::A, TextInputKeyCommand::SelectAll),
+                (KeyCode::C, TextInputKeyCommand::Copy),
+                (KeyCode::V, TextInputKeyCommand::Paste),
+                (KeyCode::X, TextInputKeyCommand::Cut),
+            ] {
+                assert_eq!(classify_key_command(key, primary, keymap), Some(expected));
+                assert_eq!(classify_key_command(key, secondary, keymap), None);
             }
         }
     }

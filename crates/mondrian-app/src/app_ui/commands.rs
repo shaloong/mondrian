@@ -16,7 +16,8 @@ use crate::app::ui_actions::{
     app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
     app_shell_open_project_dialog_action, app_shell_preferences_action,
     app_shell_project_settings_action, app_shell_quit_action,
-    app_shell_save_project_as_dialog_action, timeline_create_basic_title_action,
+    app_shell_save_project_as_dialog_action, app_shell_sequence_settings_action,
+    timeline_create_basic_title_action,
 };
 
 /// Stable command descriptor consumed by menus, shortcuts, and preferences.
@@ -129,6 +130,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::File,
             None,
             action_project_settings,
+        ),
+        command(
+            "file.sequence_settings",
+            "序列设置",
+            "序列设置...",
+            AppUiCommandCategory::File,
+            None,
+            app_shell_sequence_settings_action,
         ),
         command(
             "file.close_project",
@@ -429,7 +438,7 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
         command(
             "panel.export",
             "导出面板",
-            "导出",
+            "导出设置...",
             AppUiCommandCategory::Window,
             Some(ShortcutBinding::new(KeyCode::X, ctrl_alt())),
             action_focus_export,

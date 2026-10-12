@@ -364,8 +364,8 @@ impl ExportVisualRenderSession {
     ) -> Result<Option<PreparedHeterogeneousEffectRoute>, ExportHeterogeneousEffectError> {
         let cpu_exact = compiled_effect_graph_supports_rgba_f32_with_domain_processor(graph);
         if cpu_exact {
-            self.visual_diagnostics.cpu_routes_selected_before_start =
-                self.visual_diagnostics.cpu_routes_selected_before_start.saturating_add(1);
+            self.visual_diagnostics.cpu_compatible_effect_checks =
+                self.visual_diagnostics.cpu_compatible_effect_checks.saturating_add(1);
             return Ok(None);
         }
         if !graph.execution_envelope().requires_execution_transitions() {

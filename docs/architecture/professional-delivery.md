@@ -229,7 +229,11 @@ CineCert. The package builder emits SMPTE CPL/PKL/AssetMap documents, then the
 DCP-o-matic/libdcp verifier checks the complete directory, assets, hashes, XML,
 JPEG 2000, and MXF. The current row targets baseline SMPTE DCP, not the stricter
 SMPTE Bv2.1 profile: Bv2.1 findings are retained as a distinct verifier class,
-while any ordinary interoperability `Error` fails the export.
+while any ordinary interoperability `Error` fails the export. The verifier must
+also complete with a successful process exit and a complete bounded report.
+Warnings and Bv2.1 findings never excuse a crash, signal, non-zero exit, or
+truncated report. The production Export owner and independent qualification
+entry use the same supervised result interpretation.
 
 ## Package graph
 

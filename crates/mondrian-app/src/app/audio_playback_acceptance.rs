@@ -150,6 +150,7 @@ pub(crate) struct ProfessionalVideoCoordinatorObservation {
     pub(crate) max_consecutive_stale: u64,
     pub(crate) stale_ready: u64,
     pub(crate) stale_queued_ready: u64,
+    pub(crate) stale_presented_degraded: u64,
     pub(crate) stale_in_flight: u64,
     pub(crate) stale_loading: u64,
     pub(crate) stale_backpressured: u64,
@@ -161,6 +162,7 @@ impl ProfessionalVideoCoordinatorObservation {
     fn classified_stale(self) -> u64 {
         self.stale_ready
             .saturating_add(self.stale_queued_ready)
+            .saturating_add(self.stale_presented_degraded)
             .saturating_add(self.stale_in_flight)
             .saturating_add(self.stale_loading)
             .saturating_add(self.stale_backpressured)
@@ -736,7 +738,7 @@ pub(crate) fn evaluate_professional_audio_playback(
         push_failure(
             &mut failures,
             "product_process_tree_memory_gate_failed",
-            "product_process_tree_private_commit_v2 passes",
+            format!("{} passes", process_memory.profile_name()),
             "failed",
             "fixed-cadence complete Mondrian process-tree memory evidence",
         );
@@ -1169,10 +1171,14 @@ mod tests {
         let evidence = passing_playback_evidence();
         let mut memory_collector =
             super::super::playback_acceptance::PreviewProcessMemoryEvidenceCollector::default();
+        #[cfg(target_os = "macos")]
+        let memory_backend = ProcessMemoryProbeBackend::MacOsLibprocProcessTree;
+        #[cfg(not(target_os = "macos"))]
+        let memory_backend = ProcessMemoryProbeBackend::WindowsToolhelpProcessTree;
         let memory_sample = || {
             ProcessMemoryProbeResult::observed(
                 mondrian_platform::ProcessMemoryScope::ProductProcessTree,
-                ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                memory_backend,
                 3,
                 1,
                 512 * 1024 * 1024,

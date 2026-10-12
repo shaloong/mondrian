@@ -41,6 +41,8 @@ pub(super) struct PerfWorkerClosureReport {
 pub(super) struct PerfProjectClosureReport {
     pub(super) session_was_open: bool,
     pub(super) pending_close_was_active: bool,
+    pub(super) pending_open_was_active: bool,
+    pub(super) pending_open_released: bool,
     pub(super) authoring_session_released: bool,
     pub(super) pending_close_released: bool,
     pub(super) runtime_lease_released: bool,
@@ -239,6 +241,8 @@ impl PerfAppClosureReport {
         let project = PerfProjectClosureReport {
             session_was_open: evidence.project.session_was_open,
             pending_close_was_active: evidence.project.pending_close_was_active,
+            pending_open_was_active: evidence.project.pending_open_was_active,
+            pending_open_released: evidence.project.pending_open_released,
             authoring_session_released: evidence.project.authoring_session_released,
             pending_close_released: evidence.project.pending_close_released,
             runtime_lease_released: evidence.project.runtime_lease_released,

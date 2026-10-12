@@ -1,6 +1,63 @@
 use super::*;
 
 #[test]
+fn frame_period_uses_the_bound_grid_and_active_signed_rate() {
+    for (grid, rate, period_ns) in [
+        (Rational::new(1, 24), PlaybackRate::FORWARD_1X, 41_666_667),
+        (
+            Rational::new(1001, 30000),
+            PlaybackRate::FORWARD_1X,
+            33_366_667,
+        ),
+        (Rational::new(1, 60), PlaybackRate::FORWARD_1X, 16_666_667),
+        (Rational::new(1, 60), PlaybackRate::REVERSE_1X, 16_666_667),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(2, 1).unwrap(),
+            8_333_334,
+        ),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(-2, 1).unwrap(),
+            8_333_334,
+        ),
+        (
+            Rational::new(1, 60),
+            PlaybackRate::new(1, 2).unwrap(),
+            33_333_334,
+        ),
+        (
+            Rational::new(1001, 24000),
+            PlaybackRate::new(1, 2).unwrap(),
+            83_416_667,
+        ),
+    ] {
+        let mut engine = PlaybackEngine::new(grid, PlaybackPolicy::default()).unwrap();
+        engine.rate = rate;
+        let before = engine.snapshot();
+        assert_eq!(engine.frame_period(), Ok(Duration::from_nanos(period_ns)));
+        assert_eq!(
+            engine.snapshot(),
+            before,
+            "a diagnostic budget cannot advance transport"
+        );
+    }
+}
+
+#[test]
+fn frame_period_fails_closed_when_duration_cannot_be_represented() {
+    let mut engine =
+        PlaybackEngine::new(Rational::new(i64::MAX, 1), PlaybackPolicy::default()).unwrap();
+    engine.rate = PlaybackRate::new(1, u16::MAX).unwrap();
+    let before = engine.snapshot();
+    assert_eq!(
+        engine.frame_period(),
+        Err(PlaybackError::TransportArithmeticOverflow)
+    );
+    assert_eq!(engine.snapshot(), before);
+}
+
+#[test]
 fn authoritative_monotonic_timestamp_addition_fails_closed_on_overflow() {
     assert_eq!(
         MonotonicTimestamp::ZERO.checked_add(Duration::from_millis(5)),
@@ -108,7 +165,7 @@ fn engine_application_binds_delivery_target_snapshot_and_same_instant_phase() {
 
     assert!(application.accepted());
     assert_eq!(application.delivery(), delivery);
-    assert_eq!(application.target(), Some(demand.target));
+    assert_eq!(application.demand(), Some(demand));
     assert_eq!(application.snapshot(), engine.snapshot());
     assert_eq!(phase.epoch(), demand.epoch);
     assert_eq!(phase.master(), ClockMaster::Synthetic);
@@ -768,6 +825,160 @@ fn refreshed_audio_point_cannot_rewind_an_already_extrapolated_phase() {
         engine.audio_device_anchor.expect("retained anchor").last_uncertainty_frames,
         752
     );
+}
+
+#[test]
+fn slower_audio_device_does_not_accumulate_wall_clock_phase_correction() {
+    let mut engine = engine();
+    engine.play(100_000, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("prime");
+    let sample_rate = AudioSampleRate::new(48_000).expect("sample rate");
+    let mut initial = audio_observation(&engine, 1_000, ts(0));
+    initial.uncertainty_frames = 512;
+    engine.observe_audio_device_clock(initial).expect("acquire audio");
+
+    // A physical device may differ from the host monotonic clock by a few
+    // parts per million. Over thirty minutes, 10 ppm is 18 ms: larger than
+    // one callback's uncertainty, but no single callback is implausible.
+    let mut previous_sample = 0;
+    for frame in 1..=54_000_u64 {
+        let observed_at =
+            MonotonicTimestamp::from_duration(Duration::from_nanos(frame * 1_000_000_000 / 30));
+        engine.tick(observed_at).expect("advance between callbacks");
+        let nominal_frames = frame * 1_600;
+        let device_frames = nominal_frames - nominal_frames / 100_000;
+        let mut observation = audio_observation(&engine, 1_000 + device_frames, observed_at);
+        observation.uncertainty_frames = 512;
+        let snapshot = engine.observe_audio_device_clock(observation).expect("observe device");
+        assert_eq!(snapshot.clock_master, Some(ClockMaster::AudioDevice));
+        let sample = engine
+            .authoritative_audio_sample_position_at(snapshot.epoch, observed_at, sample_rate)
+            .expect("monotonic device phase")
+            .sample();
+        assert!(sample >= previous_sample);
+        previous_sample = sample;
+    }
+
+    assert!(
+        engine.audio_device_anchor.expect("device anchor").last_uncertainty_frames <= 514,
+        "wall-clock extrapolation must not feed its error back into the device sample"
+    );
+}
+
+#[test]
+fn author_revision_replaces_pending_and_consumed_stills_at_the_same_coordinate() {
+    for completed in [false, true] {
+        let mut engine = engine();
+        engine
+            .seek_timeline(
+                timeline_binding(100),
+                FramePosition::new(4, Rational::new(1, 25)),
+                ts(0),
+            )
+            .unwrap();
+        let old = engine.frame_demand().unwrap();
+        if completed {
+            engine
+                .observe_frame_delivery(current_delivery(&engine, FrameDeliveryKind::Ready, ts(0)))
+                .unwrap();
+        }
+        let snapshot = engine.snapshot();
+        let binding = PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 100).unwrap();
+        assert_eq!(engine.revise_timeline(binding, ts(1)).unwrap(), snapshot);
+        let new = engine.pending_frame_demand().unwrap();
+        assert_eq!(new.timeline_revision, 2);
+        assert_eq!(new.target, old.target);
+        assert_eq!(new.deadline, None);
+        assert_ne!(new.identity(), old.identity());
+        assert!(!engine
+            .observe_frame_delivery(
+                FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                    .complete_at(ts(2))
+            )
+            .unwrap()
+            .accepted());
+        assert_eq!(engine.pending_frame_demand(), Some(new));
+    }
+}
+
+#[test]
+fn author_revision_preserves_running_clock_phase_and_never_extends_deadlines() {
+    for priming in [false, true] {
+        let mut engine = engine();
+        engine
+            .play_timeline(
+                timeline_binding(100),
+                FramePosition::new(0, Rational::new(1, 25)),
+                ts(0),
+            )
+            .unwrap();
+        if !priming {
+            engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+        }
+        let mut control = engine.clone();
+        let old = engine.frame_demand().unwrap();
+        let before = engine.snapshot();
+        let binding = PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 100).unwrap();
+        assert_eq!(engine.revise_timeline(binding, ts(10)).unwrap(), before);
+        let new = engine.pending_frame_demand().unwrap();
+        assert_eq!(new.deadline, old.deadline);
+        assert_eq!(new.timeline_revision, 2);
+        assert_ne!(new.identity(), old.identity());
+        let later = if priming { ts(500) } else { ts(45) };
+        assert_eq!(engine.tick(later).unwrap(), control.tick(later).unwrap());
+    }
+}
+
+#[test]
+fn dependency_edit_with_unchanged_root_revision_still_invalidates_picture() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(4, Rational::new(1, 25)),
+            ts(0),
+        )
+        .unwrap();
+    let old = engine.frame_demand().unwrap();
+    engine.revise_timeline(timeline_binding(100), ts(1)).unwrap();
+    let new = engine.pending_frame_demand().unwrap();
+    assert_eq!(new.timeline_revision, old.timeline_revision);
+    assert_ne!(new.identity(), old.identity());
+}
+
+#[test]
+fn invalid_author_binding_preserves_entire_current_demand_and_clock() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(4, Rational::new(1, 25)),
+            ts(0),
+        )
+        .unwrap();
+    let before = engine.snapshot();
+    let demand = engine.frame_demand();
+    for (binding, expected) in [
+        (
+            PlaybackTimelineBinding::new(Some(SequenceId::new()), 2, Rational::new(1, 25), 100)
+                .unwrap(),
+            PlaybackError::MismatchedTimelineSequence,
+        ),
+        (
+            PlaybackTimelineBinding::new(None, 2, Rational::new(1, 30), 100).unwrap(),
+            PlaybackError::MismatchedTimelineTimeBase,
+        ),
+        (
+            PlaybackTimelineBinding::new(None, 2, Rational::new(1, 25), 3).unwrap(),
+            PlaybackError::InvalidTimelineExtent,
+        ),
+    ] {
+        assert_eq!(engine.revise_timeline(binding, ts(1)), Err(expected));
+        assert_eq!(engine.snapshot(), before);
+        assert_eq!(engine.frame_demand(), demand);
+        assert_eq!(engine.monotonic_high_water(), ts(0));
+        assert_eq!(engine.timeline_revision(), 1);
+    }
 }
 
 #[test]
@@ -1878,6 +2089,49 @@ fn audio_clock_wake_does_not_sleep_past_the_projected_video_boundary() {
 }
 
 #[test]
+fn expired_presentation_wake_is_consumed_without_renewing_the_demand_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    let demand = engine.pending_frame_demand().expect("pending picture");
+    let deadline = demand.deadline.expect("timed picture");
+    assert_eq!(deadline, ts(20));
+    assert_eq!(
+        engine.next_wake(deadline).unwrap().unwrap().after(),
+        Duration::ZERO
+    );
+
+    engine.tick(deadline).unwrap();
+    for _ in 0..100 {
+        assert_eq!(engine.pending_frame_demand(), Some(demand));
+        assert!(engine.next_wake(deadline).unwrap().unwrap().after() > Duration::ZERO);
+        engine.tick(deadline).unwrap();
+    }
+    let ticket = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
+    let delivery = ticket.complete_at(ts(21));
+    assert_eq!(delivery.kind(), FrameDeliveryKind::Degraded);
+    let beyond_grace = deadline
+        .checked_add(Duration::from_nanos(demand.late_presentation_grace_ns + 1))
+        .unwrap();
+    assert_eq!(
+        ticket.complete_at(beyond_grace).kind(),
+        FrameDeliveryKind::Late
+    );
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+
+    engine.tick(ts(40)).unwrap();
+    let successor = engine.pending_frame_demand().expect("next picture");
+    assert_ne!(successor.identity(), demand.identity());
+    let successor_deadline = successor.deadline.unwrap();
+    assert_eq!(
+        engine.next_wake(successor_deadline).unwrap().unwrap().after(),
+        Duration::ZERO
+    );
+    engine.tick(successor_deadline).unwrap();
+    assert!(engine.next_wake(successor_deadline).unwrap().unwrap().after() > Duration::ZERO);
+}
+
+#[test]
 fn invalid_recovery_policy_is_rejected_at_the_interface() {
     let result = PlaybackEngine::new(
         Rational::new(1, 25),
@@ -2398,6 +2652,99 @@ fn native_audio_control_hold_keeps_exact_phase_intent_and_pending_output_wake() 
 }
 
 #[test]
+fn author_revision_preserves_native_hold_still_and_output_retirement() {
+    for consumed in [false, true] {
+        for finalized in [false, true] {
+            let mut value = native_hold_audio_engine();
+            let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
+            if consumed {
+                assert!(value
+                    .observe_frame_delivery(current_delivery(
+                        &value,
+                        FrameDeliveryKind::Ready,
+                        ts(45),
+                    ))
+                    .expect("consume held still")
+                    .accepted());
+            }
+            if finalized {
+                assert!(value
+                    .finalize_native_audio_control_hold(ticket, None, ts(50))
+                    .expect("controlled output-retirement proof"));
+                if consumed {
+                    // Finalization publishes a fresh still. Consume that demand
+                    // too so revision is exercised against a consumed picture.
+                    assert!(value
+                        .observe_frame_delivery(current_delivery(
+                            &value,
+                            FrameDeliveryKind::Ready,
+                            ts(55),
+                        ))
+                        .expect("consume finalized held still")
+                        .accepted());
+                }
+            }
+            let before = value.snapshot();
+            let sample = native_hold_sample(&value, ts(60));
+            let old = value.frame_demand().expect("held still before revision");
+            assert_eq!(before.state, TransportState::HoldingForNativeAudioControl);
+            assert_eq!(before.clock_master, None);
+            assert_eq!(sample, 1_920);
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(old.kind, FrameDemandKind::PersistentStill);
+            assert_eq!(old.deadline, None);
+            assert_eq!(value.pending_frame_demand().is_none(), consumed);
+            assert_eq!(
+                value.native_audio_control_hold.expect("retained native hold").finalized,
+                finalized
+            );
+            let binding = PlaybackTimelineBinding::new(
+                value.sequence_id,
+                2,
+                before.position.time_base,
+                value.end_frame,
+            )
+            .expect("same Sequence and grid, revised author content");
+            assert_eq!(
+                value.revise_timeline(binding, ts(60)).expect("revision"),
+                before
+            );
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(native_hold_sample(&value, ts(60)), sample);
+            let revised = value.pending_frame_demand().expect("revised held still");
+            assert_ne!(revised.identity(), old.identity());
+            assert_eq!(revised.timeline_revision, 2);
+            assert_eq!(revised.epoch, before.epoch);
+            assert_eq!(revised.target, before.position);
+            assert_eq!(revised.kind, FrameDemandKind::PersistentStill);
+            assert_eq!(revised.deadline, None);
+            assert!(!value
+                .observe_frame_delivery(
+                    FrameDeliveryCandidate::for_demand(old.identity(), FrameDeliveryKind::Ready)
+                        .complete_at(ts(65)),
+                )
+                .expect("reject old still authority")
+                .accepted());
+            assert_eq!(value.pending_frame_demand(), Some(revised));
+            assert_eq!(value.tick(ts(120_000)).expect("frozen native wait"), before);
+            assert_eq!(value.native_audio_control_hold_ticket(), Some(ticket));
+            assert_eq!(native_hold_sample(&value, ts(120_000)), sample);
+            let wake = value.next_wake(ts(120_000)).expect("output-retirement wake");
+            if finalized {
+                assert_eq!(wake, None);
+            } else {
+                let wake = wake.expect("pending callback retirement");
+                assert_eq!(
+                    wake.reason(),
+                    PlaybackWakeReason::NativeAudioOutputQuiescence
+                );
+                assert_eq!(wake.after(), Duration::from_millis(2));
+            }
+        }
+    }
+}
+
+#[test]
 fn native_audio_control_hold_finalizes_only_matching_quiesced_device_evidence() {
     let mut value = native_hold_audio_engine();
     let ticket = value.hold_for_native_audio_control(17, None, ts(40)).expect("hold");
@@ -2443,6 +2790,24 @@ fn native_audio_control_hold_ignores_ordinary_device_observations() {
         TransportState::HoldingForNativeAudioControl
     );
     assert_eq!(native_hold_sample(&value, ts(120_000)), 1_920);
+}
+
+#[test]
+fn native_audio_control_hold_preserves_phase_floor_until_device_catches_up() {
+    let mut value = native_hold_audio_engine();
+    value.audio_device_anchor.as_mut().expect("device anchor").phase_floor_ns = Some(41_000_000);
+    let mut observation = audio_observation(&value, 2_400, ts(40));
+    observation.estimated_latency_frames = 480;
+    let ticket = value
+        .hold_for_native_audio_control(17, Some(observation), ts(40))
+        .expect("hold keeps published floor");
+    assert_eq!(native_hold_sample(&value, ts(40)), 1_968);
+    let mut final_observation = audio_observation(&value, 2_496, ts(42));
+    final_observation.estimated_latency_frames = 480;
+    assert!(value
+        .finalize_native_audio_control_hold(ticket, Some(final_observation), ts(42))
+        .expect("device catches up"));
+    assert_eq!(native_hold_sample(&value, ts(42)), 2_016);
 }
 
 #[test]

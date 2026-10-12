@@ -26,6 +26,7 @@ const PRODUCT_LOG_FILE_RETENTION: usize = 8;
 /// process return.
 pub(crate) struct ProductTracingGuard {
     _file_guard: Option<WorkerGuard>,
+    _console_guard: Option<WorkerGuard>,
 }
 
 /// Install the sole product tracing subscriber.
@@ -56,11 +57,12 @@ pub(crate) fn init_product_tracing(
             .with_thread_names(true)
             .with_writer(writer)
     });
+    let (console_writer, console_guard) = crate::diagnostic_logging::buffered_stderr();
     let console_layer = tracing_subscriber::fmt::layer()
         .compact()
         .with_thread_ids(true)
         .with_thread_names(true)
-        .with_writer(std::io::stderr);
+        .with_writer(console_writer);
 
     if tracing_subscriber::registry()
         .with(app_ui_log_filter())
@@ -70,7 +72,7 @@ pub(crate) fn init_product_tracing(
         .is_err()
     {
         eprintln!("Mondrian tracing subscriber was already initialized; product logging skipped");
-        return ProductTracingGuard { _file_guard: None };
+        return ProductTracingGuard { _file_guard: None, _console_guard: None };
     }
 
     if let Some(directory) = log_directory {
@@ -83,7 +85,10 @@ pub(crate) fn init_product_tracing(
         tracing::warn!("persistent product logging unavailable; stderr remains active");
     }
 
-    ProductTracingGuard { _file_guard: file_guard }
+    ProductTracingGuard {
+        _file_guard: file_guard,
+        _console_guard: Some(console_guard),
+    }
 }
 
 fn app_ui_log_filter() -> EnvFilter {

@@ -362,18 +362,14 @@ impl AppState {
                 step_id: "audio_edit_automation".to_owned(),
                 reason: "当前没有活动序列".to_owned(),
             })?;
-        let outcome =
-            self.commit_sequence_edit(sequence_id, "编辑音频自动化", |sequence| {
-                apply_audio_automation_edit(sequence, &request).map_err(|error| {
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "audio_edit_automation".to_owned(),
-                        reason: error.to_string(),
-                    }
-                })
-            })?;
-        if outcome.changed {
-            self.reconcile_audio_after_committed_authoring_change("audio_edit_automation");
-        }
+        self.commit_sequence_edit(sequence_id, "编辑音频自动化", |sequence| {
+            apply_audio_automation_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "audio_edit_automation".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
         Ok(())
     }
 
@@ -399,7 +395,6 @@ impl AppState {
                 reason: "Audio Component already has the requested value".to_owned(),
             });
         }
-        self.reconcile_audio_after_committed_authoring_change("audio_edit_component");
         Ok(())
     }
 
@@ -578,7 +573,7 @@ impl AppState {
                 step_id: "audio_edit_routing".to_owned(),
                 reason: "当前没有活动序列".to_owned(),
             })?;
-        let outcome = self.commit_sequence_edit(sequence_id, "编辑音频路由", |sequence| {
+        self.commit_sequence_edit(sequence_id, "编辑音频路由", |sequence| {
             apply_audio_routing_edit(sequence, &request).map_err(|error| {
                 MondrianError::WorkflowStepFailed {
                     step_id: "audio_edit_routing".to_owned(),
@@ -586,9 +581,6 @@ impl AppState {
                 }
             })
         })?;
-        if outcome.changed {
-            self.reconcile_audio_after_committed_authoring_change("audio_edit_routing");
-        }
         Ok(())
     }
 
@@ -598,18 +590,14 @@ impl AppState {
                 step_id: "audio_edit_channel_strip".to_owned(),
                 reason: "当前没有活动序列".to_owned(),
             })?;
-        let outcome =
-            self.commit_sequence_edit(sequence_id, "编辑音频通道条", |sequence| {
-                apply_audio_channel_strip_edit(sequence, &request).map_err(|error| {
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "audio_edit_channel_strip".to_owned(),
-                        reason: error.to_string(),
-                    }
-                })
-            })?;
-        if outcome.changed {
-            self.reconcile_audio_after_committed_authoring_change("audio_edit_channel_strip");
-        }
+        self.commit_sequence_edit(sequence_id, "编辑音频通道条", |sequence| {
+            apply_audio_channel_strip_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "audio_edit_channel_strip".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
         Ok(())
     }
 
@@ -619,18 +607,14 @@ impl AppState {
                 step_id: "audio_processor_edit_rack".to_owned(),
                 reason: "当前没有活动序列".to_owned(),
             })?;
-        let outcome =
-            self.commit_sequence_edit(sequence_id, "编辑音频处理器", |sequence| {
-                apply_audio_processor_rack_edit(sequence, &request).map_err(|error| {
-                    MondrianError::WorkflowStepFailed {
-                        step_id: "audio_processor_edit_rack".to_owned(),
-                        reason: error.to_string(),
-                    }
-                })
-            })?;
-        if outcome.changed {
-            self.reconcile_audio_after_committed_authoring_change("audio_processor_edit_rack");
-        }
+        self.commit_sequence_edit(sequence_id, "编辑音频处理器", |sequence| {
+            apply_audio_processor_rack_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "audio_processor_edit_rack".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
         Ok(())
     }
 }

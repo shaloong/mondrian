@@ -163,6 +163,22 @@ impl TimelineAudioPcmRenderer {
         *self.author_snapshot.get_mut() = Some(Arc::new(snapshot));
     }
 
+    /// Refresh permission metadata only after App proves the audible binding
+    /// unchanged. This neither installs a Program nor acquires native/DSP state.
+    pub(super) fn rebind_unchanged_author_snapshot(
+        &self,
+        snapshot: mondrian_editor_state::AuthorExecutionSnapshot,
+    ) -> std::result::Result<(), mondrian_editor_state::AuthorExecutionAdmissionError> {
+        let next = Arc::new(snapshot);
+        let mut metadata = self.author_snapshot.write();
+        let author_guard = next.enter_commit()?;
+        let retired = metadata.replace(Arc::clone(&next));
+        drop(author_guard);
+        drop(metadata);
+        drop(retired);
+        Ok(())
+    }
+
     pub(super) fn native_author_snapshot_current(&self) -> bool {
         self.author_snapshot
             .read()

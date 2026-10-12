@@ -11,13 +11,21 @@ use mondrian_media::{
     ResidentEncodeColorimetry,
 };
 
+use crate::GpuColorFrameTextureFormat;
 #[cfg(target_os = "windows")]
 use crate::GpuResidentEncoderInputLease;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 use crate::{
     ColorFrameAlpha, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace,
-    GpuColorFrameContract, GpuColorFrameTextureFormat,
+    GpuColorFrameContract,
 };
 
+#[cfg(target_os = "macos")]
+mod metal_encode;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod yuv_conversion;
+#[cfg(target_os = "macos")]
+pub use metal_encode::{MetalResidentEncodeAdapter, MetalResidentEncodeAdapterDiagnostics};
 #[cfg(target_os = "linux")]
 mod vulkan_cuda_encode;
 #[cfg(target_os = "linux")]
@@ -57,21 +65,21 @@ impl ResidentEncodeAdapterContract {
         }
     }
 
-    /// Validate platform-independent dimensions, cadence, and signal identity.
-    pub fn validate_static(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+    /// Validate the exact dimensions, cadence, and signal supported by D3D12 Video Process.
+    pub fn validate_d3d12(self) -> Result<(), ResidentEncodeAdapterCreateError> {
         self.validate_common()?;
         if self.colorimetry == ResidentEncodeColorimetry::Rec2100Hlg {
-            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+            return Err(ResidentEncodeAdapterCreateError::UnsupportedSignal {
                 reason: "D3D12 Video Process exposes no exact RGB HLG color-space identity",
             });
         }
         if self.full_range && self.colorimetry == ResidentEncodeColorimetry::Rec2100Pq {
-            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+            return Err(ResidentEncodeAdapterCreateError::UnsupportedSignal {
                 reason: "D3D12 Video Process exposes no exact full-range PQ YCbCr identity",
             });
         }
         if self.chroma_location != ResidentEncodeChromaLocation::Left {
-            return Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal {
+            return Err(ResidentEncodeAdapterCreateError::UnsupportedSignal {
                 reason: "D3D12 Video Process resident 4:2:0 output is left-sited",
             });
         }
@@ -80,41 +88,57 @@ impl ResidentEncodeAdapterContract {
 
     /// Validate dimensions, cadence, and signal identity for Vulkan/CUDA conversion.
     #[cfg(target_os = "linux")]
-    pub fn validate_vulkan_cuda(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+    pub fn validate_vulkan_cuda(self) -> Result<(), ResidentEncodeAdapterCreateError> {
         self.validate_common()
     }
 
-    fn validate_common(self) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+    /// Logical private-buffer bytes for the shared compute transport, counted once.
+    pub fn compute_transport_byte_len(self) -> Result<u64, ResidentEncodeAdapterCreateError> {
+        self.validate_common()?;
+        let component_bytes = if self.bit_depth == ResidentEncodeBitDepth::Ten {
+            2
+        } else {
+            1
+        };
+        let pitch = (u64::from(self.width) * component_bytes).div_ceil(256) * 256;
+        pitch.checked_mul(u64::from(self.height) + u64::from(self.height / 2)).ok_or(
+            ResidentEncodeAdapterCreateError::InvalidDimensions {
+                width: self.width,
+                height: self.height,
+            },
+        )
+    }
+
+    fn validate_common(self) -> Result<(), ResidentEncodeAdapterCreateError> {
         if self.width == 0
             || self.height == 0
             || !self.width.is_multiple_of(2)
             || !self.height.is_multiple_of(2)
         {
-            return Err(D3D12ResidentEncodeAdapterCreateError::InvalidDimensions {
+            return Err(ResidentEncodeAdapterCreateError::InvalidDimensions {
                 width: self.width,
                 height: self.height,
             });
         }
         if self.frame_rate_num == 0 || self.frame_rate_den == 0 {
-            return Err(D3D12ResidentEncodeAdapterCreateError::InvalidFrameRate {
+            return Err(ResidentEncodeAdapterCreateError::InvalidFrameRate {
                 numerator: self.frame_rate_num,
                 denominator: self.frame_rate_den,
             });
         }
         if self.max_frames_in_flight == 0 {
-            return Err(D3D12ResidentEncodeAdapterCreateError::ZeroInFlightLimit);
+            return Err(ResidentEncodeAdapterCreateError::ZeroInFlightLimit);
         }
         Ok(())
     }
 }
 
-/// Backward-compatible name for the single resident conversion contract.
-pub type D3D12ResidentEncodeAdapterContract = ResidentEncodeAdapterContract;
-
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", test))]
 fn validate_resident_source_contract(
     contract: ResidentEncodeAdapterContract,
     actual: GpuColorFrameContract,
-) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    supports_float32: bool,
+) -> Result<(), ResidentEncodeSubmissionError> {
     let expected_space = match contract.colorimetry {
         ResidentEncodeColorimetry::Rec709 => mondrian_core::types::ColorSpace::Rec709,
         ResidentEncodeColorimetry::Rec2100Pq => mondrian_core::types::ColorSpace::Rec2100Pq,
@@ -132,9 +156,12 @@ fn validate_resident_source_contract(
         || descriptor.encoding != expected_encoding
         || descriptor.residency != ColorFrameResidency::Gpu
         || descriptor.alpha != ColorFrameAlpha::Opaque
-        || actual.texture_format != contract.source_texture_format()
+        || !(actual.texture_format == contract.source_texture_format()
+            || (supports_float32
+                && contract.bit_depth == ResidentEncodeBitDepth::Ten
+                && actual.texture_format == GpuColorFrameTextureFormat::Rgba32Float))
     {
-        return Err(D3D12ResidentEncodeSubmissionError::SourceContract {
+        return Err(ResidentEncodeSubmissionError::SourceContract {
             reason: format!(
                 "expected {}x{} {:?}/{:?}/{:?}/GPU/opaque/{:?}, got {:?}",
                 contract.width,
@@ -152,7 +179,7 @@ fn validate_resident_source_contract(
 
 /// Failure to create an exact-device resident encoder Adapter.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum D3D12ResidentEncodeAdapterCreateError {
+pub enum ResidentEncodeAdapterCreateError {
     /// The active wgpu objects are not D3D12 objects.
     #[error("resident encode requires a wgpu DX12 {object}")]
     WrongBackend { object: &'static str },
@@ -180,7 +207,7 @@ pub enum D3D12ResidentEncodeAdapterCreateError {
     /// Native object construction failed.
     #[error("resident encode D3D12 stage {stage} failed: {reason}")]
     D3D12 { stage: &'static str, reason: String },
-    /// Native Linux interop construction failed.
+    /// Native platform interop construction failed.
     #[error("resident encode {backend} stage {stage} failed: {reason}")]
     Native {
         backend: &'static str,
@@ -194,7 +221,7 @@ pub enum D3D12ResidentEncodeAdapterCreateError {
 
 /// Failure while converting one resident renderer output.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum D3D12ResidentEncodeSubmissionError {
+pub enum ResidentEncodeSubmissionError {
     /// Renderer output does not match the sealed Adapter contract.
     #[error("resident encode source contract mismatch: {reason}")]
     SourceContract { reason: String },
@@ -207,7 +234,7 @@ pub enum D3D12ResidentEncodeSubmissionError {
     /// Native queue recording or synchronization failed.
     #[error("resident encode D3D12 stage {stage} failed: {reason}")]
     D3D12 { stage: &'static str, reason: String },
-    /// Native Linux conversion, synchronization, or copy failed.
+    /// Native platform conversion, synchronization, or copy failed.
     #[error("resident encode {backend} stage {stage} failed: {reason}")]
     Native {
         backend: &'static str,
@@ -242,7 +269,7 @@ pub struct D3D12ResidentEncodeAdapter {
             reason = "Creation fails on non-D3D12 platforms; retain the private contract field."
         )
     )]
-    contract: D3D12ResidentEncodeAdapterContract,
+    contract: ResidentEncodeAdapterContract,
     #[cfg(target_os = "windows")]
     inner: windows_impl::AdapterInner,
 }
@@ -252,9 +279,9 @@ impl D3D12ResidentEncodeAdapter {
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        contract: D3D12ResidentEncodeAdapterContract,
-    ) -> Result<Self, D3D12ResidentEncodeAdapterCreateError> {
-        contract.validate_static()?;
+        contract: ResidentEncodeAdapterContract,
+    ) -> Result<Self, ResidentEncodeAdapterCreateError> {
+        contract.validate_d3d12()?;
         #[cfg(target_os = "windows")]
         {
             Ok(Self {
@@ -265,7 +292,7 @@ impl D3D12ResidentEncodeAdapter {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = (device, queue);
-            Err(D3D12ResidentEncodeAdapterCreateError::WrongBackend { object: "device" })
+            Err(ResidentEncodeAdapterCreateError::WrongBackend { object: "device" })
         }
     }
 
@@ -285,7 +312,7 @@ impl D3D12ResidentEncodeAdapter {
         &mut self,
         source: GpuResidentEncoderInputLease,
         destination: D3D12ResidentEncodeInputFrame,
-    ) -> Result<D3D12ResidentEncodeReadyFrame, D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<D3D12ResidentEncodeReadyFrame, ResidentEncodeSubmissionError> {
         self.inner.process(self.contract, source, destination)
     }
 
@@ -376,12 +403,12 @@ mod windows_impl {
         pub(super) fn new(
             device: &wgpu::Device,
             queue: &wgpu::Queue,
-            contract: D3D12ResidentEncodeAdapterContract,
-        ) -> Result<Self, D3D12ResidentEncodeAdapterCreateError> {
+            contract: ResidentEncodeAdapterContract,
+        ) -> Result<Self, ResidentEncodeAdapterCreateError> {
             let hal_device = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
-                .ok_or(D3D12ResidentEncodeAdapterCreateError::WrongBackend { object: "device" })?;
+                .ok_or(ResidentEncodeAdapterCreateError::WrongBackend { object: "device" })?;
             let hal_queue = unsafe { queue.as_hal::<wgpu::hal::api::Dx12>() }
-                .ok_or(D3D12ResidentEncodeAdapterCreateError::WrongBackend { object: "queue" })?;
+                .ok_or(ResidentEncodeAdapterCreateError::WrongBackend { object: "queue" })?;
             let raw_device = hal_device.raw_device().clone();
             let raw_direct_queue = hal_queue.as_raw().clone();
             drop(hal_queue);
@@ -417,8 +444,8 @@ mod windows_impl {
             let encoder_device_root = RendererHwAccelDeviceContext::from_d3d12_device(
                 raw_device.clone(),
             )
-            .map_err(|error| {
-                D3D12ResidentEncodeAdapterCreateError::MediaDeviceRoot { reason: error.to_string() }
+            .map_err(|error| ResidentEncodeAdapterCreateError::MediaDeviceRoot {
+                reason: error.to_string(),
             })?;
             Ok(Self {
                 raw_device,
@@ -441,17 +468,17 @@ mod windows_impl {
 
         pub(super) fn process(
             &mut self,
-            contract: D3D12ResidentEncodeAdapterContract,
+            contract: ResidentEncodeAdapterContract,
             source: GpuResidentEncoderInputLease,
             destination: D3D12ResidentEncodeInputFrame,
-        ) -> Result<D3D12ResidentEncodeReadyFrame, D3D12ResidentEncodeSubmissionError> {
+        ) -> Result<D3D12ResidentEncodeReadyFrame, ResidentEncodeSubmissionError> {
             validate_frame_contract(contract, &source, &destination)?;
             let render_ready_value = reserve_value(&mut self.next_render_ready_value, "render")?;
             let completion_value = reserve_value(&mut self.next_completion_value, "completion")?;
             let slot_index = self.acquire_slot()?;
             let source_resource = {
                 let hal = unsafe { source.texture().as_hal::<wgpu::hal::api::Dx12>() }.ok_or(
-                    D3D12ResidentEncodeSubmissionError::SourceContract {
+                    ResidentEncodeSubmissionError::SourceContract {
                         reason: "source texture is not a DX12 resource".to_owned(),
                     },
                 )?;
@@ -463,10 +490,10 @@ mod windows_impl {
             let mut destination_device = None;
             unsafe { destination_resource.GetDevice::<ID3D12Device>(&mut destination_device) }
                 .map_err(|error| submit_error("encoder_surface.GetDevice", error))?;
-            let destination_device = destination_device
-                .ok_or(D3D12ResidentEncodeSubmissionError::DestinationContract)?;
+            let destination_device =
+                destination_device.ok_or(ResidentEncodeSubmissionError::DestinationContract)?;
             if destination_device.as_raw() != self.raw_device.as_raw() {
-                return Err(D3D12ResidentEncodeSubmissionError::DestinationContract);
+                return Err(ResidentEncodeSubmissionError::DestinationContract);
             }
             record_source_transitions(&self.slots[slot_index], &source_resource)?;
             record_process(
@@ -548,10 +575,10 @@ mod windows_impl {
             Ok(unsafe { destination.assume_producer_signal_enqueued() })
         }
 
-        fn acquire_slot(&mut self) -> Result<usize, D3D12ResidentEncodeSubmissionError> {
+        fn acquire_slot(&mut self) -> Result<usize, ResidentEncodeSubmissionError> {
             let completed = unsafe { self.completion_fence.GetCompletedValue() };
             if completed == u64::MAX {
-                return Err(D3D12ResidentEncodeSubmissionError::D3D12 {
+                return Err(ResidentEncodeSubmissionError::D3D12 {
                     stage: "completion_fence.GetCompletedValue",
                     reason: "device removed".to_owned(),
                 });
@@ -572,7 +599,7 @@ mod windows_impl {
                 .min_by_key(|(_, slot)| slot.completion_value)
                 .map(|(index, slot)| (index, slot.completion_value))
             else {
-                return Err(D3D12ResidentEncodeSubmissionError::Backpressure);
+                return Err(ResidentEncodeSubmissionError::Backpressure);
             };
             self.diagnostics.command_slot_waits =
                 self.diagnostics.command_slot_waits.saturating_add(1);
@@ -581,9 +608,7 @@ mod windows_impl {
         }
     }
 
-    fn create_slot(
-        device: &ID3D12Device,
-    ) -> Result<CommandSlot, D3D12ResidentEncodeSubmissionError> {
+    fn create_slot(device: &ID3D12Device) -> Result<CommandSlot, ResidentEncodeSubmissionError> {
         let transition_allocator = unsafe {
             device.CreateCommandAllocator::<ID3D12CommandAllocator>(D3D12_COMMAND_LIST_TYPE_DIRECT)
         }
@@ -620,7 +645,7 @@ mod windows_impl {
     fn create_closed_direct_list(
         device: &ID3D12Device,
         allocator: &ID3D12CommandAllocator,
-    ) -> Result<ID3D12GraphicsCommandList, D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<ID3D12GraphicsCommandList, ResidentEncodeSubmissionError> {
         let list = unsafe {
             device.CreateCommandList::<_, _, ID3D12GraphicsCommandList>(
                 0,
@@ -638,7 +663,7 @@ mod windows_impl {
     fn record_source_transitions(
         slot: &CommandSlot,
         source: &ID3D12Resource,
-    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<(), ResidentEncodeSubmissionError> {
         unsafe { slot.transition_allocator.Reset() }
             .map_err(|error| submit_error("TransitionCommandAllocator.Reset", error))?;
         record_source_transition(
@@ -663,7 +688,7 @@ mod windows_impl {
         source: &ID3D12Resource,
         before: D3D12_RESOURCE_STATES,
         after: D3D12_RESOURCE_STATES,
-    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<(), ResidentEncodeSubmissionError> {
         unsafe { list.Reset(allocator, None::<&ID3D12PipelineState>) }
             .map_err(|error| submit_error("GraphicsCommandList.Reset", error))?;
         let mut barrier = [transition_barrier(source, before, after)];
@@ -675,10 +700,10 @@ mod windows_impl {
     fn record_process(
         slot: &CommandSlot,
         processor: &ID3D12VideoProcessor,
-        contract: D3D12ResidentEncodeAdapterContract,
+        contract: ResidentEncodeAdapterContract,
         source: &ID3D12Resource,
         destination: &ID3D12Resource,
-    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<(), ResidentEncodeSubmissionError> {
         unsafe { slot.video_allocator.Reset() }
             .map_err(|error| submit_error("CommandAllocator.Reset", error))?;
         unsafe { slot.video_list.Reset(&slot.video_allocator) }
@@ -745,19 +770,19 @@ mod windows_impl {
     }
 
     fn validate_frame_contract(
-        contract: D3D12ResidentEncodeAdapterContract,
+        contract: ResidentEncodeAdapterContract,
         source: &GpuResidentEncoderInputLease,
         destination: &D3D12ResidentEncodeInputFrame,
-    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
-        validate_resident_source_contract(contract, source.contract())?;
+    ) -> Result<(), ResidentEncodeSubmissionError> {
+        validate_resident_source_contract(contract, source.contract(), false)?;
         if destination.bit_depth() != contract.bit_depth {
-            return Err(D3D12ResidentEncodeSubmissionError::DestinationContract);
+            return Err(ResidentEncodeSubmissionError::DestinationContract);
         }
         Ok(())
     }
 
     fn stream_descriptors(
-        contract: D3D12ResidentEncodeAdapterContract,
+        contract: ResidentEncodeAdapterContract,
     ) -> (
         D3D12_VIDEO_PROCESS_INPUT_STREAM_DESC,
         D3D12_VIDEO_PROCESS_OUTPUT_STREAM_DESC,
@@ -804,10 +829,10 @@ mod windows_impl {
 
     fn qualify_conversion(
         device: &ID3D12VideoDevice,
-        contract: D3D12ResidentEncodeAdapterContract,
+        contract: ResidentEncodeAdapterContract,
         input_desc: D3D12_VIDEO_PROCESS_INPUT_STREAM_DESC,
         output_desc: D3D12_VIDEO_PROCESS_OUTPUT_STREAM_DESC,
-    ) -> Result<(), D3D12ResidentEncodeAdapterCreateError> {
+    ) -> Result<(), ResidentEncodeAdapterCreateError> {
         let mut support = D3D12_FEATURE_DATA_VIDEO_PROCESS_SUPPORT {
             InputSample: D3D12_VIDEO_SAMPLE {
                 Width: contract.width,
@@ -838,13 +863,13 @@ mod windows_impl {
         }
         .map_err(|error| create_error("CheckFeatureSupport(VIDEO_PROCESS)", error))?;
         if !support.SupportFlags.contains(D3D12_VIDEO_PROCESS_SUPPORT_FLAG_SUPPORTED) {
-            return Err(D3D12ResidentEncodeAdapterCreateError::ConversionUnsupported);
+            return Err(ResidentEncodeAdapterCreateError::ConversionUnsupported);
         }
         Ok(())
     }
 
     fn native_formats(
-        contract: D3D12ResidentEncodeAdapterContract,
+        contract: ResidentEncodeAdapterContract,
     ) -> (
         DXGI_FORMAT,
         DXGI_FORMAT,
@@ -909,9 +934,9 @@ mod windows_impl {
     fn reserve_value(
         next: &mut u64,
         stage: &'static str,
-    ) -> Result<u64, D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<u64, ResidentEncodeSubmissionError> {
         let value = *next;
-        *next = value.checked_add(1).ok_or_else(|| D3D12ResidentEncodeSubmissionError::D3D12 {
+        *next = value.checked_add(1).ok_or_else(|| ResidentEncodeSubmissionError::D3D12 {
             stage,
             reason: "fence value exhausted".to_owned(),
         })?;
@@ -922,7 +947,7 @@ mod windows_impl {
         fence: &ID3D12Fence,
         value: u64,
         timeout: Duration,
-    ) -> Result<(), D3D12ResidentEncodeSubmissionError> {
+    ) -> Result<(), ResidentEncodeSubmissionError> {
         if unsafe { fence.GetCompletedValue() } >= value {
             return Ok(());
         }
@@ -933,7 +958,7 @@ mod windows_impl {
             .map_err(|error| submit_error("Fence.SetEventOnCompletion", error))?;
         let timeout_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         if unsafe { WaitForSingleObject(event.0, timeout_ms) } != WAIT_OBJECT_0 {
-            return Err(D3D12ResidentEncodeSubmissionError::Backpressure);
+            return Err(ResidentEncodeSubmissionError::Backpressure);
         }
         Ok(())
     }
@@ -949,15 +974,15 @@ mod windows_impl {
     fn create_error(
         stage: &'static str,
         error: windows::core::Error,
-    ) -> D3D12ResidentEncodeAdapterCreateError {
-        D3D12ResidentEncodeAdapterCreateError::D3D12 { stage, reason: error.to_string() }
+    ) -> ResidentEncodeAdapterCreateError {
+        ResidentEncodeAdapterCreateError::D3D12 { stage, reason: error.to_string() }
     }
 
     fn submit_error(
         stage: &'static str,
         error: windows::core::Error,
-    ) -> D3D12ResidentEncodeSubmissionError {
-        D3D12ResidentEncodeSubmissionError::D3D12 { stage, reason: error.to_string() }
+    ) -> ResidentEncodeSubmissionError {
+        ResidentEncodeSubmissionError::D3D12 { stage, reason: error.to_string() }
     }
 }
 
@@ -996,7 +1021,7 @@ mod tests {
 
     #[test]
     fn resident_source_admission_requires_the_complete_export_signal_contract() {
-        assert!(validate_resident_source_contract(contract(), source()).is_ok());
+        assert!(validate_resident_source_contract(contract(), source(), false).is_ok());
         let mut invalid = Vec::new();
 
         let mut value = source();
@@ -1018,8 +1043,8 @@ mod tests {
 
         for actual in invalid {
             assert!(matches!(
-                validate_resident_source_contract(contract(), actual),
-                Err(D3D12ResidentEncodeSubmissionError::SourceContract { .. })
+                validate_resident_source_contract(contract(), actual, false),
+                Err(ResidentEncodeSubmissionError::SourceContract { .. })
             ));
         }
     }
@@ -1031,8 +1056,8 @@ mod tests {
                 chroma_location: ResidentEncodeChromaLocation::Center,
                 ..contract()
             }
-            .validate_static(),
-            Err(D3D12ResidentEncodeAdapterCreateError::UnsupportedSignal { .. })
+            .validate_d3d12(),
+            Err(ResidentEncodeAdapterCreateError::UnsupportedSignal { .. })
         ));
     }
 }

@@ -32,8 +32,9 @@ use ocio_rs::{
     FixedFunctionStyle, GpuShaderDesc, GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
     GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, HueCurveType,
-    Interpolation as OcioRsInterpolation, Processor, ProcessorCacheFlags, RGBCurveType, RangeStyle,
-    ReferenceSpaceType, TransformDirection, ViewTransform, ViewTransformDirection,
+    Interpolation as OcioRsInterpolation, OptimizationFlags, Processor, ProcessorCacheFlags,
+    RGBCurveType, RangeStyle, ReferenceSpaceType, TransformDirection, ViewTransform,
+    ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -601,6 +602,8 @@ const MONDRIAN_STANDARD_V3_OCIO_RESOURCES: [MondrianDefaultOcioResource; 1] =
 
 /// OCIO GPU function name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_FUNCTION_NAME: &str = "mondrian_ocio_main";
+/// OCIO-generated analytic PQ function used by proven GPU curve lowering.
+pub const MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME: &str = "mondrian_ocio_pq_oetf";
 /// OCIO GPU pixel variable name generated for Mondrian wrapper shaders.
 pub const MONDRIAN_OCIO_GPU_PIXEL_NAME: &str = "mondrian_ocio_pixel";
 /// OCIO GPU resource symbol prefix generated for Mondrian wrapper shaders.
@@ -3039,24 +3042,33 @@ impl OcioGpuShaderBundle {
         shader_text: String,
         desc: &GpuShaderDesc,
         cache_id: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let textures_2d = ocio_texture_2d_bindings(desc)?;
+        let textures_3d = ocio_texture_3d_bindings(desc)?;
+        let uniforms = ocio_uniform_bindings(desc)?;
+        Ok(Self {
             src_color_space: ocio_color_space_identity_name(src).to_string(),
             dst_color_space: ocio_color_space_identity_name(dst).to_string(),
             language,
             shader_text,
-            descriptor_set_index: desc.descriptor_set_index(),
-            texture_binding_start: desc.texture_binding_start(),
+            descriptor_set_index: desc
+                .try_descriptor_set_index()
+                .map_err(|err| format!("OCIO GPU descriptor set index: {err}"))?,
+            texture_binding_start: desc
+                .try_texture_binding_start()
+                .map_err(|err| format!("OCIO GPU texture binding start: {err}"))?,
             uniform_buffer_binding: 0,
-            uniform_buffer_size: desc.uniform_buffer_size(),
-            texture_2d_count: desc.num_textures(),
-            texture_3d_count: desc.num_3d_textures(),
-            uniform_count: desc.num_uniforms(),
-            textures_2d: ocio_texture_2d_bindings(desc),
-            textures_3d: ocio_texture_3d_bindings(desc),
-            uniforms: ocio_uniform_bindings(desc),
+            uniform_buffer_size: desc
+                .try_uniform_buffer_size()
+                .map_err(|err| format!("OCIO GPU uniform buffer size: {err}"))?,
+            texture_2d_count: textures_2d.len() as u32,
+            texture_3d_count: textures_3d.len() as u32,
+            uniform_count: uniforms.len() as u32,
+            textures_2d,
+            textures_3d,
+            uniforms,
             cache_id,
-        }
+        })
     }
 
     fn for_display(
@@ -3067,62 +3079,113 @@ impl OcioGpuShaderBundle {
         shader_text: String,
         desc: &GpuShaderDesc,
         cache_id: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let textures_2d = ocio_texture_2d_bindings(desc)?;
+        let textures_3d = ocio_texture_3d_bindings(desc)?;
+        let uniforms = ocio_uniform_bindings(desc)?;
+        Ok(Self {
             src_color_space: ocio_color_space_identity_name(src).to_string(),
             dst_color_space: format!("{display}/{view}"),
             language,
             shader_text,
-            descriptor_set_index: desc.descriptor_set_index(),
-            texture_binding_start: desc.texture_binding_start(),
+            descriptor_set_index: desc
+                .try_descriptor_set_index()
+                .map_err(|err| format!("OCIO GPU descriptor set index: {err}"))?,
+            texture_binding_start: desc
+                .try_texture_binding_start()
+                .map_err(|err| format!("OCIO GPU texture binding start: {err}"))?,
             uniform_buffer_binding: 0,
-            uniform_buffer_size: desc.uniform_buffer_size(),
-            texture_2d_count: desc.num_textures(),
-            texture_3d_count: desc.num_3d_textures(),
-            uniform_count: desc.num_uniforms(),
-            textures_2d: ocio_texture_2d_bindings(desc),
-            textures_3d: ocio_texture_3d_bindings(desc),
-            uniforms: ocio_uniform_bindings(desc),
+            uniform_buffer_size: desc
+                .try_uniform_buffer_size()
+                .map_err(|err| format!("OCIO GPU uniform buffer size: {err}"))?,
+            texture_2d_count: textures_2d.len() as u32,
+            texture_3d_count: textures_3d.len() as u32,
+            uniform_count: uniforms.len() as u32,
+            textures_2d,
+            textures_3d,
+            uniforms,
             cache_id,
-        }
+        })
     }
 }
 
-fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture2DBinding> {
-    desc.textures_2d()
-        .into_iter()
-        .enumerate()
-        .map(|(index, texture)| OcioGpuTexture2DBinding {
-            index: index as u32,
-            texture_name: texture.texture_name,
-            sampler_name: texture.sampler_name,
-            binding_index: texture.binding_index,
-            channel: ocio_texture_channel(texture.channel),
-            dimensions: ocio_texture_dimensions(texture.dimensions),
-            interpolation: ocio_texture_interpolation(texture.interpolation),
-            width: texture.width,
-            height: texture.height,
-            value_count: texture.values.len(),
-            values: texture.values,
+fn ocio_texture_2d_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuTexture2DBinding>, String> {
+    let count = desc
+        .try_num_textures()
+        .map_err(|err| format!("OCIO GPU 1D/2D texture count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let texture = desc
+                .try_texture_2d(index)
+                .map_err(|err| format!("OCIO GPU 1D/2D texture {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU 1D/2D texture {index} is missing"))?;
+            ocio_texture_2d_binding(index, texture)
         })
         .collect()
 }
 
-fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuTexture3DBinding> {
-    desc.textures_3d()
-        .into_iter()
-        .enumerate()
-        .map(|(index, texture)| OcioGpuTexture3DBinding {
-            index: index as u32,
-            texture_name: texture.texture_name,
-            sampler_name: texture.sampler_name,
-            binding_index: texture.binding_index,
-            interpolation: ocio_texture_interpolation(texture.interpolation),
-            edge_len: texture.edge_len,
-            value_count: texture.values.len(),
-            values: texture.values,
+fn ocio_texture_2d_binding(
+    index: u32,
+    texture: ocio_rs::GpuTexture2D,
+) -> Result<OcioGpuTexture2DBinding, String> {
+    let binding_index = texture.binding_index.ok_or_else(|| {
+        format!(
+            "OCIO GPU 1D/2D texture '{}' (index {index}) is missing a shader binding index; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            texture.texture_name
+        )
+    })?;
+    Ok(OcioGpuTexture2DBinding {
+        index,
+        texture_name: texture.texture_name,
+        sampler_name: texture.sampler_name,
+        binding_index,
+        channel: ocio_texture_channel(texture.channel),
+        dimensions: ocio_texture_dimensions(texture.dimensions),
+        interpolation: ocio_texture_interpolation(texture.interpolation),
+        width: texture.width,
+        height: texture.height,
+        value_count: texture.values.len(),
+        values: texture.values,
+    })
+}
+
+fn ocio_texture_3d_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuTexture3DBinding>, String> {
+    let count = desc
+        .try_num_3d_textures()
+        .map_err(|err| format!("OCIO GPU 3D texture count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let texture = desc
+                .try_texture_3d(index)
+                .map_err(|err| format!("OCIO GPU 3D texture {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU 3D texture {index} is missing"))?;
+            ocio_texture_3d_binding(index, texture)
         })
         .collect()
+}
+
+fn ocio_texture_3d_binding(
+    index: u32,
+    texture: ocio_rs::GpuTexture3D,
+) -> Result<OcioGpuTexture3DBinding, String> {
+    let binding_index = texture.binding_index.ok_or_else(|| {
+        format!(
+            "OCIO GPU 3D texture '{}' (index {index}) is missing a shader binding index; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            texture.texture_name
+        )
+    })?;
+    Ok(OcioGpuTexture3DBinding {
+        index,
+        texture_name: texture.texture_name,
+        sampler_name: texture.sampler_name,
+        binding_index,
+        interpolation: ocio_texture_interpolation(texture.interpolation),
+        edge_len: texture.edge_len,
+        value_count: texture.values.len(),
+        values: texture.values,
+    })
 }
 
 fn ocio_texture_channel(channel: OcioRsGpuTextureChannel) -> OcioGpuTextureChannel {
@@ -3151,19 +3214,40 @@ fn ocio_texture_interpolation(interpolation: OcioRsInterpolation) -> OcioGpuText
     }
 }
 
-fn ocio_uniform_bindings(desc: &GpuShaderDesc) -> Vec<OcioGpuUniformBinding> {
-    desc.uniforms()
-        .into_iter()
-        .enumerate()
-        .map(|(index, uniform)| OcioGpuUniformBinding {
-            index: index as u32,
-            name: uniform.name,
-            uniform_type: ocio_uniform_type(uniform.uniform_type),
-            buffer_offset: uniform.buffer_offset,
-            value_count: uniform.value_count,
-            value: ocio_uniform_value(uniform.value),
+fn ocio_uniform_bindings(desc: &GpuShaderDesc) -> Result<Vec<OcioGpuUniformBinding>, String> {
+    let count = desc
+        .try_num_uniforms()
+        .map_err(|err| format!("OCIO GPU uniform count: {err}"))?;
+    (0..count)
+        .map(|index| {
+            let uniform = desc
+                .try_uniform(index)
+                .map_err(|err| format!("OCIO GPU uniform {index}: {err}"))?
+                .ok_or_else(|| format!("OCIO GPU uniform {index} is missing"))?;
+            ocio_uniform_binding(index, uniform)
         })
         .collect()
+}
+
+fn ocio_uniform_binding(
+    index: u32,
+    uniform: ocio_rs::GpuUniform,
+) -> Result<OcioGpuUniformBinding, String> {
+    let buffer_offset = uniform.buffer_offset.ok_or_else(|| {
+        format!(
+            "OCIO GPU uniform '{}' (index {index}) is missing a uniform buffer offset; \
+             Mondrian requires OpenColorIO 2.5.1 or newer",
+            uniform.name
+        )
+    })?;
+    Ok(OcioGpuUniformBinding {
+        index,
+        name: uniform.name,
+        uniform_type: ocio_uniform_type(uniform.uniform_type),
+        buffer_offset,
+        value_count: uniform.value_count,
+        value: ocio_uniform_value(uniform.value),
+    })
 }
 
 fn ocio_uniform_type(uniform_type: OcioRsGpuUniformType) -> OcioGpuUniformType {
@@ -3604,8 +3688,13 @@ fn cpu_processor_from_static(
     let processor = processor
         .lock()
         .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    // Preserve default graph optimizations and independent dynamic properties,
+    // but use precise native math and inverse-LUT evaluation. Approximate pow
+    // and rebaked forward LUTs introduce avoidable CPU error, amplified by PQ.
+    let approximate = OptimizationFlags::FAST_LOG_EXP_POW.0 | OptimizationFlags::LUT_INV_FAST.0;
+    let flags = OptimizationFlags::DEFAULT.0 & !approximate;
     let cpu = processor
-        .default_cpu_processor()
+        .optimized_cpu_processor(u64::from(flags))
         .map_err(|err| format!("OCIO CPU processor creation failed: {err}"))?;
     Ok((cpu, shared_hit))
 }
@@ -4007,14 +4096,7 @@ fn extract_ocio_identity_gpu_shader_bundle_from_processor(
     apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
-    Ok(OcioGpuShaderBundle::for_color_space(
-        src,
-        dst,
-        language,
-        shader_text,
-        &desc,
-        cache_id,
-    ))
+    OcioGpuShaderBundle::for_color_space(src, dst, language, shader_text, &desc, cache_id)
 }
 
 /// Extract an engine-qualified display/view GPU shader from a shared static graph.
@@ -4066,15 +4148,7 @@ fn extract_ocio_display_identity_gpu_shader_bundle_from_processor(
     apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
-    Ok(OcioGpuShaderBundle::for_display(
-        src,
-        display,
-        view,
-        language,
-        shader_text,
-        &desc,
-        cache_id,
-    ))
+    OcioGpuShaderBundle::for_display(src, display, view, language, shader_text, &desc, cache_id)
 }
 
 fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, String> {
@@ -4093,6 +4167,33 @@ fn configured_gpu_shader_desc(language: GpuLanguage) -> Result<GpuShaderDesc, St
     )
     .map_err(|e| format!("OCIO GPU shader descriptor binding: {e}"))?;
     Ok(desc)
+}
+
+/// Extract OCIO's own normalized-nits-to-PQ implementation, without authoring
+/// another transfer function. Callers must prove the curve and input domain
+/// before substituting this representation for an extracted half-domain LUT.
+pub fn extract_ocio_pq_oetf_gpu_function(language: GpuLanguage) -> Result<String, String> {
+    let config = Config::raw().map_err(|err| format!("OCIO PQ function config: {err}"))?;
+    let transform = FixedFunctionTransform::create(FixedFunctionStyle::LinToPq)
+        .map_err(|err| format!("OCIO PQ fixed function: {err}"))?;
+    let processor = config
+        .processor_from_transform(&transform, TransformDirection::Forward)
+        .map_err(|err| format!("OCIO PQ function processor: {err}"))?;
+    let gpu = processor
+        .default_gpu_processor()
+        .map_err(|err| format!("OCIO PQ function GPU processor: {err}"))?;
+    let mut desc = configured_gpu_shader_desc(language)?;
+    desc.set_function_name(MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME)
+        .map_err(|err| format!("OCIO PQ function name: {err}"))?;
+    gpu.try_extract_shader_info(&mut desc)
+        .map_err(|err| format!("OCIO PQ function extraction: {err}"))?;
+    if desc.try_num_textures().map_err(|err| err.to_string())? != 0
+        || desc.try_num_3d_textures().map_err(|err| err.to_string())? != 0
+        || desc.try_num_uniforms().map_err(|err| err.to_string())? != 0
+    {
+        return Err("OCIO PQ fixed function unexpectedly requires GPU resources".to_owned());
+    }
+    extracted_shader_text(&desc)
 }
 
 fn extracted_shader_text(desc: &GpuShaderDesc) -> Result<String, String> {
@@ -4370,6 +4471,80 @@ mod cpu_apply_tests;
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn gpu_texture_2d_metadata_requires_binding_index_and_preserves_zero() {
+        let texture = |binding_index| ocio_rs::GpuTexture2D {
+            texture_name: "tone_lut".to_owned(),
+            sampler_name: "tone_sampler".to_owned(),
+            width: 2,
+            height: 1,
+            channel: OcioRsGpuTextureChannel::Red,
+            dimensions: OcioRsGpuTextureDimensions::Texture1D,
+            interpolation: OcioRsInterpolation::Linear,
+            binding_index,
+            values: vec![0.0, 1.0],
+        };
+        for binding_index in [0, 7] {
+            let binding = ocio_texture_2d_binding(2, texture(Some(binding_index)))
+                .expect("reported binding index");
+            assert_eq!(binding.binding_index, binding_index);
+            assert_eq!(binding.index, 2);
+            assert_eq!(binding.values, [0.0, 1.0]);
+        }
+        let error = ocio_texture_2d_binding(2, texture(None)).expect_err("missing binding index");
+        assert!(
+            error.contains("1D/2D texture 'tone_lut' (index 2)"),
+            "{error}"
+        );
+        assert!(error.contains("missing a shader binding index"), "{error}");
+    }
+
+    #[test]
+    fn gpu_texture_3d_metadata_requires_binding_index_and_preserves_zero() {
+        let texture = |binding_index| ocio_rs::GpuTexture3D {
+            texture_name: "gamut_lut".to_owned(),
+            sampler_name: "gamut_sampler".to_owned(),
+            edge_len: 2,
+            interpolation: OcioRsInterpolation::Tetrahedral,
+            binding_index,
+            values: vec![0.25; 24],
+        };
+        for binding_index in [0, 11] {
+            let binding = ocio_texture_3d_binding(3, texture(Some(binding_index)))
+                .expect("reported binding index");
+            assert_eq!(binding.binding_index, binding_index);
+            assert_eq!(binding.index, 3);
+            assert_eq!(binding.values, vec![0.25; 24]);
+        }
+        let error = ocio_texture_3d_binding(3, texture(None)).expect_err("missing binding index");
+        assert!(
+            error.contains("3D texture 'gamut_lut' (index 3)"),
+            "{error}"
+        );
+        assert!(error.contains("missing a shader binding index"), "{error}");
+    }
+
+    #[test]
+    fn gpu_uniform_metadata_requires_buffer_offset_and_preserves_zero() {
+        let uniform = |buffer_offset| ocio_rs::GpuUniform {
+            name: "exposure".to_owned(),
+            uniform_type: OcioRsGpuUniformType::Double,
+            buffer_offset,
+            value_count: 1,
+            value: OcioRsGpuUniformValue::F32(vec![1.25]),
+        };
+        for buffer_offset in [0, 16] {
+            let binding = ocio_uniform_binding(4, uniform(Some(buffer_offset)))
+                .expect("reported uniform buffer offset");
+            assert_eq!(binding.buffer_offset, buffer_offset);
+            assert_eq!(binding.index, 4);
+            assert_eq!(binding.value, OcioGpuUniformValue::F32(vec![1.25]));
+        }
+        let error = ocio_uniform_binding(4, uniform(None)).expect_err("missing buffer offset");
+        assert!(error.contains("uniform 'exposure' (index 4)"), "{error}");
+        assert!(error.contains("missing a uniform buffer offset"), "{error}");
+    }
 
     fn ocio_env_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

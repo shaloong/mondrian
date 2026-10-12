@@ -17,6 +17,8 @@ fn normal_receipt() -> EnduranceGpuShutdownEvidence {
             owners["host_shutdown"]["preview"]["work_callbacks"].clone(),
         )
         .expect("callback receipt"),
+        native_completion_wake_captures_pending: Some(0),
+        native_completion_wake_registrations: Some(0),
         native_wake_failures: 0,
         wake_registration_rejections: 0,
         worker_started: true,
@@ -27,6 +29,7 @@ fn normal_receipt() -> EnduranceGpuShutdownEvidence {
         retirement_handoff_accepted: true,
         retirement_completed: true,
         renderer_retirement: Some(ViewerGpuRetirementReceipt {
+            backend_preparation: mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
             cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
             native_device_removed: false,
         }),
@@ -60,6 +63,14 @@ fn every_normal_shutdown_barrier_is_required() {
     let normal = normal_receipt();
     assert!(normal.qualifies_normal_runtime());
     for evidence in [
+        EnduranceGpuShutdownEvidence {
+            native_completion_wake_captures_pending: Some(1),
+            ..normal
+        },
+        EnduranceGpuShutdownEvidence {
+            native_completion_wake_captures_pending: None,
+            ..normal
+        },
         EnduranceGpuShutdownEvidence { native_wake_failures: 1, ..normal },
         EnduranceGpuShutdownEvidence { wake_registration_rejections: 1, ..normal },
         EnduranceGpuShutdownEvidence { wake_callbacks: Default::default(), ..normal },
@@ -78,6 +89,17 @@ fn every_normal_shutdown_barrier_is_required() {
         EnduranceGpuShutdownEvidence { renderer_retirement: None, ..normal },
         EnduranceGpuShutdownEvidence {
             renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::Panicked,
+                cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
+                native_device_removed: false,
+            }),
+            ..normal
+        },
+        EnduranceGpuShutdownEvidence {
+            renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                 cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Panicked,
                 native_device_removed: false,
             }),
@@ -85,6 +107,8 @@ fn every_normal_shutdown_barrier_is_required() {
         },
         EnduranceGpuShutdownEvidence {
             renderer_retirement: Some(ViewerGpuRetirementReceipt {
+                backend_preparation:
+                    mondrian_renderer::ViewerBackendPreparationWorkerExit::NotStarted,
                 cpu_yuv_upload: ViewerCpuYuvUploadWorkerExit::Returned,
                 native_device_removed: true,
             }),

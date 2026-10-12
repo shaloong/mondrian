@@ -7,10 +7,11 @@ use lru::LruCache;
 use mondrian_core::ColorSpace;
 use mondrian_core::{
     extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
-    ColorEngine, GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
-    OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    extract_ocio_pq_oetf_gpu_function, ColorEngine, GpuLanguage, OcioColorSpaceIdentity,
+    OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
+    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
-    MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
+    MONDRIAN_OCIO_GPU_RESOURCE_PREFIX, MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME,
 };
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -19,6 +20,8 @@ use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+
+mod constant_arrays;
 
 /// Full, domain-separated identity used to authorize OCIO GPU cache reuse.
 ///
@@ -2694,6 +2697,8 @@ impl OcioGpuWgpuFullscreenTopology {
 pub enum OcioGpuWgpuColorTargetFormat {
     /// 8-bit normalized RGBA target.
     Rgba8Unorm,
+    /// 16-bit normalized RGBA target.
+    Rgba16Unorm,
     /// 16-bit float RGBA target.
     Rgba16Float,
     /// 32-bit float RGBA target.
@@ -2704,6 +2709,7 @@ impl OcioGpuWgpuColorTargetFormat {
     fn to_wgpu(self) -> wgpu::TextureFormat {
         match self {
             Self::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba16Unorm => wgpu::TextureFormat::Rgba16Unorm,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
             Self::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
         }
@@ -4014,6 +4020,16 @@ impl OcioGpuWgpuBackendPrepRuntime {
         Self::default()
     }
 
+    pub(crate) fn cached_static_pipeline(
+        &self,
+        shader_plan: &OcioGpuShaderPlan,
+        output_format: OcioGpuWgpuColorTargetFormat,
+    ) -> Option<&OcioGpuWgpuPreparedStaticPipeline> {
+        self.static_pipelines
+            .peek(&static_pipeline_cache_key(shader_plan, output_format))
+            .map(AsRef::as_ref)
+    }
+
     /// Prepare pure backend contracts for an OCIO fullscreen color pass.
     pub fn prepare_static_pipeline(
         &mut self,
@@ -4383,6 +4399,24 @@ impl OcioGpuWgpuBackendObjectRuntime {
         }
     }
 
+    pub(crate) fn fused_input_is_cached(
+        &self,
+        shader_plan: &OcioGpuShaderPlan,
+        static_pipeline: &OcioGpuWgpuPreparedStaticPipeline,
+        input_source: &str,
+    ) -> bool {
+        let Some(backend) =
+            self.objects.peek(&backend_object_cache_key(shader_plan, static_pipeline))
+        else {
+            return false;
+        };
+        self.input_pipelines.contains(&fused_input_pipeline_cache_key(
+            shader_plan,
+            backend,
+            input_source,
+        ))
+    }
+
     /// Compose a physical input fetch with the same compiled OCIO callable and LUTs.
     /// The caller supplies a group-1 input layout; OCIO retains group 0.
     pub(crate) fn prepare_fused_input_pipeline(
@@ -4396,14 +4430,7 @@ impl OcioGpuWgpuBackendObjectRuntime {
         if backend.ocio_bind_group.bind_group_index != 0 {
             return Err(OcioGpuFusedInputError::ResourceGroup);
         }
-        let key = OcioGpuCanonicalIdentity::for_hash(
-            b"fused-input-pipeline",
-            &(
-                shader_plan.canonical_identity(),
-                backend.ocio_bind_group.layout_identity,
-                input_source,
-            ),
-        );
+        let key = fused_input_pipeline_cache_key(shader_plan, backend, input_source);
         if let Some(pipeline) = self.input_pipelines.get(&key) {
             return Ok(Arc::clone(pipeline));
         }
@@ -5222,7 +5249,7 @@ pub(crate) struct OcioGpuWgpuRenderPassRecorder;
 
 impl OcioGpuWgpuRenderPassRecorder {
     pub(crate) fn record(
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &OcioGpuWgpuRenderPassNodePlan,
         pipeline: &OcioGpuWgpuRenderPipeline,
         ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
@@ -5475,6 +5502,10 @@ impl OcioGpuShaderCache {
         self.entries.clear();
     }
 
+    pub(crate) fn cached(&self, request: &OcioGpuShaderRequest) -> Option<&OcioGpuShaderPlan> {
+        self.entries.peek(&request_cache_identity(request)).map(AsRef::as_ref)
+    }
+
     /// Resolve a request to an OCIO GPU shader plan, using the cache when possible.
     pub fn get_or_extract(
         &mut self,
@@ -5688,12 +5719,13 @@ fn translate_naga_shader_stage(
 
     let mut frontend = naga::front::glsl::Frontend::default();
     let options = naga::front::glsl::Options::from(stage.to_naga());
-    let module = frontend.parse(&options, shader_text).map_err(|err| {
+    let mut module = frontend.parse(&options, shader_text).map_err(|err| {
         OcioGpuShaderTranslationFailure::ParseFailed {
             message: err.emit_to_string_with_path(shader_text, "ocio-wrapper.glsl"),
         }
     })?;
 
+    constant_arrays::remove_read_only_spills(&mut module);
     let mut validator = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
@@ -6361,7 +6393,8 @@ fn lower_ocio_program_source_for_wgpu(shader_plan: &OcioGpuShaderPlan) -> Result
     let source = strip_glsl_version_directives(&bundle.shader_text);
     let source = lower_redundant_nested_component_swizzles(&source);
     let source = lower_ocio_tetrahedral_lut_blocks(&source, bundle);
-    let source = lower_mondrian_standard_pq_hlg_inverse_lut(&source, shader_plan);
+    let source = lower_ocio_identity_curve_channels(&source, bundle);
+    let source = lower_mondrian_standard_pq_encoding(&source, shader_plan)?;
     let legacy_sampler_1d_names = legacy_sampler_names_for_kind(
         &source,
         &binding_contract,
@@ -6425,11 +6458,19 @@ fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle)
         replacements.push((
             start,
             end,
-            branchless_tetrahedral_lut_block(
-                &texture.texture_name,
-                &texture.sampler_name,
-                texture.edge_len,
-            ),
+            if tetrahedral_lut_has_independent_red_axis(texture) {
+                independent_red_tetrahedral_lut_block(
+                    &texture.texture_name,
+                    &texture.sampler_name,
+                    texture.edge_len,
+                )
+            } else {
+                branchless_tetrahedral_lut_block(
+                    &texture.texture_name,
+                    &texture.sampler_name,
+                    texture.edge_len,
+                )
+            },
         ));
     }
 
@@ -6440,14 +6481,129 @@ fn lower_ocio_tetrahedral_lut_blocks(source: &str, bundle: &OcioGpuShaderBundle)
     lowered
 }
 
-fn lower_mondrian_standard_pq_hlg_inverse_lut(
+fn lower_ocio_identity_curve_channels(source: &str, bundle: &OcioGpuShaderBundle) -> String {
+    let mut lowered = source.to_owned();
+    for texture in &bundle.textures_2d {
+        if texture.dimensions != OcioGpuTextureDimensions::Texture1D
+            || texture.interpolation != OcioGpuTextureInterpolation::Linear
+            || texture.channel != OcioGpuTextureChannel::Rgb
+            || texture.width < 2
+            || texture.height != 2
+        {
+            continue;
+        }
+        let width = texture.width as usize;
+        let last = width - 1;
+        if texture.values.len() / 3 <= width {
+            continue;
+        }
+        // Recognize the exact normalized, clamped OCIO addressing function.
+        // Only row zero plus the duplicated endpoint in row one is reachable.
+        let helper = format!(
+            "vec2 {name}_computePos(float f)\n{{\n  float dep = clamp(f, 0.0, 1.0) * {last}.;\n  vec2 retVal;\n  retVal.y = floor(dep / {last}.);\n  retVal.x = dep - retVal.y * {last}.;\n  retVal.x = (retVal.x + 0.5) / {width}.;\n  retVal.y = (retVal.y + 0.5) / 2.;\n  return retVal;\n}}",
+            name = texture.texture_name,
+        );
+        if !source.contains(&helper) {
+            continue;
+        }
+        for (channel, name) in ["r", "g", "b"].into_iter().enumerate() {
+            let identity = (0..=width).all(|index| {
+                let expected = (index.min(last) as f64 / last as f64) as f32;
+                texture.values[index * 3 + channel].to_bits() == expected.to_bits()
+            });
+            if identity {
+                let original = format!(
+                    "mondrian_ocio_pixel.{name} = texture({sampler}, {texture}_computePos(mondrian_ocio_pixel.{name})).{name};",
+                    sampler = texture.sampler_name,
+                    texture = texture.texture_name,
+                );
+                let replacement = format!(
+                    "mondrian_ocio_pixel.{name} = clamp(mondrian_ocio_pixel.{name}, 0.0, 1.0); // Proven identity LUT channel"
+                );
+                lowered = lowered.replace(&original, &replacement);
+            }
+        }
+    }
+    lowered
+}
+
+// The recognized OCIO block samples RGB coordinates in texture BGR order.
+// Prove every texel: R/B are identity axes and G is independent of R. The
+// tetrahedral interpolant then reduces to the original three B/G corners;
+// no LUT sample, resolution, interpolation policy or color meaning changes.
+fn tetrahedral_lut_has_independent_red_axis(
+    texture: &mondrian_core::OcioGpuTexture3DBinding,
+) -> bool {
+    let edge = texture.edge_len as usize;
+    let Some(expected_values) = edge.checked_pow(3).and_then(|count| count.checked_mul(3)) else {
+        return false;
+    };
+    if edge < 2 || texture.value_count != expected_values || texture.values.len() != expected_values
+    {
+        return false;
+    }
+    let denominator = (edge - 1) as f64;
+    for (index, pixel) in texture.values.chunks_exact(3).enumerate() {
+        let blue = index % edge;
+        let green = (index / edge) % edge;
+        let red = index / (edge * edge);
+        let expected_red = (red as f64 / denominator) as f32;
+        let expected_blue = (blue as f64 / denominator) as f32;
+        let reference_green = texture.values[(green * edge + blue) * 3 + 1];
+        if pixel[0].to_bits() != expected_red.to_bits()
+            || pixel[2].to_bits() != expected_blue.to_bits()
+            || !pixel[1].is_finite()
+            || pixel[1].to_bits() != reference_green.to_bits()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn independent_red_tetrahedral_lut_block(
+    texture_name: &str,
+    sampler_name: &str,
+    edge_len: u32,
+) -> String {
+    let scale = edge_len - 1;
+    let edge = f64::from(edge_len);
+    let inverse_edge = 1.0 / edge;
+    format!(
+        r#"  // Proven red-independent tetrahedral lowering for {texture_name}
+  {{
+    vec2 coords = mondrian_ocio_pixel.bg * vec2({scale}.0);
+    vec2 base = floor(coords);
+    vec2 frac = coords - base;
+    vec3 baseInd = vec3((base + vec2(0.5)) / vec2({edge:.17}), {half_texel:.17});
+    float maxFrac = max(frac.x, frac.y);
+    float minFrac = min(frac.x, frac.y);
+    vec3 texel = vec3({inverse_edge:.17}, {inverse_edge:.17}, 0.0);
+    float v1 = texture({sampler_name}, baseInd).g;
+    float v2 = texture({sampler_name}, baseInd + vec3(step(vec2(maxFrac), frac), 0.0) * texel).g;
+    float v3 = texture({sampler_name}, baseInd + texel).g;
+    float green = ((maxFrac - minFrac) * v2) + ((1.0 - maxFrac) * v1) + (minFrac * v3);
+    mondrian_ocio_pixel.rgb = vec3(clamp(mondrian_ocio_pixel.r, 0.0, 1.0), green,
+                                 clamp(mondrian_ocio_pixel.b, 0.0, 1.0));
+  }}
+"#,
+        half_texel = 0.5 / edge,
+    )
+}
+
+fn lower_mondrian_standard_pq_encoding(
     source: &str,
     shader_plan: &OcioGpuShaderPlan,
-) -> String {
+) -> Result<String, String> {
     const HLG_INVERSE_LUT_SHA256: [u8; 32] = [
         0x17, 0x9f, 0x0e, 0xf6, 0xcb, 0x48, 0x7c, 0xb7, 0xc1, 0x54, 0x05, 0x32, 0x2f, 0x49, 0x21,
         0x31, 0xeb, 0x3f, 0x71, 0x11, 0x96, 0x4d, 0x56, 0x44, 0xc9, 0x1e, 0x4a, 0xec, 0xc7, 0x19,
         0x40, 0xf9,
+    ];
+    const PQ_OETF_LUT_SHA256: [u8; 32] = [
+        0x83, 0x29, 0x85, 0xd4, 0xf1, 0xd3, 0x29, 0x99, 0xbb, 0xa1, 0xf4, 0x14, 0xce, 0xf0, 0x6d,
+        0x19, 0x29, 0x43, 0x6d, 0xbb, 0x6e, 0xcb, 0xcf, 0x8b, 0xd2, 0x18, 0xde, 0x02, 0x2e, 0x70,
+        0xaa, 0x97,
     ];
     let OcioGpuShaderRequest::DisplayView {
         engine:
@@ -6460,16 +6616,17 @@ fn lower_mondrian_standard_pq_hlg_inverse_lut(
         language: GpuLanguage::Glsl4_0,
     } = &shader_plan.request
     else {
-        return source.to_owned();
+        return Ok(source.to_owned());
     };
     if display != "Rec.2100-PQ - Display"
         || view != "Mondrian Standard HDR 1000 nits v1"
         || shader_plan.bundle().textures_2d.len() != 2
         || shader_plan.bundle().textures_3d.len() != 1
     {
-        return source.to_owned();
+        return Ok(source.to_owned());
     }
     let hlg_inverse = &shader_plan.bundle().textures_2d[0];
+    let pq_oetf = &shader_plan.bundle().textures_2d[1];
     let formation = &shader_plan.bundle().textures_3d[0];
     if hlg_inverse.dimensions != OcioGpuTextureDimensions::Texture1D
         || hlg_inverse.channel != OcioGpuTextureChannel::Red
@@ -6478,13 +6635,20 @@ fn lower_mondrian_standard_pq_hlg_inverse_lut(
         || hlg_inverse.height != 17
         || hlg_inverse.value_count != 69_632
         || shader_curve_payload_sha256(&hlg_inverse.values) != HLG_INVERSE_LUT_SHA256
+        || pq_oetf.dimensions != OcioGpuTextureDimensions::Texture1D
+        || pq_oetf.channel != OcioGpuTextureChannel::Red
+        || pq_oetf.interpolation != OcioGpuTextureInterpolation::Linear
+        || pq_oetf.width != 4_096
+        || pq_oetf.height != 17
+        || pq_oetf.value_count != 69_632
+        || shader_curve_payload_sha256(&pq_oetf.values) != PQ_OETF_LUT_SHA256
         || formation.edge_len != 57
         || formation
             .values
             .iter()
             .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
     {
-        return source.to_owned();
+        return Ok(source.to_owned());
     }
 
     let marker = format!(
@@ -6492,14 +6656,14 @@ fn lower_mondrian_standard_pq_hlg_inverse_lut(
         hlg_inverse.texture_name
     );
     let Some(start) = source.find(&marker) else {
-        return source.to_owned();
+        return Ok(source.to_owned());
     };
     let Some(end) = glsl_braced_block_end(source, start.saturating_add(marker.len())) else {
-        return source.to_owned();
+        return Ok(source.to_owned());
     };
     let block = &source[start..end];
     if !block.contains(&format!("texture({}", hlg_inverse.sampler_name)) {
-        return source.to_owned();
+        return Ok(source.to_owned());
     }
     let replacement = r#"  // Analytic inverse HLG OETF for the fingerprinted Mondrian Standard HDR formation.
   // The preceding 3D LUT is proven to emit only the normalized 0..1 domain.
@@ -6515,7 +6679,30 @@ fn lower_mondrian_standard_pq_hlg_inverse_lut(
   }"#;
     let mut lowered = source.to_owned();
     lowered.replace_range(start..end, replacement);
-    lowered
+    let pq_marker = format!("  // Add LUT 1D processing for {}", pq_oetf.texture_name);
+    let Some(pq_start) = lowered.find(&pq_marker) else {
+        return Ok(source.to_owned());
+    };
+    let Some(pq_end) = glsl_braced_block_end(&lowered, pq_start.saturating_add(pq_marker.len()))
+    else {
+        return Ok(source.to_owned());
+    };
+    if !lowered[pq_start..pq_end].contains(&format!("texture({}", pq_oetf.sampler_name)) {
+        return Ok(source.to_owned());
+    }
+    let function = extract_ocio_pq_oetf_gpu_function(GpuLanguage::Glsl4_0)?;
+    lowered.replace_range(
+        pq_start..pq_end,
+        &format!(
+            "  // OCIO analytic PQ OETF for the fingerprinted normalized HDR formation.\n  mondrian_ocio_pixel = {MONDRIAN_OCIO_PQ_GPU_FUNCTION_NAME}(mondrian_ocio_pixel);"
+        ),
+    );
+    let declaration = format!("vec4 {MONDRIAN_OCIO_GPU_FUNCTION_NAME}(");
+    let Some(function_start) = lowered.find(&declaration) else {
+        return Ok(source.to_owned());
+    };
+    lowered.insert_str(function_start, &function);
+    Ok(lowered)
 }
 
 fn shader_curve_payload_sha256(values: &[f32]) -> [u8; 32] {
@@ -7935,6 +8122,21 @@ fn hash_resource_layout(signature: ResourceLayoutSignature) -> u64 {
         ),
     )
     .diagnostic_key()
+}
+
+fn fused_input_pipeline_cache_key(
+    shader_plan: &OcioGpuShaderPlan,
+    backend: &OcioGpuWgpuPreparedBackendObjects,
+    input_source: &str,
+) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(
+        b"fused-input-pipeline",
+        &(
+            shader_plan.canonical_identity(),
+            backend.ocio_bind_group.layout_identity,
+            input_source,
+        ),
+    )
 }
 
 fn backend_object_cache_key(
@@ -10280,6 +10482,28 @@ mod tests {
         assert_eq!(plan.bundle().dst_color_space, format!("{display}/{view}"));
         assert_eq!(plan.bundle().language, GpuLanguage::Glsl4_0);
         assert!(plan.shader_hash != 0);
+        let texture = &plan.bundle().textures_3d[0];
+        assert!(tetrahedral_lut_has_independent_red_axis(texture));
+        let lowered = lower_ocio_program_source_for_wgpu(&plan).expect("lower Standard SDR");
+        assert!(lowered.contains("Proven red-independent tetrahedral lowering"));
+        assert_eq!(lowered.matches("Proven identity LUT channel").count(), 2);
+        let mut curve_drifted = (*plan).clone();
+        std::sync::Arc::make_mut(&mut curve_drifted.bundle).textures_2d[0].values[0] += 0.001;
+        let curve_drifted_lowered = lower_ocio_program_source_for_wgpu(&curve_drifted)
+            .expect("nonidentity channel retains the original LUT");
+        assert_eq!(
+            curve_drifted_lowered.matches("Proven identity LUT channel").count(),
+            1
+        );
+        for index in [
+            0,
+            texture.edge_len as usize * texture.edge_len as usize * 3 + 1,
+            2,
+        ] {
+            let mut drifted = texture.clone();
+            drifted.values[index] += 0.001;
+            assert!(!tetrahedral_lut_has_independent_red_axis(&drifted));
+        }
     }
 
     #[test]
@@ -10322,21 +10546,34 @@ mod tests {
             standard.bundle().textures_2d[0].texture_name,
             standard.bundle().textures_2d[0].sampler_name
         )));
-        assert!(lowered.contains(&format!(
+        assert!(!lowered.contains(&format!(
             "textureLod(sampler2D({}, {}),",
             standard.bundle().textures_2d[1].texture_name,
             standard.bundle().textures_2d[1].sampler_name
         )));
-        let mut drifted = (*standard).clone();
-        std::sync::Arc::make_mut(&mut drifted.bundle).textures_2d[0].values[0] = 1.0;
-        let drifted_lowered = lower_ocio_program_source_for_wgpu(&drifted)
-            .expect("resource drift keeps the original OCIO program");
-        assert!(!drifted_lowered.contains("Analytic inverse HLG OETF"));
-        assert!(drifted_lowered.contains(&format!(
-            "textureLod(sampler2D({}, {}),",
-            drifted.bundle().textures_2d[0].texture_name,
-            drifted.bundle().textures_2d[0].sampler_name
-        )));
+        assert!(lowered.contains("OCIO analytic PQ OETF"));
+        for curve in 0..2 {
+            let mut drifted = (*standard).clone();
+            std::sync::Arc::make_mut(&mut drifted.bundle).textures_2d[curve].values[0] = 1.0;
+            let drifted_lowered = lower_ocio_program_source_for_wgpu(&drifted)
+                .expect("resource drift keeps the original OCIO program");
+            assert!(!drifted_lowered.contains("Analytic inverse HLG OETF"));
+            assert!(!drifted_lowered.contains("OCIO analytic PQ OETF"));
+            for texture in &drifted.bundle().textures_2d {
+                assert!(drifted_lowered.contains(&format!(
+                    "textureLod(sampler2D({}, {}),",
+                    texture.texture_name, texture.sampler_name
+                )));
+            }
+        }
+        for outside_domain in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+            let mut drifted = (*standard).clone();
+            std::sync::Arc::make_mut(&mut drifted.bundle).textures_3d[0].values[0] = outside_domain;
+            let drifted_lowered = lower_ocio_program_source_for_wgpu(&drifted)
+                .expect("unproven formation retains the original curves");
+            assert!(!drifted_lowered.contains("Analytic inverse HLG OETF"));
+            assert!(!drifted_lowered.contains("OCIO analytic PQ OETF"));
+        }
         assert!(
             standard.shader_len < aces.shader_len,
             "Standard HDR shader should be smaller than ACES 2: Standard={} bytes, ACES={} bytes",

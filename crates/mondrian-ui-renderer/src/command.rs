@@ -609,6 +609,94 @@ impl DrawEncoder {
         );
         self.commands
     }
+
+    /// Resolve logical UI points into backing pixels at the Window boundary.
+    /// Layout and hit testing stay in points; the renderer and its surface stay
+    /// in physical pixels. The entire stream is scaled together so geometry,
+    /// text, clipping, shadows, and external Viewer textures share one space.
+    pub fn finish_scaled(self, pixels_per_point: f32) -> Vec<DrawCommand> {
+        assert!(pixels_per_point.is_finite() && pixels_per_point > 0.0);
+        let mut commands = self.finish();
+        if pixels_per_point == 1.0 {
+            return commands;
+        }
+        let scale = pixels_per_point;
+        let point = |p: &mut Point| {
+            p.x *= scale;
+            p.y *= scale;
+        };
+        let rect = |r: &mut Rect| {
+            r.x *= scale;
+            r.y *= scale;
+            r.width *= scale;
+            r.height *= scale;
+        };
+        for command in &mut commands {
+            match command {
+                DrawCommand::Rect { bounds, corner_radii, .. } => {
+                    rect(bounds);
+                    corner_radii.top_left *= scale;
+                    corner_radii.top_right *= scale;
+                    corner_radii.bottom_right *= scale;
+                    corner_radii.bottom_left *= scale;
+                }
+                DrawCommand::SoftShadow {
+                    bounds,
+                    corner_radius,
+                    blur_radius,
+                    spread,
+                    offset,
+                    ..
+                } => {
+                    rect(bounds);
+                    *corner_radius *= scale;
+                    *blur_radius *= scale;
+                    *spread *= scale;
+                    *offset *= scale;
+                }
+                DrawCommand::GradientRect { bounds, corner_radius, .. } => {
+                    rect(bounds);
+                    *corner_radius *= scale;
+                }
+                DrawCommand::Text { style, position, max_width, .. } => {
+                    point(position);
+                    style.font_size *= scale;
+                    style.line_height *= scale;
+                    style.letter_spacing *= scale;
+                    if let Some(width) = max_width {
+                        *width *= scale;
+                    }
+                }
+                DrawCommand::Image { bounds, .. }
+                | DrawCommand::RasterImage { bounds, .. }
+                | DrawCommand::RasterAtlasImage { bounds, .. }
+                | DrawCommand::ExternalTexture { bounds, .. } => rect(bounds),
+                DrawCommand::Line { start, end, width, .. } => {
+                    point(start);
+                    point(end);
+                    *width *= scale;
+                }
+                DrawCommand::Triangles { vertices, .. } => {
+                    for vertex in vertices {
+                        point(vertex);
+                    }
+                }
+                DrawCommand::ColoredTriangles { vertices, mask } => {
+                    for (vertex, _) in vertices {
+                        point(vertex);
+                    }
+                    if let Some(mask) = mask {
+                        rect(&mut mask.bounds);
+                        mask.corner_radius *= scale;
+                    }
+                }
+                DrawCommand::PushClip { bounds } => rect(bounds),
+                DrawCommand::PushTranslate { offset } => *offset *= scale,
+                DrawCommand::PopClip | DrawCommand::PopTransform => {}
+            }
+        }
+        commands
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
@@ -751,6 +839,60 @@ mod tests {
         let enc = DrawEncoder::new();
         assert!(enc.is_empty());
         assert_eq!(enc.command_count(), 0);
+    }
+
+    #[test]
+    fn backing_scale_maps_text_clip_geometry_and_viewer_texture_together() {
+        let mut encoder = DrawEncoder::new();
+        encoder.push_clip(Rect::new(1.0, 2.0, 100.0, 50.0));
+        encoder.draw_rect(Rect::new(2.0, 3.0, 20.0, 10.0), color(), 4.0);
+        encoder.draw_text_box(
+            "Viewer",
+            &TextStyle {
+                font_size: 14.0,
+                line_height: 20.0,
+                font_weight: mondrian_ui_theme::typography::FontWeight::Regular,
+                letter_spacing: 0.5,
+            },
+            Point::new(3.0, 4.0),
+            80.0,
+            color(),
+        );
+        encoder.draw_external_texture(
+            ExternalTextureKey::new("viewer").unwrap(),
+            Rect::new(5.0, 6.0, 40.0, 30.0),
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color(),
+        );
+        encoder.pop_clip();
+        let commands = encoder.finish_scaled(2.0);
+        assert!(matches!(
+            commands[0],
+            DrawCommand::PushClip { bounds }
+                if bounds == Rect::new(2.0, 4.0, 200.0, 100.0)
+        ));
+        assert!(matches!(
+            commands[1],
+            DrawCommand::Rect { bounds, corner_radii, .. }
+                if bounds == Rect::new(4.0, 6.0, 40.0, 20.0)
+                    && corner_radii.top_left == 8.0
+        ));
+        assert!(matches!(
+            &commands[2],
+            DrawCommand::Text { style, position, max_width, .. }
+                if *position == Point::new(6.0, 8.0)
+                    && style.font_size == 28.0
+                    && style.line_height == 40.0
+                    && style.letter_spacing == 1.0
+                    && *max_width == Some(160.0)
+        ));
+        assert!(matches!(
+            commands[3],
+            DrawCommand::ExternalTexture { bounds, uv_rect, .. }
+                if bounds == Rect::new(10.0, 12.0, 80.0, 60.0)
+                    && uv_rect == Rect::new(0.0, 0.0, 1.0, 1.0)
+        ));
+        assert!(matches!(commands[4], DrawCommand::PopClip));
     }
 
     #[test]

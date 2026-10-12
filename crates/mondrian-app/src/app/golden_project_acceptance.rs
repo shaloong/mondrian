@@ -46,14 +46,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Run three bounded local real-media software stages without commercial qualification.
+/// Workload controls for the same production-linked local validation runtime.
+#[cfg(feature = "validation")]
+pub use local_media_smoke::{
+    LocalMediaSmokePhases, LocalMediaSmokeSettings, LocalMediaSmokeSources,
+};
+
+/// Run bounded local real-media production stages without commercial qualification.
 #[cfg(feature = "validation")]
 pub fn run_local_media_smoke(
     root: PathBuf,
     output: PathBuf,
-    phase_seconds: u64,
+    settings: LocalMediaSmokeSettings,
 ) -> anyhow::Result<PathBuf> {
-    local_media_smoke::run(root, output, phase_seconds)
+    local_media_smoke::run(root, output, settings)
 }
 
 /// Run real-media repeated Export and cancel/retry validation independently.

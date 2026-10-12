@@ -420,7 +420,9 @@ mod tests {
     use mondrian_ui_core::{EventResult, UiEvent};
 
     use super::*;
-    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::test_utils::{
+        make_event_ctx, primary_text_modifiers, DummyFocus, DummyShortcut, DummyTooltip,
+    };
 
     fn number_action(value: f64) -> Action {
         assert!(value.is_finite());
@@ -999,7 +1001,7 @@ mod tests {
             (KeyCode::Up, Modifiers { alt: true, ..Default::default() }),
             (
                 KeyCode::Down,
-                Modifiers { meta: true, ..Default::default() },
+                Modifiers { ctrl: true, meta: true, ..Default::default() },
             ),
             (
                 KeyCode::PageDown,
@@ -1018,6 +1020,21 @@ mod tests {
 
         assert_eq!(input.text(), "10");
         assert!(values.borrow().is_empty());
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                input.event(
+                    &UiEvent::KeyDown {
+                        key: KeyCode::Down,
+                        modifiers: primary_text_modifiers(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+            assert_eq!(input.text(), "10");
+            assert!(values.borrow().is_empty());
+        }
     }
 
     #[test]

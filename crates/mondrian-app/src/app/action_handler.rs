@@ -42,7 +42,7 @@ use mondrian_timeline::audio::AudioComponentSource;
 #[cfg(test)]
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::clip::{Clip, TrimEdge};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 enum AssetLibrarySubject {
@@ -65,10 +65,11 @@ impl AppState {
                 if namespace == crate::app::ui_actions::APP_SHELL_NAMESPACE
                     && name == crate::app::ui_actions::APP_SHELL_CANCEL_PORTABLE_PACKAGE_EXPORT
         );
-        if self.project_close_blocks_actions() && !is_portable_cancel {
+        if self.project_lifecycle_blocks_actions() && !is_portable_cancel {
             return Err(MondrianError::ActionNotExecuted {
                 action: "project_lifecycle_handoff".to_owned(),
-                reason: "项目正在安全关闭，或持久化所有权未能证明；作者操作保持冻结".to_owned(),
+                reason: "项目正在打开或安全关闭，或持久化所有权未能证明；作者操作保持冻结"
+                    .to_owned(),
             });
         }
 
@@ -289,24 +290,7 @@ impl AppState {
         if path.as_os_str().is_empty() {
             return Err(action_not_executed("open_project", "项目路径不能为空"));
         }
-        let package_root = if path.is_dir()
-            && path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
-        {
-            Some(path.clone())
-        } else if path.file_name().is_some_and(|name| name.eq_ignore_ascii_case("project.mdp")) {
-            path.parent()
-                .filter(|parent| {
-                    parent.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mdpkg"))
-                })
-                .map(Path::to_path_buf)
-        } else {
-            None
-        };
-        let result = match package_root {
-            Some(root) => self.open_portable_project_package(root),
-            None => self.open_project_file(path),
-        };
-        result.map_err(|err| {
+        self.request_project_open(path).map_err(|err| {
             let reason = err.to_string();
             self.set_status_hint(
                 AppMessage::new("status-open-failed")
@@ -314,9 +298,7 @@ impl AppState {
                 true,
             );
             MondrianError::WorkflowStepFailed { step_id: "open_project".to_string(), reason }
-        })?;
-        self.set_status_hint(AppMessage::new("status-opened"), false);
-        Ok(())
+        })
     }
 
     fn save_project_as_from_action(&mut self, path: PathBuf) -> Result<()> {
@@ -5489,11 +5471,14 @@ mod tests {
         let mut state = AppState::new();
         let missing = unique_temp_path("missing-project").join("missing.mdp");
 
-        let err = state
+        state
             .dispatch_action(mondrian_editor_state::Action::OpenProject(missing))
-            .expect_err("missing project should fail");
-
-        assert!(matches!(err, MondrianError::WorkflowStepFailed { .. }));
+            .expect("admission must not do filesystem I/O");
+        assert!(!state.has_open_project());
+        state
+            .wait_for_project_open()
+            .expect_err("missing archive cannot install a Session");
+        assert!(!state.has_open_project());
         assert!(state.status_hint.as_ref().is_some_and(|(_, is_error)| *is_error));
     }
 

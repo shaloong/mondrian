@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod cancellation;
+mod codec;
 mod decode_contract;
 mod decode_session;
 mod decoded_frame;
@@ -45,7 +46,10 @@ pub(crate) use frame_materialization::resize_float_rgba;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
+mod scaler;
 mod seek_index;
+#[cfg(target_os = "macos")]
+mod videotoolbox;
 
 pub use decode_contract::{
     CameraRawDecodeIntent, PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence,
@@ -129,7 +133,7 @@ use frame_materialization::{
 use native_frame::parse_ffmpeg_d3d11_texture;
 pub use native_frame::{
     FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, PreviewNativeDecodedFrame,
+    FfmpegNativeDecodedFrameResourceError, PreviewCvPixelBuffer, PreviewNativeDecodedFrame,
     PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
     PreviewNativeDecodedFrameResource,
 };
@@ -214,12 +218,16 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
     InProcessFfmpegCpuFloat,
+    /// In-process FFmpeg scaler preserved source-encoded RGBA16 UNORM samples.
+    InProcessFfmpegCpuUnorm16,
     /// In-process DNG/CinemaDNG Adapter returned developed scene-linear RGBA32F.
     InProcessCameraRawDng,
     /// In-process FFmpeg decoder retained compact CPU YUV planes for GPU materialization.
     InProcessFfmpegCpuYuv,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
     InProcessFfmpegNative,
+    /// Direct public VideoToolbox decoder returned a retained native surface.
+    InProcessVideoToolboxNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
     ExternalFfmpegCpuRgba,
     /// Playback cursor reused a frame from its session-local forward ring.
@@ -462,6 +470,8 @@ pub enum PreviewNativeDecodeFallback {
     SurfaceFormatUnavailable,
     /// Required range, chroma-location, or bit-depth metadata was incomplete.
     SamplingMetadataIncomplete,
+    /// Decoded sampling metadata conflicted with a codec-defined sampling grid.
+    SamplingMetadataConflict,
     /// FFmpeg could not retain or expose the native decoder resource.
     ResourceRetentionFailed,
     /// A hardware-preferred Session failed during runtime decode and the same
@@ -474,7 +484,7 @@ pub enum PreviewNativeDecodeFallback {
 
 impl PreviewHardwareDecodeBlocker {
     fn from_probe(probe: &HwAccelProbe) -> Self {
-        if probe.hardware_decode_active
+        if probe.native_decoder_active
             && probe.frame_residency == DecodedFrameResidency::GpuTexture
             && probe.gpu_frame_handle_kind.is_some()
         {
@@ -580,6 +590,9 @@ pub struct PreviewSourceColorContract {
     /// omits its matrix coefficient. Stream/frame metadata still wins.
     #[serde(default)]
     pub yuv_matrix_fallback: Option<DecodedVideoMatrix>,
+    /// Authoritative YCbCr correction. Never applies to already decoded RGB.
+    #[serde(default)]
+    pub yuv_matrix_override: Option<DecodedVideoMatrix>,
 }
 
 impl PreviewSourceColorContract {
@@ -589,6 +602,7 @@ impl PreviewSourceColorContract {
             identity: PreviewSourceSampleIdentity::ColorManaged(color_space),
             range,
             yuv_matrix_fallback: None,
+            yuv_matrix_override: None,
         }
     }
 
@@ -598,6 +612,7 @@ impl PreviewSourceColorContract {
             identity: PreviewSourceSampleIdentity::DataTexture,
             range,
             yuv_matrix_fallback: None,
+            yuv_matrix_override: None,
         }
     }
 
@@ -628,6 +643,69 @@ impl PreviewSourceColorContract {
             self.yuv_matrix_fallback = Some(matrix);
         }
         self
+    }
+
+    /// Lower the persistent coefficient intent once at the shared decode boundary.
+    pub const fn with_matrix_interpretation(
+        mut self,
+        intent: mondrian_core::timeline_data::MediaMatrixInterpretation,
+    ) -> Self {
+        use mondrian_core::timeline_data::{MediaMatrixInterpretation, MediaYuvMatrix};
+        if !self.is_data_texture() {
+            self.yuv_matrix_override = match intent {
+                MediaMatrixInterpretation::Auto => None,
+                MediaMatrixInterpretation::Override { matrix } => Some(match matrix {
+                    MediaYuvMatrix::Bt709 => DecodedVideoMatrix::Bt709,
+                    MediaYuvMatrix::Bt2020NonConstant => DecodedVideoMatrix::Bt2020NonConstant,
+                    MediaYuvMatrix::Fcc => DecodedVideoMatrix::Fcc,
+                    MediaYuvMatrix::Bt470Bg => DecodedVideoMatrix::Bt470Bg,
+                    MediaYuvMatrix::Smpte170M => DecodedVideoMatrix::Smpte170M,
+                    MediaYuvMatrix::Smpte240M => DecodedVideoMatrix::Smpte240M,
+                }),
+            };
+        }
+        self
+    }
+
+    /// Bind validated codec sampling facts independently of RGB interpretation
+    /// and authored range. Explicit picture matrix metadata still wins.
+    pub fn with_video_stream_sampling(mut self, stream: &crate::VideoStreamInfo) -> Self {
+        use mondrian_core::{timeline_data::MediaRangeInterpretation, VideoSamplingConvention};
+        if !self.is_data_texture()
+            && matches!(
+                DecodedVideoRangeContract::from_video_stream(
+                    MediaRangeInterpretation::Auto,
+                    stream
+                ),
+                DecodedVideoRangeContract::AutomaticWithConvention {
+                    convention: VideoSamplingConvention::SdDv,
+                    ..
+                }
+            )
+        {
+            self.yuv_matrix_fallback = Some(if stream.height == 576 {
+                DecodedVideoMatrix::Bt470Bg
+            } else {
+                DecodedVideoMatrix::Smpte170M
+            });
+        }
+        self
+    }
+
+    /// Resolve coefficients for a YCbCr payload. An authored correction wins;
+    /// Auto preserves explicit/unsupported facts and only fills missing metadata.
+    /// Already decoded RGB does not enter this YCbCr conversion boundary.
+    pub const fn resolve_yuv_matrix(self, decoded: DecodedVideoMatrix) -> DecodedVideoMatrix {
+        if let Some(matrix) = self.yuv_matrix_override {
+            return matrix;
+        }
+        match decoded {
+            DecodedVideoMatrix::Unknown => match self.yuv_matrix_fallback {
+                Some(matrix) => matrix,
+                None => DecodedVideoMatrix::Unknown,
+            },
+            explicit => explicit,
+        }
     }
 
     /// Build an automatic contract with a stream-probe fallback.
@@ -961,6 +1039,35 @@ pub enum PreviewTemporalExtentSource {
     SuccessorBoundary,
 }
 
+/// Exact projection from source-local targets onto a decoder selection clock.
+/// The clock includes the stream origin and field-processing tick scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewDecodeSelectionClock {
+    numerator: i64,
+    denominator: i64,
+    start_pts: i64,
+}
+
+impl PreviewDecodeSelectionClock {
+    /// Preserve the concrete stream clock, including field-rate selection.
+    pub fn new(numerator: i64, denominator: i64, start_pts: i64, scale: i64) -> Option<Self> {
+        if numerator <= 0 || denominator <= 0 || scale <= 0 {
+            return None;
+        }
+        Some(Self {
+            numerator,
+            denominator: denominator.checked_mul(scale)?,
+            start_pts: start_pts.checked_mul(scale)?,
+        })
+    }
+
+    fn project(self, target: SourceSampleTarget) -> Option<i64> {
+        self.start_pts.checked_add(
+            source_sample_to_time_base_ticks(target, self.numerator, self.denominator).ok()?,
+        )
+    }
+}
+
 /// Narrow immutable temporal-selection evidence retained beyond the decoder.
 ///
 /// This is the physical PTS interval actually selected for one exact source
@@ -969,6 +1076,8 @@ pub enum PreviewTemporalExtentSource {
 /// identity without depending on the complete decoder implementation record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewDecodeTemporalSelection {
+    /// Concrete clock required to prove coverage of another exact source target.
+    pub selection_clock: Option<PreviewDecodeSelectionClock>,
     /// Requested decode-selection PTS after exact source-target lowering.
     /// Field-rate/Automatic Sessions use two ticks per source stream tick.
     pub requested_pts: i64,
@@ -980,6 +1089,31 @@ pub struct PreviewDecodeTemporalSelection {
     pub extent_source: PreviewTemporalExtentSource,
     /// Whether the selection deliberately approximated the request.
     pub temporal_approximation: bool,
+}
+
+impl PreviewDecodeTemporalSelection {
+    /// Retarget only within the proven half-open physical interval.
+    /// Unknown clocks, approximations, invalid extents and overflow cannot reuse.
+    pub fn covering_target(self, target: SourceSampleTarget) -> Option<Self> {
+        if self.temporal_approximation
+            || self.extent_source == PreviewTemporalExtentSource::Unknown
+            || self.selected_duration_pts <= 0
+        {
+            return None;
+        }
+        let requested_pts = self.selection_clock?.project(target)?;
+        let end = self.selected_pts.checked_add(self.selected_duration_pts)?;
+        // A packet duration alone can overlap a later VFR picture. At an
+        // exact start it proves only that point; wider reuse requires the
+        // actual successor observed by the canonical decoder selector.
+        if requested_pts != self.selected_pts
+            && self.extent_source != PreviewTemporalExtentSource::SuccessorBoundary
+        {
+            return None;
+        }
+        (self.selected_pts <= requested_pts && requested_pts < end)
+            .then_some(Self { requested_pts, ..self })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1206,9 +1340,11 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
+            Self::InProcessFfmpegCpuUnorm16 => "InProcessFfmpegCpuUnorm16",
             Self::InProcessCameraRawDng => "InProcessCameraRawDng",
             Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
+            Self::InProcessVideoToolboxNative => "InProcessVideoToolboxNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
         }
@@ -1299,6 +1435,8 @@ pub struct PreviewDecodeDiagnostics {
     /// Evidence source that established the selected frame's presentation interval.
     #[serde(default)]
     pub selected_temporal_extent_source: PreviewTemporalExtentSource,
+    /// Concrete stream/field clock used by exact temporal selection.
+    pub selection_clock: Option<PreviewDecodeSelectionClock>,
     /// Whether interactive scrubbing intentionally presented a nearby keyframe.
     #[serde(default)]
     pub temporal_approximation: bool,
@@ -1385,6 +1523,10 @@ pub struct PreviewDecodeDiagnostics {
     /// coordinate (PTS only when DTS is absent), not presentation coverage.
     #[serde(default)]
     pub seek_index_anchor_pts: Option<i64>,
+    /// The demux seek failed with this FFmpeg code. The exact sample was
+    /// decoded from a newly opened, revision-verified origin under its budget.
+    #[serde(default)]
+    pub origin_restart_seek_error: Option<i32>,
     /// Decoded frames consumed by this request before selecting the output frame.
     #[serde(default)]
     pub decoded_frame_count: u32,
@@ -1400,9 +1542,13 @@ pub struct PreviewDecodeDiagnostics {
     /// Hardware decode backend reported by the media decode boundary.
     #[serde(default)]
     pub hw_accel_backend: HwAccelBackend,
-    /// Whether the media decode boundary actively used hardware decode.
+    /// Whether a native decoder backend produced this frame. This is separate
+    /// from hardware execution and from the frame's final residency.
     #[serde(default)]
-    pub hardware_decode_active: bool,
+    pub native_decoder_active: bool,
+    /// Hardware/software execution observed by the decoder; None is unobserved.
+    /// VideoToolbox output alone cannot establish its UsingHardware property.
+    pub hardware_decode_observed: Option<bool>,
     /// Whether decoded frames stayed GPU-resident through the media boundary.
     #[serde(default)]
     pub zero_copy_active: bool,
@@ -1436,13 +1582,15 @@ pub struct PreviewDecodeDiagnostics {
 pub enum PreviewDecodeExecutionPath {
     #[default]
     SoftwareCpu,
-    HardwareCpuTransfer {
+    NativeCpuTransfer {
         backend: HwAccelBackend,
+        hardware_decode_observed: Option<bool>,
         surface: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,
     },
-    HardwareNative {
+    NativeSurface {
         backend: HwAccelBackend,
+        hardware_decode_observed: Option<bool>,
         handle_kind: DecodedGpuFrameHandleKind,
         surface: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,
@@ -1457,12 +1605,17 @@ impl PreviewDecodeDiagnostics {
             cache_hit: path == PreviewDecodePath::PlaybackSessionRingHit,
             access_mode: PreviewDecodeAccessMode::RandomAccessStillFrame,
             external_process: path == PreviewDecodePath::ExternalFfmpegCpuRgba,
-            cpu_resident: path != PreviewDecodePath::InProcessFfmpegNative,
+            cpu_resident: !matches!(
+                path,
+                PreviewDecodePath::InProcessFfmpegNative
+                    | PreviewDecodePath::InProcessVideoToolboxNative
+            ),
             seek_performed: false,
             requested_pts: None,
             selected_pts: None,
             selected_duration_pts: None,
             selected_temporal_extent_source: PreviewTemporalExtentSource::Unknown,
+            selection_clock: None,
             temporal_approximation: false,
             seek_strategy: PreviewDecodeSeekStrategy::KeyframeBefore,
             forward_reuse_frame_window: 0,
@@ -1492,12 +1645,20 @@ impl PreviewDecodeDiagnostics {
             seek_index_source: PreviewSeekIndexSource::None,
             seek_index_used: false,
             seek_index_anchor_pts: None,
+            origin_restart_seek_error: None,
             decoded_frame_count: 0,
             threading_kind: PreviewDecodeThreadingKind::None,
             threading_count: 0,
             stage_durations: PreviewDecodeStageDurations::default(),
             hw_accel_backend: HwAccelBackend::None,
-            hardware_decode_active: false,
+            native_decoder_active: false,
+            hardware_decode_observed: (!matches!(
+                path,
+                PreviewDecodePath::InProcessFfmpegNative
+                    | PreviewDecodePath::InProcessVideoToolboxNative
+                    | PreviewDecodePath::PlaybackSessionRingHit
+            ))
+            .then_some(false),
             zero_copy_active: false,
             decoded_frame_residency: DecodedFrameResidency::CpuRgba,
             gpu_frame_handle_kind: None,
@@ -1508,24 +1669,27 @@ impl PreviewDecodeDiagnostics {
         }
     }
 
-    /// Return only execution facts that prove actual hardware frame work.
+    /// Return frame-local backend/residency and hardware-execution observations.
+    /// A native surface is not itself proof of hardware decoder execution.
     pub fn execution_path(&self) -> PreviewDecodeExecutionPath {
         let native_handle = self.gpu_frame_handle_kind.filter(|_| {
             self.hardware_decode_decision == PreviewHardwareDecodeDecision::GpuResidentNative
-                && self.hardware_decode_active
+                && self.native_decoder_active
                 && self.decoded_frame_residency == DecodedFrameResidency::GpuTexture
         });
         if let Some(handle_kind) = native_handle {
-            return PreviewDecodeExecutionPath::HardwareNative {
+            return PreviewDecodeExecutionPath::NativeSurface {
                 backend: self.hw_accel_backend,
+                hardware_decode_observed: self.hardware_decode_observed,
                 handle_kind,
                 surface: self.decoded_surface_format,
                 sampling: self.decoded_video_sampling,
             };
         }
-        if self.hardware_decode_cpu_transfer_observed && self.hardware_decode_active {
-            return PreviewDecodeExecutionPath::HardwareCpuTransfer {
+        if self.hardware_decode_cpu_transfer_observed && self.native_decoder_active {
+            return PreviewDecodeExecutionPath::NativeCpuTransfer {
                 backend: self.hw_accel_backend,
+                hardware_decode_observed: self.hardware_decode_observed,
                 surface: self.decoded_surface_format,
                 sampling: self.decoded_video_sampling,
             };
@@ -1541,6 +1705,7 @@ impl PreviewDecodeDiagnostics {
         (self.selected_temporal_extent_source != PreviewTemporalExtentSource::Unknown
             && selected_pts.checked_add(selected_duration_pts).is_some())
         .then_some(PreviewDecodeTemporalSelection {
+            selection_clock: self.selection_clock,
             requested_pts,
             selected_pts,
             selected_duration_pts,
@@ -1603,7 +1768,12 @@ impl PreviewDecodeDiagnostics {
         self.hardware_decode_candidate_backend = probe.candidate_backend;
         self.hardware_decode_candidate_handle_kind = probe.candidate_handle_kind;
         self.hardware_decode_adapter_available = probe.decoder_adapter_available;
-        self.hardware_decode_active = probe.hardware_decode_active;
+        self.native_decoder_active = probe.native_decoder_active;
+        self.hardware_decode_observed = if probe.native_decoder_active {
+            probe.hardware_decode_observed
+        } else {
+            Some(false)
+        };
         self.zero_copy_active = probe.zero_copy_active;
         self.decoded_frame_residency = probe.frame_residency;
         self.gpu_frame_handle_kind = probe.gpu_frame_handle_kind;
@@ -1668,6 +1838,8 @@ pub enum PreviewDecodeOutcome {
     Frame(RgbaFrame),
     /// Decode completed with a CPU scene-linear RGBA f32 preview frame.
     FloatFrame(FloatRgbaFrame),
+    /// Decode completed with source-encoded CPU RGBA16 UNORM samples.
+    Unorm16Frame(Unorm16RgbaFrame),
     /// Decode completed with compact CPU YUV planes for direct GPU materialization.
     CpuYuvFrame(CpuYuvFrame),
     /// Decode completed with a GPU-resident native frame.
@@ -1749,15 +1921,13 @@ fn preview_trace(message: String) {
 
 fn preview_decode_threading_config(
     codec_id: ffmpeg::codec::Id,
+    backend: HwAccelBackend,
     access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
 ) -> PreviewDecodeThreadingConfig {
     let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
-        .unwrap_or_else(|| {
-            default_threading_kind_for_software_decode(codec_id, access_mode, decode_pixels)
-        });
+        .unwrap_or_else(|| default_decoder_threading_kind(codec_id, backend));
     let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
@@ -1767,7 +1937,7 @@ fn preview_decode_threading_config(
     PreviewDecodeThreadingConfig { kind, count }
 }
 
-/// Default software-decode threading kind.
+/// Default threading kind for the concrete decoder context being opened.
 ///
 /// Frame threading pipelines coded pictures and therefore provides stable
 /// throughput independently of how many slices the bitstream author placed in
@@ -1780,12 +1950,15 @@ fn preview_decode_threading_config(
 /// ProRes instead parallelizes slices within the requested intra picture:
 /// frame threading unnecessarily retains future pictures across seek/EOF and
 /// increases residency without improving measured native decode throughput.
-fn default_threading_kind_for_software_decode(
+/// VideoToolbox owns asynchronous native picture decode. FFmpeg frame threading
+/// adds another coded-picture pipeline in front of that owner; slice threading
+/// avoids that additional pipeline without changing native codec reordering.
+/// A software fallback still uses the software codec's policy.
+fn default_decoder_threading_kind(
     codec_id: ffmpeg::codec::Id,
-    _access_mode: PreviewDecodeAccessMode,
-    _decode_pixels: u64,
+    backend: HwAccelBackend,
 ) -> PreviewDecodeThreadingKind {
-    if codec_id == ffmpeg::codec::Id::PRORES {
+    if backend == HwAccelBackend::VideoToolbox || codec_id == ffmpeg::codec::Id::PRORES {
         PreviewDecodeThreadingKind::Slice
     } else {
         PreviewDecodeThreadingKind::Frame
@@ -1805,11 +1978,11 @@ fn default_decoder_threads_for_access_mode(
 
 fn preview_decode_threading_config_for_codec(
     codec_id: ffmpeg::codec::Id,
+    backend: HwAccelBackend,
     access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
     worker_thread_limit: Option<usize>,
 ) -> PreviewDecodeThreadingConfig {
-    let requested = preview_decode_threading_config(codec_id, access_mode, decode_pixels);
+    let requested = preview_decode_threading_config(codec_id, backend, access_mode);
     let requested = cap_preview_decode_threading_config(requested, worker_thread_limit);
     apply_preview_codec_threading_policy(codec_id, requested)
 }
@@ -1985,8 +2158,31 @@ enum DecodedVideoReceive {
     EndOfStream,
 }
 
+fn validate_decoded_picture_integrity(
+    decoded: &ffmpeg::util::frame::video::Video,
+    path: &Path,
+) -> Result<()> {
+    // SAFETY: decoded owns this live AVFrame throughout these metadata reads.
+    let (flags, decode_error_flags) = unsafe {
+        (
+            (*decoded.as_ptr()).flags,
+            (*decoded.as_ptr()).decode_error_flags,
+        )
+    };
+    if flags & ffmpeg::ffi::AV_FRAME_FLAG_CORRUPT != 0 || decode_error_flags != 0 {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "decoded picture has corrupt/error-concealed samples: pts={:?}, frame_flags={flags:#x}, decode_error_flags={decode_error_flags:#x}",
+                decoded.pts(),
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn receive_decoded_video_frame(
-    decoder: &mut ffmpeg::decoder::Video,
+    decoder: &mut codec::PreviewCodec,
     interrupt_state: &PreviewDecodeInterruptState,
     path: &Path,
 ) -> Result<DecodedVideoReceive> {
@@ -1994,6 +2190,10 @@ fn receive_decoded_video_frame(
     let mut decoded = ffmpeg::util::frame::video::Video::empty();
     match decoder.receive_frame(&mut decoded) {
         Ok(()) => {
+            // Validate once before field processing, caching, color conversion
+            // or GPU publication. A successful receive can contain FFmpeg's
+            // error-concealed samples and does not itself prove picture integrity.
+            validate_decoded_picture_integrity(&decoded, path)?;
             let mut pts = decoded.pts();
             if pts.is_none() {
                 let best_effort = unsafe { (*decoded.as_ptr()).best_effort_timestamp };
@@ -2013,7 +2213,7 @@ fn receive_decoded_video_frame(
         Err(ffmpeg::Error::Eof) => Ok(DecodedVideoReceive::EndOfStream),
         Err(error) => Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
-            reason: format!("FFmpeg receive_frame failed: {error}"),
+            reason: format!("preview codec receive_frame failed: {error}"),
         }),
     }
 }

@@ -18,6 +18,7 @@ use mondrian_renderer::GpuNativeDecodedFrameImportSupport;
 use mondrian_ui_core::types::{Point, Rect};
 use mondrian_ui_core::{TreeWalker, Widget};
 use mondrian_ui_theme::{set_theme_preset, ThemePreset};
+use mondrian_ui_widgets::ViewerFrameContent;
 
 use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, ExecutionDomainDemand,
@@ -153,11 +154,12 @@ pub(crate) struct AppUiBackgroundTaskPollOutcome {
 
 impl AppUiBackgroundTaskPollOutcome {
     const fn from_changes(full_model_changed: bool, preview: PlaybackPreviewPumpOutcome) -> Self {
+        // The existing execution turn retries candidates before waiting. A
+        // retry hint alone does not change the currently published picture.
         Self {
             repaint_required: full_model_changed
                 || preview.visible_change
-                || preview.transport_change
-                || preview.candidate_retry_required,
+                || preview.transport_change,
             needs_follow_up_poll: preview.needs_follow_up_poll,
             quit_requested: false,
         }
@@ -289,13 +291,28 @@ impl AppUiHost {
     /// Resolve the currently laid-out Viewer spatial presentation contract.
     pub(crate) fn viewer_presentation_geometry(
         &self,
+        pixels_per_point: f32,
     ) -> Option<mondrian_ui_widgets::ViewerPresentationGeometry> {
-        crate::app_ui::shell::viewer_presentation_geometry(self.active_root())
+        crate::app_ui::shell::viewer_presentation_geometry(self.active_root(), pixels_per_point)
     }
 
     /// Whether a demand-driven panel is the active visible workspace tab.
     pub(crate) fn is_panel_active(&self, panel: PanelKind) -> bool {
         self.mode == AppUiMode::Workspace && self.root.is_panel_active(panel)
+    }
+
+    fn synchronize_preview_raster_requirement(&self) {
+        use crate::app::preview_quality::PreviewRasterRequirement;
+        let requirement = if self.is_panel_active(PanelKind::Scopes)
+            || self.video_scopes_settings().monitoring.is_active()
+        {
+            PreviewRasterRequirement::CanonicalProgram
+        } else {
+            PreviewRasterRequirement::Viewer
+        };
+        if self.preview_service.set_raster_requirement(requirement) {
+            self.preview_dirty.set(true);
+        }
     }
 
     /// Read-only access to the current app state.
@@ -375,6 +392,8 @@ impl AppUiHost {
 
     /// Build a GPU-output preview candidate for the current app state.
     pub(crate) fn gpu_preview_frame_for_current_state(&self) -> PreviewGpuFrameState {
+        self.sync_native_visual_gui_presence();
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         self.preview_service
             .gpu_preview_frame(state.preview_frame_execution_request(std::time::Instant::now()))
@@ -386,6 +405,7 @@ impl AppUiHost {
         &self,
         frame: Box<PreviewGpuFrame>,
     ) -> Option<Box<PreviewGpuFrame>> {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         let snapshot = state.preview_execution_snapshot(std::time::Instant::now());
         self.preview_service.bind_staged_gpu_frame_for_current(frame, &snapshot)
@@ -393,6 +413,7 @@ impl AppUiHost {
 
     /// Build ticketless immediate-successor work from the same Preview Runtime.
     pub(crate) fn gpu_preview_successor_for_current_state(&self) -> PreviewGpuFrameState {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         state
             .preview_successor_execution_request(std::time::Instant::now())
@@ -407,6 +428,7 @@ impl AppUiHost {
         &self,
         offset: usize,
     ) -> PreviewGpuFrameState {
+        self.synchronize_preview_raster_requirement();
         let state = self.app_state.borrow();
         state
             .preview_lookahead_execution_request(std::time::Instant::now(), offset)
@@ -578,28 +600,50 @@ impl AppUiHost {
     }
 
     /// Select current presentation or ticketless successor preparation.
-    pub(crate) fn viewer_gpu_preparation(&self) -> Option<ViewerGpuPreparation> {
+    pub(crate) fn viewer_gpu_preparation(
+        &self,
+        observed_at: Instant,
+    ) -> Option<ViewerGpuPreparation> {
         // Consuming the current ticket must not close the existing speculative
         // successor lane: priming waits for that physical preparation.
-        let successor_only = {
+        let (current_pending, successor_only) = {
             let state = self.app_state.borrow();
-            state.pending_playback_frame_demand_identity().is_none()
-                && state.preview_successor_execution_request(Instant::now()).is_some()
+            let current_pending = state.pending_playback_frame_demand_identity().is_some();
+            (
+                current_pending,
+                !current_pending
+                    && state.preview_successor_execution_request(observed_at).is_some(),
+            )
         };
         if successor_only {
             Some(ViewerGpuPreparation::Successor)
+        } else if current_pending
+            && self
+                .prepared_current_window_preview(PreviewPresentationCarrier::ExternalGpu)
+                .is_some_and(|(_, _, artifact_was_visible)| artifact_was_visible)
+        {
+            // Preserve the ticket until the Window can validate its physical
+            // slot and continuous visibility. This only selects that owner;
+            // a new GPU execution still takes the ordinary expiry preflight.
+            Some(ViewerGpuPreparation::Current)
         } else {
-            self.preflight_pending_viewer_gpu_presentation()
+            self.preflight_pending_viewer_gpu_presentation(observed_at)
                 .then_some(ViewerGpuPreparation::Current)
         }
     }
 
     /// Consume an already-expired current demand before the Window builds a
     /// Viewer candidate.
-    pub(crate) fn preflight_pending_viewer_gpu_presentation(&self) -> bool {
+    pub(crate) fn preflight_pending_viewer_gpu_presentation(&self, observed_at: Instant) -> bool {
         let preflight =
-            self.app_state.borrow_mut().preflight_pending_frame_presentation(Instant::now());
-        self.finish_window_presentation_preflight(preflight)
+            self.app_state.borrow_mut().preflight_pending_frame_presentation(observed_at);
+        match preflight {
+            // No candidate has been built or published at this admission seam.
+            // A consumed demand blocks new work without invalidating the
+            // retained picture or scheduling another identical preparation.
+            FramePresentationPreflight::LostAuthority => false,
+            other => self.finish_window_presentation_preflight(other),
+        }
     }
 
     /// Recheck the exact ticket carried by a built candidate immediately
@@ -643,6 +687,8 @@ impl AppUiHost {
         let texture_key = texture_key.into();
         let visible_output = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
             texture_key.clone(),
+            frame.width,
+            frame.height,
             presentation,
         );
         let visible_changed = Cell::new(false);
@@ -698,7 +744,19 @@ impl AppUiHost {
                 self.window_preview_state.replace(next);
                 visible_changed.set(changed);
             });
-            if candidate.was_already_visible()
+            if carrier == PreviewPresentationCarrier::ExternalGpu
+                && candidate.was_already_visible()
+                && artifact_was_visible
+                && !changed
+                && candidate.presentation_ticket().is_none()
+                && self.app_state.borrow().pending_playback_frame_demand_identity().is_none()
+            {
+                // Preview proved the exact current artifact and the Window
+                // still holds its Ready physical slot. Observe it without a
+                // visibility commit or a second Frame Delivery. A new demand,
+                // distinct texture, or stale slot still needs ticket authority.
+                FramePresentationDisposition::NoDemand
+            } else if candidate.was_already_visible()
                 && artifact_was_visible
                 && let Some(already_visible_at) = self.last_playback_frame_advance_at.get()
             {
@@ -811,6 +869,12 @@ impl AppUiHost {
         }
         match disposition {
             FramePresentationDisposition::Presented(_) => {
+                {
+                    let state = self.app_state.borrow();
+                    self.preview_service.prefetch_after_gpu_presentation(
+                        state.preview_frame_execution_request(std::time::Instant::now()),
+                    );
+                }
                 self.preview_service.try_release_settled_transport_media_residency();
                 let _ = self.observe_playback_video_preroll();
                 self.preview_dirty.set(true);
@@ -895,6 +959,7 @@ impl AppUiHost {
         // First admission must see the real current control subtree/panel;
         // startup intentionally queues no native Render before RootBuilt.
         self.sync_native_visual_gui_presence();
+        self.synchronize_preview_raster_requirement();
         {
             let state = self.app_state.borrow();
             if state.is_playing() && state.pending_playback_frame_demand_identity().is_none() {
@@ -923,7 +988,26 @@ impl AppUiHost {
                         return;
                     }
                 };
-                let _ = self.admit_window_preview_state(ticket, next);
+                if matches!(
+                    next,
+                    ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(_))
+                ) {
+                    if ticket.is_none() {
+                        // Observe an admitted physical slot without republishing
+                        // pixels or reviving a consumed still ticket.
+                        let _ = self.present_current_viewer_output(
+                            PreviewPresentationCandidate::already_visible((), None),
+                            PreviewPresentationCarrier::ExternalGpu,
+                        );
+                    } else {
+                        // Semantic reuse cannot prove the Window's physical
+                        // slot. Its GPU owner must validate that slot and
+                        // complete this ticket at the presentation seam.
+                        self.mark_window_preview_pending();
+                    }
+                } else {
+                    let _ = self.admit_window_preview_state(ticket, next);
+                }
             }
             PreviewPresentationState::Transparent(candidate) => {
                 let _ = self.admit_window_preview_state(
@@ -990,12 +1074,14 @@ impl AppUiHost {
     }
 
     fn observe_playback_video_preroll(&self) -> bool {
+        self.synchronize_preview_raster_requirement();
         observe_preview_preroll(&mut self.app_state.borrow_mut(), &self.preview_service)
     }
 
     /// Re-observe exact media lookahead after the Window Adapter installed the
     /// immediate successor's physical prepared-output lease.
     pub(crate) fn observe_prepared_viewer_gpu_preroll(&self) -> bool {
+        self.synchronize_preview_raster_requirement();
         observe_playback_video_preroll_with_presentation_readiness(
             &mut self.app_state.borrow_mut(),
             &self.preview_service,
@@ -1115,17 +1201,24 @@ impl AppUiHost {
         true
     }
 
+    /// Whether the existing visible UI projection needs a refresh before paint.
+    /// GPU capacity release and ticketless preparation are not visual changes.
+    pub(crate) fn has_pending_ui_refresh(&self) -> bool {
+        self.ui_dirty.get() || self.preview_dirty.get()
+    }
+
     /// Refresh the root widget models when editor state changed.
     pub fn refresh_if_dirty(&mut self, bounds: Rect) {
         let full_refresh = self.ui_dirty.replace(false);
         let force_model_refresh = self.force_model_refresh.replace(false);
         let preview_refresh = self.preview_dirty.replace(false);
-        if !full_refresh {
+        let next_mode = mode_for_app_state(&self.app_state.borrow());
+        let mode_changed = next_mode != self.mode;
+        if !full_refresh && !mode_changed {
             if preview_refresh && self.mode == AppUiMode::Workspace {
                 self.refresh_preview_state_without_rebuild();
                 self.sync_playback_feedback_from_viewer();
             }
-            self.sync_mode_from_app_state(bounds);
             return;
         }
         // A live draft may defer rebuilding its widgets, but never defer
@@ -1159,13 +1252,18 @@ impl AppUiHost {
             }
             return;
         }
+        // A mode transition projects the same App state as a dirty refresh.
+        // Select its active root first and refresh/layout once, rather than
+        // rebuilding Workspace again through a second mode-sync path.
+        self.mode = next_mode;
         self.normalize_asset_folder_selection();
         self.asset_thumbnails
             .set_color_context(self.app_state.borrow().thumbnail_color_context().ok());
         self.refresh_window_preview_state();
         self.refresh_root_models();
-        self.sync_mode_from_app_state(bounds);
-        TreeWalker::layout(self.active_root_mut(), bounds);
+        if !mode_changed {
+            TreeWalker::layout(self.active_root_mut(), bounds);
+        }
     }
 
     /// Seal author interactions before any path replaces their input widgets.
@@ -1187,6 +1285,10 @@ impl AppUiHost {
         );
     }
 
+    pub fn has_transient_interaction(&self) -> bool {
+        widget_tree_has_transient_interaction(self.active_root())
+    }
+
     fn refresh_preview_state_without_rebuild(&mut self) {
         self.refresh_window_preview_state();
         let window_preview_state = self.window_preview_state.borrow().clone();
@@ -1201,21 +1303,21 @@ impl AppUiHost {
         self.preview_service.set_native_visual_gui_registry(
             self.root.native_visual_gui_registry(),
             self.mode == AppUiMode::Workspace
-                && !self.app_state.borrow().project_close_blocks_actions()
+                && !self.app_state.borrow().project_lifecycle_blocks_actions()
                 && self.root.is_panel_active(mondrian_editor_state::state::PanelKind::Inspector),
         );
     }
 
     /// Read actual Preview admission facts without issuing work or a presentation ticket.
     #[cfg(feature = "validation")]
-    pub(crate) fn validation_question_preview_observation(&self) -> String {
+    pub(crate) fn validation_question_preview_observation(&self, pixels_per_point: f32) -> String {
         let state = self.app_state.borrow();
         let diagnostics = self.preview_service.diagnostics();
         format!(
             "mode={:?}; inspector={}; viewer_geometry={:?}; viewer_state={:?}; demand={:?}; playing={}; gui_presence={:?}; render_requests={}; gpu_requests={}; gpu_loading={}; gpu_unavailable={}; last_gpu_loading={:?}; unavailability={:?}; visual_failed={}; callbacks={:?}; generation={}",
             self.mode,
             self.root.is_panel_active(PanelKind::Inspector),
-            self.viewer_presentation_geometry(),
+            self.viewer_presentation_geometry(pixels_per_point),
             self.window_preview_state.borrow(),
             state.pending_playback_frame_demand_identity(),
             state.is_playing(),
@@ -1255,6 +1357,7 @@ impl AppUiHost {
         let persistence_changed = self.app_state.borrow_mut().poll_project_persistence();
         let audio_input_observations_changed =
             self.app_state.borrow_mut().poll_audio_processor_input_observations();
+        let project_open_changed = self.app_state.borrow_mut().poll_project_open().is_some();
         let native_audio_catalog_changed =
             self.app_state.borrow_mut().poll_native_audio_catalog_restore();
         let openfx_catalog_changed = self.app_state.borrow_mut().poll_openfx_catalog();
@@ -1275,23 +1378,20 @@ impl AppUiHost {
                 );
             }
         }
-        if persistence_changed {
+        if persistence_changed || project_open_changed {
             let project_path_after_persistence =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
-            if project_path_after_persistence.is_some()
-                && project_path_after_persistence != project_path_before_persistence
+            if project_path_after_persistence != project_path_before_persistence
+                && let Some(path) = project_path_after_persistence
             {
-                if let Some(path) = project_path_after_persistence {
-                    self.record_recent_project(path);
-                }
-                self.refresh_recovery_candidates();
+                self.record_recent_project(path);
             }
         }
         let (project_close_changed, quit_requested) = self.poll_quiescing_project_close();
         // A quiescing Project remains readable for UI projection, but no
         // Project-scoped worker result may commit while its Session admission
         // is frozen. Final close invalidates their generations in one place.
-        let project_execution_frozen = self.app_state.borrow().project_close_blocks_actions();
+        let project_execution_frozen = self.app_state.borrow().project_lifecycle_blocks_actions();
         let (
             media_imports_changed,
             media_asset_mutations_changed,
@@ -1316,6 +1416,7 @@ impl AppUiHost {
             self.root
                 .set_audio_output_device_catalog(self.audio_device_catalog.state().clone());
         }
+        self.synchronize_preview_raster_requirement();
         let preview_outcome =
             pump_playback_preview(&mut self.app_state.borrow_mut(), &self.preview_service);
         let native_question_changed = self.poll_native_visual_questions();
@@ -1332,6 +1433,7 @@ impl AppUiHost {
             || native_audio_catalog_changed
             || openfx_catalog_changed
             || persistence_changed
+            || project_open_changed
             || project_close_changed
             || media_imports_changed
             || media_asset_mutations_changed
@@ -1529,7 +1631,9 @@ impl AppUiHost {
     pub(crate) fn next_execution_resource_observation_deadline(&self) -> Instant {
         let resource_deadline =
             self.app_state.borrow().next_execution_resource_observation_deadline();
-        let resource_deadline = if self.quiescing_close_action.is_some() {
+        let resource_deadline = if self.quiescing_close_action.is_some()
+            || self.app_state.borrow().has_pending_project_open()
+        {
             resource_deadline.min(Instant::now() + Duration::from_millis(16))
         } else {
             resource_deadline
@@ -1594,9 +1698,9 @@ impl AppUiHost {
         true
     }
 
-    /// Delay until Playback next requires a Clock or bounded-priming wake.
-    pub fn playback_next_wake_delay(&self) -> Option<Duration> {
-        self.app_state.borrow().playback_next_wake_delay()
+    /// Absolute owner-derived Clock or bounded-priming wake.
+    pub fn playback_next_wake_deadline(&self) -> Option<Instant> {
+        self.app_state.borrow().playback_next_wake_deadline()
     }
 
     /// Whether transport currently requires the Window playback coordinator.
@@ -1634,6 +1738,7 @@ impl AppUiHost {
         platform: &dyn PlatformService,
     ) -> AppUiShellCommands {
         let mut commands = AppUiShellCommands::default();
+        let window_mode = self.mode;
         let actions = pending_actions.take_all();
         if actions.is_empty() {
             self.refresh_if_dirty(bounds);
@@ -1814,20 +1919,10 @@ impl AppUiHost {
         }
 
         self.refresh_if_dirty(bounds);
-        if needs_layout {
+        if needs_layout && self.mode == window_mode {
             TreeWalker::layout(self.active_root_mut(), bounds);
         }
         commands
-    }
-
-    fn sync_mode_from_app_state(&mut self, bounds: Rect) {
-        let next = mode_for_app_state(&self.app_state.borrow());
-        if self.mode != next {
-            self.mode = next;
-            self.refresh_window_preview_state();
-            self.refresh_root_models();
-            TreeWalker::layout(self.active_root_mut(), bounds);
-        }
     }
 
     fn refresh_transport_state_without_preview(&mut self) {
@@ -2065,11 +2160,13 @@ impl AppUiHost {
             }
             let current_project_path =
                 self.app_state.borrow().current_project_path().map(std::path::Path::to_path_buf);
-            if current_project_path.is_some() && current_project_path != previous_project_path {
-                if let Some(path) = current_project_path {
-                    self.record_recent_project(path);
-                }
-                self.refresh_recovery_candidates();
+            // Recovery choices are consumed by Welcome. Closing the Project
+            // refreshes them before returning there; Open and Save As do not
+            // need to scan every other Project's runtime while in Workspace.
+            if current_project_path != previous_project_path
+                && let Some(path) = current_project_path
+            {
+                self.record_recent_project(path);
             }
         } else if let Err(err) = &result {
             self.set_unreported_action_error_status(previous_publication, err);
@@ -2656,7 +2753,8 @@ fn mode_for_app_state(state: &AppState) -> AppUiMode {
 }
 
 fn widget_tree_has_transient_interaction(widget: &dyn Widget) -> bool {
-    (widget.accepts_text_input() && !widget.can_inspect_text_draft())
+    widget.has_transient_interaction()
+        || (widget.accepts_text_input() && !widget.can_inspect_text_draft())
         || widget.has_active_pointer_interaction()
         || widget.overlay_hit_test(Point::new(-1_000_000.0, -1_000_000.0))
         || (0..widget.child_count())
@@ -2954,16 +3052,18 @@ mod tests {
 
     #[test]
     fn bounded_background_remainder_requests_poll_without_repaint() {
-        let outcome = AppUiBackgroundTaskPollOutcome::from_changes(
-            false,
-            PlaybackPreviewPumpOutcome {
-                needs_follow_up_poll: true,
-                ..PlaybackPreviewPumpOutcome::default()
-            },
-        );
-
-        assert!(!outcome.repaint_required);
-        assert!(outcome.needs_follow_up_poll);
+        for (retry, remainder) in [(false, true), (true, false), (true, true)] {
+            let outcome = AppUiBackgroundTaskPollOutcome::from_changes(
+                false,
+                PlaybackPreviewPumpOutcome {
+                    candidate_retry_required: retry,
+                    needs_follow_up_poll: remainder,
+                    ..PlaybackPreviewPumpOutcome::default()
+                },
+            );
+            assert!(!outcome.repaint_required);
+            assert_eq!(outcome.needs_follow_up_poll, remainder);
+        }
     }
 
     #[test]
@@ -2987,13 +3087,6 @@ mod tests {
                 false,
                 PlaybackPreviewPumpOutcome {
                     transport_change: true,
-                    ..PlaybackPreviewPumpOutcome::default()
-                },
-            ),
-            (
-                false,
-                PlaybackPreviewPumpOutcome {
-                    candidate_retry_required: true,
                     ..PlaybackPreviewPumpOutcome::default()
                 },
             ),
@@ -3458,6 +3551,8 @@ mod tests {
         );
         let output = ViewerExternalTextureFrame::new_spatial(
             "seeded-window-gpu",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1).expect("valid seeded presentation"),
         )
         .expect("valid seeded external frame");
@@ -3488,6 +3583,8 @@ mod tests {
         let output = |name| {
             ViewerExternalTextureFrame::new_spatial(
                 name,
+                1,
+                1,
                 ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
             )
             .expect("external texture")
@@ -3537,6 +3634,521 @@ mod tests {
             Some("promoted-frame-one"),
             "rejection cannot replace the admitted artifact",
         );
+    }
+
+    #[test]
+    fn completed_current_gpu_observation_keeps_the_visible_picture_without_a_new_delivery() {
+        let host = workspace_host_without_preview_workers("completed-current-gpu-observation");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind still demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("current untimed demand")
+        };
+        host.preview_service
+            .synchronize_transport_intent(host.app_state.borrow().preview_transport_intent());
+        seed_window_gpu_output(&host);
+        let (_, output) = host
+            .preview_service
+            .registered_exact_current_gpu_output_artifact()
+            .expect("exact prepared output");
+        host.window_preview_state.replace(ViewerPreviewState::Ready(
+            ViewerFrameContent::ExternalTexture(output),
+        ));
+        // The physical slot already contains the exact artifact. Complete the
+        // original demand once before observing that same current output again.
+        host.last_playback_frame_advance_at.set(Some(Instant::now()));
+        assert!(matches!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::already_visible((), Some(ticket)),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        let ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(visible)) =
+            host.window_preview_state.borrow().clone()
+        else {
+            panic!("original publication must remain Ready");
+        };
+        host.preview_dirty.set(false);
+        host.ui_dirty.set(false);
+        for _ in 0..2 {
+            assert_eq!(
+                host.present_current_viewer_output(
+                    PreviewPresentationCandidate::already_visible((), None),
+                    PreviewPresentationCarrier::ExternalGpu,
+                ),
+                FramePresentationDisposition::NoDemand,
+                "observing the same admitted picture cannot invent a second publication",
+            );
+            assert!(matches!(
+                &*host.window_preview_state.borrow(),
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    if frame == &visible
+            ));
+            assert!(
+                !host.has_pending_ui_refresh(),
+                "unchanged pixels cannot schedule another surface repaint"
+            );
+            assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        }
+        host.app_state.borrow_mut().set_playback_frame_running(7);
+        let replacement = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("replacement demand");
+        assert_eq!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::already_visible((), None),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::LostAuthority,
+            "a ticketless observation cannot consume the replacement demand",
+        );
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(replacement),
+        );
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Stale(_)
+        ));
+    }
+
+    #[test]
+    fn scopes_panel_requires_canonical_program_without_changing_playback_quality() {
+        let mut state = workspace_app_state_with_timed_solid();
+        let sequence = state.active_sequence_mut_uncommitted().expect("Sequence");
+        sequence.video_tracks[0].clips[0].is_disabled = false;
+        sequence.settings.resolution = mondrian_core::Resolution { width: 3840, height: 2160 };
+        sequence.settings.preview.resolution_scale = 0.5;
+        state.seek(4).expect("bind still");
+        state.observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("scopes-canonical-program"),
+        );
+        let quality = host.app_state.borrow().playback_preview_resolution_scale();
+        assert_eq!(quality, mondrian_playback::PreviewResolutionScale::Quarter);
+        for (analysis_active, expected) in [
+            (false, (480, 270)),
+            (true, (3840, 2160)),
+            (false, (480, 270)),
+        ] {
+            if host.is_panel_active(PanelKind::Scopes) != analysis_active {
+                host.root
+                    .try_handle_shell_action(
+                        Action::TogglePanel(PanelKind::Scopes),
+                        &NoopPlatformService,
+                        None,
+                    )
+                    .expect("toggle analysis panel");
+            }
+            assert_eq!(host.is_panel_active(PanelKind::Scopes), analysis_active);
+            let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state()
+            else {
+                panic!("solid panel frame must resolve");
+            };
+            assert_eq!((frame.width, frame.height), expected);
+            assert_eq!(
+                host.app_state.borrow().playback_preview_resolution_scale(),
+                quality
+            );
+        }
+    }
+
+    #[test]
+    fn settled_gpu_model_projection_keeps_the_admitted_picture_without_republishing() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("settled-gpu-model-projection"),
+        );
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "settled-model-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+
+        for iteration in 0..10 {
+            host.refresh_window_preview_state();
+            assert!(
+                matches!(
+                    &*host.window_preview_state.borrow(),
+                    ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                        if frame.key == "settled-model-output"
+                ),
+                "projection iteration {iteration}: state {:?}, demand {:?}",
+                std::mem::discriminant(&*host.window_preview_state.borrow()),
+                host.app_state.borrow().pending_playback_frame_demand_identity()
+            );
+            assert!(!host.has_pending_ui_refresh());
+            assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        }
+    }
+
+    #[test]
+    fn reused_gpu_model_projection_preserves_the_window_presentation_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let logical_extent = state.active_sequence().expect("Sequence").settings.resolution;
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("reused-gpu-model-projection"),
+        );
+        // Reuse requires the same raster contract. Realtime admission may
+        // change Viewer scale on minimum-memory machines; the real Scopes
+        // consumer retains the canonical full-resolution Program instead.
+        if !host.is_panel_active(PanelKind::Scopes) {
+            host.root
+                .try_handle_shell_action(
+                    Action::TogglePanel(PanelKind::Scopes),
+                    &NoopPlatformService,
+                    None,
+                )
+                .expect("open canonical Program consumer");
+        }
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        assert_eq!(
+            (frame.width, frame.height),
+            (logical_extent.width, logical_extent.height)
+        );
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "reused-model-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.app_state.borrow_mut().play().expect("prime playback of the same solid");
+        host.app_state.borrow().observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
+        let demand = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("new playback demand");
+        let projection = {
+            let state = host.app_state.borrow();
+            host.preview_service.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                PreviewPresentationCarrier::ExternalGpu,
+            )
+        };
+        let PreviewPresentationState::Ready(candidate) = projection else {
+            panic!("static solid must reuse its semantically identical GPU output");
+        };
+        assert_eq!(
+            candidate.presentation_ticket().map(|ticket| ticket.identity()),
+            Some(demand)
+        );
+        let evidence = host.app_state.borrow().playback_evidence_report();
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand),
+            "model projection cannot complete GPU delivery before Window validates its physical slot",
+        );
+        assert_eq!(host.app_state.borrow().playback_evidence_report(), evidence);
+        assert!(matches!(
+            &*host.window_preview_state.borrow(),
+            ViewerPreviewState::Stale(ViewerFrameContent::ExternalTexture(frame))
+                if frame.key == "reused-model-output"
+        ));
+        let PreviewGpuFrameState::Current(candidate) = host.gpu_preview_frame_for_current_state()
+        else {
+            panic!("the GPU owner must receive the current reused output");
+        };
+        assert_eq!(
+            candidate.presentation_ticket().map(|ticket| ticket.identity()),
+            Some(demand)
+        );
+        assert!(candidate.was_already_visible());
+        assert!(matches!(
+            host.present_current_viewer_output(candidate, PreviewPresentationCarrier::ExternalGpu),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let completed_evidence = host.app_state.borrow().playback_evidence_report();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().playback_evidence_report(),
+            completed_evidence
+        );
+        assert!(!host.has_pending_ui_refresh());
+    }
+
+    #[test]
+    fn changed_viewer_quality_cannot_reuse_the_old_gpu_output_or_complete_its_ticket() {
+        let mut state = workspace_app_state_with_timed_solid();
+        state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+            .is_disabled = false;
+        state.seek(4).expect("bind still picture");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("changed-quality-model-projection"),
+        );
+        let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state() else {
+            panic!("generated solid must have a ready GPU execution plan");
+        };
+        let presentation = ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("valid presentation");
+        assert!(matches!(
+            host.set_external_viewer_frame(&frame, "previous-quality-output", presentation),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.app_state.borrow_mut().play().expect("prime playback");
+        host.app_state.borrow().observe_execution_resource_pressure(
+            crate::app::execution_resource_coordination::ExecutionResourcePressure::Critical,
+        );
+        let demand = host
+            .app_state
+            .borrow()
+            .pending_playback_frame_demand_identity()
+            .expect("new playback demand");
+        let projection = {
+            let state = host.app_state.borrow();
+            host.preview_service.presentation(
+                state.preview_frame_execution_request(Instant::now()),
+                PreviewPresentationCarrier::ExternalGpu,
+            )
+        };
+        assert!(matches!(projection, PreviewPresentationState::Stale(_)));
+        host.refresh_window_preview_state();
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand)
+        );
+        let PreviewGpuFrameState::Ready(successor) = host.gpu_preview_frame_for_current_state()
+        else {
+            panic!("changed quality requires a new GPU execution plan");
+        };
+        assert_ne!(successor.output_key, frame.output_key);
+        assert_ne!(
+            (successor.width, successor.height),
+            (frame.width, frame.height)
+        );
+        assert_eq!(
+            host.app_state.borrow().pending_playback_frame_demand_identity(),
+            Some(demand)
+        );
+    }
+
+    #[test]
+    fn current_visible_gpu_output_reaches_its_owner_before_expiry_preflight() {
+        for exact_visible in [true, false] {
+            let mut state = workspace_app_state_with_timed_solid();
+            state.active_sequence_mut_uncommitted().expect("Sequence").video_tracks[0].clips[0]
+                .is_disabled = false;
+            state.play().expect("prime playback");
+            let host = AppUiHost::new_with_preferences_path(
+                state,
+                AppUiPreferences::default(),
+                temp_preferences_path("current-visible-before-preflight"),
+            );
+            let mut submissions =
+                crate::app::viewer_gpu_submission::ViewerGpuSubmissionLifecycle::<u32, ()>::new();
+            let mut callbacks = Vec::new();
+            while !submissions.is_at_capacity() {
+                let index = submissions.active_count() as u32;
+                submissions.reserve().expect("bounded slot").commit(
+                    index,
+                    Instant::now() + Duration::from_secs(60),
+                    |callback| callbacks.push(callback),
+                    || {},
+                );
+            }
+            let active_count = submissions.active_count();
+            let mut staged = crate::app::preview_execution::PreviewGpuFrameStaging::default();
+            let PreviewGpuFrameState::Ready(frame) = host.gpu_preview_frame_for_current_state()
+            else {
+                panic!("generated solid has a real GPU plan");
+            };
+            let candidate_id = frame.candidate_id();
+            let mut pending_candidate = Some(frame);
+            for _ in 0..3 {
+                assert!(crate::app_ui::window::take_window_viewer_gpu_candidate(
+                    &host,
+                    ViewerGpuPreparation::Current,
+                    &mut pending_candidate,
+                    &mut staged,
+                    submissions.is_at_capacity(),
+                )
+                .is_none());
+                assert_eq!(
+                    pending_candidate.as_ref().expect("bounded pending owner").candidate_id(),
+                    candidate_id
+                );
+                assert_eq!(submissions.active_count(), active_count);
+                assert_eq!(staged.len(), 0);
+            }
+            let frame = pending_candidate.take().expect("same pending frame");
+            let presentation =
+                ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+                    .expect("valid presentation");
+            assert!(matches!(
+                host.set_external_viewer_frame(&frame, "continuous-output", presentation),
+                FramePresentationDisposition::Presented(_)
+            ));
+            let boundary_at = {
+                let mut state = host.app_state.borrow_mut();
+                assert!(state.observe_video_preroll(0, 0));
+                let boundary_at = state.playback_next_wake_deadline().expect("frame boundary");
+                assert!(state.advance_playback_clock_at(boundary_at).requires_refresh());
+                assert_eq!(state.current_frame(), 1);
+                boundary_at
+            };
+            host.last_playback_frame_advance_at.set(Some(boundary_at));
+            host.refresh_window_preview_state();
+            let pending = host
+                .app_state
+                .borrow()
+                .pending_playback_frame_demand_identity()
+                .expect("new timed demand");
+            let expired_at = boundary_at + Duration::from_secs(10);
+            assert!(host
+                .app_state
+                .borrow()
+                .playback_frame_deadline_at(expired_at)
+                .is_some_and(|deadline| deadline < expired_at));
+            if !exact_visible {
+                host.window_preview_state.replace(ViewerPreviewState::Stale(
+                    ViewerFrameContent::ExternalTexture(
+                        ViewerExternalTextureFrame::new_spatial(
+                            "different-physical-output",
+                            frame.width,
+                            frame.height,
+                            presentation,
+                        )
+                        .expect("different retained output"),
+                    ),
+                ));
+            }
+            let before = host.app_state.borrow().playback_evidence_report();
+            if exact_visible {
+                assert_eq!(
+                    host.viewer_gpu_preparation(expired_at),
+                    Some(ViewerGpuPreparation::Current),
+                    "expiry cannot consume a ticket before the Window can confirm continuous visibility",
+                );
+                assert_eq!(
+                    host.app_state.borrow().pending_playback_frame_demand_identity(),
+                    Some(pending)
+                );
+                assert_eq!(host.app_state.borrow().playback_evidence_report(), before);
+                let Some(PreviewGpuFrameState::Current(candidate)) =
+                    crate::app_ui::window::take_window_viewer_gpu_candidate(
+                        &host,
+                        ViewerGpuPreparation::Current,
+                        &mut pending_candidate,
+                        &mut staged,
+                        submissions.is_at_capacity(),
+                    )
+                else {
+                    panic!("a full submission horizon cannot block the exact retained artifact");
+                };
+                assert!(candidate.was_already_visible());
+                assert!(matches!(
+                    host.present_current_viewer_output(
+                        candidate,
+                        PreviewPresentationCarrier::ExternalGpu,
+                    ),
+                    FramePresentationDisposition::Presented(_)
+                ));
+                assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+                assert_eq!(
+                    host.app_state.borrow().playback_evidence_report().deliveries.late,
+                    before.deliveries.late
+                );
+            } else {
+                assert_eq!(host.viewer_gpu_preparation(expired_at), None);
+                assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+                assert_eq!(
+                    host.app_state.borrow().playback_evidence_report().deliveries.late,
+                    before.deliveries.late + 1,
+                    "a different artifact keeps the ordinary expiry contract"
+                );
+            }
+            assert_eq!(submissions.active_count(), active_count);
+            assert!(matches!(
+                submissions.reserve(),
+                Err(crate::app::viewer_gpu_submission::ViewerGpuSubmissionAdmissionError::Backpressured)
+            ));
+            assert!(pending_candidate.is_none());
+            assert_eq!(staged.len(), 0);
+            assert_eq!(callbacks.len(), active_count);
+        }
+    }
+
+    #[test]
+    fn settled_gpu_preparation_does_not_self_schedule_preview_refresh() {
+        let host = workspace_host_without_preview_workers("settled-gpu-preparation");
+        let ticket = {
+            let mut state = host.app_state.borrow_mut();
+            state.seek(0).expect("bind still demand");
+            state
+                .playback_frame_presentation_ticket(
+                    mondrian_playback::FramePresentationQuality::Ready,
+                )
+                .expect("current ticket")
+        };
+        seed_window_gpu_output(&host);
+        assert!(matches!(
+            host.present_current_viewer_output(
+                PreviewPresentationCandidate::new((), Some(ticket)),
+                PreviewPresentationCarrier::ExternalGpu,
+            ),
+            FramePresentationDisposition::Presented(_)
+        ));
+        assert!(host.app_state.borrow().pending_playback_frame_demand_identity().is_none());
+        let before = window_preview_state_external_texture_key(&host.window_preview_state.borrow())
+            .expect("visible GPU output")
+            .to_owned();
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+
+        for _ in 0..1_000 {
+            assert_eq!(host.viewer_gpu_preparation(Instant::now()), None);
+            assert!(
+                !host.has_pending_ui_refresh(),
+                "no candidate can require another redraw"
+            );
+            assert!(matches!(
+                &*host.window_preview_state.borrow(),
+                ViewerPreviewState::Ready(ViewerFrameContent::ExternalTexture(frame))
+                    if frame.key == before
+            ));
+        }
+        assert!(host.preview_service.has_retained_gpu_output());
     }
 
     #[test]
@@ -3590,6 +4202,8 @@ mod tests {
         };
         let old = ViewerExternalTextureFrame::new_spatial(
             "old-widget-only",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
         )
         .expect("frame");
@@ -3617,6 +4231,8 @@ mod tests {
         let output = |name| {
             ViewerExternalTextureFrame::new_spatial(
                 name,
+                1,
+                1,
                 ViewerExternalTexturePresentation::full_frame(1, 1).expect("presentation"),
             )
             .expect("frame")
@@ -3653,6 +4269,8 @@ mod tests {
         );
         let output = ViewerExternalTextureFrame::new_spatial(
             "window-gpu:submission:7",
+            1,
+            1,
             ViewerExternalTexturePresentation::full_frame(1, 1)
                 .expect("valid external presentation"),
         )
@@ -3662,6 +4280,9 @@ mod tests {
             ViewerFrameContent::ExternalTexture(output),
         ));
 
+        host.ui_dirty.set(false);
+        host.preview_dirty.set(false);
+        assert!(!host.has_pending_ui_refresh());
         assert!(
             !host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:older"),
             "a different physical submission must not revoke the current artifact"
@@ -3672,7 +4293,15 @@ mod tests {
                 if frame.key == "window-gpu:submission:7"
         ));
 
+        assert!(
+            !host.has_pending_ui_refresh(),
+            "retirement of another submission cannot repaint the retained picture"
+        );
         assert!(host.clear_external_viewer_frame_for_artifact(&key, "window-gpu:submission:7"));
+        assert!(
+            host.has_pending_ui_refresh(),
+            "exact revocation must repaint even without a new Ready frame"
+        );
         assert!(!host.preview_service.has_retained_gpu_output());
         assert!(matches!(
             &*host.window_preview_state.borrow(),
@@ -3696,7 +4325,7 @@ mod tests {
             temp_preferences_path("priming-successor"),
         );
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Successor)
         );
         assert!(
@@ -3723,11 +4352,67 @@ mod tests {
             Some(ticket),
             "CPU model projection must not settle the picture before the Window GPU owner submits it",
         );
-        assert!(host.preflight_pending_viewer_gpu_presentation());
+        assert!(host.preflight_pending_viewer_gpu_presentation(Instant::now()));
         assert!(!matches!(
             &*host.window_preview_state.borrow(),
             ViewerPreviewState::Ready(ViewerFrameContent::Raster(_)),
         ));
+    }
+
+    #[test]
+    fn author_edit_replaces_consumed_paused_picture_without_seeking() {
+        use crate::app::product_action::{
+            TrackAuthorControl, TrackProductAction, TrackSetAuthorControlPayload,
+        };
+
+        let mut state = workspace_app_state_with_timed_solid();
+        state.seek(4).expect("bind still picture");
+        let old = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("still ticket");
+        let before = state.playback_diagnostic_snapshot();
+        let track_id = state.active_sequence().expect("Sequence").video_tracks[0].id;
+        let mut host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("paused-author-edit"),
+        );
+        assert!(matches!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::Presented(_)
+        ));
+        host.dispatch_editor_action(
+            ProductAction::Track(TrackProductAction::SetAuthorControl(
+                TrackSetAuthorControlPayload {
+                    track_id,
+                    control: TrackAuthorControl::Visibility,
+                    enabled: false,
+                },
+            ))
+            .into_external_action(),
+        )
+        .expect("commit author edit");
+        let state = host.app_state.borrow();
+        let new = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("author edit must issue a new current picture");
+        assert_ne!(new.identity(), old.identity());
+        assert_eq!(state.playback_diagnostic_snapshot(), before);
+        drop(state);
+        assert_eq!(
+            host.viewer_gpu_preparation(Instant::now()),
+            Some(ViewerGpuPreparation::Current)
+        );
+        assert_eq!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::LostAuthority
+        );
     }
 
     #[test]
@@ -3761,7 +4446,7 @@ mod tests {
         assert_eq!(host.app_state.borrow().current_frame(), 4);
         assert!(!host.app_state.borrow().is_playing());
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
         assert_eq!(
@@ -4039,13 +4724,27 @@ mod tests {
         TreeWalker::layout(host.active_root_mut(), bounds);
 
         let geometry = host
-            .viewer_presentation_geometry()
+            .viewer_presentation_geometry(1.0)
             .expect("laid out workspace Viewer should expose GPU presentation geometry");
 
         assert!(geometry.presentation.output_width > 0);
         assert!(geometry.presentation.output_height > 0);
         assert!(geometry.visible_rect.width > 0.0);
         assert!(geometry.visible_rect.height > 0.0);
+        let retina = host.viewer_presentation_geometry(2.0).expect("Retina Viewer geometry");
+        assert_eq!(retina.visible_rect, geometry.visible_rect);
+        assert_eq!(
+            retina.presentation.output_width,
+            geometry.presentation.output_width * 2
+        );
+        assert_eq!(
+            retina.presentation.output_height,
+            geometry.presentation.output_height * 2
+        );
+        assert_eq!(
+            retina.presentation.normalized_source_rect(),
+            geometry.presentation.normalized_source_rect()
+        );
     }
 
     #[test]
@@ -4406,6 +5105,10 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.mode(), AppUiMode::Workspace);
+        assert!(host.viewer_presentation_geometry(1.0).is_none());
+        let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
+        TreeWalker::layout(host.active_root_mut(), workspace_bounds);
+        assert!(host.viewer_presentation_geometry(1.0).is_some());
         assert!(!host.startup.has_modal());
         assert!(host.app_state().has_open_project());
         assert_eq!(
@@ -4620,7 +5323,7 @@ mod tests {
             "production Preview has a ready transparent picture"
         );
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current),
             "payload-free Widget Loading must not veto an exact production candidate"
         );
@@ -4660,7 +5363,7 @@ mod tests {
 
         assert!(host.app_state.borrow().is_playing());
         assert_eq!(
-            host.viewer_gpu_preparation(),
+            host.viewer_gpu_preparation(Instant::now()),
             Some(ViewerGpuPreparation::Current)
         );
 
@@ -4850,7 +5553,20 @@ mod tests {
             host.drain_pending_actions(&pending, Rect::new(0.0, 0.0, 1280.0, 720.0), &platform);
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
         assert_eq!(host.mode(), AppUiMode::Workspace);
+        assert!(
+            !host.root().hit_test(Point::new(10.0, 10.0)),
+            "Open must not lay out Workspace in the retired Welcome bounds"
+        );
+        let workspace_bounds = Rect::new(0.0, 0.0, 1408.0, 736.0);
+        TreeWalker::layout(host.active_root_mut(), workspace_bounds);
+        assert!(host.root().hit_test(Point::new(1400.0, 730.0)));
+        assert!(host.viewer_presentation_geometry(1.0).is_some());
         assert_eq!(
             host.app_state().current_project_path(),
             Some(project_file.as_path())
@@ -4865,6 +5581,77 @@ mod tests {
         );
 
         cleanup_project_file(&project_file);
+        let _ = std::fs::remove_file(preferences_path);
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn host_returning_to_welcome_discovers_recovery_created_during_workspace() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let project_file = create_project_file("recovery-return-workspace");
+        let recovery_project = create_project_file("recovery-created-during-workspace");
+        let preferences_path = temp_preferences_path("recovery-return-preferences");
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            AppUiPreferences::default(),
+            preferences_path.clone(),
+        );
+        let pending = PendingUiActions::default();
+        let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
+        pending.push(
+            crate::app::ui_actions::app_shell_open_recent_project_action(
+                crate::app::ui_actions::AppShellOpenRecentProjectPayload {
+                    project_file: project_file.clone(),
+                },
+            ),
+        );
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
+        assert_eq!(host.mode(), AppUiMode::Workspace);
+
+        // Another Project can acquire recovery evidence while Welcome is hidden.
+        let mut autosave_state = AppState::new();
+        autosave_state
+            .open_project_file(recovery_project.clone())
+            .expect("recovery Project");
+        let sequence_id = autosave_state.active_sequence_id().expect("active Sequence");
+        autosave_state
+            .rename_sequence(sequence_id, "New Recovery Edit")
+            .expect("author edit");
+        let autosave_file = autosave_state.write_autosave_snapshot(2, 7).expect("autosave");
+
+        pending.push(Action::CloseProject);
+        host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        if host.pending_close_action.is_some() {
+            pending.push(crate::app::ui_actions::app_shell_pending_close_discard_action());
+            host.drain_pending_actions(&pending, bounds, &NoopPlatformService);
+        }
+        assert!(!poll_host_until_project_close_finishes(&mut host));
+        host.refresh_if_dirty(bounds);
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(
+            host.recovery_candidates
+                .iter()
+                .any(|candidate| candidate.autosave_file == autosave_file),
+            "Welcome must discover the newly created recovery candidate"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (state, ui_shutdown) = host.into_app_state_until(deadline);
+        assert!(ui_shutdown.all_resources_released(), "{ui_shutdown:#?}");
+        let app_shutdown = state.shutdown_for_endurance(deadline);
+        assert!(app_shutdown.all_resources_released(), "{app_shutdown:#?}");
+        let autosave_shutdown = autosave_state.shutdown_for_endurance(deadline);
+        assert!(
+            autosave_shutdown.all_resources_released(),
+            "{autosave_shutdown:#?}"
+        );
+        cleanup_project_file(&project_file);
+        cleanup_project_file(&recovery_project);
         let _ = std::fs::remove_file(preferences_path);
     }
 
@@ -4896,6 +5683,11 @@ mod tests {
         );
 
         assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.mode(), AppUiMode::Startup);
+        assert!(host.app_state().has_pending_project_open());
+        poll_host_background_tasks_until(&mut host, "verified Project installation", |state| {
+            !state.has_pending_project_open()
+        });
         assert_eq!(host.mode(), AppUiMode::Workspace);
         assert_eq!(
             host.app_state().current_project_path(),
@@ -8982,6 +9774,71 @@ mod tests {
         assert!(thumbnails.all_resources_released(), "{thumbnails:?}");
         assert!(catalog.all_resources_released(), "{catalog:?}");
         assert!(!host.audio_device_catalog.request_refresh());
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn returned_app_owner_needs_a_new_still_ticket_for_its_next_window() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = workspace_app_state_with_timed_solid();
+        state.seek(4).expect("seek still picture");
+        let before = state.playback_diagnostic_snapshot();
+        let old = state
+            .playback_frame_presentation_ticket(mondrian_playback::FramePresentationQuality::Ready)
+            .expect("first Window ticket");
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("returned-window-ticket-first"),
+        );
+        assert!(matches!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::Presented(_)
+        ));
+        let deadline = Instant::now() + VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT;
+        let (state, first_shutdown) = host.into_app_state_until(deadline);
+        assert!(
+            first_shutdown.all_resources_released(),
+            "{first_shutdown:#?}"
+        );
+        assert!(state.pending_playback_frame_demand_identity().is_none());
+
+        let host = AppUiHost::new_with_preferences_path(
+            state,
+            AppUiPreferences::default(),
+            temp_preferences_path("returned-window-ticket-second"),
+        );
+        assert_eq!(host.viewer_gpu_preparation(Instant::now()), None);
+        host.renew_still_frame_demand_after_output_retirement()
+            .expect("bind the next physical Window carrier");
+        let new = host.app_state().pending_playback_frame_demand_identity().expect("new ticket");
+        assert_ne!(new, old.identity());
+        assert_eq!(host.app_state().playback_diagnostic_snapshot(), before);
+        assert_eq!(
+            host.viewer_gpu_preparation(Instant::now()),
+            Some(ViewerGpuPreparation::Current)
+        );
+        assert_eq!(
+            host.present_transparent_viewer_output(PreviewPresentationCandidate::new(
+                (),
+                Some(old)
+            )),
+            FramePresentationDisposition::LostAuthority
+        );
+        assert_eq!(
+            host.app_state().pending_playback_frame_demand_identity(),
+            Some(new)
+        );
+        let (state, second_shutdown) = host.into_app_state_until(deadline);
+        assert!(
+            second_shutdown.all_resources_released(),
+            "{second_shutdown:#?}"
+        );
+        let app_shutdown = state.shutdown_for_endurance(deadline);
+        assert!(app_shutdown.all_resources_released(), "{app_shutdown:#?}");
     }
 
     #[cfg(feature = "validation")]

@@ -43,8 +43,8 @@ use mondrian_renderer::{
     color::RenderColorStageDiagnostics,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     product_gpu_working_texture_device_features,
-    profile::gpu_timestamp_query_device_features,
-    profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
+    profile::{gpu_frame_timestamp_query_device_features, gpu_timestamp_query_device_features},
+    profile::{GpuTimestampQueryRing, GpuTimestampToken},
     request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
     GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
@@ -57,6 +57,7 @@ use mondrian_renderer::{
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
+const HEADLESS_GPU_TIMESTAMP_MAX_PASSES: u32 = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeadlessGpuStartupStage {
     ProgressStarted,
@@ -178,6 +179,9 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub gpu_completion_observed: bool,
     /// Deferred timestamp token, absent if unsupported or the bounded ring discarded it.
     pub gpu_timestamp_token: Option<u64>,
+    /// Actual pass commands lacked a complete GPU timing boundary.
+    pub gpu_timestamp_coverage_error:
+        Option<mondrian_renderer::gpu_command::GpuPassTimestampCoverageError>,
     /// CPU attribution inside the renderer record call.
     pub cpu_stage_timings: Option<ViewerGpuExecutionCpuStageTimings>,
     /// Session-qualified native-import candidate coverage, derived once from
@@ -735,6 +739,8 @@ impl HeadlessViewerGpuAdapter {
         ViewerGpuDeviceProgressShutdownEvidence {
             worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
             wake_callbacks: Default::default(),
+            native_completion_wake_captures_pending: None,
+            native_completion_wake_registrations: None,
             native_wake_failures: 0,
             wake_registration_rejections: 0,
             worker_started: true,
@@ -759,6 +765,8 @@ impl HeadlessViewerGpuAdapter {
             return ViewerGpuDeviceProgressShutdownEvidence {
                 worker_shutdown: super::owned_worker_lifecycle::OwnedWorkerShutdown::NotStarted,
                 wake_callbacks: Default::default(),
+                native_completion_wake_captures_pending: None,
+                native_completion_wake_registrations: None,
                 native_wake_failures: 0,
                 wake_registration_rejections: 0,
                 worker_started: false,
@@ -819,27 +827,10 @@ struct HeadlessGpuStageMarker<'a> {
 impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn mondrian_renderer::gpu_command::GpuCommandEncoder,
         stage: ViewerGpuExecutionGpuStage,
     ) -> Result<(), String> {
-        let marker = match stage {
-            ViewerGpuExecutionGpuStage::WorkingComposite => {
-                GpuTimestampStageMarker::AfterWorkingComposite
-            }
-            ViewerGpuExecutionGpuStage::Spatial => GpuTimestampStageMarker::AfterSpatial,
-            ViewerGpuExecutionGpuStage::ProgramOutputBoundary => {
-                GpuTimestampStageMarker::AfterProgramOutputBoundary
-            }
-            ViewerGpuExecutionGpuStage::ProgramScopes => {
-                GpuTimestampStageMarker::AfterProgramScopes
-            }
-            ViewerGpuExecutionGpuStage::SignalMonitoring => {
-                GpuTimestampStageMarker::AfterSignalMonitoring
-            }
-            ViewerGpuExecutionGpuStage::MonitorAdaptation => {
-                GpuTimestampStageMarker::AfterMonitorAdaptation
-            }
-        };
+        let marker = stage.timestamp_marker();
         self.ring
             .mark_stage(encoder, self.token, marker)
             .map_err(|error| error.to_string())
@@ -913,7 +904,7 @@ impl HeadlessViewerGpuAdapter {
                 let supported_features = adapter.features();
                 let raw_adapter_info = adapter.get_info();
                 let viewer_suffix_timing_features =
-                    gpu_timestamp_query_device_features(supported_features);
+                    gpu_frame_timestamp_query_device_features(supported_features);
                 let working_texture_features =
                     product_gpu_working_texture_device_features(&adapter)
                         .map_err(HeadlessViewerGpuError::from)?;
@@ -966,7 +957,15 @@ impl HeadlessViewerGpuAdapter {
                     &device,
                     &queue,
                     HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
-                );
+                )
+                .or_else(|| {
+                    GpuTimestampQueryRing::new_for_passes(
+                        &device,
+                        &queue,
+                        HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
+                        HEADLESS_GPU_TIMESTAMP_MAX_PASSES,
+                    )
+                });
                 startup.as_mut().expect("created progress guard").install_runtime(
                     ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
                         &adapter, &device, &queue, policy,
@@ -1318,7 +1317,7 @@ impl HeadlessViewerGpuAdapter {
                 height: frame.height,
             });
         }
-        let progress_permit = self
+        let mut progress_permit = self
             .device_progress
             .reserve_submission()
             .map_err(map_headless_device_progress_reserve_error)?;
@@ -1347,12 +1346,17 @@ impl HeadlessViewerGpuAdapter {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("headless_viewer_gpu_preview_encoder"),
         });
+        let pass_timestamps = self
+            .timestamp_ring
+            .as_ref()
+            .is_some_and(GpuTimestampQueryRing::uses_pass_timestamps);
         let timestamp_token_result = self
             .timestamp_ring
             .as_mut()
+            .filter(|ring| !ring.uses_pass_timestamps())
             .map(|ring| ring.begin_frame(&self.device, &mut encoder))
             .transpose();
-        if self.timestamp_ring.is_some() {
+        if self.timestamp_ring.is_some() && !pass_timestamps {
             // `GpuTimestampQueryRing::begin_frame` performs the existing
             // non-blocking telemetry poll. Reservation has not committed an
             // in-flight Viewer owner beyond the bounded submission capacity,
@@ -1365,7 +1369,7 @@ impl HeadlessViewerGpuAdapter {
                 &mut self.native_import_gpu_timing,
             );
         }
-        let timestamp_token = timestamp_token_result
+        let mut timestamp_token = timestamp_token_result
             .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?
             .flatten();
         let heterogeneous_inputs = frame.take_heterogeneous_gpu_inputs();
@@ -1393,19 +1397,39 @@ impl HeadlessViewerGpuAdapter {
             program_scopes: None,
             signal_monitoring: None,
         };
-        let record_result =
-            if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
-                let mut stage_marker = HeadlessGpuStageMarker { ring, token };
-                self.runtime.record_with_stage_marker(
-                    &self.device,
-                    &self.queue,
-                    &mut encoder,
-                    request,
-                    Some(&mut stage_marker),
-                )
-            } else {
-                self.runtime.record(&self.device, &self.queue, &mut encoder, request)
-            };
+        let mut timestamp_coverage_error = None;
+        let record_result = if pass_timestamps {
+            let ring = self.timestamp_ring.as_mut().expect("selected pass ring");
+            let scope = ring.begin_pass_frame(&self.device, &mut encoder);
+            collect_headless_native_import_gpu_timings_after_device_poll(
+                &mut self.runtime,
+                &mut self.native_import_gpu_timing,
+            );
+            match scope.map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))? {
+                Some((token, mut recorder)) => {
+                    timestamp_token = Some(token);
+                    let result =
+                        self.runtime.record(&self.device, &self.queue, &mut recorder, request);
+                    let receipt = recorder.finish();
+                    timestamp_coverage_error = receipt.coverage().err();
+                    ring.finish_pass_frame(receipt)
+                        .map_err(|error| HeadlessViewerGpuError::Timestamp(error.to_string()))?;
+                    result
+                }
+                None => self.runtime.record(&self.device, &self.queue, &mut encoder, request),
+            }
+        } else if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {
+            let mut stage_marker = HeadlessGpuStageMarker { ring, token };
+            self.runtime.record_with_stage_marker(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                request,
+                Some(&mut stage_marker),
+            )
+        } else {
+            self.runtime.record(&self.device, &self.queue, &mut encoder, request)
+        };
         let mut record = match record_result {
             Ok(record) => record,
             Err(error) => {
@@ -1427,7 +1451,8 @@ impl HeadlessViewerGpuAdapter {
                 return Err(HeadlessViewerGpuError::Record(error.to_string()));
             }
         };
-        if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
+        if !pass_timestamps
+            && let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token)
             && let Err(error) = ring.finish_frame(&mut encoder, token)
         {
             drop(record);
@@ -1469,6 +1494,7 @@ impl HeadlessViewerGpuAdapter {
             }
             return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
         }
+        progress_permit.arm_native_completion_wake(&self.queue);
         let submission = self.queue.submit(std::iter::once(encoder.finish()));
         let heterogeneous_submission = record.assert_adapter_submission(submission.clone());
         let native_import_gpu_timing_receipt = native_import_gpu_timing_receipt
@@ -1480,6 +1506,9 @@ impl HeadlessViewerGpuAdapter {
         let record_submit_us = elapsed_us(started);
         tracing::debug!(
             submission_id = submission_id.get(),
+            playback_intent = ?frame.playback_intent(),
+            successor_preparation = frame.is_successor_preparation(),
+            heterogeneous,
             record_submit_us,
             cpu_stage_timings = ?record.cpu_stage_timings,
             "recorded Headless Viewer GPU submission"
@@ -1498,7 +1527,10 @@ impl HeadlessViewerGpuAdapter {
                 record_submit_us,
                 completion_wait_us: 0,
                 gpu_completion_observed: false,
-                gpu_timestamp_token: timestamp_token.map(|token| token.id()),
+                gpu_timestamp_token: timestamp_token
+                    .filter(|_| timestamp_coverage_error.is_none())
+                    .map(|token| token.id()),
+                gpu_timestamp_coverage_error: timestamp_coverage_error,
                 cpu_stage_timings: Some(record.cpu_stage_timings),
                 native_import_gpu_timing_receipt,
                 compositing_diagnostics: Some(record.compositing_diagnostics),
@@ -1784,6 +1816,19 @@ impl HeadlessViewerGpuAdapter {
             .is_some_and(|current| current == output)
     }
 
+    /// Whether an off-screen prepared artifact has its exact live physical owner.
+    pub(crate) fn has_prepared_physical_output_artifact(
+        &self,
+        output_key: &crate::app::preview_execution::PreviewOutputKey,
+        output: &HeadlessViewerGpuOutput,
+    ) -> bool {
+        self.device_progress.generation_terminal().is_none()
+            && self
+                .physical_outputs
+                .prepared_artifact_for_key(output_key)
+                .is_some_and(|prepared| prepared == output)
+    }
+
     /// Whether the visible physical slot has this exact semantic key.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_current_physical_output_for_key(
@@ -1823,13 +1868,14 @@ impl HeadlessViewerGpuAdapter {
     /// active semantic generation.
     pub(crate) fn retire_stale_prepared_physical_output(
         &mut self,
-        expected_output_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+        expected_prepared_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+        expected_current_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
     ) -> Option<(
         crate::app::preview_execution::PreviewOutputKey,
         HeadlessViewerGpuOutput,
     )> {
         self.physical_outputs
-            .retire_prepared_unless(expected_output_key)
+            .retire_prepared_unless(expected_prepared_key, expected_current_key)
             .map(ViewerGpuPhysicalPublication::into_key_and_artifact)
     }
 
@@ -2205,6 +2251,15 @@ impl HeadlessViewerGpuAdapter {
         owner.execution.completion_wait_us =
             duration_us(owner.completion_started_at, completion_observed_at);
         owner.execution.gpu_completion_observed = true;
+        tracing::debug!(
+            submission_id = submission_id.get(),
+            playback_intent = ?owner.frame.playback_intent(),
+            successor_preparation = owner.frame.is_successor_preparation(),
+            record_submit_us = owner.execution.record_submit_us,
+            completion_wait_us = owner.execution.completion_wait_us,
+            quarantine_reason = ?quarantine_reason,
+            "observed Headless Viewer GPU submission completion"
+        );
         let completion_error = self
             .runtime
             .retire_completed_native_import_sources()

@@ -177,15 +177,18 @@ async fn high_bit_420_422_444_planes_execute_without_half_float_staging() {
         let output = GpuNativeYuvDecoder::allocate_output(&context.device, &plan);
         let luma_view = luma.create_view(&wgpu::TextureViewDescriptor::default());
         let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
-        let prepared = decoder.prepare_pass(
-            &context.device,
-            &plan,
-            GpuNativeYuvPlaneViews {
-                luma: &luma_view,
-                chroma: &chroma_view,
-                chroma_v: &chroma_view,
-            },
-        );
+        let prepared = decoder
+            .prepare_pass(
+                &context.device,
+                &plan,
+                GpuNativeYuvPlaneViews {
+                    luma: &luma_view,
+                    chroma: &chroma_view,
+                    chroma_v: &chroma_view,
+                    alpha: None,
+                },
+            )
+            .expect("opaque YUV plane contract");
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-high-bit-yuv"),
         });

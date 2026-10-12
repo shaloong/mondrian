@@ -109,6 +109,7 @@ command-file-save_project_as = Save As...
 command-file-export_portable_package = Package Project...
 command-file-cancel_portable_package_export = Cancel Project Packaging
 command-file-project_settings = Project Settings...
+command-file-sequence_settings = Sequence Settings...
 command-file-close_project = Close Project
 command-edit-undo = Undo
 command-edit-redo = Redo
@@ -393,6 +394,9 @@ interpret-title = Interpret Footage
 interpret-current = Current interpretation
 interpret-input-color-space = Input color space
 interpret-signal-range = Signal range
+interpret-yuv-matrix = YCbCr matrix
+interpret-matrix-unknown = Unknown
+interpret-matrix-auto = Auto (metadata: { $detected })
 interpret-raw-exposure = RAW exposure
 interpret-raw-white-balance = RAW white balance
 interpret-debayer = Demosaic quality
@@ -536,6 +540,19 @@ audio-rack-move-down = Down
 audio-rack-move-down-tooltip = Move processor down
 audio-rack-remove = Remove
 audio-rack-remove-tooltip = Remove processor
+
+interpret-evidence-h264-range = H.264 sequence range: { $range } ({ $source })
+interpret-evidence-codec-range = { $codec } standard sample range: { $range }
+interpret-evidence-range-convention = { $codec }: { $rule }
+interpret-range-sd-dv = SD DV BT.601 coefficients and video levels (format convention)
+interpret-range-dnx-clv = Per-picture VC-3 CLV levels; out-of-band needs interpretation
+interpret-range-legacy-assumption = Assumed video levels for untagged legacy SDR; override if incorrect
+interpret-range-auto-dv = Auto (Video, SD DV convention)
+interpret-range-auto-dnx = Auto (per-picture VC-3 CLV)
+interpret-range-auto-assumed = Auto (assumed Video; source untagged)
+asset-thumbnail-alternate = First-frame preview
+interpret-range-codec-default = Annex E default; no color-space inference
+interpret-range-coded = encoded video_full_range_flag
 
 # Preferences dialog
 preferences-appearance = Appearance
@@ -966,6 +983,8 @@ status-export-active = Export in progress
 
 # Runtime status messages
 status-saving = Saving project…
+status-open-preparing = Opening and validating project…
+status-open-cancel-closing = Cancelling project open and safely closing project…
 status-open-failed = Could not open project: { $reason }
 status-opened = Project opened
 status-save-as-failed = Could not start Save As: { $reason }
@@ -1017,6 +1036,7 @@ status-audio-streams-refreshed = Audio streams refreshed: { $name }
 status-audio-rebound = Audio component of { $name } mapped to stream #{ $stream }
 status-proxy-failed = Proxy generation failed: { $detail }
 status-proxy-switch-failed = Could not switch proxy mode: { $error }
+status-proxy-binding-failed = Proxy mode changed, but playback binding failed: { $error }
 status-native-audio-unavailable = Native audio host unavailable; saved plugins could not be restored
 status-native-audio-restore-failed = Could not start native audio plugin restore: { $error }
 status-audio-restored-partial = Audio plugins restored: { $available } libraries available, { $failed } failed; select failed plugin files to retry

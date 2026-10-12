@@ -5,6 +5,8 @@
 //! module instead of accumulating panel or runtime wiring.
 
 pub mod about_dialog;
+#[cfg(target_os = "macos")]
+pub mod accessibility;
 pub mod action_availability;
 pub mod action_queue;
 pub mod asset_thumbnails;
@@ -54,6 +56,7 @@ pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;
 pub mod startup;
+pub(crate) mod surface_acquisition;
 #[cfg(feature = "validation")]
 pub mod surface_reopen_batch_receipt;
 #[cfg(feature = "validation")]

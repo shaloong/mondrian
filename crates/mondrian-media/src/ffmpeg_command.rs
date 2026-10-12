@@ -163,8 +163,8 @@ pub struct FfmpegChild {
     provider_owner: Option<std::sync::Arc<crate::approved_provider_command::ProviderOwner>>,
     #[cfg(windows)]
     job: crate::native_process_job::NativeProcessJob,
-    #[cfg(target_os = "linux")]
-    process_group: Option<linux_process_group::ProcessGroup>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    process_group: Option<unix_process_group::ProcessGroup>,
     #[cfg(feature = "validation")]
     lease: Option<crate::qualified_ffmpeg::QualifiedChildLease>,
 }
@@ -185,7 +185,7 @@ impl FfmpegChild {
             command.creation_flags(0x0800_0000 | 0x0000_0004);
         }
         check_spawn_deadline(deadline)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
@@ -193,8 +193,8 @@ impl FfmpegChild {
         let child = command.spawn()?;
         #[allow(unused_mut)]
         let mut owner = Self {
-            #[cfg(target_os = "linux")]
-            process_group: Some(linux_process_group::ProcessGroup::new(child.id())),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            process_group: Some(unix_process_group::ProcessGroup::new(child.id())),
             child: Some(child),
             provider_owner,
             #[cfg(windows)]
@@ -244,7 +244,7 @@ impl FfmpegChild {
 
     /// Observe native exit without blocking.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(group) = &self.process_group
             && !group.exited()?
         {
@@ -256,7 +256,7 @@ impl FfmpegChild {
             if self.job.is_assigned() && self.job.active()? != 0 {
                 return Ok(None);
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             self.process_group.take();
             self.release_lease();
         }
@@ -265,11 +265,11 @@ impl FfmpegChild {
 
     /// Terminate the entire owned native process tree, including launcher descendants.
     pub fn kill(&mut self) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.process_group.as_ref().map_or(Ok(()), |group| group.terminate())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             #[cfg(windows)]
             if self.job.is_assigned() {
@@ -313,7 +313,7 @@ impl Drop for FfmpegChild {
         if !settled {
             let _ = self.job.terminate();
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if !settled
             && let (Some(group), Some(child)) = (self.process_group.take(), self.child.take())
         {
@@ -482,8 +482,8 @@ pub(crate) fn record_native_cleanup(pid: u32, cleanup: &crate::SupervisedProcess
     );
 }
 
-#[cfg(target_os = "linux")]
-mod linux_process_group {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_process_group {
     use std::io;
     use std::process::Child;
     use std::time::Duration;
@@ -494,10 +494,12 @@ mod linux_process_group {
         leader: u32,
     }
 
+    #[cfg(target_os = "linux")]
     #[derive(Debug, thiserror::Error)]
     #[error("invalid Linux process-group inventory record")]
     struct InvalidProcessRecord;
 
+    #[cfg(target_os = "linux")]
     fn process_stat_record(result: io::Result<Vec<u8>>) -> io::Result<Option<Vec<u8>>> {
         match result {
             Ok(stat) => Ok(Some(stat)),
@@ -519,14 +521,24 @@ mod linux_process_group {
         }
 
         pub(super) fn terminate(&self) -> io::Result<()> {
-            // Linux PIDs fit pid_t. The leader has not been reaped, so this
+            // The leader has not been reaped, so this
             // group number cannot have been recycled for an unrelated owner.
             if unsafe { libc::kill(-(self.leader as libc::pid_t), libc::SIGKILL) } != 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                // A natural exit can win the race between the supervisor's
+                // liveness check and SIGKILL. A failed signal is harmless only
+                // when the unreaped leader and every group member are gone.
+                if matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::EPERM))
+                    && self.exited()?
+                {
+                    return Ok(());
+                }
+                return Err(error);
             }
             Ok(())
         }
 
+        #[cfg(target_os = "linux")]
         pub(super) fn exited(&self) -> io::Result<bool> {
             let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
             // Observe without reaping: an exiting launcher must not release
@@ -580,6 +592,80 @@ mod linux_process_group {
             Ok(true)
         }
 
+        #[cfg(target_os = "macos")]
+        pub(super) fn exited(&self) -> io::Result<bool> {
+            let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // Keep the launcher unreaped while inspecting its group. This pins
+            // the group ID even when the launcher exits before its children.
+            if unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.leader,
+                    &mut status,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            } != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if unsafe { status.si_pid() } == 0 {
+                return Ok(false);
+            }
+            // Public libproc inventory reports the actual process group.
+            // A full buffer is ambiguous because members can arrive during
+            // enumeration; retry rather than issue a false exit receipt.
+            const SHORT_BSD_INFO: libc::c_int = 13;
+            let mut capacity = 32usize;
+            for _ in 0..8 {
+                let mut pids = vec![0i32; capacity];
+                let count = unsafe {
+                    libc::proc_listpgrppids(
+                        self.leader as libc::pid_t,
+                        pids.as_mut_ptr().cast(),
+                        (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
+                    )
+                };
+                if count < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if count as usize >= pids.len() {
+                    capacity = capacity.saturating_mul(2);
+                    continue;
+                }
+                for pid in pids.into_iter().take(count as usize) {
+                    if pid <= 0 || pid as u32 == self.leader {
+                        continue;
+                    }
+                    let mut info = [0u32; 64];
+                    let size = unsafe {
+                        libc::proc_pidinfo(
+                            pid,
+                            SHORT_BSD_INFO,
+                            0,
+                            info.as_mut_ptr().cast(),
+                            std::mem::size_of_val(&info) as libc::c_int,
+                        )
+                    };
+                    if size == 0 {
+                        let error = io::Error::last_os_error();
+                        if matches!(error.raw_os_error(), Some(libc::ESRCH) | Some(libc::ENOENT)) {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                    if size < 4 * std::mem::size_of::<u32>() as libc::c_int {
+                        return Err(io::Error::other("incomplete macOS process-group inventory"));
+                    }
+                    // proc_bsdshortinfo starts with pid, ppid, pgid, status.
+                    if info[2] == self.leader && info[3] != libc::SZOMB {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            Err(io::Error::other("unstable macOS process-group inventory"))
+        }
+
         pub(super) fn retire(self, mut child: Child) {
             if let Err(error) = self.terminate() {
                 tracing::error!(pid = self.leader, %error, "native process group termination failed");
@@ -609,7 +695,7 @@ mod linux_process_group {
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     mod tests {
         use super::*;
         use std::io::Read;
@@ -738,6 +824,91 @@ mod linux_lifecycle_tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_lifecycle_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+
+    fn launcher_exited(pid: u32) -> bool {
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(result, 0, "observe unreaped launcher");
+        (unsafe { status.si_pid() }) != 0
+    }
+
+    fn process_live(pid: libc::pid_t) -> bool {
+        let mut info = [0u32; 64];
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                13,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of_val(&info) as libc::c_int,
+            )
+        };
+        size > 0 && info[3] != libc::SZOMB
+    }
+
+    fn descendant_pid(child: &mut FfmpegChild) -> libc::pid_t {
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().expect("PID pipe"))
+            .read_line(&mut line)
+            .expect("read descendant PID");
+        line.trim().parse().expect("descendant PID")
+    }
+
+    #[test]
+    fn exiting_launcher_retains_descendant_until_group_termination() {
+        let mut command = FfmpegCommand::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & printf '%s\\n' $!; exit 7"])
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().expect("spawn native launcher");
+        let descendant = descendant_pid(&mut child);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !launcher_exited(child.id()) {
+            assert!(Instant::now() < deadline, "launcher did not exit");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(process_live(descendant), "fixture descendant must be live");
+        assert!(child.try_wait().expect("observe owned group").is_none());
+        child.kill().expect("terminate native process group");
+        let status = child.wait().expect("reap native process group");
+        assert_eq!(status.code(), Some(7));
+        assert!(
+            !process_live(descendant),
+            "descendant survived closure receipt"
+        );
+    }
+
+    #[test]
+    fn dropped_owner_retires_descendant_and_reaps_launcher() {
+        let mut command = FfmpegCommand::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & printf '%s\\n' $!; wait"])
+            .stdout(Stdio::piped());
+        let mut child = command.spawn().expect("spawn native launcher");
+        let descendant = descendant_pid(&mut child);
+        drop(child);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while process_live(descendant) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if process_live(descendant) {
+            unsafe { libc::kill(descendant, libc::SIGKILL) };
+            panic!("dropped media owner left a live descendant");
+        }
     }
 }
 

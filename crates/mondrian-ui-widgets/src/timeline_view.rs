@@ -4787,6 +4787,10 @@ impl Widget for TimelineView {
         self.id
     }
 
+    fn has_transient_interaction(&self) -> bool {
+        self.pointer_capture_active
+    }
+
     fn measure(&self, constraint: LayoutConstraint) -> Size {
         constraint.constrain(Size::new(
             560.0,
@@ -5445,6 +5449,10 @@ impl Widget for TimelineView {
                     selected_clip_count,
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -6240,6 +6248,7 @@ mod tests {
         );
 
         assert_eq!(view.playhead_frame(), 24);
+        assert!(view.has_transient_interaction());
         assert_eq!(
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Capture(view.id()))
@@ -6262,6 +6271,7 @@ mod tests {
             ctx.requests.pointer_capture,
             Some(PointerCaptureRequest::Release(view.id()))
         );
+        assert!(!view.has_transient_interaction());
         assert_eq!(
             seek_events.borrow().as_slice(),
             &[
@@ -9577,6 +9587,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -9738,6 +9749,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 220.0, 80.0),
@@ -9761,6 +9773,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
@@ -9794,6 +9807,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
@@ -9823,6 +9837,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 180.0, 100.0),
@@ -9865,6 +9880,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 80.0, 80.0),
@@ -9894,6 +9910,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 80.0, 80.0),
@@ -9923,6 +9940,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -9949,6 +9967,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -9975,6 +9994,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut base_encoder = RecordingEncoder::default();
         let mut base_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut base_encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -9983,6 +10003,7 @@ mod tests {
 
         let mut waveform_encoder = RecordingEncoder::default();
         let mut waveform_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut waveform_encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -10005,6 +10026,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),
@@ -10026,6 +10048,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 520.0, 180.0),

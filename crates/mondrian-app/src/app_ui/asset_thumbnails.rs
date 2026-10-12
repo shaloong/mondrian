@@ -103,7 +103,12 @@ impl AssetThumbnailSource for AssetThumbnailAdapter {
                     color_space,
                     frame.rgba,
                 ) {
-                    Some(image) => AssetThumbnailState::Ready(image),
+                    Some(image) => match frame.sample_fallback {
+                        Some(fallback) => {
+                            AssetThumbnailState::Degraded { image, failure: fallback.failure }
+                        }
+                        None => AssetThumbnailState::Ready(image),
+                    },
                     None => AssetThumbnailState::Failed(ThumbnailFailure::new(
                         ThumbnailFailureReason::InvalidRasterPayload,
                         "production thumbnail frame failed Window raster validation",

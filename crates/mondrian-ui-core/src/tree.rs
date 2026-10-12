@@ -168,7 +168,7 @@ impl TreeWalker {
     /// 这样 ScrollView 等容器可以在绘制子节点前设置 clip/transform。
     pub fn paint(root: &dyn Widget, encoder: &mut dyn DrawCommandEncoder, theme: &Theme) {
         let clip_rect = Rect::new(0.0, 0.0, f32::MAX, f32::MAX);
-        Self::paint_clipped(root, encoder, theme, clip_rect);
+        Self::paint_clipped(root, encoder, theme, clip_rect, 1.0);
     }
 
     /// Paint a widget tree with an explicit root clip rectangle.
@@ -176,13 +176,16 @@ impl TreeWalker {
     /// Application shells should pass the window or surface bounds here so
     /// overlay widgets can place popups, tooltips, and menus against the real
     /// visible viewport instead of an unbounded test canvas.
+    /// Use the same native pixel density as the shell's final draw conversion;
+    /// GPU-backed widgets use it to bind their physical raster identity.
     pub fn paint_clipped(
         root: &dyn Widget,
         encoder: &mut dyn DrawCommandEncoder,
         theme: &Theme,
         clip_rect: Rect,
+        pixels_per_point: f32,
     ) {
-        let mut ctx = PaintContext { encoder, theme, clip_rect };
+        let mut ctx = PaintContext { encoder, theme, clip_rect, pixels_per_point };
         root.paint(&mut ctx);
         root.paint_overlay(&mut ctx);
     }
@@ -576,7 +579,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let clip = Rect::new(10.0, 20.0, 320.0, 240.0);
 
-        TreeWalker::paint_clipped(&root, &mut encoder, &theme, clip);
+        TreeWalker::paint_clipped(&root, &mut encoder, &theme, clip, 1.0);
 
         assert_eq!(encoder.rects, vec![clip]);
     }

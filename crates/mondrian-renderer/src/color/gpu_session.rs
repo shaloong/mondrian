@@ -23,7 +23,7 @@ pub struct GpuColorBackendContext<'a> {
     /// Queue used for uploads and later submission.
     pub queue: &'a wgpu::Queue,
     /// Encoder receiving the color pass.
-    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub encoder: &'a mut dyn crate::gpu_command::GpuCommandEncoder,
     /// Load operation for the output target.
     pub load_op: wgpu::LoadOp<wgpu::Color>,
 }
@@ -123,6 +123,11 @@ impl GpuColorExecutionSession {
         self.runtime.diagnostics()
     }
 
+    /// Device-scoped pool shared by adjacent renderer Adapters.
+    pub fn resource_pool(&self) -> Arc<GpuColorFrameWgpuResourcePool> {
+        self.runtime.resource_pool()
+    }
+
     /// Release frame-local resources while preserving reusable caches and the pool.
     pub fn clear_frame_resources(&mut self) {
         self.runtime.clear_frame_resources();
@@ -137,7 +142,7 @@ impl GpuColorExecutionSession {
     pub fn record_readback(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuColorFrameReadbackPlan,
     ) -> Result<wgpu::Buffer, GpuColorSessionReadbackError> {
         let resource = self.runtime.frame_table().get(&plan.handle)?;

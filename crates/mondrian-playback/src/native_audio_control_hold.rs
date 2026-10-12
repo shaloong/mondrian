@@ -223,7 +223,8 @@ impl PlaybackEngine {
         {
             return Ok(None);
         }
-        let mut phase = audio_media_position_ns(observation, effective)?;
+        let measured_phase = audio_media_position_ns(observation, effective)?;
+        let mut phase = measured_phase;
         let mut uncertainty_frames = observation.uncertainty_frames;
         if let Some(previous) = hold.device {
             if observation.stream_generation != previous.stream_generation
@@ -246,12 +247,15 @@ impl PlaybackEngine {
             if sample_frames_exceed_duration_ns(effective_delta, rate, allowed_elapsed_ns)? {
                 return Ok(None);
             }
-            if phase < previous.last_media_position_ns {
-                if previous.last_media_position_ns.abs_diff(phase) > allowed {
+            let previous_phase =
+                previous.phase_floor_ns.map_or(previous.last_media_position_ns, |floor| {
+                    previous.last_media_position_ns.max(floor)
+                });
+            if phase < previous_phase {
+                if previous_phase.abs_diff(phase) > allowed {
                     return Ok(None);
                 }
-                let correction_frames = previous
-                    .last_media_position_ns
+                let correction_frames = previous_phase
                     .abs_diff(phase)
                     .checked_mul(u128::from(observation.sample_rate))
                     .and_then(|value| value.checked_add(999_999_999))
@@ -266,7 +270,7 @@ impl PlaybackEngine {
                 {
                     return Ok(None);
                 }
-                phase = previous.last_media_position_ns;
+                phase = previous_phase;
                 effective = effective.max(previous.last_effective_consumed_frames);
             }
         } else if phase.abs_diff(hold.phase_ns).saturating_add(sample_frames_ns_ceil(
@@ -284,7 +288,10 @@ impl PlaybackEngine {
                 last_consumed_frames: observation.consumed_frames,
                 last_effective_consumed_frames: effective,
                 last_observed_at: observation.observed_at,
-                last_media_position_ns: phase,
+                // Keep the physical measurement separate from a temporary
+                // published floor, just as the ordinary device clock does.
+                last_media_position_ns: measured_phase,
+                phase_floor_ns: (phase > measured_phase).then_some(phase),
                 last_uncertainty_frames: uncertainty_frames,
             },
         )))
@@ -327,5 +334,62 @@ impl PlaybackEngine {
             candidate.refresh_frame_demand_with_duration(now, candidate.policy.priming_limit)?;
             Ok(true)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_hold_phase_keeps_device_measurement_separate_from_published_floor() {
+        let engine =
+            PlaybackEngine::new(Rational::new(1, 25), PlaybackPolicy::default()).expect("engine");
+        let now = MonotonicTimestamp::from_duration(Duration::from_millis(40));
+        let observation = AudioDeviceClockObservation {
+            epoch: engine.snapshot().epoch,
+            stream_generation: 7,
+            sample_rate: 48_000,
+            consumed_frames: 2_400,
+            media_anchor: AudioSamplePosition::new(
+                0,
+                AudioSampleRate::new(48_000).expect("sample rate"),
+            ),
+            observed_at: now,
+            grade: AudioClockObservationGrade::CallbackConsumptionEstimate,
+            estimated_latency_frames: 480,
+            uncertainty_frames: 240,
+            underrun_frames: 0,
+            state: AudioDeviceClockState::Running,
+        };
+        let hold = NativeAudioControlHold {
+            ticket: NativeAudioControlHoldTicket {
+                epoch: observation.epoch,
+                pending_generation: 17,
+                serial: 1,
+            },
+            phase_ns: 41_000_000,
+            began_at: now,
+            device: Some(AudioDeviceClockAnchor {
+                stream_generation: observation.stream_generation,
+                media_anchor: observation.media_anchor,
+                last_consumed_frames: observation.consumed_frames,
+                last_effective_consumed_frames: 1_920,
+                last_observed_at: now,
+                last_media_position_ns: 40_000_000,
+                phase_floor_ns: Some(41_000_000),
+                last_uncertainty_frames: 240,
+            }),
+            finalized: false,
+        };
+        let (phase, device) = engine
+            .native_hold_phase(hold, observation, now)
+            .expect("valid clock arithmetic")
+            .expect("accepted adjacent uncertainty");
+        assert_eq!(phase, 41_000_000);
+        assert_eq!(device.last_media_position_ns, 40_000_000);
+        assert_eq!(device.phase_floor_ns, Some(41_000_000));
+        assert_eq!(device.last_effective_consumed_frames, 1_920);
+        assert_eq!(device.last_uncertainty_frames, 288);
     }
 }

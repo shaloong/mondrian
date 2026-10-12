@@ -79,8 +79,10 @@ pub enum AccessibilityRole {
     Checkbox,
     /// Numeric slider.
     Slider,
-    /// Editable single-line or multiline text field.
+    /// Editable single-line text field.
     TextInput,
+    /// Editable multiline text field.
+    MultilineTextInput,
     /// Popup or dropdown menu.
     Menu,
     /// Command or submenu entry within a menu.
@@ -183,6 +185,20 @@ pub struct AccessibilityNode {
     pub value: Option<AccessibilityValue>,
     /// Sequential focus order assigned by [`collect_accessibility_nodes`].
     pub focus_order: Option<u32>,
+}
+
+/// Accessible action region painted and handled by a composite widget.
+///
+/// The key is stable within its parent widget. Native adapters use the parent's
+/// normal pointer event path to activate the region; no second action owner is
+/// created for controls drawn inside a single widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessibilityVirtualNode {
+    pub key: u64,
+    pub role: AccessibilityRole,
+    pub name: String,
+    pub bounds: Rect,
+    pub enabled: bool,
 }
 
 impl AccessibilityNode {
@@ -559,6 +575,8 @@ pub struct PaintContext<'a> {
     pub theme: &'a Theme,
     /// 当前裁剪区域
     pub clip_rect: Rect,
+    /// Native Window pixels per layout point; also used by raster producers.
+    pub pixels_per_point: f32,
 }
 
 impl PaintContext<'_> {
@@ -708,6 +726,12 @@ pub trait DrawCommandEncoder {
 pub trait Widget {
     /// 返回 Widget 的唯一标识
     fn id(&self) -> WidgetId;
+
+    /// Whether an in-progress interaction needs this widget instance to survive
+    /// model refresh until the matching release or cancellation event arrives.
+    fn has_transient_interaction(&self) -> bool {
+        false
+    }
 
     /// Return the editor panel kind represented by this widget, if it is a
     /// panel boundary.
@@ -980,6 +1004,18 @@ pub trait Widget {
             visitor(node);
         }
     }
+
+    /// Bounds of the semantic node in window logical coordinates, after layout.
+    /// A platform bridge converts these coordinates to physical pixels.
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        None
+    }
+
+    /// Accessible hit regions drawn within this widget rather than stored as
+    /// separate child widgets.
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        Vec::new()
+    }
 }
 
 /// Collect accessibility metadata from a widget subtree.
@@ -1070,6 +1106,7 @@ mod tests {
         let theme: &'static Theme =
             Box::leak(Box::new(mondrian_ui_theme::ThemePreset::Dark.build()));
         PaintContext {
+            pixels_per_point: 1.0,
             encoder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),

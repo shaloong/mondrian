@@ -2,6 +2,11 @@ use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
 use crate::app::AppMessage;
 
+enum AuthoringAudioPolicy {
+    ReconcileAudibleClosure,
+    NativeParameterHandoff,
+}
+
 fn sequence_time_from_frame(
     frame: i64,
     time_base: Rational,
@@ -191,7 +196,7 @@ impl AppState {
         after.sequences.default_sequence_id = sequence_id;
         if let Some(commit) = session.commit_project_snapshot("设置默认序列", before, after)?
         {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(())
     }
@@ -256,7 +261,7 @@ impl AppState {
         let commit = session.commit_project_snapshot("复制序列", before, after)?;
         session.switch_active_sequence(duplicated_id, SequenceNavigationIntent::ReplaceRoot)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         self.settle_preview_access_source();
         Ok(duplicated_id)
@@ -316,7 +321,7 @@ impl AppState {
             }
         })?;
         if let Some(commit) = session.commit_project_snapshot("删除序列", before, after)? {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         if active_changed {
             self.settle_preview_access_source();
@@ -398,7 +403,7 @@ impl AppState {
             session.edit_sequence(sequence_id, description, edit)?
         };
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(value)
     }
@@ -432,7 +437,7 @@ impl AppState {
             })?
             .commit_project_snapshot(description, before, after)?;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
+            self.consume_authoring_commit(commit)?;
         }
         Ok(())
     }
@@ -440,7 +445,31 @@ impl AppState {
     pub(super) fn consume_authoring_commit(
         &mut self,
         commit: mondrian_editor_state::AuthoringCommit,
-    ) {
+    ) -> mondrian_core::Result<()> {
+        self.consume_authoring_commit_with_audio_policy(
+            commit,
+            AuthoringAudioPolicy::ReconcileAudibleClosure,
+        )
+    }
+
+    /// The captured native renderer installs this transaction on its existing
+    /// serial handoff queue. Generic PCM replacement would retire that owner
+    /// before the accepted native proposal can reach it.
+    pub(super) fn consume_native_audio_authoring_commit(
+        &mut self,
+        commit: mondrian_editor_state::AuthoringCommit,
+    ) -> mondrian_core::Result<()> {
+        self.consume_authoring_commit_with_audio_policy(
+            commit,
+            AuthoringAudioPolicy::NativeParameterHandoff,
+        )
+    }
+
+    fn consume_authoring_commit_with_audio_policy(
+        &mut self,
+        commit: mondrian_editor_state::AuthoringCommit,
+        audio_policy: AuthoringAudioPolicy,
+    ) -> mondrian_core::Result<()> {
         if !commit.undo_retained {
             self.set_status_hint(AppMessage::new("status-history-retired"), true);
         }
@@ -455,6 +484,11 @@ impl AppState {
         }
         self.synchronize_audio_idle_warmup_binding();
         self.reconcile_timeline_targeting();
+        let playback_result = self.synchronize_playback_authoring_binding();
+        if matches!(audio_policy, AuthoringAudioPolicy::ReconcileAudibleClosure) {
+            self.reconcile_audio_after_authoring_commit();
+        }
+        playback_result
     }
 
     /// Rebind restored navigation through the sole Playback seek seam.
@@ -496,8 +530,9 @@ impl AppState {
         let playback_result = self.rebind_history_playback(previous_owner, previous_position);
         // Author restore already committed; publish its receipt even if an
         // independent runtime binding fails.
-        self.consume_authoring_commit(commit);
+        let authoring_result = self.consume_authoring_commit(commit);
         playback_result?;
+        authoring_result?;
         self.settle_preview_access_source();
         Ok(true)
     }
@@ -516,14 +551,15 @@ impl AppState {
         let playback_result = self.rebind_history_playback(previous_owner, previous_position);
         // Author restore already committed; publish its receipt even if an
         // independent runtime binding fails.
-        self.consume_authoring_commit(commit);
+        let authoring_result = self.consume_authoring_commit(commit);
         playback_result?;
+        authoring_result?;
         self.settle_preview_access_source();
         Ok(true)
     }
 
     pub fn close_project(&mut self) -> anyhow::Result<()> {
-        if self.project_close_blocks_actions() {
+        if self.project_lifecycle_blocks_actions() {
             anyhow::bail!("Project close is already active or fail-closed");
         }
         self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1338,7 +1374,7 @@ impl AppState {
             session.switch_active_sequence(sequence_id, SequenceNavigationIntent::ReplaceRoot)?;
             commit
         };
-        self.consume_authoring_commit(commit);
+        self.consume_authoring_commit(commit)?;
         self.settle_preview_access_source();
         tracing::info!(%sequence_id, "新建序列: {name}");
         Ok(sequence_id)

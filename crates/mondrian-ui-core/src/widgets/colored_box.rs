@@ -279,6 +279,7 @@ mod tests {
         let theme = leak_theme();
         let mut encoder = MockEncoder::new();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),

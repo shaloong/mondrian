@@ -9,11 +9,13 @@ use std::sync::Arc;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{ColorSpace, WorkingColorSpace};
 use mondrian_core::WorkingRgbaF32Frame;
-use mondrian_media::{DecodedRgbaEncoding, DecodedRgbaFrameContract, FloatRgbaFrame, RgbaFrame};
+use mondrian_media::{
+    DecodedRgbaEncoding, DecodedRgbaFrameContract, FloatRgbaFrame, RgbaFrame, Unorm16RgbaFrame,
+};
 
 use crate::color_frame::{
     normalize_rgba8_alpha, normalize_rgba_f32_alpha, CpuColorFrame, CpuEncodedColorFrame,
-    CpuEncodedFloatColorFrame, CpuSourceColorFrame, LinearFloatSource,
+    CpuEncodedFloatColorFrame, CpuEncodedUnorm16ColorFrame, CpuSourceColorFrame, LinearFloatSource,
     SourceAlphaInterpretationError,
 };
 use crate::color_stage::execute_cpu_source_input_stage_with_session;
@@ -25,6 +27,7 @@ use crate::color_transform::{
 #[derive(Debug, Clone)]
 enum DecodedCpuSourcePixels {
     Rgba8(Arc<Vec<u8>>),
+    Rgba16(Arc<Vec<u16>>),
     RgbaF32(Arc<Vec<f32>>),
 }
 
@@ -65,6 +68,20 @@ impl From<FloatRgbaFrame> for DecodedCpuSourceFrame {
             height,
             color_contract,
             pixels: DecodedCpuSourcePixels::RgbaF32(frame.into_shared_data()),
+        }
+    }
+}
+
+impl From<Unorm16RgbaFrame> for DecodedCpuSourceFrame {
+    fn from(frame: Unorm16RgbaFrame) -> Self {
+        let width = frame.width;
+        let height = frame.height;
+        let color_contract = frame.color_contract;
+        Self {
+            width,
+            height,
+            color_contract,
+            pixels: DecodedCpuSourcePixels::Rgba16(frame.into_shared_data()),
         }
     }
 }
@@ -282,6 +299,9 @@ pub enum SourceFramePreparationError {
     /// An eight-bit decode payload claimed scene-linear source samples.
     #[error("decoded RGBA8 payload cannot claim source-linear RGB")]
     Rgba8MarkedSourceLinear,
+    /// A normalized integer payload claimed scene-linear samples.
+    #[error("decoded RGBA16 UNORM payload cannot claim source-linear RGB")]
+    Rgba16MarkedSourceLinear,
     /// A color-managed intent was paired with an explicit data-texture decode.
     #[error("decoded data-texture payload cannot enter a color-managed source transform")]
     DataTextureEnteredColorTransform,
@@ -370,6 +390,23 @@ pub fn prepare_decoded_cpu_source_frame(
                 data,
             ))
         }
+        DecodedCpuSourcePixels::Rgba16(data) => {
+            validate_component_count(
+                decoded.width,
+                decoded.height,
+                expected_components,
+                data.len(),
+            )?;
+            if decoded.color_contract.encoding != DecodedRgbaEncoding::SourceEncodedRgb {
+                return Err(SourceFramePreparationError::Rgba16MarkedSourceLinear);
+            }
+            CpuSourceColorFrame::from(CpuEncodedUnorm16ColorFrame::source_shared(
+                decoded.width,
+                decoded.height,
+                color_space,
+                data,
+            ))
+        }
         DecodedCpuSourcePixels::RgbaF32(data) => {
             validate_component_count(
                 decoded.width,
@@ -442,6 +479,20 @@ fn prepare_data_texture_frame(
                     ]
                 })
                 .collect()
+        }
+        DecodedCpuSourcePixels::Rgba16(shared) => {
+            validate_component_count(
+                decoded.width,
+                decoded.height,
+                expected_components,
+                shared.len(),
+            )?;
+            let mut rgba = shared
+                .iter()
+                .map(|sample| f32::from(*sample) / f32::from(u16::MAX))
+                .collect::<Vec<_>>();
+            normalize_rgba_f32_alpha(&mut rgba, alpha_interpretation)?;
+            bytemuck::allocation::cast_vec(rgba)
         }
         DecodedCpuSourcePixels::RgbaF32(shared) => {
             validate_component_count(

@@ -1865,9 +1865,14 @@ pub(crate) fn classify_viewer_gpu_output_health(
     let display_boundary_ready = outcome != ViewerGpuOutputAttemptOutcome::DisplayContractBlocked;
     let stage_sequence_ready = last_stage_diagnostics
         .map(|diagnostics| {
-            diagnostics.total_stages == 2
-                && diagnostics.upload_stages == 1
-                && diagnostics.gpu_color_stages == 1
+            // Resident native inputs need no upload. Program Output, monitor
+            // adaptation and ICC calibration can each add GPU color stages.
+            // Require complete stage accounting rather than one legacy graph.
+            diagnostics.gpu_color_stages > 0
+                && diagnostics.cpu_input_stages == 0
+                && diagnostics.cpu_output_stages == 0
+                && diagnostics.upload_stages.checked_add(diagnostics.gpu_color_stages)
+                    == Some(diagnostics.total_stages)
                 && diagnostics.readback_stages == 0
         })
         .unwrap_or(false);
@@ -2477,6 +2482,63 @@ mod tests {
                 Some(ready_stage_diagnostics()),
             );
             assert_eq!(health.status, expected);
+        }
+    }
+
+    #[test]
+    fn shared_attempt_classifier_accepts_resident_and_multistage_color_graphs() {
+        for diagnostics in [
+            RenderColorStageDiagnostics {
+                total_stages: 1,
+                gpu_color_stages: 1,
+                ..Default::default()
+            },
+            RenderColorStageDiagnostics {
+                total_stages: 3,
+                gpu_color_stages: 3,
+                ..Default::default()
+            },
+            RenderColorStageDiagnostics {
+                total_stages: 5,
+                upload_stages: 2,
+                gpu_color_stages: 3,
+                ..Default::default()
+            },
+        ] {
+            let health = classify_viewer_gpu_output_health(
+                Some(ViewerGpuOutputAttemptOutcome::Registered),
+                true,
+                Some(diagnostics),
+            );
+            assert_eq!(health.status, ViewerGpuOutputHealthStatus::Ready);
+        }
+        for diagnostics in [
+            RenderColorStageDiagnostics::default(),
+            RenderColorStageDiagnostics {
+                total_stages: 2,
+                gpu_color_stages: 1,
+                ..Default::default()
+            },
+            RenderColorStageDiagnostics {
+                total_stages: 2,
+                gpu_color_stages: 1,
+                readback_stages: 1,
+                ..Default::default()
+            },
+            RenderColorStageDiagnostics {
+                total_stages: 1,
+                gpu_color_stages: 1,
+                cpu_output_stages: 1,
+                ..Default::default()
+            },
+        ] {
+            let health = classify_viewer_gpu_output_health(
+                Some(ViewerGpuOutputAttemptOutcome::Registered),
+                true,
+                Some(diagnostics),
+            );
+            assert_eq!(health.status, ViewerGpuOutputHealthStatus::Degraded);
+            assert!(!health.stage_sequence_ready);
         }
     }
 

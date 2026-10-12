@@ -342,6 +342,59 @@ mod tests {
     }
 
     #[test]
+    fn mac_command_arrows_reach_line_and_document_edges() {
+        let command = Modifiers { meta: true, ..Modifiers::none() };
+        let command_shift = Modifiers { meta: true, shift: true, ..Modifiers::none() };
+        for (key, expected) in [
+            (
+                KeyCode::Left,
+                MultilineTextKeyCommand::MoveLineStart { extend_selection: false },
+            ),
+            (
+                KeyCode::Right,
+                MultilineTextKeyCommand::MoveLineEnd { extend_selection: false },
+            ),
+            (
+                KeyCode::Up,
+                MultilineTextKeyCommand::MoveDocStart { extend_selection: false },
+            ),
+            (
+                KeyCode::Down,
+                MultilineTextKeyCommand::MoveDocEnd { extend_selection: false },
+            ),
+        ] {
+            assert_eq!(
+                classify_key_command(key, command, mac(), mb()),
+                Some(expected)
+            );
+            assert_eq!(classify_key_command(key, command, win(), mb()), None);
+        }
+        for (key, expected) in [
+            (
+                KeyCode::Left,
+                MultilineTextKeyCommand::MoveLineStart { extend_selection: true },
+            ),
+            (
+                KeyCode::Right,
+                MultilineTextKeyCommand::MoveLineEnd { extend_selection: true },
+            ),
+            (
+                KeyCode::Up,
+                MultilineTextKeyCommand::MoveDocStart { extend_selection: true },
+            ),
+            (
+                KeyCode::Down,
+                MultilineTextKeyCommand::MoveDocEnd { extend_selection: true },
+            ),
+        ] {
+            assert_eq!(
+                classify_key_command(key, command_shift, mac(), mb()),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn home_end_doc_vs_line() {
         let km = win();
         assert_eq!(

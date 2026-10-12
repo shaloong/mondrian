@@ -1775,6 +1775,13 @@ use sRGB-encoded surface formats; PQ/HLG require float or 10-bit non-sRGB
 formats so the final color pass, not hardware sRGB conversion, owns the output
 transfer. Camera-log and Rec.2020 working spaces are not presentation contracts
 and must fail closed until mapped through an explicit display/view transform.
+On macOS, the borderless startup window also requires an explicit compositor
+alpha mode; wgpu `Auto` selects an opaque Metal layer and is not transparency
+evidence. The existing UI carrier resolves the complete linear premultiplied
+composition, applies the outer rounded mask once (including the banner), and
+adapts alpha association to the selected native mode. Transparent pixels carry
+zero RGB, and a Retina-scale change rebuilds the physical-pixel mask. Windows
+HWND swapchains retain their existing opaque surface and native DWM shape.
 The viewer GPU output path records presentation readiness for each requested
 display boundary. If the current surface already matches the requested display
 space, recording may proceed. If wgpu reports that a better surface contract
@@ -1783,15 +1790,16 @@ texture compositor, the path must report a payload blocker instead of switching
 the surface prematurely. This prevents false HDR/P3 readiness: real promotion
 requires the output texture format, external texture sampling contract, UI
 compositor shader, and swapchain color space to move together.
-SDR viewer textures use an explicit `SrgbSurfaceCodeValuesOpaque` external
-texture contract. The source is an unorm texture containing encoded output or
-ICC device codes, not a linear UI image. A dedicated UI fragment pass applies
-the inverse sRGB carrier curve before writing the sRGB attachment, whose store
-conversion restores the original code values. The pass forces opaque output so
-the renderer never alpha-blends nonlinear device codes, and clips normalized
-SDR code values only at this presentation boundary. Registration fails
-closed on non-sRGB surfaces. This carrier operation preserves code values; it
-is not an implicit sRGB color-space assumption or a replacement for OCIO/ICC.
+Standard Viewer output uses the explicit `SurfaceCodeValues` external texture
+contract. Its selected sRGB, P3, PQ, or HLG transfer is decoded into
+target-primary display-linear light. Coverage is associated before bilinear
+filtering and retained when blending over the Viewer checkerboard/black canvas;
+the native carrier then applies the final output transfer. ICC device values
+use the separate `DeviceCodeValuesOpaque` contract through a direct sRGB
+attachment. That opaque carrier preserves device codes without assigning
+standard colorimetry or blending nonlinear ICC values. Neither carrier replaces
+the renderer's OCIO/ICC transform, and registration fails closed when the
+configured native surface cannot carry its contract.
 Viewer GPU output telemetry reports display-boundary blockers by reason, not
 only as a total. It separates HDR-output-on-SDR-surface blockers from
 surface-color-space blockers and stores the last blocked output color space,
@@ -2277,6 +2285,13 @@ pipeline survive steady frames and rebuild only on presentation-contract or
 size changes. Batch construction also resets texture authority when returning
 from an external/raster image to an ordinary UI primitive; a shape can never
 inherit the preceding Viewer pipeline.
+Because ICC device values are nonlinear and device-specific, transparent Viewer
+content is matted over the widget-owned canvas colors in display-linear light
+before ICC calibration. The UI device-code batch consumes this opaque texture.
+Canvas colors, logical crop origin and pixel step are part of the Window
+publication identity; changing the background or theme retires that texture
+and renews the existing paused still demand. This presentation matte does not
+change Program Output, clean feed, Scopes or Export coverage.
 The application-layer `PreviewRasterPresentationContract` resolves the CPU
 boundary before any Widget object exists: Rec.709, sRGB, and Display P3 SDR
 requests are monitor-adapted to an sRGB atlas payload; PQ/HLG requests fail
@@ -2519,10 +2534,21 @@ explicitly closeable. A normal role-replacement error is retained as an
 event-loop failure. Partially mutated Host state is not rolled back and may not
 resume; the Window fails closed and exits.
 
-Initial Window native/GPU construction now runs inside one caught, stage-ledger
-scope after Runtime and Host startup. The raw complete Host is retained outside
-that scope and is wrapped as an active `AppUiHostSessionOwner` only after Host
-publication succeeds. Window, Surface, Adapter, Device/Queue, Viewer progress,
+Every active Window publication binds its new physical carrier through the
+Playback Engine's existing persistent-still renewal seam. This includes initial
+startup with an App returned by a previous Window: its consumed picture ticket
+cannot authorize the new carrier. The renewal preserves the Timeline coordinate,
+transport state and quality, invalidates the old ticket, and leaves timed demands
+at their original deadlines. Initial publication, role replacement and Device
+reopen share this boundary rather than depending on validation-only seeks.
+
+Initial Window native/GPU construction runs inside the first `Resumed` callback,
+after Runtime and Host startup, in one caught, stage-ledger scope. Creating a
+Window before winit installs its handler can lose macOS focus/resize events.
+The existing `AppUiHostSessionOwner` retains the complete Host outside that scope;
+Window state is published only after the candidate is activated. Repeated
+`Resumed` events reuse that same native candidate rather than creating another
+Window, Surface or Device. Window, Surface, Adapter, Device/Queue, Viewer progress,
 Preview waker, Prepared Window, and Activated Window checkpoints feed one failure
 path. That path first consumes any partial Viewer GPU owner, then hands the exact
 App back through complete Host closure, then consumes the background Runtime

@@ -41,6 +41,7 @@ type PlaybackFrameStore = mondrian_playback::PreviewFrameStore<
     ViewerPreviewCacheKey,
     PreviewViewerCpuFrame,
     ViewerFrameScope,
+    super::preview_unavailability::PreviewUnavailability,
 >;
 
 /// One immutable CPU result admitted under the sole playback residency budget.
@@ -114,9 +115,20 @@ impl PreviewFrameStoreAdapter {
         if !media_key_authorizes_residency(key) {
             return None;
         }
-        self.store
-            .media_frame(key)
-            .map(|(frame, resource)| frame.with_residency_resource(resource))
+        if let Some((frame, resource)) = self.store.media_frame(key) {
+            return Some(frame.with_residency_resource(resource));
+        }
+        let (frame, resource) = self.store.media_frame_matching(|resident_key, frame| {
+            if !resident_key.decode.same_configuration(&key.decode) {
+                return false;
+            }
+            let mut retargeted = resident_key.clone();
+            retargeted.decode = key.decode.clone();
+            retargeted == *key && frame.native_target_selection(key.source_sample()).is_some()
+        })?;
+        frame
+            .for_native_target(key)
+            .map(|frame| frame.with_residency_resource(resource))
     }
 
     /// Return one decoded frame protected for a current Viewer candidate.
@@ -128,11 +140,10 @@ impl PreviewFrameStoreAdapter {
         if !media_key_authorizes_residency(key) {
             return Ok(None);
         }
-        self.store.protected_media_frame(key, demand_id).map(|frame| {
-            frame.map(|(frame, resource, protection)| {
-                frame.with_residency_resource(resource).with_residency_protection(protection)
-            })
-        })
+        let Some(frame) = self.media_frame(key) else {
+            return Ok(None);
+        };
+        frame.protect_for_demand(demand_id).map(Some)
     }
 
     /// Reserve bounded decoded-media residency before Broker admission.
@@ -294,11 +305,15 @@ impl PreviewFrameStoreAdapter {
     }
 
     /// Remember one terminal media failure.
-    pub(crate) fn remember_failure(&mut self, key: MediaPreviewKey) {
+    pub(crate) fn remember_failure(
+        &mut self,
+        key: MediaPreviewKey,
+        failure: super::preview_unavailability::PreviewUnavailability,
+    ) {
         if !media_key_authorizes_residency(&key) {
             return;
         }
-        self.store.remember_failure(key);
+        self.store.remember_failure(key, failure);
     }
 
     /// Remove failure memory after a successful completion.
@@ -310,8 +325,20 @@ impl PreviewFrameStoreAdapter {
     }
 
     /// Return whether the key has a remembered terminal failure and touch it.
+    #[cfg(test)]
     pub(crate) fn contains_failure(&mut self, key: &MediaPreviewKey) -> bool {
         media_key_authorizes_residency(key) && self.store.contains_failure(key)
+    }
+
+    /// Project the retained decoder failure without replacing its explanation.
+    pub(crate) fn failure(
+        &mut self,
+        key: &MediaPreviewKey,
+    ) -> Option<super::preview_unavailability::PreviewUnavailability> {
+        if !media_key_authorizes_residency(key) {
+            return None;
+        }
+        self.store.failure(key)
     }
 
     /// Pin the current Preview raster with its exact stale-reuse scope.
@@ -364,6 +391,14 @@ impl PreviewFrameStoreAdapter {
     /// Release decoded-media payloads without invalidating a usable final Viewer output.
     pub(crate) fn clear_media_frames(&mut self) {
         self.store.clear_media_frames();
+    }
+
+    /// A near-keyframe scrub payload proves no exact source-sample residency
+    /// in the next generation. Preserve exact CPU frames and final output.
+    pub(crate) fn retire_approximate_media_frames(&mut self) {
+        self.store.clear_media_frames_matching(|_, frame| {
+            frame.presentation_quality() == mondrian_playback::FramePresentationQuality::Degraded
+        });
     }
 
     /// Release native decoder resources while retaining ordinary CPU frames.

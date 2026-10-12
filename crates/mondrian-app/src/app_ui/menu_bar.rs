@@ -59,7 +59,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 MenuItem::submenu(
                     "导出",
                     vec![
-                        MenuItem::inert("导出设置...").with_message_id("menu-export-settings"),
+                        command_menu_item("panel.export").with_message_id("menu-export-settings"),
                         MenuItem::separator(),
                         command_menu_item("file.export_portable_package"),
                         command_menu_item("file.cancel_portable_package_export"),
@@ -68,6 +68,7 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
                 .with_message_id("menu-export"),
                 MenuItem::separator(),
                 command_menu_item("file.project_settings"),
+                command_menu_item("file.sequence_settings"),
                 MenuItem::separator(),
                 command_menu_item("file.close_project"),
             ],
@@ -1032,23 +1033,10 @@ mod tests {
     #[test]
     fn placeholder_menu_rows_are_inert_instead_of_noop_actions() {
         let menu_items = default_menu_items();
-
-        for (menu_label, item_label) in [("文件", "文件夹..."), ("文件", "导出设置...")]
-        {
-            let item = menu_item_deep(&menu_items, menu_label, item_label);
-            assert!(
-                !item.enabled,
-                "{menu_label}/{item_label} should be disabled"
-            );
-            assert!(
-                item.action().is_none(),
-                "{menu_label}/{item_label} should not dispatch a placeholder action"
-            );
-            assert!(
-                !item.has_command(),
-                "{menu_label}/{item_label} should not carry a hidden command"
-            );
-        }
+        let item = menu_item_deep(&menu_items, "文件", "文件夹...");
+        assert!(!item.enabled);
+        assert!(item.action().is_none());
+        assert!(!item.has_command());
     }
 
     #[test]

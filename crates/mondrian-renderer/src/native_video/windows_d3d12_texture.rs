@@ -162,6 +162,7 @@ pub(super) fn validate_device_feature(
         | GpuNativeDecodedFrameTextureFormat::P410
         | GpuNativeDecodedFrameTextureFormat::P412
         | GpuNativeDecodedFrameTextureFormat::P416
+        | GpuNativeDecodedFrameTextureFormat::Yuva444sp16
         | GpuNativeDecodedFrameTextureFormat::Y210
         | GpuNativeDecodedFrameTextureFormat::Y212
         | GpuNativeDecodedFrameTextureFormat::Xv30

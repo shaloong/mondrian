@@ -4,7 +4,7 @@
 //!
 //! Cursor navigation, backspace/delete, Home/End, mouse drag selection
 //! (extendable beyond widget bounds), Shift+Click/Shift+Arrow selection
-//! expansion, Ctrl+A/C/X/V clipboard, Ctrl+Left/Right word navigation,
+//! expansion, platform primary clipboard shortcuts and word navigation,
 //! grapheme-safe cursor (emoji / combining marks), IME multi-codepoint
 //! input, timed blinking cursor (500 ms cycle).
 //!
@@ -955,6 +955,9 @@ impl Widget for TextInput {
                     return EventResult::Ignored;
                 }
                 self.mouse_down = false;
+                if !self.has_selection() {
+                    self.clear_selection();
+                }
                 ctx.release_pointer_capture(self.id);
                 ctx.request_repaint();
                 EventResult::Handled
@@ -1203,6 +1206,10 @@ impl Widget for TextInput {
         )
     }
 
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
@@ -1215,7 +1222,10 @@ impl Widget for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::test_utils::{
+        make_event_ctx, primary_text_modifiers, word_text_modifiers, DummyFocus, DummyShortcut,
+        DummyTooltip,
+    };
     use mondrian_editor_state::Action;
     use mondrian_platform_core::{
         ClipboardError, FileDialogError, FileDialogOutcome, FileFilter, FileRevealError,
@@ -1286,19 +1296,13 @@ mod tests {
     }
     fn kd_primary(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
         ti.event(
-            &UiEvent::KeyDown {
-                key,
-                modifiers: crate::test_utils::primary_text_modifiers(),
-            },
+            &UiEvent::KeyDown { key, modifiers: primary_text_modifiers() },
             ctx,
         );
     }
     fn kd_word(ti: &mut TextInput, key: KeyCode, ctx: &mut EventContext) {
         ti.event(
-            &UiEvent::KeyDown {
-                key,
-                modifiers: crate::test_utils::word_text_modifiers(),
-            },
+            &UiEvent::KeyDown { key, modifiers: word_text_modifiers() },
             ctx,
         );
     }
@@ -1987,7 +1991,7 @@ mod tests {
             (KeyCode::Delete, Modifiers::none()),
             (KeyCode::Left, Modifiers::none()),
             (KeyCode::Right, Modifiers::none()),
-            (KeyCode::A, crate::test_utils::primary_text_modifiers()),
+            (KeyCode::A, primary_text_modifiers()),
         ] {
             assert_eq!(
                 ti.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
@@ -2337,10 +2341,7 @@ mod tests {
         kd_mod(
             &mut ti,
             KeyCode::Left,
-            Modifiers {
-                shift: true,
-                ..crate::test_utils::word_text_modifiers()
-            },
+            Modifiers { shift: true, ..word_text_modifiers() },
             &mut ctx,
         );
 
@@ -2461,7 +2462,7 @@ mod tests {
         assert_eq!(ti.selection_byte_range(), Some((1, 4)));
     }
 
-    // ── Ctrl shortcuts ───────────────────────────────────────────────────
+    // ── Platform primary shortcuts ───────────────────────────────────────
 
     #[test]
     fn primary_a_select_all() {
@@ -2533,7 +2534,7 @@ mod tests {
         let result = ti.event(
             &UiEvent::KeyDown {
                 key: KeyCode::X,
-                modifiers: crate::test_utils::primary_text_modifiers(),
+                modifiers: primary_text_modifiers(),
             },
             &mut ctx,
         );
@@ -2609,7 +2610,7 @@ mod tests {
         let result = ti.event(
             &UiEvent::KeyDown {
                 key: KeyCode::C,
-                modifiers: crate::test_utils::primary_text_modifiers(),
+                modifiers: primary_text_modifiers(),
             },
             &mut ctx,
         );
@@ -2673,7 +2674,12 @@ mod tests {
             ),
             (
                 KeyCode::Home,
-                Modifiers { alt: true, shift: true, ..Default::default() },
+                Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                    ..Default::default()
+                },
             ),
             (
                 KeyCode::End,
@@ -2735,6 +2741,26 @@ mod tests {
         assert_eq!(result, EventResult::Ignored);
         assert!(ctx.requests.pointer_capture.is_none());
         assert!(!ti.mouse_down);
+    }
+
+    #[test]
+    fn click_with_stationary_mouse_move_does_not_select_first_typed_character() {
+        let mut ti = TextInput::new("ph");
+        layout(&mut ti);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = mk_ctx(&mut f, &mut s, &mut t);
+
+        md(&mut ti, 80.0, 14.0, &mut ctx);
+        mm(&mut ti, 80.0, 14.0, &mut ctx);
+        mu(&mut ti, &mut ctx);
+        assert_eq!(ti.edit.selection_start, None);
+
+        tp(&mut ti, "a", &mut ctx);
+        assert!(!ti.has_selection());
+        tp(&mut ti, "b", &mut ctx);
+        assert_eq!(ti.text(), "ab");
     }
 
     #[test]
@@ -2943,6 +2969,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 28.0),
@@ -2980,6 +3007,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 240.0, 30.0),
@@ -3052,6 +3080,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
@@ -3070,6 +3099,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
@@ -3097,14 +3127,11 @@ mod tests {
         input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let undo = UiEvent::KeyDown {
             key: KeyCode::Z,
-            modifiers: crate::test_utils::primary_text_modifiers(),
+            modifiers: primary_text_modifiers(),
         };
         let redo = UiEvent::KeyDown {
             key: KeyCode::Z,
-            modifiers: Modifiers {
-                shift: true,
-                ..crate::test_utils::primary_text_modifiers()
-            },
+            modifiers: Modifiers { shift: true, ..primary_text_modifiers() },
         };
         assert_eq!(
             input.event(&undo, &mut ctx),
@@ -3144,12 +3171,9 @@ mod tests {
         input.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
         let undo = UiEvent::KeyDown {
             key: KeyCode::Z,
-            modifiers: crate::test_utils::primary_text_modifiers(),
+            modifiers: primary_text_modifiers(),
         };
-        let word_delete = |key| UiEvent::KeyDown {
-            key,
-            modifiers: crate::test_utils::word_text_modifiers(),
-        };
+        let word_delete = |key| UiEvent::KeyDown { key, modifiers: word_text_modifiers() };
         assert_eq!(
             input.event(&word_delete(KeyCode::Backspace), &mut ctx),
             EventResult::Handled
@@ -3213,11 +3237,8 @@ mod tests {
         kd_primary(&mut input, KeyCode::Z, &mut ctx);
         input.set_text("fresh canonical model".to_owned());
         for modifiers in [
-            crate::test_utils::primary_text_modifiers(),
-            Modifiers {
-                shift: true,
-                ..crate::test_utils::primary_text_modifiers()
-            },
+            primary_text_modifiers(),
+            Modifiers { shift: true, ..primary_text_modifiers() },
         ] {
             assert_eq!(
                 input.event(&UiEvent::KeyDown { key: KeyCode::Z, modifiers }, &mut ctx),
@@ -3270,6 +3291,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         input.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 80.0),
@@ -3376,6 +3398,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         input.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 400.0, 100.0),
@@ -3875,10 +3898,7 @@ mod tests {
             assert_eq!(input.text(), complete);
             let redo = UiEvent::KeyDown {
                 key: KeyCode::Z,
-                modifiers: Modifiers {
-                    shift: true,
-                    ..crate::test_utils::primary_text_modifiers()
-                },
+                modifiers: Modifiers { shift: true, ..primary_text_modifiers() },
             };
             input.event(&redo, &mut ctx);
             assert_eq!(input.text(), format!("X{complete}"));
@@ -3921,10 +3941,7 @@ mod tests {
         assert_eq!(input.text(), "👩💻");
         let redo = UiEvent::KeyDown {
             key: KeyCode::Z,
-            modifiers: Modifiers {
-                shift: true,
-                ..crate::test_utils::primary_text_modifiers()
-            },
+            modifiers: Modifiers { shift: true, ..primary_text_modifiers() },
         };
         input.event(&redo, &mut ctx);
         assert_eq!(input.text(), "👩‍💻");
@@ -3976,6 +3993,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         input.paint(&mut PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 400.0, 100.0),
@@ -4011,7 +4029,7 @@ mod tests {
         let mut tooltip = DummyTooltip;
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
         let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
-        let primary = crate::test_utils::primary_text_modifiers();
+        let primary = primary_text_modifiers();
         let redo = Modifiers { shift: true, ..primary };
         let mut original =
             crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Play);
@@ -4114,7 +4132,7 @@ mod tests {
         let mut tooltip = DummyTooltip;
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
         let key = |key, modifiers| UiEvent::KeyDown { key, modifiers };
-        let primary = crate::test_utils::primary_text_modifiers();
+        let primary = primary_text_modifiers();
         let mut original =
             crate::NumberInput::new(12.0_f64, 0.0, 100.0).on_change(|_| Action::Play);
         original.set_control_inspection_key(Some("joined-numeric-draft".to_owned()));

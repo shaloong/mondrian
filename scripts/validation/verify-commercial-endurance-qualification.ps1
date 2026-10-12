@@ -25,6 +25,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "window-owner-closure.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "../perf/perf-owner-closure.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "native-preloader-closure.psm1") -Force
 $script:ObservedJsonHashes = [System.Collections.Generic.Dictionary[string,string]]::new(
     [StringComparer]::Ordinal
@@ -868,11 +869,7 @@ foreach ($phase in @($manifest.phases)) {
                             )) {
                                 Assert-JsonBoolean $finalRetirement.$field "Window final GPU $field"
                             }
-                            Assert-ExactJsonProperties $finalRetirement.renderer_retirement @(
-                                "cpu_yuv_upload", "native_device_removed"
-                            ) "Window final Renderer retirement receipt"
-                            Assert-JsonString $finalRetirement.renderer_retirement.cpu_yuv_upload "Window final GPU upload-worker exit"
-                            Assert-JsonBoolean $finalRetirement.renderer_retirement.native_device_removed "Window final native-device removal"
+                            Assert-MondrianRendererRetirement $finalRetirement.renderer_retirement "Window final Renderer retirement receipt"
                             if ([uint64]$finalGpu.surface_generation -ne [uint64]$receipt.surface_generation_after -or
                                 [uint64]$finalGpu.device_generation -ne [uint64]$receipt.device_generation_after -or
                                 $null -ne $finalGpu.publication_cleanup.Ok -or
@@ -882,8 +879,6 @@ foreach ($phase in @($manifest.phases)) {
                                 -not [bool]$finalRetirement.retirement_requested -or
                                 -not [bool]$finalRetirement.retirement_handoff_accepted -or
                                 -not [bool]$finalRetirement.retirement_completed -or
-                                [string]$finalRetirement.renderer_retirement.cpu_yuv_upload -cne "returned" -or
-                                [bool]$finalRetirement.renderer_retirement.native_device_removed -or
                                 $null -ne $finalRetirement.generation_terminal_kind) {
                                 throw "Window final GPU retirement is not bound to the recovered generation."
                             }
@@ -940,11 +935,7 @@ foreach ($phase in @($manifest.phases)) {
                         )) {
                             Assert-JsonBoolean $shutdown.$field "Old GPU $field"
                         }
-                        Assert-ExactJsonProperties $shutdown.renderer_retirement @(
-                            "cpu_yuv_upload", "native_device_removed"
-                        ) "Surface/device Renderer retirement receipt"
-                        Assert-JsonString $shutdown.renderer_retirement.cpu_yuv_upload "Old GPU upload-worker exit"
-                        Assert-JsonBoolean $shutdown.renderer_retirement.native_device_removed "Old native-device removal"
+                        Assert-MondrianRendererRetirement $shutdown.renderer_retirement "Surface/device Renderer retirement receipt"
                         if ($null -ne $windowRun) {
                             $history = $windowRun.generation_history
                             Assert-ExactJsonProperties $history @('schema_version', 'overflowed', 'events') 'Window generation history'
@@ -1100,8 +1091,6 @@ foreach ($phase in @($manifest.phases)) {
                             [bool]$shutdown.timed_out -or -not [bool]$shutdown.retirement_requested -or
                             -not [bool]$shutdown.retirement_handoff_accepted -or
                             -not [bool]$shutdown.retirement_completed -or
-                            [string]$shutdown.renderer_retirement.cpu_yuv_upload -cne "returned" -or
-                            [bool]$shutdown.renderer_retirement.native_device_removed -or
                             $null -ne $shutdown.generation_terminal_kind -or
                             [int]$reopened.schema_version -ne 2 -or
                             [uint64]$reopened.surface_generation -ne [uint64]$receipt.surface_generation_after -or

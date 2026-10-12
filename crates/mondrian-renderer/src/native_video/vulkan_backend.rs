@@ -140,6 +140,26 @@ impl VulkanNativeVideoImportBackend {
         self.inner.frame_cpu_timings()
     }
 
+    pub(crate) fn input_backends_are_prepared(
+        &self,
+        plans: &[crate::viewer_execution::NativeVideoInputBackendPreparation],
+    ) -> bool {
+        self.inner.input_backends_are_prepared(plans)
+    }
+
+    pub(crate) fn take_input_backend_cache(
+        &mut self,
+    ) -> Option<crate::viewer_execution::NativeVideoInputBackendCache> {
+        self.inner.take_input_backend_cache()
+    }
+
+    pub(crate) fn return_input_backend_cache(
+        &mut self,
+        cache: crate::viewer_execution::NativeVideoInputBackendCache,
+    ) {
+        self.inner.return_input_backend_cache(cache);
+    }
+
     pub(crate) fn prepare_import_plan(
         &mut self,
         plan: &GpuNativeDecodedFrameImportPlan,
@@ -334,7 +354,7 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
             chroma_format,
             "mondrian.native-video.vulkan-chroma",
         )?;
-        Ok(DirectNativeYuvTextures { luma, chroma })
+        Ok(DirectNativeYuvTextures { luma, chroma, alpha: None })
     }
 }
 

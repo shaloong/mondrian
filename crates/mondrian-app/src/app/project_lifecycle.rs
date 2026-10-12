@@ -7,6 +7,10 @@ use super::project_library_generation::{
     retained_project_runtime_lease, sweep_orphaned_project_libraries,
     ProjectLibraryGenerationCandidate, RetiredProjectLibraryGeneration,
 };
+use super::project_open::{
+    available_package_import_destination, claim_or_reuse_runtime, PreparedProductProjectOpen,
+    ProjectArchiveInstallPolicy, ProjectOpenPreparation, ProjectOpenTicket,
+};
 #[cfg(test)]
 use super::project_persistence::PERSISTENCE_QUEUE_CAPACITY;
 use super::project_persistence::{
@@ -22,9 +26,8 @@ use super::project_recovery::{
 #[cfg(test)]
 use super::project_runtime::project_runtime_roots_for_path_for_test;
 use super::project_runtime::{
-    claim_project_runtime, claim_project_runtime_sharing_logical_authority,
     lease_existing_project_runtime, lease_existing_project_runtime_sharing_logical_authority,
-    project_runtime_root_for_project, ProjectRuntimeLease,
+    ProjectRuntimeLease,
 };
 use super::*;
 #[cfg(any(test, feature = "validation"))]
@@ -49,24 +52,6 @@ enum PersistenceCompletionDisposition {
     SatisfiedByNewerPublication,
     IgnoredSupersededDestination,
     IgnoredStaleSession,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectArchiveInstallPolicy {
-    CanonicalProduct,
-    RecoveredProduct,
-    PortableImport,
-    #[cfg(any(test, feature = "validation"))]
-    #[cfg_attr(
-        not(windows),
-        expect(
-            dead_code,
-            reason = "Exact immutable fixture admission requires a native provider."
-        )
-    )]
-    ExactEnduranceFixture {
-        expected_sequence_id: SequenceId,
-    },
 }
 
 /// Unforgeable receipt for one exact machine-plan Project installation.
@@ -143,14 +128,31 @@ impl PreparedEnduranceProjectFixture {
     }
 }
 
-impl ProjectArchiveInstallPolicy {
-    const fn opens_canonical_project(self) -> bool {
-        !matches!(self, Self::RecoveredProduct | Self::PortableImport)
-    }
+/// One App-owned handoff; candidates never become a second authoring authority.
+pub(super) struct PendingProjectOpen {
+    source_session_id: Option<AuthoringSessionId>,
+    phase: PendingProjectOpenPhase,
+    close_after_cancel: bool,
+}
 
-    const fn repairs_minimum_tracks(self) -> bool {
-        matches!(self, Self::CanonicalProduct | Self::RecoveredProduct)
-    }
+enum PendingProjectOpenPhase {
+    Quiescing {
+        path: PathBuf,
+        ticket: ProjectPersistencePauseTicket,
+    },
+    Preparing {
+        ticket: ProjectOpenTicket,
+        handoff: Option<ProjectPersistencePauseToken>,
+    },
+}
+
+enum ProjectOpenPoll {
+    Pending,
+    Opened,
+    Rejected(String),
+    Closed,
+    ClosedWithTeardownFailure(String),
+    Faulted(String),
 }
 
 /// App-owned pending close operation over one exact persistence generation.
@@ -192,25 +194,254 @@ fn autosave_archive_leaf(saved_at_unix_ms: u64, generation: u64) -> String {
     )
 }
 
-fn available_package_import_destination(package_root: &Path) -> anyhow::Result<PathBuf> {
-    let stem = package_root.file_stem().context("portable package has no name")?;
-    let parent = package_root.parent().context("portable package has no parent")?;
-    for index in 0..1000 {
-        let candidate = if index == 0 {
-            package_root.with_extension("mdp")
-        } else {
-            parent.join(format!("{}-imported-{index}.mdp", stem.to_string_lossy()))
+impl AppState {
+    /// Admit Open without doing archive or runtime filesystem work on the UI thread.
+    pub(crate) fn request_project_open(&mut self, path: PathBuf) -> anyhow::Result<()> {
+        if path.as_os_str().is_empty() {
+            anyhow::bail!("项目路径不能为空");
+        }
+        if self.project_lifecycle_blocks_actions() {
+            anyhow::bail!("Project lifecycle already owns an unfinished handoff");
+        }
+        let source_session_id = self.authoring.as_ref().map(AuthoringSession::session_id);
+        let phase = match source_session_id {
+            Some(session_id) => {
+                self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let ticket = self.begin_project_lifecycle_pause(session_id)?;
+                PendingProjectOpenPhase::Quiescing { path, ticket }
+            }
+            None => {
+                let ticket = self.submit_project_open_preparation(path)?;
+                PendingProjectOpenPhase::Preparing { ticket, handoff: None }
+            }
         };
-        match fs::symlink_metadata(&candidate) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
-            Ok(_) => {}
-            Err(error) => return Err(error.into()),
+        self.pending_project_open = Some(PendingProjectOpen {
+            source_session_id,
+            phase,
+            close_after_cancel: false,
+        });
+        self.set_status_hint(AppMessage::new("status-open-preparing"), false);
+        Ok(())
+    }
+
+    fn begin_project_lifecycle_pause(
+        &mut self,
+        session_id: AuthoringSessionId,
+    ) -> anyhow::Result<ProjectPersistencePauseTicket> {
+        match self.project_persistence.begin_pause_and_quiesce(session_id) {
+            Ok(ticket) => Ok(ticket),
+            Err(reason) => {
+                // Even failed queue admission can poison persistence authority.
+                // The old Session remains readable, but only explicit fault
+                // discard may detach it; another author action cannot bypass it.
+                self.retain_project_close_fault(session_id, reason.clone());
+                Err(anyhow::Error::msg(reason))
+            }
         }
     }
-    anyhow::bail!("no available sibling Project filename for portable package")
-}
 
-impl AppState {
+    fn submit_project_open_preparation(
+        &mut self,
+        path: PathBuf,
+    ) -> anyhow::Result<ProjectOpenTicket> {
+        let runtime_leases = self.project_open_runtime_leases();
+        let protected_libraries = runtime_leases
+            .iter()
+            .flat_map(|lease| {
+                protected_project_library_paths(
+                    self.authoring.as_ref().map(AuthoringSession::asset_library),
+                    lease.runtime_root(),
+                    &self.retired_project_libraries,
+                )
+            })
+            .collect();
+        let preparation = ProjectOpenPreparation { path, runtime_leases, protected_libraries };
+        self.project_persistence.prepare_open(preparation).map_err(anyhow::Error::msg)
+    }
+
+    pub(crate) fn has_pending_project_open(&self) -> bool {
+        self.pending_project_open.is_some()
+    }
+
+    /// Poll bounded completion delivery; actual Session installation remains here.
+    pub(crate) fn poll_project_open(&mut self) -> Option<Result<(), String>> {
+        if self
+            .pending_project_open
+            .as_ref()
+            .is_none_or(|pending| pending.close_after_cancel)
+        {
+            return None;
+        }
+        match self.poll_pending_project_open() {
+            ProjectOpenPoll::Pending => None,
+            ProjectOpenPoll::Opened => Some(Ok(())),
+            ProjectOpenPoll::Rejected(reason) | ProjectOpenPoll::Faulted(reason) => {
+                Some(Err(reason))
+            }
+            ProjectOpenPoll::Closed => Some(Err("Open was cancelled by Project close".to_owned())),
+            ProjectOpenPoll::ClosedWithTeardownFailure(reason) => Some(Err(reason)),
+        }
+    }
+
+    /// Headless validation waits for the same product intent and exact result;
+    /// it may not interpret queue admission as successful Project installation.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn wait_for_project_open(&mut self) -> anyhow::Result<()> {
+        if !self.has_pending_project_open() {
+            anyhow::bail!("no admitted Project open to await");
+        }
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            if let Some(result) = self.poll_project_open() {
+                return result.map_err(anyhow::Error::msg);
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("Project open exceeded the validation wait deadline");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn finish_project_open_error(
+        &mut self,
+        source_session_id: Option<AuthoringSessionId>,
+        mut handoff: Option<ProjectPersistencePauseToken>,
+        reason: String,
+    ) -> ProjectOpenPoll {
+        if let Err(resume_error) = self.resume_project_session_handoff(&mut handoff) {
+            let reason = format!("{reason}; failed to resume Project admission: {resume_error}");
+            if let Some(session_id) = source_session_id {
+                self.retain_project_close_fault(session_id, reason.clone());
+            }
+            self.set_status_hint(
+                AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectOpenPoll::Faulted(reason);
+        }
+        self.set_status_hint(
+            AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+            true,
+        );
+        ProjectOpenPoll::Rejected(reason)
+    }
+
+    fn finish_cancelled_project_open(
+        &mut self,
+        mut handoff: Option<ProjectPersistencePauseToken>,
+    ) -> ProjectOpenPoll {
+        if let Err(reason) = self.retire_project_session_handoff(&mut handoff) {
+            if let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) {
+                self.retain_project_close_fault(session_id, reason.clone());
+            }
+            return ProjectOpenPoll::Faulted(reason);
+        }
+        self.retain_current_project_library_generation();
+        match self.finalize_project_close_state() {
+            Ok(()) => ProjectOpenPoll::Closed,
+            Err(error) => ProjectOpenPoll::ClosedWithTeardownFailure(error.to_string()),
+        }
+    }
+
+    fn poll_pending_project_open(&mut self) -> ProjectOpenPoll {
+        let Some(mut pending) = self.pending_project_open.take() else {
+            return ProjectOpenPoll::Rejected("no pending Project open".to_owned());
+        };
+        if self.authoring.as_ref().map(AuthoringSession::session_id) != pending.source_session_id {
+            if let PendingProjectOpenPhase::Quiescing { ticket, .. } = &pending.phase {
+                self.project_persistence.poison_pause_ticket(ticket);
+            }
+            let reason =
+                "active Authoring Session changed while Project open was preparing".to_owned();
+            if let Some(session_id) = pending.source_session_id {
+                self.retain_project_close_fault(session_id, reason.clone());
+            }
+            self.set_status_hint(
+                AppMessage::new("status-open-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectOpenPoll::Faulted(reason);
+        }
+        match pending.phase {
+            PendingProjectOpenPhase::Quiescing { path, ticket } => {
+                match self.project_persistence.poll_pause_and_quiesce(&ticket) {
+                    Ok(None) => {
+                        pending.phase = PendingProjectOpenPhase::Quiescing { path, ticket };
+                        self.pending_project_open = Some(pending);
+                        ProjectOpenPoll::Pending
+                    }
+                    Ok(Some(token)) => {
+                        self.drain_quiesced_project_persistence_completions();
+                        if pending.close_after_cancel {
+                            return self.finish_cancelled_project_open(Some(token));
+                        }
+                        match self.submit_project_open_preparation(path) {
+                            Ok(ticket) => {
+                                pending.phase = PendingProjectOpenPhase::Preparing {
+                                    ticket,
+                                    handoff: Some(token),
+                                };
+                                self.pending_project_open = Some(pending);
+                                ProjectOpenPoll::Pending
+                            }
+                            Err(error) => self.finish_project_open_error(
+                                pending.source_session_id,
+                                Some(token),
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                    Err(reason) => {
+                        if let Some(session_id) = pending.source_session_id {
+                            self.retain_project_close_fault(session_id, reason.clone());
+                        }
+                        self.set_status_hint(
+                            AppMessage::new("status-open-failed")
+                                .with_text("reason", reason.clone()),
+                            true,
+                        );
+                        ProjectOpenPoll::Faulted(reason)
+                    }
+                }
+            }
+            PendingProjectOpenPhase::Preparing { ticket, mut handoff } => {
+                match ticket.poll() {
+                    Ok(None) => {
+                        pending.phase = PendingProjectOpenPhase::Preparing { ticket, handoff };
+                        self.pending_project_open = Some(pending);
+                        ProjectOpenPoll::Pending
+                    }
+                    Ok(Some(result)) => {
+                        if pending.close_after_cancel {
+                            // A completed candidate must be destroyed before the
+                            // terminal close receipt is reported, even if cancel
+                            // arrived after the worker's last cancellation check.
+                            drop(result);
+                            return self.finish_cancelled_project_open(handoff);
+                        }
+                        let result = result.map_err(anyhow::Error::msg).and_then(|candidate| {
+                            self.install_prepared_project_open(candidate, &mut handoff)
+                        });
+                        match result {
+                            Ok(()) => {
+                                self.set_status_hint(AppMessage::new("status-opened"), false);
+                                ProjectOpenPoll::Opened
+                            }
+                            Err(error) => self.finish_project_open_error(
+                                pending.source_session_id,
+                                handoff,
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                    Err(reason) => {
+                        self.finish_project_open_error(pending.source_session_id, handoff, reason)
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn autosave_manifest_path(runtime_root: &Path) -> PathBuf {
         recovery_manifest_path(runtime_root)
@@ -221,42 +452,22 @@ impl AppState {
         project_file: &Path,
         project_id: ProjectId,
     ) -> Result<Arc<ProjectRuntimeLease>, String> {
-        if let Some(lease) = self
-            .project_runtime_lease
-            .as_ref()
-            .filter(|lease| lease.project_id() == project_id)
-            && lease.allocation_target_matches(project_file)?
-        {
-            lease.retain_publication_target(project_file)?;
-            return Ok(Arc::clone(lease));
-        }
-        let expected_runtime_root = project_runtime_root_for_project(project_file, project_id)?;
-        let shared_logical_authority = self
-            .project_runtime_lease
-            .as_ref()
-            .filter(|lease| lease.project_id() == project_id)
-            .map(Arc::clone);
         collect_retired_project_libraries(&mut self.retired_project_libraries);
-        if let Some(lease) = retained_project_runtime_lease(
-            &self.retired_project_libraries,
+        claim_or_reuse_runtime(
+            &self.project_open_runtime_leases(),
+            project_file,
             project_id,
-            Some(&expected_runtime_root),
-        ) {
-            lease.validate()?;
-            lease.retain_publication_target(project_file)?;
-            return Ok(lease);
-        }
-        let shared_logical_authority = shared_logical_authority.or_else(|| {
-            retained_project_runtime_lease(&self.retired_project_libraries, project_id, None)
-        });
-        match shared_logical_authority {
-            Some(authority) => claim_project_runtime_sharing_logical_authority(
-                project_file,
-                project_id,
-                &authority,
-            ),
-            None => claim_project_runtime(project_file, project_id),
-        }
+        )
+    }
+
+    fn project_open_runtime_leases(&self) -> Vec<Arc<ProjectRuntimeLease>> {
+        self.project_runtime_lease
+            .iter()
+            .cloned()
+            .chain(super::project_library_generation::retained_runtime_leases(
+                &self.retired_project_libraries,
+            ))
+            .collect()
     }
 
     fn lease_or_reuse_existing_runtime(
@@ -389,6 +600,9 @@ impl AppState {
     fn begin_project_session_handoff(
         &mut self,
     ) -> anyhow::Result<Option<ProjectPersistencePauseToken>> {
+        if self.project_lifecycle_blocks_actions() {
+            anyhow::bail!("Project lifecycle already owns an unfinished handoff");
+        }
         let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
             return Ok(None);
         };
@@ -492,24 +706,34 @@ impl AppState {
         if self.pending_project_close.is_some() {
             anyhow::bail!("Project close is already waiting for persistence quiescence");
         }
+        if let Some(pending) = &mut self.pending_project_open {
+            if required_manual_save.is_some() {
+                anyhow::bail!("Save-before-close cannot replace a pending Open handoff");
+            }
+            pending.close_after_cancel = true;
+            if let PendingProjectOpenPhase::Preparing { ticket, .. } = &pending.phase {
+                ticket.cancel();
+            }
+            self.set_status_hint(AppMessage::new("status-open-cancel-closing"), false);
+            return Ok(true);
+        }
         let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
             return Ok(false);
         };
         self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        let ticket = self
-            .project_persistence
-            .begin_pause_and_quiesce(session_id)
-            .map_err(anyhow::Error::msg)?;
+        let ticket = self.begin_project_lifecycle_pause(session_id)?;
         self.pending_project_close =
             Some(PendingProjectClose { session_id, ticket, required_manual_save });
         self.set_status_hint(AppMessage::new("status-closing"), false);
         Ok(true)
     }
 
-    /// Whether the current Project is frozen behind an asynchronous close
-    /// handoff or a fail-closed ownership fault.
-    pub fn project_close_blocks_actions(&self) -> bool {
-        self.pending_project_close.is_some() || self.project_close_fault.is_some()
+    /// Whether the current Project is frozen behind an Open/Close handoff
+    /// or a fail-closed ownership fault.
+    pub fn project_lifecycle_blocks_actions(&self) -> bool {
+        self.pending_project_open.is_some()
+            || self.pending_project_close.is_some()
+            || self.project_close_fault.is_some()
     }
 
     /// Whether a failed handoff awaits an explicit user-authorized detach.
@@ -545,6 +769,24 @@ impl AppState {
 
     /// Poll the asynchronous Project-close handoff once without blocking.
     pub(crate) fn poll_project_close(&mut self) -> ProjectClosePoll {
+        if self
+            .pending_project_open
+            .as_ref()
+            .is_some_and(|pending| pending.close_after_cancel)
+        {
+            return match self.poll_pending_project_open() {
+                ProjectOpenPoll::Pending => ProjectClosePoll::Pending,
+                ProjectOpenPoll::Closed => ProjectClosePoll::Closed,
+                ProjectOpenPoll::ClosedWithTeardownFailure(reason) => {
+                    ProjectClosePoll::ClosedWithTeardownFailure(reason)
+                }
+                ProjectOpenPoll::Faulted(reason) => ProjectClosePoll::Faulted(reason),
+                ProjectOpenPoll::Opened => ProjectClosePoll::Faulted(
+                    "cancelled Open unexpectedly installed a Session".to_owned(),
+                ),
+                ProjectOpenPoll::Rejected(reason) => ProjectClosePoll::SaveRejected(reason),
+            };
+        }
         let Some(pending) = self.pending_project_close.take() else {
             return ProjectClosePoll::Inactive;
         };
@@ -780,42 +1022,31 @@ impl AppState {
         runtime_lease: Arc<ProjectRuntimeLease>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
-        let prepared_project_id = prepared.project_id();
-        if runtime_lease.project_id() != prepared_project_id {
-            anyhow::bail!("Project runtime lease belongs to another Project");
-        }
-        runtime_lease.validate().map_err(anyhow::Error::msg)?;
-        let runtime_root = runtime_lease.runtime_root().to_path_buf();
-        let mut library_generation =
+        let library_generation =
             self.prepare_project_library_generation(Arc::clone(&runtime_lease))?;
-        let mut loaded = prepared.load_into(library_generation.root())?;
-        if loaded.document.project_id != prepared_project_id {
-            anyhow::bail!("项目归属在打开期间发生变化，拒绝安装新的素材库代际与项目会话");
-        }
-        if loaded.library_schema_version > mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION {
-            anyhow::bail!(
-                "项目素材库 schema v{} 高于当前支持的 v{}",
-                loaded.library_schema_version,
-                mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION
-            );
-        }
-        #[cfg(any(test, feature = "validation"))]
-        if let ProjectArchiveInstallPolicy::ExactEnduranceFixture { expected_sequence_id } =
-            install_policy
-        {
-            validate_exact_endurance_project(&loaded, expected_sequence_id)?;
-        }
-        let asset_library = library_generation.open()?;
-        if let Some(bindings) = package_bindings {
-            super::project_packaging::rebind_document_resources(&mut loaded.document, bindings)?;
-            asset_library.rebind_verified_package_sources(
-                &super::project_packaging::utf8_package_source_bindings(bindings)?,
-            )?;
-            super::project_packaging::ensure_package_asset_sources_rebound(
-                &asset_library,
-                bindings,
-            )?;
-        }
+        let candidate = PreparedProductProjectOpen::prepare(
+            project_file,
+            prepared,
+            install_policy,
+            package_bindings,
+            runtime_lease,
+            library_generation,
+        )?;
+        self.install_prepared_project_open(candidate, handoff)
+    }
+
+    fn install_prepared_project_open(
+        &mut self,
+        candidate: PreparedProductProjectOpen,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> anyhow::Result<()> {
+        let install_policy = candidate.install_policy;
+        let project_file = candidate.project_file.clone();
+        let runtime_root = candidate.runtime_lease.runtime_root().to_path_buf();
+        let loaded = candidate.loaded;
+        // Keep candidate rollback ownership until Session construction and the
+        // exact old persistence generation's retirement have both succeeded.
+        let asset_library = Arc::clone(&candidate.asset_library);
         let session = if install_policy.opens_canonical_project() {
             AuthoringSession::open_saved(
                 loaded.document,
@@ -852,12 +1083,12 @@ impl AppState {
         // state. A panic after this point can leave only an owner-recognized
         // orphan for the next sweep; it can never delete an installed SQLite
         // directory out from under a live Session.
-        library_generation.commit();
+        candidate.library_generation.commit();
         self.authoring = Some(session);
         self.gallery_comparison = None;
         self.audio_monitoring.reset();
         self.synchronize_audio_idle_warmup_binding();
-        self.project_runtime_lease = Some(runtime_lease);
+        self.project_runtime_lease = Some(candidate.runtime_lease);
         self.manual_project_file_destination = portable_destination;
         self.manual_project_file_applied_request = None;
         self.autosave_in_flight_request = None;
@@ -1216,7 +1447,7 @@ impl AppState {
                 }
             }
         }
-        if !self.project_close_blocks_actions() && self.maybe_request_autosave() {
+        if !self.project_lifecycle_blocks_actions() && self.maybe_request_autosave() {
             changed = true;
         }
         changed
@@ -1818,7 +2049,7 @@ impl AppState {
 }
 
 #[cfg(any(test, feature = "validation"))]
-fn validate_exact_endurance_project(
+pub(super) fn validate_exact_endurance_project(
     loaded: &LoadedProjectArchive,
     expected_sequence_id: SequenceId,
 ) -> anyhow::Result<()> {
@@ -1895,6 +2126,7 @@ fn open_endurance_project_read_handle(path: &Path) -> std::io::Result<fs::File> 
 
 #[cfg(test)]
 mod persistence_lifecycle_tests {
+    use super::super::project_runtime::project_runtime_root_for_project;
     use super::*;
     use crate::app::project_runtime::{
         claim_project_runtime_lease_for_test, test_project_runtime_namespace,
@@ -2015,6 +2247,31 @@ mod persistence_lifecycle_tests {
         state.authoring = Some(session);
         state.project_runtime_lease = Some(lease);
         state
+    }
+
+    #[test]
+    fn lifecycle_and_proxy_status_messages_resolve_with_opaque_details() {
+        use crate::app_ui::localization::{AppUiLocale, Localizer};
+
+        let detail = "status-open-failed / native.detail 用户🙂";
+        let messages = [
+            AppMessage::new("status-open-preparing"),
+            AppMessage::new("status-open-cancel-closing"),
+            AppMessage::new("status-opened"),
+            AppMessage::new("status-open-failed").with_text("reason", detail),
+            AppMessage::new("status-proxy-binding-failed").with_text("error", detail),
+        ];
+        for locale in [AppUiLocale::ZhCn, AppUiLocale::EnUs, AppUiLocale::Pseudo] {
+            let localizer = Localizer::new(locale).expect("status catalog");
+            for message in &messages {
+                let text = localizer.message(message);
+                assert_ne!(text, message.id, "unresolved status for {locale:?}");
+                assert!(!text.is_empty());
+                if !message.args.is_empty() {
+                    assert!(text.contains(detail), "opaque status detail lost: {text}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2295,7 +2552,7 @@ mod persistence_lifecycle_tests {
             "Project close initiation must never wait for durable publication"
         );
         assert!(state.has_open_project());
-        assert!(state.project_close_blocks_actions());
+        assert!(state.project_lifecycle_blocks_actions());
         assert!(matches!(
             state.poll_project_close(),
             ProjectClosePoll::Pending
@@ -2318,7 +2575,7 @@ mod persistence_lifecycle_tests {
             }
         }
         assert!(!state.has_open_project());
-        assert!(!state.project_close_blocks_actions());
+        assert!(!state.project_lifecycle_blocks_actions());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2355,7 +2612,7 @@ mod persistence_lifecycle_tests {
             state.has_open_project(),
             "failed required save keeps Project open"
         );
-        assert!(!state.project_close_blocks_actions());
+        assert!(!state.project_lifecycle_blocks_actions());
         assert_eq!(state.current_project_path(), Some(original_path.as_path()));
         assert_eq!(
             fs::read(&target).expect("competing file survives"),
@@ -2459,7 +2716,7 @@ mod persistence_lifecycle_tests {
             .force_close_project_after_fault()
             .expect("explicit force close abandons poisoned Session");
         assert!(!state.has_open_project());
-        assert!(!state.project_close_blocks_actions());
+        assert!(!state.project_lifecycle_blocks_actions());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2650,6 +2907,248 @@ mod persistence_lifecycle_tests {
             .expect("durably publish crash-stage recovery point");
 
         std::process::abort();
+    }
+
+    fn finish_requested_project_open(state: &mut AppState) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while state.has_pending_project_open() {
+            state.poll_project_open();
+            assert!(Instant::now() < deadline, "Open completion timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn requested_open_keeps_old_session_until_worker_completes() {
+        let root = unique_root("async-open");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("save original");
+        let old = state.authoring.as_ref().expect("old Session");
+        let session_id = old.session_id();
+        let project_file = old.project_file().to_path_buf();
+        let old_library = Arc::clone(old.asset_library());
+        let old_root = old_library.database_path().parent().expect("library root").to_path_buf();
+        let lease_id = state.project_runtime_lease.as_ref().expect("lease").id();
+        let gate = state.project_persistence.gate_next_request();
+        state.request_project_open(project_file).expect("admit Open");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(
+            state.pending_project_open.as_ref().map(|open| &open.phase),
+            Some(PendingProjectOpenPhase::Quiescing { .. })
+        ) {
+            state.poll_project_open();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        gate.wait_until_running();
+        assert!(
+            state.poll_project_open().is_none(),
+            "gated filesystem work must not block App polling"
+        );
+        assert_eq!(
+            state.authoring.as_ref().expect("unchanged Session").session_id(),
+            session_id
+        );
+        assert!(state.project_lifecycle_blocks_actions());
+        assert!(state.dispatch_action(mondrian_editor_state::Action::Play).is_err());
+        assert!(state.open_project_file(root.join("other.mdp")).is_err());
+        gate.release();
+        finish_requested_project_open(&mut state);
+        assert_ne!(
+            state.authoring.as_ref().expect("installed Session").session_id(),
+            session_id
+        );
+        assert_eq!(
+            state.project_runtime_lease.as_ref().expect("same lease").id(),
+            lease_id
+        );
+        assert!(old_root.is_dir(), "external old library must remain named");
+        assert!(!state.project_lifecycle_blocks_actions());
+        drop(old_library);
+        state.collect_released_project_libraries();
+        assert!(!old_root.exists());
+        state.close_project().expect("close Project");
+        drop(state);
+        fs::remove_dir_all(&root).expect("remove owned test root");
+    }
+
+    #[test]
+    fn requested_open_failure_resumes_old_generation_and_preserves_history() {
+        let root = unique_root("async-open-failure");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("save original");
+        let old = state.authoring.as_ref().expect("Session");
+        let session_id = old.session_id();
+        let runtime = old.runtime_root().to_path_buf();
+        let project_file = old.project_file().to_path_buf();
+        let sequence = old.active_sequence().expect("sequence").id;
+        state.rename_sequence(sequence, "Retained undo".to_owned()).expect("edit");
+        let history = state.authoring_history().expect("history").diagnostics();
+        let generations = library_generation_roots(&runtime);
+        let invalid = root.join("invalid.mdp");
+        let invalid_library = root.join("invalid.db");
+        fs::write(&invalid_library, b"not a SQLite database").expect("invalid SQLite");
+        save_project_archive(
+            state.authoring.as_ref().expect("Session").document(),
+            &invalid_library,
+            &invalid,
+        )
+        .expect("archive with invalid embedded database");
+        state.request_project_open(invalid).expect("admit validation");
+        finish_requested_project_open(&mut state);
+        let current = state.authoring.as_ref().expect("original retained");
+        assert_eq!(current.session_id(), session_id);
+        assert_eq!(current.project_file(), project_file);
+        assert_eq!(
+            state.authoring_history().expect("history").diagnostics(),
+            history
+        );
+        assert_eq!(library_generation_roots(&runtime), generations);
+        assert!(state.status_hint.as_ref().is_some_and(|(_, error)| *error));
+        assert!(!state.project_lifecycle_blocks_actions());
+        state.save_project_file().expect("exact persistence admission resumed");
+        state.close_project().expect("close");
+        drop(state);
+        fs::remove_dir_all(&root).expect("remove owned test root");
+    }
+
+    #[test]
+    fn requested_open_waits_for_save_barrier_and_can_close_without_installing() {
+        let root = unique_root("async-open-save-barrier");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("save baseline");
+        let session = state.authoring.as_ref().expect("Session");
+        let project_file = session.project_file().to_path_buf();
+        let sequence = session.active_sequence().expect("sequence").id;
+        state.rename_sequence(sequence, "Saved before Open".to_owned()).expect("edit");
+        let gate = state.project_persistence.gate_next_request();
+        state.request_project_save().expect("admit save");
+        gate.wait_until_running();
+        state.request_project_open(project_file.clone()).expect("admit Open");
+        assert!(
+            state.poll_project_open().is_none(),
+            "Open may not bypass pending save"
+        );
+        assert!(state.begin_project_close().expect("cancel Open and close"));
+        assert_eq!(state.poll_project_close(), ProjectClosePoll::Pending);
+        gate.release();
+        let receipt = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(10));
+        assert!(receipt.project.all_resources_released(), "{receipt:?}");
+        assert!(receipt.project.pending_open_was_active);
+        assert!(
+            receipt.project_persistence.lifecycle_closed(),
+            "{receipt:?}"
+        );
+        let loaded = load_project_archive(&project_file, &root.join("verify"))
+            .expect("independently reopen durable save");
+        assert_eq!(
+            loaded.document.sequences.active().expect("sequence").name,
+            "Saved before Open"
+        );
+        fs::remove_dir_all(&root).expect("remove owned test root");
+    }
+
+    #[test]
+    fn requested_open_failed_barrier_admission_keeps_old_session_frozen() {
+        let root = unique_root("async-open-barrier-fault");
+        let mut state = test_state(&root);
+        let old = state.authoring.as_ref().expect("Session");
+        let path = old.project_file().to_path_buf();
+        let session_id = old.session_id();
+        state.test_poison_project_persistence_admission();
+        assert!(state.request_project_open(path).is_err());
+        assert!(state.has_project_close_fault());
+        assert!(state.project_lifecycle_blocks_actions());
+        assert!(!state.has_pending_project_open());
+        assert_eq!(
+            state.authoring.as_ref().expect("old Session").session_id(),
+            session_id
+        );
+        assert!(state.dispatch_action(mondrian_editor_state::Action::Play).is_err());
+        state
+            .force_close_project_after_fault()
+            .expect("explicit authorized fault detach");
+        let receipt = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(10));
+        assert!(receipt.project.all_resources_released(), "{receipt:?}");
+        assert!(
+            receipt.project_persistence.lifecycle_closed(),
+            "{receipt:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove owned test root");
+    }
+
+    #[test]
+    fn requested_cold_open_cancel_keeps_worker_ownership_until_return() {
+        let root = unique_root("async-cold-open-cancel");
+        fs::create_dir_all(&root).expect("test root");
+        let mut state = AppState::new();
+        let gate = state.project_persistence.gate_next_request();
+        state.request_project_open(root.join("not-read.mdp")).expect("admit Open");
+        gate.wait_until_running();
+        assert!(state.begin_project_close().expect("cancel cold Open"));
+        assert_eq!(state.poll_project_close(), ProjectClosePoll::Pending);
+        assert!(state.has_pending_project_open());
+        assert!(!state.has_open_project());
+        assert_eq!(
+            state.project_persistence.endurance_runtime_facts().owned_resources,
+            1
+        );
+        gate.release();
+        let receipt = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(10));
+        assert!(receipt.project.pending_open_was_active);
+        assert!(receipt.project.pending_open_released);
+        assert!(receipt.project.all_resources_released(), "{receipt:?}");
+        assert!(
+            receipt.project_persistence.lifecycle_closed(),
+            "{receipt:?}"
+        );
+        assert_eq!(receipt.project_persistence.cumulative_failures, 0);
+        fs::remove_dir_all(&root).expect("remove owned test root");
+    }
+
+    #[test]
+    fn requested_open_cancel_drops_completed_candidate_before_close_receipt() {
+        let root = unique_root("async-open-completed-cancel");
+        let mut state = test_state(&root);
+        state.save_project_file().expect("save");
+        let old = state.authoring.as_ref().expect("Session");
+        let path = old.project_file().to_path_buf();
+        let runtime = old.runtime_root().to_path_buf();
+        state.request_project_open(path).expect("admit Open");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while matches!(
+            state.pending_project_open.as_ref().map(|open| &open.phase),
+            Some(PendingProjectOpenPhase::Quiescing { .. })
+        ) {
+            state.poll_project_open();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Wait on owner facts without consuming the result. The candidate is
+        // now in the capacity-one result channel rather than worker execution.
+        while state.project_persistence.endurance_runtime_facts().owned_resources != 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            runtime.join("library").is_dir(),
+            "old SQLite must remain named"
+        );
+        assert_eq!(library_generation_roots(&runtime).len(), 1);
+        let snapshot = state.background_endurance_snapshot().expect("owner snapshot");
+        assert!(snapshot.infrastructure.owned_resource_units >= 1);
+        assert!(state.begin_project_close().expect("cancel completed Open"));
+        assert_eq!(state.poll_project_close(), ProjectClosePoll::Closed);
+        assert!(!state.has_open_project());
+        assert!(!state.has_pending_project_open());
+        assert!(library_generation_roots(&runtime).is_empty());
+        let receipt = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(10));
+        assert!(receipt.project.all_resources_released(), "{receipt:?}");
+        assert!(
+            receipt.project_persistence.lifecycle_closed(),
+            "{receipt:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove owned test root");
     }
 
     #[test]

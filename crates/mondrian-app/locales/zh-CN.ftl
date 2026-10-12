@@ -109,6 +109,7 @@ command-file-save_project_as = 另存为...
 command-file-export_portable_package = 打包项目...
 command-file-cancel_portable_package_export = 取消项目打包
 command-file-project_settings = 项目设置...
+command-file-sequence_settings = 序列设置...
 command-file-close_project = 关闭项目
 command-edit-undo = 撤销
 command-edit-redo = 重做
@@ -360,6 +361,9 @@ interpret-title = 解释素材
 interpret-current = 当前解释
 interpret-input-color-space = 输入色彩空间
 interpret-signal-range = 信号范围
+interpret-yuv-matrix = YCbCr 矩阵
+interpret-matrix-unknown = 未知
+interpret-matrix-auto = 自动（元数据：{ $detected }）
 interpret-raw-exposure = RAW 曝光
 interpret-raw-white-balance = RAW 白平衡
 interpret-debayer = 去马赛克
@@ -497,6 +501,19 @@ audio-rack-move-down = 下移
 audio-rack-move-down-tooltip = 下移处理器
 audio-rack-remove = 移除
 audio-rack-remove-tooltip = 移除处理器
+
+interpret-evidence-h264-range = H.264 码流范围：{ $range }（{ $source }）
+interpret-evidence-codec-range = { $codec } 标准定义的采样范围：{ $range }
+interpret-evidence-range-convention = { $codec }：{ $rule }
+interpret-range-sd-dv = SD DV BT.601 系数与 video levels（格式约定）
+interpret-range-dnx-clv = 按每帧 VC-3 CLV 解释；外部编码模式需要指定范围
+interpret-range-legacy-assumption = 未标记旧式 SDR 假设为 video levels；不正确时请覆盖
+interpret-range-auto-dv = 自动（Video，SD DV 格式约定）
+interpret-range-auto-dnx = 自动（每帧 VC-3 CLV）
+interpret-range-auto-assumed = 自动（假设 Video；源未标记）
+asset-thumbnail-alternate = 首帧预览
+interpret-range-codec-default = Annex E 规范缺省值；不推断色彩空间
+interpret-range-coded = 码流 video_full_range_flag
 
 # Preferences dialog
 preferences-appearance = 外观
@@ -921,6 +938,8 @@ status-export-active = 导出处理中
 
 # Runtime status messages
 status-saving = 正在后台保存项目…
+status-open-preparing = 正在打开并验证项目…
+status-open-cancel-closing = 正在取消打开并安全关闭项目…
 status-open-failed = 打开项目失败：{ $reason }
 status-opened = 项目已打开
 status-save-as-failed = 无法启动另存为：{ $reason }
@@ -972,6 +991,7 @@ status-audio-streams-refreshed = 已刷新 { $name } 的音频流候选
 status-audio-rebound = 已将 { $name } 的音频 Component 映射到流 #{ $stream }
 status-proxy-failed = 代理生成失败：{ $detail }
 status-proxy-switch-failed = 切换代理模式失败：{ $error }
+status-proxy-binding-failed = 代理模式已修改，但播放绑定失败：{ $error }
 status-native-audio-unavailable = 原生音频插件宿主不可用；已保存的插件无法恢复
 status-native-audio-restore-failed = 原生音频插件恢复无法启动：{ $error }
 status-audio-restored-partial = 音频插件恢复完成：{ $available } 个库可用，{ $failed } 个库失败；可重新选择失败的插件文件

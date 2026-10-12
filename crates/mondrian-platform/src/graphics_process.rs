@@ -1,6 +1,6 @@
 //! Process entry policy, independent of graphics resource ownership.
 
-/// Failure to establish the graphics loader policy before opening resources.
+/// Failure to establish platform process policy before opening graphics resources.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphicsProcessBootstrapError {
     /// An inherited setting explicitly contradicts the Linux loader policy.
@@ -16,6 +16,21 @@ pub enum GraphicsProcessBootstrapError {
         #[source]
         source: std::io::Error,
     },
+    /// The native application role could not be observed.
+    #[cfg(target_os = "macos")]
+    #[error("could not observe the macOS graphics application role: {source}")]
+    MacApplicationRoleObservation {
+        #[source]
+        source: crate::PlaybackThreadSchedulingError,
+    },
+    /// The native default application role was rejected before owner startup.
+    #[cfg(target_os = "macos")]
+    #[error("task_policy_set(TASK_DEFAULT_APPLICATION) failed: native result={native_result}")]
+    MacApplicationRoleAdmission { native_result: i32 },
+    /// Readback did not establish the requested default application role.
+    #[cfg(target_os = "macos")]
+    #[error("macOS graphics application role readback was {observed_role}, expected 7")]
+    MacApplicationRoleReadback { observed_role: i32 },
 }
 
 /// Establishes the desktop graphics process policy before starting any owner.
@@ -26,6 +41,12 @@ pub enum GraphicsProcessBootstrapError {
 /// PID, arguments (including non-Unicode `argv[0]`), environment, working directory
 /// and standard streams; it never mutates the current process environment or
 /// leaves a supervisor child behind. An explicit conflicting value fails closed.
+/// On macOS an unspecified application role becomes TASK_DEFAULT_APPLICATION.
+/// This establishes the application's process policy so pthread QoS is not
+/// capped by the unspecified role. It does not claim foreground visibility;
+/// AppKit continues to own subsequent foreground/background transitions. Any
+/// already assigned native role is preserved. Admission is process-lifetime,
+/// and rejected policy or mismatched readback fails before owners start.
 /// Other platforms do nothing.
 ///
 /// Vulkan loader 1.3.259 or later is required to honor this policy. Driver code
@@ -57,6 +78,47 @@ pub fn prepare_graphics_process() -> Result<(), GraphicsProcessBootstrapError> {
         let source = replacement.args(arguments).env(POLICY, "1").exec();
         Err(GraphicsProcessBootstrapError::Reexecute { source })
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        prepare_macos_graphics_process()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_macos_graphics_process() -> Result<(), GraphicsProcessBootstrapError> {
+    const TASK_CATEGORY_POLICY: u32 = 1;
+    const TASK_DEFAULT_APPLICATION: i32 = 7;
+    let observe_role = || {
+        crate::observe_macos_playback_task_role().map_err(|source| {
+            GraphicsProcessBootstrapError::MacApplicationRoleObservation { source }
+        })
+    };
+    if observe_role()? != 0 {
+        return Ok(());
+    }
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn task_policy_set(task: u32, flavor: u32, policy: *const i32, count: u32) -> i32;
+    }
+    // Public mach/task_policy.h: category policy contains one integer role.
+    // SAFETY: Only this process's task is changed, at its executable entry.
+    // The call reads one live integer and retains no pointer or Mach right.
+    let native_result = unsafe {
+        task_policy_set(
+            mach_task_self_,
+            TASK_CATEGORY_POLICY,
+            &TASK_DEFAULT_APPLICATION,
+            1,
+        )
+    };
+    if native_result != 0 {
+        return Err(GraphicsProcessBootstrapError::MacApplicationRoleAdmission { native_result });
+    }
+    let observed_role = observe_role()?;
+    if observed_role != TASK_DEFAULT_APPLICATION {
+        return Err(GraphicsProcessBootstrapError::MacApplicationRoleReadback { observed_role });
+    }
     Ok(())
 }

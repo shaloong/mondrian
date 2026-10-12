@@ -104,6 +104,7 @@ pub struct GpuDisplayCalibrationPreparedPass {
 /// Renderer-owned cache and frame resources for monitor calibration.
 pub struct GpuDisplayCalibrationRuntime {
     pipeline: Option<GpuDisplayCalibrationPipeline>,
+    pub(crate) matte: Option<crate::display_matte::GpuDisplayMattePipeline>,
     pipeline_format: Option<GpuColorFrameTextureFormat>,
     lut: Option<GpuDisplayCalibrationLut>,
     lut_contract: Option<DisplayCalibrationLutIdentity>,
@@ -136,6 +137,7 @@ impl GpuDisplayCalibrationRuntime {
     ) -> Result<Self, GpuColorFrameIdAllocationError> {
         Ok(Self {
             pipeline: None,
+            matte: None,
             pipeline_format: None,
             lut: None,
             lut_contract: None,
@@ -151,7 +153,7 @@ impl GpuDisplayCalibrationRuntime {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         calibration: Arc<DisplayCalibrationLut3d>,
         output_format: GpuColorFrameTextureFormat,
@@ -230,6 +232,11 @@ impl GpuDisplayCalibrationRuntime {
         }
     }
 
+    /// Abandon an unsubmitted output without making its texture reusable.
+    pub(crate) fn discard_frame_resources(&mut self) {
+        self.output = None;
+    }
+
     pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
         if let Some(output) = self.output.take() {
             self.resource_pool.release_for_ordered_turnover(output);
@@ -245,6 +252,7 @@ impl GpuDisplayCalibrationRuntime {
     pub fn clear(&mut self) {
         self.clear_frame_resources();
         self.pipeline = None;
+        self.matte = None;
         self.pipeline_format = None;
         self.lut = None;
         self.lut_contract = None;
@@ -446,7 +454,7 @@ impl GpuDisplayCalibrationPipeline {
     /// Record one monitor calibration draw.
     pub fn record(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         plan: &GpuDisplayCalibrationPlan,
         prepared: &GpuDisplayCalibrationPreparedPass,
         output: &GpuColorFrameResource<GpuColorFrameWgpuResource>,

@@ -812,6 +812,7 @@ mod tests {
         let mut encoder = NoopEncoder;
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 200.0, 120.0),
@@ -1057,6 +1058,7 @@ mod tests {
         let theme = ThemePreset::Dark.build();
         let mut encoder = OverlayRecorder::default();
         let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 240.0, 160.0),

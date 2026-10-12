@@ -178,6 +178,22 @@ impl EventRouter {
     pub fn focused(&self) -> Option<WidgetId> {
         self.focused
     }
+
+    /// Focus a live widget through the same focus ownership and notifications
+    /// used by pointer and keyboard input.
+    pub fn focus_widget(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        widget_id: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) -> bool {
+        self.prune_stale_widget_state(tree, dispatch);
+        if !tree.get(widget_id).is_some_and(Widget::can_focus) {
+            return false;
+        }
+        self.move_focus_to(tree, widget_id, FocusSource::Programmatic, dispatch);
+        true
+    }
     pub fn captured(&self) -> Option<WidgetId> {
         self.capture.owner()
     }
@@ -401,6 +417,7 @@ impl EventRouter {
                     UiEvent::KeyDown { .. }
                         | UiEvent::KeyUp { .. }
                         | UiEvent::TextInput(_)
+                        | UiEvent::SetNumericValue(_)
                         | UiEvent::ImePreedit(_)
                         | UiEvent::ImeCommit(_)
                         | UiEvent::ImeCancel

@@ -613,13 +613,11 @@ impl AppState {
         if let Some(context) = &mut self.native_audio_editor {
             context.gesture = Some(gesture);
         }
-        if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
-        }
         let author =
             self.authoring.as_ref().ok_or_else(|| failure("native author Session closed"))?;
         let snapshot = std::sync::Arc::new(author.execution_snapshot());
-        // Store the exact already-accepted batch BEFORE any later compilation.
+        // Store the exact already-accepted batch BEFORE any later compilation
+        // or runtime binding. A binding failure must retain this same proposal.
         // A preparation refusal cannot cause this batch to enter Session again.
         let context = self
             .native_audio_editor
@@ -632,6 +630,9 @@ impl AppState {
             installed: None,
             queued: false,
         });
+        if let Some(commit) = commit {
+            self.consume_native_audio_authoring_commit(commit)?;
+        }
         self.queue_native_audio_author_handoff()
     }
 
@@ -727,16 +728,16 @@ impl AppState {
         &mut self,
         proposal: mondrian_core::NativeAudioAuthorProposal,
         status: mondrian_media::AudioPcmNativeAuthorHandoffStatus,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         use mondrian_media::AudioPcmNativeAuthorHandoffStatus as Status;
         let Some(context) = &mut self.native_audio_editor else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(pending) = &mut context.outstanding else {
-            return Ok(());
+            return Ok(false);
         };
         if !pending.proposal.same_retained_proposal(&proposal) {
-            return Ok(());
+            return Ok(false);
         }
         pending.queued = false;
         match status {
@@ -770,6 +771,7 @@ impl AppState {
                 } else {
                     self.set_status_hint(AppMessage::new("native-editor-opened"), false);
                 }
+                return Ok(true);
             }
             Status::InstalledAwaitingAcknowledgement { target, continuity } => {
                 if continuity
@@ -786,7 +788,7 @@ impl AppState {
                 self.set_status_hint(AppMessage::new("native-editor-control-pending"), true);
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 

@@ -6,7 +6,8 @@ use mondrian_ui_core::widget::{EventContext, PaintContext};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
 use crate::test_utils::{
-    custom_action, make_event_ctx, paint_widget, test_icon, DummyFocus, DummyShortcut, DummyTooltip,
+    custom_action, make_event_ctx, paint_widget, primary_text_modifiers, test_icon, DummyFocus,
+    DummyShortcut, DummyTooltip,
 };
 use crate::{
     Checkbox, ColorPickerTrigger, ColorPickerTriggerOptions, ContextMenu, DockSplitter, Dropdown,
@@ -123,7 +124,7 @@ fn text_input_visual_scenarios_cover_small_bounds_selection_caret_and_ime() {
         mixed_input.event(
             &UiEvent::KeyDown {
                 key: KeyCode::A,
-                modifiers: Modifiers { ctrl: true, ..Modifiers::none() },
+                modifiers: primary_text_modifiers(),
             },
             &mut ctx,
         ),

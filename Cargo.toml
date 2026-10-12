@@ -182,7 +182,7 @@ vst3 = { path = "vendor/vst3-sdk" }
 vst3-host = { path = "vendor/vst3-host", default-features = false }
 
 # ---- 颜色管理 ----
-ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933c65dc4e8e4e22767174f0e22b07fe7af42e07", features = ["bundled"] }
+ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "61a557330d49b7e494eb18beebca0c7b47907680", features = ["bundled", "v2_5"] }
 
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

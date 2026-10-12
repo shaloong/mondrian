@@ -16,6 +16,18 @@ use mondrian_ui_theme::{Theme, ThemePreset};
 
 use crate::VectorIcon;
 
+pub(crate) fn primary_text_modifiers() -> Modifiers {
+    Modifiers::primary()
+}
+
+pub(crate) fn word_text_modifiers() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers { alt: true, ..Modifiers::none() }
+    } else {
+        Modifiers::ctrl()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TextCommand {
     pub text: String,
@@ -175,7 +187,12 @@ pub(crate) fn paint_widget(widget: &dyn Widget, clip_rect: Rect) -> RecordingEnc
     let theme = theme();
     let mut encoder = RecordingEncoder::default();
     {
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         widget.paint(&mut ctx);
         widget.paint_overlay(&mut ctx);
     }
@@ -258,23 +275,5 @@ pub(crate) fn make_event_ctx<'a>(
         dispatch,
         platform: &NoopPlatformService,
         requests,
-    }
-}
-
-/// Native primary modifier for actual text Widget events, not classifier vectors.
-pub(crate) fn primary_text_modifiers() -> Modifiers {
-    Modifiers {
-        ctrl: !cfg!(target_os = "macos"),
-        meta: cfg!(target_os = "macos"),
-        ..Modifiers::none()
-    }
-}
-
-/// Native word-navigation modifier for actual text Widget events.
-pub(crate) fn word_text_modifiers() -> Modifiers {
-    Modifiers {
-        ctrl: !cfg!(target_os = "macos"),
-        alt: cfg!(target_os = "macos"),
-        ..Modifiers::none()
     }
 }

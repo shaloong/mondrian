@@ -36,6 +36,10 @@ jobs:
         shell: pwsh
         run: ./scripts/validation/validate-github-actions-pins.ps1
 
+      - name: 校验 Phase owner receipt 合同
+        shell: pwsh
+        run: ./scripts/validation/test-phase-owner-closure.ps1
+
       - name: 校验 Windows 参考机资格契约
         shell: pwsh
         run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v3.json -RequiredMemoryClass standard-playback -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
@@ -192,12 +196,30 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
+      # Hosted Linux runners use Mesa software Vulkan for shader correctness.
+      # This provider is not evidence of physical GPU or playback qualification.
+      - name: Install and verify headless Vulkan test provider (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          install -d -m 700 "$RUNNER_TEMP/mondrian-xdg-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/mondrian-xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
       # ── macOS ─────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg@8 pkg-config
-          ffmpeg_prefix="$(brew --prefix ffmpeg@8)"
+          brew install pkg-config x264 x265 aom dav1d openjpeg freetype harfbuzz fontconfig libass openssl@3 zlib
+          brew_prefix="$(brew --prefix)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          zlib_prefix="$(brew --prefix zlib)"
+          export PKG_CONFIG_PATH="$openssl_prefix/lib/pkgconfig:$zlib_prefix/lib/pkgconfig:$brew_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          export LDFLAGS="-L$brew_prefix/lib -Wl,-rpath,$brew_prefix/lib -L$openssl_prefix/lib -Wl,-rpath,$openssl_prefix/lib -L$zlib_prefix/lib -Wl,-rpath,$zlib_prefix/lib"
+          ffmpeg_prefix="$RUNNER_TEMP/mondrian-ffmpeg"
+          bash scripts/build-macos-ffmpeg.sh "$RUNNER_TEMP/mondrian-ffmpeg-build" "$ffmpeg_prefix" 2
           echo "$ffmpeg_prefix/bin" >> "$GITHUB_PATH"
           echo "PKG_CONFIG_PATH=$ffmpeg_prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$ffmpeg_prefix/lib/pkgconfig" pkg-config --modversion libavcodec | grep -E '^62\.'
@@ -324,6 +346,31 @@ jobs:
           sudo apt-get install -y --no-install-recommends fonts-noto-cjk fontconfig
           bash scripts/validation/verify-linux-title-font.sh
 
+      # wgpu's Auto policy can fall back to the legacy system FXC. Pin the
+      # supported DXC provider for DX12 shader correctness, as with Mesa on Linux.
+      # Hosted WARP is software evidence, never physical GPU qualification.
+      - name: Install and verify DX12 shader compiler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtime = ./scripts/install-windows-dxc.ps1 -DestinationPath (Join-Path $env:RUNNER_TEMP 'mondrian-dxc')
+          $runtime.BinDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          'WGPU_DX12_COMPILER=dxc' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          'WGPU_BACKEND=dx12' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Keep strict GPU failures visible even if a later native driver fault
+      # terminates libtest before its captured panic output can be printed.
+      - name: Windows Renderer GPU regression preflight
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $failed = $false
+          cargo test --locked -p mondrian-renderer --lib encoded_unorm16_input_matches_cpu_color_on_real_gpu -- --nocapture
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          cargo test --locked -p mondrian-renderer --lib program_scopes_gpu::tests -- --nocapture
+          if ($LASTEXITCODE -ne 0) { $failed = $true }
+          if ($failed) { exit 1 }
+
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
 
@@ -378,6 +425,17 @@ jobs:
             libavdevice-dev libswscale-dev libswresample-dev \
             libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
+      # Exercise the same shader and compositor contracts on software Vulkan.
+      # Physical Metal qualification remains a separate real-machine test.
+      - name: Install and verify headless Vulkan test provider
+        run: |
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          install -d -m 700 "$RUNNER_TEMP/mondrian-xdg-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/mondrian-xdg-runtime"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "WGPU_BACKEND=vulkan" >> "$GITHUB_ENV"
+          vulkaninfo --summary
+
       # Distribution package retains Noto's OFL-1.1 notices; no font is vendored.
       - name: Install and verify Linux title font
         run: |
@@ -388,7 +446,7 @@ jobs:
         run: cargo test -p mondrian-app --all-targets
 
       - name: 运行 app UI primitive/draw-command renderer 测试
-        run: cargo test -p mondrian-ui-renderer
+        run: cargo test -p mondrian-ui-renderer -- --nocapture
 
       - name: 运行 app UI widget 极端场景测试
         run: cargo test -p mondrian-ui-widgets component_extreme_tests

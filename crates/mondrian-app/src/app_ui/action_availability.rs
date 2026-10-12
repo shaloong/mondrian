@@ -20,7 +20,7 @@ use mondrian_core::types::ClipId;
 /// Whether a shell-dispatched action can produce a useful editor operation for
 /// the supplied application state snapshot.
 pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
-    if state.project_close_blocks_actions() {
+    if state.project_lifecycle_blocks_actions() {
         return matches!(action, Action::CloseProject)
             || matches!(
                 action,

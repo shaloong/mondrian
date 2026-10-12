@@ -125,6 +125,8 @@ fn fs_lanczos(in: VsOut) -> @location(0) vec4<f32> {
         first = i32(floor(source_position)) - 15;
     }
 
+    var reference_coverage = 0.0;
+    var constant_coverage = true;
     var weighted = vec4<f32>(0.0);
     var weight_sum = 0.0;
     for (var tap = 0u; tap < 32u; tap = tap + 1u) {
@@ -142,11 +144,22 @@ fn fs_lanczos(in: VsOut) -> @location(0) vec4<f32> {
         if (!input_is_premultiplied) {
             sample = to_premultiplied(sample);
         }
+        if (tap == 0u) {
+            reference_coverage = sample.a;
+        } else {
+            constant_coverage = constant_coverage && sample.a == reference_coverage;
+        }
         let weight = lanczos3(f32(sample_axis) - source_position, filter_scale);
         weighted += sample * weight;
         weight_sum += weight;
     }
-    let normalized = weighted / max(abs(weight_sum), 0.0000001);
+    var normalized = weighted / max(abs(weight_sum), 0.0000001);
+    // Normalized filtering preserves a constant coverage field exactly. Even
+    // a small Float32 division error below one can lose a Float16 coverage step.
+    // Require equality of every sampled alpha; never snap varying coverage.
+    if (constant_coverage && weight_sum >= 0.0000001) {
+        normalized.a = reference_coverage;
+    }
     if (output_is_premultiplied) {
         return normalized;
     }
@@ -370,7 +383,7 @@ impl GpuViewerSpatialRuntime {
     pub fn record_for_presentation(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
@@ -405,7 +418,7 @@ impl GpuViewerSpatialRuntime {
     pub fn record(
         &mut self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         ids: &mut GpuColorFrameIdAllocator,
         input: &GpuColorFrameResource<GpuColorFrameWgpuResource>,
         source_rect: ViewerSourceRect,
@@ -591,6 +604,13 @@ impl GpuViewerSpatialRuntime {
         }
     }
 
+    /// Abandon unsubmitted frame textures without making them reusable.
+    pub(crate) fn discard_frame_resources(&mut self) {
+        self.prefilters.clear();
+        self.horizontal = None;
+        self.output = None;
+    }
+
     pub(crate) fn stage_frame_resources_for_ordered_turnover(&mut self) {
         for resource in self.prefilters.drain(..) {
             self.resource_pool.release_for_ordered_turnover(resource);
@@ -755,7 +775,7 @@ impl GpuViewerSpatialPipeline {
     fn record_downsample(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         input_width: u32,
         input_height: u32,
@@ -778,7 +798,7 @@ impl GpuViewerSpatialPipeline {
     fn record_lanczos(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         input_size: (u32, u32),
         output: &wgpu::TextureView,
@@ -804,7 +824,7 @@ impl GpuViewerSpatialPipeline {
     fn record_pass(
         &self,
         device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         input: &wgpu::TextureView,
         output: &wgpu::TextureView,
         uniforms: &SpatialUniforms,
@@ -1107,6 +1127,38 @@ mod tests {
         }
         assert_eq!(diagnostics.prefilter_passes, 0);
         assert_eq!(diagnostics.lanczos_passes, 2);
+
+        // A normalized reconstruction must preserve constant coverage even at
+        // noninteger sample positions. A tiny error below one can become a
+        // visible coverage step when the display carrier stores Float16.
+        for alpha in [0.0, edge, 0.375, 1.0] {
+            let input = [1.25, -0.25, 0.5, alpha];
+            let Some((actual, _)) = run_spatial(
+                79,
+                63,
+                input.repeat(79 * 63),
+                ViewerSourceRect::FULL,
+                53,
+                37,
+            )
+            .await
+            else {
+                return;
+            };
+            for (pixel_index, pixel) in actual.chunks_exact(4).enumerate() {
+                assert_eq!(
+                    pixel[3], alpha,
+                    "constant coverage {alpha}, pixel {pixel_index}"
+                );
+                for channel in 0..3 {
+                    let expected = if alpha == 0.0 { 0.0 } else { input[channel] };
+                    assert!(
+                        (pixel[channel] - expected).abs() <= 2.0e-6,
+                        "constant color, pixel {pixel_index}, channel {channel}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1147,6 +1199,289 @@ mod tests {
             assert!((row[0] - 1.0 / 3.0).abs() < 1.0e-5);
             assert!((row[4] - 2.0 / 3.0).abs() < 1.0e-5);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a physical GPU; checks fractional filtering against a scalar reference"]
+    async fn physical_spatial_resize_matches_independent_lanczos_reference() {
+        let width = 19;
+        let height = 13;
+        let mut pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                let code = (x * 73 + y * 119) % 257;
+                pixels.push([
+                    code as f32 / 11.0 - 2.0,
+                    ((x * 17 + y * 41) % 101) as f32 / 19.0,
+                    ((x * 47 + y * 13) % 97) as f32 / 23.0 - 0.5,
+                    if code % 7 == 0 {
+                        0.0
+                    } else {
+                        0.125 + code as f32 / 343.0
+                    },
+                ]);
+            }
+        }
+        for (rect, output_width, output_height) in [
+            (ViewerSourceRect::FULL, 5, 4),
+            (ViewerSourceRect::FULL, 31, 23),
+            (
+                ViewerSourceRect { x: 0.19, y: 0.17, width: 0.61, height: 0.71 },
+                11,
+                9,
+            ),
+        ] {
+            let (actual, diagnostics) = run_spatial(
+                width,
+                height,
+                pixels.iter().flatten().copied().collect(),
+                rect,
+                output_width,
+                output_height,
+            )
+            .await
+            .expect("physical GPU must execute the spatial reference test");
+            let horizontal: Vec<_> =
+                scalar_lanczos_axis(&pixels, width, height, output_width, height, rect, false)
+                    .into_iter()
+                    .map(|pixel| pixel.map(|value| value as f32))
+                    .collect();
+            let expected = scalar_lanczos_axis(
+                &horizontal,
+                output_width,
+                height,
+                output_width,
+                output_height,
+                rect,
+                true,
+            );
+            // Reconstruction operates on coverage-weighted color. Compare that
+            // quantity and alpha directly: unassociation near zero coverage is
+            // ill-conditioned and does not define an f64 straight-RGB contract.
+            for (index, (observed, reference)) in actual.chunks_exact(4).zip(&expected).enumerate()
+            {
+                for channel in 0..4 {
+                    assert!(observed[channel].is_finite());
+                    let (observed_value, reference_value) = if channel == 3 {
+                        (f64::from(observed[3]), reference[3])
+                    } else {
+                        (
+                            f64::from(observed[channel]) * f64::from(observed[3]),
+                            reference[channel] * reference[3],
+                        )
+                    };
+                    let tolerance = 2.0e-5 * (1.0 + reference_value.abs());
+                    assert!(
+                        (observed_value - reference_value).abs() <= tolerance,
+                        "{output_width}x{output_height}, pixel {index}, channel {channel}: \
+                         {observed_value} != {reference_value}"
+                    );
+                }
+            }
+            assert_eq!(diagnostics.prefilter_passes, 0);
+        }
+    }
+
+    // The sample grid and intermediate storage are Float32 contracts. Evaluate
+    // the kernel and accumulation independently in f64 on that physical grid;
+    // a different f64 grid is not the renderer's requested sampling position.
+    fn scalar_lanczos_axis<T: Copy + Into<f64>>(
+        input: &[[T; 4]],
+        width: u32,
+        height: u32,
+        output_width: u32,
+        output_height: u32,
+        rect: ViewerSourceRect,
+        vertical: bool,
+    ) -> Vec<[f64; 4]> {
+        let (length, output_length, origin, extent) = if vertical {
+            (height, output_height, rect.y, rect.height)
+        } else {
+            (width, output_width, rect.x, rect.width)
+        };
+        let source_length = length as f32 * extent;
+        let scale = (output_length as f32 / source_length).min(1.0);
+        let sinc = |value: f64| {
+            if value.abs() < 1.0e-6 {
+                1.0
+            } else {
+                let angle = value * std::f64::consts::PI;
+                angle.sin() / angle
+            }
+        };
+        let mut output = Vec::new();
+        for y in 0..output_height {
+            for x in 0..output_width {
+                let destination = if vertical { y } else { x };
+                let position = origin * length as f32
+                    + (destination as f32 + 0.5) * source_length / output_length as f32
+                    - 0.5;
+                let first = (position - 3.0 / scale).ceil() as i32;
+                let last = (position + 3.0 / scale).floor() as i32;
+                let mut weighted = [0.0; 4];
+                let mut sum = 0.0;
+                for tap in first..=last {
+                    let coordinate = tap.clamp(0, length as i32 - 1) as u32;
+                    let index = if vertical {
+                        coordinate * width + x
+                    } else {
+                        y * width + coordinate
+                    };
+                    let mut pixel = input[index as usize].map(Into::into);
+                    if !vertical {
+                        pixel[3] = pixel[3].clamp(0.0, 1.0);
+                        let alpha = pixel[3];
+                        for channel in pixel.iter_mut().take(3) {
+                            *channel *= alpha;
+                        }
+                    }
+                    let distance = f64::from((tap as f32 - position) * scale);
+                    let weight = if distance.abs() >= 3.0 {
+                        0.0
+                    } else {
+                        sinc(distance) * sinc(distance / 3.0) * f64::from(scale)
+                    };
+                    for (channel, sample) in weighted.iter_mut().zip(pixel) {
+                        *channel += sample * weight;
+                    }
+                    sum += weight;
+                }
+                for channel in &mut weighted {
+                    *channel /= sum.abs().max(1.0e-7);
+                }
+                if vertical {
+                    let alpha = weighted[3];
+                    if alpha <= 0.0 {
+                        weighted = [0.0; 4];
+                    } else {
+                        for channel in weighted.iter_mut().take(3) {
+                            *channel /= alpha;
+                        }
+                        weighted[3] = alpha.clamp(0.0, 1.0);
+                    }
+                }
+                output.push(weighted);
+            }
+        }
+        output
+    }
+
+    #[tokio::test]
+    #[ignore = "physical GPU short diagnostic, not a realtime or commercial qualification"]
+    async fn physical_spatial_4k_short_diagnostic() {
+        let context = crate::GpuContext::new().await.expect("physical GPU context");
+        let adapter = context.adapter.get_info();
+        #[cfg(target_os = "macos")]
+        assert_eq!(adapter.backend, wgpu::Backend::Metal);
+        let features = context.device.features()
+            | crate::profile::gpu_frame_timestamp_query_device_features(context.adapter.features());
+        let (device, queue) = context
+            .adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("viewer-spatial-physical-diagnostic"),
+                required_features: features,
+                ..Default::default()
+            })
+            .await
+            .expect("physical timestamp device");
+        let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 3840,
+            height: 2160,
+            data: (0..3840 * 2160)
+                .map(|index| {
+                    let x = index % 3840;
+                    let y = index / 3840;
+                    let value = ((x * 73 + y * 119) % 257) as f32;
+                    [
+                        value / 17.0 - 1.0,
+                        value / 23.0,
+                        value / 31.0,
+                        0.25 + value / 343.0,
+                    ]
+                })
+                .collect(),
+            color_space: WorkingColorSpace::LinearRec709,
+            alpha: ColorFrameAlpha::StraightCoverage,
+        });
+        let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            crate::GpuColorFrameId::from_raw(10_000),
+            &frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "viewer-spatial-physical-fixture",
+        )
+        .expect("physical fixture upload");
+        let input = GpuColorFrameUploader::upload(&device, &queue, &upload);
+        let mut runtime = GpuViewerSpatialRuntime::default();
+        runtime.prepare_backend(&device);
+        let mut ids = GpuColorFrameIdAllocator::new(20_000).expect("frame identities");
+        let mut timer = crate::profile::GpuTimestampPassIntervalTimer::new(&device, &queue, 8)
+            .expect("real pass-boundary timestamps");
+        let mut samples = Vec::new();
+        let mut pass_counts = Vec::new();
+        let mut last = None;
+        for frame_index in 0..36 {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let (output, receipt) = timer
+                .record(&mut encoder, |measured| {
+                    runtime
+                        .record(
+                            &device,
+                            measured,
+                            &mut ids,
+                            &input,
+                            ViewerSourceRect::FULL,
+                            1652,
+                            930,
+                        )
+                        .expect("actual spatial passes")
+                })
+                .expect("complete timestamp coverage");
+            let submission = queue.submit([encoder.finish()]);
+            let sample = timer
+                .read_sample_after_submission(&device, submission, receipt)
+                .expect("exact submission and counter retirement");
+            if frame_index >= 4 {
+                samples.push(sample.elapsed_us);
+                pass_counts.push(sample.pass_counters.len());
+            }
+            last = Some(output);
+        }
+        let output = runtime
+            .take_output(&last.expect("recorded output"))
+            .expect("final output ownership");
+        let plan = GpuColorFrameReadbackPlan::encoded_rgba32float(output.handle().clone())
+            .expect("diagnostic readback contract");
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let readback = GpuColorFrameReadback::record_copy(&device, &mut encoder, &plan, &output)
+            .expect("independent output readback");
+        queue.submit([encoder.finish()]);
+        let bytes = map_readback_buffer(&device, &readback);
+        let pixels = plan.unpack_mapped_rgba32float(&bytes).expect("actual output pixels");
+        readback.unmap();
+        let selected: Vec<_> = [(0, 0), (1, 1), (127, 113), (825, 464), (1651, 929)]
+            .into_iter()
+            .map(|(x, y)| {
+                let offset = (y * 1652 + x) * 4;
+                (x, y, &pixels[offset..offset + 4])
+            })
+            .collect();
+        use sha2::Digest;
+        let pixel_sha256 = format!("{:x}", sha2::Sha256::digest(bytemuck::cast_slice(&pixels)));
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        eprintln!(
+            "SPATIAL_DIAGNOSTIC_JSON={}",
+            serde_json::json!({
+            "classification":"DiagnosticOnly", "adapter":format!("{adapter:?}"),
+            "fixture":"extended-rgba-arithmetic-v1", "input":[3840,2160],
+            "output":[1652,930], "quality":"unchanged separable Lanczos3 Float32",
+            "warmup":4, "samples_us":samples, "pass_counts":pass_counts,
+            "p50_us":sorted[15], "p95_us":sorted[30], "p99_us":sorted[31],
+                "selected_pixels":selected, "diagnostics":format!("{:?}",runtime.diagnostics()),
+                "pixel_sha256":pixel_sha256,
+            "limitations":"Isolated spatial passes; one explicit fixture upload and diagnostic pixel readback. No VideoToolbox/Window realtime qualification."
+            })
+        );
     }
 
     #[tokio::test]
@@ -1318,6 +1653,10 @@ mod tests {
             eprintln!("skipping Viewer spatial GPU test: no adapter available");
             return None;
         };
+        eprintln!(
+            "Viewer spatial test physical adapter: {:?}",
+            context.adapter.get_info()
+        );
         let frame = crate::CpuColorFrame::working(WorkingRgbaF32Frame {
             alpha: mondrian_core::ColorFrameAlpha::StraightCoverage,
             width,

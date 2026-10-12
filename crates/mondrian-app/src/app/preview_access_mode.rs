@@ -1556,6 +1556,11 @@ impl MediaPreviewScheduler {
         self.broker.pending_keys()
     }
 
+    /// Physical work ownership includes canceled in-flight leases until return.
+    pub(crate) fn active_keys(&self) -> Vec<MediaPreviewKey> {
+        self.broker.active_keys()
+    }
+
     /// Reclaim one queued speculative request for visible current work.
     ///
     /// The Broker never returns an in-flight key from this Interface.

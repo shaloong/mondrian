@@ -35,7 +35,8 @@ use std::cell::{Cell, OnceCell};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
-    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityVirtualNode,
+    EventContext, PaintContext,
 };
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 
@@ -291,10 +292,9 @@ impl Dropdown {
     }
 
     fn item_at(&self, position: Point) -> Option<usize> {
-        let visible = visible_item_count(self.items.len(), self.max_visible_items);
         item_at(
             self.menu_rect(),
-            visible,
+            self.items.len(),
             self.item_height(),
             self.scroll_offset,
             position,
@@ -732,7 +732,7 @@ impl Widget for Dropdown {
                     modifiers,
                 } if self.focused && *modifiers == Modifiers::none() => {
                     self.focus_visible = false;
-                    self.open(ctx);
+                    self.open_with_release_suppression(ctx, false);
                     return EventResult::Handled;
                 }
                 UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
@@ -890,6 +890,47 @@ impl Widget for Dropdown {
                     ..AccessibilityState::default()
                 }),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
+
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        if !self.enabled || !self.open {
+            return Vec::new();
+        }
+        let mut rows = Vec::new();
+        for depth in 0..=self.submenu_chain.len() {
+            let path = &self.submenu_chain[..depth];
+            let (Some(items), Some(menu_bounds)) =
+                (self.children_at(path), self.menu_rect_at_depth(depth))
+            else {
+                continue;
+            };
+            let scroll = if depth == 0 { self.scroll_offset } else { 0.0 };
+            for (index, item) in items.iter().enumerate() {
+                if item.is_separator() {
+                    continue;
+                }
+                let bounds = item_rect(menu_bounds, index, self.item_height(), scroll)
+                    .intersection(&menu_bounds);
+                if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                    continue;
+                }
+                let key = path.iter().chain(std::iter::once(&index)).fold(0_u64, |key, index| {
+                    key.wrapping_mul(257).wrapping_add(*index as u64 + 1)
+                });
+                rows.push(AccessibilityVirtualNode {
+                    key,
+                    role: AccessibilityRole::MenuItem,
+                    name: item.label.clone(),
+                    bounds,
+                    enabled: item.is_activatable(),
+                });
+            }
+        }
+        rows
     }
 }
 
@@ -1299,6 +1340,59 @@ mod tests {
         assert!(node.state.focused);
         assert_eq!(node.state.expanded, Some(true));
         assert!(!node.state.disabled);
+    }
+
+    #[test]
+    fn keyboard_open_exposes_rows_and_first_pointer_selection_activates() {
+        let mut menu = Dropdown::new(
+            "File",
+            vec![
+                MenuItem::new("Save", Action::SaveProject),
+                MenuItem::separator(),
+                MenuItem::inert("Unavailable"),
+            ],
+        );
+        menu.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let selected = RefCell::new(Vec::new());
+        let dispatch = |action| selected.borrow_mut().push(action);
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        menu.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        menu.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        let rows = menu.accessibility_virtual_children();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Save");
+        assert!(rows[0].enabled);
+        assert_eq!(rows[1].name, "Unavailable");
+        assert!(!rows[1].enabled);
+        assert!(!menu.suppress_next_release);
+
+        let position = rows[0].bounds.center();
+        menu.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        menu.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(*selected.borrow(), [Action::SaveProject]);
+        assert!(!menu.is_open());
+        assert!(menu.accessibility_virtual_children().is_empty());
     }
 
     #[test]
@@ -1860,7 +1954,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint(&mut ctx);
 
         assert_eq!(
@@ -1884,7 +1983,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint(&mut ctx);
 
         assert_eq!(
@@ -1950,13 +2054,23 @@ mod tests {
 
         let mut encoder = RecordingEncoder::default();
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             d.paint(&mut ctx);
         }
         assert_eq!(encoder.rects.len(), 1);
         assert_eq!(encoder.triangles, 1);
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
         assert!(
             encoder.rects.len() > 1,
@@ -1985,6 +2099,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = RecordingEncoder::default();
         let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 180.0, 150.0),
@@ -2055,7 +2170,12 @@ mod tests {
             let theme = mondrian_ui_theme::ThemePreset::Dark.build();
             let mut encoder = RecordingEncoder::default();
 
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             d.paint_overlay(&mut ctx);
 
             assert!(encoder.rects.is_empty());
@@ -2072,7 +2192,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let popup = Rect::new(20.0, 30.0, 120.0, 64.0);
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_popup_chrome(&mut ctx, popup);
 
         assert_eq!(encoder.soft_shadows.len(), 3);
@@ -2112,7 +2237,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 120.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
 
         assert!(encoder.texts.iter().any(|text| text == "Disabled"));
@@ -2125,7 +2255,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 120.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 64.0, 24.0),
@@ -2156,7 +2291,12 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let icon = test_icon();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 128.0, 24.0),
@@ -2180,7 +2320,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 180.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 128.0, 28.0),
@@ -2206,7 +2351,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 220.0, 80.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         paint_menu_row(
             &mut ctx,
             Rect::new(10.0, 20.0, 160.0, 24.0),
@@ -2282,7 +2432,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 200.0, 140.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         d.paint_overlay(&mut ctx);
 
         assert_eq!(encoder.texts, vec!["Open".to_string(), "Save".to_string()]);
@@ -2290,5 +2445,53 @@ mod tests {
             encoder.rects.iter().any(|rect| rect.height == 1.0),
             "separator should be drawn as a geometric divider"
         );
+    }
+
+    #[test]
+    fn dropdown_scrolled_last_row_dispatches_its_action() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+        let mut items: Vec<MenuItem> = (0..7)
+            .map(|index| MenuItem::new(format!("Item {index}"), Action::SaveProject))
+            .collect();
+        items.push(MenuItem::new("60 fps", Action::Pause));
+        let mut dropdown = Dropdown::new("Frame rate", items).with_max_visible_items(7);
+        dropdown.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
+        dropdown.open_menu(&mut ctx);
+
+        dropdown.event(
+            &UiEvent::MouseWheel {
+                delta: 999.0,
+                position: dropdown.menu_rect().center(),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(dropdown.scroll_offset > 0.0);
+        let last_row = dropdown.item_rect(7).center();
+        assert!(dropdown.menu_rect().contains(last_row));
+        dropdown.event(
+            &UiEvent::MouseDown {
+                position: last_row,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        dropdown.event(
+            &UiEvent::MouseUp {
+                position: last_row,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(*actions.borrow(), [Action::Pause]);
+        assert!(!dropdown.is_open());
     }
 }

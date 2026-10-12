@@ -67,6 +67,7 @@ impl NativeQuestionWindowRequest {
 pub(crate) struct NativeQuestionSurfaceFrame {
     pub(crate) state_before: Option<EffectProcessorQuestionState>,
     pub(crate) result: AppUiFrameResult,
+    pub(crate) pixels_per_point: f32,
 }
 
 /// Read-only facts from one real paint, sampled around the product surface gate.
@@ -227,7 +228,7 @@ impl NativeQuestionWindowPump {
         if self.done {
             return;
         }
-        let NativeQuestionSurfaceFrame { state_before, result } = frame;
+        let NativeQuestionSurfaceFrame { state_before, result, pixels_per_point } = frame;
         let observation = NativeQuestionSurfaceObservation {
             window: window.clone(),
             surface_generation: surface,
@@ -252,7 +253,7 @@ impl NativeQuestionWindowPump {
                 )
             }),
             frame_result: format!("{result:?}"),
-            preview_observation: host.validation_question_preview_observation(),
+            preview_observation: host.validation_question_preview_observation(pixels_per_point),
         };
         if self.report.surface_observations.last() != Some(&observation) {
             if self.report.surface_observations.len() < 16 {

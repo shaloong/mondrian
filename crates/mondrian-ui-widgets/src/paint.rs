@@ -253,6 +253,7 @@ mod tests {
         let theme: &'static mondrian_ui_theme::Theme =
             Box::leak(Box::new(mondrian_ui_theme::ThemePreset::Dark.build()));
         PaintContext {
+            pixels_per_point: 1.0,
             encoder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
@@ -378,6 +379,7 @@ mod tests {
 
         {
             let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
                 encoder: &mut encoder,
                 theme: &theme,
                 clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),

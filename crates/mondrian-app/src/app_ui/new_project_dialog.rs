@@ -171,7 +171,7 @@ const RESOLUTION_PRESETS: [(&str, Resolution); 4] = [
     ("DCI 4K", Resolution::DCI4K),
 ];
 
-const FRAME_RATE_PRESETS: [(&str, Rational); 7] = [
+const FRAME_RATE_PRESETS: [(&str, Rational); 8] = [
     ("23.976 fps", Rational::FPS_23976),
     ("24 fps", Rational::FPS_24),
     ("25 fps", Rational::FPS_25),
@@ -179,6 +179,7 @@ const FRAME_RATE_PRESETS: [(&str, Rational); 7] = [
     ("30 fps", Rational::FPS_30),
     ("50 fps", Rational::FPS_50),
     ("59.94 fps", Rational::FPS_5994),
+    ("60 fps", Rational::FPS_60),
 ];
 
 const AUDIO_SAMPLE_RATE_PRESETS: [(&str, u32); 3] =
@@ -351,10 +352,6 @@ const CONTENT_PADDING: f32 = 20.0;
 const FIELD_HEIGHT: f32 = 34.0;
 const DROPDOWN_HEIGHT: f32 = 28.0;
 const ROW_GAP: f32 = 12.0;
-const NAME_Y: f32 = 82.0;
-const PRESET_ROW_Y: f32 = 142.0;
-const AUDIO_ROW_Y: f32 = 202.0;
-const COLOR_ROW_Y: f32 = 254.0;
 const CHECKBOX_ROW_Y: f32 = 314.0;
 const ERROR_ROW_Y: f32 = 350.0;
 const BUTTON_WIDTH: f32 = 88.0;
@@ -363,12 +360,14 @@ const BUTTON_GAP: f32 = 8.0;
 const BUTTON_BOTTOM_INSET: f32 = 20.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const LABEL_FONT_SIZE: f32 = 12.0;
+const FIELD_LABEL_HEIGHT: f32 = LABEL_FONT_SIZE * 1.5;
+const LABEL_CONTROL_GAP: f32 = 4.0;
 const TITLE_BASELINE_Y: f32 = 22.0;
 const DESCRIPTION_BASELINE_Y: f32 = 46.0;
-const NAME_LABEL_BASELINE_Y: f32 = 76.0;
-const PRESET_LABEL_BASELINE_Y: f32 = 136.0;
-const AUDIO_LABEL_BASELINE_Y: f32 = 196.0;
-const COLOR_LABEL_BASELINE_Y: f32 = 248.0;
+const NAME_LABEL_Y: f32 = 76.0;
+const PRESET_LABEL_Y: f32 = 136.0;
+const AUDIO_LABEL_Y: f32 = 196.0;
+const COLOR_LABEL_Y: f32 = 252.0;
 
 pub struct NewProjectDialog {
     id: WidgetId,
@@ -572,62 +571,62 @@ impl Widget for NewProjectDialog {
         ));
         self.name_label.layout(Rect::new(
             content.x,
-            content.y + NAME_LABEL_BASELINE_Y,
+            content.y + NAME_LABEL_Y,
             content.width,
-            LABEL_FONT_SIZE * 1.5,
+            FIELD_LABEL_HEIGHT,
         ));
         self.name_input.layout(Rect::new(
             content.x,
-            content.y + NAME_Y,
+            content.y + NAME_LABEL_Y + FIELD_LABEL_HEIGHT + LABEL_CONTROL_GAP,
             content.width,
             FIELD_HEIGHT,
         ));
         let half = (content.width - ROW_GAP) * 0.5;
         self.frame_size_label.layout(Rect::new(
             content.x,
-            content.y + PRESET_LABEL_BASELINE_Y,
+            content.y + PRESET_LABEL_Y,
             half,
-            LABEL_FONT_SIZE * 1.5,
+            FIELD_LABEL_HEIGHT,
         ));
         self.frame_rate_label_widget.layout(Rect::new(
             content.x + half + ROW_GAP,
-            content.y + PRESET_LABEL_BASELINE_Y,
+            content.y + PRESET_LABEL_Y,
             half,
-            LABEL_FONT_SIZE * 1.5,
+            FIELD_LABEL_HEIGHT,
         ));
         self.resolution_dropdown.layout(Rect::new(
             content.x,
-            content.y + PRESET_ROW_Y,
+            content.y + PRESET_LABEL_Y + FIELD_LABEL_HEIGHT + LABEL_CONTROL_GAP,
             half,
             DROPDOWN_HEIGHT,
         ));
         self.frame_rate_dropdown.layout(Rect::new(
             content.x + half + ROW_GAP,
-            content.y + PRESET_ROW_Y,
+            content.y + PRESET_LABEL_Y + FIELD_LABEL_HEIGHT + LABEL_CONTROL_GAP,
             half,
             DROPDOWN_HEIGHT,
         ));
         self.audio_sample_rate_dropdown.layout(Rect::new(
             content.x,
-            content.y + AUDIO_ROW_Y,
+            content.y + AUDIO_LABEL_Y + FIELD_LABEL_HEIGHT + LABEL_CONTROL_GAP,
             half,
             DROPDOWN_HEIGHT,
         ));
         self.audio_label.layout(Rect::new(
             content.x,
-            content.y + AUDIO_LABEL_BASELINE_Y,
+            content.y + AUDIO_LABEL_Y,
             half,
-            LABEL_FONT_SIZE * 1.5,
+            FIELD_LABEL_HEIGHT,
         ));
         self.color_label.layout(Rect::new(
             content.x,
-            content.y + COLOR_LABEL_BASELINE_Y,
+            content.y + COLOR_LABEL_Y,
             content.width,
-            LABEL_FONT_SIZE * 1.5,
+            FIELD_LABEL_HEIGHT,
         ));
         self.color_engine_dropdown.layout(Rect::new(
             content.x,
-            content.y + COLOR_ROW_Y,
+            content.y + COLOR_LABEL_Y + FIELD_LABEL_HEIGHT + LABEL_CONTROL_GAP,
             content.width,
             DROPDOWN_HEIGHT,
         ));

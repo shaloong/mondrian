@@ -5,16 +5,32 @@
 //! timestamp lifecycle; the semantically fixed Viewer suffix timestamps cannot
 //! describe this work.
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use crate::profile::gpu_timestamp_query_device_features;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const NATIVE_IMPORT_TIMESTAMP_COUNT: u32 = 3;
-#[cfg(target_os = "windows")]
-const NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES: u64 =
-    NATIVE_IMPORT_TIMESTAMP_COUNT as u64 * wgpu::QUERY_SIZE as u64;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+const NATIVE_IMPORT_PASS_TIMESTAMP_COUNT: u32 = 2;
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeVideoImportTimestampMode {
+    Encoder,
+    FusedPass,
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+impl NativeVideoImportTimestampMode {
+    const fn query_count(self) -> u32 {
+        match self {
+            Self::Encoder => NATIVE_IMPORT_TIMESTAMP_COUNT,
+            Self::FusedPass => NATIVE_IMPORT_PASS_TIMESTAMP_COUNT,
+        }
+    }
+}
 
 /// Schema version for serialized native-import GPU timing evidence.
 pub const NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION: u32 = 1;
@@ -216,7 +232,7 @@ impl NativeVideoImportGpuTimingDiagnostics {
 }
 
 #[derive(Debug)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(super) struct NativeVideoImportGpuTimingProbe {
     candidate_token: Option<NativeVideoImportCandidateToken>,
     import_token: Option<NativeVideoImportToken>,
@@ -225,7 +241,7 @@ pub(super) struct NativeVideoImportGpuTimingProbe {
 }
 
 #[derive(Debug)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 enum NativeVideoImportGpuTimingProbeDisposition {
     Recording(NativeVideoImportGpuTimestampToken),
     Missing,
@@ -233,14 +249,14 @@ enum NativeVideoImportGpuTimingProbeDisposition {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 enum NativeVideoImportCandidateSampleDisposition {
     Scheduled,
     Missing,
     Dropped,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub(super) struct NativeVideoImportGpuTimingRuntime {
     ring: Option<NativeVideoImportGpuTimestampRing>,
     capability_supported: bool,
@@ -254,7 +270,7 @@ pub(super) struct NativeVideoImportGpuTimingRuntime {
     completed: Vec<NativeVideoImportGpuTimingSample>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportActiveCandidate {
     token: NativeVideoImportCandidateToken,
     submitted_imports: u64,
@@ -263,7 +279,7 @@ struct NativeVideoImportActiveCandidate {
     dropped_samples: u64,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl NativeVideoImportActiveCandidate {
     const fn new(token: NativeVideoImportCandidateToken) -> Self {
         Self {
@@ -292,19 +308,27 @@ impl NativeVideoImportActiveCandidate {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl NativeVideoImportGpuTimingRuntime {
     pub(super) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         policy: NativeVideoImportGpuTimingPolicy,
     ) -> Self {
-        let capability_supported =
-            !gpu_timestamp_query_device_features(device.features()).is_empty();
+        let encoder_timestamps = !gpu_timestamp_query_device_features(device.features()).is_empty();
+        #[cfg(target_os = "macos")]
+        let capability_supported = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        #[cfg(target_os = "windows")]
+        let capability_supported = encoder_timestamps;
+        let mode = if encoder_timestamps {
+            NativeVideoImportTimestampMode::Encoder
+        } else {
+            NativeVideoImportTimestampMode::FusedPass
+        };
         let (ring, inactive_reason) = match activated_capacity(capability_supported, policy) {
             Ok(capacity) => (
                 Some(NativeVideoImportGpuTimestampRing::new(
-                    device, queue, capacity,
+                    device, queue, capacity, mode,
                 )),
                 None,
             ),
@@ -364,7 +388,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn begin_import(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         decode_fence_ready_at_admission: Option<bool>,
     ) -> NativeVideoImportGpuTimingProbe {
         let candidate_token = self.active_candidate.as_ref().map(|active| active.token);
@@ -402,7 +426,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn mark_after_yuv(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         self.mark(
@@ -412,9 +436,24 @@ impl NativeVideoImportGpuTimingRuntime {
         );
     }
 
+    /// Borrow the query set for the one real fused render pass on Metal.
+    /// The pass itself writes both timestamps; no empty pass or CPU clock is
+    /// substituted for GPU execution.
+    #[cfg(target_os = "macos")]
+    pub(super) fn fused_pass_query_set(
+        &mut self,
+        probe: &NativeVideoImportGpuTimingProbe,
+    ) -> Option<(wgpu::QuerySet, u32)> {
+        let NativeVideoImportGpuTimingProbeDisposition::Recording(token) = &probe.disposition
+        else {
+            return None;
+        };
+        self.ring.as_mut()?.fused_pass_query_set(*token)
+    }
+
     pub(super) fn mark_after_input_color(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         self.mark(
@@ -426,7 +465,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     pub(super) fn finish_recording(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
     ) {
         let NativeVideoImportGpuTimingProbeDisposition::Recording(token) = &probe.disposition
@@ -567,7 +606,7 @@ impl NativeVideoImportGpuTimingRuntime {
 
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         probe: &mut NativeVideoImportGpuTimingProbe,
         marker: NativeVideoImportGpuTimestampMarker,
     ) {
@@ -637,7 +676,7 @@ impl NativeVideoImportGpuTimingRuntime {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn activated_capacity(
     capability_supported: bool,
     policy: NativeVideoImportGpuTimingPolicy,
@@ -647,7 +686,7 @@ fn activated_capacity(
             Err("native-import GPU timing is disabled by product policy".to_owned())
         }
         NativeVideoImportGpuTimingPolicy::Enabled { .. } if !capability_supported => Err(
-            "native-import GPU timing requires TIMESTAMP_QUERY and TIMESTAMP_QUERY_INSIDE_ENCODERS"
+            "native-import GPU timing requires TIMESTAMP_QUERY and supported encoder or render-pass timestamp writes"
                 .to_owned(),
         ),
         NativeVideoImportGpuTimingPolicy::Enabled { capacity: 0 } => {
@@ -665,7 +704,7 @@ fn activated_capacity(
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn allocate_token(next: &mut u64) -> Option<u64> {
     let token = *next;
     let successor = token.checked_add(1)?;
@@ -674,34 +713,34 @@ fn allocate_token(next: &mut u64) -> Option<u64> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampToken {
     id: u64,
     slot: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampMetadata {
     candidate_token: NativeVideoImportCandidateToken,
     import_token: NativeVideoImportToken,
     decode_fence_ready_at_admission: Option<bool>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 enum NativeVideoImportGpuTimestampAdmission {
     Recording(NativeVideoImportGpuTimestampToken),
     Dropped,
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 enum NativeVideoImportGpuTimestampMarker {
     AfterYuv,
     AfterInputColor,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl NativeVideoImportGpuTimestampMarker {
     const fn query_index(self) -> u32 {
         match self {
@@ -711,25 +750,34 @@ impl NativeVideoImportGpuTimestampMarker {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampRing {
     slots: Vec<NativeVideoImportGpuTimestampSlot>,
     completed: Vec<NativeVideoImportGpuTimingSample>,
     next_id: u64,
+    mode: NativeVideoImportTimestampMode,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampSlot {
     timer: NativeVideoImportGpuTimestampTimer,
     state: NativeVideoImportGpuTimestampSlotState,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 enum NativeVideoImportGpuTimestampSlotState {
     Free,
     Recording {
         token: NativeVideoImportGpuTimestampToken,
         next_query_index: u32,
+        fused_pass_armed: bool,
+    },
+    AwaitingWork {
+        token: NativeVideoImportGpuTimestampToken,
+        metadata: NativeVideoImportGpuTimestampMetadata,
+        receiver: Receiver<()>,
     },
     Pending {
         token: NativeVideoImportGpuTimestampToken,
@@ -738,24 +786,52 @@ enum NativeVideoImportGpuTimestampSlotState {
     },
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl NativeVideoImportGpuTimestampRing {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, capacity: usize) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capacity: usize,
+        mode: NativeVideoImportTimestampMode,
+    ) -> Self {
         debug_assert!(capacity > 0);
-        debug_assert!(!gpu_timestamp_query_device_features(device.features()).is_empty());
+        debug_assert!(device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
+        // The tested M4 Metal device loses its device at this bound with a
+        // query set per slot. One set gives each slot disjoint pass markers.
+        let shared_query_set = (mode == NativeVideoImportTimestampMode::FusedPass).then(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("mondrian.native-video.shared-import-gpu-timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: u32::try_from(capacity).expect("bounded timestamp capacity")
+                    * mode.query_count(),
+            })
+        });
         let mut slots = Vec::with_capacity(capacity);
         for slot in 0..capacity {
             slots.push(NativeVideoImportGpuTimestampSlot {
-                timer: NativeVideoImportGpuTimestampTimer::new(device, queue, slot),
+                timer: NativeVideoImportGpuTimestampTimer::new(
+                    device,
+                    queue,
+                    slot,
+                    mode,
+                    shared_query_set.as_ref(),
+                ),
                 state: NativeVideoImportGpuTimestampSlotState::Free,
             });
         }
-        Self { slots, completed: Vec::new(), next_id: 1 }
+        Self {
+            slots,
+            completed: Vec::new(),
+            next_id: 1,
+            mode,
+            device: device.clone(),
+            queue: queue.clone(),
+        }
     }
 
     fn begin(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
     ) -> Result<NativeVideoImportGpuTimestampAdmission, String> {
         let Some(slot) = self
             .slots
@@ -769,19 +845,49 @@ impl NativeVideoImportGpuTimestampRing {
         };
         let token = NativeVideoImportGpuTimestampToken { id: self.next_id, slot };
         self.next_id = next_id;
-        self.slots[slot].timer.begin(encoder);
-        self.slots[slot].state =
-            NativeVideoImportGpuTimestampSlotState::Recording { token, next_query_index: 1 };
+        self.slots[slot].timer.begin(encoder)?;
+        self.slots[slot].state = NativeVideoImportGpuTimestampSlotState::Recording {
+            token,
+            next_query_index: if self.mode == NativeVideoImportTimestampMode::Encoder {
+                1
+            } else {
+                0
+            },
+            fused_pass_armed: false,
+        };
         Ok(NativeVideoImportGpuTimestampAdmission::Recording(token))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fused_pass_query_set(
+        &mut self,
+        token: NativeVideoImportGpuTimestampToken,
+    ) -> Option<(wgpu::QuerySet, u32)> {
+        if self.mode != NativeVideoImportTimestampMode::FusedPass {
+            return None;
+        }
+        let slot = self.slots.get_mut(token.slot)?;
+        match &mut slot.state {
+            NativeVideoImportGpuTimestampSlotState::Recording {
+                token: active,
+                next_query_index: 0,
+                fused_pass_armed,
+            } if *active == token && !*fused_pass_armed => {
+                *fused_pass_armed = true;
+                Some((slot.timer.query_set.clone(), slot.timer.query_start_index))
+            }
+            _ => None,
+        }
     }
 
     fn mark(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         token: NativeVideoImportGpuTimestampToken,
         marker: NativeVideoImportGpuTimestampMarker,
     ) -> Result<(), String> {
         let expected = marker.query_index();
+        let mode = self.mode;
         let Some(slot) = self.slots.get_mut(token.slot) else {
             return Err("native-import GPU timestamp token addressed no slot".to_owned());
         };
@@ -789,8 +895,17 @@ impl NativeVideoImportGpuTimestampRing {
             NativeVideoImportGpuTimestampSlotState::Recording {
                 token: active,
                 next_query_index,
-            } if *active == token && *next_query_index == expected => {
-                slot.timer.mark(encoder, marker);
+                fused_pass_armed,
+            } if *active == token
+                && *next_query_index
+                    == if mode == NativeVideoImportTimestampMode::Encoder {
+                        expected
+                    } else {
+                        expected - 1
+                    }
+                && (mode == NativeVideoImportTimestampMode::Encoder || *fused_pass_armed) =>
+            {
+                slot.timer.mark(encoder, marker)?;
                 *next_query_index = next_query_index.saturating_add(1);
                 Ok(())
             }
@@ -803,11 +918,13 @@ impl NativeVideoImportGpuTimestampRing {
 
     fn finish(
         &mut self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         token: NativeVideoImportGpuTimestampToken,
     ) -> Result<(), String> {
         self.validate_recording_complete(token)?;
-        self.slots[token.slot].timer.finish(encoder);
+        if self.mode == NativeVideoImportTimestampMode::Encoder {
+            self.slots[token.slot].timer.finish(encoder)?;
+        }
         Ok(())
     }
 
@@ -835,6 +952,15 @@ impl NativeVideoImportGpuTimestampRing {
         metadata: NativeVideoImportGpuTimestampMetadata,
     ) -> Result<(), String> {
         self.validate_recording_complete(token)?;
+        if self.mode == NativeVideoImportTimestampMode::FusedPass {
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            self.queue.on_submitted_work_done(move || {
+                let _ = sender.send(());
+            });
+            self.slots[token.slot].state =
+                NativeVideoImportGpuTimestampSlotState::AwaitingWork { token, metadata, receiver };
+            return Ok(());
+        }
         let receiver = self.slots[token.slot].timer.map_async();
         self.slots[token.slot].state =
             NativeVideoImportGpuTimestampSlotState::Pending { token, metadata, receiver };
@@ -859,6 +985,7 @@ impl NativeVideoImportGpuTimestampRing {
                 matches!(
                     slot.state,
                     NativeVideoImportGpuTimestampSlotState::Pending { .. }
+                        | NativeVideoImportGpuTimestampSlotState::AwaitingWork { .. }
                 )
             })
             .count() as u64
@@ -876,7 +1003,10 @@ impl NativeVideoImportGpuTimestampRing {
             NativeVideoImportGpuTimestampSlotState::Recording {
                 token: active,
                 next_query_index,
-            } if active == token && next_query_index == NATIVE_IMPORT_TIMESTAMP_COUNT
+                fused_pass_armed,
+            } if active == token
+                && next_query_index == self.mode.query_count()
+                && (self.mode == NativeVideoImportTimestampMode::Encoder || fused_pass_armed)
         ) {
             Ok(())
         } else {
@@ -886,6 +1016,43 @@ impl NativeVideoImportGpuTimestampRing {
 
     fn collect_ready(&mut self) -> Result<(), String> {
         for index in 0..self.slots.len() {
+            let work_completed = match &self.slots[index].state {
+                NativeVideoImportGpuTimestampSlotState::AwaitingWork { receiver, .. } => {
+                    match receiver.try_recv() {
+                        Ok(()) => true,
+                        Err(TryRecvError::Empty) => false,
+                        Err(TryRecvError::Disconnected) => {
+                            return Err(
+                                "native-import GPU timestamp work callback was dropped".to_owned()
+                            );
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if work_completed {
+                let state = std::mem::replace(
+                    &mut self.slots[index].state,
+                    NativeVideoImportGpuTimestampSlotState::Free,
+                );
+                let NativeVideoImportGpuTimestampSlotState::AwaitingWork {
+                    token, metadata, ..
+                } = state
+                else {
+                    return Err(
+                        "native-import GPU timestamp work state changed before resolve".to_owned(),
+                    );
+                };
+                let mut encoder =
+                    self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("mondrian.native-video.timestamp-resolve-after-completion"),
+                    });
+                self.slots[index].timer.finish(&mut encoder)?;
+                self.queue.submit([encoder.finish()]);
+                let receiver = self.slots[index].timer.map_async();
+                self.slots[index].state =
+                    NativeVideoImportGpuTimestampSlotState::Pending { token, metadata, receiver };
+            }
             let callback = match &self.slots[index].state {
                 NativeVideoImportGpuTimestampSlotState::Pending { receiver, .. } => {
                     match receiver.try_recv() {
@@ -899,7 +1066,8 @@ impl NativeVideoImportGpuTimestampRing {
                     }
                 }
                 NativeVideoImportGpuTimestampSlotState::Free
-                | NativeVideoImportGpuTimestampSlotState::Recording { .. } => None,
+                | NativeVideoImportGpuTimestampSlotState::Recording { .. }
+                | NativeVideoImportGpuTimestampSlotState::AwaitingWork { .. } => None,
             };
             let Some(callback) = callback else {
                 continue;
@@ -934,29 +1102,43 @@ impl NativeVideoImportGpuTimestampRing {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 struct NativeVideoImportGpuTimestampTimer {
     query_set: wgpu::QuerySet,
+    query_start_index: u32,
     resolve_buffer: wgpu::Buffer,
     readback_buffer: wgpu::Buffer,
     timestamp_period_ns: f64,
+    mode: NativeVideoImportTimestampMode,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 impl NativeVideoImportGpuTimestampTimer {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, slot: usize) -> Self {
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some(&format!(
-                "mondrian.native-video.import-gpu-timestamps.slot-{slot}"
-            )),
-            ty: wgpu::QueryType::Timestamp,
-            count: NATIVE_IMPORT_TIMESTAMP_COUNT,
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot: usize,
+        mode: NativeVideoImportTimestampMode,
+        shared_query_set: Option<&wgpu::QuerySet>,
+    ) -> Self {
+        let readback_bytes = mode.query_count() as u64 * wgpu::QUERY_SIZE as u64;
+        let query_start_index = shared_query_set.map_or(0, |_| {
+            u32::try_from(slot).expect("bounded timestamp slot") * mode.query_count()
+        });
+        let query_set = shared_query_set.cloned().unwrap_or_else(|| {
+            device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some(&format!(
+                    "mondrian.native-video.import-gpu-timestamps.slot-{slot}"
+                )),
+                ty: wgpu::QueryType::Timestamp,
+                count: mode.query_count(),
+            })
         });
         let resolve_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!(
                 "mondrian.native-video.import-gpu-timestamp-resolve.slot-{slot}"
             )),
-            size: NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES,
+            size: readback_bytes,
             usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -964,44 +1146,61 @@ impl NativeVideoImportGpuTimestampTimer {
             label: Some(&format!(
                 "mondrian.native-video.import-gpu-timestamp-readback.slot-{slot}"
             )),
-            size: NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES,
+            size: readback_bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
         Self {
             query_set,
+            query_start_index,
             resolve_buffer,
             readback_buffer,
             timestamp_period_ns: f64::from(queue.get_timestamp_period()),
+            mode,
         }
     }
 
-    fn begin(&self, encoder: &mut wgpu::CommandEncoder) {
-        encoder.write_timestamp(&self.query_set, 0);
+    fn begin(&self, encoder: &mut dyn crate::gpu_command::GpuCommandEncoder) -> Result<(), String> {
+        if self.mode == NativeVideoImportTimestampMode::Encoder {
+            encoder.write_timestamp(&self.query_set, self.query_start_index)
+        } else {
+            Ok(())
+        }
     }
 
     fn mark(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
         marker: NativeVideoImportGpuTimestampMarker,
-    ) {
-        encoder.write_timestamp(&self.query_set, marker.query_index());
+    ) -> Result<(), String> {
+        if self.mode == NativeVideoImportTimestampMode::Encoder {
+            encoder.write_timestamp(
+                &self.query_set,
+                self.query_start_index + marker.query_index(),
+            )
+        } else {
+            Ok(())
+        }
     }
 
-    fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn finish(
+        &self,
+        encoder: &mut dyn crate::gpu_command::GpuCommandEncoder,
+    ) -> Result<(), String> {
         encoder.resolve_query_set(
             &self.query_set,
-            0..NATIVE_IMPORT_TIMESTAMP_COUNT,
+            self.query_start_index..self.query_start_index + self.mode.query_count(),
             &self.resolve_buffer,
             0,
-        );
+        )?;
         encoder.copy_buffer_to_buffer(
             &self.resolve_buffer,
             0,
             &self.readback_buffer,
             0,
-            NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES,
+            Some(self.mode.query_count() as u64 * wgpu::QUERY_SIZE as u64),
         );
+        Ok(())
     }
 
     fn map_async(&self) -> Receiver<Result<(), wgpu::BufferAsyncError>> {
@@ -1023,16 +1222,18 @@ impl NativeVideoImportGpuTimestampTimer {
                 ));
             }
         };
-        if mapped.len() < NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES as usize {
+        if mapped.len() < self.mode.query_count() as usize * wgpu::QUERY_SIZE as usize {
             drop(mapped);
             self.readback_buffer.unmap();
             return Err(
-                "native-import GPU timestamp readback contained fewer than three counters"
+                "native-import GPU timestamp readback contained fewer counters than recorded"
                     .to_owned(),
             );
         }
         let mut counters = [0_u64; NATIVE_IMPORT_TIMESTAMP_COUNT as usize];
-        for (index, counter) in counters.iter_mut().enumerate() {
+        for (index, counter) in
+            counters.iter_mut().take(self.mode.query_count() as usize).enumerate()
+        {
             let offset = index * wgpu::QUERY_SIZE as usize;
             let mut bytes = [0_u8; 8];
             bytes.copy_from_slice(&mapped[offset..offset + 8]);
@@ -1040,14 +1241,21 @@ impl NativeVideoImportGpuTimestampTimer {
         }
         drop(mapped);
         self.readback_buffer.unmap();
-        Ok((
-            timestamp_elapsed_us(counters[0], counters[1], self.timestamp_period_ns)?,
-            timestamp_elapsed_us(counters[1], counters[2], self.timestamp_period_ns)?,
-        ))
+        let fused = timestamp_elapsed_us(counters[0], counters[1], self.timestamp_period_ns)?;
+        Ok(if self.mode == NativeVideoImportTimestampMode::Encoder {
+            (
+                fused,
+                timestamp_elapsed_us(counters[1], counters[2], self.timestamp_period_ns)?,
+            )
+        } else {
+            // One real render pass fuses YUV sampling with input OCIO. There
+            // is no second GPU pass to attribute to input color separately.
+            (fused, 0)
+        })
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn timestamp_elapsed_us(start: u64, end: u64, timestamp_period_ns: f64) -> Result<u64, String> {
     let ticks = end.checked_sub(start).ok_or_else(|| {
         format!("native-import GPU timestamp counter regressed from {start} to {end}")
@@ -1056,7 +1264,7 @@ fn timestamp_elapsed_us(start: u64, end: u64, timestamp_period_ns: f64) -> Resul
     Ok(elapsed_us.min(u64::MAX as f64) as u64)
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 mod tests {
     use super::*;
 
@@ -1270,6 +1478,7 @@ mod tests {
             .contains("regressed"));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn activated_runtime_reports_scheduled_samples_bounded_drop_and_failed_scope_tokens() {
         let _gpu_permit = crate::context::TestGpuContextPermit::acquire();

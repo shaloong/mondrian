@@ -50,9 +50,11 @@ windows = { workspace = true }
 wgpu = { workspace = true, features = ["static-dxc"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVReturn", "objc2", "objc2-metal"] }
-objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLTexture"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLTexture", "MTLBuffer", "MTLResource", "MTLCommandQueue", "MTLCommandBuffer", "MTLBlitCommandEncoder", "MTLCommandEncoder", "MTLAllocation", "MTLTypes", "block2"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

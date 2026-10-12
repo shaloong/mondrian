@@ -5,6 +5,7 @@
 //! typed frame materialization, and final cancellation publication. The
 //! parent module exposes only the request/outcome contract and session reset.
 
+use super::codec::PreviewCodec;
 use super::demux_source::{
     PreviewDemuxWorkerConfig, PreviewPacketRead, PreviewPacketSeek, PreviewPacketSource,
     PreviewPacketSourceOpen, PreviewPacketSourceOpenError,
@@ -471,6 +472,14 @@ impl PreviewDecodeSessionContext {
         should_cancel: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<PreviewDecodeOutcome> {
         let _execution = self.execution_observer.begin_request();
+        tracing::debug!(
+            request_sequence = self.execution_observer.snapshot().request_sequence,
+            worker_thread = std::thread::current().name(),
+            path = %request.path.display(),
+            source_sample = ?request.source_sample,
+            access_mode = ?request.access_mode,
+            "started observed Preview decoder request"
+        );
         let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
         let requested_hardware = request.hardware_decode_request;
         let quarantine_key = PreviewHardwareFailureQuarantineKey::from_request(&request);
@@ -574,6 +583,7 @@ fn mark_runtime_hardware_fallback(
     let diagnostics = match &mut outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
@@ -997,8 +1007,8 @@ struct PreviewDecodeSession {
     playback_ring: PreviewPlaybackRing,
     /// Session-owned progressive/pass-through or BWDIF field processor.
     field_processor: super::field_processing::PreviewFieldProcessingSession,
-    decoder: ffmpeg::decoder::Video,
-    scaler: Option<ffmpeg::software::scaling::Context>,
+    decoder: PreviewCodec,
+    scaler: Option<super::scaler::PreviewScaler>,
     scaler_format_contract: Option<(
         ffmpeg::util::format::pixel::Pixel,
         ffmpeg::util::format::pixel::Pixel,
@@ -1011,6 +1021,9 @@ struct PreviewDecodeSession {
     stream_tb: ffmpeg::Rational,
     /// Absolute stream PTS representing media-source-local time zero.
     stream_start_pts: i64,
+    /// The freshly opened demux cursor still owns the source's initial packet
+    /// prefix. Neither codec flush nor cancellation restores this fact.
+    at_demux_origin: bool,
     frame_duration_pts: i64,
     target_width: u32,
     target_height: u32,
@@ -1131,14 +1144,15 @@ pub(super) fn decoded_temporal_candidate_within_selection_distance(
 
 enum PreviewSeekToTarget {
     Complete(PreviewSeekResolution),
-    DirectCanceled,
-    IsolatedCanceled,
+    DirectCanceled(PreviewDecodeCancellationCheckpoint),
+    IsolatedCanceled(PreviewDecodeCancellationCheckpoint),
 }
 
 #[derive(Debug, Clone)]
 pub(super) enum PreviewDecodedFramePayload {
     CpuRgba(RgbaFrame),
     CpuFloat(FloatRgbaFrame),
+    CpuUnorm16(Unorm16RgbaFrame),
     CpuYuv(CpuYuvFrame),
     NativeGpu(PreviewNativeDecodedFrame),
 }
@@ -1155,6 +1169,12 @@ impl From<FloatRgbaFrame> for PreviewDecodedFramePayload {
     }
 }
 
+impl From<Unorm16RgbaFrame> for PreviewDecodedFramePayload {
+    fn from(frame: Unorm16RgbaFrame) -> Self {
+        Self::CpuUnorm16(frame)
+    }
+}
+
 impl From<CpuYuvFrame> for PreviewDecodedFramePayload {
     fn from(frame: CpuYuvFrame) -> Self {
         Self::CpuYuv(frame)
@@ -1166,6 +1186,9 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => frame.rgba().len(),
             Self::CpuFloat(frame) => frame.rgba().len().saturating_mul(std::mem::size_of::<f32>()),
+            Self::CpuUnorm16(frame) => {
+                frame.rgba().len().saturating_mul(std::mem::size_of::<u16>())
+            }
             Self::CpuYuv(frame) => frame.retained_bytes(),
             Self::NativeGpu(_) => 0,
         }
@@ -1175,6 +1198,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.into_playback_ring_hit(elapsed)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.into_playback_ring_hit(elapsed)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.into_playback_ring_hit(elapsed)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.into_playback_ring_hit(elapsed)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1192,6 +1216,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_temporal_selection(requested_pts, selected_extent))
             }
+            Self::CpuUnorm16(frame) => {
+                Self::CpuUnorm16(frame.with_temporal_selection(requested_pts, selected_extent))
+            }
             Self::CpuYuv(frame) => {
                 Self::CpuYuv(frame.with_temporal_selection(requested_pts, selected_extent))
             }
@@ -1203,6 +1230,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_access_policy(policy)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_access_policy(policy)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_access_policy(policy)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_access_policy(policy)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1220,6 +1248,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_seek_index_diagnostics(diagnostics, resolution))
             }
+            Self::CpuUnorm16(frame) => {
+                Self::CpuUnorm16(frame.with_seek_index_diagnostics(diagnostics, resolution))
+            }
             Self::CpuYuv(frame) => {
                 Self::CpuYuv(frame.with_seek_index_diagnostics(diagnostics, resolution))
             }
@@ -1231,6 +1262,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_stage_durations(durations)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_stage_durations(durations)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_stage_durations(durations)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_stage_durations(durations)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1240,6 +1272,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_hardware_decode_plan(plan)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_hardware_decode_plan(plan)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_hardware_decode_plan(plan)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_hardware_decode_plan(plan)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1249,6 +1282,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_decoded_surface_format(format)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_decoded_surface_format(format)),
+            Self::CpuUnorm16(frame) => Self::CpuUnorm16(frame.with_decoded_surface_format(format)),
             Self::CpuYuv(frame) => Self::CpuYuv(frame.with_decoded_surface_format(format)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
@@ -1258,6 +1292,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => PreviewDecodeOutcome::Frame(frame),
             Self::CpuFloat(frame) => PreviewDecodeOutcome::FloatFrame(frame),
+            Self::CpuUnorm16(frame) => PreviewDecodeOutcome::Unorm16Frame(frame),
             Self::CpuYuv(frame) => PreviewDecodeOutcome::CpuYuvFrame(frame),
             Self::NativeGpu(frame) => PreviewDecodeOutcome::NativeGpuFrame(frame),
         }
@@ -1291,6 +1326,10 @@ impl RetainedDecodedFrame {
 
     fn reserved_bytes(&self) -> usize {
         let frame = self.frame();
+        #[cfg(target_os = "macos")]
+        if let Some(bytes) = super::native_frame::ffmpeg_cv_pixel_buffer_allocation_bytes(frame) {
+            return bytes;
+        }
         let plane_bytes = (0..frame.planes()).fold(0usize, |total, plane| {
             total.saturating_add(
                 frame.stride(plane).saturating_mul(frame.plane_height(plane) as usize),
@@ -1299,9 +1338,9 @@ impl RetainedDecodedFrame {
         if plane_bytes > 0 {
             return plane_bytes;
         }
-        // Hardware frames often expose no CPU linesize. Charge a conservative
-        // four bytes per coded pixel so the byte bound remains meaningful in
-        // addition to the independent retained-surface count.
+        // Backends without an allocation-size query may expose no CPU linesize.
+        // Keep the existing fallback charge alongside their independent retained
+        // surface count; CoreVideo uses its actual allocation size above.
         (frame.width() as usize)
             .saturating_mul(frame.height() as usize)
             .saturating_mul(4)
@@ -1544,6 +1583,7 @@ use playback_ring::PreviewPlaybackRing;
 fn preview_decode_context_from_parameters(
     parameters: ffmpeg::codec::Parameters,
     threading: ffmpeg::codec::threading::Config,
+    stream_time_base: ffmpeg::Rational,
     path: &Path,
 ) -> Result<ffmpeg::codec::context::Context> {
     let mut context =
@@ -1554,6 +1594,10 @@ fn preview_decode_context_from_parameters(
             }
         })?;
     context.set_threading(threading);
+    // AVCodecParameters does not carry packet time base. FFmpeg needs this
+    // before codec open to preserve packet duration on decoded AVFrames.
+    // SAFETY: context is newly allocated and exclusively owned here.
+    unsafe { (*context.as_mut_ptr()).pkt_timebase = stream_time_base.into() };
     Ok(context)
 }
 
@@ -1625,15 +1669,23 @@ pub(super) fn preview_create_rgba_scaler(
     target_width: u32,
     target_height: u32,
     path: &Path,
-) -> Result<ffmpeg::software::scaling::Context> {
-    ffmpeg::software::scaling::Context::get(
+) -> Result<super::scaler::PreviewScaler> {
+    super::scaler::PreviewScaler::get(
         source_format,
         source_width,
         source_height,
         destination_format,
         target_width,
         target_height,
-        ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
+        // The default RGB converter reuses one chroma sample for each horizontal
+        // pixel pair, even for 4:4:4 input. Preserve the decoded chroma grid.
+        // Truncated conversion maps limited-range white to 253 instead of 255
+        // on the ARM path. Preserve code endpoints before the working transform.
+        // FAST_BILINEAR changes chroma coordinates on x86 instead of retaining
+        // the frame-derived sample positions. Use the exact bilinear filter.
+        ffmpeg::software::scaling::flag::Flags::BILINEAR
+            | ffmpeg::software::scaling::flag::Flags::FULL_CHR_H_INT
+            | ffmpeg::software::scaling::flag::Flags::ACCURATE_RND,
     )
     .map_err(|e| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
@@ -1676,6 +1728,7 @@ impl PreviewDecodeSession {
             requested_video_stream_index: self.requested_video_stream_index,
             opened: PreviewPacketSourceOpen {
                 source,
+                at_demux_origin: self.at_demux_origin,
                 parameters: self.source_parameters.clone(),
                 stream_index: self.stream_index,
                 stream_tb: self.stream_tb,
@@ -1752,6 +1805,7 @@ impl PreviewDecodeSession {
         }
         let PreviewPacketSourceOpen {
             source,
+            at_demux_origin,
             parameters,
             stream_index,
             stream_tb,
@@ -1776,20 +1830,13 @@ impl PreviewDecodeSession {
             ffmpeg::codec::Profile::from((codec_id, (*parameters.as_ptr()).profile))
         };
         hardware_decode_plan.apply_stream_profile(stream_profile);
-        let decode_pixels = unsafe {
-            // `parameters` owns a valid AVCodecParameters allocation for this
-            // Session open; FFmpeg fills coded width/height during demux probe.
-            let raw = parameters.as_ptr();
-            u64::from((*raw).width.max(0) as u32)
-                .saturating_mul(u64::from((*raw).height.max(0) as u32))
-        };
         let requested_threading = preview_decode_threading_config_for_codec(
             codec_id,
+            HwAccelBackend::None,
             access_mode,
-            decode_pixels,
             decoder_thread_limit,
         );
-        let ffmpeg_threading = ffmpeg::codec::threading::Config {
+        let software_threading = ffmpeg::codec::threading::Config {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
         };
@@ -1803,8 +1850,12 @@ impl PreviewDecodeSession {
                 stream_profile,
             )
         {
-            let probe_context =
-                preview_decode_context_from_parameters(parameters.clone(), ffmpeg_threading, path)?;
+            let probe_context = preview_decode_context_from_parameters(
+                parameters.clone(),
+                software_threading,
+                stream_tb,
+                path,
+            )?;
             let probe_decoder =
                 probe_context.decoder().video().map_err(|error| MondrianError::DecodeFailed {
                     asset_id: path.display().to_string(),
@@ -1840,17 +1891,75 @@ impl PreviewDecodeSession {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        let native_decoder = {
+            // SAFETY: These source parameters remain owned throughout setup.
+            let raw = unsafe { &*parameters.as_ptr() };
+            let direct_codec = ((codec_id == ffmpeg::codec::Id::PRORES
+                && super::videotoolbox::prores_chroma_format_for_tag(raw.codec_tag.swap_bytes())
+                    .is_some())
+                || (codec_id == ffmpeg::codec::Id::HEVC
+                    && super::videotoolbox::hevc::source_sampling(raw.profile, raw.format)
+                        .is_some()
+                    && raw.color_range == ffmpeg::ffi::AVColorRange::AVCOL_RANGE_MPEG))
+                && hardware_decode_request.prefers_gpu_residency()
+                && backend != PreviewDecodeBackend::Software
+                && !field_processing.requires_cpu_decode()
+                && hardware_decode_plan.probe.candidate_backend
+                    == Some(HwAccelBackend::VideoToolbox);
+            if direct_codec {
+                let range = source_color.range.resolve_for_frame(
+                    crate::decoder::decoded_video_range_from_ffmpeg(raw.color_range.into()),
+                );
+                match PreviewCodec::videotoolbox(&parameters, stream_tb, range) {
+                    Ok(decoder) => Some(decoder),
+                    Err(super::codec::PreviewCodecError::Hevc(
+                        super::videotoolbox::hevc::HevcContractError::UnsupportedLayers,
+                    )) => {
+                        // The direct adapter cannot interpret auxiliary layers.
+                        // Leave the complete stream with the existing FFmpeg
+                        // codec adapter; its output still has to prove residency
+                        // and retains unknown hardware execution when unobserved.
+                        preview_trace("[preview] direct VideoToolbox single-layer capability unavailable; retaining FFmpeg codec ownership for the complete HEVC stream".to_owned());
+                        None
+                    }
+                    Err(error) => {
+                        return Err(MondrianError::DecodeFailed {
+                            asset_id: path.display().to_string(),
+                            reason: format!("direct VideoToolbox codec setup failed: {error}"),
+                        });
+                    }
+                }
+            } else {
+                None
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let native_decoder: Option<PreviewCodec> = None;
+
         let mut hardware_decode_context_state = None;
         let mut hardware_device_context = None;
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
-        let hardware_decoder = if !field_processing.requires_cpu_decode()
+        let hardware_decoder = if native_decoder.is_none()
+            && !field_processing.requires_cpu_decode()
             && hardware_decode_plan.should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
             loop {
+                let requested_threading = preview_decode_threading_config_for_codec(
+                    codec_id,
+                    hardware_decode_plan.probe.candidate_backend.unwrap_or(HwAccelBackend::None),
+                    access_mode,
+                    decoder_thread_limit,
+                );
+                let hardware_threading = ffmpeg::codec::threading::Config {
+                    kind: requested_threading.kind.to_ffmpeg(),
+                    count: requested_threading.count,
+                };
                 let mut context = preview_decode_context_from_parameters(
                     parameters.clone(),
-                    ffmpeg_threading,
+                    hardware_threading,
+                    stream_tb,
                     path,
                 )?;
                 interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::HardwareDevice);
@@ -1929,24 +2038,31 @@ impl PreviewDecodeSession {
             None
         };
 
-        let decoder = match hardware_decoder {
+        let decoder = match native_decoder {
             Some(decoder) => decoder,
-            None => {
-                interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
-                match preopened_software_decoder {
-                    Some(decoder) => decoder,
-                    None => {
-                        preview_decode_context_from_parameters(parameters, ffmpeg_threading, path)?
-                            .decoder()
-                            .video()
-                            .map_err(|error| MondrianError::DecodeFailed {
-                                asset_id: path.display().to_string(),
-                                reason: error.to_string(),
-                            })?
+            None => PreviewCodec::Ffmpeg(match hardware_decoder {
+                Some(decoder) => decoder,
+                None => {
+                    interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::CodecOpen);
+                    match preopened_software_decoder {
+                        Some(decoder) => decoder,
+                        None => preview_decode_context_from_parameters(
+                            parameters,
+                            software_threading,
+                            stream_tb,
+                            path,
+                        )?
+                        .decoder()
+                        .video()
+                        .map_err(|error| MondrianError::DecodeFailed {
+                            asset_id: path.display().to_string(),
+                            reason: error.to_string(),
+                        })?,
                     }
                 }
-            }
+            }),
         };
+        hardware_decode_plan.native_decode_path = decoder.native_decode_path();
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
         let active_threading = decoder.threading();
         let threading_kind = PreviewDecodeThreadingKind::from_ffmpeg(active_threading.kind);
@@ -1990,6 +2106,7 @@ impl PreviewDecodeSession {
             stream_tb,
             stream_start_pts,
             frame_duration_pts,
+            at_demux_origin,
             target_width,
             target_height,
             _hardware_decode_context_state: hardware_decode_context_state,
@@ -2107,15 +2224,14 @@ impl PreviewDecodeSession {
     /// The codec allocation and immutable hardware device remain reusable, but
     /// demux/codec position cannot: cancellation may have occurred after a
     /// packet was submitted or while reordered output was only partly drained.
-    /// Clearing position forces the next request through indexed seek + flush.
+    /// Clearing decoded position forces indexed seek + flush unless the source
+    /// still owns its untouched initial packet prefix.
     fn recover_after_cancellation(&mut self) {
         // SAFETY: this worker exclusively owns the open decoder and calls flush
         // only after the interrupted decode operation has returned.
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
-        unsafe {
-            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
-        }
+        self.decoder.flush();
         self.decoder.skip_frame(ffmpeg::codec::discard::Discard::Default);
         self.last_pts = None;
         self.duplicate_decoded_pts = None;
@@ -2236,7 +2352,13 @@ impl PreviewDecodeSession {
                 })
                 .unwrap_or(false);
 
-        let seek_performed = !(should_continue_forward || reverse_window_covers_target);
+        // A container index is a seek locator, not proof of an independently
+        // decodable packet. Seeking the first PTS can skip the initial key
+        // packet's earlier DTS even when that index claims a keyframe there.
+        // A pristine source already owns the initial packet prefix.
+        let can_decode_origin = self.at_demux_origin && decode_target_pts == self.stream_start_pts;
+        let seek_performed =
+            !(should_continue_forward || reverse_window_covers_target || can_decode_origin);
         let mut seek_resolution = PreviewSeekResolution::default();
         let mut seek_us = 0;
         if seek_performed {
@@ -2249,17 +2371,14 @@ impl PreviewDecodeSession {
             let seek_started_at = Instant::now();
             seek_resolution = match self.seek_to_target(decode_target_pts, policy, should_cancel) {
                 Ok(PreviewSeekToTarget::Complete(resolution)) => resolution,
-                Ok(PreviewSeekToTarget::DirectCanceled) => {
+                Ok(PreviewSeekToTarget::DirectCanceled(checkpoint)) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        self.interrupt_state
-                            .cancellation(PreviewDecodeCancellationCheckpoint::Seek),
+                        self.interrupt_state.cancellation(checkpoint),
                     ));
                 }
-                Ok(PreviewSeekToTarget::IsolatedCanceled) => {
+                Ok(PreviewSeekToTarget::IsolatedCanceled(checkpoint)) => {
                     return Ok(PreviewDecodeOutcome::Canceled(
-                        PreviewDecodeCancellation::isolated_demux_termination(
-                            PreviewDecodeCancellationCheckpoint::Seek,
-                        ),
+                        PreviewDecodeCancellation::isolated_demux_termination(checkpoint),
                     ));
                 }
                 Err(_) if should_cancel() => {
@@ -2382,6 +2501,42 @@ impl PreviewDecodeSession {
                     }
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
+                PreviewDecodedFramePayload::CpuUnorm16(frame) => {
+                    let conversion_us = frame
+                        .diagnostics
+                        .stage_durations
+                        .hardware_transfer_us
+                        .saturating_add(frame.diagnostics.stage_durations.swscale_us)
+                        .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+                    let packet_decode_us =
+                        duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
+                    let frame = frame
+                        .with_access_mode(access_mode)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us,
+                            seek_us,
+                            packet_decode_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_temporal_selection(target_pts, result.selected_extent)
+                        .with_access_policy(policy)
+                        .with_forward_reused(should_continue_forward)
+                        .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
+                        .with_threading(self.threading_kind, self.threading_count)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format)
+                        .with_decode_execution();
+                    if policy.use_playback_ring
+                        && let Some(selected_extent) = result.selected_extent
+                    {
+                        self.playback_ring.put(
+                            selected_extent,
+                            PreviewDecodedFramePayload::CpuUnorm16(frame.clone()),
+                        );
+                    }
+                    return Ok(PreviewDecodeOutcome::Unorm16Frame(frame));
+                }
                 PreviewDecodedFramePayload::CpuYuv(frame) => {
                     let conversion_us = frame
                         .diagnostics
@@ -2440,6 +2595,8 @@ impl PreviewDecodeSession {
                     diagnostics.seek_index_source = seek_index.source;
                     diagnostics.seek_index_used = seek_resolution.used_index;
                     diagnostics.seek_index_anchor_pts = seek_resolution.anchor_pts;
+                    diagnostics.origin_restart_seek_error =
+                        seek_resolution.origin_restart_seek_error;
                     diagnostics.threading_kind = self.threading_kind;
                     diagnostics.threading_count =
                         self.threading_count.min(u32::MAX as usize) as u32;
@@ -2556,16 +2713,88 @@ impl PreviewDecodeSession {
             });
         }
 
+        // A first random request has not observed any packet yet. Preserve
+        // evidence from the pristine prefix before a container locator can
+        // skip it. The real key packet's DTS can precede the first indexed PTS.
+        // This reads through the same packet owner and never materializes a
+        // hidden frame or introduces a second decoding path.
+        let mut probe_work_units = 0;
+        if self.at_demux_origin {
+            loop {
+                if policy.forward_decode_budget_exhausted(probe_work_units) {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "initial seek packet probe exhausted the forward-work budget"
+                            .to_owned(),
+                    });
+                }
+                self.at_demux_origin = false;
+                self.interrupt_state
+                    .set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
+                let source =
+                    self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "retired decoder has no packet source".to_owned(),
+                    })?;
+                let packet = match source.read_next(&self.path, should_cancel)? {
+                    PreviewPacketRead::Packet(packet) => packet,
+                    PreviewPacketRead::End => {
+                        return Err(MondrianError::DecodeFailed {
+                            asset_id: self.path.display().to_string(),
+                            reason: "initial seek packet probe reached EOF before video".to_owned(),
+                        });
+                    }
+                    PreviewPacketRead::DirectCanceled => {
+                        return Ok(PreviewSeekToTarget::DirectCanceled(
+                            PreviewDecodeCancellationCheckpoint::PacketRead,
+                        ));
+                    }
+                    PreviewPacketRead::IsolatedCanceled => {
+                        return Ok(PreviewSeekToTarget::IsolatedCanceled(
+                            PreviewDecodeCancellationCheckpoint::PacketRead,
+                        ));
+                    }
+                };
+                if should_cancel() {
+                    return Ok(PreviewSeekToTarget::DirectCanceled(
+                        PreviewDecodeCancellationCheckpoint::PacketRead,
+                    ));
+                }
+                probe_work_units += 1;
+                if packet.stream() == self.stream_index {
+                    self.seek_index.observe_packet(&packet);
+                    break;
+                }
+            }
+        }
+        // Decode dependencies include the field processor's temporal window,
+        // not only codec keyframes. Seek from the preceding decode root while
+        // retaining the original exact sample as the selection target. If no
+        // root is known, the pristine origin is the only proven predecessor;
+        // the existing work budget still bounds this decode.
+        let target_pts = if self.field_processor.requires_temporal_preroll() {
+            match self.seek_index.keyframe_at_or_before(target_pts) {
+                Some(anchor) if anchor > self.stream_start_pts => anchor - 1,
+                Some(anchor) => anchor,
+                None => self.stream_start_pts,
+            }
+        } else {
+            target_pts
+        };
         let seek_anchor_pts = self.seek_index.keyframe_at_or_before(target_pts);
-        let (min_ts, seek_target_ts, max_ts, seek_flags, used_anchor_pts) = match policy
+        let (min_ts, seek_target_ts, max_ts, seek_flags, mut used_anchor_pts) = match policy
             .seek_strategy
         {
             PreviewDecodeSeekStrategy::KeyframeBefore => {
-                // 关键帧安全模式：不限制 backward seek 范围，避免长 GOP 时落到不可独立解码帧。
+                // Container indexes identify decode timestamps, not the target
+                // picture's presentation timestamp. Seek the known key packet
+                // itself; some demuxers otherwise land on a dependent packet
+                // between that root and the requested PTS.
+                let seek_target = seek_anchor_pts.unwrap_or(target_pts);
                 (
                     seek_anchor_pts.unwrap_or(i64::MIN),
-                    target_pts,
-                    target_pts,
+                    seek_target,
+                    seek_target,
                     ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
                     seek_anchor_pts,
                 )
@@ -2607,8 +2836,8 @@ impl PreviewDecodeSession {
                 if let Some(anchor_pts) = used_anchor_pts {
                     (
                         anchor_pts,
-                        target_pts,
-                        target_pts,
+                        anchor_pts,
+                        anchor_pts,
                         ffmpeg::ffi::AVSEEK_FLAG_BACKWARD,
                         Some(anchor_pts),
                     )
@@ -2624,6 +2853,8 @@ impl PreviewDecodeSession {
             }
         };
 
+        self.at_demux_origin = false;
+        self.interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Seek);
         let source = self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
             asset_id: self.path.display().to_string(),
             reason: "retired decoder has no packet source".to_owned(),
@@ -2637,18 +2868,70 @@ impl PreviewDecodeSession {
             &self.path,
             should_cancel,
         )?;
+        let mut origin_restart_seek_error = None;
         match seek {
-            PreviewPacketSeek::DirectCanceled => return Ok(PreviewSeekToTarget::DirectCanceled),
+            PreviewPacketSeek::DirectCanceled => {
+                return Ok(PreviewSeekToTarget::DirectCanceled(
+                    PreviewDecodeCancellationCheckpoint::Seek,
+                ));
+            }
             PreviewPacketSeek::IsolatedCanceled => {
-                return Ok(PreviewSeekToTarget::IsolatedCanceled)
+                return Ok(PreviewSeekToTarget::IsolatedCanceled(
+                    PreviewDecodeCancellationCheckpoint::Seek,
+                ));
             }
             PreviewPacketSeek::Complete => {}
+            PreviewPacketSeek::Unavailable(code) => {
+                if !self.fingerprint.authorizes_reuse() {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!("seek failed with code {code}; source revision does not authorize reopening"),
+                    });
+                }
+                let config = self
+                    .packet_source
+                    .take()
+                    .expect("live packet source")
+                    .retire_for_origin_restart(&self.path)?;
+                let opened = match PreviewPacketSource::open(
+                    &self.path,
+                    self.fingerprint,
+                    Some(self.stream_index as u32),
+                    &PreviewSeekIndexCache::default(),
+                    config.as_ref(),
+                    &self.interrupt_state,
+                    should_cancel,
+                ) {
+                    Ok(opened) => opened,
+                    Err(PreviewPacketSourceOpenError::DirectCanceled) => {
+                        return Ok(PreviewSeekToTarget::DirectCanceled(
+                            PreviewDecodeCancellationCheckpoint::InputOpen,
+                        ))
+                    }
+                    Err(PreviewPacketSourceOpenError::IsolatedCanceled(checkpoint)) => {
+                        return Ok(PreviewSeekToTarget::IsolatedCanceled(checkpoint))
+                    }
+                    Err(PreviewPacketSourceOpenError::Failed(error)) => return Err(error),
+                };
+                if opened.stream_index != self.stream_index
+                    || opened.stream_tb != self.stream_tb
+                    || opened.stream_start_pts != self.stream_start_pts
+                    || opened.parameters.id() != self.codec_id
+                {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: "reopened origin contradicts the bound stream contract".to_owned(),
+                    });
+                }
+                self.packet_source = Some(opened.source);
+                self.at_demux_origin = true;
+                used_anchor_pts = None;
+                origin_restart_seek_error = Some(code);
+            }
         }
         self.interrupt_state
             .set_execution_stage(PreviewDecodeExecutionStage::CodecFlush);
-        unsafe {
-            ffmpeg::ffi::avcodec_flush_buffers(self.decoder.as_mut_ptr());
-        }
+        self.decoder.flush();
         self.reached_eof = false;
         self.last_pts = None;
         self.duplicate_decoded_pts = None;
@@ -2660,6 +2943,8 @@ impl PreviewDecodeSession {
         Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
+            probe_work_units,
+            origin_restart_seek_error,
         }))
     }
 
@@ -2697,7 +2982,8 @@ impl PreviewDecodeSession {
             candidates.seed(retained);
         }
         let mut frames_decoded: usize = 0;
-        let mut video_packets_submitted: usize = 0;
+        let mut video_packets_submitted: usize = seek_resolution.probe_work_units;
+        let mut awaiting_seek_root = seek_resolution.anchor_pts.is_some();
         let mut non_reference_discard_until_pts = exact_seek_non_reference_discard_until_pts(
             policy,
             stream_target_pts,
@@ -2733,7 +3019,7 @@ impl PreviewDecodeSession {
         let representation = self.representation;
 
         let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
-                                  scaler: &mut Option<ffmpeg::software::scaling::Context>,
+                                  scaler: &mut Option<super::scaler::PreviewScaler>,
                                   scaler_format_contract: &mut Option<(
             ffmpeg::util::format::pixel::Pixel,
             ffmpeg::util::format::pixel::Pixel,
@@ -2912,6 +3198,7 @@ impl PreviewDecodeSession {
 
         loop {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::PacketRead);
+            self.at_demux_origin = false;
             let source =
                 self.packet_source.as_mut().ok_or_else(|| MondrianError::DecodeFailed {
                     asset_id: self.path.display().to_string(),
@@ -2944,38 +3231,48 @@ impl PreviewDecodeSession {
                 break;
             }
 
-            // Container indexes name decode timestamps. A key packet selected
-            // before the requested PTS can nevertheless present after it (for
-            // example an HEVC CRA whose leading pictures require the prior GOP).
-            // Inspect the real packet before accepting that random-access root.
-            // Retreat only through strictly earlier indexed anchors, charging
-            // each probe against the existing forward-work budget.
-            if !policy.keyframe_only
+            // Some demuxers mark byte-location index entries as keyframes
+            // without inspecting the picture. Validate the actual first packet
+            // before admitting the root. A real key packet can also present
+            // after the target (HEVC CRA leading pictures need the prior GOP).
+            // Every retreat is strictly earlier and spends the existing budget.
+            let missing_key_root = awaiting_seek_root && !packet.is_key();
+            let root_presents_after_target = !policy.keyframe_only
                 && frames_decoded == 0
                 && candidates.before().is_none()
                 && packet.is_key()
-                && packet.pts().is_some_and(|pts| pts > stream_target_pts)
-                && let Some(earlier) = packet
-                    .dts()
-                    .or_else(|| packet.pts())
-                    .and_then(|dts| dts.checked_sub(1))
-                    .and_then(|before| self.seek_index.keyframe_at_or_before(before))
-                && seek_resolution.anchor_pts.is_some_and(|anchor| earlier < anchor)
-            {
-                video_packets_submitted = video_packets_submitted.saturating_add(1);
-                match self.seek_to_target(earlier, policy, should_cancel)? {
-                    PreviewSeekToTarget::Complete(resolution) => *seek_resolution = resolution,
-                    PreviewSeekToTarget::DirectCanceled => {
-                        return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                && packet.pts().is_some_and(|pts| pts > stream_target_pts);
+            if missing_key_root || root_presents_after_target {
+                let earlier = seek_resolution
+                    .anchor_pts
+                    .and_then(|anchor| anchor.checked_sub(1))
+                    .and_then(|before| self.seek_index.keyframe_at_or_before(before));
+                if let Some(earlier) = earlier {
+                    video_packets_submitted = video_packets_submitted.saturating_add(1);
+                    match self.seek_to_target(earlier, policy, should_cancel)? {
+                        PreviewSeekToTarget::Complete(resolution) => *seek_resolution = resolution,
+                        PreviewSeekToTarget::DirectCanceled(_) => {
+                            return Ok(PreviewDecodeForwardResult::canceled(frames_decoded));
+                        }
+                        PreviewSeekToTarget::IsolatedCanceled(_) => {
+                            return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
+                                frames_decoded,
+                            ));
+                        }
                     }
-                    PreviewSeekToTarget::IsolatedCanceled => {
-                        return Ok(PreviewDecodeForwardResult::isolated_demux_canceled(
-                            frames_decoded,
-                        ));
-                    }
+                    awaiting_seek_root = true;
+                    continue;
+                } else if missing_key_root {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.path.display().to_string(),
+                        reason: format!(
+                            "container seek anchor {:?} did not land on a key packet; no earlier decode root is known",
+                            seek_resolution.anchor_pts
+                        ),
+                    });
                 }
-                continue;
             }
+            awaiting_seek_root = false;
 
             if non_reference_discard_until_pts.is_some_and(|switch_pts| {
                 packet
@@ -3520,7 +3817,7 @@ fn decode_preview_frame_outcome_in_sessions(
             }
         }
 
-        let outcome = match session.decode_at(
+        let mut outcome = match session.decode_at(
             source_sample,
             access_mode,
             adaptive_hints,
@@ -3538,6 +3835,23 @@ fn decode_preview_frame_outcome_in_sessions(
                 return Err(error);
             }
         };
+        let clock = PreviewDecodeSelectionClock::new(
+            i64::from(session.stream_tb.numerator()),
+            i64::from(session.stream_tb.denominator()),
+            session.stream_start_pts,
+            session.field_processor.selection_scale(),
+        );
+        let diagnostics = match &mut outcome {
+            PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
+            PreviewDecodeOutcome::Canceled(_) => None,
+        };
+        if let Some(diagnostics) = diagnostics {
+            diagnostics.selection_clock = clock;
+        }
         match outcome {
             PreviewDecodeOutcome::Frame(frame) => {
                 let result_session_disposition = if frame.diagnostics.session_disposition
@@ -3572,6 +3886,30 @@ fn decode_preview_frame_outcome_in_sessions(
                     session_disposition
                 };
                 Ok(PreviewDecodeOutcome::FloatFrame(
+                    frame
+                        .with_access_mode(access_mode)
+                        .with_seek_strategy(
+                            PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                        )
+                        .with_session_disposition(result_session_disposition)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            session_open_us,
+                            output_lease_wait_us,
+                            external_process_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_elapsed(started_at.elapsed()),
+                ))
+            }
+            PreviewDecodeOutcome::Unorm16Frame(frame) => {
+                let result_session_disposition = if frame.diagnostics.session_disposition
+                    == PreviewDecodeSessionDisposition::BypassedCache
+                {
+                    PreviewDecodeSessionDisposition::BypassedCache
+                } else {
+                    session_disposition
+                };
+                Ok(PreviewDecodeOutcome::Unorm16Frame(
                     frame
                         .with_access_mode(access_mode)
                         .with_seek_strategy(
@@ -3673,6 +4011,7 @@ pub(super) fn finalize_preview_decode_outcome(
     let diagnostics = match &outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::Unorm16Frame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
@@ -3739,6 +4078,246 @@ fn packet_source_execution_family_matches(
 mod session_topology_tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires actual VideoToolbox and the sixty-frame Main10 motion/B fixture"]
+    fn direct_main10_session_preserves_seek_cancel_and_reopen_authority() {
+        let path = PathBuf::from(
+            std::env::var("MONDRIAN_HEVC_VT_TEST_MEDIA_PATH").expect("explicit Main10 fixture"),
+        );
+        assert_native_hevc_session_contract(
+            &path,
+            DecodedVideoSurfaceFormat::P010,
+            ColorSpace::Rec2100Pq,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires actual VideoToolbox and six SDR/PQ/HLG HEVC 422/444 motion/B fixtures"]
+    fn direct_hevc_range_extensions_sessions_preserve_seek_cancel_and_reopen_authority() {
+        let fixtures = std::env::var_os("MONDRIAN_MACOS_HEVC_REXT_FIXTURES")
+            .expect("explicit SDR/PQ/HLG fixtures for 422, then 444");
+        let paths: Vec<_> = std::env::split_paths(&fixtures).collect();
+        assert_eq!(paths.len(), 6);
+        let colors = [
+            ColorSpace::Rec709,
+            ColorSpace::Rec2100Pq,
+            ColorSpace::Rec2100Hlg,
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let format = if index < 3 {
+                DecodedVideoSurfaceFormat::P210
+            } else {
+                DecodedVideoSurfaceFormat::P410
+            };
+            assert_native_hevc_session_contract(path, format, colors[index % 3]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_native_hevc_session_contract(
+        path: &Path,
+        expected_surface: DecodedVideoSurfaceFormat,
+        source_color: ColorSpace,
+    ) {
+        let mut context = PreviewDecodeSessionContext::new();
+        let request_for = |index| {
+            let mut request = PreviewDecodeRequest::new(
+                path,
+                SourceSampleTarget::covering(mondrian_core::TimelineTime::new(index, 30).unwrap()),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(source_color, DecodedVideoRange::Limited),
+            )
+            .with_field_processing(PreviewSourceFieldProcessing::Progressive)
+            .with_fingerprint(MediaFileFingerprint::capture(path))
+            .with_hardware_decode_request(PreviewHardwareDecodeRequest::RequireGpuResident);
+            request.representation = PreviewDecodeRepresentation::NativeSurface;
+            request
+        };
+        for index in [0, 1, 17, 59, 2, 29, 0] {
+            let outcome = context.decode_cancellable(request_for(index), || false).unwrap();
+            let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+                panic!("ten-bit HEVC native demand must never fall back to CPU")
+            };
+            assert_eq!(
+                frame.diagnostics.path,
+                PreviewDecodePath::InProcessVideoToolboxNative
+            );
+            assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                frame.diagnostics.requested_pts
+            );
+            assert_eq!(frame.surface_format, expected_surface);
+            assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 10);
+            assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
+            assert!(!frame.diagnostics.cpu_resident);
+            assert!(frame.handle.cv_pixel_buffer().is_some());
+            drop(frame);
+            assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        }
+        assert!(matches!(
+            context.decode_cancellable(request_for(3), || true).unwrap(),
+            PreviewDecodeOutcome::Canceled(_)
+        ));
+        let observer = context.execution_observer.clone();
+        let canceled = context
+            .decode_cancellable(request_for(5), move || {
+                observer.snapshot().stage == PreviewDecodeExecutionStage::FrameMaterialization
+            })
+            .unwrap();
+        assert!(matches!(canceled, PreviewDecodeOutcome::Canceled(_)));
+        assert!(context
+            .sessions
+            .playback
+            .iter()
+            .flatten()
+            .all(|session| session.last_pts.is_none()));
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) =
+            context.decode_cancellable(request_for(5), || false).unwrap()
+        else {
+            panic!("ten-bit HEVC native retry")
+        };
+        assert!(frame.diagnostics.seek_performed);
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) =
+            context.decode_cancellable(request_for(0), || false).unwrap()
+        else {
+            panic!("ten-bit HEVC native reopen")
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Opened
+        );
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        eprintln!("{expected_surface:?} HEVC production session: seven seeks, before/mid cancellation, retry, reopen, zero output residual");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires real VideoToolbox and an explicit sixteen-frame ProRes 4444 fixture"]
+    fn direct_prores_session_preserves_seek_cancel_and_reopen_authority() {
+        let path = PathBuf::from(
+            std::env::var("MONDRIAN_PRORES_VT_SESSION_MEDIA_PATH")
+                .expect("explicit sixteen-frame 30 fps fixture is required"),
+        );
+        ensure_ffmpeg_initialized(&path).unwrap();
+        let mut context = PreviewDecodeSessionContext::new();
+        let request_for = |index| {
+            let mut request = PreviewDecodeRequest::new(
+                &path,
+                SourceSampleTarget::covering(mondrian_core::TimelineTime::new(index, 30).unwrap()),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                PreviewSourceColorContract::automatic(
+                    ColorSpace::Rec709,
+                    DecodedVideoRange::Limited,
+                ),
+            )
+            .with_field_processing(PreviewSourceFieldProcessing::Progressive)
+            .with_fingerprint(MediaFileFingerprint::capture(&path))
+            .with_hardware_decode_request(PreviewHardwareDecodeRequest::RequireGpuResident);
+            request.representation = PreviewDecodeRepresentation::NativeSurface;
+            request
+        };
+        let mut backward_seeks = 0;
+        let mut previous_index = 0;
+        let mut forward_reuses = 0;
+        for index in [0, 1, 15, 2, 0] {
+            let outcome = context.decode_cancellable(request_for(index), || false).unwrap();
+            let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+                panic!("native request must never return a CPU fallback");
+            };
+            assert_eq!(
+                frame.diagnostics.path,
+                PreviewDecodePath::InProcessVideoToolboxNative
+            );
+            assert_eq!(
+                frame.diagnostics.hw_accel_backend,
+                HwAccelBackend::VideoToolbox
+            );
+            assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+            assert_eq!(
+                frame.diagnostics.selected_pts,
+                frame.diagnostics.requested_pts
+            );
+            assert_eq!(frame.surface_format, DecodedVideoSurfaceFormat::Yuva444sp16);
+            assert!(!frame.diagnostics.cpu_resident);
+            assert!(!frame.diagnostics.hardware_decode_cpu_transfer_observed);
+            assert!(frame.handle.cv_pixel_buffer().is_some());
+            eprintln!(
+                "native session frame={index} seek={} forward_reused={}",
+                frame.diagnostics.seek_performed, frame.diagnostics.forward_reused
+            );
+            if index < previous_index && frame.diagnostics.seek_performed {
+                backward_seeks += 1;
+            }
+            previous_index = index;
+            forward_reuses += usize::from(frame.diagnostics.forward_reused);
+            drop(frame);
+            assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+            if index == 15 {
+                // Selecting the final frame can finish before demux EOF.
+                // An out-of-extent request must actually drain to EOF and fail
+                // exact selection, without substituting the final picture.
+                let session = context.sessions.playback.iter_mut().flatten().next().unwrap();
+                let beyond_end = session.decode_at(
+                    SourceSampleTarget::covering(mondrian_core::TimelineTime::new(16, 30).unwrap()),
+                    PreviewDecodeAccessMode::PlaybackCursor,
+                    PreviewDecodeAdaptiveHints::default(),
+                    &|| false,
+                );
+                assert!(beyond_end.is_err());
+                assert!(session.reached_eof);
+            }
+        }
+        assert!(backward_seeks > 0, "must exercise a real backward seek");
+        assert!(forward_reuses > 0);
+        assert!(matches!(
+            context.decode_cancellable(request_for(3), || true).unwrap(),
+            PreviewDecodeOutcome::Canceled(_)
+        ));
+        let observer = context.execution_observer.clone();
+        let canceled = context
+            .decode_cancellable(request_for(5), move || {
+                observer.snapshot().stage == PreviewDecodeExecutionStage::FrameMaterialization
+            })
+            .unwrap();
+        assert!(matches!(canceled, PreviewDecodeOutcome::Canceled(_)));
+        assert!(context
+            .sessions
+            .playback
+            .iter()
+            .flatten()
+            .all(|session| session.last_pts.is_none()));
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        let outcome = context.decode_cancellable(request_for(5), || false).unwrap();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+            panic!("native retry")
+        };
+        assert!(frame.diagnostics.seek_performed);
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+        let outcome = context.decode_cancellable(request_for(0), || false).unwrap();
+        let PreviewDecodeOutcome::NativeGpuFrame(frame) = outcome else {
+            panic!("native reopen")
+        };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Opened
+        );
+        assert_eq!(frame.diagnostics.hardware_decode_observed, Some(true));
+        drop(frame);
+        context.clear();
+        assert_eq!(context.resources.native_output_tracker().outstanding(), 0);
+    }
+
     #[test]
     fn prores_default_threading_outputs_each_packet_without_future_frames() {
         let directory = tempfile::tempdir().expect("ProRes fixture directory");
@@ -3778,14 +4357,14 @@ mod session_topology_tests {
         ensure_ffmpeg_initialized(&path).expect("initialize FFmpeg");
         let mut input = ffmpeg::format::input(&path).expect("open fixture");
         let parameters = input.stream(0).expect("video stream").parameters();
-        let kind = super::super::default_threading_kind_for_software_decode(
+        let kind = super::super::default_decoder_threading_kind(
             ffmpeg::codec::Id::PRORES,
-            PreviewDecodeAccessMode::PlaybackCursor,
-            128 * 64,
+            HwAccelBackend::None,
         );
         let mut decoder = preview_decode_context_from_parameters(
             parameters.clone(),
             ffmpeg::codec::threading::Config { kind: kind.to_ffmpeg(), count: 3 },
+            input.stream(0).expect("video stream").time_base(),
             &path,
         )
         .expect("production context")
@@ -3798,6 +4377,7 @@ mod session_topology_tests {
                 kind: ffmpeg::codec::threading::Type::None,
                 count: 1,
             },
+            input.stream(0).expect("video stream").time_base(),
             &path,
         )
         .expect("reference context")
@@ -3907,7 +4487,7 @@ mod session_topology_tests {
             )
             .with_max_size(Some(64), Some(64));
             let outcome = context.decode_cancellable(request, || false).expect("decode");
-            let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            let PreviewDecodeOutcome::FloatFrame(frame) = outcome else {
                 panic!("software fixture must produce a frame");
             };
             if index == 2 {
@@ -4009,7 +4589,7 @@ mod session_topology_tests {
                 || false,
             )
             .expect("scrub decode");
-        let PreviewDecodeOutcome::Frame(frame) = scrub else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = scrub else {
             panic!("software fixture must produce a frame");
         };
         assert_eq!(
@@ -4035,7 +4615,7 @@ mod session_topology_tests {
                 || false,
             )
             .expect("second playback decode");
-        let PreviewDecodeOutcome::Frame(frame) = playback_again else {
+        let PreviewDecodeOutcome::FloatFrame(frame) = playback_again else {
             panic!("software fixture must produce a frame");
         };
         assert_eq!(
@@ -4236,5 +4816,69 @@ mod scrub_target_tests {
         let index = PreviewSeekIndex::from_probe_keyframes(vec![-41, 79]);
         assert_eq!(index.keyframe_at_or_before(7), Some(-41));
         assert_eq!(policy.decode_target_pts(7), 7);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_storage_tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVPixelBufferCreate(
+            allocator: *const c_void,
+            width: usize,
+            height: usize,
+            format: u32,
+            attributes: *const c_void,
+            output: *mut *mut c_void,
+        ) -> i32;
+        fn CVPixelBufferGetDataSize(buffer: *const c_void) -> usize;
+        fn CVPixelBufferRelease(buffer: *const c_void);
+    }
+
+    struct PixelBuffer(*mut c_void);
+
+    impl Drop for PixelBuffer {
+        fn drop(&mut self) {
+            // SAFETY: This guard owns the successful Create reference.
+            unsafe { CVPixelBufferRelease(self.0) };
+        }
+    }
+
+    #[test]
+    fn retained_corevideo_frame_charges_actual_high_bit_allocation() {
+        let mut pointer = std::ptr::null_mut();
+        // SAFETY: Valid output pointer and public 16-bit packed 4444 format.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                std::ptr::null(),
+                64,
+                48,
+                u32::from_be_bytes(*b"y416"),
+                std::ptr::null(),
+                &mut pointer,
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(!pointer.is_null());
+        let owner = PixelBuffer(pointer);
+        // SAFETY: Owner retains the live pixel buffer throughout the test.
+        let actual = unsafe { CVPixelBufferGetDataSize(owner.0) };
+        assert!(actual >= 64 * 48 * 8);
+        let mut frame = ffmpeg::util::frame::video::Video::empty();
+        frame.set_format(ffmpeg::util::format::pixel::Pixel::VIDEOTOOLBOX);
+        frame.set_width(64);
+        frame.set_height(48);
+        // SAFETY: The test's owner outlives this borrowed native-frame fixture.
+        // No AVBuffer is installed, so AVFrame destruction does not release it.
+        unsafe {
+            (*frame.as_mut_ptr()).data[3] = owner.0.cast();
+        }
+        let retained = RetainedDecodedFrame(frame);
+        assert_eq!(retained.reserved_bytes(), actual);
+        drop(retained);
+        drop(owner);
     }
 }

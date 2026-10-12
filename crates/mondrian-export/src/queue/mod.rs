@@ -66,14 +66,16 @@ use mondrian_media::D3D12ResidentHevcEncoderSession;
 use mondrian_media::FfmpegCommand as Command;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use mondrian_media::ResidentHevcEncoderConfig;
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+use mondrian_media::ResidentVideoEncoderConfig;
+#[cfg(target_os = "macos")]
+use mondrian_media::VideoToolboxResidentVideoEncoderSession;
 use mondrian_media::{
     run_supervised_command, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
     PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewDecodeSessionContext, PreviewSourceColorContract, ResidentEncodeBitDepth,
-    ResidentEncodeColorimetry, SupervisedChild, SupervisedProcessError, SupervisedProcessPolicy,
-    SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
+    ResidentEncodeCodec, ResidentEncodeColorimetry, SupervisedChild, SupervisedProcessError,
+    SupervisedProcessPolicy, SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheShutdownEvidence};
 use mondrian_renderer::{
@@ -263,6 +265,7 @@ struct ExportGpuOutputBackend {
     runtime: GpuColorExecutionSession,
     visual: Option<GpuVisualFrameExecutor>,
     heterogeneous_runtime: HeterogeneousGpuContinuationRuntime,
+    native_import: Option<mondrian_renderer::NativeVideoImportRuntime>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -485,6 +488,87 @@ impl ExportGpuExecutionRuntime {
         Err(ExportGpuOutputFallbackReason::ContextUnavailable)
     }
 
+    fn native_import_support(
+        &mut self,
+        decode_context: &mut PreviewDecodeSessionContext,
+    ) -> Result<Option<mondrian_renderer::GpuNativeDecodedFrameImportSupport>, String> {
+        #[cfg(test)]
+        if !ENABLE_GPU_VISUAL_EXECUTION.with(|cell| cell.get()) {
+            return Ok(None);
+        }
+        if self.ensure_ready().is_err() {
+            return Ok(None);
+        }
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state else {
+            return Ok(None);
+        };
+        let native = backend.native_import.get_or_insert_with(|| {
+            mondrian_renderer::NativeVideoImportRuntime::new_with_resource_pool(
+                &backend.context.adapter,
+                &backend.context.device,
+                &backend.context.queue,
+                backend.runtime.resource_pool(),
+            )
+        });
+        let support = native.support();
+        if let Some(root) = native.decoder_device_root() {
+            let selector = support.hardware_decode_device_selector.ok_or_else(|| {
+                "native Export decoder root has no exact adapter selector".to_owned()
+            })?;
+            decode_context
+                .worker_resources()
+                .hardware_device_context_pool()
+                .install_renderer_device_context(selector, root)
+                .map_err(|error| {
+                    format!("native Export decoder root installation failed: {error}")
+                })?;
+        }
+        Ok(Some(support))
+    }
+
+    /// Retire actual queued native sampling before codec/source ownership closes.
+    fn finish_native_sources_until(&mut self, deadline: Instant) -> Result<(), String> {
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state else {
+            return Ok(());
+        };
+        let Some(native) = backend.native_import.as_mut() else {
+            return Ok(());
+        };
+        backend
+            .context
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(deadline.saturating_duration_since(Instant::now())),
+            })
+            .map_err(|error| format!("native Export GPU completion failed: {error}"))?;
+        native
+            .wait_for_released_source_residency_until(deadline)
+            .map_err(|error| format!("native Export source release failed: {error}"))?;
+        if native.retained_source_count() != 0 {
+            return Err(format!(
+                "native Export sources remain retained: {}",
+                native.retained_source_count()
+            ));
+        }
+        // Closing the platform release worker consumes admission. The visual
+        // Session is terminal; a retry owns a new runtime and decode generation.
+        loop {
+            if native
+                .poll_native_release_retirement()
+                .map_err(|error| format!("native Export release worker shutdown failed: {error}"))?
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err("native Export release worker shutdown timed out".to_owned());
+            }
+            std::thread::yield_now();
+        }
+        backend.runtime.clear_frame_resources();
+        Ok(())
+    }
+
     fn record_visual_node(
         &mut self,
         request: GpuVisualFrameRequest<'_>,
@@ -515,6 +599,7 @@ impl ExportGpuExecutionRuntime {
                 &backend.context.device,
                 &backend.context.queue,
                 &mut encoder,
+                backend.native_import.as_mut(),
                 request,
             )
             .map_err(|error| format!("export GPU visual node failed: {error}"))?;
@@ -661,6 +746,10 @@ impl ExportGpuExecutionRuntime {
         boundary_texture_format: GpuColorFrameTextureFormat,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<ExportGpuResidentOutputAttemptOutcome, ExportGpuOutputExecutionError> {
+        #[cfg(test)]
+        if FORCE_GPU_BOUNDARY_FAILURE.with(|cell| cell.get()) {
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable.into());
+        }
         self.ensure_ready().map_err(ExportGpuOutputExecutionError::from)?;
         match &mut self.state {
             ExportGpuExecutionRuntimeState::Ready { backend, .. } => {
@@ -716,6 +805,24 @@ impl ExportGpuExecutionRuntime {
             return Err("export GPU runtime unavailable".to_owned());
         };
         mondrian_renderer::VulkanCudaResidentEncodeAdapter::new(
+            &backend.context.device,
+            &backend.context.queue,
+            contract,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn create_resident_encode_adapter(
+        &mut self,
+        contract: mondrian_renderer::ResidentEncodeAdapterContract,
+    ) -> Result<mondrian_renderer::MetalResidentEncodeAdapter, String> {
+        self.ensure_ready()
+            .map_err(|reason| format!("export GPU runtime unavailable: {reason:?}"))?;
+        let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &self.state else {
+            return Err("export GPU runtime unavailable".to_owned());
+        };
+        mondrian_renderer::MetalResidentEncodeAdapter::new(
             &backend.context.device,
             &backend.context.queue,
             contract,
@@ -780,6 +887,7 @@ fn build_export_gpu_output_runtime(
     .map_err(|err| format!("create heterogeneous GPU continuation runtime failed: {err}"))?;
     Ok(Box::new(ExportGpuOutputBackend {
         visual: None,
+        native_import: None,
         context,
         runtime: GpuColorExecutionSession::with_resource_pool(resource_pool)
             .map_err(|err| format!("create GPU output runtime failed: {err}"))?,
@@ -827,13 +935,16 @@ impl Drop for ExportGpuReadbackMapLease<'_> {
     }
 }
 
-fn map_readback_buffer_sync(
+/// Serialize while the completed GPU mapping is borrowed. The view drops
+/// before the lease unmaps on success, rejection, cancellation or unwind.
+fn with_mapped_readback<T>(
     device: &wgpu::Device,
     readback: &wgpu::Buffer,
     submission_index: &wgpu::SubmissionIndex,
     cancellation: &ExecutionCancellationToken,
     deadline: Instant,
-) -> Result<Vec<u8>, ExportGpuOutputExecutionError> {
+    serialize: impl FnOnce(&[u8]) -> Result<T, ExportGpuOutputExecutionError>,
+) -> Result<T, ExportGpuOutputExecutionError> {
     let slice = readback.slice(..);
     let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {
@@ -859,12 +970,12 @@ fn map_readback_buffer_sync(
     let mapped = slice
         .get_mapped_range()
         .map_err(|_| ExportGpuOutputFallbackReason::ReadbackMapFailed)?;
-    let bytes = mapped.to_vec();
-    drop(mapped);
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
     }
-    Ok(bytes)
+    let serialized = serialize(&mapped);
+    drop(mapped);
+    serialized
 }
 
 fn accept_export_gpu_readback_poll(
@@ -964,6 +1075,9 @@ fn execute_export_gpu_output_boundary_with_backend(
             ExportGpuOutputFallbackReason::MissingReadbackBuffer,
         ))?;
     let readback_plan = match boundary_texture_format {
+        GpuColorFrameTextureFormat::Rgba16Unorm => {
+            return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
+        }
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.output().clone())
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
@@ -980,55 +1094,59 @@ fn execute_export_gpu_output_boundary_with_backend(
     let deadline = Instant::now()
         .checked_add(EXPORT_GPU_READBACK_TIMEOUT)
         .ok_or(ExportGpuOutputExecutionError::DeviceTimedOut)?;
-    let mapped = map_readback_buffer_sync(
+    let pipe_bytes = with_mapped_readback(
         &backend.context.device,
         &readback_buffer,
         &submission_index,
         cancellation,
         deadline,
+        |mapped| {
+            Ok(match boundary_texture_format {
+                GpuColorFrameTextureFormat::Rgba16Unorm => {
+                    return Err(ExportGpuOutputFallbackReason::ReadbackUnpackFailed.into());
+                }
+                GpuColorFrameTextureFormat::Rgba8Unorm => {
+                    let actual = readback_plan
+                        .unpack_mapped_rgba8(mapped)
+                        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    frame_contract.pack_rgba8(actual.rgba())?
+                }
+                GpuColorFrameTextureFormat::Rgba32Float
+                    if matches!(frame_contract, ExportFrameContract::EncodedRgba16Unorm)
+                        && !legalizer.is_active() =>
+                {
+                    frame_contract.pack_rgba32float_readback(
+                        mapped,
+                        readback_plan.extent.width,
+                        readback_plan.extent.height,
+                        readback_plan.padded_bytes_per_row,
+                    )?
+                }
+                GpuColorFrameTextureFormat::Rgba16Float
+                | GpuColorFrameTextureFormat::Rgba32Float => {
+                    let mut f32_data = match boundary_texture_format {
+                        GpuColorFrameTextureFormat::Rgba16Float => {
+                            readback_plan.unpack_mapped_rgba16float(mapped)
+                        }
+                        _ => readback_plan.unpack_mapped_rgba32float(mapped),
+                    }
+                    .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    if legalizer.is_active() {
+                        let compliance =
+                            SignalComplianceContract::normalized_rgb(boundary.output_color_space())
+                                .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+                        legalize_encoded_rgba_f32(
+                            bytemuck::cast_slice_mut(&mut f32_data),
+                            compliance,
+                            legalizer,
+                        )
+                        .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+                    }
+                    frame_contract.pack_rgba_f32(&f32_data)?
+                }
+            })
+        },
     )?;
-    let pipe_bytes = match boundary_texture_format {
-        GpuColorFrameTextureFormat::Rgba8Unorm => {
-            let actual = readback_plan
-                .unpack_mapped_rgba8(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            frame_contract.pack_rgba8(actual.rgba())?
-        }
-        GpuColorFrameTextureFormat::Rgba16Float => {
-            let mut f32_data = readback_plan
-                .unpack_mapped_rgba16float(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            if legalizer.is_active() {
-                let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
-                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
-                legalize_encoded_rgba_f32(
-                    bytemuck::cast_slice_mut(&mut f32_data),
-                    compliance,
-                    legalizer,
-                )
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            }
-            frame_contract.pack_rgba_f32(&f32_data)?
-        }
-        GpuColorFrameTextureFormat::Rgba32Float => {
-            let mut f32_data = readback_plan
-                .unpack_mapped_rgba32float(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            if legalizer.is_active() {
-                let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
-                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
-                legalize_encoded_rgba_f32(
-                    bytemuck::cast_slice_mut(&mut f32_data),
-                    compliance,
-                    legalizer,
-                )
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
-            }
-            frame_contract.pack_rgba_f32(&f32_data)?
-        }
-    };
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
     }
@@ -1238,6 +1356,18 @@ impl ExportHeterogeneousCompletionEvidence {
 pub struct ExportJobVisualDiagnostics {
     /// Prepared visual nodes completed as GPU-resident working frames.
     pub gpu_visual_nodes_completed: u64,
+    /// Compact YUV source branches completed by the shared Renderer input shader.
+    pub gpu_visual_compact_yuv_sources: u64,
+    /// Native decoder surfaces actually imported into the working graph.
+    pub gpu_visual_native_sources: u64,
+    /// Imported surfaces whose decoder execution was actually observed as hardware.
+    pub gpu_visual_native_hardware_sources: u64,
+    /// Imported surfaces whose decoder execution was actually observed as software.
+    pub gpu_visual_native_software_sources: u64,
+    /// Imported native surfaces without decoder hardware-execution observation.
+    pub gpu_visual_native_unobserved_sources: u64,
+    /// Native sampling completed, release worker consumed, and decode outputs released.
+    pub native_source_consuming_shutdown: bool,
     /// Non-root Sequence outputs handed to their parent without CPU readback.
     pub gpu_visual_nested_outputs: u64,
     /// Typed non-color DataTexture uploads consumed by the GPU numeric bypass.
@@ -1258,8 +1388,8 @@ pub struct ExportJobVisualDiagnostics {
     pub heterogeneous_frames_completed: u64,
     /// Terminal post-start heterogeneous failures.
     pub heterogeneous_terminal_failures: u64,
-    /// Frames retained on a complete CPU route before heterogeneous work started.
-    pub cpu_routes_selected_before_start: u64,
+    /// Effect preflight observations with an exact CPU implementation; not executed routes.
+    pub cpu_compatible_effect_checks: u64,
     /// Aggregate completed CPU-to-GPU bytes.
     pub heterogeneous_upload_bytes: u64,
     /// Aggregate completed GPU-to-CPU readback bytes.
@@ -1273,10 +1403,14 @@ pub struct ExportJobVisualDiagnostics {
     pub resident_encode_sessions: u64,
     /// Frames submitted without a host pixel boundary.
     pub resident_encode_frames: u64,
-    /// Native GPU RGB-to-YCbCr conversions (D3D12 Video Process or Vulkan compute).
+    /// Native GPU RGB-to-YCbCr conversions (Video Process or shared compute).
     pub resident_encode_video_process_submissions: u64,
     /// Encoded packets written to the video-only temporary artifact.
     pub resident_encode_packets: u64,
+    /// Actual GPU transport allocation bytes, counted once on unified memory.
+    pub resident_encode_transport_allocation_bytes: u64,
+    /// The native codec worker has exited and been joined, rather than merely canceled.
+    pub resident_encode_consuming_shutdown: bool,
     /// Host pixel readbacks on the resident route; must remain zero.
     pub resident_encode_cpu_pixel_readbacks: u64,
     /// Rawvideo pipe bytes on the resident route; must remain zero.
@@ -1997,6 +2131,18 @@ fn push_export_root_causes_and_actions(
             ),
             color_report_vocab::action::INSPECT_GPU_BLOCKERS,
             "Inspect renderer GPU color blocker breakdown before relying on export GPU scheduling.",
+        );
+    }
+    if summary.transfer_stages > 0 {
+        push_export_root_cause_with_action(
+            root_causes,
+            actions,
+            ExportColorHealthArea::StageScheduling,
+            "export_transfer_stage_present",
+            ExportColorHealthSeverity::Fail,
+            format!("transfer_stages={}", summary.transfer_stages),
+            color_report_vocab::action::REMOVE_TRANSFER_STAGE,
+            "Trace export source uploads and encoder-boundary readbacks before claiming GPU residency.",
         );
     }
     if summary.gpu_output_cpu_fallbacks > 0 || summary.gpu_output_fallback_reasons.total() > 0 {
@@ -3082,7 +3228,11 @@ fn execute_professional_delivery_export(
             }
             report(ExportProgress::validating(0.975));
             let mut verify = toolchain.dcp_package_validation_command(staging.path());
-            if let Err(outcome) = run_dcp_package_validator(&mut verify, cancel) {
+            if let Err(outcome) = run_dcp_package_validator(
+                &mut verify,
+                cancel,
+                Instant::now() + Duration::from_secs(6 * 60 * 60),
+            ) {
                 return outcome;
             }
             publish_professional_directory(staging, final_output, cancel, execution_gate, report)
@@ -3145,6 +3295,9 @@ fn render_professional_pcm24_wave(
     };
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3156,7 +3309,9 @@ fn render_professional_pcm24_wave(
         .arg("-ac")
         .arg("2")
         .arg("-i")
-        .arg(&raw_path)
+        .arg(&raw_path);
+    apply_external_codec_thread_args(&mut command, resource_policy);
+    command
         .arg("-map")
         .arg("0:a:0")
         .arg("-c:a")
@@ -3225,6 +3380,9 @@ fn render_professional_picture_essence(
     };
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3240,6 +3398,7 @@ fn render_professional_picture_essence(
         .arg("-i")
         .arg("pipe:0")
         .arg("-an");
+    apply_external_codec_thread_args(&mut command, resource_policy);
     match profile {
         ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
             command
@@ -3408,38 +3567,25 @@ fn run_professional_tool_capture(
     Ok(String::from_utf8_lossy(&combined).into_owned())
 }
 
-fn run_dcp_package_validator(
+pub(crate) fn run_dcp_package_validator(
     command: &mut impl mondrian_media::SupervisedCommand,
     cancel: &ExecutionCancellationToken,
-) -> Result<(), JobExecutionResult> {
+    deadline: Instant,
+) -> Result<String, JobExecutionResult> {
     let policy = SupervisedProcessPolicy {
         stdout: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
-        stderr: SupervisedStreamCapture::Tail { limit_bytes: 2 * 1024 * 1024 },
-        deadline: Some(Instant::now() + Duration::from_secs(6 * 60 * 60)),
+        stderr: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
+        deadline: Some(deadline),
         ..SupervisedProcessPolicy::default()
     };
     let output = run_supervised_command(command, None, policy, cancel)
         .map_err(|error| process_supervision_failure("DCP package verification", error))?;
-    let mut combined = output.stdout.clone();
-    combined.extend_from_slice(&output.stderr);
-    let report = String::from_utf8_lossy(&combined);
-    if report.lines().any(|line| line.trim_start().starts_with("Error:")) {
-        return Err(JobExecutionResult::Failed(
-            "DCP package verification reported a SMPTE interoperability error".to_owned(),
-        ));
-    }
-    if !output.status.success()
-        && !report.lines().any(|line| {
-            let line = line.trim_start();
-            line.starts_with("Bv2.1 error:") || line.starts_with("Warning:")
-        })
-    {
-        return Err(JobExecutionResult::Failed(format!(
-            "DCP package verification failed: {}",
+    crate::professional_delivery::validate_dcp_verifier_output(&output).map_err(|reason| {
+        JobExecutionResult::Failed(format!(
+            "DCP package verification rejected: {reason}; {}",
             bounded_process_reason(&output)
-        )));
-    }
-    Ok(())
+        ))
+    })
 }
 
 fn extract_imf_descriptor_xml(
@@ -3642,6 +3788,9 @@ fn execute_audio_stems_export(
             Ok(command) => command,
             Err(error) => return JobExecutionResult::Failed(error.to_string()),
         };
+        let resource_policy = execution_gate.resource_policy();
+        apply_external_filter_thread_args(&mut command, resource_policy);
+        apply_external_codec_thread_args(&mut command, resource_policy);
         command
             .arg("-y")
             .arg("-hide_banner")
@@ -3656,7 +3805,9 @@ fn execute_audio_stems_export(
             .arg("-ac")
             .arg(channel_layout.channel_count().to_string())
             .arg("-i")
-            .arg(&rendered.path)
+            .arg(&rendered.path);
+        apply_external_codec_thread_args(&mut command, resource_policy);
+        command
             .arg("-map")
             .arg("0:a:0")
             .arg("-c:a")
@@ -3952,8 +4103,7 @@ impl TimelineAudioInput {
 
 #[derive(Debug, Clone)]
 struct DecodedVideoLayer {
-    frame: CpuColorFrame,
-    is_data_texture: bool,
+    pixels: DecodedVideoLayerPixels,
     source_resolution: Resolution,
     picture_geometry: ResolvedPictureGeometry,
     source_fingerprint: MediaFileFingerprint,
@@ -3961,6 +4111,98 @@ struct DecodedVideoLayer {
     #[cfg_attr(not(test), allow(dead_code))]
     decode_diagnostics: Option<PreviewDecodeDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportDecodedSourceRoute {
+    CpuWorking,
+    GpuInput,
+}
+
+#[derive(Debug, Clone)]
+enum DecodedVideoLayerPixels {
+    CpuWorking {
+        frame: CpuColorFrame,
+        is_data_texture: bool,
+    },
+    GpuInput(PreparedSourceFrame),
+    GpuNative {
+        frame: Arc<mondrian_media::PreviewNativeDecodedFrame>,
+        source_color_space: ColorSpace,
+        transform: mondrian_renderer::RenderInputTransform,
+    },
+    GpuYuv {
+        frame: Arc<mondrian_media::CpuYuvFrame>,
+        transform: mondrian_renderer::RenderInputTransform,
+    },
+}
+
+impl DecodedVideoLayer {
+    fn route(&self) -> ExportDecodedSourceRoute {
+        match self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { .. } => ExportDecodedSourceRoute::CpuWorking,
+            DecodedVideoLayerPixels::GpuInput(_)
+            | DecodedVideoLayerPixels::GpuYuv { .. }
+            | DecodedVideoLayerPixels::GpuNative { .. } => ExportDecodedSourceRoute::GpuInput,
+        }
+    }
+
+    fn extent(&self) -> Resolution {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, .. } => decoded_frame_resolution(frame),
+            DecodedVideoLayerPixels::GpuNative { frame, .. } => {
+                Resolution { width: frame.width, height: frame.height }
+            }
+            DecodedVideoLayerPixels::GpuYuv { frame, .. } => {
+                Resolution { width: frame.width, height: frame.height }
+            }
+            DecodedVideoLayerPixels::GpuInput(source) => {
+                let (width, height) = source.extent();
+                Resolution { width, height }
+            }
+        }
+    }
+
+    fn cpu_frame(&self) -> Result<&CpuColorFrame, String> {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, .. } => Ok(frame),
+            DecodedVideoLayerPixels::GpuInput(_)
+            | DecodedVideoLayerPixels::GpuYuv { .. }
+            | DecodedVideoLayerPixels::GpuNative { .. } => {
+                Err("GPU input source reached the CPU Export visual route".to_owned())
+            }
+        }
+    }
+
+    fn gpu_source(&self) -> Result<GpuVisualFrameSource, String> {
+        match &self.pixels {
+            DecodedVideoLayerPixels::CpuWorking { frame, is_data_texture } => {
+                Ok(export_gpu_cpu_source(frame, *is_data_texture))
+            }
+            DecodedVideoLayerPixels::GpuNative { frame, source_color_space, transform } => {
+                Ok(GpuVisualFrameSource::Native {
+                    frame: Arc::clone(frame),
+                    source_color_space: *source_color_space,
+                    transform: transform.clone(),
+                })
+            }
+            DecodedVideoLayerPixels::GpuYuv { frame, transform } => {
+                Ok(GpuVisualFrameSource::CompactYuv {
+                    frame: Arc::clone(frame),
+                    transform: transform.clone(),
+                })
+            }
+            DecodedVideoLayerPixels::GpuInput(source) => {
+                if let Some((source, transform)) = source.color_managed_gpu_input() {
+                    Ok(GpuVisualFrameSource::ColorManaged { source, transform })
+                } else if let Some(frame) = source.data_texture_frame() {
+                    Ok(GpuVisualFrameSource::DataTexture(Arc::new(frame)))
+                } else {
+                    Err("prepared GPU Export source has no typed input route".to_owned())
+                }
+            }
+        }
+    }
 }
 
 fn execute_timeline_export(
@@ -4230,7 +4472,7 @@ fn execute_timeline_export(
         let resident_qualification = if job.config.broadcast_qc.is_some() {
             Err(ExportResidentEncodeBlocker::BroadcastQcObservationRequired)
         } else {
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 timeline,
                 &delivery,
                 job.config.preset.alpha_mode,
@@ -4239,8 +4481,8 @@ fn execute_timeline_export(
         };
         match resident_qualification {
             Ok(plan) => {
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
-                match execute_resident_hevc_export(
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+                match execute_resident_video_export(
                     timeline,
                     &delivery,
                     range,
@@ -4262,7 +4504,7 @@ fn execute_timeline_export(
                         return JobExecutionResult::ReversibleWorkCompleted;
                     }
                     ResidentExportAttemptOutcome::NotStarted(reason) => {
-                        tracing::debug!(%reason, "resident HEVC route did not start");
+                        tracing::debug!(%reason, "resident video route did not start");
                         visual_session.visual_diagnostics.resident_encode_blocker =
                             Some(ExportResidentEncodeBlocker::BackendUnavailable);
                     }
@@ -4273,7 +4515,7 @@ fn execute_timeline_export(
                         return JobExecutionResult::Failed(reason);
                     }
                 }
-                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
                 {
                     let _ = plan;
                     visual_session.visual_diagnostics.resident_encode_blocker =
@@ -4376,6 +4618,7 @@ fn execute_timeline_export(
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
         apply_external_filter_thread_args(&mut cmd, resource_policy);
+        apply_external_codec_thread_args(&mut cmd, resource_policy);
         cmd.arg("-f")
             .arg("rawvideo")
             .arg("-pix_fmt")
@@ -4394,6 +4637,7 @@ fn execute_timeline_export(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
                 };
+                apply_external_codec_thread_args(&mut cmd, resource_policy);
                 cmd.arg("-f")
                     .arg("f32le")
                     .arg("-ar")
@@ -4416,6 +4660,7 @@ fn execute_timeline_export(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
                     ));
                 };
+                apply_external_codec_thread_args(&mut cmd, resource_policy);
                 cmd.arg("-f")
                     .arg("lavfi")
                     .arg("-i")
@@ -4434,6 +4679,7 @@ fn execute_timeline_export(
             }
         }
 
+        apply_external_codec_thread_args(&mut cmd, resource_policy);
         match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
                 let Some(encoder) = resolved_video_encoder else {
@@ -4574,7 +4820,7 @@ fn execute_timeline_export(
     result
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[derive(Debug)]
 enum ResidentExportAttemptOutcome {
     Completed,
@@ -4583,9 +4829,9 @@ enum ResidentExportAttemptOutcome {
     Failed(String),
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 #[allow(clippy::too_many_arguments)]
-fn execute_resident_hevc_export(
+fn execute_resident_video_export(
     timeline: &TimelineExportSnapshot,
     delivery: &ResolvedExportDeliveryContract,
     range: TimelineRenderRange,
@@ -4597,7 +4843,7 @@ fn execute_resident_hevc_export(
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
     initial_diagnostics: ExportRenderInitialDiagnostics,
-    plan: ResidentHevcExportPlan,
+    plan: ResidentVideoExportPlan,
 ) -> ResidentExportAttemptOutcome {
     let renderer_adapter_identity = visual_session.active_adapter_identity();
     let width = delivery.resolution.width;
@@ -4606,7 +4852,7 @@ fn execute_resident_hevc_export(
         Ok(value) if value > 0 => value,
         _ => {
             return ResidentExportAttemptOutcome::NotStarted(
-                "resident HEVC frame-rate numerator is invalid".to_owned(),
+                "resident video frame-rate numerator is invalid".to_owned(),
             );
         }
     };
@@ -4614,7 +4860,7 @@ fn execute_resident_hevc_export(
         Ok(value) if value > 0 => value,
         _ => {
             return ResidentExportAttemptOutcome::NotStarted(
-                "resident HEVC frame-rate denominator is invalid".to_owned(),
+                "resident video frame-rate denominator is invalid".to_owned(),
             );
         }
     };
@@ -4633,14 +4879,19 @@ fn execute_resident_hevc_export(
         match visual_session.gpu_output.create_resident_encode_adapter(adapter_contract) {
             Ok(adapter) => adapter,
             Err(error) => {
-                tracing::debug!(%error, "resident HEVC Adapter qualification rejected");
+                tracing::debug!(%error, "resident video Adapter qualification rejected");
                 return ResidentExportAttemptOutcome::NotStarted(error.to_string());
             }
         };
-    let temp_dir = match tempfile::Builder::new().prefix("mondrian-resident-hevc-").tempdir() {
+    #[cfg(target_os = "macos")]
+    {
+        visual_session.visual_diagnostics.resident_encode_transport_allocation_bytes =
+            adapter.diagnostics().bridge_allocation_bytes;
+    }
+    let temp_dir = match tempfile::Builder::new().prefix("mondrian-resident-video-").tempdir() {
         Ok(directory) => directory,
         Err(error) => {
-            tracing::debug!(%error, "resident HEVC temporary directory unavailable");
+            tracing::debug!(%error, "resident video temporary directory unavailable");
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
@@ -4648,7 +4899,8 @@ fn execute_resident_hevc_export(
     // codec extradata during open. MPEG-TS admits that standard Annex-B stream
     // while preserving timestamps for the final pixel-free stream-copy mux.
     let resident_video_path = temp_dir.path().join("resident-video.ts");
-    let config = ResidentHevcEncoderConfig {
+    let config = ResidentVideoEncoderConfig {
+        codec: plan.codec,
         output_path: resident_video_path.clone(),
         width,
         height,
@@ -4670,140 +4922,294 @@ fn execute_resident_hevc_export(
         D3D12ResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
     #[cfg(target_os = "linux")]
     let encoder_open = CudaResidentHevcEncoderSession::open(&adapter.encoder_device_root(), config);
+    #[cfg(target_os = "macos")]
+    let encoder_open =
+        VideoToolboxResidentVideoEncoderSession::open(&adapter.encoder_device_root(), config);
     let mut encoder = match encoder_open {
         Ok(encoder) => encoder,
         Err(error) => {
-            tracing::debug!(%error, "resident HEVC encoder Session rejected");
+            tracing::debug!(%error, "resident video encoder Session rejected");
             return ResidentExportAttemptOutcome::NotStarted(error.to_string());
         }
     };
-    #[cfg(target_os = "windows")]
-    let encoder_diagnostics = crate::hardware_encoding::resident_hevc_d3d12_diagnostics(
-        renderer_adapter_identity.as_ref(),
-    );
-    #[cfg(target_os = "linux")]
-    let encoder_diagnostics = crate::hardware_encoding::resident_hevc_cuda_diagnostics(
-        renderer_adapter_identity.as_ref(),
-    );
-    visual_session.visual_diagnostics.video_encoder = Some(encoder_diagnostics);
-    visual_session.visual_diagnostics.resident_encode_sessions =
-        visual_session.visual_diagnostics.resident_encode_sessions.saturating_add(1);
-    let root_color_context = match resolved_export_color_context(timeline, delivery) {
-        Ok(context) => context,
-        Err(error) => return ResidentExportAttemptOutcome::Failed(error),
-    };
-    let frame_contract = export_frame_contract(delivery);
-    let total = range.total_frames.max(1);
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
         .color
         .record_asset_issue_summary(initial_diagnostics.asset_issue_summary);
     diagnostics.audio = initial_diagnostics.audio_analysis;
-    let mut submitted = 0_u64;
-
-    for index in 0..total {
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
-            return ResidentExportAttemptOutcome::Cancelled;
-        }
-        let timeline_frame = match range.evaluation_frame(index) {
-            Ok(frame) => frame,
+    let outcome = (|| {
+        #[cfg(target_os = "windows")]
+        let encoder_diagnostics = crate::hardware_encoding::resident_hevc_d3d12_diagnostics(
+            renderer_adapter_identity.as_ref(),
+        );
+        #[cfg(target_os = "linux")]
+        let encoder_diagnostics = crate::hardware_encoding::resident_hevc_cuda_diagnostics(
+            renderer_adapter_identity.as_ref(),
+        );
+        #[cfg(target_os = "macos")]
+        let encoder_diagnostics = crate::hardware_encoding::resident_videotoolbox_diagnostics(
+            plan.codec,
+            renderer_adapter_identity.as_ref(),
+            false,
+        );
+        visual_session.visual_diagnostics.video_encoder = Some(encoder_diagnostics);
+        visual_session.visual_diagnostics.resident_encode_sessions =
+            visual_session.visual_diagnostics.resident_encode_sessions.saturating_add(1);
+        let root_color_context = match resolved_export_color_context(timeline, delivery) {
+            Ok(context) => context,
             Err(error) => return ResidentExportAttemptOutcome::Failed(error),
         };
-        let mut frame_color_counts = InputColorResolutionSourceCounts::default();
-        let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
-        let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let source = match render_timeline_frame_resident_with_session_cancellable(
-            timeline,
-            timeline_frame,
-            width,
-            height,
-            ExportAlphaMode::FlattenBlack,
-            root_color_context.clone(),
-            ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
-            Some(&mut frame_color_counts),
-            Some(&mut frame_stage_diagnostics),
-            Some(&mut frame_composite_diagnostics),
-            Some(&mut diagnostics.color),
-            visual_session,
-            cancel,
-        ) {
-            Ok(source) => source,
-            Err(_error) if cancel.is_canceled() => {
+        let frame_contract = export_frame_contract(delivery);
+        let total = range.total_frames.max(1);
+        let mut submitted = 0_u64;
+
+        for index in 0..total {
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
                 return ResidentExportAttemptOutcome::Cancelled;
             }
-            Err(error) if submitted == 0 => {
-                tracing::debug!(%error, "resident HEVC first frame rejected before submission");
-                return ResidentExportAttemptOutcome::NotStarted(error);
-            }
-            Err(error) => {
+            let timeline_frame = match range.evaluation_frame(index) {
+                Ok(frame) => frame,
+                Err(error) => return ResidentExportAttemptOutcome::Failed(error),
+            };
+            let mut frame_color_counts = InputColorResolutionSourceCounts::default();
+            let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
+            let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
+            let source = match render_timeline_frame_resident_with_session_cancellable(
+                timeline,
+                timeline_frame,
+                width,
+                height,
+                ExportAlphaMode::FlattenBlack,
+                root_color_context.clone(),
+                ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
+                Some(&mut frame_color_counts),
+                Some(&mut frame_stage_diagnostics),
+                Some(&mut frame_composite_diagnostics),
+                Some(&mut diagnostics.color),
+                visual_session,
+                cancel,
+            ) {
+                Ok(source) => source,
+                Err(_error) if cancel.is_canceled() => {
+                    return ResidentExportAttemptOutcome::Cancelled;
+                }
+                Err(error) => {
+                    return ResidentExportAttemptOutcome::Failed(format!(
+                        "resident video render failed after {submitted} submitted frames: {error}"
+                    ));
+                }
+            };
+            let destination = match encoder.acquire_input_frame() {
+                Ok(frame) => frame,
+                Err(error) => {
+                    return ResidentExportAttemptOutcome::Failed(format!(
+                    "resident video surface acquisition failed after {submitted} frames: {error}"
+                ));
+                }
+            };
+            let ready = match adapter.process(source, destination) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    return ResidentExportAttemptOutcome::Failed(format!(
+                        "resident video native conversion failed after {submitted} frames: {error}"
+                    ));
+                }
+            };
+            if let Err(error) = encoder.submit_input_frame(ready, index) {
                 return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC render failed after {submitted} submitted frames: {error}"
+                    "resident video encoder rejected frame {index}: {error}"
                 ));
             }
-        };
-        let destination = match encoder.acquire_input_frame() {
-            Ok(frame) => frame,
-            Err(error) if submitted == 0 => {
-                tracing::debug!(%error, "resident HEVC first input surface unavailable");
-                return ResidentExportAttemptOutcome::NotStarted(error.to_string());
+            submitted = submitted.saturating_add(1);
+            diagnostics.color.record_frame_diagnostics(
+                frame_color_counts,
+                frame_stage_diagnostics,
+                frame_composite_diagnostics,
+            );
+            visual_session.visual_diagnostics.resident_encode_frames = submitted;
+            #[cfg(target_os = "windows")]
+            {
+                visual_session.visual_diagnostics.resident_encode_video_process_submissions =
+                    adapter.diagnostics().video_process_submissions;
             }
-            Err(error) => {
-                return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC surface acquisition failed after {submitted} frames: {error}"
-                ));
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            {
+                visual_session.visual_diagnostics.resident_encode_video_process_submissions =
+                    adapter.diagnostics().color_conversion_submissions;
             }
-        };
-        let ready = match adapter.process(source, destination) {
-            Ok(ready) => ready,
-            Err(error) if submitted == 0 => {
-                tracing::debug!(%error, "resident HEVC first native conversion submission rejected");
-                return ResidentExportAttemptOutcome::NotStarted(error.to_string());
+            #[cfg(target_os = "macos")]
+            {
+                visual_session.visual_diagnostics.video_encoder =
+                    Some(crate::hardware_encoding::resident_videotoolbox_diagnostics(
+                        plan.codec,
+                        renderer_adapter_identity.as_ref(),
+                        encoder.diagnostics().hardware_observed,
+                    ));
             }
-            Err(error) => {
-                return ResidentExportAttemptOutcome::Failed(format!(
-                    "resident HEVC native conversion failed after {submitted} frames: {error}"
-                ));
-            }
-        };
-        if let Err(error) = encoder.submit_input_frame(ready, index) {
-            return ResidentExportAttemptOutcome::Failed(format!(
-                "resident HEVC encoder rejected frame {index}: {error}"
+            diagnostics.visual = visual_session.visual_diagnostics();
+            report_diagnostics(diagnostics.clone());
+            let ratio = submitted as f32 / total as f32;
+            report(ExportProgress::rendering(
+                (0.18 + 0.72 * ratio).clamp(0.18, 0.92),
+                submitted,
+                total,
             ));
         }
-        submitted = submitted.saturating_add(1);
-        diagnostics.color.record_frame_diagnostics(
-            frame_color_counts,
-            frame_stage_diagnostics,
-            frame_composite_diagnostics,
-        );
-        visual_session.visual_diagnostics.resident_encode_frames = submitted;
-        #[cfg(target_os = "windows")]
-        {
-            visual_session.visual_diagnostics.resident_encode_video_process_submissions =
-                adapter.diagnostics().video_process_submissions;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            visual_session.visual_diagnostics.resident_encode_video_process_submissions =
-                adapter.diagnostics().color_conversion_submissions;
-        }
-        diagnostics.visual = visual_session.visual_diagnostics();
-        report_diagnostics(diagnostics.clone());
-        let ratio = submitted as f32 / total as f32;
-        report(ExportProgress::rendering(
-            (0.18 + 0.72 * ratio).clamp(0.18, 0.92),
-            submitted,
-            total,
-        ));
-    }
 
-    if cancel.is_canceled() {
-        return ResidentExportAttemptOutcome::Cancelled;
+        if cancel.is_canceled() {
+            return ResidentExportAttemptOutcome::Cancelled;
+        }
+        if let Err(error) = encoder.finish() {
+            return ResidentExportAttemptOutcome::Failed(format!(
+                "resident video encoder finalization failed: {error}"
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        let media_evidence = encoder.diagnostics();
+        #[cfg(target_os = "macos")]
+        if !media_evidence.hardware_observed || !media_evidence.consuming_shutdown {
+            return ResidentExportAttemptOutcome::Failed(
+                "resident VideoToolbox hardware/consuming shutdown proof missing".to_owned(),
+            );
+        }
+
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
+            return ResidentExportAttemptOutcome::Cancelled;
+        }
+        let ResolvedExportArtifactEncoding::MediaFile { container, audio, .. } = &delivery.artifact
+        else {
+            return ResidentExportAttemptOutcome::Failed(
+                "resident video route lost its media-file contract".to_owned(),
+            );
+        };
+        let mut command = match mondrian_media::ffmpeg_command() {
+            Ok(command) => command,
+            Err(error) => return ResidentExportAttemptOutcome::Failed(error.to_string()),
+        };
+        let resource_policy = execution_gate.resource_policy();
+        apply_external_filter_thread_args(&mut command, resource_policy);
+        apply_external_codec_thread_args(&mut command, resource_policy);
+        command
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("mpegts")
+            .arg("-i")
+            .arg(&resident_video_path);
+        match audio_input {
+            TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
+                let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
+                    return ResidentExportAttemptOutcome::Failed(
+                        "resident video audio layout has no FFmpeg lowering".to_owned(),
+                    );
+                };
+                apply_external_codec_thread_args(&mut command, resource_policy);
+                command
+                    .arg("-f")
+                    .arg("f32le")
+                    .arg("-ar")
+                    .arg(sample_rate.to_string())
+                    .arg("-channel_layout")
+                    .arg(layout)
+                    .arg("-ac")
+                    .arg(channel_layout.channel_count().to_string())
+                    .arg("-i")
+                    .arg(path);
+            }
+            TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
+                let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
+                    return ResidentExportAttemptOutcome::Failed(
+                        "resident video audio layout has no FFmpeg lowering".to_owned(),
+                    );
+                };
+                apply_external_codec_thread_args(&mut command, resource_policy);
+                command
+                .arg("-f")
+                .arg("lavfi")
+                .arg("-i")
+                .arg(format!(
+                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
+                    analysis.sample_frames
+                ));
+            }
+            TimelineAudioInput::Disabled => {}
+        }
+        // FFmpeg scopes options to the next input/output file. Finish both
+        // input groups before adding output mapping or the copy encoder.
+        command.arg("-map").arg("0:v:0").arg("-c:v").arg("copy");
+        // Resident admission requires progressive pictures. Preserve that
+        // contract in the container even when HEVC omits picture-timing SEI.
+        command.arg("-field_order").arg("progressive");
+        match audio_input {
+            TimelineAudioInput::PcmFile { .. } | TimelineAudioInput::Silent { .. } => {
+                command.arg("-map").arg("1:a:0").arg("-shortest");
+                apply_audio_codec_args(&mut command, audio);
+            }
+            TimelineAudioInput::Disabled => {
+                command.arg("-an");
+            }
+        }
+        // The resident encoder already wrote pixel format, range, CICP, cadence,
+        // and sample aspect ratio into the coded stream. Adding the
+        // generic pre-encode `scale`, `setsar`, or `pix_fmt` arguments here would
+        // require a decode/filter/re-encode and is invalid with `-c:v copy`.
+        apply_external_codec_thread_args(&mut command, resource_policy);
+        command.arg("-f").arg(container_format(container)).arg(output_path);
+        report(ExportProgress::encoding(0.98));
+        let output = mondrian_media::run_supervised_command(
+            &mut command,
+            None,
+            SupervisedProcessPolicy {
+                stdout: SupervisedStreamCapture::Drain,
+                stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
+                ..SupervisedProcessPolicy::default()
+            },
+            cancel,
+        );
+        match output {
+            Ok(output) if output.status.success() => {
+                visual_session.visual_diagnostics.resident_encode_video_stream_copy_muxes =
+                    visual_session
+                        .visual_diagnostics
+                        .resident_encode_video_stream_copy_muxes
+                        .saturating_add(1);
+                diagnostics.visual = visual_session.visual_diagnostics();
+                report_diagnostics(diagnostics.clone());
+                ResidentExportAttemptOutcome::Completed
+            }
+            Ok(output) => {
+                let reason = String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("unknown FFmpeg remux failure")
+                    .to_owned();
+                ResidentExportAttemptOutcome::Failed(format!(
+                    "resident video final stream-copy mux failed: {reason}"
+                ))
+            }
+            Err(error) if error.is_canceled() && !error.has_cleanup_failure() => {
+                ResidentExportAttemptOutcome::Cancelled
+            }
+            Err(error) => ResidentExportAttemptOutcome::Failed(format!(
+                "resident video final stream-copy mux failed: {error}"
+            )),
+        }
+    })();
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = encoder.shutdown() {
+            return ResidentExportAttemptOutcome::Failed(format!(
+                "resident VideoToolbox consuming shutdown failed: {error}"
+            ));
+        }
+        visual_session.visual_diagnostics.resident_encode_consuming_shutdown =
+            encoder.diagnostics().consuming_shutdown;
     }
-    if let Err(error) = encoder.finish() {
-        return ResidentExportAttemptOutcome::Failed(format!(
-            "resident HEVC encoder finalization failed: {error}"
-        ));
+    if let Err(error) = visual_session.release_decode_sessions() {
+        return ResidentExportAttemptOutcome::Failed(error);
     }
     let media_evidence = encoder.diagnostics();
     let renderer_evidence = adapter.diagnostics();
@@ -4817,124 +5223,9 @@ fn execute_resident_hevc_export(
     visual_session.visual_diagnostics.resident_encode_cpu_pixel_uploads = media_evidence
         .cpu_pixel_uploads
         .saturating_add(renderer_evidence.cpu_pixel_uploads);
-
-    if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
-        return ResidentExportAttemptOutcome::Cancelled;
-    }
-    let ResolvedExportArtifactEncoding::MediaFile { container, audio, .. } = &delivery.artifact
-    else {
-        return ResidentExportAttemptOutcome::Failed(
-            "resident HEVC route lost its media-file contract".to_owned(),
-        );
-    };
-    let mut command = match mondrian_media::ffmpeg_command() {
-        Ok(command) => command,
-        Err(error) => return ResidentExportAttemptOutcome::Failed(error.to_string()),
-    };
-    command
-        .arg("-y")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-f")
-        .arg("mpegts")
-        .arg("-i")
-        .arg(&resident_video_path)
-        .arg("-map")
-        .arg("0:v:0")
-        .arg("-c:v")
-        .arg("copy");
-    match audio_input {
-        TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
-            let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
-                return ResidentExportAttemptOutcome::Failed(
-                    "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
-                );
-            };
-            command
-                .arg("-f")
-                .arg("f32le")
-                .arg("-ar")
-                .arg(sample_rate.to_string())
-                .arg("-channel_layout")
-                .arg(layout)
-                .arg("-ac")
-                .arg(channel_layout.channel_count().to_string())
-                .arg("-i")
-                .arg(path)
-                .arg("-map")
-                .arg("1:a:0")
-                .arg("-shortest");
-            apply_audio_codec_args(&mut command, audio);
-        }
-        TimelineAudioInput::Silent { sample_rate, channel_layout, analysis } => {
-            let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
-                return ResidentExportAttemptOutcome::Failed(
-                    "resident HEVC audio layout has no FFmpeg lowering".to_owned(),
-                );
-            };
-            command
-                .arg("-f")
-                .arg("lavfi")
-                .arg("-i")
-                .arg(format!(
-                    "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
-                    analysis.sample_frames
-                ))
-                .arg("-map")
-                .arg("1:a:0")
-                .arg("-shortest");
-            apply_audio_codec_args(&mut command, audio);
-        }
-        TimelineAudioInput::Disabled => {
-            command.arg("-an");
-        }
-    }
-    // The resident encoder already wrote pixel format, range, CICP, cadence,
-    // field order, and sample aspect ratio into the coded stream. Adding the
-    // generic pre-encode `scale`, `setsar`, or `pix_fmt` arguments here would
-    // require a decode/filter/re-encode and is invalid with `-c:v copy`.
-    command.arg("-f").arg(container_format(container)).arg(output_path);
-    report(ExportProgress::encoding(0.98));
-    let output = mondrian_media::run_supervised_command(
-        &mut command,
-        None,
-        SupervisedProcessPolicy {
-            stdout: SupervisedStreamCapture::Drain,
-            stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
-            ..SupervisedProcessPolicy::default()
-        },
-        cancel,
-    );
-    match output {
-        Ok(output) if output.status.success() => {
-            visual_session.visual_diagnostics.resident_encode_video_stream_copy_muxes =
-                visual_session
-                    .visual_diagnostics
-                    .resident_encode_video_stream_copy_muxes
-                    .saturating_add(1);
-            diagnostics.visual = visual_session.visual_diagnostics();
-            report_diagnostics(diagnostics.clone());
-            ResidentExportAttemptOutcome::Completed
-        }
-        Ok(output) => {
-            let reason = String::from_utf8_lossy(&output.stderr)
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("unknown FFmpeg remux failure")
-                .to_owned();
-            ResidentExportAttemptOutcome::Failed(format!(
-                "resident HEVC final stream-copy mux failed: {reason}"
-            ))
-        }
-        Err(error) if error.is_canceled() && !error.has_cleanup_failure() => {
-            ResidentExportAttemptOutcome::Cancelled
-        }
-        Err(error) => ResidentExportAttemptOutcome::Failed(format!(
-            "resident HEVC final stream-copy mux failed: {error}"
-        )),
-    }
+    diagnostics.visual = visual_session.visual_diagnostics();
+    report_diagnostics(diagnostics);
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5005,12 +5296,22 @@ fn try_execute_smart_render(
             return Ok(None);
         }
     };
-    if MediaFileFingerprint::capture(&plan.path) != plan.source_fingerprint {
+    let current_fingerprint = MediaFileFingerprint::capture(&plan.path);
+    if current_fingerprint != plan.source_fingerprint {
+        tracing::debug!(
+            asset_id = %plan.asset_id,
+            expected = ?plan.source_fingerprint,
+            actual = ?current_fingerprint,
+            "Smart Render source revision changed before remux"
+        );
         return Ok(None);
     }
 
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+    let resource_policy = execution_gate.resource_policy();
+    apply_external_filter_thread_args(&mut command, resource_policy);
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -5023,6 +5324,7 @@ fn try_execute_smart_render(
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
+            apply_external_codec_thread_args(&mut command, resource_policy);
             command
                 .arg("-f")
                 .arg("f32le")
@@ -5039,6 +5341,7 @@ fn try_execute_smart_render(
             let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                 return Ok(None);
             };
+            apply_external_codec_thread_args(&mut command, resource_policy);
             command.arg("-f").arg("lavfi").arg("-i").arg(format!(
                 "anullsrc=channel_layout={layout}:sample_rate={sample_rate},atrim=end_sample={}",
                 analysis.sample_frames
@@ -5060,6 +5363,7 @@ fn try_execute_smart_render(
             command.arg("-an");
         }
     }
+    apply_external_codec_thread_args(&mut command, resource_policy);
     command.arg("-f").arg(container_format(container)).arg(output_path);
 
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
@@ -6292,7 +6596,8 @@ struct ExportDeliveryPixelContract {
 type ExportFrameSink<'a> = dyn FnMut(u64, &mut Vec<u8>) -> Result<(), JobExecutionResult> + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentHevcExportPlan {
+struct ResidentVideoExportPlan {
+    codec: ResidentEncodeCodec,
     bit_depth: ResidentEncodeBitDepth,
     colorimetry: ResidentEncodeColorimetry,
     full_range: bool,
@@ -6302,12 +6607,12 @@ struct ResidentHevcExportPlan {
     surface_pool_size: u32,
 }
 
-fn qualify_resident_hevc_export(
+fn qualify_resident_video_export(
     timeline: &TimelineExportSnapshot,
     delivery: &ResolvedExportDeliveryContract,
     alpha_mode: ExportAlphaMode,
     policy: service::ExportExecutionResourcePolicy,
-) -> Result<ResidentHevcExportPlan, ExportResidentEncodeBlocker> {
+) -> Result<ResidentVideoExportPlan, ExportResidentEncodeBlocker> {
     if !policy.opportunistic_gpu_acceleration {
         return Err(ExportResidentEncodeBlocker::ResourceGrant);
     }
@@ -6317,8 +6622,34 @@ fn qualify_resident_hevc_export(
     let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact else {
         return Err(ExportResidentEncodeBlocker::UnsupportedCodec);
     };
-    let (profile, rate_control) = match video {
-        VideoCodecConfig::Hevc { profile, rate_control } => (*profile, *rate_control),
+    let (codec, bit_depth, rate_control) = match (video, delivery.bit_depth) {
+        (
+            VideoCodecConfig::Hevc { profile: HevcProfile::Main, rate_control },
+            DeliveryBitDepth::Eight,
+        ) => (
+            ResidentEncodeCodec::Hevc,
+            ResidentEncodeBitDepth::Eight,
+            *rate_control,
+        ),
+        (
+            VideoCodecConfig::Hevc { profile: HevcProfile::Main10, rate_control },
+            DeliveryBitDepth::Ten,
+        ) => (
+            ResidentEncodeCodec::Hevc,
+            ResidentEncodeBitDepth::Ten,
+            *rate_control,
+        ),
+        (
+            VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control,
+            },
+            DeliveryBitDepth::Eight,
+        ) => (
+            ResidentEncodeCodec::H264High,
+            ResidentEncodeBitDepth::Eight,
+            *rate_control,
+        ),
         _ => return Err(ExportResidentEncodeBlocker::UnsupportedCodec),
     };
     if delivery.chroma_sampling != ExportChromaSampling::Yuv420 {
@@ -6342,14 +6673,10 @@ fn qualify_resident_hevc_export(
     if rate_control.max_bitrate_kbps.is_some() || rate_control.buffer_size_kbits.is_some() {
         return Err(ExportResidentEncodeBlocker::RateControl);
     }
-    let bit_depth = match (profile, delivery.bit_depth) {
-        (HevcProfile::Main, DeliveryBitDepth::Eight) => ResidentEncodeBitDepth::Eight,
-        (HevcProfile::Main10, DeliveryBitDepth::Ten) => ResidentEncodeBitDepth::Ten,
-        _ => return Err(ExportResidentEncodeBlocker::UnsupportedCodec),
-    };
     let colorimetry = match delivery.color_target.color_space {
         ColorSpace::Rec709 => ResidentEncodeColorimetry::Rec709,
         ColorSpace::Rec2100Pq => ResidentEncodeColorimetry::Rec2100Pq,
+        ColorSpace::Rec2100Hlg => ResidentEncodeColorimetry::Rec2100Hlg,
         _ => return Err(ExportResidentEncodeBlocker::Signal),
     };
     let full_range = match delivery.video_range {
@@ -6380,10 +6707,30 @@ fn qualify_resident_hevc_export(
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel_x2))
         .and_then(|bytes| bytes.checked_mul(u128::from(policy.resident_encoder_surfaces)))
         .ok_or(ExportResidentEncodeBlocker::ResourceGrant)?;
+    #[cfg(target_os = "macos")]
+    let pool_bytes_x2 = pool_bytes_x2
+        + 2 * u128::from(
+            mondrian_renderer::ResidentEncodeAdapterContract {
+                width: delivery.resolution.width,
+                height: delivery.resolution.height,
+                frame_rate_num: u32::try_from(delivery.frame_rate.num)
+                    .map_err(|_| ExportResidentEncodeBlocker::Signal)?,
+                frame_rate_den: u32::try_from(delivery.frame_rate.den)
+                    .map_err(|_| ExportResidentEncodeBlocker::Signal)?,
+                bit_depth,
+                colorimetry,
+                full_range,
+                chroma_location: mondrian_media::ResidentEncodeChromaLocation::Left,
+                max_frames_in_flight: policy.resident_encoder_surfaces as usize,
+            }
+            .compute_transport_byte_len()
+            .map_err(|_| ExportResidentEncodeBlocker::ResourceGrant)?,
+        );
     if pool_bytes_x2 > u128::from(policy.resident_encoder_surface_bytes).saturating_mul(2) {
         return Err(ExportResidentEncodeBlocker::ResourceGrant);
     }
-    Ok(ResidentHevcExportPlan {
+    Ok(ResidentVideoExportPlan {
+        codec,
         bit_depth,
         colorimetry,
         full_range,
@@ -6899,7 +7246,7 @@ fn render_timeline_sample_into_with_session_cancellable(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn render_timeline_frame_resident_with_session_cancellable(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
@@ -6946,7 +7293,7 @@ enum SequenceRenderTarget<'a> {
     Working(&'a mut Option<CpuColorFrame>),
     Deliverable(&'a mut Vec<u8>),
     #[cfg_attr(
-        not(any(target_os = "windows", target_os = "linux")),
+        not(any(target_os = "windows", target_os = "linux", target_os = "macos")),
         expect(
             dead_code,
             reason = "Resident encode admission requires a native same-device adapter."
@@ -7143,8 +7490,32 @@ impl ExportVisualRenderSession {
     /// context travels through every prepared root, child, Transition, and
     /// temporal materialization and is retired before the executor returns to
     /// terminal publication.
-    fn release_decode_sessions(&mut self) {
+    fn release_decode_sessions(&mut self) -> Result<(), String> {
+        self.gpu_output
+            .finish_native_sources_until(Instant::now() + EXPORT_GPU_READBACK_TIMEOUT)?;
         self.decode_context.clear();
+        if !self.decode_context.native_outputs_released() {
+            return Err(
+                "Export decode outputs remain retained after native sampling shutdown".to_owned(),
+            );
+        }
+        self.visual_diagnostics.native_source_consuming_shutdown = true;
+        Ok(())
+    }
+
+    fn record_native_source_execution(&mut self, source: &GpuVisualFrameSource) {
+        let GpuVisualFrameSource::Native { frame, .. } = source else {
+            return;
+        };
+        let diagnostics = &mut self.visual_diagnostics;
+        diagnostics.gpu_visual_native_sources =
+            diagnostics.gpu_visual_native_sources.saturating_add(1);
+        let counter = match frame.diagnostics.hardware_decode_observed {
+            Some(true) => &mut diagnostics.gpu_visual_native_hardware_sources,
+            Some(false) => &mut diagnostics.gpu_visual_native_software_sources,
+            None => &mut diagnostics.gpu_visual_native_unobserved_sources,
+        };
+        *counter = counter.saturating_add(1);
     }
 
     fn visual_diagnostics(&self) -> ExportJobVisualDiagnostics {
@@ -7230,7 +7601,9 @@ impl Default for ExportVisualRenderSession {
 
 impl Drop for ExportVisualRenderSession {
     fn drop(&mut self) {
-        self.release_decode_sessions();
+        if let Err(error) = self.release_decode_sessions() {
+            tracing::error!(%error, "Export native source ownership did not close cleanly");
+        }
     }
 }
 
@@ -7797,7 +8170,7 @@ impl TimelineVisualExecutionIntent {
     }
 }
 
-#[cfg(any(test, target_os = "windows", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn render_sequence_frame_into(
     timeline: &TimelineExportSnapshot,
     context: &mut ExportFrameRenderContext<'_>,
@@ -8103,6 +8476,7 @@ fn render_prepared_visual_node_gpu(
                     context.stage_diagnostics.as_deref_mut(),
                     context.visual_session,
                     context.cancellation,
+                    ExportDecodedSourceRoute::GpuInput,
                 )?);
             }
             TimelineRenderPlanElement::BasicTitle(title) => {
@@ -8159,13 +8533,13 @@ fn render_prepared_visual_node_gpu(
                     media.transform,
                     decoded.picture_geometry.source_to_display_affine(),
                     decoded.source_resolution,
-                    decoded_frame_resolution(&decoded.frame),
+                    decoded.extent(),
                     author_resolution,
                     resolution,
                     "GPU media",
                 )?;
                 GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
-                    source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                    source: decoded.gpu_source()?,
                     opacity: media.opacity,
                     blend_mode: media.blend_mode,
                     transform,
@@ -8303,6 +8677,21 @@ fn render_prepared_visual_node_gpu(
         },
         context.cancellation,
     )?;
+    for element in &gpu_elements {
+        match element {
+            GpuVisualFrameElement::Source(source) => {
+                context.visual_session.record_native_source_execution(&source.source);
+            }
+            GpuVisualFrameElement::CrossDissolve { left, right, .. } => {
+                for input in [left, right] {
+                    if let GpuVisualTransitionInput::Source(source) = input {
+                        context.visual_session.record_native_source_execution(&source.source);
+                    }
+                }
+            }
+            GpuVisualFrameElement::Adjustment { .. } => {}
+        }
+    }
     if flatten_black
         && record.output.descriptor().alpha != mondrian_renderer::ColorFrameAlpha::Opaque
     {
@@ -8326,6 +8715,11 @@ fn render_prepared_visual_node_gpu(
         .visual_diagnostics
         .gpu_visual_nodes_completed
         .saturating_add(1);
+    context.visual_session.visual_diagnostics.gpu_visual_compact_yuv_sources = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_compact_yuv_sources
+        .saturating_add(record.compact_yuv_sources);
     if !inputs.is_root() {
         context.visual_session.visual_diagnostics.gpu_visual_nested_outputs = context
             .visual_session
@@ -8407,18 +8801,19 @@ fn lower_export_gpu_transition_input(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::GpuInput,
             )?;
             let transform = project_export_picture_affine(
                 media.transform,
                 decoded.picture_geometry.source_to_display_affine(),
                 decoded.source_resolution,
-                decoded_frame_resolution(&decoded.frame),
+                decoded.extent(),
                 author_resolution,
                 resolution,
                 "GPU Transition media",
             )?;
             GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
-                source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                source: decoded.gpu_source()?,
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
@@ -8563,8 +8958,7 @@ fn finish_export_gpu_visual_output(
             ExportGpuOutputFallbackBreakdown::default(),
         );
     }
-    canvas.clear();
-    canvas.extend_from_slice(&attempt.pipe_bytes);
+    *canvas = attempt.pipe_bytes;
     Ok(())
 }
 
@@ -8675,6 +9069,7 @@ fn render_prepared_visual_node_into(
                         context.stage_diagnostics.as_deref_mut(),
                         context.visual_session,
                         context.cancellation,
+                        ExportDecodedSourceRoute::CpuWorking,
                     )?);
                 }
             }
@@ -8756,7 +9151,7 @@ fn render_prepared_visual_node_into(
                                 "heterogeneous media plan was not resolved before Effect execution"
                                     .to_owned()
                             })?
-                            .frame
+                            .cpu_frame()?
                             .clone(),
                     )
                 }
@@ -8851,7 +9246,7 @@ fn render_prepared_visual_node_into(
                             "media plan was not resolved before compositing".to_owned()
                         })?;
                         (
-                            &decoded.frame,
+                            decoded.cpu_frame()?,
                             decoded.source_resolution,
                             decoded.picture_geometry.source_to_display_affine(),
                         )
@@ -9191,8 +9586,7 @@ fn render_prepared_visual_node_into(
             gpu_output_fallback_reasons,
         );
     }
-    output_target.clear();
-    output_target.extend_from_slice(&final_bytes);
+    *output_target = final_bytes;
     Ok(())
 }
 
@@ -9207,6 +9601,7 @@ fn decode_export_media_plan(
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
     visual_session: &mut ExportVisualRenderSession,
     cancellation: &ExecutionCancellationToken,
+    route: ExportDecodedSourceRoute,
 ) -> Result<Arc<DecodedVideoLayer>, String> {
     let dependency = media_dependencies
         .get(&media.asset_id)
@@ -9218,6 +9613,7 @@ fn decode_export_media_plan(
     );
     let source_preparation = resolve_export_source_preparation(
         ExportSourcePreparationRequest {
+            route,
             asset_id: media.asset_id,
             color_space_override: media.color_space_override,
             auto_tone_map: media.auto_tone_map,
@@ -9264,6 +9660,9 @@ fn decode_export_media_plan(
         picture_geometry,
     )?;
     if let Some(decoded) = cache.get(&key) {
+        if decoded.route() != route {
+            return Err("Export decode cache route disagrees with its visual owner".to_owned());
+        }
         if decoded.source_fingerprint != dependency.source_fingerprint
             || decoded.video_stream_index != key.video_stream_index
         {
@@ -9274,6 +9673,13 @@ fn decode_export_media_plan(
         }
         return Ok(Arc::clone(decoded));
     }
+    let native_import_support = if route == ExportDecodedSourceRoute::GpuInput {
+        visual_session
+            .gpu_output
+            .native_import_support(&mut visual_session.decode_context)?
+    } else {
+        None
+    };
     let decoded = decode_video_layer_scaled(
         ExportVideoLayerDecodeRequest {
             asset_id: media.asset_id,
@@ -9287,9 +9693,11 @@ fn decode_export_media_plan(
             preparation_intent,
         },
         ExportVideoLayerDecodeExecutionContext {
+            native_import_support: native_import_support.as_ref(),
             color_session: visual_session.composite_scratch.color_execution_mut(),
             decode_context: &mut visual_session.decode_context,
             cancellation,
+            route,
         },
     )?;
     if decoded.source_fingerprint != key.source_fingerprint
@@ -9327,6 +9735,7 @@ struct ExportSourcePreparationRequest<'a> {
     dependency: &'a crate::preset::ExportMediaDependency,
     input_video_range: DecodedVideoRangeContract,
     color_context: &'a ProgramColorContext,
+    route: ExportDecodedSourceRoute,
 }
 
 fn resolve_export_source_preparation(
@@ -9340,6 +9749,7 @@ fn resolve_export_source_preparation(
         dependency,
         input_video_range,
         color_context,
+        route,
     } = request;
     let input_color_resolution =
         color_context.missing_metadata_policy().resolve_asset_input_decision(
@@ -9362,10 +9772,19 @@ fn resolve_export_source_preparation(
     }
     let (source_contract, preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
-            PreviewSourceColorContract::new(color_space, input_video_range),
-            SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
-                &color_context.media_input(auto_tone_map),
-            )),
+            SourceColorModule::decode_contract(
+                color_space,
+                input_video_range,
+                input_color_resolution.source,
+            ),
+            SourceFramePreparationIntent::ColorManaged(match route {
+                ExportDecodedSourceRoute::CpuWorking => {
+                    SourceColorModule::cpu_intent(&color_context.media_input(auto_tone_map))
+                }
+                ExportDecodedSourceRoute::GpuInput => {
+                    SourceColorModule::gpu_intent(&color_context.media_input(auto_tone_map))
+                }
+            }),
         ),
         ResolvedInputColor::Data => {
             let sampling = dependency
@@ -9411,6 +9830,13 @@ fn resolve_export_source_preparation(
             ));
         }
     };
+    let source_contract = dependency
+        .source_video_stream
+        .as_ref()
+        .map_or(source_contract, |stream| {
+            source_contract.with_video_stream_sampling(stream)
+        })
+        .with_matrix_interpretation(dependency.interpretation.matrix);
     Ok(ExportSourcePreparation {
         source_contract,
         preparation_intent,
@@ -9596,9 +10022,10 @@ fn resolve_export_temporal_source(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
             )?;
             (
-                decoded.frame.clone(),
+                decoded.cpu_frame()?.clone(),
                 decoded.source_resolution,
                 decoded.picture_geometry.source_to_display_affine(),
             )
@@ -9883,6 +10310,7 @@ fn resolve_export_transition_input(
                 context.stage_diagnostics.as_deref_mut(),
                 context.visual_session,
                 context.cancellation,
+                ExportDecodedSourceRoute::CpuWorking,
             )?)
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
@@ -9975,13 +10403,13 @@ fn lower_export_transition_input<'a>(
                 media.transform,
                 frame.picture_geometry.source_to_display_affine(),
                 frame.source_resolution,
-                decoded_frame_resolution(&frame.frame),
+                frame.extent(),
                 author_resolution,
                 resolution,
                 "Transition media",
             )?;
             TimelineTransitionInput::Media(TimelineMediaLayer {
-                frame: &frame.frame,
+                frame: frame.cpu_frame()?,
                 opacity: media.opacity,
                 blend_mode: media.blend_mode,
                 transform,
@@ -10098,6 +10526,13 @@ fn resolve_export_input_video_range(
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
 ) -> DecodedVideoRangeContract {
+    if let Some(stream) = media_dependencies
+        .get(&asset_id)
+        .and_then(|dependency| dependency.source_video_stream.as_ref())
+        && stream.camera_raw.is_none()
+    {
+        return DecodedVideoRangeContract::from_video_stream(interpretation.range, stream);
+    }
     if media_dependencies
         .get(&asset_id)
         .and_then(|dependency| dependency.source_video_stream.as_ref())
@@ -10144,7 +10579,7 @@ fn finish_empty_sequence_target(
     }
 }
 
-/// Immutable author and delivery facts for one export still-frame decode.
+/// Immutable author and delivery facts for one export source-frame decode.
 ///
 /// The request owns the renderer source-preparation intent so media decode
 /// cannot reinterpret color-managed versus DataTexture execution while a job
@@ -10162,7 +10597,7 @@ struct ExportVideoLayerDecodeRequest<'a> {
     preparation_intent: SourceFramePreparationIntent,
 }
 
-/// Job-owned mutable execution services for one export still-frame decode.
+/// Job-owned mutable execution services for one export source-frame decode.
 ///
 /// Keeping these borrows outside `ExportVideoLayerDecodeRequest` makes the
 /// immutable cache-authorizing request reusable without obscuring mutation of
@@ -10171,6 +10606,8 @@ struct ExportVideoLayerDecodeExecutionContext<'a> {
     color_session: &'a mut mondrian_renderer::RenderCpuColorExecutionSession,
     decode_context: &'a mut PreviewDecodeSessionContext,
     cancellation: &'a ExecutionCancellationToken,
+    route: ExportDecodedSourceRoute,
+    native_import_support: Option<&'a mondrian_renderer::GpuNativeDecodedFrameImportSupport>,
 }
 
 fn decode_video_layer_scaled(
@@ -10188,8 +10625,13 @@ fn decode_video_layer_scaled(
         alpha_interpretation,
         preparation_intent,
     } = request;
-    let ExportVideoLayerDecodeExecutionContext { color_session, decode_context, cancellation } =
-        execution;
+    let ExportVideoLayerDecodeExecutionContext {
+        color_session,
+        decode_context,
+        cancellation,
+        route,
+        native_import_support,
+    } = execution;
     let path = dependency.path.as_path();
     if !dependency.source_fingerprint.authorizes_reuse() {
         return Err(format!(
@@ -10208,7 +10650,9 @@ fn decode_video_layer_scaled(
     let mut media_request = PreviewDecodeRequest::new(
         path,
         source_sample,
-        PreviewDecodeAccessMode::RandomAccessStillFrame,
+        // Export owns a decoder session across frames; exact playback selection
+        // retains forward decode while still seeking for discontinuous source time.
+        PreviewDecodeAccessMode::PlaybackCursor,
         source_color,
     )
     .with_field_processing(
@@ -10238,90 +10682,168 @@ fn decode_video_layer_scaled(
         })?;
         media_request = media_request.with_camera_raw(intent);
     }
+    if route == ExportDecodedSourceRoute::GpuInput
+        && alpha_interpretation == AlphaInterpretation::Straight
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture()
+        && picture_geometry.scan() == mondrian_core::PictureScan::Progressive
+        && dependency.source_video_stream.as_ref().is_some_and(|stream| {
+            stream.camera_raw.is_none()
+                && mondrian_media::PreviewCompactCpuYuvHint::from_pixel_format(stream.pixel_format)
+                    .is_some()
+        })
+    {
+        media_request.representation = mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv;
+    }
+    if route == ExportDecodedSourceRoute::GpuInput
+        && alpha_interpretation == AlphaInterpretation::Straight
+        && !source_color.is_scene_linear()
+        && !source_color.is_data_texture()
+        && picture_geometry.scan() == mondrian_core::PictureScan::Progressive
+        && let Some(support) = native_import_support
+            .filter(|support| support.renderer_backend_ready && !support.routes.is_empty())
+        && dependency.source_video_stream.as_ref().is_some_and(|stream| {
+            stream.camera_raw.is_none()
+                && mondrian_media::PreviewDecodeSource::from_probed_stream(
+                    path.to_path_buf(),
+                    dependency.source_fingerprint,
+                    stream,
+                )
+                .is_ok_and(|source| source.native_surface_hint().is_some())
+        })
+    {
+        // Media owns codec/profile eligibility. Renderer validates the observed
+        // native handle and physical layout through its exact route contract.
+        // Once chosen, this request cannot return CPU pixels or silently fall back.
+        media_request.representation = mondrian_media::PreviewDecodeRepresentation::NativeSurface;
+        media_request.hardware_decode_request =
+            mondrian_media::PreviewHardwareDecodeRequest::RequireGpuResident;
+        media_request.hardware_decode_device_selector = support.hardware_decode_device_selector;
+    }
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
-    let (source, decode_diagnostics): (PreparedSourceFrame, PreviewDecodeDiagnostics) =
-        match outcome {
-            Ok(PreviewDecodeOutcome::Frame(frame)) => {
-                let diagnostics = frame.diagnostics;
-                let source = prepare_decoded_cpu_source_frame(
-                    frame,
-                    alpha_interpretation,
-                    preparation_intent.clone(),
-                )
-                .map_err(|err| {
-                    format!(
-                        "asset={} path={} source frame preparation failed: {}",
-                        asset_id,
-                        path.display(),
-                        err
-                    )
-                })?;
-                (source, diagnostics)
+    let (decoded, decode_diagnostics) = match outcome {
+        Ok(PreviewDecodeOutcome::Frame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::Unorm16Frame(frame)) => {
+            let diagnostics = frame.diagnostics;
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+            )
+        }
+        Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+            if route != ExportDecodedSourceRoute::GpuInput
+                || alpha_interpretation != AlphaInterpretation::Straight
+            {
+                return Err(
+                    "compact source reached a CPU/alpha-normalizing Export route".to_owned(),
+                );
             }
-            Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
-                let diagnostics = frame.diagnostics;
-                let source = prepare_decoded_cpu_source_frame(
-                    frame,
-                    alpha_interpretation,
-                    preparation_intent,
-                )
-                .map_err(|err| {
-                    format!(
-                        "asset={} path={} source frame preparation failed: {}",
-                        asset_id,
-                        path.display(),
-                        err
-                    )
-                })?;
-                (source, diagnostics)
+            let SourceFramePreparationIntent::ColorManaged(transform) = preparation_intent else {
+                return Err("compact color source cannot enter DataTexture bypass".to_owned());
+            };
+            let diagnostics = frame.diagnostics;
+            return Ok(Arc::new(DecodedVideoLayer {
+                pixels: DecodedVideoLayerPixels::GpuYuv { frame: Arc::new(frame), transform },
+                source_resolution,
+                picture_geometry,
+                source_fingerprint: dependency.source_fingerprint,
+                video_stream_index,
+                decode_diagnostics: Some(diagnostics),
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            }));
+        }
+        Ok(PreviewDecodeOutcome::Canceled(_)) => {
+            return Err(format!(
+                "asset={} path={} err=export source-frame decode canceled unexpectedly",
+                asset_id,
+                path.display()
+            ));
+        }
+        Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
+            if route != ExportDecodedSourceRoute::GpuInput
+                || alpha_interpretation != AlphaInterpretation::Straight
+            {
+                return Err("native source reached a CPU/alpha-normalizing Export route".to_owned());
             }
-            Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
-                return Err(format!(
-                    "asset={} path={} err=export still-frame CPU fallback requires CPU-addressable RGB, got compact GPU-materialization YUV",
-                    asset_id,
-                    path.display()
-                ));
-            }
-            Ok(PreviewDecodeOutcome::Canceled(_)) => {
-                return Err(format!(
-                    "asset={} path={} err=export still-frame decode canceled unexpectedly",
-                    asset_id,
-                    path.display()
-                ));
-            }
-            Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
-                return Err(format!(
-                "asset={} path={} err=export still-frame CPU fallback requires CPU RGBA, got native GPU {} {:?}",
+            let SourceFramePreparationIntent::ColorManaged(transform) = preparation_intent else {
+                return Err("native color source cannot enter DataTexture bypass".to_owned());
+            };
+            let source_color_space = source_color.color_space().ok_or_else(|| {
+                "native Export source is missing its typed color identity".to_owned()
+            })?;
+            let diagnostics = frame.diagnostics;
+            return Ok(Arc::new(DecodedVideoLayer {
+                pixels: DecodedVideoLayerPixels::GpuNative {
+                    frame: Arc::new(frame),
+                    source_color_space,
+                    transform,
+                },
+                source_resolution,
+                picture_geometry,
+                source_fingerprint: dependency.source_fingerprint,
+                video_stream_index,
+                decode_diagnostics: Some(diagnostics),
+                stage_diagnostics: RenderColorStageDiagnostics::default(),
+            }));
+        }
+        Err(err) => {
+            return Err(format!(
+                "asset={} path={} err={}",
                 asset_id,
                 path.display(),
-                frame.handle_kind().as_str(),
-                frame.surface_format
+                err
             ));
-            }
-            Err(err) => {
-                return Err(format!(
-                    "asset={} path={} err={}",
+        }
+    };
+    let source: PreparedSourceFrame =
+        prepare_decoded_cpu_source_frame(decoded, alpha_interpretation, preparation_intent)
+            .map_err(|err| {
+                format!(
+                    "asset={} path={} source frame preparation failed: {}",
                     asset_id,
                     path.display(),
                     err
-                ));
-            }
-        };
-    let is_data_texture = source.is_data_texture();
-    let execution = source
-        .execute_cpu_with_session(color_session)
-        .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+                )
+            })?;
+    let (pixels, stage_diagnostics) = match route {
+        ExportDecodedSourceRoute::CpuWorking => {
+            let is_data_texture = source.is_data_texture();
+            let execution = source
+                .execute_cpu_with_session(color_session)
+                .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+            (
+                DecodedVideoLayerPixels::CpuWorking { frame: execution.frame, is_data_texture },
+                execution.stage_diagnostics,
+            )
+        }
+        ExportDecodedSourceRoute::GpuInput => (
+            DecodedVideoLayerPixels::GpuInput(source),
+            RenderColorStageDiagnostics::default(),
+        ),
+    };
     Ok(Arc::new(DecodedVideoLayer {
-        frame: execution.frame,
-        is_data_texture,
+        pixels,
         source_resolution,
         picture_geometry,
         source_fingerprint: dependency.source_fingerprint,
         video_stream_index,
         decode_diagnostics: Some(decode_diagnostics),
-        stage_diagnostics: execution.stage_diagnostics,
+        stage_diagnostics,
     }))
 }
 
@@ -10449,21 +10971,70 @@ mod tests {
     }
 
     #[test]
-    fn external_encoder_filter_threads_follow_the_frozen_attempt_policy() {
-        let mut command = mondrian_media::FfmpegCommand::new("ffmpeg");
+    fn external_encoder_thread_grants_apply_to_each_file() {
+        if !ffmpeg_is_available_for_test() {
+            eprintln!("skipping external encoder threading test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary threading artifact");
+        let path = directory.path().join("thread-grant.mp4");
         let policy = service::ExportExecutionResourcePolicy {
             ffmpeg_filter_threads: 2,
+            ffmpeg_codec_threads: 2,
             ..service::ExportExecutionResourcePolicy::default()
         };
+        let mut command = mondrian_media::ffmpeg_command().expect("admit threading encoder");
+        command.args(["-y", "-hide_banner", "-loglevel", "info"]);
         super::apply_external_filter_thread_args(&mut command, policy);
-        let arguments = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            arguments,
-            ["-filter_threads", "2", "-filter_complex_threads", "2"]
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=0.1",
+        ]);
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=sample_rate=48000:channel_layout=stereo",
+        ]);
+        super::apply_external_codec_thread_args(&mut command, policy);
+        command.args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ]);
+        let encoded = command.arg(&path).output().expect("run threading encoder");
+        let stderr = String::from_utf8_lossy(&encoded.stderr);
+        assert!(encoded.status.success(), "{stderr}");
+        // Observe the actual codec, not just the requested CLI argument. A
+        // threads option attached only to an input leaves x264's output pool
+        // at its topology-derived default instead of this frozen grant.
+        assert!(
+            stderr.contains("threads=2 "),
+            "missing observed x264 thread grant: {stderr}"
+        );
+        let mut verify = mondrian_media::ffmpeg_command().expect("admit independent full decode");
+        super::apply_external_filter_thread_args(&mut verify, policy);
+        super::apply_external_codec_thread_args(&mut verify, policy);
+        verify.arg("-hide_banner").arg("-loglevel").arg("error").arg("-i").arg(&path);
+        super::apply_external_codec_thread_args(&mut verify, policy);
+        let decoded = verify
+            .args(["-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"])
+            .output()
+            .expect("full video/audio decode");
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
         );
     }
 
@@ -10572,7 +11143,7 @@ mod tests {
 
         assert_eq!(
             decode.matches("prepare_decoded_cpu_source_frame(").count(),
-            2
+            1
         );
         assert!(!decode.contains("CpuEncodedFloatColorFrame"));
         assert!(!decode.contains("LinearFloatSource"));
@@ -10728,6 +11299,72 @@ mod tests {
                 ExportGpuOutputFallbackReason::ReadbackMapFailed
             ))
         );
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU"]
+    fn mapped_readback_releases_view_and_mapping_after_rejection_and_cancellation() {
+        let runtime =
+            TokioRuntimeBuilder::new_current_thread().enable_all().build().expect("runtime");
+        let context = runtime.block_on(GpuContext::new()).expect("physical adapter");
+        eprintln!(
+            "borrowed readback adapter: {:?}",
+            context.adapter.get_info()
+        );
+        let buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("borrowed-export-readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let values = [1.0_f32, 0.5, f32::NAN, 1.0];
+        let bytes: Vec<_> = values.into_iter().flat_map(f32::to_le_bytes).collect();
+        context.queue.write_buffer(&buffer, 0, &bytes);
+        let submission = context.queue.submit([]);
+        let cancellation = ExecutionCancellationToken::new();
+        let error = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &cancellation,
+            Instant::now() + Duration::from_secs(30),
+            |mapped| {
+                ExportFrameContract::EncodedRgba16Unorm
+                    .pack_rgba32float_readback(mapped, 1, 1, 16)
+                    .map_err(Into::into)
+            },
+        );
+        assert_eq!(
+            error,
+            Err(ExportGpuOutputExecutionError::Packing(
+                ExportFramePackingError::NonFiniteComponent { component_index: 2 },
+            ))
+        );
+        let canceled = ExecutionCancellationToken::new();
+        canceled.cancel();
+        let error = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &canceled,
+            Instant::now() + Duration::from_secs(30),
+            |_| -> Result<(), ExportGpuOutputExecutionError> {
+                panic!("canceled mapping cannot reach serialization")
+            },
+        );
+        assert_eq!(error, Err(ExportGpuOutputExecutionError::Canceled));
+        // Remapping the same physical buffer proves both views and mapping
+        // leases have actually been released, including the canceled callback.
+        let actual = with_mapped_readback(
+            &context.device,
+            &buffer,
+            &submission,
+            &cancellation,
+            Instant::now() + Duration::from_secs(30),
+            |mapped| Ok(mapped.to_vec()),
+        )
+        .expect("fresh mapping after rejection and cancellation");
+        assert_eq!(actual, bytes);
     }
 
     #[test]
@@ -11066,10 +11703,7 @@ mod tests {
             "a complete exact CPU route must win before any heterogeneous work starts"
         );
         assert!(session.heterogeneous_route_contracts.is_empty());
-        assert_eq!(
-            session.visual_diagnostics().cpu_routes_selected_before_start,
-            1
-        );
+        assert_eq!(session.visual_diagnostics().cpu_compatible_effect_checks, 1);
     }
 
     #[test]
@@ -12105,6 +12739,16 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_smart_renders_full_identity_video_with_packet_proof() {
+        // Keep production rejection events in libtest's captured output. A
+        // successful pixel fallback must not obscure why this packet-proof
+        // regression failed; the subscriber is local to this test thread.
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .without_time()
+            .with_ansi(false)
+            .finish();
+        let _trace = tracing::subscriber::set_default(subscriber);
         if !ffmpeg_is_available_for_test() {
             eprintln!("skipping Smart Render integration test: FFmpeg unavailable");
             return;
@@ -12216,6 +12860,56 @@ mod tests {
             frozen_ancillary: None,
             approved_bmx: None,
         });
+        let delivery = crate::delivery::resolve_export_delivery(
+            &job.config.preset,
+            &job.config.timeline.sequence.settings,
+            &job.config.timeline.color_environment,
+        )
+        .expect("delivery");
+        assert!(crate::smart_render::qualify_smart_render(
+            &job.config,
+            &job.config.timeline,
+            &delivery,
+            source_range,
+            25
+        )
+        .is_ok());
+        let mut corrected = job.config.timeline.as_ref().clone();
+        corrected.media.get_mut(&asset_id).expect("source").interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+                matrix: mondrian_core::timeline_data::MediaYuvMatrix::Bt709,
+            };
+        assert_eq!(
+            crate::smart_render::qualify_smart_render(
+                &job.config,
+                &corrected,
+                &delivery,
+                source_range,
+                25
+            ),
+            Err(crate::smart_render::SmartRenderBlocker::SignalMismatch)
+        );
+        let corrected_source = corrected.media.get_mut(&asset_id).expect("source");
+        corrected_source.interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Auto;
+        corrected_source
+            .source_video_stream
+            .as_mut()
+            .expect("stream")
+            .color_metadata
+            .as_mut()
+            .expect("CICP")
+            .matrix = exact_test_cicp_tag(TestCicpTagKind::Matrix, "smpte170m");
+        assert_eq!(
+            crate::smart_render::qualify_smart_render(
+                &job.config,
+                &corrected,
+                &delivery,
+                source_range,
+                25
+            ),
+            Err(crate::smart_render::SmartRenderBlocker::SignalMismatch)
+        );
         let mut latest_diagnostics = None;
         let result = FfmpegExportExecutor.execute(
             &job,
@@ -12290,7 +12984,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_hevc_admission_is_exact_and_resource_bounded() {
+    fn resident_video_admission_is_exact_and_resource_bounded() {
         let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Ten,
@@ -12306,13 +13000,14 @@ mod tests {
             },
             audio: AudioCodecConfig::Disabled,
         };
-        let plan = qualify_resident_hevc_export(
+        let plan = qualify_resident_video_export(
             &timeline,
             &delivery,
             ExportAlphaMode::FlattenBlack,
             ExportExecutionResourcePolicy::default(),
         )
         .expect("qualified Main10 resident route");
+        assert_eq!(plan.codec, ResidentEncodeCodec::Hevc);
         assert_eq!(plan.bit_depth, ResidentEncodeBitDepth::Ten);
         assert_eq!(plan.colorimetry, ResidentEncodeColorimetry::Rec709);
         assert!(!plan.full_range);
@@ -12323,7 +13018,7 @@ mod tests {
             ..ExportExecutionResourcePolicy::default()
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12334,55 +13029,9 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
-    fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
-        run_production_export_queue_resident_hevc_qualification();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
-    fn production_export_queue_runs_same_device_cuda_resident_hevc() {
-        run_production_export_queue_resident_hevc_qualification();
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    fn run_production_export_queue_resident_hevc_qualification() {
-        let _gpu_visual = GpuVisualExecutionGuard::activate();
-        let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .filter(|value| (1..=600).contains(value))
-            .unwrap_or(3);
-        let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
-        let mut sequence = Sequence::new("same-device resident HEVC Export");
-        sequence.settings.resolution = Resolution { width: 320, height: 180 };
-        sequence.settings.frame_rate = Rational::new(30_000, 1_001);
-        sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
-        sequence.settings.color.program_output.color_space = ColorSpace::Rec709;
-        let time_base = sequence.time_base();
-        sequence.video_tracks[0]
-            .add_clip(
-                Clip::new_solid_color(
-                    AssetId::new(),
-                    mondrian_core::Color::from_rgba8(48, 132, 224, 255),
-                    tt(0, time_base),
-                    tt(clip_frames, time_base),
-                )
-                .expect("bounded solid clip"),
-            )
-            .expect("place solid clip");
-        let mut timeline = TimelineExportSnapshot {
-            sequence,
-            sequences: Vec::new(),
-            media: HashMap::new(),
-            color_environment: mondrian_core::ProjectColorEnvironment::default(),
-            prepared_execution: None,
-            range: TimelineExportRange::SequenceInOut,
-        };
-        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+    fn resident_h264_admission_rejects_precision_and_constrained_rate_substitution() {
+        let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut delivery = test_delivery_contract(
             DeliveryBitDepth::Eight,
             VideoRange::Legal,
@@ -12390,14 +13039,330 @@ mod tests {
             "yuv420p",
         );
         delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
-            container: Container::Mkv,
-            video: VideoCodecConfig::Hevc {
-                profile: HevcProfile::Main,
-                rate_control: VideoRateControl::constant_quality(18),
+            container: Container::Mp4,
+            video: VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constant_quality(23),
             },
             audio: AudioCodecConfig::Disabled,
         };
-        delivery.resolution = crate::preset::Resolution { width: 320, height: 180 };
+        let admit = |delivery: &ResolvedExportDeliveryContract| {
+            qualify_resident_video_export(
+                &timeline,
+                delivery,
+                ExportAlphaMode::FlattenBlack,
+                ExportExecutionResourcePolicy::default(),
+            )
+        };
+        assert_eq!(
+            admit(&delivery).expect("exact High8 contract").codec,
+            ResidentEncodeCodec::H264High
+        );
+        delivery.bit_depth = DeliveryBitDepth::Ten;
+        assert_eq!(
+            admit(&delivery),
+            Err(ExportResidentEncodeBlocker::UnsupportedCodec)
+        );
+        delivery.bit_depth = DeliveryBitDepth::Eight;
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mp4,
+            video: VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constrained_quality(23, 8_000, 16_000),
+            },
+            audio: AudioCodecConfig::Disabled,
+        };
+        assert_eq!(
+            admit(&delivery),
+            Err(ExportResidentEncodeBlocker::RateControl)
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "manual Windows qualification; requires DX12, D3D12 Video Process, and D3D12VA HEVC encode"]
+    fn production_export_queue_runs_same_device_d3d12_resident_hevc() {
+        for mode in [
+            ResidentExportQualification::Complete,
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual NVIDIA qualification; requires Vulkan external memory, CUDA, and NVENC"]
+    fn production_export_queue_runs_same_device_cuda_resident_hevc() {
+        for mode in [
+            ResidentExportQualification::Complete,
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS qualification; requires unified Metal and observed VideoToolbox hardware encode"]
+    fn production_export_queue_runs_same_device_metal_resident_hevc() {
+        for mode in [
+            ResidentExportQualification::Complete,
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::Hevc,
+                mode,
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS H.264 qualification; requires unified Metal and observed VideoToolbox encode"]
+    fn production_export_queue_runs_same_device_metal_resident_h264() {
+        for mode in [
+            ResidentExportQualification::Complete,
+            ResidentExportQualification::CompleteSilentAudio,
+            ResidentExportQualification::CompletePcmAudio,
+        ] {
+            run_production_export_queue_resident_video_qualification(
+                ResidentEncodeCodec::H264High,
+                mode,
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS H.264 qualification; consuming cancel before a fresh encoder attempt"]
+    fn production_resident_h264_cancel_consumes_sources_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::CancelRetry,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical H.264 failure/retry qualification after actual native source import"]
+    fn production_resident_h264_first_frame_failure_consumes_sources_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::RejectFirstFrame,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical H.264 qualification; active grant must reject before native import"]
+    fn production_resident_h264_native_grant_rejection_precedes_import_and_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::H264High,
+            ResidentExportQualification::RejectActiveGrant,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS qualification; cancels actual resident frames before a fresh encoder attempt"]
+    fn production_resident_export_cancel_consumes_codec_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
+            ResidentExportQualification::CancelRetry,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS qualification; rejects the first GPU boundary after native decode, then retries"]
+    fn production_resident_first_frame_failure_consumes_sources_before_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
+            ResidentExportQualification::RejectFirstFrame,
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "physical macOS qualification; rejects native visual allocation before GPU import, then retries"]
+    fn production_resident_native_grant_rejection_precedes_import_and_retry() {
+        run_production_export_queue_resident_video_qualification(
+            ResidentEncodeCodec::Hevc,
+            ResidentExportQualification::RejectActiveGrant,
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ResidentExportQualification {
+        Complete,
+        CompleteSilentAudio,
+        CompletePcmAudio,
+        CancelRetry,
+        RejectFirstFrame,
+        RejectActiveGrant,
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    fn run_production_export_queue_resident_video_qualification(
+        codec: ResidentEncodeCodec,
+        mode: ResidentExportQualification,
+    ) {
+        let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let frame_count = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_FRAMES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=600).contains(value))
+            .unwrap_or(3);
+        let (bit_depth, signal) =
+            match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_SIGNAL").as_deref() {
+                Ok("rec709-ten") => (DeliveryBitDepth::Ten, ColorSpace::Rec709),
+                Ok("pq") => (DeliveryBitDepth::Ten, ColorSpace::Rec2100Pq),
+                Ok("hlg") => (DeliveryBitDepth::Ten, ColorSpace::Rec2100Hlg),
+                Ok("rec709-eight") | Err(_) => (DeliveryBitDepth::Eight, ColorSpace::Rec709),
+                Ok(other) => panic!("unknown resident test signal {other}"),
+            };
+        let quantizer = std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_QUANTIZER")
+            .map(|value| value.parse::<u8>().expect("integer quantizer"))
+            .unwrap_or(18);
+        assert!((1..=51).contains(&quantizer));
+        let resolution = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_RESOLUTION").as_deref()
+        {
+            Ok("1080p") => Resolution { width: 1920, height: 1080 },
+            Ok("4k") => Resolution { width: 3840, height: 2160 },
+            Err(_) => Resolution { width: 320, height: 180 },
+            Ok(other) => panic!("unknown resident test resolution {other}"),
+        };
+        let video_range = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_RANGE").as_deref() {
+            Ok("full") => VideoRange::Full,
+            Ok("legal") | Err(_) => VideoRange::Legal,
+            Ok(other) => panic!("unknown resident range {other}"),
+        };
+        let container = match std::env::var("MONDRIAN_RESIDENT_ENCODE_TEST_CONTAINER").as_deref() {
+            Ok("mp4") => Container::Mp4,
+            Ok("mkv") | Err(_) => Container::Mkv,
+            Ok(other) => panic!("unknown resident container {other}"),
+        };
+        let clip_frames = i64::try_from(frame_count).expect("bounded test frame count");
+        let mut sequence = Sequence::new("same-device resident video Export");
+        sequence.settings.resolution = resolution;
+        sequence.settings.frame_rate = Rational::new(30_000, 1_001);
+        sequence.settings.delivery.bit_depth = bit_depth;
+        sequence.settings.color.program_output.color_space = signal;
+        let time_base = sequence.time_base();
+        let mut media = HashMap::new();
+        let external_input = std::env::var_os("MONDRIAN_RESIDENT_ENCODE_TEST_INPUT");
+        let clip = if let Some(path) = external_input.as_ref() {
+            let path = PathBuf::from(path);
+            let probe = mondrian_media::probe_media_info(&path).expect("actual source probe");
+            let stream = probe.primary_video().expect("actual source video").clone();
+            let duration = stream.duration.unwrap_or(probe.duration);
+            let source_range = TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(
+                    i64::try_from(duration.as_nanos()).expect("bounded source duration"),
+                    1_000_000_000,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let asset_id = AssetId::new();
+            media.insert(
+                asset_id,
+                crate::preset::ExportMediaDependency {
+                    source_fingerprint: MediaFileFingerprint::capture(&path),
+                    path,
+                    source_container: probe.container,
+                    source_video_stream: Some(stream.clone()),
+                    video_stream_index: Some(stream.index),
+                    picture_source_extent: Some(
+                        mondrian_timeline::PictureSourceExtent::TimelineRange(source_range),
+                    ),
+                    source_resolution: Some(Resolution {
+                        width: stream.width,
+                        height: stream.height,
+                    }),
+                    picture: Some(stream.picture),
+                    audio_components: HashMap::new(),
+                    interpretation: AssetMediaInterpretation::default(),
+                    color_diagnostic: Some(mondrian_media::VideoColorDiagnostic::from_stream(
+                        &stream,
+                    )),
+                },
+            );
+            Clip::new(asset_id, tt(0, time_base), tt(clip_frames, time_base))
+                .expect("actual media clip")
+        } else {
+            Clip::new_solid_color(
+                AssetId::new(),
+                mondrian_core::Color::from_rgba8(48, 132, 224, 255),
+                tt(0, time_base),
+                tt(clip_frames, time_base),
+            )
+            .expect("bounded solid clip")
+        };
+        sequence.video_tracks[0].add_clip(clip).expect("selected source placement");
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media,
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::SequenceInOut,
+        };
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        let audio_enabled = matches!(
+            mode,
+            ResidentExportQualification::CompleteSilentAudio
+                | ResidentExportQualification::CompletePcmAudio
+        );
+        let mut delivery = test_delivery_contract(
+            bit_depth,
+            video_range,
+            ExportChromaSampling::Yuv420,
+            if bit_depth == DeliveryBitDepth::Ten {
+                "yuv420p10le"
+            } else {
+                "yuv420p"
+            },
+        );
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container,
+            video: if codec == ResidentEncodeCodec::H264High {
+                assert_eq!(bit_depth, DeliveryBitDepth::Eight);
+                VideoCodecConfig::H264 {
+                    profile: crate::preset::H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(quantizer),
+                }
+            } else {
+                VideoCodecConfig::Hevc {
+                    profile: if bit_depth == DeliveryBitDepth::Ten {
+                        HevcProfile::Main10
+                    } else {
+                        HevcProfile::Main
+                    },
+                    rate_control: VideoRateControl::constant_quality(quantizer),
+                }
+            },
+            audio: if audio_enabled {
+                AudioCodecConfig::Aac { bitrate_kbps: 192 }
+            } else {
+                AudioCodecConfig::Disabled
+            },
+        };
+        delivery.resolution =
+            crate::preset::Resolution { width: resolution.width, height: resolution.height };
+        delivery.color_target.color_space = signal;
         delivery.frame_rate = Rational::new(30_000, 1_001);
         delivery.video_coding = crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
             keyframe_interval_frames: 30,
@@ -12406,7 +13371,7 @@ mod tests {
             scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
         };
         let policy = service::ExportExecutionResourcePolicy::default();
-        let plan = qualify_resident_hevc_export(
+        let plan = qualify_resident_video_export(
             &timeline,
             &delivery,
             ExportAlphaMode::FlattenBlack,
@@ -12417,14 +13382,165 @@ mod tests {
             .expect("bounded render range");
         assert_eq!(range.total_frames, frame_count);
         let directory = tempfile::tempdir().expect("temporary Export directory");
-        let output = directory.path().join("resident-queue.mkv");
+        let audio_input = if audio_enabled {
+            let sample_rate = 48_000;
+            let channel_layout = AudioChannelLayout::Stereo;
+            let (_, sample_frames) =
+                timeline_audio_sample_range(range, sample_rate).expect("exact audio sample extent");
+            if mode == ResidentExportQualification::CompleteSilentAudio {
+                TimelineAudioInput::Silent {
+                    sample_rate,
+                    channel_layout,
+                    analysis: AudioLoudnessReport::digital_silence(sample_frames as u64),
+                }
+            } else {
+                let path = directory.path().join("program-audio.f32le");
+                let pcm: Vec<f32> = (0..sample_frames)
+                    .flat_map(|index| {
+                        let sample = (index as f32 * std::f32::consts::TAU * 1_000.0
+                            / sample_rate as f32)
+                            .sin()
+                            * 0.25;
+                        [sample, -sample]
+                    })
+                    .collect();
+                let bytes: Vec<u8> = pcm.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+                std::fs::write(&path, bytes).expect("write actual interleaved PCM");
+                let mut loudness =
+                    AudioLoudnessAnalyzer::new(sample_rate, channel_layout).expect("PCM analyzer");
+                loudness.observe_interleaved(&pcm).expect("observe actual PCM");
+                TimelineAudioInput::PcmFile {
+                    path,
+                    sample_rate,
+                    channel_layout,
+                    analysis: loudness.finish().expect("actual PCM loudness receipt"),
+                }
+            }
+        } else {
+            TimelineAudioInput::Disabled
+        };
+        let output = directory.path().join(if container == Container::Mp4 {
+            "resident-queue.mp4"
+        } else {
+            "resident-queue.mkv"
+        });
+        if matches!(
+            mode,
+            ResidentExportQualification::RejectFirstFrame
+                | ResidentExportQualification::RejectActiveGrant
+        ) {
+            let partial = directory.path().join("first-frame-rejected.mkv");
+            let cancellation = ExecutionCancellationToken::new();
+            let mut rejected_diagnostics = ExportJobDiagnostics::default();
+            let rejected = {
+                let _failure = (mode == ResidentExportQualification::RejectFirstFrame)
+                    .then(GpuBoundaryFailureGuard::activate);
+                if mode == ResidentExportQualification::RejectActiveGrant {
+                    visual_session.gpu_output.visual_active_grant =
+                        GpuVisualFrameExecutionResourceGrant::new(1, 1);
+                }
+                execute_resident_video_export(
+                    &timeline,
+                    &delivery,
+                    range,
+                    &TimelineAudioInput::Disabled,
+                    &partial,
+                    &cancellation,
+                    &open_execution_gate(),
+                    &mut |_| {},
+                    &mut |diagnostics| rejected_diagnostics = diagnostics,
+                    &mut visual_session,
+                    ExportRenderInitialDiagnostics {
+                        asset_issue_summary: VideoColorDiagnosticIssueAggregate::default(),
+                        audio_analysis: None,
+                    },
+                    plan,
+                )
+            };
+            assert!(
+                matches!(rejected, ResidentExportAttemptOutcome::Failed(_)),
+                "{rejected:?}"
+            );
+            assert_eq!(rejected_diagnostics.visual.resident_encode_frames, 0);
+            assert_eq!(rejected_diagnostics.visual.resident_encode_packets, 0);
+            assert!(rejected_diagnostics.visual.resident_encode_consuming_shutdown);
+            assert!(rejected_diagnostics.visual.native_source_consuming_shutdown);
+            assert!(visual_session.decode_context.native_outputs_released());
+            assert!(!partial.exists());
+            if external_input.is_some() {
+                let imported_sources =
+                    u64::from(mode == ResidentExportQualification::RejectFirstFrame);
+                assert_eq!(
+                    rejected_diagnostics.visual.gpu_visual_native_sources,
+                    imported_sources
+                );
+                assert_eq!(
+                    rejected_diagnostics.visual.gpu_visual_native_hardware_sources,
+                    imported_sources
+                );
+            }
+            println!(
+                "resident_first_failure_evidence={}",
+                serde_json::to_string(&rejected_diagnostics).unwrap()
+            );
+            visual_session = captured_visual_session_for_test(&mut timeline);
+        }
+        if mode == ResidentExportQualification::CancelRetry {
+            let partial = directory.path().join("canceled-attempt.mkv");
+            let cancellation = ExecutionCancellationToken::new();
+            let mut canceled_diagnostics = ExportJobDiagnostics::default();
+            let canceled = execute_resident_video_export(
+                &timeline,
+                &delivery,
+                range,
+                &TimelineAudioInput::Disabled,
+                &partial,
+                &cancellation,
+                &open_execution_gate(),
+                &mut |progress| {
+                    if matches!(
+                        progress.detail,
+                        service::ExportProgressDetail::Frames { completed: 2, .. }
+                    ) {
+                        cancellation.cancel();
+                    }
+                },
+                &mut |diagnostics| canceled_diagnostics = diagnostics,
+                &mut visual_session,
+                ExportRenderInitialDiagnostics {
+                    asset_issue_summary: VideoColorDiagnosticIssueAggregate::default(),
+                    audio_analysis: None,
+                },
+                plan,
+            );
+            assert!(
+                matches!(canceled, ResidentExportAttemptOutcome::Cancelled),
+                "{canceled:?}"
+            );
+            assert_eq!(canceled_diagnostics.visual.resident_encode_frames, 2);
+            assert_eq!(canceled_diagnostics.visual.resident_encode_packets, 2);
+            assert!(canceled_diagnostics.visual.resident_encode_consuming_shutdown);
+            assert!(canceled_diagnostics.visual.native_source_consuming_shutdown);
+            assert!(visual_session.decode_context.native_outputs_released());
+            assert!(
+                !partial.exists(),
+                "canceled video must never reach the final artifact"
+            );
+            println!(
+                "resident_cancel_evidence={}",
+                serde_json::to_string(&canceled_diagnostics).unwrap()
+            );
+            // A fresh move-only codec and cancellation generation render the
+            // entire frozen program; no partial output is reused.
+            visual_session = captured_visual_session_for_test(&mut timeline);
+        }
         let cancellation = ExecutionCancellationToken::new();
         let mut latest = ExportJobDiagnostics::default();
-        let outcome = execute_resident_hevc_export(
+        let outcome = execute_resident_video_export(
             &timeline,
             &delivery,
             range,
-            &TimelineAudioInput::Disabled,
+            &audio_input,
             &output,
             &cancellation,
             &open_execution_gate(),
@@ -12441,6 +13557,23 @@ mod tests {
             matches!(outcome, ResidentExportAttemptOutcome::Completed),
             "resident queue outcome: {outcome:?}"
         );
+        #[cfg(target_os = "macos")]
+        assert!(latest.visual.resident_encode_consuming_shutdown);
+        println!(
+            "resident_source_evidence={}",
+            serde_json::to_string(&latest).expect("actual source/transport evidence")
+        );
+        assert!(latest.visual.native_source_consuming_shutdown);
+        if external_input.is_some() {
+            assert_eq!(latest.visual.gpu_visual_native_sources, frame_count);
+            assert_eq!(
+                latest.visual.gpu_visual_native_hardware_sources,
+                frame_count
+            );
+            assert_eq!(latest.visual.gpu_visual_native_software_sources, 0);
+            assert_eq!(latest.visual.gpu_visual_native_unobserved_sources, 0);
+            assert!(visual_session.decode_context.native_outputs_released());
+        }
         assert_eq!(latest.visual.resident_encode_frames, frame_count);
         assert_eq!(latest.color.stage_diagnostics.upload_stages, 0);
         assert_eq!(latest.color.stage_diagnostics.readback_stages, 0);
@@ -12454,26 +13587,160 @@ mod tests {
         assert_eq!(latest.visual.resident_encode_video_stream_copy_muxes, 1);
         let probe = mondrian_media::probe_media_info(&output).expect("final queue artifact probe");
         assert!(probe.has_video);
-        let mut chroma_probe = mondrian_media::ffprobe_command().expect("qualified ffprobe");
-        let chroma_probe = chroma_probe
+        assert_eq!(probe.has_audio, audio_enabled);
+        if audio_enabled {
+            let audio = probe.primary_audio().expect("muxed AAC stream");
+            assert_eq!(audio.sample_rate, 48_000);
+            assert_eq!(audio.channels, 2);
+            let mut decode_audio = mondrian_media::ffmpeg_command().expect("qualified FFmpeg");
+            let decoded_audio = decode_audio
+                .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+                .arg(&output)
+                .args(["-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+                .output()
+                .expect("independent full audio decode");
+            assert!(decoded_audio.status.success());
+            assert!(!decoded_audio.stdout.is_empty());
+            assert_eq!(decoded_audio.stdout.len() % 8, 0);
+            let peak = decoded_audio
+                .stdout
+                .chunks_exact(4)
+                .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()).abs())
+                .fold(0.0_f32, f32::max);
+            if mode == ResidentExportQualification::CompleteSilentAudio {
+                assert_eq!(peak, 0.0, "silent Program must remain silent after mux");
+            } else {
+                assert!(peak > 0.1, "PCM Program signal was lost during mux: {peak}");
+            }
+        }
+        let video = probe.primary_video().expect("one output video stream");
+        assert_eq!(
+            video.picture.field_order,
+            Some(mondrian_core::timeline_data::FieldOrder::Progressive)
+        );
+        assert_eq!(
+            (video.width, video.height),
+            (resolution.width, resolution.height)
+        );
+        assert_eq!(video.frame_rate, delivery.frame_rate);
+        assert_eq!(
+            video.codec,
+            if codec == ResidentEncodeCodec::H264High {
+                mondrian_core::VideoCodec::H264
+            } else {
+                mondrian_core::VideoCodec::H265
+            }
+        );
+        assert_eq!(
+            video.codec_profile,
+            if codec == ResidentEncodeCodec::H264High {
+                mondrian_media::VideoCodecProfile::H264High
+            } else if bit_depth == DeliveryBitDepth::Ten {
+                mondrian_media::VideoCodecProfile::HevcMain10
+            } else {
+                mondrian_media::VideoCodecProfile::HevcMain
+            }
+        );
+        assert_eq!(
+            video.bit_depth,
+            if bit_depth == DeliveryBitDepth::Ten {
+                10
+            } else {
+                8
+            }
+        );
+        assert_eq!(
+            video.color_range,
+            if video_range == VideoRange::Full {
+                mondrian_core::DecodedVideoRange::Full
+            } else {
+                mondrian_core::DecodedVideoRange::Limited
+            }
+        );
+        assert_eq!(
+            video.color_interpretation.candidate_color_space,
+            Some(signal)
+        );
+        let mut independent_probe = mondrian_media::ffprobe_command().expect("qualified ffprobe");
+        let independent_probe = independent_probe
             .args([
                 "-v",
                 "error",
                 "-select_streams",
                 "v:0",
+                "-count_frames",
                 "-show_entries",
-                "stream=chroma_location",
+                "stream=chroma_location,nb_read_frames:frame=key_frame,pict_type,interlaced_frame",
                 "-of",
-                "default=noprint_wrappers=1:nokey=1",
+                "json",
             ])
             .arg(&output)
             .output()
-            .expect("probe final queue chroma location");
-        assert!(chroma_probe.status.success());
-        assert_eq!(String::from_utf8_lossy(&chroma_probe.stdout).trim(), "left");
+            .expect("independent frame/chroma inventory");
+        assert!(independent_probe.status.success());
+        let inventory: serde_json::Value =
+            serde_json::from_slice(&independent_probe.stdout).expect("structured output inventory");
+        let streams = inventory["streams"].as_array().expect("coded streams");
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["chroma_location"], "left");
+        assert_eq!(streams[0]["nb_read_frames"], frame_count.to_string());
+        let frames = inventory["frames"].as_array().expect("independently decoded frames");
+        assert_eq!(frames.len(), frame_count as usize);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                frame["interlaced_frame"], 0,
+                "coded picture must be progressive"
+            );
+            assert_eq!(frame["key_frame"], u64::from(index % 30 == 0));
+            assert_ne!(
+                frame["pict_type"], "B",
+                "actual output must obey max_b_frames=0"
+            );
+        }
         let packets = mondrian_media::capture_video_packet_identity(&output, None)
             .expect("independent final packet identity");
         assert_eq!(packets.packet_count, frame_count);
+        let encoder = latest.visual.video_encoder.expect("actual encoder diagnostics");
+        assert!(
+            encoder.hardware_selected,
+            "actual output must prove hardware admission"
+        );
+        assert_eq!(
+            encoder.frame_transport,
+            crate::hardware_encoding::ExportVideoEncoderFrameTransport::SameDeviceGpuSurface
+        );
+        let mut decode = mondrian_media::ffmpeg_command().expect("qualified FFmpeg");
+        let decoded = decode
+            .args(["-hide_banner", "-v", "error", "-xerror", "-nostdin", "-i"])
+            .arg(&output)
+            .args(["-map", "0", "-f", "null", "-"])
+            .output()
+            .expect("independent full artifact decode");
+        assert!(
+            decoded.status.success(),
+            "full decode: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        let artifact_bytes = std::fs::read(&output).expect("verified artifact identity");
+        println!(
+            "resident_artifact_identity={}",
+            serde_json::json!({
+                "sha256": format!("{:x}", Sha256::digest(&artifact_bytes)),
+                "bytes": artifact_bytes.len(),
+                "frames": frame_count,
+                "independent_full_decode": true,
+                "packet_identity_verified": true,
+            })
+        );
+        println!(
+            "resident_export_evidence={}",
+            serde_json::to_string(&latest).expect("owner-derived diagnostics")
+        );
+        println!(
+            "resident_export_probe={probe:?}; packets={}; artifact_bytes={}",
+            packets.packet_count,
+            std::fs::metadata(&output).expect("artifact extent").len()
+        );
     }
 
     #[test]
@@ -12495,12 +13762,12 @@ mod tests {
         };
         let policy = ExportExecutionResourcePolicy::default();
         assert_eq!(
-            qualify_resident_hevc_export(&timeline, &delivery, ExportAlphaMode::Preserve, policy,),
+            qualify_resident_video_export(&timeline, &delivery, ExportAlphaMode::Preserve, policy,),
             Err(ExportResidentEncodeBlocker::AlphaPreservation)
         );
         delivery.legalizer = SignalLegalizer::ClampRgb;
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12517,7 +13784,7 @@ mod tests {
             rate_control: VideoRateControl::constrained_quality(20, 20_000, 40_000),
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12546,7 +13813,7 @@ mod tests {
             audio: AudioCodecConfig::Disabled,
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12560,7 +13827,7 @@ mod tests {
             ..ExportExecutionResourcePolicy::default()
         };
         assert_eq!(
-            qualify_resident_hevc_export(
+            qualify_resident_video_export(
                 &timeline,
                 &delivery,
                 ExportAlphaMode::FlattenBlack,
@@ -12758,6 +14025,212 @@ mod tests {
     }
 
     #[test]
+    fn export_assumed_rec709_decodes_untagged_yuv_into_working_color() {
+        mondrian_core::ensure_mondrian_default_ocio_loaded().expect("production OCIO");
+        let root = tempfile::tempdir().expect("untagged YUV source directory");
+        let source = root.path().join("untagged.y4m");
+        let mut bytes = b"YUV4MPEG2 W4 H2 F25:1 Ip A1:1 C420jpeg\nFRAME\n".to_vec();
+        // Limited-range endpoints have exact 8-bit RGB carriers, independent
+        // of swscale's integer rounding at intermediate luma values.
+        let codes = [16, 235, 16, 235, 16, 235, 16, 235];
+        bytes.extend_from_slice(&codes);
+        bytes.extend_from_slice(&[128; 4]);
+        std::fs::write(&source, bytes).expect("untagged neutral source");
+        let mut dependency = test_media_dependency(
+            source.clone(),
+            None,
+            AssetMediaInterpretation::default(),
+            None,
+        );
+        dependency.source_video_stream = Some(
+            mondrian_media::probe_media_info(&source)
+                .expect("physical YUV stream")
+                .video_streams[0]
+                .clone(),
+        );
+        let mut sequence = Sequence::new("assumed Rec.709 export");
+        sequence.settings.color.input.missing_metadata_policy =
+            MissingColorMetadataPolicy::AssumeRec709;
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid context");
+        let preparation = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
+                asset_id: AssetId::new(),
+                color_space_override: None,
+                auto_tone_map: false,
+                dependency: &dependency,
+                // Range is independently authorized; the test isolates matrix policy.
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("missing metadata policy resolves input");
+        assert_eq!(
+            preparation.resolution_source,
+            InputColorResolutionSource::MissingPolicyAssumeRec709
+        );
+        for (route, alpha) in [
+            (
+                ExportDecodedSourceRoute::CpuWorking,
+                AlphaInterpretation::Straight,
+            ),
+            (
+                ExportDecodedSourceRoute::GpuInput,
+                AlphaInterpretation::Straight,
+            ),
+            (
+                ExportDecodedSourceRoute::GpuInput,
+                AlphaInterpretation::Premultiplied,
+            ),
+        ] {
+            let mut decoder = PreviewDecodeSessionContext::new();
+            let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+            let cancellation = ExecutionCancellationToken::new();
+            let decoded = decode_video_layer_scaled(
+                ExportVideoLayerDecodeRequest {
+                    asset_id: AssetId::new(),
+                    dependency: &dependency,
+                    source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                    decode_resolution: Resolution { width: 4, height: 2 },
+                    source_resolution: Resolution { width: 4, height: 2 },
+                    picture_geometry: square_picture_geometry(Resolution { width: 4, height: 2 }),
+                    source_color: preparation.source_contract,
+                    alpha_interpretation: alpha,
+                    preparation_intent: preparation.preparation_intent.clone(),
+                },
+                ExportVideoLayerDecodeExecutionContext {
+                    native_import_support: None,
+                    color_session: &mut color_session,
+                    decode_context: &mut decoder,
+                    cancellation: &cancellation,
+                    route,
+                },
+            );
+            // Close the real decode session even when reproducing a decode rejection.
+            decoder.clear();
+            drop(decoder);
+            let decoded = decoded.expect("assumed Rec.709 must authorize missing YUV matrix");
+            if route == ExportDecodedSourceRoute::GpuInput && alpha == AlphaInterpretation::Straight
+            {
+                assert_eq!(
+                    decoded.decode_diagnostics.as_ref().expect("decode receipt").path,
+                    mondrian_media::PreviewDecodePath::InProcessFfmpegCpuYuv
+                );
+                assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 0);
+                continue;
+            }
+            if route == ExportDecodedSourceRoute::GpuInput {
+                assert_ne!(
+                    decoded.decode_diagnostics.as_ref().expect("decode receipt").path,
+                    mondrian_media::PreviewDecodePath::InProcessFfmpegCpuYuv
+                );
+                assert!(matches!(
+                    decoded.pixels,
+                    DecodedVideoLayerPixels::GpuInput(_)
+                ));
+                continue;
+            }
+            let frame = decoded.cpu_frame().expect("CPU working frame").rgba_f32();
+            assert_eq!(frame.color_space, color_context.working_color_space());
+            assert_eq!(decoded.stage_diagnostics.cpu_input_stages, 1);
+            for (pixel, code) in frame.data.iter().zip(codes) {
+                let encoded = (f32::from(code) - 16.0) / 219.0;
+                let mut reference = [encoded, encoded, encoded, 1.0];
+                color_context
+                    .engine()
+                    .convert_identity_float(
+                        &mut reference,
+                        ColorSpace::Rec709.into(),
+                        color_context.working_color_space().into(),
+                    )
+                    .expect("independent working reference");
+                for channel in 0..4 {
+                    assert!(
+                        (pixel[channel] - reference[channel]).abs() <= 1.0e-3,
+                        "working pixel {pixel:?}, reference {reference:?}"
+                    );
+                }
+            }
+        }
+        let explicit = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
+                asset_id: AssetId::new(),
+                color_space_override: Some(ColorSpace::Rec709),
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("RGB override resolves color but not missing matrix");
+        assert_eq!(
+            explicit.resolution_source,
+            InputColorResolutionSource::Override
+        );
+        assert_ne!(explicit.source_contract, preparation.source_contract);
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let rejected = decoder.decode_cancellable(
+            PreviewDecodeRequest::new(
+                &dependency.path,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                explicit.source_contract,
+            ),
+            || false,
+        );
+        decoder.clear();
+        drop(decoder);
+        assert!(rejected
+            .expect_err("RGB override cannot infer matrix")
+            .to_string()
+            .contains("YUV matrix is unspecified"));
+        dependency.interpretation.matrix =
+            mondrian_core::timeline_data::MediaMatrixInterpretation::Override {
+                matrix: mondrian_core::timeline_data::MediaYuvMatrix::Smpte170M,
+            };
+        let corrected = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
+                asset_id: AssetId::new(),
+                color_space_override: Some(ColorSpace::Rec709),
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("frozen matrix authority");
+        let mut decoder = PreviewDecodeSessionContext::new();
+        let decoded = decoder.decode_cancellable(
+            PreviewDecodeRequest::new(
+                &dependency.path,
+                mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                PreviewDecodeAccessMode::PlaybackCursor,
+                corrected.source_contract,
+            ),
+            || false,
+        );
+        decoder.clear();
+        drop(decoder);
+        let mondrian_media::PreviewDecodeOutcome::FloatFrame(frame) =
+            decoded.expect("matrix override admits the original source")
+        else {
+            panic!("unclamped Float32 YUV materialization");
+        };
+        assert_eq!(
+            frame.color_contract.applied_matrix,
+            mondrian_media::DecodedVideoMatrix::Smpte170M
+        );
+    }
+
+    #[test]
     fn export_source_preparation_resolves_rgb_data_texture_without_color_identity() {
         let source = tempfile::NamedTempFile::new().expect("temporary RGB data source");
         std::fs::write(source.path(), b"rgb data identity").expect("write source identity");
@@ -12776,6 +14249,7 @@ mod tests {
             .expect("valid rejecting context");
         let preparation = resolve_export_source_preparation(
             ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
                 asset_id: AssetId::new(),
                 color_space_override: Some(ColorSpace::Rec2100Pq),
                 auto_tone_map: true,
@@ -12810,6 +14284,7 @@ mod tests {
             .expect("valid ACES context");
         let under_different_engine = resolve_export_source_preparation(
             ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
                 asset_id: AssetId::new(),
                 color_space_override: None,
                 auto_tone_map: false,
@@ -12839,6 +14314,7 @@ mod tests {
             .expect("valid test context");
         let error = resolve_export_source_preparation(
             ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
                 asset_id: AssetId::new(),
                 color_space_override: None,
                 auto_tone_map: false,
@@ -12873,6 +14349,7 @@ mod tests {
             .expect("valid test context");
         let preparation = resolve_export_source_preparation(
             ExportSourcePreparationRequest {
+                route: ExportDecodedSourceRoute::CpuWorking,
                 asset_id: AssetId::new(),
                 color_space_override: None,
                 auto_tone_map: false,
@@ -12899,25 +14376,30 @@ mod tests {
                 preparation_intent: preparation.preparation_intent,
             },
             ExportVideoLayerDecodeExecutionContext {
+                native_import_support: None,
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         )
         .expect("decode and prepare RGB data texture");
 
-        assert!(decoded.is_data_texture);
+        assert!(matches!(
+            decoded.pixels,
+            DecodedVideoLayerPixels::CpuWorking { is_data_texture: true, .. }
+        ));
         assert_eq!(
             decoded.stage_diagnostics,
             RenderColorStageDiagnostics::default()
         );
-        let pixel = decoded.frame.rgba_f32().data[0];
+        let pixel = decoded.cpu_frame().expect("CPU data texture").rgba_f32().data[0];
         assert!((pixel[0] - 17.0 / 255.0).abs() < 1.0e-6);
         assert!((pixel[1] - 64.0 / 255.0).abs() < 1.0e-6);
         assert_eq!(pixel[2], 1.0);
         assert_eq!(pixel[3], 1.0);
         assert_eq!(
-            decoded.frame.rgba_f32().color_space,
+            decoded.cpu_frame().expect("CPU data texture").rgba_f32().color_space,
             color_context.working_color_space()
         );
     }
@@ -13103,9 +14585,11 @@ mod tests {
                 .into(),
             },
             ExportVideoLayerDecodeExecutionContext {
+                native_import_support: None,
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         );
         let error = match result {
@@ -13158,9 +14642,11 @@ mod tests {
                     .into(),
                 },
                 ExportVideoLayerDecodeExecutionContext {
+                    native_import_support: None,
                     color_session: session.composite_scratch.color_execution_mut(),
                     decode_context: &mut session.decode_context,
                     cancellation: &cancellation,
+                    route: ExportDecodedSourceRoute::CpuWorking,
                 },
             )
             .unwrap_or_else(|error| {
@@ -13188,9 +14674,25 @@ mod tests {
         );
         assert_eq!(second.source_fingerprint, dependency.source_fingerprint);
         assert_eq!(second.video_stream_index, 0);
+        assert_eq!(
+            second.decode_diagnostics.as_ref().expect("real decode diagnostics").access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+
+        let backward = decode(TimelineTime::ZERO, &mut session);
+        let backward_diagnostics =
+            backward.decode_diagnostics.as_ref().expect("reverse decode diagnostics");
+        assert_eq!(
+            backward_diagnostics.access_mode,
+            PreviewDecodeAccessMode::PlaybackCursor
+        );
+        assert_eq!(
+            backward_diagnostics.requested_pts,
+            backward_diagnostics.selected_pts
+        );
         assert_eq!(session.decode_context.resident_session_count(), 1);
 
-        session.release_decode_sessions();
+        session.release_decode_sessions().expect("consume Export decode sources");
         assert_eq!(session.decode_context.resident_session_count(), 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -13241,9 +14743,11 @@ mod tests {
                 .into(),
             },
             ExportVideoLayerDecodeExecutionContext {
+                native_import_support: None,
                 color_session: &mut color_session,
                 decode_context: &mut decode_context,
                 cancellation: &cancellation,
+                route: ExportDecodedSourceRoute::CpuWorking,
             },
         )
         .expect_err("stale export dependency must fail before decoder setup");
@@ -13989,6 +15493,54 @@ mod tests {
             .root_causes
             .iter()
             .any(|root| root.code == "export_gpu_color_stage_blocked"));
+    }
+
+    #[test]
+    fn export_transfer_only_failure_has_shared_root_cause_and_action() {
+        let mut diagnostics = ExportJobColorDiagnostics::default();
+        diagnostics.record_frame_diagnostics(
+            InputColorResolutionSourceCounts::default(),
+            RenderColorStageDiagnostics {
+                upload_stages: 60,
+                readback_stages: 87,
+                ..RenderColorStageDiagnostics::default()
+            },
+            TimelineCompositeDiagnostics {
+                float_linear_composites: 87,
+                ..TimelineCompositeDiagnostics::default()
+            },
+        );
+        let report = diagnostics.health_report("export-transfer-only").expect("health report");
+        assert_eq!(report.verdict, ExportColorHealthVerdict::Fail);
+        let failures: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|check| check.severity == ExportColorHealthSeverity::Fail)
+            .collect();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].code, color_report_vocab::check::TRANSFER_STAGES);
+        assert_eq!(failures[0].observed, 147);
+        assert_eq!(failures[0].limit, Some(0));
+        assert_eq!(report.root_causes.len(), 1);
+        let root = &report.root_causes[0];
+        assert_eq!(
+            color_report_vocab::normalize_root_cause_code(root.code),
+            color_report_vocab::root_cause::TRANSFER_STAGE_PRESENT
+        );
+        assert_eq!(root.severity, ExportColorHealthSeverity::Fail);
+        assert_eq!(root.evidence, "transfer_stages=147");
+        assert_eq!(report.actions.len(), 1);
+        assert_eq!(
+            report.actions[0].code,
+            color_report_vocab::action::REMOVE_TRANSFER_STAGE
+        );
+
+        diagnostics.stage_diagnostics.upload_stages = 0;
+        diagnostics.stage_diagnostics.readback_stages = 0;
+        let resident = diagnostics.health_report("export-resident").expect("health report");
+        assert_eq!(resident.verdict, ExportColorHealthVerdict::Pass);
+        assert!(resident.root_causes.is_empty());
+        assert!(resident.actions.is_empty());
     }
 
     #[test]
@@ -16983,6 +18535,29 @@ mod tests {
                     == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,setsar=1/1"
         }));
         assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
+    }
+
+    #[test]
+    fn prores_xq_keeps_legal_twelve_bit_delivery_separate_from_encoder_input() {
+        let settings = SequenceSettings::default();
+        let delivery = crate::delivery::resolve_export_delivery(
+            &crate::preset::ExportPreset::prores_4444_alpha(),
+            &settings,
+            &mondrian_core::ProjectColorEnvironment::default(),
+        )
+        .expect("valid ProRes 4444 XQ delivery");
+        assert_eq!(delivery.bit_depth, DeliveryBitDepth::Twelve);
+        assert_eq!(delivery.video_range, VideoRange::Legal);
+        assert_eq!(delivery.pixel_format, "yuva444p12le");
+        let mut command = Command::new("ffmpeg");
+        apply_export_video_signal_args(&mut command, &settings, &delivery);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
+        #[cfg(target_os = "macos")]
+        assert!(args.windows(2).any(|pair| pair == ["-pix_fmt", "ayuv64le"]));
     }
 
     #[test]

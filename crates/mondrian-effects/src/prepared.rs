@@ -20,7 +20,7 @@ use mondrian_core::{
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     panic::{catch_unwind, AssertUnwindSafe},
     path::PathBuf,
     sync::Arc,
@@ -1160,6 +1160,26 @@ impl PreparedEffectProgram {
             .saturating_add(self.inner.zero_topology.retained_bytes_estimate())
             .saturating_add(self.inner.zero_compiled.retained_bytes_estimate())
             .saturating_add(std::mem::size_of::<usize>().saturating_mul(8))
+    }
+
+    /// Conservative charge for program handles retained by one owner.
+    ///
+    /// Every handle is charged, but clones of the same internal allocation
+    /// retain its payload only once. Independently prepared programs remain
+    /// separate charges even when their semantics match. Deduplication is
+    /// local to this call; other owners must account for their own residency.
+    pub fn retained_bytes_estimate_for_owner<'a>(
+        programs: impl IntoIterator<Item = &'a Self>,
+    ) -> usize {
+        let mut allocations = HashSet::new();
+        programs.into_iter().fold(0_usize, |retained, program| {
+            let charge = if allocations.insert(Arc::as_ptr(&program.inner)) {
+                program.retained_bytes_estimate()
+            } else {
+                std::mem::size_of::<Self>()
+            };
+            retained.saturating_add(charge)
+        })
     }
 
     /// Revalidate process-local plugin definitions and external resources.

@@ -530,6 +530,18 @@ for closures that support it, including the final color/output boundary, and
 does not qualify a resident hardware-encode route. A closure whose Effect
 contract has no exact CPU Float32 route retains its required GPU execution;
 the scheduling policy cannot reinterpret authored processing semantics.
+The same frozen policy supplies FFmpeg filter and codec thread grants to the
+attempt's external processes. Global `-filter_threads` and
+`-filter_complex_threads` are independent of file-scoped `-threads`: every
+input file and the output receive their own codec option. This includes raw
+picture encoding, professional picture/audio essence, stem WAV encoding, native
+resident-video remux, and Smart Render; a video stream-copy route stays a copy.
+Input codec options cannot stand in for the output encoder grant. An actual
+libx264 diagnostic verifies its reported output thread count and independently
+decodes the resulting video/audio artifact. Codec-specific internal pools and
+native driver threads need their own observed provider evidence; the CLI grant
+alone does not qualify their physical worker count.
+
 A later resource decision may close dispatch or request a safe-boundary yield,
 but it cannot resize or reinterpret the running attempt. Only a later
 dispatched attempt freezes the later grant.

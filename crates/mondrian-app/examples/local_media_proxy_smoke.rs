@@ -13,12 +13,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     mondrian_platform::prepare_graphics_process()?;
+    let (diagnostics_writer, _diagnostics_guard) =
+        mondrian_app::diagnostic_logging::buffered_stderr();
+    let diagnostics_errors = diagnostics_writer.error_counter();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
-        .with_writer(std::io::stderr)
+        .with_writer(diagnostics_writer)
         .init();
     let mut args = arguments.into_iter();
     let root =
@@ -33,6 +36,10 @@ fn main() -> anyhow::Result<()> {
     let report = mondrian_app::app::golden_project_acceptance::run_local_media_proxy_smoke(
         root, output, seconds,
     )?;
+    ensure!(
+        diagnostics_errors.dropped_lines() == 0,
+        "proxy smoke diagnostic log queue lost evidence"
+    );
     println!("MONDRIAN_LOCAL_MEDIA_PROXY_SMOKE={}", report.display());
     Ok(())
 }

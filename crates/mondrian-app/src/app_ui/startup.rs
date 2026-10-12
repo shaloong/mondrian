@@ -11,7 +11,9 @@ use mondrian_core::{Color, MondrianError, Result};
 use mondrian_editor_state::Action;
 use mondrian_platform::PlatformService;
 use mondrian_ui_core::types::*;
-use mondrian_ui_core::widget::{EventContext, PaintContext};
+use mondrian_ui_core::widget::{
+    AccessibilityRole, AccessibilityVirtualNode, EventContext, PaintContext,
+};
 use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use mondrian_ui_widgets::{RasterImage, VectorIcon};
 use std::path::PathBuf;
@@ -564,9 +566,15 @@ impl Widget for AppUiStartupScreen {
         let colors = &ctx.theme.colors;
         let spacing = &ctx.theme.spacing;
         let typography = &ctx.theme.typography;
-        let radius = spacing.radius_lg;
-
-        ctx.encoder.draw_rect(self.panel_rect, colors.popover, radius);
+        // The window carrier clips the complete composition, including the
+        // cover image. Applying the outer radius here would double the edge
+        // coverage on the panel while leaving the cover independently clipped.
+        let outer_radius = if cfg!(target_os = "macos") {
+            0.0
+        } else {
+            spacing.radius_lg
+        };
+        ctx.encoder.draw_rect(self.panel_rect, colors.popover, outer_radius);
         ctx.push_clip(self.panel_rect);
         paint_startup_banner(ctx, self.left_rect);
         ctx.pop_clip();
@@ -764,6 +772,58 @@ impl Widget for AppUiStartupScreen {
             0 => self.modal.as_mut().map(|modal| modal as &mut dyn Widget),
             _ => None,
         }
+    }
+
+    fn accessibility_virtual_children(&self) -> Vec<AccessibilityVirtualNode> {
+        if self.modal.is_some() {
+            return Vec::new();
+        }
+        let mut nodes = vec![
+            AccessibilityVirtualNode {
+                key: 1,
+                role: AccessibilityRole::Button,
+                name: self.text("startup-new-project"),
+                bounds: self.new_project_rect,
+                enabled: true,
+            },
+            AccessibilityVirtualNode {
+                key: 2,
+                role: AccessibilityRole::Button,
+                name: self.text("startup-open-project"),
+                bounds: self.open_project_rect,
+                enabled: true,
+            },
+            AccessibilityVirtualNode {
+                key: 3,
+                role: AccessibilityRole::Button,
+                name: self.text("about-close"),
+                bounds: self.close_rect,
+                enabled: true,
+            },
+        ];
+        nodes.extend(
+            self.recovery_rects.iter().enumerate().filter_map(|(index, bounds)| {
+                self.recovery_projects.get(index).map(|project| AccessibilityVirtualNode {
+                    key: 100 + index as u64,
+                    role: AccessibilityRole::Button,
+                    name: project.title.clone(),
+                    bounds: *bounds,
+                    enabled: true,
+                })
+            }),
+        );
+        nodes.extend(
+            self.recent_rects.iter().enumerate().filter_map(|(index, bounds)| {
+                self.recent_projects.get(index).map(|project| AccessibilityVirtualNode {
+                    key: 200 + index as u64,
+                    role: AccessibilityRole::Button,
+                    name: project.title.clone(),
+                    bounds: *bounds,
+                    enabled: true,
+                })
+            }),
+        );
+        nodes
     }
 }
 
@@ -1134,6 +1194,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = StartupPaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
@@ -1167,6 +1228,7 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let mut encoder = StartupPaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),
@@ -1202,6 +1264,7 @@ mod tests {
         ));
         let mut rows_encoder = StartupPaintRecorder::default();
         let mut rows_ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut rows_encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, STARTUP_WINDOW_WIDTH, STARTUP_WINDOW_HEIGHT),

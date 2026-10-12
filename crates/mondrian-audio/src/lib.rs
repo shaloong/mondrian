@@ -49,7 +49,8 @@ pub use delivery::{
     AudioProgramDeliveryRuntime,
 };
 pub use dependency::{
-    compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
+    compile_audio_dependency_closure, compile_full_audio_dependency_closure,
+    AudioDependencyClosure, AudioDependencyError,
 };
 pub use loudness::{AudioLoudnessAnalyzer, AudioLoudnessError, AudioLoudnessReport};
 pub use meter::{

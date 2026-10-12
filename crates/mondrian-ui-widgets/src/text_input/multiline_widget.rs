@@ -1383,16 +1383,21 @@ impl Widget for MultilineTextInput {
 
     fn accessibility(&self) -> Option<AccessibilityNode> {
         Some(
-            AccessibilityNode::new(self.id, AccessibilityRole::TextInput)
+            AccessibilityNode::new(self.id, AccessibilityRole::MultilineTextInput)
                 .with_name(self.placeholder.clone())
                 .with_state(AccessibilityState {
                     focusable: self.enabled,
                     focused: self.focused,
                     disabled: !self.enabled,
+                    read_only: self.read_only,
                     ..AccessibilityState::default()
                 })
                 .with_value(AccessibilityValue::Text(self.edit.text().to_string())),
         )
+    }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {
@@ -2518,7 +2523,7 @@ mod tests {
     fn accessibility_exposes_text_value() {
         let widget = MultilineTextInput::new("placeholder").with_text("hello");
         let node = widget.accessibility().expect("should expose accessibility");
-        assert_eq!(node.role, AccessibilityRole::TextInput);
+        assert_eq!(node.role, AccessibilityRole::MultilineTextInput);
         assert_eq!(node.name.as_deref(), Some("placeholder"));
         assert_eq!(node.value, Some(AccessibilityValue::Text("hello".into())));
         assert!(node.state.focusable);
@@ -2907,7 +2912,7 @@ mod tests {
         let result = widget.event(
             &UiEvent::KeyDown {
                 key: KeyCode::Down,
-                modifiers: crate::test_utils::primary_text_modifiers(),
+                modifiers: Modifiers { ctrl: true, meta: true, ..Modifiers::none() },
             },
             &mut ctx,
         );

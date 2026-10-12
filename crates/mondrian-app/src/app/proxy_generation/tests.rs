@@ -153,8 +153,14 @@ impl ProxyGenerationBackend for FakeBackend {
 }
 
 fn color() -> ProxyColorContract {
-    ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
-        .expect("valid proxy color")
+    ProxyColorContract::try_new(
+        0,
+        ColorSpace::Rec709,
+        8,
+        DecodedVideoRange::Limited,
+        mondrian_media::DecodedVideoMatrix::Bt709,
+    )
+    .expect("valid proxy color")
 }
 
 fn config() -> ProxyConfig {

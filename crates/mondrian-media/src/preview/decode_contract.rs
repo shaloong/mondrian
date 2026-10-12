@@ -109,6 +109,8 @@ pub enum PreviewNativeSurfaceHint {
     Yuv444p12,
     /// A 16-bit 4:4:4 source may decode to a platform-native surface.
     Yuv444p16,
+    /// A ProRes 4444 straight-alpha source may decode to a native YUVA surface.
+    Yuva444p12,
 }
 
 /// Compact CPU YUV representation conservatively inferred from a probed source.
@@ -128,10 +130,14 @@ pub enum PreviewCompactCpuYuvHint {
     Yuv420p10le,
     /// Planar little-endian twelve-bit YUV 4:2:0 with right-aligned samples.
     Yuv420p12le,
+    /// Planar little-endian sixteen-bit YUV 4:2:0.
+    Yuv420p16le,
     /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
     Yuv422p10le,
     /// Planar little-endian twelve-bit YUV 4:2:2 with right-aligned samples.
     Yuv422p12le,
+    /// Planar little-endian sixteen-bit YUV 4:2:2.
+    Yuv422p16le,
     /// Planar eight-bit 4:2:2 with full-height chroma planes.
     Yuv422p,
     /// Planar eight-bit 4:4:4 with full-resolution chroma planes.
@@ -140,9 +146,35 @@ pub enum PreviewCompactCpuYuvHint {
     Yuv444p10le,
     /// Planar little-endian twelve-bit YUV 4:4:4 with right-aligned samples.
     Yuv444p12le,
+    /// Planar little-endian sixteen-bit YUV 4:4:4.
+    Yuv444p16le,
+    /// Planar twelve-bit 4:4:4 color and full-resolution straight alpha.
+    Yuva444p12le,
 }
 
 impl PreviewCompactCpuYuvHint {
+    /// Resolve the single Media-owned compact CPU plane admission from a probed format.
+    pub const fn from_pixel_format(pixel_format: PixelFormat) -> Option<PreviewCompactCpuYuvHint> {
+        match pixel_format {
+            PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
+            PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
+            PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
+            PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
+            PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
+            PixelFormat::Yuv420p16le => Some(PreviewCompactCpuYuvHint::Yuv420p16le),
+            PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
+            PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
+            PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
+            PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
+            PixelFormat::Yuv444p16le => Some(PreviewCompactCpuYuvHint::Yuv444p16le),
+            PixelFormat::Yuva444p12le => Some(PreviewCompactCpuYuvHint::Yuva444p12le),
+            PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+            PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
+            PixelFormat::Yuv422p16le => Some(PreviewCompactCpuYuvHint::Yuv422p16le),
+            _ => None,
+        }
+    }
+
     /// Upper bound on tightly packed bytes per luma pixel for even extents.
     ///
     /// Fractional ratios round up. Use `retained_bytes_for_extent` for physical
@@ -150,9 +182,14 @@ impl PreviewCompactCpuYuvHint {
     pub const fn retained_bytes_per_pixel(self) -> usize {
         match self {
             Self::Yuv420p | Self::Nv12 | Self::Yuv422p => 2,
-            Self::Yuv420p10le | Self::Yuv420p12le | Self::P010 | Self::Yuv444p => 3,
-            Self::Yuv422p10le | Self::Yuv422p12le => 4,
-            Self::Yuv444p10le | Self::Yuv444p12le => 6,
+            Self::Yuv420p10le
+            | Self::Yuv420p12le
+            | Self::Yuv420p16le
+            | Self::P010
+            | Self::Yuv444p => 3,
+            Self::Yuv422p10le | Self::Yuv422p12le | Self::Yuv422p16le => 4,
+            Self::Yuv444p10le | Self::Yuv444p12le | Self::Yuv444p16le => 6,
+            Self::Yuva444p12le => 8,
         }
     }
 
@@ -164,7 +201,17 @@ impl PreviewCompactCpuYuvHint {
     /// merely to make the allocation tightly packed.
     pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
         match self {
-            Self::Yuv420p | Self::Yuv420p10le | Self::Yuv420p12le | Self::Nv12 | Self::P010 => {
+            Self::Yuva444p12le => {
+                align_up_saturating((extent.width as usize).saturating_mul(2), 256)
+                    .saturating_mul(4)
+                    .saturating_mul(extent.height as usize)
+            }
+            Self::Yuv420p
+            | Self::Yuv420p10le
+            | Self::Yuv420p12le
+            | Self::Yuv420p16le
+            | Self::Nv12
+            | Self::P010 => {
                 let component_bytes = match self {
                     Self::Yuv420p | Self::Nv12 => 1,
                     _ => 2,
@@ -184,15 +231,19 @@ impl PreviewCompactCpuYuvHint {
             Self::Yuv422p
             | Self::Yuv422p10le
             | Self::Yuv422p12le
+            | Self::Yuv422p16le
             | Self::Yuv444p
             | Self::Yuv444p10le
-            | Self::Yuv444p12le => {
+            | Self::Yuv444p12le
+            | Self::Yuv444p16le => {
                 let component_bytes = match self {
                     Self::Yuv422p | Self::Yuv444p => 1,
                     _ => 2,
                 };
                 let chroma_width = match self {
-                    Self::Yuv444p | Self::Yuv444p10le | Self::Yuv444p12le => extent.width,
+                    Self::Yuv444p | Self::Yuv444p10le | Self::Yuv444p12le | Self::Yuv444p16le => {
+                        extent.width
+                    }
                     _ => extent.width.div_ceil(2),
                 };
                 let luma_row = align_up_saturating(
@@ -244,6 +295,7 @@ pub struct PreviewDecodeSource {
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
     compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
     cpu_component_bit_depth: Option<u8>,
+    cpu_rgb_sampling: Option<bool>,
     still_image: bool,
     source_extent: Resolution,
 }
@@ -289,10 +341,11 @@ impl PreviewDecodeSource {
             stream.index,
             alpha_presence,
             native_surface_hint_from_stream(stream, sampling.pixel_format),
-            compact_cpu_yuv_hint_from_pixel_format(sampling.pixel_format),
+            PreviewCompactCpuYuvHint::from_pixel_format(sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
         )?;
         source.cpu_component_bit_depth = Some(sampling.bit_depth);
+        source.cpu_rgb_sampling = Some(sampling.pixel_format.is_rgb());
         Ok(source)
     }
 
@@ -349,6 +402,7 @@ impl PreviewDecodeSource {
             ProxyEncodingProfile::H264High8 | ProxyEncodingProfile::DnxHrSq8 => 8,
             ProxyEncodingProfile::H265Main10 | ProxyEncodingProfile::DnxHrHqx10 => 10,
         });
+        source.cpu_rgb_sampling = Some(false);
         Ok(source)
     }
 
@@ -406,6 +460,7 @@ impl PreviewDecodeSource {
             native_surface_hint,
             compact_cpu_yuv_hint,
             cpu_component_bit_depth: None,
+            cpu_rgb_sampling: None,
             still_image: false,
             source_extent,
         })
@@ -460,18 +515,23 @@ impl PreviewDecodeSource {
 
     /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
     ///
-    /// Encoded sources above eight bits retain float RGBA just like the actual
-    /// decoder materializer. Unproven sampling reserves float capacity; proven
-    /// eight-bit sources retain their smaller RGBA8 allocation. Compact YUV and
-    /// native surfaces have separate representation-specific accounting.
+    /// YCbCr retains unclamped encoded Float32 for CPU/Export parity. Integer
+    /// RGB may also require Float32 when its range is resolved per picture.
+    /// Explicit full-range RGB retains packed RGBA8/16. Unproven sources reserve
+    /// float capacity. Compact
+    /// YUV and native surfaces have separate representation-specific accounting.
     pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
         if color.is_scene_linear()
-            || color.is_data_texture()
-            || self.cpu_component_bit_depth.is_none_or(cpu_preview_uses_float)
+            || self.cpu_rgb_sampling != Some(true)
+            || (!color.is_data_texture()
+                && !matches!(color.range, crate::DecodedVideoRangeContract::OverrideFull))
         {
-            4 * std::mem::size_of::<f32>()
-        } else {
-            4
+            return 4 * std::mem::size_of::<f32>();
+        }
+        match self.cpu_component_bit_depth {
+            None | Some(17..) => 4 * std::mem::size_of::<f32>(),
+            Some(9..=16) => 4 * std::mem::size_of::<u16>(),
+            Some(_) => 4,
         }
     }
 
@@ -480,10 +540,18 @@ impl PreviewDecodeSource {
         self.source_extent
     }
 
-    /// Whether this source is eligible to request an opaque native output.
+    /// Whether this source has a supported native color and alpha contract.
     pub const fn permits_native_output(&self) -> bool {
-        matches!(self.alpha_presence, PreviewDecodeAlphaPresence::Opaque)
-            && self.native_surface_hint.is_some()
+        match self.alpha_presence {
+            PreviewDecodeAlphaPresence::Opaque => self.native_surface_hint.is_some(),
+            PreviewDecodeAlphaPresence::Present => {
+                matches!(
+                    self.native_surface_hint,
+                    Some(PreviewNativeSurfaceHint::Yuva444p12)
+                )
+            }
+            PreviewDecodeAlphaPresence::Unknown => false,
+        }
     }
 }
 
@@ -769,6 +837,13 @@ impl PreviewDecodeKey {
         self.source_sample
     }
 
+    /// Compare the complete decode contract except its exact sampling target.
+    pub fn same_configuration(&self, other: &Self) -> bool {
+        let mut retargeted = other.clone();
+        retargeted.source_sample = self.source_sample;
+        *self == retargeted
+    }
+
     /// Decode-policy representation identity (no output extent).
     pub const fn representation(&self) -> PreviewDecodeRepresentation {
         self.representation
@@ -1009,7 +1084,9 @@ const fn native_surface_hint_from_pixel_format(
         PixelFormat::Yuv444p10le => Some(PreviewNativeSurfaceHint::Yuv444p10),
         PixelFormat::Yuv444p12le => Some(PreviewNativeSurfaceHint::Yuv444p12),
         PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
+        PixelFormat::Yuva444p12le => Some(PreviewNativeSurfaceHint::Yuva444p12),
         PixelFormat::Yuv422p
+        | PixelFormat::Yuv411p
         | PixelFormat::Yuv444p
         | PixelFormat::Gbrp10le
         | PixelFormat::Gbrp12le
@@ -1022,7 +1099,11 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Gbrapf32le
         | PixelFormat::Gbrapf32be
         | PixelFormat::Rgb24
+        | PixelFormat::Bgr24
         | PixelFormat::Rgba
+        | PixelFormat::Bgra
+        | PixelFormat::Argb
+        | PixelFormat::Abgr
         | PixelFormat::Rgba64le
         | PixelFormat::BayerRggb8
         | PixelFormat::BayerBggr8
@@ -1035,31 +1116,38 @@ const fn native_surface_hint_from_pixel_format(
     }
 }
 
-const fn compact_cpu_yuv_hint_from_pixel_format(
-    pixel_format: PixelFormat,
-) -> Option<PreviewCompactCpuYuvHint> {
-    match pixel_format {
-        PixelFormat::Nv12 => Some(PreviewCompactCpuYuvHint::Nv12),
-        PixelFormat::P010 => Some(PreviewCompactCpuYuvHint::P010),
-        PixelFormat::Yuv420p => Some(PreviewCompactCpuYuvHint::Yuv420p),
-        PixelFormat::Yuv420p10le => Some(PreviewCompactCpuYuvHint::Yuv420p10le),
-        PixelFormat::Yuv420p12le => Some(PreviewCompactCpuYuvHint::Yuv420p12le),
-        PixelFormat::Yuv422p => Some(PreviewCompactCpuYuvHint::Yuv422p),
-        PixelFormat::Yuv444p => Some(PreviewCompactCpuYuvHint::Yuv444p),
-        PixelFormat::Yuv444p10le => Some(PreviewCompactCpuYuvHint::Yuv444p10le),
-        PixelFormat::Yuv444p12le => Some(PreviewCompactCpuYuvHint::Yuv444p12le),
-        PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
-        PixelFormat::Yuv422p12le => Some(PreviewCompactCpuYuvHint::Yuv422p12le),
-        _ => None,
-    }
-}
-
 fn native_surface_hint_from_stream(
     stream: &VideoStreamInfo,
     pixel_format: PixelFormat,
 ) -> Option<PreviewNativeSurfaceHint> {
     let surface = native_surface_hint_from_pixel_format(pixel_format)?;
+    // The direct macOS adapter needs an encoded color contract it can
+    // represent. Missing source tags remain valid for shared CPU sampling and
+    // App-owned interpretation; they cannot authorize a strict native request.
+    #[cfg(target_os = "macos")]
+    if matches!(stream.codec, VideoCodec::ProRes(_) | VideoCodec::H265)
+        && !stream.color_metadata.as_ref().is_some_and(|metadata| {
+            metadata.primaries.specified
+                && metadata.transfer.specified
+                && metadata.matrix.specified
+                && super::videotoolbox::supports_source_color_contract(
+                    metadata.primaries.code,
+                    metadata.transfer.code,
+                    metadata.matrix.code,
+                    stream.color_range,
+                )
+        })
+    {
+        return None;
+    }
     match surface {
+        PreviewNativeSurfaceHint::Yuva444p12 => matches!(
+            stream.codec,
+            VideoCodec::ProRes(
+                mondrian_core::ProResVariant::R4444 | mondrian_core::ProResVariant::R4444Xq
+            )
+        )
+        .then_some(surface),
         PreviewNativeSurfaceHint::Nv12 => match &stream.codec {
             VideoCodec::H264 => (!matches!(
                 stream.codec_profile,
@@ -1103,6 +1191,20 @@ fn native_surface_hint_from_stream(
                     stream.codec_profile,
                     VideoCodecProfile::HevcRangeExtensions | VideoCodecProfile::Unknown
                 ) =>
+            {
+                Some(surface)
+            }
+            // Probe describes software reconstruction precision. The native
+            // adapter separately validates the actual CVPixelBuffer format.
+            VideoCodec::ProRes(
+                mondrian_core::ProResVariant::Proxy
+                | mondrian_core::ProResVariant::Lt
+                | mondrian_core::ProResVariant::Standard
+                | mondrian_core::ProResVariant::Hq,
+            ) if matches!(
+                surface,
+                PreviewNativeSurfaceHint::Yuv422p10 | PreviewNativeSurfaceHint::Yuv422p12
+            ) =>
             {
                 Some(surface)
             }
@@ -1167,7 +1269,23 @@ mod tests {
             pixel_format_proven,
             color_range: DecodedVideoRange::Limited,
             color_interpretation: DetectedColorInterpretation::decoder_unavailable(),
-            color_metadata: None,
+            color_metadata: Some(mondrian_core::VideoColorMetadata {
+                primaries: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+                transfer: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+                matrix: mondrian_core::VideoColorTag {
+                    code: 1,
+                    name: Some("bt709".to_owned()),
+                    specified: true,
+                },
+            }),
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
             camera_raw: None,
@@ -1188,8 +1306,14 @@ mod tests {
                 object_identity: Some(MediaFileObjectIdentity::Unix { device: 4, inode: 5 }),
                 change_stamp: Some(MediaFileChangeStamp::Unix { seconds: 6, nanoseconds: 7 }),
             },
-            color: ProxyColorContract::try_new(ColorSpace::Rec709, 8, DecodedVideoRange::Limited)
-                .expect("valid proxy color"),
+            color: ProxyColorContract::try_new(
+                0,
+                ColorSpace::Rec709,
+                8,
+                DecodedVideoRange::Limited,
+                crate::DecodedVideoMatrix::Bt709,
+            )
+            .expect("valid proxy color"),
             settings: ProxyArtifactSettings { resolution: ProxyResolution::P720, crf: 20 },
             encoding,
         }
@@ -1254,6 +1378,153 @@ mod tests {
         )
         .expect("ProRes remains a valid CPU-decodable source");
         assert_eq!(source.native_surface_hint(), None);
+    }
+
+    #[test]
+    fn prores_422_native_hint_requires_matching_variant_and_reconstruction_surface() {
+        use mondrian_core::ProResVariant;
+        for variant in [
+            ProResVariant::Proxy,
+            ProResVariant::Lt,
+            ProResVariant::Standard,
+            ProResVariant::Hq,
+            ProResVariant::R4444,
+            ProResVariant::R4444Xq,
+        ] {
+            for pixel_format in [
+                PixelFormat::Yuv422p10le,
+                PixelFormat::Yuv422p12le,
+                PixelFormat::Yuv422p16le,
+                PixelFormat::Yuv420p10le,
+                PixelFormat::Yuv444p12le,
+            ] {
+                let mut stream = video_stream(0, pixel_format, true);
+                stream.codec = VideoCodec::ProRes(variant.clone());
+                stream.codec_profile = VideoCodecProfile::Unknown;
+                let source = PreviewDecodeSource::from_probed_stream(
+                    absolute_test_path("media/prores.mov"),
+                    exact_fingerprint(16),
+                    &stream,
+                )
+                .expect("valid probed ProRes source");
+                let eligible =
+                    matches!(
+                        pixel_format,
+                        PixelFormat::Yuv422p10le | PixelFormat::Yuv422p12le
+                    ) && !matches!(variant, ProResVariant::R4444 | ProResVariant::R4444Xq);
+                let expected = match pixel_format {
+                    PixelFormat::Yuv422p10le if eligible => {
+                        Some(PreviewNativeSurfaceHint::Yuv422p10)
+                    }
+                    PixelFormat::Yuv422p12le if eligible => {
+                        Some(PreviewNativeSurfaceHint::Yuv422p12)
+                    }
+                    _ => None,
+                };
+                assert_eq!(
+                    source.native_surface_hint(),
+                    expected,
+                    "{variant:?} {pixel_format:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alpha_native_hint_requires_prores_4444_codec() {
+        for (codec, expected) in [
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444),
+                true,
+            ),
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444Xq),
+                true,
+            ),
+            (VideoCodec::ProRes(mondrian_core::ProResVariant::Hq), false),
+            (VideoCodec::H265, false),
+        ] {
+            let mut stream = video_stream(0, PixelFormat::Yuva444p12le, true);
+            stream.codec = codec;
+            let source = PreviewDecodeSource::from_probed_stream(
+                absolute_test_path("media/alpha.mov"),
+                exact_fingerprint(17),
+                &stream,
+            )
+            .unwrap();
+            assert_eq!(source.permits_native_output(), expected);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn direct_native_hint_requires_representable_source_color_contract() {
+        for (codec, pixel_format) in [
+            (
+                VideoCodec::ProRes(mondrian_core::ProResVariant::R4444),
+                PixelFormat::Yuva444p12le,
+            ),
+            (VideoCodec::H265, PixelFormat::Yuv444p10le),
+        ] {
+            let mut stream = video_stream(0, pixel_format, true);
+            stream.codec = codec;
+            stream.codec_profile = VideoCodecProfile::Unknown;
+            let source_for = |stream: &VideoStreamInfo| {
+                PreviewDecodeSource::from_probed_stream(
+                    absolute_test_path("media/native-color.mov"),
+                    exact_fingerprint(17),
+                    stream,
+                )
+                .expect("source sampling stays valid")
+            };
+            assert!(source_for(&stream).native_surface_hint().is_some());
+            let tagged = stream.clone();
+            stream.color_metadata = None;
+            let source = source_for(&stream);
+            assert_eq!(source.native_surface_hint(), None);
+            assert_eq!(
+                source.compact_cpu_yuv_hint(),
+                PreviewCompactCpuYuvHint::from_pixel_format(pixel_format)
+            );
+            stream = tagged.clone();
+            stream.color_metadata.as_mut().unwrap().transfer.code = 2;
+            assert_eq!(source_for(&stream).native_surface_hint(), None);
+            stream = tagged;
+            stream.color_range = DecodedVideoRange::Full;
+            assert_eq!(source_for(&stream).native_surface_hint(), None);
+        }
+    }
+
+    #[test]
+    fn prores_4444_alpha_retains_native_and_compact_cpu_contracts() {
+        let mut prores = video_stream(6, PixelFormat::Yuva444p12le, true);
+        prores.codec = VideoCodec::ProRes(mondrian_core::ProResVariant::R4444);
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/prores-4444.mov"),
+            exact_fingerprint(17),
+            &prores,
+        )
+        .expect("ProRes 4444 remains CPU-decodable");
+        assert_eq!(source.alpha_presence(), PreviewDecodeAlphaPresence::Present);
+        assert_eq!(
+            source.native_surface_hint(),
+            Some(PreviewNativeSurfaceHint::Yuva444p12)
+        );
+        assert!(source.permits_native_output());
+        let hint = source.compact_cpu_yuv_hint().expect("compact straight-alpha CPU carrier");
+        assert_eq!(hint, PreviewCompactCpuYuvHint::Yuva444p12le);
+        assert_eq!(hint.retained_bytes_per_pixel(), 8);
+        assert_eq!(
+            source.cpu_rgba_retained_bytes_per_pixel(PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                DecodedVideoRange::Limited
+            )),
+            16
+        );
+        assert_eq!(
+            hint.retained_bytes_for_extent(Resolution { width: 5, height: 3 }),
+            4 * 256 * 3
+        );
     }
 
     #[test]
@@ -1373,6 +1644,9 @@ mod tests {
             (PreviewCompactCpuYuvHint::Yuv444p12le, 6912),
             (PreviewCompactCpuYuvHint::Yuv422p12le, 5376),
             (PreviewCompactCpuYuvHint::Yuv420p12le, 4352),
+            (PreviewCompactCpuYuvHint::Yuv420p16le, 4352),
+            (PreviewCompactCpuYuvHint::Yuv422p16le, 5376),
+            (PreviewCompactCpuYuvHint::Yuv444p16le, 6912),
         ] {
             assert_eq!(
                 hint.retained_bytes_for_extent(Resolution { width: 257, height: 3 }),
@@ -1391,6 +1665,9 @@ mod tests {
             PixelFormat::Yuv420p12le,
             PixelFormat::Yuv422p12le,
             PixelFormat::Yuv444p12le,
+            PixelFormat::Yuv420p16le,
+            PixelFormat::Yuv422p16le,
+            PixelFormat::Yuv444p16le,
         ] {
             let mut stream = video_stream(9, pixel, true);
             stream.codec = VideoCodec::H264;

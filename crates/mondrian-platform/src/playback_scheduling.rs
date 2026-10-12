@@ -33,6 +33,129 @@ impl std::fmt::Display for PlaybackThreadSchedulingError {
 
 impl std::error::Error for PlaybackThreadSchedulingError {}
 
+/// Read-only diagnostic of the calling macOS thread, not a playback clock.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub struct MacPlaybackThreadObservation {
+    pub thread_id: u64,
+    pub cpu_time_ns: u64,
+    pub requested_qos_class: u32,
+    pub relative_priority: i32,
+    pub base_priority: i32,
+    pub current_priority: i32,
+    pub maximum_priority: i32,
+    pub scheduling_policy: i32,
+}
+
+/// Read the calling process's public Mach application role without changing it.
+///
+/// A pthread QoS request can be limited by this process policy. The role alone
+/// does not prove effective thread priority or bounded wake latency.
+#[cfg(target_os = "macos")]
+pub fn observe_macos_playback_task_role() -> Result<i32, PlaybackThreadSchedulingError> {
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn task_policy_get(
+            task: u32,
+            flavor: u32,
+            policy: *mut i32,
+            count: *mut u32,
+            get_default: *mut i32,
+        ) -> i32;
+    }
+    // Public mach/task_policy.h: TASK_CATEGORY_POLICY is one integer role.
+    let mut role = 0;
+    let mut count = 1;
+    let mut get_default = 0;
+    // SAFETY: The initialized self-task port is process-owned. The getter writes
+    // only these three live outputs and neither retains pointers nor sets policy.
+    let result =
+        unsafe { task_policy_get(mach_task_self_, 1, &mut role, &mut count, &mut get_default) };
+    if result != 0 || count != 1 || get_default != 0 {
+        return Err(PlaybackThreadSchedulingError::new(
+            "task_policy_get(TASK_CATEGORY_POLICY)",
+            format!("native result={result}, count={count}, get_default={get_default}"),
+        ));
+    }
+    Ok(role)
+}
+
+/// Observe CPU time and pthread QoS without changing scheduling policy.
+///
+/// CPU time excludes periods when the thread is asleep or not scheduled. The
+/// Requested QoS and kernel priorities are separate observations. Their queries
+/// are sequential, not an atomic scheduler snapshot or a bounded wake guarantee.
+#[cfg(target_os = "macos")]
+pub fn observe_macos_playback_thread(
+) -> Result<MacPlaybackThreadObservation, PlaybackThreadSchedulingError> {
+    let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: The clock writes one initialized timespec and retains no pointer.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+        return Err(PlaybackThreadSchedulingError::new(
+            "clock_gettime(CLOCK_THREAD_CPUTIME_ID)",
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    let cpu_time_ns = u64::try_from(time.tv_sec)
+        .ok()
+        .filter(|_| (0..1_000_000_000).contains(&time.tv_nsec))
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|seconds| seconds.checked_add(time.tv_nsec as u64))
+        .ok_or_else(|| {
+            PlaybackThreadSchedulingError::new("thread CPU clock", "invalid or overflowing time")
+        })?;
+    let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+    let mut priority = 0;
+    // SAFETY: This queries only the live calling pthread and both output values.
+    let result =
+        unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut priority) };
+    if result != 0 {
+        return Err(PlaybackThreadSchedulingError::new(
+            "pthread_get_qos_class_np",
+            std::io::Error::from_raw_os_error(result).to_string(),
+        ));
+    }
+    let mut thread_id = 0;
+    // SAFETY: This queries only the live calling pthread and its output value.
+    let result = unsafe { libc::pthread_threadid_np(libc::pthread_self(), &mut thread_id) };
+    if result != 0 {
+        return Err(PlaybackThreadSchedulingError::new(
+            "pthread_threadid_np",
+            std::io::Error::from_raw_os_error(result).to_string(),
+        ));
+    }
+    // SAFETY: All fields of this public SDK structure are integer values.
+    let mut native: libc::thread_extended_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::THREAD_EXTENDED_INFO_COUNT;
+    // SAFETY: pthread_mach_thread_np borrows the live calling pthread's port;
+    // no send right is acquired. thread_info writes only this full-sized buffer
+    // and count, retains neither pointer, and does not change thread policy.
+    let result = unsafe {
+        libc::thread_info(
+            libc::pthread_mach_thread_np(libc::pthread_self()),
+            libc::THREAD_EXTENDED_INFO as libc::thread_flavor_t,
+            (&mut native as *mut libc::thread_extended_info).cast(),
+            &mut count,
+        )
+    };
+    if result != libc::KERN_SUCCESS || count != libc::THREAD_EXTENDED_INFO_COUNT {
+        return Err(PlaybackThreadSchedulingError::new(
+            "thread_info(THREAD_EXTENDED_INFO)",
+            format!("native result={result}, count={count}"),
+        ));
+    }
+    Ok(MacPlaybackThreadObservation {
+        thread_id,
+        cpu_time_ns,
+        requested_qos_class: class as u32,
+        relative_priority: priority,
+        base_priority: native.pth_priority,
+        current_priority: native.pth_curpri,
+        maximum_priority: native.pth_maxpriority,
+        scheduling_policy: native.pth_policy,
+    })
+}
+
 /// Thread-affine native scheduling state for the product playback coordinator.
 ///
 /// The owner synchronizes this object with transport residency. On Windows it
@@ -200,11 +323,24 @@ impl NativePlaybackThreadScheduling {
                 std::io::Error::from_raw_os_error(result).to_string(),
             ));
         }
-        Ok(Some(Self {
+        let native = Self {
             previous_class,
             previous_priority,
             _thread_affine: std::marker::PhantomData,
-        }))
+        };
+        static DIAGNOSTICS_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DIAGNOSTICS_ENABLED.get_or_init(|| {
+            std::env::var_os("MONDRIAN_PREVIEW_WAIT_DIAGNOSTICS").is_some_and(|value| value == "1")
+        }) {
+            // The same optional observation covers Window and Headless owners.
+            // Keep the guard alive so unwinding also restores requested QoS.
+            eprintln!(
+                "MONDRIAN_MACOS_PLAYBACK_THREAD task_role={:?} thread={:?}",
+                observe_macos_playback_task_role(),
+                observe_macos_playback_thread(),
+            );
+        }
+        Ok(Some(native))
     }
 }
 
@@ -309,6 +445,47 @@ impl NativePlaybackThreadScheduling {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_playback_residency_restores_calling_thread_qos_on_stop_and_drop() {
+        let before = observe_macos_playback_thread().expect("read actual calling pthread");
+        let task_role = observe_macos_playback_task_role().expect("read actual calling task role");
+        let mut scheduling = PlaybackThreadScheduling::default();
+        for _ in 0..2 {
+            assert_eq!(
+                scheduling.synchronize(true).expect("native playback admission"),
+                PlaybackThreadSchedulingStatus::Active
+            );
+            let active = observe_macos_playback_thread().expect("read admitted pthread");
+            assert_eq!(active.thread_id, before.thread_id);
+            assert_eq!(
+                active.requested_qos_class,
+                libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE as u32
+            );
+            assert_eq!(active.relative_priority, 0);
+            assert_eq!(
+                scheduling.synchronize(false).expect("consuming residency release"),
+                PlaybackThreadSchedulingStatus::Inactive
+            );
+            let stopped = observe_macos_playback_thread().expect("read restored pthread");
+            assert_eq!(
+                (stopped.requested_qos_class, stopped.relative_priority),
+                (before.requested_qos_class, before.relative_priority)
+            );
+        }
+        scheduling.synchronize(true).expect("reopen native playback residency");
+        drop(scheduling);
+        let dropped = observe_macos_playback_thread().expect("read pthread after Drop");
+        assert_eq!(
+            observe_macos_playback_task_role().expect("read task role after Drop"),
+            task_role
+        );
+        assert_eq!(
+            (dropped.requested_qos_class, dropped.relative_priority),
+            (before.requested_qos_class, before.relative_priority)
+        );
+    }
 
     #[test]
     fn portable_fallback_is_stable_until_residency_ends() {

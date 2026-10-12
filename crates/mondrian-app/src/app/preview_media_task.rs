@@ -544,6 +544,16 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             continue;
         }
         let decode_started_at = Instant::now();
+        tracing::debug!(
+            ?execution_id, ?lane,
+            asset_id = %job.key.asset_id,
+            source_sample = ?job.key.source_sample(),
+            generation = job.generation,
+            priority = ?job.priority,
+            demand_identity = ?job.demand_identity,
+            queue_wait_us, dispatch_wait_us,
+            "Preview media execution began"
+        );
         let panic_context =
             MediaPreviewWorkerPanicContext::from_job(&job, queue_wait_us, execution_id);
         let recovery_revision = decode_context.recovery_revision();
@@ -586,7 +596,15 @@ fn media_preview_worker_with_decoder<DecodeJob>(
             }
         };
         result.dispatch_wait_us = dispatch_wait_us;
+        tracing::debug!(
+            ?execution_id,
+            ?lane,
+            decode_elapsed_us = result.decode_elapsed_us,
+            worker_elapsed_us = app_duration_us(decode_started_at.elapsed()),
+            "Preview media decoder returned"
+        );
         scheduler.mark_execution_completed(execution_id);
+        let observer_wait_started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
         let terminal = match cancellation_observer.finish(execution_id) {
             Ok(terminal) => terminal,
             Err(()) => {
@@ -600,6 +618,13 @@ fn media_preview_worker_with_decoder<DecodeJob>(
                 break;
             }
         };
+        tracing::debug!(
+            ?execution_id,
+            ?lane,
+            ?terminal,
+            observer_wait_us = observer_wait_started.map(|start| app_duration_us(start.elapsed())),
+            "Preview media cancellation observer acknowledged execution"
+        );
         match terminal {
             MediaPreviewCancellationObserverTerminal::Canceled => {
                 apply_media_preview_cancel_observation(&mut result, cancel_observation.snapshot());
@@ -904,6 +929,7 @@ fn send_media_preview_result(
     mut result: MediaPreviewResult,
 ) -> MediaPreviewResultPublication {
     let execution_id = result.execution_id;
+    let publication_started = tracing::enabled!(tracing::Level::DEBUG).then(Instant::now);
     if let Some(execution_id) = execution_id {
         scheduler.mark_execution_completed(execution_id);
     }
@@ -926,6 +952,13 @@ fn send_media_preview_result(
         match results.try_send(result) {
             Ok(()) => {
                 work_notifier.result_became_pollable();
+                tracing::debug!(
+                    ?execution_id,
+                    ?lane,
+                    publication_us =
+                        publication_started.map(|start| app_duration_us(start.elapsed())),
+                    "Preview media result transport accepted execution"
+                );
                 return MediaPreviewResultPublication::Published;
             }
             Err(mpsc::TrySendError::Full(returned)) => {
@@ -1049,6 +1082,146 @@ pub(crate) fn decode_media_preview_with_context(
     decode_media_preview_inner(job, queue_wait_us, Some(decode_context), should_cancel)
 }
 
+fn media_preview_cpu_result(
+    job: MediaPreviewJob,
+    queue_wait_us: u64,
+    decode_elapsed_us: u64,
+    outcome: PreviewDecodeOutcome,
+) -> MediaPreviewResult {
+    let (decoded, diagnostics, execution, evidence) = match outcome {
+        PreviewDecodeOutcome::Frame(frame) => {
+            let diagnostics = frame.diagnostics;
+            let execution = frame.decode_execution;
+            let evidence = MediaPreviewDecodedFrameEvidence::CpuRgba8 {
+                width: frame.width,
+                height: frame.height,
+                color_contract: frame.color_contract,
+                selected_pts: diagnostics.selected_pts,
+                surface_format: diagnostics.decoded_surface_format,
+                sampling: diagnostics.decoded_video_sampling,
+                execution,
+            };
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+                execution,
+                evidence,
+            )
+        }
+        PreviewDecodeOutcome::FloatFrame(frame) => {
+            let diagnostics = frame.diagnostics;
+            let execution = frame.decode_execution;
+            let evidence = MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
+                width: frame.width,
+                height: frame.height,
+                color_contract: frame.color_contract,
+                selected_pts: diagnostics.selected_pts,
+                surface_format: diagnostics.decoded_surface_format,
+                sampling: diagnostics.decoded_video_sampling,
+                execution,
+            };
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+                execution,
+                evidence,
+            )
+        }
+        PreviewDecodeOutcome::Unorm16Frame(frame) => {
+            let diagnostics = frame.diagnostics;
+            let execution = frame.decode_execution;
+            let evidence = MediaPreviewDecodedFrameEvidence::CpuRgbaUnorm16 {
+                width: frame.width,
+                height: frame.height,
+                color_contract: frame.color_contract,
+                selected_pts: diagnostics.selected_pts,
+                surface_format: diagnostics.decoded_surface_format,
+                sampling: diagnostics.decoded_video_sampling,
+                execution,
+            };
+            (
+                mondrian_renderer::DecodedCpuSourceFrame::from(frame),
+                diagnostics,
+                execution,
+                evidence,
+            )
+        }
+        PreviewDecodeOutcome::CpuYuvFrame(_)
+        | PreviewDecodeOutcome::NativeGpuFrame(_)
+        | PreviewDecodeOutcome::Canceled(_) => {
+            unreachable!("CPU source helper only receives RGBA outcomes")
+        }
+    };
+    let presentation_quality = match preview_decode_presentation_quality(&diagnostics) {
+        Ok(quality) => quality,
+        Err(reason) => {
+            return media_preview_temporal_failure(
+                job,
+                queue_wait_us,
+                decode_elapsed_us,
+                diagnostics,
+                reason,
+            );
+        }
+    };
+    let frame_identity = media_preview_frame_identity(&job.key, evidence);
+    let prepared_source = match prepare_decoded_cpu_source_frame(
+        decoded,
+        job.key.alpha_interpretation,
+        job.key.preparation_intent.clone(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            return media_preview_alpha_failure(
+                job,
+                queue_wait_us,
+                decode_elapsed_us,
+                diagnostics,
+                error.to_string(),
+            );
+        }
+    };
+    let gpu_source =
+        MediaPreviewGpuSourceFrame::from_decode_diagnostics(prepared_source, diagnostics);
+    let render_cache_source_fingerprint =
+        super::preview_render_cache_identity::canonical_media_source_fingerprint(&job.key).ok();
+    let frame = MediaPreviewFrame::from_source(
+        gpu_source,
+        job.key.source_resolution,
+        frame_identity,
+        presentation_quality,
+        PreviewDecodeExecutionSummary::from_path(execution),
+    )
+    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
+    .with_picture_geometry(job.key.picture_geometry)
+    .with_cross_call_reuse(diagnostics.selected_pts.is_some());
+    MediaPreviewResult {
+        key: job.key,
+        frame: Some(frame),
+        error: None,
+        failure_reason: None,
+        generation: job.generation,
+        priority: job.priority,
+        access_mode: job.access_mode,
+        queue_disposition: MediaPreviewQueueDisposition::Ready,
+        queue_wait_us,
+        dispatch_wait_us: 0,
+        decode_elapsed_us,
+        deadline_at: job.deadline_at,
+        logical_cancellation_observed: None,
+        canceled: false,
+        cancellation_phase: None,
+        cancel_reason: None,
+        concrete_media_checkpoint: None,
+        decode_diagnostics: Some(diagnostics),
+        color_diagnostics: None,
+        color_stage_diagnostics: None,
+        demand_identity: job.demand_identity,
+        execution_id: job.execution_id,
+        residency_work: job.residency_work,
+    }
+}
+
 fn decode_media_preview_inner(
     job: MediaPreviewJob,
     queue_wait_us: u64,
@@ -1065,11 +1238,12 @@ fn decode_media_preview_inner(
     let execution_id = job.execution_id;
     let render_cache_source_fingerprint =
         super::preview_render_cache_identity::canonical_media_source_fingerprint(&job.key).ok();
-    let hardware_decode_request = if job.key.source_has_alpha() {
-        PreviewHardwareDecodeRequest::Auto
-    } else {
-        job.hardware_decode_request
-    };
+    let hardware_decode_request =
+        if job.key.source_has_alpha() && !job.key.decode.source().permits_native_output() {
+            PreviewHardwareDecodeRequest::Auto
+        } else {
+            job.hardware_decode_request
+        };
     let decode_outcome = decode_media_preview_for_access_mode(
         &job.key.decode,
         access_mode,
@@ -1081,183 +1255,14 @@ fn decode_media_preview_inner(
     );
     let decode_elapsed_us = app_duration_us(decode_started_at.elapsed());
     match decode_outcome {
-        Ok(PreviewDecodeOutcome::Frame(frame)) => {
-            let decode_diagnostics = frame.diagnostics;
-            let decode_execution = frame.decode_execution;
-            let presentation_quality =
-                match preview_decode_presentation_quality(&decode_diagnostics) {
-                    Ok(quality) => quality,
-                    Err(reason) => {
-                        return media_preview_temporal_failure(
-                            job,
-                            queue_wait_us,
-                            decode_elapsed_us,
-                            decode_diagnostics,
-                            reason,
-                        );
-                    }
-                };
-            let width = frame.width;
-            let height = frame.height;
-            let frame_identity = media_preview_frame_identity(
-                &job.key,
-                MediaPreviewDecodedFrameEvidence::CpuRgba8 {
-                    width,
-                    height,
-                    color_contract: frame.color_contract,
-                    selected_pts: decode_diagnostics.selected_pts,
-                    surface_format: decode_diagnostics.decoded_surface_format,
-                    sampling: decode_diagnostics.decoded_video_sampling,
-                    execution: decode_execution,
-                },
-            );
-            let prepared_source = match prepare_decoded_cpu_source_frame(
-                frame,
-                job.key.alpha_interpretation,
-                job.key.preparation_intent.clone(),
-            ) {
-                Ok(source) => source,
-                Err(error) => {
-                    return media_preview_alpha_failure(
-                        job,
-                        queue_wait_us,
-                        decode_elapsed_us,
-                        decode_diagnostics,
-                        error.to_string(),
-                    );
-                }
-            };
-            let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                prepared_source,
-                decode_diagnostics,
-            );
-            MediaPreviewResult {
-                key: job.key,
-                frame: Some(
-                    MediaPreviewFrame::from_source(
-                        gpu_source,
-                        logical_resolution,
-                        frame_identity,
-                        presentation_quality,
-                        PreviewDecodeExecutionSummary::from_path(decode_execution),
-                    )
-                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
-                    .with_picture_geometry(picture_geometry)
-                    .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
-                ),
-                error: None,
-                failure_reason: None,
-                generation: job.generation,
-                priority,
-                access_mode,
-                queue_disposition: MediaPreviewQueueDisposition::Ready,
-                queue_wait_us,
-                dispatch_wait_us: 0,
-                decode_elapsed_us,
-                deadline_at,
-                logical_cancellation_observed: None,
-                canceled: false,
-                cancellation_phase: None,
-                cancel_reason: None,
-                concrete_media_checkpoint: None,
-                decode_diagnostics: Some(decode_diagnostics),
-                color_diagnostics: None,
-                color_stage_diagnostics: None,
-                demand_identity,
-                execution_id,
-                residency_work: job.residency_work,
-            }
-        }
-        Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
-            let decode_diagnostics = frame.diagnostics;
-            let decode_execution = frame.decode_execution;
-            let presentation_quality =
-                match preview_decode_presentation_quality(&decode_diagnostics) {
-                    Ok(quality) => quality,
-                    Err(reason) => {
-                        return media_preview_temporal_failure(
-                            job,
-                            queue_wait_us,
-                            decode_elapsed_us,
-                            decode_diagnostics,
-                            reason,
-                        );
-                    }
-                };
-            let width = frame.width;
-            let height = frame.height;
-            let frame_identity = media_preview_frame_identity(
-                &job.key,
-                MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
-                    width,
-                    height,
-                    color_contract: frame.color_contract,
-                    selected_pts: decode_diagnostics.selected_pts,
-                    surface_format: decode_diagnostics.decoded_surface_format,
-                    sampling: decode_diagnostics.decoded_video_sampling,
-                    execution: decode_execution,
-                },
-            );
-            let prepared_source = match prepare_decoded_cpu_source_frame(
-                frame,
-                job.key.alpha_interpretation,
-                job.key.preparation_intent.clone(),
-            ) {
-                Ok(source) => source,
-                Err(error) => {
-                    return media_preview_alpha_failure(
-                        job,
-                        queue_wait_us,
-                        decode_elapsed_us,
-                        decode_diagnostics,
-                        error.to_string(),
-                    );
-                }
-            };
-            let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                prepared_source,
-                decode_diagnostics,
-            );
-            MediaPreviewResult {
-                key: job.key,
-                frame: Some(
-                    MediaPreviewFrame::from_source(
-                        gpu_source,
-                        logical_resolution,
-                        frame_identity,
-                        presentation_quality,
-                        PreviewDecodeExecutionSummary::from_path(decode_execution),
-                    )
-                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
-                    .with_picture_geometry(picture_geometry)
-                    .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
-                ),
-                error: None,
-                failure_reason: None,
-                generation: job.generation,
-                priority,
-                access_mode,
-                queue_disposition: MediaPreviewQueueDisposition::Ready,
-                queue_wait_us,
-                dispatch_wait_us: 0,
-                decode_elapsed_us,
-                deadline_at,
-                logical_cancellation_observed: None,
-                canceled: false,
-                cancellation_phase: None,
-                cancel_reason: None,
-                concrete_media_checkpoint: None,
-                decode_diagnostics: Some(decode_diagnostics),
-                color_diagnostics: None,
-                color_stage_diagnostics: None,
-                demand_identity,
-                execution_id,
-                residency_work: job.residency_work,
-            }
-        }
+        Ok(
+            cpu @ (PreviewDecodeOutcome::Frame(_)
+            | PreviewDecodeOutcome::FloatFrame(_)
+            | PreviewDecodeOutcome::Unorm16Frame(_)),
+        ) => media_preview_cpu_result(job, queue_wait_us, decode_elapsed_us, cpu),
         Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
-            if job.key.source_has_alpha() {
+            if job.key.source_has_alpha() && frame.alpha_plane().is_none() {
                 return media_preview_alpha_failure(
                     job,
                     queue_wait_us,
@@ -1347,7 +1352,9 @@ fn decode_media_preview_inner(
         }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
-            if job.key.source_has_alpha() {
+            if job.key.source_has_alpha()
+                && !frame.surface_format.descriptor().is_some_and(|surface| surface.has_alpha)
+            {
                 return media_preview_alpha_failure(
                     job,
                     queue_wait_us,
@@ -1617,7 +1624,7 @@ fn app_duration_us(duration: Duration) -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum MediaPreviewDecodedFrameEvidence {
+pub(crate) enum MediaPreviewDecodedFrameEvidence {
     CpuRgba8 {
         width: u32,
         height: u32,
@@ -1628,6 +1635,15 @@ enum MediaPreviewDecodedFrameEvidence {
         execution: PreviewDecodeExecutionPath,
     },
     CpuRgbaF32 {
+        width: u32,
+        height: u32,
+        color_contract: DecodedRgbaFrameContract,
+        selected_pts: Option<i64>,
+        surface_format: DecodedVideoSurfaceFormat,
+        sampling: DecodedVideoSampling,
+        execution: PreviewDecodeExecutionPath,
+    },
+    CpuRgbaUnorm16 {
         width: u32,
         height: u32,
         color_contract: DecodedRgbaFrameContract,
@@ -1655,7 +1671,7 @@ enum MediaPreviewDecodedFrameEvidence {
     },
 }
 
-fn media_preview_frame_identity(
+pub(crate) fn media_preview_frame_identity(
     key: &MediaPreviewKey,
     evidence: MediaPreviewDecodedFrameEvidence,
 ) -> PreviewSemanticIdentity {

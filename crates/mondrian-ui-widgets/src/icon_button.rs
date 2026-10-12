@@ -348,6 +348,10 @@ impl Widget for IconButton {
                 }),
         )
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds)
+    }
 }
 
 #[cfg(test)]
@@ -437,6 +441,7 @@ mod tests {
         let theme: &'static mondrian_ui_theme::Theme =
             Box::leak(Box::new(ThemePreset::Dark.build()));
         PaintContext {
+            pixels_per_point: 1.0,
             encoder,
             theme,
             clip_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
@@ -709,6 +714,7 @@ mod tests {
         button.layout(Rect::new(10.0, 20.0, visual.size, visual.size));
         let mut recorder = PaintRecorder::default();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut recorder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 240.0, 120.0),

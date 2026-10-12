@@ -227,6 +227,20 @@ impl PropertyRow {
         }
         .max(1.0)
     }
+
+    fn measure_control(&self, form: &FormLayout, bounds: Rect, fallback: f32) -> (f32, Size) {
+        let limit = match self.height {
+            PropertyRowHeight::Default => fallback,
+            PropertyRowHeight::Fixed(height) => height,
+            PropertyRowHeight::Content => f32::MAX,
+        };
+        let measured = self.control.measure(form.control_constraint(bounds, limit));
+        let height = match self.height {
+            PropertyRowHeight::Content => measured.height.max(fallback),
+            _ => limit,
+        };
+        (height.max(1.0), measured)
+    }
 }
 
 /// A titled group of property rows.
@@ -499,7 +513,7 @@ impl Widget for PropertyPanel {
             self.options.margin * 2.0
                 + self.header_height()
                 + rows_height
-                + section_headers as f32 * visual.header_without_subtitle_height
+                + section_headers as f32 * visual.section_header_height
                 + section_gaps as f32 * self.options.section_gap,
         );
         constraint.constrain(preferred)
@@ -588,11 +602,8 @@ impl Widget for PropertyPanel {
 
             let section_top = y;
             for row in &mut section.rows {
-                let row_h = row.height(
-                    self.options.row_height,
-                    form_layout.control_constraint(content, f32::MAX),
-                );
-                let measured = row.control.measure(form_layout.control_constraint(content, row_h));
+                let (row_h, measured) =
+                    row.measure_control(&form_layout, content, self.options.row_height);
                 let rects = form_layout.row_rects(
                     content,
                     y,
@@ -1126,6 +1137,51 @@ mod tests {
     }
 
     #[test]
+    fn content_height_rows_keep_wrapped_details_and_following_rows_inside_measured_panel() {
+        use crate::{FlexChild, FlexContainer};
+
+        let details = "Export color health failed. Inspect the source color contract and GPU stage evidence. ".repeat(8);
+        let summary = FlexContainer::column(vec![
+            FlexChild::fixed(Box::new(
+                Label::new("Completed / 100%").with_padding(0.0, 0.0),
+            )),
+            FlexChild::fixed(Box::new(
+                Label::new(details).wrapped().with_padding(0.0, 0.0),
+            )),
+        ])
+        .with_gap(4.0);
+        let mut panel = PropertyPanel::new("Export").with_section(
+            PropertySection::new("Queue")
+                .with_row(PropertyRow::new("Job", Box::new(summary)).with_content_height())
+                .with_row(PropertyRow::new("Next", Box::new(Label::new("Pending")))),
+        );
+        let mut heights = Vec::new();
+        for width in [320.0, 640.0] {
+            let measured = panel
+                .measure(LayoutConstraint { min: Size::ZERO, max: Size::new(width, f32::MAX) });
+            assert_eq!(measured.width, width);
+            panel.layout(Rect::new(0.0, 0.0, width, measured.height));
+            let rows = &panel.sections[0].rows;
+            let intrinsic = rows[0].control.measure(LayoutConstraint {
+                min: Size::ZERO,
+                max: Size::new(rows[0].control_bounds.width, f32::MAX),
+            });
+            assert!((rows[0].control_bounds.height - intrinsic.height).abs() < 0.01);
+            assert!(rows[1].bounds.y >= rows[0].bounds.y + rows[0].bounds.height);
+            assert!(
+                (rows[1].bounds.y + rows[1].bounds.height + panel.options.margin - measured.height)
+                    .abs()
+                    < 0.01
+            );
+            heights.push(rows[0].bounds.height);
+        }
+        assert!(
+            heights[0] > heights[1],
+            "narrow details must occupy more lines"
+        );
+    }
+
+    #[test]
     fn property_panel_measures_controls_with_form_lane_constraint() {
         let seen = Rc::new(RefCell::new(Vec::new()));
         let mut panel = PropertyPanel::new("Inspector").with_section(
@@ -1307,6 +1363,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 200.0),
@@ -1339,6 +1396,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 200.0),
@@ -1363,6 +1421,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 320.0, 220.0),
@@ -1388,6 +1447,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 180.0),
@@ -1420,6 +1480,7 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
         let theme = ThemePreset::Dark.build();
         let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
             encoder: &mut encoder,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 300.0, 160.0),

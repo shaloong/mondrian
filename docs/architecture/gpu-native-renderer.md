@@ -8,7 +8,10 @@ untyped RGBA8 `RenderPipeline`/`FrameCompositor` prototypes are not alternate
 production paths. UI rendering remains independently owned by
 `mondrian-ui-renderer`.
 
-The working compositor clears its accumulation target to transparent black.
+The working compositor starts from transparent black. The first scheduled Layer
+uses the existing immutable zero texture as its accumulator input; its destination
+is cleared in the same render pass that draws the Layer. An empty plan explicitly
+clears its output. A nonempty plan does not clear an unused initial accumulator.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
@@ -28,6 +31,15 @@ Implementation. Existing references below describe that internal recorder,
 not a product-level App/Export Interface. The hidden `color::qualification`
 Adapter exposes exact internals only to ignored real-device gates that must
 measure cache reuse and resource residency. Production code cannot use it.
+
+Generated OCIO programs use the same validated Naga IR for all GPU backends.
+The translator removes frontend-generated scalar-array copies only when their
+initializer is an immutable constant and every use is a scalar read with no
+write or pointer escape. Dynamic indices and the original constant payload are
+preserved; authored arrays, whole-array value copies, and unsupported side
+effects retain their original storage. This prevents per-pixel copies of OCIO
+lookup tables without changing processors, resource bindings, precision, or
+color authority. The resulting IR still passes the ordinary full validator.
 
 ## Viewer execution retirement
 
@@ -255,6 +267,20 @@ Transition, and composite demand. Arithmetic overflow or either exceeded limit
 fails before allocating that node. Export freezes the grant per attempt and
 reports its active high-water bytes/textures; it may not reduce precision or
 fall back after GPU execution has begun.
+
+Native decoded Export sources use `NativeVideoImportRuntime`, the same concrete
+platform importer used by Viewer. The frozen source contract selects the GPU
+input intent through `SourceColorModule`; `GpuColorExecutionSession` adopts its
+working resource into the existing frame identity namespace/table. Media keeps
+codec/profile, timestamp, scan and decoded-plane authority; exact observed
+handle/format/sampling routes are validated by the importer. Native request or
+import failure cannot substitute CPU pixels after this path starts. Source
+hardware observation is counted independently from resident encode hardware.
+Terminal source retirement observes actual GPU completion, consumes the native
+release worker, clears the job decode context, and checks issued native outputs
+are released. Resident first-frame render/surface failures are terminal even
+before the first encoded packet; only pre-render adapter/session rejection may
+select the separately diagnosed generic route.
 
 Software-decoded compact YUV follows that same ownership rule. Its encoded-RGB
 intermediate is acquired from the shared exact-contract pool and returned when
@@ -724,7 +750,7 @@ distinguish CPU-decoded media, native GPU-decoded media, native media blocked
 by missing sampling facts, mixed CPU/native stacks, and procedural GPU-native
 content across the concrete D3D12, VideoToolbox/Metal, and VA-API/Vulkan
 Adapters.
-The renderer owns `ViewerNativeVideoImportRuntime` independently from the
+The renderer owns `NativeVideoImportRuntime` independently from the
 swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
 contract; construction failure remains unavailable with its exact reason. The
@@ -922,7 +948,7 @@ policy. App code consumes these contracts directly; it must not re-export them
 under App-owned aliases.
 
 Native decoded-frame format and sampling resolution is Renderer policy and
-therefore lives beside `ViewerNativeVideoImportRuntime`. Unknown range,
+therefore lives beside `NativeVideoImportRuntime`. Unknown range,
 bit-depth mismatch, unsupported chroma location, or an RGB/YUV matrix mismatch
 fails closed before backend execution. Product admission explanations remain an
 App Adapter responsibility: they may combine exact media facts with the
@@ -952,6 +978,48 @@ When recording fails, the Window Adapter may unwrap a composite-graph error only
 to preserve the renderer's typed first-blocker telemetry; it must not reproduce
 graph scheduling or collapse effect-domain failures into a generic CPU fallback.
 
+### Window drawable acquisition
+
+The Window Adapter owns a capacity-one native surface acquisition worker.
+Window/Surface creation and the initial configuration stay on the event-loop
+thread. The worker retains the actual surface and calls `get_current_texture`
+without holding its short handoff lock. Subsequent configuration revisions are
+coalesced and applied on the event-loop thread, serialized with the Window's
+queue submissions, after the worker has released any obsolete drawable.
+Background configure must not race a Viewer submission: wgpu's device-idle
+wait can fail and terminate the Viewer GPU generation. Native drawable waits
+cannot suspend the event-loop's
+existing Playback clock, producer/result, or GPU-completion observation.
+It owns no Timeline, picture, color, Frame Demand, or presentation authority.
+
+Periodic macOS display observation waits for this same acquisition owner to
+return before querying Metal surface capabilities. Those queries share the
+native surface lock with drawable acquisition. While acquisition is pending,
+its existing completion event supplies the observation wake; an already-due
+display poll must not spin or block Playback on that lock. The original display
+observation remains due and runs when acquisition returns.
+
+A drawable is transferred only for the latest configuration. A move-only paint
+guard excludes configure and another acquisition until recording/present (or
+unwind) returns and the real texture is released. Revoking a ready drawable also
+holds that exclusion through its destructor; notification order alone cannot
+protect against a spurious wake. UI commands and texture registrations are
+resolved at consumption, not captured as an unbounded queue of old pictures.
+The shared UI renderer still records the same carrier, text, color, MSAA and
+present path. Surface availability events carry the Window generation and are
+wake hints only; retired-generation hints have no publication authority.
+
+Replacing a Window closes the old acquisition admission and retains its owner
+while the existing GPU generation is handed off. Finished acquisition workers
+are consumed without waiting on the realtime event-loop; final shutdown uses
+the same original caller deadline for every remaining surface and GPU owner.
+The strict Window closure inventory includes active and retired surface worker
+receipts. The device/surface reopen receipt requires the painted old active
+surface worker to have actually terminated. A blocked worker, failed wake,
+panic, missing field or duplicate/mismatched generation cannot qualify as
+released. Fallback Drop closes admission but never asserts successful closure.
+No new Clock, quality policy, native renderer or CPU fallback is introduced.
+
 GPU-resident media layers with log or display-encoded effect domains are
 preprocessed through the runtime-owned `OCIO -> point effect -> OCIO` route
 before working-linear affine/compositing. Procedural solids with those external
@@ -960,7 +1028,9 @@ color into a pooled working GPU frame, then use that same route; layer opacity,
 affine transform, and blending remain after the effect-domain round trip in
 authored order. The consumed plan
 is removed from the working compositor request, so an otherwise eligible
-single layer can retain its passthrough path. CPU working-frame fallbacks use an
+opaque single layer can retain its passthrough path. Straight-coverage layers
+still composite over transparent black: forwarding their working texture would
+leak hidden RGB where alpha is zero. CPU working-frame fallbacks use an
 explicit pooled RGBA32F upload node before the same effect-domain route; this
 reports exactly one upload stage and no readback, while GPU/native media retain
 their transfer-free path. The upload plan retains the CPU frame's shared
@@ -986,7 +1056,7 @@ shared composite graph also ignores zero-opacity external adjustments, and the
 low-level compositor excludes all zero-contribution layers from capability
 validation, passthrough selection, and pass recording. Diagnostics therefore
 describe only executed work, and a visible GPU layer beneath an invisible
-adjustment remains a zero-pass GPU passthrough.
+adjustment retains a zero-pass GPU passthrough when the visible layer is opaque.
 
 `GpuCompositorTextureBindingDiagnostics` separately counts texture bind-group
 creation and cache hits. This keeps backend object churn observable without
@@ -1049,6 +1119,13 @@ readback tests prove 1:1 sample preservation, linear-light checkerboard
 downscaling, normalized crop coordinates, and mandatory RGBA32F working input.
 The app/UI integration must provide presentation geometry; it must not
 reinterpret this spatial filter or resample display/device code values.
+
+Two opt-in physical spatial tests execute this production runtime. The pixel
+reference reconstructs coverage-weighted RGB and alpha independently in f64
+on the declared Float32 sample grid and intermediate storage. The short 4K
+diagnostic records actual pass-boundary timestamps, the complete Float32 pixel
+digest, and explicit fixture-upload/readback limitations. It is diagnostic
+evidence only, not the full Window realtime or commercial performance gate.
 
 ## OCIO GPU Integration
 
@@ -1168,6 +1245,12 @@ by target format and LUTs by the complete fingerprint plus edge size, while
 retaining only the current device-RGB output frame. Runtime diagnostics count
 pipeline builds, LUT uploads, and records. The app combines this processor proof
 with the explicit opaque sRGB-surface code-value carrier before unblocking ICC.
+Viewer execution first composites its explicitly bound canvas backdrop in
+display-linear light using the shared OCIO identity transforms and a GPU matte.
+Its opaque re-encoded monitor signal alone enters the ICC LUT; canonical
+Program Output and scope taps keep their original coverage. The existing
+color-runtime frame table owns the three intermediate textures through GPU
+completion, and active working-set admission counts each allocation once.
 
 `OcioGpuWgpuUniformUploadPlan` is the uniform-buffer handoff. It carries OCIO
 uniform names, types, offsets, value counts, and copied values. The packed
@@ -1583,13 +1666,27 @@ detached source lease may return to the Renderer pool. Any error after native
 submission retains the source and destination as poisoned resources until
 Adapter retirement; they cannot be silently recycled under unknown state.
 
-Only the narrow exact HEVC contract is admitted. HLG, full-range PQ, authored
-static HDR metadata, active Legalizer/VBV constraints, unsupported codecs or
-pixel formats, and non-D3D12 platforms use the complete reported rawvideo path.
-Failure before the first resident frame submission may fall back to that path;
-failure after submission is terminal. Renderer and Media diagnostics count
-resident submissions while proving zero host-transfer operations, and the
-ordinary post-encode validation remains authoritative.
+Linux and macOS use one shared RGB-to-YCbCr WGSL kernel, with the same range,
+Rec.709/Rec.2020 coefficients and chroma sampling. The Metal adapter imports one
+private MTLBuffer into the active wgpu device, writes packed NV12/P010 words,
+then blits the two planes into the codec-owned CVMetalTextures. Both the exact
+wgpu submission and the actual Metal command-buffer completion are observed
+before releasing the source lease or promoting the encoder input. Metal's
+completed handler carries no borrowed surface. Timeout quarantines the source,
+destination and GPU parents instead of recycling them under uncertain state.
+The bridge allocation is included once in the unified-memory resource grant;
+GPU and CPU views do not each incur a full second allocation charge. Encoded
+Float32 output stays Float32 on compute-capable adapters, while D3D12's source
+precision admission remains its independently qualified contract.
+
+Only the narrow exact HEVC contract is admitted. Full-range PQ, authored static
+HDR metadata, active Legalizer/VBV constraints, unsupported codecs or pixel
+formats use the complete reported rawvideo path. D3D12 additionally rejects HLG.
+Before native conversion, exact backend or input admission may select that path;
+conversion/submission failure is terminal. Renderer and Media diagnostics count
+resident submissions and actual native shutdown while proving zero host-transfer
+operations. The ordinary post-encode validation remains authoritative. These
+HEVC adapters do not qualify the separate H.264 rawvideo delivery path.
 
 ## Viewer Resource Reuse
 
@@ -1650,6 +1747,18 @@ integer histogram counters before visualization; luma mode applies the inverse
 choice and derives its luma histogram from its waveform. CPU-reference readback
 tests cover both modes, high-entropy bins, excursions, vectors, and tail pixels.
 
+Exact counts refer to integer aggregation after signal classification. UNORM
+texture conversion and [WGSL floating-point evaluation](https://www.w3.org/TR/WGSL/#floating-point-evaluation)
+can round differently from CPU division and fused multiply-add, especially at
+a histogram or vectorscope boundary. The high-entropy regression retains every
+input pixel and checks its backend classification against a double-precision
+color oracle with an accumulated f32 signal error bound. A separate scalar GPU
+dispatch shares the production color functions but performs no aggregation;
+CPU summation of its per-pixel keys must then match every production histogram,
+waveform column and vectorscope counter exactly. This introduces neither a
+count tolerance nor a production readback path. Software Vulkan CI exercises
+this correctness contract and does not qualify physical GPU performance.
+
 When the adapter advertises wgpu subgroup operations, device creation requests
 that optional feature and the aggregation shader uses a one-dimensional
 256-invocation workgroup. For each four-pixel key vector it elects one active
@@ -1661,15 +1770,145 @@ retain the original 16x16 shader and dispatch. Per-frame runtime evidence
 records which variant executed, and CPU-reference tests cover low-entropy,
 high-entropy, floating-point excursion, vector, and tail-pixel inputs.
 
-The producer uses the bounded asynchronous Viewer timestamp-query ring. It
-reports complete-frame and per-stage GPU timestamps separately from CPU
-command-recording time, and records composite, fusion, color-stage, scope,
-presentation-lease, fallback, blocker, and output-format evidence. A warm
+The producer uses the bounded asynchronous Viewer timestamp-query ring.
+Headless production device creation requests the supported frame-timing
+features. When both timestamp and encoder timestamp features are available,
+the existing encoder-marker mode is used. Otherwise, basic timestamp support
+can time the actual render/compute passes through the same production
+`GpuCommandEncoder` interface. A leading copy receives one measured compute
+workgroup with a storage write before that copy, because an empty Metal pass
+can be elided and leave its timestamp at zero. This instrumentation executes
+only in pass-timestamp mode and its cost remains in the GPU interval; it adds
+no rendering or color authority. Native-import prefix timing still requires
+its encoder feature pair;
+frame timing support does not imply prefix timing support.
+
+The pass mode has 16 query slots and at most 256 measured passes per frame in
+the Headless owner. Query overflow drops timing coverage while recording the
+unchanged workload. The first measured boundary and final real pass timestamp
+bracket the recorded Viewer command scope, including leading plane uploads and
+intervening encoder copies/clears. Trailing unmeasured commands, commands
+across an unmeasured stage boundary, conflicting
+timestamp writes and invalid stage order produce typed coverage errors instead
+of partial execution samples. Queue `write_buffer`/`write_texture` traffic,
+decode work and presentation are outside this encoder timing span; it is not
+all queue traffic or end-to-end Viewer latency. Semantic stage markers are
+shared across both timing modes.
+
+The native Window owner enables actual-pass timing only when
+`MONDRIAN_RENDER_PROFILE` is enabled. Its ring has eight query slots and at
+most 64 measured passes per frame. Exhaustion discards timing coverage without
+changing the recorded workload. Submission and sample logs bind query identity
+to the owning device generation; reopen does not reuse that identity. The ring
+follows that same generation across Startup/Workspace window replacement;
+preparing a replacement window shell does not create a second query ring. Counter
+readback remains owned by the existing generation retirement envelope. After
+the initial queue barrier, the device progress owner continues nonblocking
+polling until deferred counter callbacks and the other retirement resources
+prove safe release. Timing errors do not authorize early resource release or
+replace the renderer's result with a fallback.
+
+On macOS, the product establishes its `NSApplication` subclass before winit
+creates the shared application. Public AppKit `terminate:` requests enter the
+current Window run's existing UI action queue as the same guarded Quit action
+used by window close. The event-loop proxy sends only a wake hint; queued hints
+cannot move an old run's actions into a new run. Winit retains its delegate.
+Saving, cancelling, native GPU retirement, App shutdown and background runtime
+closure stay with the existing consuming owners. Opt-in profiling logs those
+owners' final GPU receipt and independent closure results before log flushing;
+normal process exit alone is not their proof.
+
+The standalone scopes and Standard View gates use the same actual-pass
+recorder through `GpuTimestampPassIntervalTimer`. A consuming receipt binds
+the measured command interval to its query allocation. This synchronous gate
+timer admits one interval until the exact submitted work, query resolution and
+counter read have completed; abandoning a receipt cannot reopen query admission.
+Its receipt proves elapsed time without inventing Viewer stage attribution.
+The consuming sample retains raw counter pairs and the counter period for every
+actual pass. These expose inter-pass copies, scheduling gaps and legal stage
+overlap; even an individual pass span may include GPU preemption. Each pair
+must be ordered internally, while complete elapsed time brackets the earliest
+start and latest end across all pairs rather than assuming serialization.
+Per-pass observations never
+replace the complete interval used by the performance gate.
+The scopes clear remains inside the measured span, including the leading anchor
+cost, while counter readback remains outside. The existing workload, precision,
+sample counts, cache gates and GPU/CPU time budgets are unchanged. Color View
+and input-transform gates wait for all cold and warmup GPU submissions to
+complete before measurement; submitting warmup work alone is not completion.
+The reports retain this completion fact alongside the original warmup count.
+Same-device display/surface transitions invalidate the Viewer frame-resource
+generation after exact in-flight completion, without discarding immutable,
+contract-keyed device pipelines. Spatial, calibration, signal monitoring and
+scopes release their frame outputs; scope count buffers and display textures
+are recreated. A detached old output cannot repopulate the new pool generation.
+Calibration LUT reuse still requires its complete fingerprint, and no drawable
+or frame texture is reused across that invalidation. Actual device replacement
+retires the complete runtime and constructs a fresh one. This removes repeated
+pipeline compilation at same-device transitions; first-use compilation of a
+new pipeline contract remains a separate responsiveness concern.
+
+Interactive Program Output/scopes preparation loans the existing device caches to
+one bounded Renderer worker. `ViewerGpuBackendPreparation` freezes the
+canonical Program color context and the existing local monitor policy; the
+worker invokes the same production backend planner used by synchronous startup
+and headless preparation. It has no frame, Timeline, demand or publication
+authority. No second color cache, scopes executor or interpretation is created. The Window
+admits the loan only after its exact GPU submissions have completed and before
+consuming a frame candidate or presentation ticket. The Renderer also rejects
+a loan while a recorded frame is still unsubmitted.
+
+The frame table is cleared before transferring that one cache. Preparation
+creates only device objects, so it cannot return an old frame or allocate a new
+frame identity. A changed Program/monitor contract remains pending until its
+own preparation has returned; completion of a superseded contract cannot mark
+the new contract ready. The candidate's exact contract must match the canonical
+prepared contract before recording. Existing frame deadlines, quality and
+fallback rules remain unchanged. First-use input conversion and monitor adaptation are not covered by this preparation.
+The worker publishes one payload-free native Window wake hint after returning
+the cache. This requests a recording turn even if no Preview delivery changed;
+it cannot mark a frame Ready. Window replacement transfers the same event route.
+A late hint from a retired generation can request redraw, but only the current
+cache, canonical contract and original ticket can authorize presentation.
+
+Consuming Renderer retirement closes preparation admission, polls without
+blocking the UI, drains the returned cache and joins the actually terminated
+worker. `ViewerGpuRetirementReceipt.backend_preparation` records `NotStarted`,
+`Returned` or `Panicked` separately from GPU queue completion and CPU upload
+worker exit. A pending job cannot establish retirement completion; a lost cache
+or panicked worker cannot establish a healthy receipt. The existing native
+source and GPU completion barriers still govern resource release.
+The input-transform gate uses the same complete pass interval on pass-boundary
+GPUs. Exact frame-contract identity is separately audited through that command
+recorder: no pass, copy, clear, query write or completion map is accepted as
+hidden work. Its report carries `AuditedNoGpuCommands` and a null GPU timing,
+never a synthetic zero or CPU duration. Executed matrix/OETF and input transforms
+retain all original samples and the 5 ms budget; missing or incomplete hardware
+timing still rejects qualification. No empty GPU submission is needed for an
+actual resource alias.
+
+Submitted query ownership remains live until actual work completion. The owner
+then submits query resolution/readback in a separate command buffer; GPU queue
+order alone cannot substitute for observing measured work completion on the
+M4 Metal stage-counter path. Collection is asynchronous and nonblocking.
+Incomplete scopes publish no execution sample but still retire their submitted
+query slot through completion. The producer reports command-scope and per-stage
+GPU timestamps separately from CPU command-recording time, and records
+composite, fusion, color-stage, scope, presentation-lease, fallback, blocker,
+and output-format evidence. A warm
 snapshot and measured snapshot of the texture pool, OCIO shader/static
 pipeline/backend caches, and scopes resources prove that the measured interval
 does not allocate or prepare new GPU resources. Missing timestamp support,
 partial samples, a weakened workload, warm-path creation, a readback/upload,
 or a deadline miss fails closed under `sealed-required` policy.
+
+The ignored UI `physical_surface_code_carrier_short_diagnostic` measures the
+existing 4x-MSAA SDR carrier pass with real Metal timestamps. Its synthetic
+RGBA8 raster, upload and counter readback isolate the Viewer image's UI blend;
+they do not reproduce the full Window widgets, native surface, VideoToolbox
+decode or shared-queue contention. Query resolution follows actual measured
+work completion. All instrumentation is test-only; the production carrier and
+color interpretation are unchanged.
 
 The professional Viewer texture grant is Renderer-owned so the App and the
 hardware gate cannot qualify different resource policies. Its 4 GiB idle and
@@ -1776,14 +2015,21 @@ cleanup with an unspecified output parameter. The shared acquisition seam has
 fault-injection coverage for failed calls that modify both pointer and device
 address outputs; this proves error-path ownership, not physical device qualification.
 
-### Linux decoded-pixel agreement
+### Native decoded-pixel agreement
 
-The opt-in `linux_decode_pixel_parity` integration test feeds explicit 30 fps SDR
-fixtures through the production isolated demux and both compact CPU YUV and CUDA
-decode. Both routes use the same Viewer input, Program Output, and monitor stages
-at seek targets across GOP boundaries. The existing typed readback implementation
-can borrow a presentation lease without detaching its ownership; the test keeps
-that lease until copy completion and consumes Renderer retirement afterward.
+The opt-in `native_decode_pixel_parity` integration test feeds explicit fixtures
+through the production isolated demux and both compact CPU YUV and native decode.
+Linux uses CUDA fixtures. macOS requires tagged HEVC 10-bit 4:2:0, 4:2:2 and 4:4:4
+fixtures and verifies CVPixelBuffer residency and P010/P210/P410 surfaces.
+The direct Main10 P010, ProRes 422 P216, and ProRes 4444 routes also require
+the actual
+session's observed hardware property; FFmpeg-managed VideoToolbox sessions retain
+unobserved execution rather than inferring it from their surfaces. A separate
+Main10 motion/B fixture checks temporal identity across GOP seeks. Both routes use the same Viewer input, Program
+Output, and monitor stages at seek targets across GOP boundaries. The existing
+typed readback implementation can borrow a presentation lease without detaching
+its ownership; the test keeps that lease until copy completion and consumes
+Renderer retirement afterward.
 Half-float output comparison permits one half-float ULP at unity; it does not
 qualify a display, original media, a different GPU provider, or sustained playback.
 
@@ -1960,3 +2206,32 @@ gate. Other targets, including Windows ARM, Metal and Vulkan, require their
 own compiler/device qualification. Compiler provenance and redistributed
 licenses belong to the packaged dependency receipt. None of these compiler
 gates establishes realtime throughput or complete driver memory accounting.
+
+
+## Idle Viewer device progress
+
+Window and Headless share the same bounded device progress owner. An idle
+command-receive timeout drives already-ready callbacks through nonblocking
+`Device::poll(PollType::Poll)`. It cannot wait for the latest untracked GPU work:
+native input recording may submit a prefix before the exact Viewer command is
+committed, and an idle latest-submission wait would block that command's receipt.
+Command receipt retains its existing bounded cadence; tracked submissions,
+renderer cleanup and consuming device retirement retain their real fence waits.
+An idle poll failure terminalizes the same device generation and rejects new
+permits. Queue-dispatch and fence-poll host timings are diagnostics, never GPU
+execution timestamps or semantic presentation authority.
+
+### Interactive scopes backend preparation
+
+Window asks the existing Renderer owner whether the exact Program, monitor,
+scopes and native input backend contract is prepared before gating on submitted
+cleanup owners. This read-only match creates no frame, clears no resources and
+loans no cache. A warm match uses ordinary queue-ordered recording while the
+bounded submission owners retain their physical output leases and real GPU
+completion obligations. A cache miss still waits for prior submissions to
+complete before asynchronous preparation may clear and loan the same caches.
+Presentation tickets, deadlines, resource grants and color semantics are unchanged.
+
+Visible scopes extend the existing bounded Viewer preparation job with the exact waveform mode. The same owner loans its Program cache and scope runtime together; hidden scopes compile nothing. The worker creates only device pipelines. Frame count buffers, textures, input surfaces, candidate identities, commands and publication remain on the production recording path. Luma and RGB Parade pipelines remain tied to this device and survive ordinary frame invalidation. A mode change requires its own preparation result; a previous mode result cannot authorize it. Consuming retirement joins the same worker and retains both caches. Native input preparation uses the same worker after the exact candidate exposes its decoded-source contract. The existing import validator derives source/working descriptors without frame IDs; only these descriptors, the input transform, the original input cache and its physical shader layout cross the worker boundary. CVPixelBuffer/IOSurface, platform adapters, frame resources and presentation tickets stay on the recording path. The import backend has no local input cache during the loan and rejects recording until that same cache returns. Warm native input readiness comes from the original owner caches: the canonical shader request, static pipeline, concrete backend objects and fused input pipeline must all remain resident. The input planner and inspection share one semantic contract builder; inspection extracts nothing, mutates no LRU state and allocates no frame. The last preparation job is only request deduplication, not a cache inventory: preparing another source contract does not make an existing physical pipeline cold. A loan, eviction or rebuilt device cache fails the query closed and requires the existing bounded preparation job. Monitor/calibration preparation is not covered by this seam yet.
+
+The Window retains one current candidate locally while its caches are pending, including the original opaque presentation ticket, Broker lease and media guards. The existing Preview owner resumes it only for the same generation, complete intent and identical ticket; preparation never replaces a demand or extends its deadline. Ticketless successors remain in the existing bounded staging horizon.

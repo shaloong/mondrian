@@ -285,7 +285,7 @@ impl AppState {
         &self,
         mut payload: AudioProcessorInputQueryPayload,
     ) -> Result<ObservationKey> {
-        if self.project_close_blocks_actions()
+        if self.project_lifecycle_blocks_actions()
             || self.authoring_session_id() != Some(payload.session_id)
         {
             return Err(observation_error(

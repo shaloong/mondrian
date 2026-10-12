@@ -1847,7 +1847,7 @@ pub(crate) fn bind_processor_input_queries(
     else {
         return;
     };
-    if state.project_close_blocks_actions() {
+    if state.project_lifecycle_blocks_actions() {
         return;
     }
     let Some(sequence) = state.active_sequence() else {

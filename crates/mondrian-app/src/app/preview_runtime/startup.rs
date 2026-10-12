@@ -215,6 +215,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             observed_decode_residency_retry_revision: Cell::new(0),
             decode_residency_waiting: Cell::new(None),
             decode_worker_resources,
+            raster_requirement: Cell::new(PreviewRasterRequirement::Viewer),
             frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
             media_aggregate_capacity_waiting: Cell::new(false),
             media_existing_work_waiters: RefCell::new(HashMap::new()),

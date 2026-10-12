@@ -4924,6 +4924,7 @@ mod temporal_handle_tests {
             encoder: &mut lines,
             theme: &theme,
             clip_rect: Rect::new(0.0, 0.0, 220.0, 104.0),
+            pixels_per_point: 1.0,
         });
         assert!(
             lines.0.iter().all(|(_, _, color)| *color != theme.colors.muted_foreground),

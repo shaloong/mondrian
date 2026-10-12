@@ -691,10 +691,6 @@ impl AppState {
         if !self.parameter_gesture_is_current() {
             return self.finish_parameter_gesture();
         }
-        let audio_parameter = self
-            .active_parameter_gesture
-            .as_ref()
-            .is_some_and(|active| matches!(&active.target, ParameterGestureTarget::AudioScalar(_)));
         let commit = self
             .authoring
             .as_mut()
@@ -702,10 +698,7 @@ impl AppState {
             .cancel_sequence_gesture(id)?;
         self.active_parameter_gesture = None;
         if let Some(commit) = commit {
-            self.consume_authoring_commit(commit);
-            if audio_parameter {
-                self.reconcile_audio_after_committed_authoring_change("audio_scalar_cancel");
-            }
+            self.consume_authoring_commit(commit)?;
         }
         Ok(())
     }

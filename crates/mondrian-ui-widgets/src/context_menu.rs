@@ -699,6 +699,10 @@ impl Widget for ContextMenu {
             node
         })
     }
+
+    fn accessibility_bounds(&self) -> Option<Rect> {
+        Some(self.bounds_rect())
+    }
 }
 
 #[cfg(test)]
@@ -1311,12 +1315,22 @@ mod tests {
         let mut encoder = RecordingEncoder::default();
 
         {
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             menu.paint(&mut ctx);
         }
         assert_eq!(encoder.rect_count, 0);
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         menu.paint_overlay(&mut ctx);
         assert!(encoder.rect_count > 0);
     }
@@ -1334,7 +1348,12 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
         let mut encoder = RecordingEncoder::default();
-        let mut paint_ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
 
         menu.paint_overlay(&mut paint_ctx);
 
@@ -1377,7 +1396,12 @@ mod tests {
         let theme = mondrian_ui_theme::ThemePreset::Dark.build();
         let clip_rect = Rect::new(0.0, 0.0, 240.0, 150.0);
         let mut encoder = RecordingEncoder::default();
-        let mut paint_ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut paint_ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
 
         menu.paint_overlay(&mut paint_ctx);
 
@@ -1447,7 +1471,12 @@ mod tests {
             let theme = mondrian_ui_theme::ThemePreset::Dark.build();
             let mut encoder = RecordingEncoder::default();
 
-            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+            let mut ctx = PaintContext {
+                pixels_per_point: 1.0,
+                encoder: &mut encoder,
+                theme: &theme,
+                clip_rect,
+            };
             menu.paint_overlay(&mut ctx);
 
             assert_eq!(encoder.rect_count, 0);
@@ -1504,7 +1533,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 300.0, 200.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         menu.paint_overlay(&mut ctx);
 
         let visual = ContextMenuVisualTokens::from_theme(&theme);
@@ -1541,7 +1575,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         iconized.paint_overlay(&mut ctx);
 
         assert!(
@@ -1571,7 +1610,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 500.0, 300.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         checked.paint_overlay(&mut ctx);
 
         assert!(
@@ -1622,7 +1666,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         menu.paint_overlay(&mut ctx);
 
         assert!(encoder.texts.iter().any(|text| text == "Disabled"));
@@ -1643,7 +1692,12 @@ mod tests {
         let clip_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
         let mut encoder = RecordingEncoder::default();
 
-        let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+        let mut ctx = PaintContext {
+            pixels_per_point: 1.0,
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect,
+        };
         menu.paint_overlay(&mut ctx);
 
         assert_eq!(encoder.texts, vec!["Copy".to_string(), "Paste".to_string()]);

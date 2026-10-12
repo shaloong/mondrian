@@ -304,6 +304,20 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
     )
     .expect("composite display/export parity frame");
 
+    // These three fixture pixels mix encoded red 36 and 110. An independent
+    // f64 Rec.709 decode proves the precise working value: approximate power
+    // shifted the eventual RGBA8 red across a half-code rounding boundary.
+    let decode_red = |code: u8| ((f64::from(code) / 255.0 + 0.099) / 1.099).powf(1.0 / 0.45);
+    let opacity = f64::from(0.42_f32);
+    let expected_red = decode_red(36) * (1.0 - opacity) + decode_red(110) * opacity;
+    for pixel in [48, 254, 589] {
+        let actual = f64::from(frame.rgba_f32().data[pixel][0]);
+        assert!(
+            (actual - expected_red).abs() <= 1.0e-7,
+            "pixel {pixel}: {actual} != {expected_red}"
+        );
+    }
+
     let preview = encode_boundary(
         &frame,
         &ProgramOutputBoundary::display(
@@ -328,7 +342,7 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
     );
     assert_eq!(preview.color_diagnostics.output, preview.output_descriptor);
     assert_eq!(export.color_diagnostics.output, export.output_descriptor);
-    assert_eq!(stable_rgba_hash(&preview.rgba), 0x1538_68f6_4d01_e749);
+    assert_eq!(stable_rgba_hash(&preview.rgba), 0x41cc_83bb_cef6_83d2);
 }
 
 #[test]

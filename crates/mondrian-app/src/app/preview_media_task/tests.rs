@@ -151,7 +151,7 @@ fn preview_cpu_rgba_decode_delegates_to_source_frame_preparation() {
     let task_source = include_str!("../preview_media_task.rs");
     assert_eq!(
         task_source.matches("prepare_decoded_cpu_source_frame(").count(),
-        2
+        1
     );
     assert!(!task_source.contains("CpuEncodedFloatColorFrame"));
     assert!(!task_source.contains("LinearFloatSource"));

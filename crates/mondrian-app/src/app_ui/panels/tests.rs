@@ -3090,7 +3090,7 @@ fn assets_panel_multi_selection_context_menu_dispatches_delete_selection() {
         &UiEvent::MouseDown {
             position: second,
             button: MouseButton::Left,
-            modifiers: Modifiers::ctrl(),
+            modifiers: Modifiers::primary(),
         },
         &mut ctx,
     );
@@ -3163,7 +3163,7 @@ fn assets_panel_delete_key_dispatches_delete_selection() {
     let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
     assert_eq!(
         grid.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::primary() },
             &mut ctx,
         ),
         EventResult::Handled
@@ -11379,7 +11379,7 @@ fn viewer_anchor_gesture_emits_one_atomic_stable_address_action() {
     let expected = model.clip_transform.as_ref().expect("transform projection").clone();
     let mut viewer = viewer_panel(&model);
     viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
-    let canvas = viewer.presentation_geometry().expect("visible canvas").canvas_rect;
+    let canvas = viewer.presentation_geometry(1.0).expect("visible canvas").canvas_rect;
     let anchor = Point::new(canvas.x, canvas.y);
     let end = Point::new(anchor.x + 20.0, anchor.y + 10.0);
     let actions = RefCell::new(Vec::new());
@@ -13821,6 +13821,7 @@ fn owned_panel_status_painted_text(widget: &mut dyn Widget) -> Vec<String> {
     let theme = mondrian_ui_theme::ThemePreset::Dark.build();
     let mut encoder = OwnedPanelStatusPaintEncoder::default();
     widget.paint(&mut PaintContext {
+        pixels_per_point: 1.0,
         encoder: &mut encoder,
         theme: &theme,
         clip_rect: bounds,

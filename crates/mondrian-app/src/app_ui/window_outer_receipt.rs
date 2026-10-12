@@ -870,10 +870,23 @@ fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64)
         "surface_generation": surface_generation,
         "device_generation": device_generation,
         "publication_cleanup": { "Ok": null },
+        "surface_acquisitions": { "Ok": {
+            "active": {
+                "surface_generation": surface_generation,
+                "worker_shutdown": "terminated",
+                "ready_outputs": 0,
+                "in_use_outputs": 0,
+                "acquisition_in_flight": false,
+                "wake_failures": 0
+            },
+            "retired": []
+        } },
         "retirement": {
             "retired": {
                 "worker_shutdown": "terminated",
                 "wake_callbacks": host["preview"]["work_callbacks"],
+                "native_completion_wake_captures_pending": 0,
+                "native_completion_wake_registrations": 0,
                 "native_wake_failures": 0,
                 "wake_registration_rejections": 0,
                 "worker_started": true,
@@ -884,6 +897,7 @@ fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64)
                 "retirement_handoff_accepted": true,
                 "retirement_completed": true,
                 "renderer_retirement": {
+                    "backend_preparation": "not_started",
                     "cpu_yuv_upload": "returned",
                     "native_device_removed": false
                 },
@@ -907,8 +921,10 @@ fn test_generation_history(
     object.remove("schema_version");
     object.remove("surface_generation");
     object.remove("device_generation");
+    let surface_acquisitions = object.remove("surface_acquisitions").expect("surface closure");
     let old = serde_json::json!({"surface_generation": before_surface, "device_generation": before_device,
-        "publication_cleanup": {"Ok": null}, "retirement": {"retired": old}});
+        "publication_cleanup": {"Ok": null}, "retirement": {"retired": old},
+        "surface_acquisitions": {"Ok": surface_acquisitions}});
     super::window_generation_history::test_history(
         before_surface,
         after_surface,
@@ -1174,7 +1190,7 @@ mod tests {
         let clean = fixture_projection();
         assert!(verify_rehashed(&clean).is_ok());
         let original = serde_json::to_value(&clean.generation_history).expect("history JSON");
-        for attack in 0..8 {
+        for attack in 0..10 {
             let mut value = original.clone();
             match attack {
                 0 => {
@@ -1194,7 +1210,15 @@ mod tests {
                     value["events"][3]["shutdown"]["retirement"]["retired"]
                         ["native_wake_failures"] = 1.into()
                 }
-                _ => value["schema_version"] = 0.into(),
+                7 => value["schema_version"] = 0.into(),
+                8 => {
+                    value["events"][2]["shutdown"]["surface_acquisitions"]["Ok"]["active"]
+                        ["worker_shutdown"] = "not_started".into()
+                }
+                _ => {
+                    value["events"][2]["shutdown"]["surface_acquisitions"]["Ok"]["active"]
+                        ["surface_generation"] = 99.into()
+                }
             }
             let mut projection = clean.clone();
             projection.generation_history = serde_json::from_value(value).expect("typed mutation");

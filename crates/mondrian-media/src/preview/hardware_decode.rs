@@ -19,6 +19,8 @@ struct PreviewHardwareDecodeCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PreviewHardwareDecodePlan {
+    pub(super) codec_id: ffmpeg::codec::Id,
+    pub(super) native_decode_path: PreviewDecodePath,
     pub(super) request: PreviewHardwareDecodeRequest,
     pub(super) decision: PreviewHardwareDecodeDecision,
     pub(super) probe: HwAccelProbe,
@@ -77,6 +79,8 @@ impl PreviewHardwareDecodePlan {
             &ffmpeg_device_context,
         );
         Self {
+            codec_id,
+            native_decode_path: PreviewDecodePath::InProcessFfmpegNative,
             request,
             decision,
             probe,
@@ -413,12 +417,13 @@ impl PreviewHardwareDecodePlan {
             self.decision = PreviewHardwareDecodeDecision::HardwareDecodeCpuTransfer;
             let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
             self.probe.selected_backend = backend;
-            self.probe.hardware_decode_active = true;
+            self.probe.native_decoder_active = true;
+            self.probe.hardware_decode_observed = self.observed_hardware_execution(backend);
             self.probe.zero_copy_active = false;
             self.probe.frame_residency = DecodedFrameResidency::CpuRgba;
             self.probe.gpu_frame_handle_kind = None;
             self.probe.reason = format!(
-                "{} FFmpeg hardware decode is active; this request permits transfer to the CPU RGBA boundary",
+                "{} FFmpeg native decoder output was transferred to the CPU RGBA boundary",
                 backend.as_str()
             );
         }
@@ -437,14 +442,26 @@ impl PreviewHardwareDecodePlan {
         let backend = self.probe.candidate_backend.unwrap_or(HwAccelBackend::None);
         self.probe.selected_backend = backend;
         self.probe.decoder_adapter_available = true;
-        self.probe.hardware_decode_active = true;
+        self.probe.native_decoder_active = true;
+        self.probe.hardware_decode_observed = self.observed_hardware_execution(backend);
         self.probe.zero_copy_active = kind != DecodedGpuFrameHandleKind::CudaDeviceMemory;
         self.probe.frame_residency = DecodedFrameResidency::GpuTexture;
         self.probe.gpu_frame_handle_kind = Some(kind);
         self.probe.reason = format!(
-            "{} FFmpeg hardware decode produced a retained native decoder surface",
-            backend.as_str()
+            "{} {} decoder produced a retained native surface",
+            backend.as_str(),
+            self.native_decode_path.as_str()
         );
+    }
+
+    fn observed_hardware_execution(&self, backend: HwAccelBackend) -> Option<bool> {
+        if self.native_decode_path == PreviewDecodePath::InProcessVideoToolboxNative {
+            // This adapter publishes only after querying the actual session's
+            // public UsingHardwareAcceleratedVideoDecoder property.
+            Some(true)
+        } else {
+            backend_hardware_execution_observation(backend)
+        }
     }
 
     pub(super) fn device_context_probe_for_plan(
@@ -511,7 +528,7 @@ impl PreviewHardwareDecodePlan {
         if !probe.decoder_adapter_available {
             return PreviewHardwareDecodeDecision::CpuRgbaBackendUnavailable;
         }
-        if !probe.hardware_decode_active
+        if !probe.native_decoder_active
             || probe.frame_residency != DecodedFrameResidency::GpuTexture
         {
             return PreviewHardwareDecodeDecision::CpuRgbaHardwareUnavailable;
@@ -645,5 +662,21 @@ mod stream_capability_tests {
                 Some(PreviewNativeDecodeFallback::DeviceStreamCapabilityRejected)
             );
         }
+    }
+}
+
+/// An FFmpeg hardware-acceleration frame proves execution on the explicit
+/// hardware-only backends. VideoToolbox can also use a software decoder while
+/// exporting CVPixelBuffer; the current AVHWDeviceContext adapter cannot expose
+/// that session's public UsingHardware property through its supported interface.
+fn backend_hardware_execution_observation(backend: HwAccelBackend) -> Option<bool> {
+    match backend {
+        HwAccelBackend::None | HwAccelBackend::VideoToolbox => None,
+        HwAccelBackend::Cuda
+        | HwAccelBackend::D3D12VA
+        | HwAccelBackend::D3D11VA
+        | HwAccelBackend::Dxva2
+        | HwAccelBackend::Vaapi
+        | HwAccelBackend::Vdpau => Some(true),
     }
 }

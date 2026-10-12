@@ -19,7 +19,8 @@ pub use mondrian_core::{
     VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
     VideoColorMetadataDeclaration, VideoColorMetadataDeclarationResolution, VideoColorMetadataHint,
     VideoColorMetadataHintAuthority, VideoColorMetadataHintScope, VideoColorSpaceSource,
-    VideoColorTag, VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoStreamInfo,
+    VideoColorTag, VideoHdrMetadataSummary, VideoHdrSideDataKind, VideoSamplingConvention,
+    VideoStreamInfo,
 };
 use mondrian_core::{
     AudioChannelLayout, AudioChannelPosition, VideoContentLightMetadata, VideoHdrChromaticity,
@@ -27,6 +28,7 @@ use mondrian_core::{
     VideoMasteringDisplayLuminance, VideoMasteringDisplayMetadata, VideoMasteringDisplayPrimaries,
 };
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::os::raw::c_int;
 use std::path::Path;
 #[cfg(test)]
@@ -500,6 +502,23 @@ impl VideoColorDiagnosticIssueAggregate {
     }
 }
 
+fn h264_sequence_range(
+    parameters: &ffmpeg::codec::Parameters,
+) -> Option<crate::h264_metadata::SequenceRange> {
+    if parameters.id() != ffmpeg::codec::Id::H264 {
+        return None;
+    }
+    // SAFETY: parameters owns the AVCodecParameters and extradata allocation.
+    // The borrowed slice is bounded and used only during this synchronous probe.
+    let raw = unsafe { &*parameters.as_ptr() };
+    let length = usize::try_from(raw.extradata_size).ok()?;
+    if raw.extradata.is_null() || length == 0 || length > 1024 * 1024 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(raw.extradata, length) };
+    crate::h264_metadata::sequence_range(bytes)
+}
+
 /// Probe one file into the stable, immutable media contract.
 ///
 /// This synchronous FFmpeg Adapter must run on bounded media execution owned
@@ -535,20 +554,18 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     let container = input.format().name().to_lowercase();
     let container_color_hints =
         collect_color_metadata_hints(VideoColorMetadataHintScope::Container, &input.metadata());
-    let file_name_color_hint =
-        path.file_name().and_then(|file_name| file_name.to_str()).and_then(|file_name| {
-            parse_video_color_metadata_hint(
-                VideoColorMetadataHintScope::FileName,
-                "filename",
-                file_name,
-            )
-        });
 
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
 
     for stream in input.streams() {
         let params = stream.parameters();
+        // Album artwork is a container attachment, not a time-varying Media
+        // Component. Its explicit disposition, not the file name or a missing
+        // frame rate, distinguishes it from an ordinary picture stream.
+        if stream.disposition().contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC) {
+            continue;
+        }
         match params.medium() {
             ffmpeg::media::Type::Video => {
                 let picture = picture_stream_metadata(&stream, &params);
@@ -559,7 +576,6 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     &stream.metadata(),
                 );
                 color_metadata_hints.extend(container_color_hints.clone());
-                color_metadata_hints.extend(file_name_color_hint.clone());
                 color_metadata_hints.sort_by(metadata_hint_diagnostic_order);
                 let hdr_metadata = collect_hdr_metadata_summaries(&stream);
                 let mut width = 0;
@@ -585,7 +601,8 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         pixel_format = camera_raw_pixel_format(raw);
                         pixel_format_proven = true;
                     }
-                    let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                    let mut color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
+                    let sequence_range = h264_sequence_range(&params);
                     bit_depth = pixel_format.bit_depth();
                     has_alpha = pixel_format.has_alpha();
                     let raw_color_metadata = capture_color_metadata(
@@ -593,7 +610,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         decoder.color_transfer_characteristic(),
                         decoder.color_space(),
                     );
-                    let color_interpretation = detect_color_space_from_metadata(
+                    let mut color_interpretation = detect_color_space_from_metadata(
                         &raw_color_metadata,
                         &color_metadata_hints,
                         icc_color_profile_hint(&hdr_metadata).as_ref(),
@@ -603,7 +620,63 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                             has_alpha,
                         }),
                     );
-                    let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
+                    if color_range == DecodedVideoRange::Unknown
+                        && pixel_format_proven
+                        && let Some(range) = codec_defined_range(params.id(), pixel_format)
+                    {
+                        color_range = range;
+                        color_interpretation.evidence.push(
+                            VideoColorInterpretationEvidence::CodecDefinedRange {
+                                codec: map_video_codec_with_profile(
+                                    params.id(),
+                                    ffmpeg::ffi::AV_PROFILE_UNKNOWN,
+                                ),
+                                range,
+                            },
+                        );
+                    }
+                    if let Some(sequence_range) = sequence_range {
+                        color_interpretation.evidence.push(
+                            VideoColorInterpretationEvidence::H264SequenceRange {
+                                range: sequence_range.range,
+                                defaulted: sequence_range.defaulted,
+                            },
+                        );
+                        // An explicit container/decoder declaration keeps precedence.
+                        // Decoded frame evidence and authored overrides still own
+                        // per-frame resolution through DecodedVideoRangeContract.
+                        if color_range == DecodedVideoRange::Unknown && pixel_format_proven {
+                            color_range = sequence_range.range;
+                        }
+                    }
+                    if pixel_format_proven
+                        && let Some(convention) = probe_range_convention(
+                            path,
+                            stream.index(),
+                            &params,
+                            pixel_format,
+                            color_range,
+                            &raw_color_metadata,
+                            &hdr_metadata,
+                        )
+                    {
+                        color_interpretation.evidence.push(
+                            VideoColorInterpretationEvidence::SamplingConvention {
+                                codec: map_video_codec_with_profile(params.id(), unsafe {
+                                    (*decoder.as_ptr()).profile
+                                }),
+                                convention,
+                            },
+                        );
+                    }
+                    let (frame_rate, frame_rate_proven) =
+                        if container == "dv" && params.id() == ffmpeg::codec::Id::DVVIDEO {
+                            raw_dv_frame_rate(path, &container, &params)
+                                .map(map_rational)
+                                .unwrap_or((Rational::new(0, 1), false))
+                        } else {
+                            map_frame_rate_evidence(stream.avg_frame_rate(), decoder.frame_rate())
+                        };
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
                         codec: map_video_codec_with_profile(
@@ -682,7 +755,18 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                 let mut sample_rate = 0u32;
                 let mut channels = 0u8;
                 let mut channel_layout = ChannelLayout::Unspecified(0);
-                let mut bit_depth = 16u16;
+                // SAFETY: `params` owns the stream's live AVCodecParameters.
+                // Valid source precision takes precedence over the decoder's
+                // storage format (for example PCM24 stored in an S32 sample).
+                let bit_depth = unsafe {
+                    let raw_bits = (*params.as_ptr()).bits_per_raw_sample;
+                    let bits = if raw_bits > 0 {
+                        raw_bits
+                    } else {
+                        ffmpeg::ffi::av_get_bits_per_sample((*params.as_ptr()).codec_id)
+                    };
+                    u16::try_from(bits).unwrap_or(0)
+                };
 
                 if let Ok(context) =
                     ffmpeg::codec::context::Context::from_parameters(params.clone())
@@ -691,12 +775,11 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     sample_rate = decoder.rate();
                     channels = decoder.channels() as u8;
                     channel_layout = map_channel_layout(decoder.channel_layout(), channels);
-                    bit_depth = 16;
                 }
 
                 let metadata = stream.metadata();
-                let language = normalized_stream_metadata(metadata.get("language"));
-                let title = normalized_stream_metadata(metadata.get("title"));
+                let language = normalized_stream_metadata(metadata_value(&metadata, "language"));
+                let title = normalized_stream_metadata(metadata_value(&metadata, "title"));
                 let stream_id = (stream.id() >= 0).then_some(stream.id());
                 let is_default =
                     stream.disposition().contains(ffmpeg::format::stream::Disposition::DEFAULT);
@@ -1310,10 +1393,47 @@ fn collect_color_metadata_hints(
     scope: VideoColorMetadataHintScope,
     metadata: &ffmpeg::DictionaryRef<'_>,
 ) -> Vec<VideoColorMetadataHint> {
-    metadata
-        .iter()
+    metadata_entries(metadata)
         .filter_map(|(key, value)| parse_video_color_metadata_hint(scope, key, value))
         .collect()
+}
+
+// FFmpeg dictionaries contain arbitrary C bytes. ffmpeg-next's get/iter use
+// from_utf8_unchecked, which is unsound for legacy container metadata. Borrow
+// entries from the unchanged dictionary and validate both strings here. An
+// invalid field supplies no color, orientation or audio-label evidence.
+fn metadata_entries<'a>(
+    metadata: &'a ffmpeg::DictionaryRef<'_>,
+) -> impl Iterator<Item = (&'a str, &'a str)> {
+    let mut previous = std::ptr::null();
+    std::iter::from_fn(move || loop {
+        // SAFETY: the shared dictionary borrow remains live and unmodified for
+        // the iterator lifetime. FFmpeg owns the entries and terminated C
+        // strings; previous is null or an entry from this same dictionary.
+        let entry = unsafe { ffmpeg::ffi::av_dict_iterate(metadata.as_ptr(), previous) };
+        if entry.is_null() {
+            return None;
+        }
+        previous = entry;
+        let (key, value) = unsafe {
+            (
+                std::ffi::CStr::from_ptr((*entry).key).to_bytes(),
+                std::ffi::CStr::from_ptr((*entry).value).to_bytes(),
+            )
+        };
+        match (std::str::from_utf8(key), std::str::from_utf8(value)) {
+            (Ok(key), Ok(value)) => return Some((key, value)),
+            (key, _) => tracing::warn!(
+                metadata_key = key.ok(),
+                "ignoring non-UTF8 metadata field; no interpretation evidence admitted"
+            ),
+        }
+    })
+}
+
+fn metadata_value<'a>(metadata: &'a ffmpeg::DictionaryRef<'_>, key: &str) -> Option<&'a str> {
+    metadata_entries(metadata)
+        .find_map(|(candidate, value)| candidate.eq_ignore_ascii_case(key).then_some(value))
 }
 
 /// Parse one container, stream, or file-name field as a complete color-space hint.
@@ -1455,7 +1575,7 @@ fn picture_stream_metadata(
         .find(|side_data| side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
         .map(|side_data| picture_orientation_from_display_matrix(side_data.data()))
         .unwrap_or_else(|| {
-            picture_orientation_from_legacy_metadata(stream.metadata().get("rotate"))
+            picture_orientation_from_legacy_metadata(metadata_value(&stream.metadata(), "rotate"))
         });
     PictureStreamMetadata {
         sample_aspect_ratio,
@@ -2016,6 +2136,133 @@ fn map_rational(value: ffmpeg::Rational) -> (Rational, bool) {
     }
 }
 
+fn map_frame_rate_evidence(
+    average: ffmpeg::Rational,
+    codec: Option<ffmpeg::Rational>,
+) -> (Rational, bool) {
+    let mapped = map_rational(average);
+    if mapped.1 {
+        // Keep the actual container average, including VFR. A codec cadence is
+        // only additional header evidence when the container provides no rate;
+        // neither the timestamp time base nor a filename supplies a frame rate.
+        mapped
+    } else {
+        codec.map(map_rational).unwrap_or(mapped)
+    }
+}
+
+fn raw_dv_frame_rate(
+    path: &Path,
+    container: &str,
+    parameters: &ffmpeg::codec::Parameters,
+) -> Option<ffmpeg::Rational> {
+    if container != "dv" || parameters.id() != ffmpeg::codec::Id::DVVIDEO {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0_u8; ffmpeg::ffi::DV_PROFILE_BYTES as usize];
+    file.read_exact(&mut header).ok()?;
+    // SAFETY: FFmpeg accepts this bounded DV_PROFILE_BYTES header and returns
+    // null or a static profile. The codec parameters remain live for this read.
+    let profile = unsafe {
+        ffmpeg::ffi::av_dv_frame_profile(std::ptr::null(), header.as_ptr(), header.len() as u32)
+            .as_ref()?
+    };
+    let raw = unsafe { &*parameters.as_ptr() };
+    if profile.width != raw.width
+        || profile.height != raw.height
+        || profile.pix_fmt as i32 != raw.format
+        || profile.frame_size <= 0
+        || file.metadata().ok()?.len() < profile.frame_size as u64
+        || profile.time_base.num <= 0
+        || profile.time_base.den <= 0
+    {
+        return None;
+    }
+    // Raw DV's demuxer average may invert the later timestamp time base (for
+    // example 1/60000), not the picture cadence. The validated DIF header's
+    // profile owns cadence; stream PTS/time base remain untouched.
+    Some(ffmpeg::Rational(
+        profile.time_base.den,
+        profile.time_base.num,
+    ))
+}
+
+fn codec_defined_range(codec: ffmpeg::codec::Id, pixel: PixelFormat) -> Option<DecodedVideoRange> {
+    // H.263 (01/2005) section 4.1 defines the BT.601 sample convention:
+    // luma black/white 16/235, chroma extrema 16/240. This fixed convention
+    // applies to admitted 8-bit H.263 pictures, not every untagged YUV codec.
+    // Sorenson/Intel variants, unknown formats and other codecs stay unresolved.
+    (matches!(codec, ffmpeg::codec::Id::H263 | ffmpeg::codec::Id::H263P)
+        && pixel == PixelFormat::Yuv420p)
+        .then_some(DecodedVideoRange::Limited)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_range_convention(
+    path: &Path,
+    stream_index: usize,
+    params: &ffmpeg::codec::Parameters,
+    pixel: PixelFormat,
+    range: DecodedVideoRange,
+    metadata: &VideoColorMetadata,
+    hdr: &[VideoHdrMetadataSummary],
+) -> Option<VideoSamplingConvention> {
+    use ffmpeg::codec::Id;
+    // A VC-3 rule is evaluated from each decoded picture's CLV-derived matrix,
+    // never from one first-packet range applied to the whole stream.
+    if params.id() == Id::DNXHD {
+        return Some(VideoSamplingConvention::DnxColorVolume);
+    }
+    if params.id() == Id::DVVIDEO {
+        // The public FFmpeg DIF-profile parser supplies physical SD sampling
+        // evidence for raw DV and DV wrapped in arbitrary admitted containers.
+        let mut input = ffmpeg::format::input(path).ok()?;
+        for (stream, packet) in input.packets().take(64) {
+            if stream.index() != stream_index {
+                continue;
+            }
+            let bytes = packet.data()?;
+            if bytes.len() < ffmpeg::ffi::DV_PROFILE_BYTES as usize {
+                return None;
+            }
+            let profile = unsafe {
+                ffmpeg::ffi::av_dv_frame_profile(
+                    std::ptr::null(),
+                    bytes.as_ptr(),
+                    bytes.len().try_into().ok()?,
+                )
+                .as_ref()?
+            };
+            let raw = unsafe { &*params.as_ptr() };
+            return (profile.width == 720
+                && matches!(profile.height, 480 | 576)
+                && profile.width == raw.width
+                && profile.height == raw.height
+                && profile.pix_fmt as i32 == raw.format
+                && profile.frame_size > 0
+                && bytes.len() >= profile.frame_size as usize
+                && pixel.bit_depth() == 8
+                && !pixel.is_rgb())
+            .then_some(VideoSamplingConvention::SdDv);
+        }
+        return None;
+    }
+    // This small, explicit SDR compatibility default does not alter raw range
+    // facts or colorimetry. In particular, it cannot conceal PQ/HLG/HDR data,
+    // unknown physical sampling, RGB, or high-bit-depth acquisition formats.
+    (range == DecodedVideoRange::Unknown
+        && pixel.bit_depth() == 8
+        && !pixel.is_rgb()
+        && matches!(
+            params.id(),
+            Id::MPEG4 | Id::MSMPEG4V1 | Id::MSMPEG4V2 | Id::MSMPEG4V3 | Id::FLV1 | Id::THEORA
+        )
+        && !matches!(metadata.transfer.code, 16 | 18)
+        && hdr.iter().all(|entry| entry.kind == VideoHdrSideDataKind::IccProfile))
+    .then_some(VideoSamplingConvention::LegacyVideoLevels)
+}
+
 fn duration_from_stream_ticks(ticks: i64, time_base: ffmpeg::Rational) -> Option<Duration> {
     let numerator = time_base.numerator();
     let denominator = time_base.denominator();
@@ -2062,15 +2309,17 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
     use ffmpeg::util::format::pixel::Pixel;
 
     match pixel {
-        Pixel::YUV420P => Some(PixelFormat::Yuv420p),
-        Pixel::YUV422P => Some(PixelFormat::Yuv422p),
-        Pixel::YUV444P => Some(PixelFormat::Yuv444p),
+        Pixel::YUV420P | Pixel::YUVJ420P => Some(PixelFormat::Yuv420p),
+        Pixel::YUV411P => Some(PixelFormat::Yuv411p),
+        Pixel::YUV422P | Pixel::YUVJ422P => Some(PixelFormat::Yuv422p),
+        Pixel::YUV444P | Pixel::YUVJ444P => Some(PixelFormat::Yuv444p),
         Pixel::YUV420P10LE => Some(PixelFormat::Yuv420p10le),
         Pixel::YUV422P10LE => Some(PixelFormat::Yuv422p10le),
         Pixel::YUV444P10LE => Some(PixelFormat::Yuv444p10le),
         Pixel::YUV420P12LE => Some(PixelFormat::Yuv420p12le),
         Pixel::YUV422P12LE => Some(PixelFormat::Yuv422p12le),
         Pixel::YUV444P12LE => Some(PixelFormat::Yuv444p12le),
+        Pixel::YUVA444P12LE => Some(PixelFormat::Yuva444p12le),
         Pixel::YUV420P16LE => Some(PixelFormat::Yuv420p16le),
         Pixel::YUV422P16LE => Some(PixelFormat::Yuv422p16le),
         Pixel::YUV444P16LE => Some(PixelFormat::Yuv444p16le),
@@ -2085,7 +2334,11 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
         Pixel::GBRAPF32LE => Some(PixelFormat::Gbrapf32le),
         Pixel::GBRAPF32BE => Some(PixelFormat::Gbrapf32be),
         Pixel::RGB24 => Some(PixelFormat::Rgb24),
+        Pixel::BGR24 => Some(PixelFormat::Bgr24),
         Pixel::RGBA => Some(PixelFormat::Rgba),
+        Pixel::BGRA => Some(PixelFormat::Bgra),
+        Pixel::ARGB => Some(PixelFormat::Argb),
+        Pixel::ABGR => Some(PixelFormat::Abgr),
         Pixel::RGBA64LE => Some(PixelFormat::Rgba64le),
         Pixel::NV12 => Some(PixelFormat::Nv12),
         Pixel::P010LE => Some(PixelFormat::P010),
@@ -2503,6 +2756,329 @@ mod tests {
     }
 
     #[test]
+    fn packed_rgb_probe_preserves_component_order_and_alpha() {
+        use ffmpeg::util::format::pixel::Pixel;
+        for (decoder, expected, alpha) in [
+            (Pixel::RGB24, PixelFormat::Rgb24, false),
+            (Pixel::BGR24, PixelFormat::Bgr24, false),
+            (Pixel::RGBA, PixelFormat::Rgba, true),
+            (Pixel::BGRA, PixelFormat::Bgra, true),
+            (Pixel::ARGB, PixelFormat::Argb, true),
+            (Pixel::ABGR, PixelFormat::Abgr, true),
+        ] {
+            let format = map_pixel_format(decoder).expect("proven packed RGB format");
+            assert_eq!(format, expected);
+            assert_eq!(format.bit_depth(), 8);
+            assert_eq!(format.has_alpha(), alpha);
+            assert!(format.is_rgb());
+        }
+    }
+
+    #[test]
+    fn attached_cover_art_does_not_become_a_timeline_picture_stream() {
+        let root = tempfile::tempdir().expect("cover art fixture directory");
+        let cover = root.path().join("cover.png");
+        let path = root.path().join("misleading-video.mp4");
+        // A complete one-pixel PNG, copied as attachment without a video encode.
+        let png = [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+            0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0x64, 0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        std::fs::write(&cover, png).expect("cover PNG");
+        let output = crate::ffmpeg_command()
+            .expect("admit cover art fixture command")
+            .args([
+                "-v",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=0.1",
+            ])
+            .arg("-i")
+            .arg(&cover)
+            .args([
+                "-map",
+                "0:a",
+                "-map",
+                "1:v",
+                "-c:a",
+                "flac",
+                "-c:v",
+                "copy",
+                "-disposition:v",
+                "attached_pic",
+                "-f",
+                "flac",
+            ])
+            .arg(&path)
+            .output()
+            .expect("create audio with cover art");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let info = probe_media_info(&path).expect("probe actual audio container");
+        assert!(info.has_audio);
+        assert!(!info.has_video);
+        assert!(info.video_streams.is_empty());
+    }
+
+    #[test]
+    fn metadata_bytes_are_validated_before_color_and_label_interpretation() {
+        let mut raw = std::ptr::null_mut();
+        for (key, value) in [
+            (c"handler_name", &b"Module de gestion vid\xe9o\0"[..]),
+            (c"title", &b"invalid\xfftitle\0"[..]),
+            (c"language", &b"eng\0"[..]),
+            (c"com.sony.colorProfile", &b"S-Log3 S-Gamut3.Cine\0"[..]),
+        ] {
+            // SAFETY: these byte strings are NUL terminated; av_dict_set copies
+            // both fields. The allocation is transferred to Dictionary below.
+            assert_eq!(
+                unsafe {
+                    ffmpeg::ffi::av_dict_set(&mut raw, key.as_ptr(), value.as_ptr().cast(), 0)
+                },
+                0
+            );
+        }
+        // SAFETY: raw is the uniquely owned dictionary created above.
+        let metadata = unsafe { ffmpeg::Dictionary::own(raw) };
+        assert_eq!(metadata_value(&metadata, "LANGUAGE"), Some("eng"));
+        assert_eq!(metadata_value(&metadata, "title"), None);
+        let hints = collect_color_metadata_hints(VideoColorMetadataHintScope::Stream, &metadata);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(
+            hints[0].detected_color_space,
+            ColorSpace::SonySLog3SGamut3Cine
+        );
+        assert!(matches!(
+            hints[0].authority,
+            VideoColorMetadataHintAuthority::SourceDeclaration(_)
+        ));
+    }
+
+    #[test]
+    fn full_range_planar_layouts_preserve_sampling_without_changing_range() {
+        use ffmpeg::util::format::pixel::Pixel;
+        for (decoder, canonical) in [
+            (Pixel::YUVJ420P, PixelFormat::Yuv420p),
+            (Pixel::YUVJ422P, PixelFormat::Yuv422p),
+            (Pixel::YUVJ444P, PixelFormat::Yuv444p),
+        ] {
+            assert_eq!(map_pixel_format(decoder), Some(canonical));
+            assert_eq!(canonical.bit_depth(), 8);
+            assert!(!canonical.has_alpha());
+        }
+        assert_eq!(
+            decoded_video_range_from_ffmpeg(ffmpeg::util::color::Range::JPEG),
+            DecodedVideoRange::Full
+        );
+    }
+
+    #[test]
+    fn raw_dv_cadence_comes_from_dif_header_instead_of_timestamp_tick_rate() {
+        let root = tempfile::tempdir().expect("raw DV fixtures");
+        for (size, rate, pixel, expected) in [
+            ("720x576", "25", "yuv420p", Rational::FPS_25),
+            ("720x480", "30000/1001", "yuv411p", Rational::FPS_2997),
+        ] {
+            let path = root.path().join(format!("{size}-misleading-name.bin"));
+            let output = crate::ffmpeg_command()
+                .expect("admit DV fixture command")
+                .args(["-v", "error", "-nostdin", "-f", "lavfi", "-i"])
+                .arg(format!("color=size={size}:rate={rate}"))
+                .args([
+                    "-frames:v",
+                    "2",
+                    "-threads",
+                    "1",
+                    "-c:v",
+                    "dvvideo",
+                    "-pix_fmt",
+                    pixel,
+                    "-f",
+                    "dv",
+                ])
+                .arg(&path)
+                .output()
+                .expect("encode raw DV fixture");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let info = probe_media_info(&path).expect("probe raw DV by content");
+            let video = info.primary_video().expect("DV picture stream");
+            assert!(video.frame_rate_proven);
+            assert_eq!(video.frame_rate, expected);
+            assert!(video.proven_sampling().is_some());
+            assert!(
+                video.color_interpretation.evidence.iter().any(|entry| matches!(
+                    entry,
+                    VideoColorInterpretationEvidence::SamplingConvention {
+                        convention: VideoSamplingConvention::SdDv,
+                        ..
+                    }
+                ))
+            );
+            assert_eq!(
+                crate::DecodedVideoRangeContract::from_video_stream(
+                    mondrian_core::timeline_data::MediaRangeInterpretation::Auto,
+                    video,
+                )
+                .baseline(),
+                DecodedVideoRange::Limited
+            );
+            let contract = crate::PreviewSourceColorContract::new(
+                ColorSpace::Rec709,
+                crate::DecodedVideoRangeContract::OverrideFull,
+            )
+            .with_yuv_matrix_fallback(crate::DecodedVideoMatrix::Bt709)
+            .with_video_stream_sampling(video);
+            let expected_matrix = if video.height == 576 {
+                crate::DecodedVideoMatrix::Bt470Bg
+            } else {
+                crate::DecodedVideoMatrix::Smpte170M
+            };
+            assert_eq!(
+                contract.resolve_yuv_matrix(crate::DecodedVideoMatrix::Unknown),
+                expected_matrix
+            );
+            assert_eq!(
+                contract.range,
+                crate::DecodedVideoRangeContract::OverrideFull,
+                "sampling coefficients are independent of the authored range"
+            );
+            assert_eq!(
+                contract.resolve_yuv_matrix(crate::DecodedVideoMatrix::Bt2020NonConstant),
+                crate::DecodedVideoMatrix::Bt2020NonConstant,
+                "explicit picture metadata remains authoritative"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_codec_range_requires_its_exact_sampling_contract() {
+        use ffmpeg::codec::Id;
+        assert_eq!(
+            codec_defined_range(Id::H263, PixelFormat::Yuv420p),
+            Some(DecodedVideoRange::Limited)
+        );
+        assert_eq!(
+            codec_defined_range(Id::H263P, PixelFormat::Yuv420p),
+            Some(DecodedVideoRange::Limited)
+        );
+        for codec in [
+            Id::H264,
+            Id::MPEG4,
+            Id::FLV1,
+            Id::H263I,
+            Id::THEORA,
+            Id::DNXHD,
+        ] {
+            assert_eq!(codec_defined_range(codec, PixelFormat::Yuv420p), None);
+        }
+        assert_eq!(
+            codec_defined_range(Id::H263, PixelFormat::Yuv420p10le),
+            None
+        );
+        assert_eq!(codec_defined_range(Id::H263, PixelFormat::Rgba), None);
+    }
+
+    #[test]
+    fn legacy_range_is_an_assumption_and_does_not_override_hdr_or_tags() {
+        let mut params = ffmpeg::codec::Parameters::new();
+        let metadata = capture_color_metadata(
+            Primaries::Unspecified,
+            TransferCharacteristic::Unspecified,
+            Space::Unspecified,
+        );
+        for id in [
+            ffmpeg::codec::Id::MPEG4,
+            ffmpeg::codec::Id::MSMPEG4V3,
+            ffmpeg::codec::Id::FLV1,
+            ffmpeg::codec::Id::THEORA,
+        ] {
+            unsafe {
+                (*params.as_mut_ptr()).codec_id = id.into();
+            }
+            assert_eq!(
+                probe_range_convention(
+                    Path::new("not-a-color-hint.mov"),
+                    0,
+                    &params,
+                    PixelFormat::Yuv420p,
+                    DecodedVideoRange::Unknown,
+                    &metadata,
+                    &[]
+                ),
+                Some(VideoSamplingConvention::LegacyVideoLevels)
+            );
+            assert_eq!(
+                probe_range_convention(
+                    Path::new("unused"),
+                    0,
+                    &params,
+                    PixelFormat::Yuv420p,
+                    DecodedVideoRange::Full,
+                    &metadata,
+                    &[]
+                ),
+                None
+            );
+            assert_eq!(
+                probe_range_convention(
+                    Path::new("unused"),
+                    0,
+                    &params,
+                    PixelFormat::Yuv420p10le,
+                    DecodedVideoRange::Unknown,
+                    &metadata,
+                    &[]
+                ),
+                None
+            );
+            let mut hdr = metadata.clone();
+            hdr.transfer.code = 16;
+            hdr.transfer.specified = true;
+            assert_eq!(
+                probe_range_convention(
+                    Path::new("unused"),
+                    0,
+                    &params,
+                    PixelFormat::Yuv420p,
+                    DecodedVideoRange::Unknown,
+                    &hdr,
+                    &[]
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn codec_cadence_fills_missing_average_without_retiming_vfr() {
+        assert_eq!(
+            map_frame_rate_evidence(ffmpeg::Rational(0, 0), Some(ffmpeg::Rational(2997, 100))),
+            (Rational::new(30000, 1001), true)
+        );
+        assert_eq!(
+            map_frame_rate_evidence(ffmpeg::Rational(13700, 563), Some(ffmpeg::Rational(120, 1))),
+            (Rational::new(13700, 563), true)
+        );
+        assert_eq!(
+            map_frame_rate_evidence(ffmpeg::Rational(0, 0), None),
+            (Rational::new(0, 1), false)
+        );
+    }
+
+    #[test]
     fn probe_mapping_keeps_unknown_frame_rate_and_pixel_format_unproven() {
         assert_eq!(
             map_rational(ffmpeg::Rational(0, 0)),
@@ -2525,6 +3101,65 @@ mod tests {
             None
         );
         assert_eq!(duration_from_stream_ticks(1, ffmpeg::Rational(0, 1)), None);
+    }
+
+    #[test]
+    fn h264_probe_uses_codec_range_across_containers_without_filename_color_inference() {
+        let root =
+            std::env::temp_dir().join(format!("mondrian-range-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("range fixture directory");
+        for extension in ["mp4", "mkv", "h264"] {
+            let path = root.join(format!("HDR_P3PQ_SLog3-SGamut3-Cine.{extension}"));
+            let output = crate::ffmpeg_command()
+                .expect("admit range fixture command")
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=s=64x32:r=24:d=0.25",
+                    "-c:v",
+                    "libx264",
+                    "-threads",
+                    "2",
+                    "-pix_fmt",
+                    "yuv420p",
+                ])
+                .arg(&path)
+                .output()
+                .expect("create H.264 fixture");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let probe = probe_media_info(&path).expect("probe H.264 fixture");
+            let video = probe.primary_video().expect("primary stream");
+            assert_eq!(video.color_range, DecodedVideoRange::Limited, "{extension}");
+            assert!(video.proven_sampling().is_some());
+            assert_eq!(
+                video.executable_color_space(),
+                None,
+                "range is not a color-space declaration"
+            );
+            assert!(video
+                .color_metadata_hints
+                .iter()
+                .all(|hint| hint.scope != VideoColorMetadataHintScope::FileName));
+            assert!(
+                video.color_interpretation.evidence.iter().any(|evidence| matches!(
+                    evidence,
+                    VideoColorInterpretationEvidence::H264SequenceRange {
+                        range: DecodedVideoRange::Limited,
+                        defaulted: true
+                    }
+                ))
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove closed range fixtures");
     }
 
     #[test]
@@ -4430,35 +5065,46 @@ mod tests {
     fn pcm_wave_without_a_channel_mask_remains_explicitly_unspecified() {
         use std::io::Write;
 
-        let mut file = tempfile::NamedTempFile::new().expect("temporary wave");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&36u32.to_le_bytes());
-        bytes.extend_from_slice(b"WAVEfmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&8_000u32.to_le_bytes());
-        bytes.extend_from_slice(&16_000u32.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        file.write_all(&bytes).expect("write wave");
-        file.flush().expect("flush wave");
-        crate::ffmpeg_runtime::ensure_ffmpeg_initialized(file.path()).expect("ffmpeg init");
-        let input = ffmpeg::format::input(file.path()).expect("open wave");
-        let stream = input.streams().next().expect("audio stream");
-        let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-            .expect("audio context");
-        let decoder = context.decoder().audio().expect("audio decoder");
+        for bit_depth in [16u16, 24, 32] {
+            let mut file =
+                tempfile::Builder::new().suffix(".wav").tempfile().expect("temporary wave");
+            let block_align = bit_depth / 8;
+            let data_size = u32::from(block_align) * 80;
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&(36 + data_size).to_le_bytes());
+            bytes.extend_from_slice(b"WAVEfmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&8_000u32.to_le_bytes());
+            bytes.extend_from_slice(&(8_000 * u32::from(block_align)).to_le_bytes());
+            bytes.extend_from_slice(&block_align.to_le_bytes());
+            bytes.extend_from_slice(&bit_depth.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&data_size.to_le_bytes());
+            bytes.resize(bytes.len() + data_size as usize, 0);
+            file.write_all(&bytes).expect("write wave");
+            file.flush().expect("flush wave");
+            crate::ffmpeg_runtime::ensure_ffmpeg_initialized(file.path()).expect("ffmpeg init");
+            let input = ffmpeg::format::input(file.path()).expect("open wave");
+            let stream = input.streams().next().expect("audio stream");
+            let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+                .expect("audio context");
+            let decoder = context.decoder().audio().expect("audio decoder");
 
-        let layout = decoder.channel_layout();
-        assert!(layout.is_empty());
-        assert_eq!(
-            map_channel_layout(layout, decoder.channels() as u8),
-            ChannelLayout::Unspecified(1)
-        );
+            let layout = decoder.channel_layout();
+            assert!(layout.is_empty());
+            assert_eq!(
+                map_channel_layout(layout, decoder.channels() as u8),
+                ChannelLayout::Unspecified(1)
+            );
+            let probe = probe_media_info(file.path()).expect("probe wave");
+            let audio = probe.primary_audio().expect("audio stream");
+            assert_eq!(audio.codec, AudioCodec::Pcm { bit_depth: bit_depth as u8 });
+            assert_eq!(audio.bit_depth, bit_depth);
+            assert_eq!(audio.channel_layout, ChannelLayout::Unspecified(1));
+        }
     }
 
     #[test]
