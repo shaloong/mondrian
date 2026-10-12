@@ -1,6 +1,6 @@
 # Plugin host engineering sprint
 
-Updated 2026-10-12 (Asia/Shanghai). This is the recoverable coordination record
+Updated 2026-10-13 (Asia/Shanghai). This is the recoverable coordination record
 for the OpenFX / VST3 / CLAP sprint. Detailed contracts remain in the existing
 [plugin architecture](../architecture/plugin-system.md),
 [audio pipeline](../architecture/audio-pipeline.md),
@@ -2630,11 +2630,65 @@ failed before any complete PCM partition, and only one startup mismatch detail
 was captured. Alignment does not change that conclusion. No measured host
 performance improvement or new third-party compatibility is claimed here.
 
-Two independently identified CLAP issues remain for subsequent slices: the
-discovery probe does not update the existing host active marker around its
-successful activate/deactivate calls, and the discovery subprocess discards
-stderr that could distinguish failures. A scoped active-marker repair and
-owned ABI fixture are prepared but are not installed or verified. That marker
-issue does not explain the earlier pre-activation Airwindows default mismatch;
+The post-alignment audit identified two CLAP issues: the discovery probe omitted
+updates to its existing host active marker, and the discovery subprocess discards
+stderr that could distinguish failures. The marker repair is recorded below;
+bounded subprocess diagnostics remain a subsequent slice. The marker omission
+does not explain the earlier pre-activation Airwindows default mismatch;
 causal diagnostics must preserve raw metadata, callback order and rescan flags
 without extra plugin queries or changed admission predicates.
+
+Local merge `44b8455379661dc3012352776b4a13b863f124af` integrates develop
+`294b5ab0657dcceac6aaa854752011df8d31ecb6` with the reviewed hold and GUI-owner
+repairs. Post-commit verification found no changes in the 1903 tested source
+files and no tracked diff or unresolved merge entries. The recovery branch is
+retained; no remote push was performed.
+
+## CLAP discovery activation marker after develop alignment
+
+Root owns `clap_discovery.rs`; two independent reviewers inspect its source,
+producer and runtime evidence. The six-line production change updates the
+existing `services.active` flag after successful native activation and clears
+it after successful native deactivation. The existing latency query now observes
+the activated host, the native deactivate callback still observes active, and
+the existing post-deactivate callbacks observe inactive. No plugin query, callback
+tick, parameter admission rule, state owner or scheduling interface is changed.
+
+Four owned Clack ABI fixtures exercise active ALL rescan classification, clean
+post-deactivate rescan, native activation refusal and pre-activation render
+refusal. They retain all 43 original assertion macros and add five deactivate
+entry checks (48 total); the earlier scratch review's count of 44 was an error.
+The fresh RED producer compiled, then the unchanged positive gate failed exactly
+two tests and passed both refusal controls, with native exit 101, runner exit 1,
+two original host-active assertion diagnostics and settled descendants. Its
+execution receipt SHA-256 is
+`EBE45C261FA568D1179B6224CC9BE01A8E12097D096AB9E96460E846420556D6`.
+
+The fresh GREEN producer binds 1903 sources (manifest SHA-256
+`724E6C7070C59C7F4CC1EEAD994A10EE1D3A6DD4F5BE66E470743429574BDF84`)
+and actual default-profile Audio test PE `C2D9EF58...7670190`. Removing just the
+two store blocks from GREEN exactly restores the formatted RED source; the
+other 1902 source records are unchanged. All four new tests and all 368 ordinary
+Audio tests passed through the original positive controller. Actual inventories
+preserve the prior 438 names and 74 ignored cases and add exactly four ordinary
+tests. Both native owners exited zero and reaped descendants without deadlines
+or errors. The runtime receipt SHA-256 is
+`ACE1A16BDB9BC05CC5A17AF61869FC6251D50A2CE34BA3C33609E78C281F7C3F`;
+its 1981 input records were unchanged. The affected package's all-target/all-feature
+Clippy with `-D warnings` and workspace formatting both passed, with zero new
+warnings/errors and unchanged sources. Quality receipt SHA-256:
+`FC17896B4EEF05E1CD18EFCD87047FBAE6BF5D65AD0E8D04E4FB32E36111AC9E`.
+Independent source/producer/quality review:
+`.scratch/plugin-host-sprint/clap-discovery-marker-green-producer-source-review-r1.md`
+(SHA-256 `60DC3F3D692809848C16C24B52EEB61633995EE3CBD383CB70408852B68529CA`).
+Independent actual RED/GREEN and ordinary runtime review:
+`.scratch/plugin-host-sprint/clap-discovery-active-marker-independent-review-r1.md`
+(SHA-256 `4F9CC97F6092AB3206BEE4C832788927564F88A0222208F2193790CC70ABE769`).
+
+This qualifies the explicit Windows discovery lifecycle through owned instance
+and extension ABI callbacks. The reused `15630DDE...` sibling helper and DF68
+runner remain tools built at the earlier merged source; new-marker application
+helper execution is not qualified. Native entry init/deinit, exceptional
+post-activation unwind, third-party PCM, GUI, other platforms and comparative
+performance are outside this slice. The earlier 8291-test workspace acceptance
+remains tied to merge `44b84553`; it is not relabeled as a new full-workspace run.

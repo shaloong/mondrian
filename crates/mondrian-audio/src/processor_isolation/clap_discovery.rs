@@ -685,6 +685,9 @@ pub(super) fn probe_loaded(
         .activate(|_, _| (), configuration)
         .map_err(|error| unavailable(format!("CLAP probe activation failed: {error}")))?
         .into();
+    instance.access_shared_handler(|host| {
+        host.services.active.store(true, std::sync::atomic::Ordering::Release);
+    });
     let handle = instance.plugin_handle();
     let latency_frames = handle
         .get_extension::<PluginLatency>()
@@ -704,6 +707,9 @@ pub(super) fn probe_loaded(
     instance
         .try_deactivate()
         .map_err(|error| unavailable(format!("CLAP probe deactivation failed: {error}")))?;
+    instance.access_shared_handler(|host| {
+        host.services.active.store(false, std::sync::atomic::Ordering::Release);
+    });
     shared.service_callbacks(&mut instance)?;
     let tail = match tail {
         TailLength::Finite(0) => ProbeTail::None,
@@ -1830,5 +1836,428 @@ mod tests {
         assert_eq!(volume.name, "Volume");
         assert_eq!((volume.min_value, volume.max_value), (0.0, 1.0));
         assert!(volume.automatable);
+    }
+
+    #[cfg(windows)]
+    mod probe_active_rescan_tests {
+        use super::*;
+        use clack_extensions::audio_ports::{
+            AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts,
+            PluginAudioPortsImpl,
+        };
+        use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
+        use clack_extensions::params::{
+            HostParams, ParamDisplayWriter, ParamInfoWriter, ParamRescanFlags,
+            PluginAudioProcessorParams, PluginMainThreadParams, PluginParams,
+        };
+        use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
+        use clack_host::extensions::wrapper::HostWrapper;
+        use clack_plugin::events::io::{InputEvents, OutputEvents};
+        use clack_plugin::prelude::{
+            Audio, ClapId, DefaultPluginFactory, Events, HostAudioProcessorHandle,
+            HostMainThreadHandle, HostSharedHandle, Plugin,
+            PluginAudioConfiguration as PluginConfig, PluginDescriptor, PluginError,
+            PluginExtensions, PluginMainThread, PluginShared, Process, ProcessStatus,
+            SinglePluginEntry,
+        };
+        use std::cell::RefCell;
+        use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        const ACTIVE_LATENCY_ALL: u8 = 0;
+        const AFTER_DEACTIVATE_ALL: u8 = 1;
+        const ACTIVATE_FALSE: u8 = 2;
+        const RENDER_ERROR: u8 = 3;
+
+        #[derive(Default)]
+        struct Audit {
+            activations: AtomicU32,
+            deactivations: AtomicU32,
+            deactivate_native_active: AtomicBool,
+            deactivate_host_active: AtomicBool,
+            latency_calls: AtomicU32,
+            latency_native_active: AtomicBool,
+            latency_host_active: AtomicBool,
+            latency_incomplete: AtomicU16,
+            latency_controls: AtomicU32,
+            post_deactivate_calls: AtomicU32,
+            post_deactivate_host_active: AtomicBool,
+            post_deactivate_incomplete: AtomicU16,
+            post_deactivate_controls: AtomicU32,
+            destroy_calls: AtomicU32,
+            destroy_native_active: AtomicBool,
+            destroy_host_active: AtomicBool,
+            destroy_incomplete: AtomicU16,
+            destroy_controls: AtomicU32,
+        }
+
+        // Same test-thread setup convention as the existing CountingFactory fixture.
+        // No global native pointer, production registry, mutex, or wrapper is added.
+        thread_local! {
+            static NEXT_AUDIT: RefCell<Option<Arc<Audit>>> = const { RefCell::new(None) };
+        }
+
+        struct Fixture<const CASE: u8>;
+        struct FixtureShared {
+            audit: Arc<Audit>,
+            native_active: AtomicBool,
+        }
+        struct FixtureMain<'a, const CASE: u8> {
+            host: HostMainThreadHandle<'a>,
+            shared: &'a FixtureShared,
+        }
+        struct FixtureProcessor<'a, const CASE: u8>(&'a FixtureShared);
+
+        impl PluginShared<'_> for FixtureShared {}
+
+        impl<const CASE: u8> Plugin for Fixture<CASE> {
+            type Shared<'a> = FixtureShared;
+            type MainThread<'a> = FixtureMain<'a, CASE>;
+            type AudioProcessor<'a> = FixtureProcessor<'a, CASE>;
+
+            fn declare_extensions(
+                builder: &mut PluginExtensions<Self>,
+                _shared: Option<&FixtureShared>,
+            ) {
+                builder
+                    .register::<PluginAudioPorts>()
+                    .register::<PluginParams>()
+                    .register::<PluginLatency>()
+                    .register::<PluginRender>();
+            }
+        }
+
+        impl<const CASE: u8> DefaultPluginFactory for Fixture<CASE> {
+            fn get_descriptor() -> PluginDescriptor {
+                PluginDescriptor::new(
+                    "org.mondrian.test.probe-active-rescan",
+                    "Probe Active Rescan Fixture",
+                )
+            }
+
+            fn new_shared(_host: HostSharedHandle<'_>) -> Result<FixtureShared, PluginError> {
+                let audit = NEXT_AUDIT
+                    .with(|slot| slot.borrow_mut().take())
+                    .ok_or(PluginError::Message("fixture audit was not supplied"))?;
+                Ok(FixtureShared { audit, native_active: AtomicBool::new(false) })
+            }
+
+            fn new_main_thread<'a>(
+                host: HostMainThreadHandle<'a>,
+                shared: &'a FixtureShared,
+            ) -> Result<FixtureMain<'a, CASE>, PluginError> {
+                Ok(FixtureMain { host, shared })
+            }
+        }
+
+        impl<const CASE: u8> FixtureMain<'_, CASE> {
+            fn host_observation(&self) -> (bool, u16, u32) {
+                // SAFETY: every fixture instance in this module is created only by
+                // probe_loaded with the live, actual ClapHost wrapper. This typed
+                // observer is not usable against an arbitrary installed host.
+                unsafe {
+                    HostWrapper::<ClapHost>::handle_observation(self.host.as_raw(), |wrapper| {
+                        let host = wrapper.shared();
+                        let source = host.control.parameter_source.snapshot();
+                        Ok((
+                            host.services.active.load(Ordering::Acquire),
+                            source.incomplete,
+                            source.pending_controls,
+                        ))
+                    })
+                }
+                .expect("owned fixture host observation")
+            }
+
+            fn rescan_all(&self) -> (bool, u16, u32) {
+                let before_active = self.host_observation().0;
+                self.host
+                    .get_extension::<HostParams>()
+                    .expect("Windows actual ClapHost exposes HostParams")
+                    .rescan(&self.host, ParamRescanFlags::ALL);
+                let (_, incomplete, controls) = self.host_observation();
+                (before_active, incomplete, controls)
+            }
+        }
+
+        impl<'a, const CASE: u8> PluginMainThread<'a, FixtureShared> for FixtureMain<'a, CASE> {
+            fn on_main_thread(&self) {
+                // Only the native deactivate callback schedules this request.
+                if CASE == AFTER_DEACTIVATE_ALL {
+                    let (active, incomplete, controls) = self.rescan_all();
+                    self.shared.audit.post_deactivate_calls.fetch_add(1, Ordering::SeqCst);
+                    self.shared.audit.post_deactivate_host_active.store(active, Ordering::SeqCst);
+                    self.shared
+                        .audit
+                        .post_deactivate_incomplete
+                        .store(incomplete, Ordering::SeqCst);
+                    self.shared.audit.post_deactivate_controls.store(controls, Ordering::SeqCst);
+                }
+            }
+        }
+
+        impl<const CASE: u8> PluginAudioPortsImpl for FixtureMain<'_, CASE> {
+            fn count(&self, _is_input: bool) -> u32 {
+                1
+            }
+
+            fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+                if index == 0 {
+                    writer.set(&AudioPortInfo {
+                        id: ClapId::new(0),
+                        name: b"main",
+                        channel_count: 2,
+                        flags: AudioPortFlags::IS_MAIN,
+                        port_type: Some(AudioPortType::STEREO),
+                        in_place_pair: None,
+                    });
+                }
+            }
+        }
+
+        // Explicitly expose an empty parameter set. No values/defaults or metadata
+        // are modified to manufacture the lifecycle observations.
+        impl<const CASE: u8> PluginMainThreadParams for FixtureMain<'_, CASE> {
+            fn count(&self) -> u32 {
+                0
+            }
+            fn get_info(&self, _index: u32, _writer: &mut ParamInfoWriter) {}
+            fn get_value(&self, _id: ClapId) -> Option<f64> {
+                None
+            }
+            fn value_to_text(
+                &self,
+                _id: ClapId,
+                _value: f64,
+                _writer: &mut ParamDisplayWriter,
+            ) -> core::fmt::Result {
+                Err(core::fmt::Error)
+            }
+            fn text_to_value(&self, _id: ClapId, _text: &std::ffi::CStr) -> Option<f64> {
+                None
+            }
+            fn flush(&self, _input: &InputEvents, _output: &mut OutputEvents) {}
+        }
+
+        impl<const CASE: u8> PluginAudioProcessorParams for FixtureProcessor<'_, CASE> {
+            fn flush(&mut self, _input: &InputEvents, _output: &mut OutputEvents) {}
+        }
+
+        impl<const CASE: u8> PluginRenderImpl for FixtureMain<'_, CASE> {
+            fn has_hard_realtime_requirement(&self) -> bool {
+                false
+            }
+            fn set(&self, _mode: RenderMode) -> Result<(), PluginError> {
+                if CASE == RENDER_ERROR {
+                    Err(PluginError::Message(
+                        "owned render refusal before activation",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        impl<const CASE: u8> PluginLatencyImpl for FixtureMain<'_, CASE> {
+            fn get(&self) -> u32 {
+                self.shared.audit.latency_calls.fetch_add(1, Ordering::SeqCst);
+                self.shared.audit.latency_native_active.store(
+                    self.shared.native_active.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                let (active, incomplete, controls) = if CASE == ACTIVE_LATENCY_ALL {
+                    self.rescan_all()
+                } else {
+                    self.host_observation()
+                };
+                self.shared.audit.latency_host_active.store(active, Ordering::SeqCst);
+                self.shared.audit.latency_incomplete.store(incomplete, Ordering::SeqCst);
+                self.shared.audit.latency_controls.store(controls, Ordering::SeqCst);
+                17
+            }
+        }
+
+        impl<'a, const CASE: u8>
+            clack_plugin::plugin::PluginAudioProcessor<'a, FixtureShared, FixtureMain<'a, CASE>>
+            for FixtureProcessor<'a, CASE>
+        {
+            fn activate(
+                _host: HostAudioProcessorHandle<'a>,
+                _main: &FixtureMain<'a, CASE>,
+                shared: &'a FixtureShared,
+                _config: PluginConfig,
+            ) -> Result<Self, PluginError> {
+                shared.audit.activations.fetch_add(1, Ordering::SeqCst);
+                if CASE == ACTIVATE_FALSE {
+                    // The genuine Clack plugin ABI translates this error into a
+                    // false native activate result; probe receives ActivationFailed.
+                    return Err(PluginError::Message("owned activation refusal"));
+                }
+                shared.native_active.store(true, Ordering::SeqCst);
+                Ok(Self(shared))
+            }
+
+            fn process(
+                &mut self,
+                _process: Process,
+                _audio: Audio,
+                _events: Events,
+            ) -> Result<ProcessStatus, PluginError> {
+                Err(PluginError::Message("probe must not process PCM"))
+            }
+
+            fn deactivate(self, main: &FixtureMain<'a, CASE>) {
+                self.0.audit.deactivate_native_active.store(
+                    self.0.native_active.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                self.0
+                    .audit
+                    .deactivate_host_active
+                    .store(main.host_observation().0, Ordering::SeqCst);
+                self.0.audit.deactivations.fetch_add(1, Ordering::SeqCst);
+                self.0.native_active.store(false, Ordering::SeqCst);
+                if CASE == AFTER_DEACTIVATE_ALL {
+                    main.host.shared().request_callback();
+                }
+            }
+        }
+
+        impl<const CASE: u8> Drop for FixtureMain<'_, CASE> {
+            fn drop(&mut self) {
+                // SDK keeps host handlers alive through native destruction, and
+                // drops the plugin main handler before its plugin shared owner.
+                let (active, incomplete, controls) = self.rescan_all();
+                self.shared.audit.destroy_calls.fetch_add(1, Ordering::SeqCst);
+                self.shared.audit.destroy_native_active.store(
+                    self.shared.native_active.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                self.shared.audit.destroy_host_active.store(active, Ordering::SeqCst);
+                self.shared.audit.destroy_incomplete.store(incomplete, Ordering::SeqCst);
+                self.shared.audit.destroy_controls.store(controls, Ordering::SeqCst);
+            }
+        }
+
+        fn run<const CASE: u8>() -> (Result<ProbeResult, AudioProcessorHostError>, Arc<Audit>) {
+            let audit = Arc::new(Audit::default());
+            NEXT_AUDIT.with(|slot| {
+                assert!(
+                    slot.borrow().is_none(),
+                    "previous fixture setup was not consumed"
+                );
+                *slot.borrow_mut() = Some(Arc::clone(&audit));
+            });
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<Fixture<CASE>>>(
+                c"/test/probe-active-rescan",
+            )
+            .expect("owned ABI entry");
+            let result = probe_loaded(
+                &entry,
+                "org.mondrian.test.probe-active-rescan",
+                AudioRenderContract {
+                    sample_rate: 48_000,
+                    channel_layout: AudioChannelLayout::Stereo,
+                    max_block_frames: 512,
+                    processing_mode: AudioProcessingMode::Offline,
+                    processor_session_scratch_budget_bytes: usize::MAX,
+                    public_output_lookahead_budget_frames: usize::MAX,
+                    compensation_delay_scratch_budget_bytes: usize::MAX,
+                },
+                None,
+                false,
+            );
+            NEXT_AUDIT.with(|slot| assert!(slot.borrow().is_none(), "fixture setup unused"));
+            (result, audit)
+        }
+
+        fn active_rescan_all_bit() -> u16 {
+            1_u16 << (super::super::super::clap_parameter_source::ClapParameterSourceFailure::ActiveRescanAll as u8)
+        }
+
+        #[test]
+        fn probe_active_latency_all_is_retained_and_classified_active() {
+            let (result, audit) = run::<ACTIVE_LATENCY_ALL>();
+            assert_eq!(
+                result.expect("ordinary probe still returns its facts").latency_frames,
+                17
+            );
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 1);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 1);
+            assert!(audit.deactivate_native_active.load(Ordering::SeqCst));
+            assert!(audit.deactivate_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.latency_calls.load(Ordering::SeqCst), 1);
+            assert!(audit.latency_native_active.load(Ordering::SeqCst));
+            assert!(audit.latency_host_active.load(Ordering::SeqCst));
+            assert_eq!(
+                audit.latency_incomplete.load(Ordering::SeqCst),
+                active_rescan_all_bit()
+            );
+            assert_eq!(audit.latency_controls.load(Ordering::SeqCst), 1);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            // The original ActiveRescanAll bit is intentionally sticky. A later
+            // deactivated callback must not erase it to make this test pass.
+            assert_eq!(
+                audit.destroy_incomplete.load(Ordering::SeqCst),
+                active_rescan_all_bit()
+            );
+        }
+
+        #[test]
+        fn probe_after_successful_deactivate_all_has_no_active_false_positive() {
+            let (result, audit) = run::<AFTER_DEACTIVATE_ALL>();
+            assert_eq!(result.expect("ordinary probe").latency_frames, 17);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 1);
+            assert!(audit.deactivate_native_active.load(Ordering::SeqCst));
+            assert!(audit.deactivate_host_active.load(Ordering::SeqCst));
+            assert!(audit.latency_native_active.load(Ordering::SeqCst));
+            assert!(audit.latency_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.latency_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.latency_controls.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.post_deactivate_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.post_deactivate_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.post_deactivate_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.post_deactivate_controls.load(Ordering::SeqCst), 1);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 2);
+        }
+
+        #[test]
+        fn probe_native_activation_false_does_not_leave_active_on_destroy() {
+            let (result, audit) = run::<ACTIVATE_FALSE>();
+            assert!(
+                matches!(result, Err(AudioProcessorHostError::Unavailable(message))
+                if message.contains("CLAP probe activation failed"))
+            );
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 1);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.latency_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn probe_render_error_before_activation_stays_inactive_through_destroy() {
+            let (result, audit) = run::<RENDER_ERROR>();
+            assert!(
+                matches!(result, Err(AudioProcessorHostError::Unavailable(message))
+                if message.contains("render mode was declined"))
+            );
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.latency_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+        }
     }
 }
