@@ -2972,7 +2972,11 @@ mod process_retirement_tests {
             if let Ok(marker) = std::fs::read_to_string(&ready)
                 && let Ok(pid) = marker.trim().parse::<u32>()
             {
-                assert_eq!(pid, owner.child.id(), "marker belongs to exact retained Child");
+                assert_eq!(
+                    pid,
+                    owner.child.id(),
+                    "marker belongs to exact retained Child"
+                );
                 break;
             }
             thread::sleep(Duration::from_millis(5));

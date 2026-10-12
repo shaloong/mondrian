@@ -401,7 +401,9 @@ mod tests {
         let mut parent = TcpStream::connect(listener.local_addr().expect("test address"))
             .expect("parent connection");
         let (mut reader, _) = listener.accept().expect("reader connection");
-        reader.set_read_timeout(Some(NATIVE_READER_CANCEL_INTERVAL)).expect("cancellation poll");
+        reader
+            .set_read_timeout(Some(NATIVE_READER_CANCEL_INTERVAL))
+            .expect("cancellation poll");
         let commands = FixedSlot::new();
         let completed = FixedSlot::new();
         let (exited, observe_exit) = mpsc::channel();
@@ -420,24 +422,43 @@ mod tests {
         let cleanup_socket = parent.try_clone().expect("unwind cleanup handle");
         std::thread::scope(|scope| {
             // This guard runs before scoped join on every assertion/panic path.
-            let cleanup = Cleanup { commands: &commands, completed: &completed, socket: cleanup_socket };
+            let cleanup = Cleanup {
+                commands: &commands,
+                completed: &completed,
+                socket: cleanup_socket,
+            };
             let task = scope.spawn(|| {
                 run_native_reader(&mut reader, &commands, &completed, 0, None);
                 exited.send(()).expect("reader exit signal");
             });
-            WorkerCommand { kind: CommandKind::Shutdown, start_sample: 0, frames: 0, event_count: 0 }
-                .write_to(&mut parent).expect("terminal request");
-            let terminal = commands.take_timeout(Duration::from_secs(2))
-                .expect("request slot").expect("decoded request").expect("valid request");
-            assert!(matches!(terminal, NativeCommand::Plain(command) if command.kind == CommandKind::Shutdown));
+            WorkerCommand {
+                kind: CommandKind::Shutdown,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+            }
+            .write_to(&mut parent)
+            .expect("terminal request");
+            let terminal = commands
+                .take_timeout(Duration::from_secs(2))
+                .expect("request slot")
+                .expect("decoded request")
+                .expect("valid request");
+            assert!(
+                matches!(terminal, NativeCommand::Plain(command) if command.kind == CommandKind::Shutdown)
+            );
             completed.publish(()).expect("owner acknowledges response");
             // Keep the owner and both socket halves open. A terminal reader
             // must exit because of the acknowledged command, not cancellation.
-            let exited_before_cancellation = observe_exit.recv_timeout(Duration::from_secs(1)).is_ok();
+            let exited_before_cancellation =
+                observe_exit.recv_timeout(Duration::from_secs(1)).is_ok();
             // Settle the scoped thread even when the original behavior fails.
             drop(cleanup);
             task.join().expect("reader join");
-            assert!(exited_before_cancellation, "acknowledged Shutdown attempted another read");
+            assert!(
+                exited_before_cancellation,
+                "acknowledged Shutdown attempted another read"
+            );
         });
     }
 

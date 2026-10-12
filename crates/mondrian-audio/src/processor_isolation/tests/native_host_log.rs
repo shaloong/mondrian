@@ -93,13 +93,21 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
             .expect("CLAP capability does not consume logs")
             .expect("current CLAP adapter exposes its actual retained native object");
         assert_ne!(object.process_id().get(), std::process::id());
-        assert_eq!(object.object_serial().get(), 1, "one initial load in this fresh exclusive child");
+        assert_eq!(
+            object.object_serial().get(),
+            1,
+            "one initial load in this fresh exclusive child"
+        );
         let activation = processor
             .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)
             .expect("same canonical Poll9 reply");
         let pid = activation.owner_process_id().expect("actual child producer PID");
         assert_ne!(pid.get(), std::process::id());
-        assert_eq!(pid, object.process_id(), "native load and logs belong to the authenticated child");
+        assert_eq!(
+            pid,
+            object.process_id(),
+            "native load and logs belong to the authenticated child"
+        );
         assert_eq!(activation.object, Some(object));
         assert_eq!(activation.logs.records().len(), 14);
         assert!(!activation.logs.incomplete());
@@ -121,7 +129,11 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
                 .poll_native_observations(crate::NativeAudioObservationConsumption::Preserve)
                 .expect("nonconsuming capability facts");
             assert_eq!(preserved.owner_process_id(), Some(pid));
-            assert_eq!(preserved.object, Some(object), "same native load after CLAP reset/seek");
+            assert_eq!(
+                preserved.object,
+                Some(object),
+                "same native load after CLAP reset/seek"
+            );
             assert!(preserved.logs.records().is_empty());
             let audio = processor
                 .poll_native_observations(crate::NativeAudioObservationConsumption::Drain)

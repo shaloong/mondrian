@@ -861,14 +861,18 @@ fn prepare_loaded_on_main(
     shared.service_callbacks(&mut instance)?;
     let channel_count = request.render_contract().channel_count();
     let handle = instance.plugin_handle();
-    if !same_clap_parameter_structure(
-        &list_parameters(&handle)
-            .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?,
-        expected_parameters,
-    ) {
-        return Err(invalid(
-            "CLAP parameter metadata changed since contract probe",
-        ));
+    {
+        // Own the one existing query snapshot only through the original check;
+        // its Vec is dropped before signature/port/activation work as before.
+        let parameters = list_parameters(&handle)
+            .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?;
+        if !same_clap_parameter_structure(&parameters, expected_parameters) {
+            let detail = first_clap_parameter_structure_mismatch(&parameters, expected_parameters)
+                .unwrap_or_else(|| {
+                    "CLAP parameter metadata changed since contract probe".to_owned()
+                });
+            return Err(invalid(detail));
+        }
     }
     let parameter_signatures = parameter_observations::capture_signatures(&handle)?;
     let signature_bytes = std::alloc::Layout::array::<parameter_observations::ParameterSignature>(
@@ -1541,6 +1545,53 @@ fn same_clap_parameter_structure(
                 && a.enumeration == e.enumeration
                 && a.read_only == e.read_only
         })
+}
+
+// Error-only projection of the already captured vectors. This is not a native
+// query, author schema, or validation substitute. The comparison above remains
+// authoritative, including numeric signed-zero equivalence and field order.
+fn first_clap_parameter_structure_mismatch(
+    actual: &[super::ClapParameterDescriptor],
+    expected: &[super::ClapParameterDescriptor],
+) -> Option<String> {
+    if actual.len() != expected.len() {
+        return Some(format!(
+            "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode field=count expected_count={} actual_count={}",
+            expected.len(), actual.len(),
+        ));
+    }
+    for (index, (a, e)) in actual.iter().zip(expected).enumerate() {
+        // IDs and booleans below are unsigned scalar projections; float fields
+        // retain their direct f64 bits. These are not full raw native flag bits.
+        let (field, expected_bits, actual_bits) = if a.id != e.id {
+            ("id", u64::from(e.id), u64::from(a.id))
+        } else if a.min_value != e.min_value {
+            ("min_value", e.min_value.to_bits(), a.min_value.to_bits())
+        } else if a.max_value != e.max_value {
+            ("max_value", e.max_value.to_bits(), a.max_value.to_bits())
+        } else if a.default_value != e.default_value {
+            (
+                "default_value",
+                e.default_value.to_bits(),
+                a.default_value.to_bits(),
+            )
+        } else if a.automatable != e.automatable {
+            ("automatable", e.automatable as u64, a.automatable as u64)
+        } else if a.stepped != e.stepped {
+            ("stepped", e.stepped as u64, a.stepped as u64)
+        } else if a.enumeration != e.enumeration {
+            ("enumeration", e.enumeration as u64, a.enumeration as u64)
+        } else if a.read_only != e.read_only {
+            ("read_only", e.read_only as u64, a.read_only as u64)
+        } else {
+            continue;
+        };
+        return Some(format!(
+            "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index={index} field={field} expected_native_id={} actual_native_id={} expected_bits={expected_bits:016X} actual_bits={actual_bits:016X}",
+            e.id, a.id,
+        ));
+    }
+    None
 }
 
 impl Drop for ClapWorker {
@@ -2658,6 +2709,162 @@ mod tests {
                 before
             );
         }
+    }
+
+    #[test]
+    fn clap_structure_diagnostic_each_compared_field_reports_first_exact_projection() {
+        let mut expected = parameter_site_descriptor();
+        expected.id = u32::MAX - 1;
+        let mut cases = Vec::new();
+        let mut actual = expected.clone();
+        actual.id = u32::MAX - 2;
+        cases.push((
+            actual,
+            "id",
+            u64::from(expected.id),
+            u64::from(u32::MAX - 2),
+        ));
+        let mut actual = expected.clone();
+        actual.min_value = -0.25;
+        cases.push((
+            actual,
+            "min_value",
+            0.0_f64.to_bits(),
+            (-0.25_f64).to_bits(),
+        ));
+        let mut actual = expected.clone();
+        actual.max_value = 2.0;
+        cases.push((actual, "max_value", 1.0_f64.to_bits(), 2.0_f64.to_bits()));
+        let mut actual = expected.clone();
+        actual.default_value = 0.5;
+        cases.push((
+            actual,
+            "default_value",
+            1.0_f64.to_bits(),
+            0.5_f64.to_bits(),
+        ));
+        let mut actual = expected.clone();
+        actual.automatable = false;
+        cases.push((actual, "automatable", 1, 0));
+        let mut actual = expected.clone();
+        actual.stepped = true;
+        cases.push((actual, "stepped", 0, 1));
+        let mut actual = expected.clone();
+        actual.enumeration = true;
+        cases.push((actual, "enumeration", 0, 1));
+        let mut actual = expected.clone();
+        actual.read_only = true;
+        cases.push((actual, "read_only", 0, 1));
+        for (mut actual, field, expected_bits, actual_bits) in cases {
+            let mut expected = expected.clone();
+            if field == "enumeration" {
+                // Both candidates are stepped so enum-only change is valid.
+                expected.stepped = true;
+                actual.stepped = true;
+            }
+            validate_parameters(std::slice::from_ref(&expected))
+                .expect("valid expected projection");
+            validate_parameters(std::slice::from_ref(&actual)).expect("valid actual projection");
+            assert!(!same_clap_parameter_structure(
+                std::slice::from_ref(&actual),
+                std::slice::from_ref(&expected),
+            ));
+            let detail = first_clap_parameter_structure_mismatch(
+                std::slice::from_ref(&actual),
+                std::slice::from_ref(&expected),
+            )
+            .expect("one changed structural field");
+            assert_eq!(detail, format!(
+                "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index=0 field={field} expected_native_id=4294967294 actual_native_id={} expected_bits={expected_bits:016X} actual_bits={actual_bits:016X}",
+                actual.id,
+            ));
+            assert!(detail.is_ascii());
+            assert!(detail.len() < 512);
+        }
+    }
+
+    #[test]
+    fn clap_structure_diagnostic_count_order_and_overlap_preserve_original_precedence() {
+        let first = parameter_site_descriptor();
+        let mut second = first.clone();
+        second.id = 2;
+        let expected = [first.clone(), second.clone()];
+        assert!(!same_clap_parameter_structure(&[second.clone()], &expected));
+        assert_eq!(first_clap_parameter_structure_mismatch(&[second.clone()], &expected).as_deref(),
+            Some("CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode field=count expected_count=2 actual_count=1"));
+        let reordered = [second, first.clone()];
+        assert!(!same_clap_parameter_structure(&reordered, &expected));
+        assert_eq!(first_clap_parameter_structure_mismatch(&reordered, &expected).as_deref(),
+            Some("CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index=0 field=id expected_native_id=1 actual_native_id=2 expected_bits=0000000000000001 actual_bits=0000000000000002"));
+        let mut later = expected.clone();
+        later[1].default_value = 0.5;
+        assert!(!same_clap_parameter_structure(&later, &expected));
+        assert_eq!(first_clap_parameter_structure_mismatch(&later, &expected).as_deref(),
+            Some("CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index=1 field=default_value expected_native_id=2 actual_native_id=2 expected_bits=3FF0000000000000 actual_bits=3FE0000000000000"));
+        let mut overlapping = first.clone();
+        overlapping.min_value = -0.25;
+        overlapping.max_value = 2.0;
+        overlapping.default_value = 0.5;
+        let detail = first_clap_parameter_structure_mismatch(&[overlapping], &[first])
+            .expect("first overlap");
+        assert_eq!(detail,
+            "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index=0 field=min_value expected_native_id=1 actual_native_id=1 expected_bits=0000000000000000 actual_bits=BFD0000000000000");
+    }
+
+    #[test]
+    fn clap_structure_diagnostic_ignored_fields_signed_zero_and_empty_do_not_create_refusal() {
+        let expected = parameter_site_descriptor();
+        let mut actual = expected.clone();
+        actual.current_value = 0.25;
+        actual.name = "主线程的新显示名称".to_owned();
+        actual.hidden = true;
+        actual.min_value = -0.0;
+        assert!(same_clap_parameter_structure(
+            std::slice::from_ref(&actual),
+            std::slice::from_ref(&expected),
+        ));
+        assert!(first_clap_parameter_structure_mismatch(&[actual], &[expected]).is_none());
+        let mut expected = parameter_site_descriptor();
+        expected.max_value = 0.0;
+        expected.default_value = 0.0;
+        expected.current_value = 0.0;
+        let mut actual = expected.clone();
+        actual.max_value = -0.0;
+        actual.default_value = -0.0;
+        assert!(same_clap_parameter_structure(
+            &[actual.clone()],
+            &[expected.clone()]
+        ));
+        assert!(first_clap_parameter_structure_mismatch(&[actual], &[expected]).is_none());
+        assert!(same_clap_parameter_structure(&[], &[]));
+        assert!(first_clap_parameter_structure_mismatch(&[], &[]).is_none());
+        let mut invalid_current = parameter_site_descriptor();
+        invalid_current.current_value = f64::from_bits(0x7FF8_0000_0000_0042);
+        assert!(
+            validate_parameters(&[invalid_current]).is_err(),
+            "structure projection never replaces native validity admission"
+        );
+    }
+
+    #[test]
+    fn clap_structure_diagnostic_native_consumer_reports_default_bits() {
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<AutomatedGainPlugin>>(
+            c"/test/parameter-structure-consumer",
+        )
+        .expect("existing owned ABI entry");
+        let mut expected = parameter_site_descriptor();
+        expected.default_value = 0.5;
+        validate_parameters(std::slice::from_ref(&expected)).expect("valid expected schema");
+        let detail = parameter_site_error(prepare_loaded(
+            parameter_site_request(),
+            entry,
+            c"org.mondrian.test.automated-gain",
+            None,
+            &[expected],
+            &[1],
+        ));
+        assert_eq!(detail,
+            "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index=0 field=default_value expected_native_id=1 actual_native_id=1 expected_bits=3FE0000000000000 actual_bits=3FF0000000000000");
     }
 
     #[test]

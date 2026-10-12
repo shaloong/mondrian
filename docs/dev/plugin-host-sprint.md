@@ -43,7 +43,96 @@ workspace/all-targets/all-features Clippy. Independent acceptances are
 The old Source43 supplemental failure remains preserved as historical evidence.
 These are finite Windows CPU and regression qualifications; they do not upgrade
 full standards, other platforms, GUI, native GPU interoperability or comparative
-performance claims. A local commit follows exact-scope code/document review.
+performance claims. Local commit `93f4865` records the reviewed implementation,
+tests, fixtures and documentation.
+
+Source45 records the CLAP structure diagnostic's historical TDD RED, not a
+production fix or third-party compatibility pass. Fresh Audio producer
+`F7E5C5A2...`, independently admitted by `1E06BFCC...`, binds freeze `200D12DB...`
+and the current default-profile test image. Its controlled Lists preserve all
+433 original names and 74 ignored cases, adding exactly four ordinary controls.
+The sole consumer test fails with the original generic refusal instead of the
+required fixed site, default field and direct bits (owned fixture: expected
+`3FE0000000000000`, actual `3FF0000000000000`). Receipt `E08C610E...` preserves
+native exit101, runner exit1, the failed positive gate and settled descendants.
+Source46 GREEN now binds freeze `6FBD0947...` and fresh Audio producer
+`A16273BC...`. The existing 180-second ordinary gate passed 363/0, with all 74
+ignored cases explicitly excluded; actual receipt is `5007E297...`. Independent
+inventory/output review `B5220B59...` confirms all 363 unique raw passes,
+unchanged ignored membership and settled native owners. Fresh-product
+real-plugin replay was still pending at that stage.
+This diagnostic does not change the parameter comparison or state authority.
+Scoped worker formatting passes. The broader workspace format check returned1
+(`07A4A628...`) for four unchanged files: `openfx_host/resident.rs`,
+`native_worker_ingress.rs`, `tests/native_host_log.rs` and
+`tests/native_owner_binding.rs`. Source47 applies only canonical test-statement
+formatting to these four files; freeze `FD9BE7A2...` retains all other 1792 source
+hashes, including the CLAP diagnostic and native OpenFX implementation. The
+workspace format check now passes (`C1FE6B16...`); the failed check is retained.
+Fresh Audio producer `2C66BA06...` and actual PE `E39942DE...` are independently
+admitted by `474909B8...`. The first full ordinary run (`D8BDC607...`) returned
+362 passed and one failed: the binary-fingerprint oversized-file fixture could
+not grow its file to 512 MiB plus one byte because Windows returned StorageFull
+(OS112). It failed before the oversized-file rejection assertion. The original
+test, 180-second budget and failed raw output remain unchanged. Retry r2
+(`5C1A570A...`) passed 363/0 with the same source closure and test image after
+bounded cache recovery. Independent acceptance `9640BAD5...` confirms all 437
+names, unchanged 74 ignored cases, every ordinary raw pass and four settled
+native owners; the original two-thread and 180-second settings are preserved.
+Strict Audio Clippy with `--all-targets --all-features -- -D warnings` passed
+(`265DE02B...`, independent `E0841061...`) with full source pre/post checks,
+jobs1 and incremental0. Fresh locked metadata captures all 30 workspace
+packages (`7CF4C99F...`); these checks assign no real-plugin compatibility or
+performance qualification. Normal Product LAST r1 failed while compiling the
+App library: `rustc-LLVM ERROR: out of memory` and `Allocation failed`, Cargo101
+(`E56F7AE4...`, raw producer `92996F1E...`, log `25CC9EBC...`). The completed
+source receipt binds the unchanged 1796-source freeze and completed pre/post
+checks, with the unchanged normal
+opt1/debug2 command. No new Product PE is qualified. The memory-allocation
+failure does not by itself establish disk capacity, paging or another process
+as its cause. A later independent disk observation reported 5.03 GB free on C;
+its external cause is unestablished. Root made no OS, paging, cache relocation
+or build-profile change. Unchanged normal Product retry r2 completed in 6m41s
+(`EE8D78C4...`, producer `ACB17663...`, log `EE01F103...`), with one fresh normal
+opt1/debug2 bin artifact and actual PE `737D53D7...` (95,336,960 bytes). Independent
+artifact admission `709A77FC...` and actual DATA admission `06399951...` preceded
+the two original real CLAP state/PCM rounds. Live memory observation `BD5F73D3...` covers
+56 samples starting about 134 seconds after launch: minimum observed available
+physical memory 1,154,785,280 bytes and API-reported available PageFile
+402,751,488 bytes. This is partial observation, not a complete peak or an
+explanation of r1's failure; the failed build remains retained.
+
+Source47's two original Airwindows CLAP positive gates both failed; observation
+receipt `A28FB237...` records both settled native101/runner1 outcomes without
+changing the 180-second oracles. Round1 failed at the first partition1 startup:
+the existing post-state/render-mode comparison reported index5, native ID
+2944917345 on both sides, `default_value`, expected bits `0000000000000000` and
+actual bits `378FFE4000000000`. This is the first concrete native structural
+projection; it does not identify a plugin/host writer or prove either violated
+the standard. Round2 reached the first partition1 but failed earlier at native
+spec resolution because the discovery worker exited1, with no descriptor fields.
+Neither round completed a PCM partition. Historical Source40's partition1/17
+boundary must not be attributed to this execution. ObservationComplete is true,
+DiagnosticCaptureComplete and ActualOriginalSelectedGatesPassed are false;
+third-party compatibility remains failed and root-cause investigation continues.
+
+The Source44 current artifacts remain recoverable on E. Resource preparation
+preserves the failed cache-copy r1; its out-of-scope vendor/fixture counterpart
+references were removed from a distinct r2 plan without expanding the main
+target boundary. The actual r2 copy and literal cleanup retained all 83 selected
+old RLIBs (648,787,832 logical bytes), with complete pre-unlink source/copy hashes
+and retained-copy postchecks; independent custody is `3C9791D5...`. Two separately
+verified product aliases were also released, with their E copies preserved.
+Measured C free space was approximately 1.72 GB after the RLIB cleanup; logical
+file sizes do not establish physical reclamation or comparative performance.
+Before the Source47 retry, the two remaining content-matched Product aliases in
+`target/debug/deps` were released after verifying both source files and both E
+copies (`B85BDD32...`, independent `3D7294AC...`). Their Rustc placement paths
+are not claimed as Cargo-reported filenames. After the retry settled, the three
+old Source44 test PE aliases were also released with all six actual source/copy
+hashes checked before unlink (`07016D4D...`, independent `789A2459...`). Their
+retained E copies preserve recovery; they must be explicitly restored or rebuilt
+before future execution. Measured C free space reached 1,189,961,728 bytes.
 
 | Gate | Result | Scope |
 | --- | --- | --- |
@@ -74,6 +163,7 @@ performance claims. A local commit follows exact-scope code/document review.
 | Source36 audio regression | PASS within existing finite workflows | Ordinary351/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. No new Note DSP, GUI, RT or performance qualification |
 | CLAP parameter-refusal detail | Verified within source38 finite Windows controls | Original admission preserved; same rejected snapshot's first reason, unsigned ID/index and direct numeric bits; ordinary355/0 and two real failed Airwindows startup observations, without compatibility/root-cause qualification |
 | CLAP startup refusal consumer sites | Implemented — Not Fully Verified | Source40 owned controls exercise three existing consumers; real Airwindows rounds failed without a tagged descriptor refusal, so third-party site capture remains unverified |
+| CLAP structural mismatch detail | Verified within Source47 owned controls and one failed native startup | Four new controls, Audio363/0 and strict Clippy; original comparison/order/query count unchanged. One actual default-value projection captured; second round failed earlier without fields. Vendor PCM compatibility remains failed |
 | Source40 audio regression | PASS within existing finite Windows workflows | Ordinary359/0; owner14 and metadata2; original CLAP/VST3 cases10; real Ring Out metadata/default-load2; strict workspace Clippy. Original vendor PCM gate remains failed |
 | New performance/platform qualification | Not run | Historical results below do not transfer to new changes |
 

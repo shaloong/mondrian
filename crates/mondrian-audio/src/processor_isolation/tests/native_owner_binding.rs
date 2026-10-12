@@ -62,7 +62,9 @@ fn installed_vst3_native_object_binding_changes_on_real_enter_and_retains_refuse
     };
     assert_eq!(initial_receipt.binding(), initial.binding);
     assert_eq!(initial_receipt.object(), before);
-    processor.enter_state(-4).expect("first Enter anchors initialized native object");
+    processor
+        .enter_state(-4)
+        .expect("first Enter anchors initialized native object");
     let anchored = processor
         .native_audio_object_observation()
         .expect("actual anchored object")
@@ -83,7 +85,9 @@ fn installed_vst3_native_object_binding_changes_on_real_enter_and_retains_refuse
     };
     assert_eq!(anchored_receipt.binding(), anchored_binding.binding);
     assert_eq!(anchored_receipt.object(), anchored);
-    processor.enter_state(9).expect("second Enter stops/destroys/reloads in same child");
+    processor
+        .enter_state(9)
+        .expect("second Enter stops/destroys/reloads in same child");
     let after = processor
         .native_audio_object_observation()
         .expect("actual reloaded object")
