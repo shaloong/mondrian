@@ -32,8 +32,9 @@ use ocio_rs::{
     FixedFunctionStyle, GpuShaderDesc, GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
     GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, HueCurveType,
-    Interpolation as OcioRsInterpolation, Processor, ProcessorCacheFlags, RGBCurveType, RangeStyle,
-    ReferenceSpaceType, TransformDirection, ViewTransform, ViewTransformDirection,
+    Interpolation as OcioRsInterpolation, OptimizationFlags, Processor, ProcessorCacheFlags,
+    RGBCurveType, RangeStyle, ReferenceSpaceType, TransformDirection, ViewTransform,
+    ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -3606,8 +3607,12 @@ fn cpu_processor_from_static(
     let processor = processor
         .lock()
         .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    // Preserve OCIO's default optimizations and independent dynamic properties,
+    // but use precise native CPU log/exp/pow. SSE approximations can exceed the
+    // shared CPU/GPU parity bound when PQ decoding amplifies numerical error.
+    let flags = OptimizationFlags::DEFAULT.0 & !OptimizationFlags::FAST_LOG_EXP_POW.0;
     let cpu = processor
-        .default_cpu_processor()
+        .optimized_cpu_processor(u64::from(flags))
         .map_err(|err| format!("OCIO CPU processor creation failed: {err}"))?;
     Ok((cpu, shared_hit))
 }

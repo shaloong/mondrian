@@ -53,6 +53,13 @@ and monitor remain separate semantic stages; the CPU presentation path moves
 one Float32 raster through both and quantizes once, while GPU recording keeps
 the Program Output handle available for scopes and diagnostics.
 
+The shared Core CPU execution processor uses OCIO's native default optimization
+flags with only `FAST_LOG_EXP_POW` disabled. Graph and LUT optimizations and
+independent dynamic properties remain enabled. On x86, OCIO's approximate SSE
+log/exp/pow kernels can amplify PQ error beyond the CPU/GPU parity contract;
+precise native math removes that avoidable CPU error. Both backends retain the
+same OCIO transform graph, color interpretation, fixtures, and error bounds.
+
 CPU presentation retains a separate pre-monitor Float32 frame only when the
 caller requests the Program Output signal-classification tap. Ordinary Viewer
 presentation consumes that raster through monitor adaptation; retaining an
