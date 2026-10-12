@@ -53,6 +53,9 @@ set(OPENFX_PROBE_BUNDLE_DIR "${CMAKE_BINARY_DIR}/SessionProbe.ofx.bundle")
 set(OPENFX_PROBE_BINARY_DIR "${OPENFX_PROBE_BUNDLE_DIR}/Contents/${OPENFX_ARCH_DIR}")
 add_library(SessionProbe MODULE session_probe.cpp)
 target_compile_features(SessionProbe PRIVATE cxx_std_17)
+if(MSVC)
+  target_compile_options(SessionProbe PRIVATE /utf-8)
+endif()
 target_include_directories(SessionProbe PRIVATE
   "${OPENFX_SOURCE_DIR}" "${OPENFX_SOURCE_DIR}/include"
   "${OPENFX_SOURCE_DIR}/Examples/include")

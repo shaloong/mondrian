@@ -1621,10 +1621,61 @@ OfxStatus genericGuiProbe(const std::string& action, const void* handle,
   return response == expected ? kOfxStatOK : kOfxStatErrValue;
 }
 
+// Test-only conjunction guards; no exported counter or product protocol.
+struct LegacyPriorityState { bool posted = false, repaired = false; };
+std::map<const void*, LegacyPriorityState> legacyPriorityStates;
+bool legacyPriorityMode(const std::string& selected) {
+  return selected == "legacy_priority_render_fatal_error" || selected == "legacy_priority_roi_failed_error" ||
+      selected == "legacy_priority_end_failed_error" || selected == "legacy_priority_error_only";
+}
+void legacyPriorityError(const void* handle, LegacyPriorityState& state) {
+  const auto* messages = auxMessageSuite();
+  // Posting failure must not alias the expected generic CABI5 and falsely pass.
+  if (!messages || messages->setPersistentMessage(const_cast<void*>(handle), kOfxMessageError,
+      "render.repair", "%s", "Change scale to recover render") != kOfxStatOK) { std::abort(); }
+  state.posted = true;
+}
+
 OfxStatus probe(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (legacyPriorityMode(selected) &&
+      (operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionGetRegionsOfInterest ||
+       operation == kOfxImageEffectActionRender)) {
+    auto found = legacyPriorityStates.find(handle);
+    if (found == legacyPriorityStates.end()) { std::abort(); }
+    auto& state = found->second;
+    if (operation == kOfxActionInstanceChanged && selected == "legacy_priority_error_only") {
+      char* type = nullptr;
+      char* name = nullptr;
+      if (gPropHost->propGetString(in, kOfxPropType, 0, &type) != kOfxStatOK || !type) { std::abort(); }
+      if (std::string(type) != kOfxTypeParameter) { /* clip changes never repair private Error */ }
+      else {
+        if (gPropHost->propGetString(in, kOfxPropName, 0, &name) != kOfxStatOK || !name ||
+            std::string(name) != "scale") { std::abort(); }
+        double gain = 0.0;
+        if (!auxiliaryScale(const_cast<void*>(handle), gain)) { std::abort(); }
+        if (gain == 2.0) {
+        const auto* messages = auxMessageSuite();
+        if (!state.posted || !messages || messages->clearPersistentMessage(const_cast<void*>(handle)) != kOfxStatOK) { std::abort(); }
+          state.posted = false;
+          state.repaired = true;
+        }
+      }
+    } else if (operation == kOfxImageEffectActionGetRegionsOfInterest && selected == "legacy_priority_roi_failed_error") {
+      if (!canonicalProgressiveContract(handle, nullptr)) { std::abort(); }
+      legacyPriorityError(handle, state);
+      return kOfxStatFailed;
+    } else if (operation == kOfxImageEffectActionRender) {
+      if (state.posted || !canonicalProgressiveContract(handle, in) ||
+          selected == "legacy_priority_roi_failed_error") { std::abort(); }
+      if (selected == "legacy_priority_render_fatal_error") {
+        legacyPriorityError(handle, state);
+        return kOfxStatErrFatal;
+      }
+    }
+  }
   if (selected == "catalog_describe_block" && operation == kOfxActionDescribe) {
     return blockCatalogCallback(gHost) ? kOfxStatOK : kOfxStatFailed;
   }
@@ -1837,6 +1888,26 @@ OfxStatus probe(const char* action, const void* handle,
        (selected == "aux_transient_descriptor" && operation == kOfxActionDescribe && !auxTransientMessages(const_cast<void*>(handle))) ||
        (selected == "aux_invalid_handles" && operation == kOfxActionDescribe && !auxInvalidHandles(const_cast<void*>(handle))) ||
        (selected == "aux_error" && !auxPersistentError(const_cast<void*>(handle), operation, in)))) { return kOfxStatFailed; }
+
+  if (legacyPriorityMode(selected)) {
+    if (operation == kOfxActionCreateInstance) {
+      if ((result != kOfxStatOK && result != kOfxStatReplyDefault) ||
+          !legacyPriorityStates.emplace(handle, LegacyPriorityState{}).second) { std::abort(); }
+    } else if (operation == kOfxActionDestroyInstance) {
+      if (legacyPriorityStates.erase(handle) != 1) { std::abort(); }
+    } else if (operation == kOfxImageEffectActionEndSequenceRender && selected == "legacy_priority_end_failed_error") {
+      if ((result != kOfxStatOK && result != kOfxStatReplyDefault) ||
+          !canonicalProgressiveContract(handle, nullptr)) { std::abort(); }
+      legacyPriorityError(handle, legacyPriorityStates.at(handle));
+      return kOfxStatFailed;
+    } else if (operation == kOfxImageEffectActionRender && selected == "legacy_priority_error_only") {
+      auto& state = legacyPriorityStates.at(handle);
+      double gain = 0.0;
+      if (result != kOfxStatOK || !auxiliaryScale(const_cast<void*>(handle), gain)) { std::abort(); }
+      if (gain == 1.5 && !state.repaired) { legacyPriorityError(handle, state); }
+      else if (gain != 2.0 || !state.repaired || state.posted) { std::abort(); }
+    }
+  }
 
   if (selected == "source_alpha" && operation == kOfxImageEffectActionDescribeInContext && result == kOfxStatOK && !defineOutputAlpha(handle)) { return kOfxStatFailed; }
   if (selected == "output_alpha") {

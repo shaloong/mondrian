@@ -532,3 +532,31 @@ possibly blocked Host destructor. Forced cleanup never converts failure to PASS.
 Successful execution drops the real Host exactly once and observes both retained
 native objects already settled. This does not qualify foreign descendants,
 termination-error recovery, hard UI latency bounds, or another platform.
+
+## Candidate legacy Render priority conjunction controls
+
+These new owned modes use the existing complete CPU Float Filter Render path;
+no product IsIdentity query or capability is added.
+`legacy_priority_render_fatal_error` posts Error and returns ErrFatal in Render
+before Output fetch. `legacy_priority_roi_failed_error` posts Error and returns
+Failed in ROI, aborting if Render is wrongly called. Both leave staging untouched.
+`legacy_priority_end_failed_error` posts Error and returns Failed in EndSequence
+only after real Basic Render produces complete finite 1.5x pixels: its PRIVATE
+staging is written, but failure cannot publish completion/alpha. Message posting
+failure aborts rather than aliasing the expected generic CABI5. Private guard state
+is isolated to these new modes, with no exported/versioned counter or product state.
+
+`legacy_priority_error_only` posts Error after successful Basic 1.5x Render with
+complete finite output and successful EndSequence. It must remain UserBlocked,
+not yield a successful frame. Unchanged author remains early-blocked; re-entering
+Render while Error remains aborts. Actual scale2 parameter InstanceChanged clears
+Error and resumes on the same owner with exact 2x output. Clip notifications do
+not clear Error. Original `aux_error` Create/InstanceChanged early block/recovery
+code and all old assertions remain byte-exact.
+
+Three negative direct ABI controls require exact Rejected(5), completionUNSET0,
+alphaInvalid-1, actual decoded persistent Error, precise untouched/written staging.
+Actual product controls require WorkerFailed("native status 5"), next exact
+Unavailable("native session has been retired"), immutable Source, no new owner,
+and successful/idempotent shutdown. Positive controls require same-owner repair.
+Prepared controls only: root owns fresh native producers and actual Job RED/GREEN.

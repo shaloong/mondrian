@@ -687,6 +687,12 @@ struct MondrianOpenFxSession {
     const bool completed = status == kOfxStatOK && written && accepted(endStatus);
     if (frame.invalidImageLifetime) { failed = true; return 5; }
     if (host.auxiliary().fatal()) { failed = true; return 6; }
+    // A failed native action or incomplete frame cannot become recoverable Error.
+    // Preserve invalid-image and auxiliary-fatal priority before this refusal.
+    if (!completed) {
+      probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+      return 5;
+    }
     if (host.auxiliary().blocked(instance->getHandle())) {
       // EndSequenceRender has finished, but staged pixels are unpublished.
       report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;

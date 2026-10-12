@@ -1299,39 +1299,106 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
     );
     let graph = authored_filter_graph("MONDRIAN_OPENFX_SESSION_PROBE_BINARY", false);
     let input = [[-0.25, 1.5, 0.75, 0.5]];
-    // Two executor rasters plus three controlled host rasters must fit before
-    // any native session is constructed. The one-byte shortfall stays retryable.
+    let key = graph
+        .graph()
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            mondrian_effects::EffectGraphNodeKind::UnaryEffect {
+                op: mondrian_effects::EffectRenderOp::Custom { key, .. },
+                ..
+            } => Some(key.clone()),
+            _ => None,
+        })
+        .expect("compiled native occurrence");
+    let runtime_before =
+        mondrian_effects::effect_plugin_runtime_status(&key).expect("registered native definition");
+    assert!(!runtime_before.disabled);
+    assert!(runtime_before.last_error.is_none());
+    let host_storage = OpenFxFilterSession::storage(1, 1).expect("native owner charge");
+    let raster_bytes = input.len() * std::mem::size_of::<[f32; 4]>();
+    let executor_raster_bytes = 2 * raster_bytes;
+    // This old lower bound deliberately omits factory/route-owned metadata.
+    // Query only the existing cold typed admission refusal; never prepare/DSP.
     let mut config = EffectExecutionSessionConfig {
-        max_working_bytes: OpenFxFilterSession::storage(1, 1)
-            .expect("native owner charge")
-            .active_peak_bytes()
-            + 2 * 16
-            - 1,
+        max_working_bytes: host_storage.active_peak_bytes() + executor_raster_bytes - 1,
         ..EffectExecutionSessionConfig::default()
     };
     let mut session = EffectExecutionSession::new(config);
     session.bind_generation(1);
-    assert!(session
-        .apply_compiled_rgba_f32(
-            mondrian_effects::EffectFloatFrameView::new(
-                mondrian_effects::EffectFrameExtent::new(1, 1),
-                mondrian_effects::EffectValueFormat::new(
-                    mondrian_effects::EffectWorkingPrecision::Float32,
-                    mondrian_effects::EffectColorDomain::SceneLinearRgb,
-                    mondrian_core::ColorFrameAlpha::StraightFloat
+    let cold_required = |session: &mut EffectExecutionSession, budget: usize| {
+        let error = session
+            .apply_compiled_rgba_f32(
+                mondrian_effects::EffectFloatFrameView::new(
+                    mondrian_effects::EffectFrameExtent::new(1, 1),
+                    mondrian_effects::EffectValueFormat::new(
+                        mondrian_effects::EffectWorkingPrecision::Float32,
+                        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                        mondrian_core::ColorFrameAlpha::StraightFloat,
+                    ),
+                    &input,
                 ),
-                &input
-            ),
-            &graph,
-            0,
-            &mut mondrian_effects::EffectProcessorControl::uncancelled()
-        )
-        .is_err());
-    assert_eq!(session.diagnostics().processor_instances, 0);
-    config.max_working_bytes = OpenFxFilterSession::storage(1, 1)
-        .expect("native owner charge")
+                &graph,
+                0,
+                &mut mondrian_effects::EffectProcessorControl::uncancelled(),
+            )
+            .expect_err("cold insufficient grant must refuse before native prepare");
+        let required = match error {
+            mondrian_effects::EffectFloatExecutionError::CustomProcessor(
+                mondrian_effects::EffectExecutionError::CustomProcessorBudgetExceeded {
+                    key: rejected_key,
+                    required_bytes,
+                    budget_bytes,
+                },
+            ) => {
+                assert_eq!(rejected_key, key);
+                assert_eq!(budget_bytes, budget);
+                assert!(required_bytes > budget_bytes);
+                required_bytes
+            }
+            other => panic!("expected typed cold working-grant refusal: {other:?}"),
+        };
+        assert_eq!(session.diagnostics().processor_instances, 0);
+        assert_eq!(session.diagnostics().processor_bytes, 0);
+        assert_eq!(
+            mondrian_effects::effect_plugin_runtime_status(&key)
+                .expect("budget refusal preserves definition"),
+            runtime_before,
+        );
+        assert_eq!(input, [[-0.25, 1.5, 0.75, 0.5]]);
+        required
+    };
+    let minimum = cold_required(&mut session, config.max_working_bytes);
+    config.max_working_bytes = minimum.checked_sub(1).expect("positive cold minimum");
+    session.reconfigure(config);
+    assert_eq!(
+        cold_required(&mut session, config.max_working_bytes),
+        minimum
+    );
+
+    // Fresh uncancelled controls above/below own no observer, prior receipts or
+    // route plan. Public graph requirements and receipt-slot policy describe
+    // the separate executor metadata grant; no GUI Weak layout is duplicated.
+    let requirements =
+        mondrian_effects::EffectProcessorFeedbackRequirements::for_compiled_graph(&graph);
+    assert_eq!(requirements.occurrences(), 1);
+    let route_bytes = mondrian_effects::EFFECT_PROCESSOR_FEEDBACK_SLOTS
+        .checked_mul(std::mem::size_of::<
+            mondrian_effects::EffectProcessorFeedbackReceipt,
+        >())
+        .and_then(|bytes| bytes.checked_add(requirements.maximum_owned_bytes()))
+        .expect("complete public feedback route grant");
+    let host_transient = host_storage
         .active_peak_bytes()
-        + 2 * 16;
+        .checked_sub(host_storage.retained_bytes())
+        .expect("native active/retained contract");
+    let expected_retained = minimum
+        .checked_sub(executor_raster_bytes)
+        .and_then(|bytes| bytes.checked_sub(route_bytes))
+        .and_then(|bytes| bytes.checked_sub(host_transient))
+        .expect("complete factory retained grant from cold admission");
+    assert!(expected_retained >= host_storage.retained_bytes());
+    config.max_working_bytes = minimum;
     session.reconfigure(config);
     assert_eq!(
         (session
@@ -1354,12 +1421,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         input.as_slice()
     );
     assert_eq!(session.diagnostics().processor_instances, 1);
-    assert_eq!(
-        session.diagnostics().processor_bytes,
-        OpenFxFilterSession::storage(1, 1)
-            .expect("complete retained owner charge")
-            .retained_bytes()
-    );
+    assert_eq!(session.diagnostics().processor_bytes, expected_retained);
     // The probe only omits Output on its second render in the same native
     // instance. A fresh process per frame would incorrectly succeed here.
     // A new frame generation must preserve that same worker; pixel residency
@@ -3648,6 +3710,152 @@ fn product_workers_bind_parent_namespace_and_restore_plugin_private_analysis_cor
         session.shutdown().expect("actual owner teardown before reprepare/reopen");
     }
 }
+fn qualify_product_legacy_render_priority(selected: &str, recoverable: bool) {
+    assert_eq!(
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").as_deref(),
+        Ok(selected)
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("priority fixture"),
+    );
+    let inspection =
+        inspect_openfx_binary(product_executable(), &binary).expect("actual product discovery");
+    let format = mondrian_effects::EffectValueFormat::new(
+        mondrian_effects::EffectWorkingPrecision::Float32,
+        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+        mondrian_core::ColorFrameAlpha::StraightFloat,
+    );
+    let input = mondrian_effects::EffectFloatFrame::from_pixels(
+        mondrian_effects::EffectFrameExtent::new(2, 2),
+        format,
+        vec![
+            [-0.0, -0.25, 2.0, 0.0],
+            [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
+            [-0.5, 0.75, 4.0, 0.25],
+            [1.0, -2.0, 0.5, 1.0],
+        ],
+    )
+    .expect("independent typed Source");
+    let before = input.pixels().iter().map(|pixel| pixel.map(f32::to_bits)).collect::<Vec<_>>();
+    let timing = OpenFxRenderTiming {
+        frame: 3.5,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 1.5,
+    };
+    for _ in 0..2 {
+        let mut session = OpenFxFilterSession::prepare(
+            product_executable(),
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            2,
+            2,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("actual native owner");
+        let pid = session.worker_process_id();
+        assert!(pid > 0);
+        let values = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(1.5))]);
+        let result = session.render(&timing, &values, &input, &mut || Ok(()));
+        if recoverable {
+            let Err(OpenFxHostError::UserBlocked(first)) = result else {
+                panic!("complete frame plus Error remains recoverable: {result:?}");
+            };
+            assert!(first.snapshot.is_blocked());
+            assert_eq!(
+                first.snapshot.persistent().expect("actual Error").id(),
+                "render.repair"
+            );
+            assert_eq!(
+                first.snapshot.persistent().expect("actual Error").text(),
+                "Change scale to recover render"
+            );
+            assert!(
+                session.take_feedback().is_none(),
+                "blocked private output is not successful frame"
+            );
+            let again = session.render(&timing, &values, &input, &mut || Ok(()));
+            let Err(OpenFxHostError::UserBlocked(second)) = again else {
+                panic!("unchanged author remains blocked: {again:?}");
+            };
+            assert_eq!(second.owner, first.owner);
+            assert_eq!(
+                second.snapshot.native_owner(),
+                first.snapshot.native_owner()
+            );
+            assert_eq!(
+                second.snapshot.persistent_revision(),
+                first.snapshot.persistent_revision()
+            );
+            let repaired =
+                constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(2.0))]);
+            let output = session
+                .render(&timing, &repaired, &input, &mut || Ok(()))
+                .expect("same owner author repair");
+            assert_eq!(output.extent(), input.extent());
+            assert_eq!(output.format(), input.format());
+            for (actual, source) in output.pixels().iter().zip(input.pixels()) {
+                for (actual, source) in actual.iter().zip(source) {
+                    assert_eq!(actual.to_bits(), (source * 2.0).to_bits());
+                }
+            }
+            let feedback = session.take_feedback().expect("repaired successful publication");
+            assert_eq!(feedback.owner, first.owner);
+            assert_eq!(
+                feedback.snapshot.native_owner(),
+                first.snapshot.native_owner()
+            );
+            assert!(!feedback.snapshot.is_blocked());
+            assert!(feedback.snapshot.persistent().is_none());
+        } else {
+            let Err(OpenFxHostError::WorkerFailed(detail)) = result else {
+                panic!(
+                    "{selected}: native failure cannot become recoverable UserBlocked: {result:?}"
+                );
+            };
+            assert_eq!(detail, "native status 5");
+            assert!(
+                session.take_feedback().is_none(),
+                "rejected frame cannot publish successful feedback"
+            );
+            let again = session.render(&timing, &values, &input, &mut || Ok(()));
+            let Err(OpenFxHostError::Unavailable(reason)) = again else {
+                panic!("{selected}: rejected native owner must remain unusable: {again:?}");
+            };
+            assert_eq!(reason, "native session has been retired");
+        }
+        assert_eq!(session.worker_process_id(), pid, "no replacement owner");
+        assert_eq!(
+            input.pixels().iter().map(|pixel| pixel.map(f32::to_bits)).collect::<Vec<_>>(),
+            before
+        );
+        session.shutdown().expect("actual owner cleanup settles or reports failure");
+        session.shutdown().expect("settled owner cleanup is idempotent");
+    }
+}
+
+#[test]
+#[ignore = "requires actual product and owned legacy Render conjunction mode"]
+fn product_native_render_failures_retire_owner_despite_persistent_error() {
+    let selected =
+        std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("controlled native mode");
+    assert!(matches!(
+        selected.as_str(),
+        "legacy_priority_render_fatal_error"
+            | "legacy_priority_roi_failed_error"
+            | "legacy_priority_end_failed_error"
+    ));
+    qualify_product_legacy_render_priority(&selected, false);
+}
+
+#[test]
+#[ignore = "requires actual product and owned legacy_priority_error_only mode"]
+fn product_complete_render_error_recovers_same_native_owner() {
+    qualify_product_legacy_render_priority("legacy_priority_error_only", true);
+}
+
 #[test]
 #[ignore = "requires current product and owned SessionProbe aux_error bundle"]
 fn native_persistent_error_repairs_through_real_effects_residency_without_owner_replacement() {

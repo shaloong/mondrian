@@ -3238,6 +3238,189 @@ pub(crate) mod shared_frame_tests {
         }
         native_actual_image_metadata_cases(false);
     }
+    fn qualify_native_legacy_render_priority(test: &str, selected: &str) {
+        if !qualification_child(test, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", selected)]) {
+            return;
+        }
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("owned priority fixture"),
+        ))
+        .expect("fixture module");
+        let bundle_path = path
+            .ancestors()
+            .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+            .expect("fixture bundle");
+        let binary = native_string(&path).expect("module path");
+        let bundle = native_string(bundle_path).expect("bundle path");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let scale = CString::new("scale").expect("fixture parameter");
+        let mut parameters = [NativeParameter {
+            name: scale.as_ptr(),
+            kind: 1,
+            value: [1.5, 0.0, 0.0, 0.0],
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+            query_mode: 0,
+            string_value: std::ptr::null(),
+            string_length: 0,
+        }];
+        let pixels = [
+            [-0.0_f32, -0.25, 2.0, 0.0],
+            [2.0, -4.0, 8.0, f32::MIN_POSITIVE],
+            [-0.5, 0.75, 4.0, 0.25],
+            [1.0, -2.0, 0.5, 1.0],
+        ];
+        let encode = |pixels: &[[f32; 4]]| {
+            pixels
+                .iter()
+                .flat_map(|pixel| pixel.iter().flat_map(|lane| lane.to_ne_bytes()))
+                .collect::<Vec<_>>()
+        };
+        let input = encode(&pixels);
+        let expected = |gain: f32| encode(&pixels.map(|pixel| pixel.map(|lane| lane * gain)));
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 2,
+            height: 2,
+            frame: 3.5,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 100.0,
+            pixel_aspect_ratio: 1.5,
+        };
+        for _ in 0..2 {
+            parameters[0].value[0] = 1.5;
+            let mut session = NativeSession::create(
+                mondrian_core::EffectProcessorOwnerId::new(),
+                &binary,
+                &bundle,
+                &identifier,
+                &input,
+                &info,
+                &parameters,
+            )
+            .expect("native owner");
+            let mut output = vec![0xa5; input.len()];
+            let result = session.render(&input, &mut output, &info, &parameters);
+            if selected == "legacy_priority_error_only" {
+                let Err(NativeRenderError::UserBlocked(first)) = result else {
+                    panic!("complete frame plus Error remains recoverable: {result:?}");
+                };
+                assert!(first.is_blocked());
+                assert_eq!(
+                    first.persistent().expect("actual Error").id(),
+                    "render.repair"
+                );
+                assert_eq!(
+                    first.persistent().expect("actual Error").text(),
+                    "Change scale to recover render"
+                );
+                assert_eq!(session.report.completion, 2);
+                assert_eq!(session.report.output_alpha, -1);
+                assert_eq!(
+                    output,
+                    expected(1.5),
+                    "private staging is complete but unpublished"
+                );
+                assert!(
+                    session.take_feedback().is_none(),
+                    "no successful frame feedback"
+                );
+                output.fill(0xa5);
+                let again = session.render(&input, &mut output, &info, &parameters);
+                let Err(NativeRenderError::UserBlocked(second)) = again else {
+                    panic!("unchanged author remains blocked without Render: {again:?}");
+                };
+                assert_eq!(second.native_owner(), first.native_owner());
+                assert_eq!(second.persistent_revision(), first.persistent_revision());
+                assert_eq!(
+                    output,
+                    vec![0xa5; input.len()],
+                    "early blocking performs no Output fetch"
+                );
+                parameters[0].value[0] = 2.0;
+                assert_eq!(
+                    session.render(&input, &mut output, &info, &parameters),
+                    Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+                );
+                assert_eq!(session.report.completion, 1);
+                assert_eq!(session.report.output_alpha, 0);
+                assert_eq!(output, expected(2.0));
+                let recovered = session.take_feedback().expect("completed repaired frame");
+                assert_eq!(recovered.native_owner(), first.native_owner());
+                assert!(!recovered.is_blocked());
+                assert!(recovered.persistent().is_none());
+            } else {
+                assert_eq!(result, Err(NativeRenderError::Rejected(5)), "{selected}");
+                assert_eq!(
+                    session.report.completion, 0,
+                    "failure cannot publish a blocked/frame completion"
+                );
+                assert_eq!(
+                    session.report.output_alpha, -1,
+                    "failure cannot publish an output representation"
+                );
+                let native = session.report.feedback.decode().expect("actual conjunction report");
+                assert!(
+                    native.is_blocked(),
+                    "actual Error remains in report despite rejected native action"
+                );
+                assert_eq!(
+                    native.persistent().expect("actual Error").kind(),
+                    mondrian_effects::EffectProcessorNoticeKind::Error
+                );
+                assert_eq!(
+                    native.persistent().expect("actual Error").id(),
+                    "render.repair"
+                );
+                assert_eq!(
+                    native.persistent().expect("actual Error").text(),
+                    "Change scale to recover render"
+                );
+                if selected == "legacy_priority_end_failed_error" {
+                    assert_eq!(
+                        output,
+                        expected(1.5),
+                        "End failure follows complete finite Basic output"
+                    );
+                } else {
+                    assert_eq!(
+                        output,
+                        vec![0xa5; input.len()],
+                        "ROI/Render failure precedes Output fetch"
+                    );
+                }
+                assert!(
+                    session.take_feedback().is_none(),
+                    "rejected frame has no successful feedback"
+                );
+            }
+            assert_eq!(input, encode(&pixels), "immutable Source bits");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires newly built owned legacy Render priority SessionProbe"]
+    fn native_render_failures_dominate_persistent_error_without_publication() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_render_failures_dominate_persistent_error_without_publication";
+        for selected in [
+            "legacy_priority_render_fatal_error",
+            "legacy_priority_roi_failed_error",
+            "legacy_priority_end_failed_error",
+        ] {
+            qualify_native_legacy_render_priority(TEST, selected);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires newly built owned complete-frame Error/recovery SessionProbe"]
+    fn native_complete_render_error_recovers_same_owner_after_author_change() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_complete_render_error_recovers_same_owner_after_author_change";
+        qualify_native_legacy_render_priority(TEST, "legacy_priority_error_only");
+    }
+
     #[test]
     #[ignore = "requires the owned SessionProbe aux_error native bundle"]
     fn native_persistent_error_blocks_render_and_recovers_same_owner_after_author_change() {

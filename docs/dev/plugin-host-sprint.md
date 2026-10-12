@@ -31,6 +31,20 @@ a native acceptance claim.
 
 Current round evidence:
 
+Source-numbered sections retain their historical source and artifact identities.
+Source42's six expected negative OpenFX observations have independent acceptance
+`23BEBC34...`; this accepts defect reproduction, not passing compatibility tests.
+Source44 retains Source43's six-line native correction and adds a test-only
+exact factory-budget correction. Its fresh full1796 cohort `89B37442...` has
+passed the original Main13 and Supplemental13 native groups, two real BitCrush
+rounds with 18 bit-exact Float32 rasters, 2778 ordinary App tests and strict
+workspace/all-targets/all-features Clippy. Independent acceptances are
+`442E684E...`, `897FEF69...`, `3C22F360...`, `00FFEAF7...` and `D3DA3245...`.
+The old Source43 supplemental failure remains preserved as historical evidence.
+These are finite Windows CPU and regression qualifications; they do not upgrade
+full standards, other platforms, GUI, native GPU interoperability or comparative
+performance claims. A local commit follows exact-scope code/document review.
+
 | Gate | Result | Scope |
 | --- | --- | --- |
 | Source recovery | PASS | Exact file hashes and stable source tree; no execution claim |
@@ -53,7 +67,7 @@ Current round evidence:
 | External native PCM | VST3 limited PASS; CLAP RED | Airwindows VST3 default-state offline bypass partitions1/17/64 and distinct finite non-bypass output; CLAP schema drift remains unresolved |
 | CLAP read-only metadata / default state load | Verified within Ring Out two-round controls | Source29 Audio336/0, exact native2/2 and independent raw state/author/payload checks; existing core behavior, new verification gate only; no PCM/full-project claim |
 | Periodic App ordinary regression | Verified within source29 default libtest scope | 2,778 passed/zero failed; exact ordinary inventory, current producer, 1,786 source hashes and four native Job retirements independently accepted; 124 ignored cases remain separate |
-| External OpenFX CPU Filter | Verified within source31 BitCrush finite Windows cases | Two actual rounds, each one passed/zero failed; 18 bit-exact Float32 rasters across direct and existing graph execution, parameter changes and instance retirement; GPU/temporal/full OFX remain unqualified |
+| External OpenFX CPU Filter | Verified within Source31/43/44 selected BitCrush Windows CPU Float32 cases | Each batch has two actual rounds, each one passed/zero failed; 18 bit-exact Float32 rasters across direct and existing graph execution, parameter changes and instance retirement; GPU/temporal/full OFX remain unqualified |
 | CLAP input-note metadata / discovery staging | Verified within source32 owned metadata and ownership controls | Audio345/0, original11 plus3 new owner controls and two metadata rounds; strict workspace Clippy; no note dispatch/instrument/RT qualification |
 | Source32 shared audio and real CLAP regression | PASS within existing finite workflows | Two rounds of five CLAP/VST3 sidechain/PCM/time/object cases and two real Ring Out metadata/default-load rounds; current host, separately retained historical fixture binaries |
 | CLAP factory slot admission | Verified within source36 Windows controls | Cached count capped before List/Probe/Note traversal; two actual RED controls, six GREEN ABI-counter controls, ordinary351/0 and current native regressions;4096 is host policy, not a CLAP limit |
@@ -115,7 +129,7 @@ has current-round `Verified` status.
 | VST3 MIDI/notes/instruments | Unsupported | Vendor event APIs exist; product author/event/output routing does not |
 | VST3 GUI | Partially Supported | Windows same-object editor path; later destructive entry, DPI/focus/keyboard and vendor matrix pending |
 | VST3 dynamic reprepare/PDC | Partially Supported | Cohort/hold/seed controls; canonical installation and retained author acceptance pending |
-| VST3 complete vendor/platform certification | Blocked | Matching fresh fixtures/vendor permissions and Linux/macOS execution hosts unavailable in this round |
+| VST3 complete vendor/platform certification | Blocked | Limited independent Windows discovery/metadata/state controls exist; repeated stress, broader vendor behavior and other platforms remain unqualified |
 | CLAP discovery, descriptor/fingerprint, supervised worker | Implemented — Not Fully Verified | Actual repeated lifecycle and vendor controls required |
 | CLAP audio ports | Partially Supported | Admitted Float32 mono/stereo main and auxiliary topology; notes/instrument/multi-output contracts absent |
 | CLAP parameter events | Implemented — Not Fully Verified | Plain scalar values, ordered bounded carrier; full allocation/deadline and author closure pending |
@@ -125,7 +139,7 @@ has current-round `Verified` status.
 | CLAP GUI/main services | Partially Supported | Windows same-object roles/timers exist; exact callbacks and native platform loops need separate gates |
 | CLAP sleep/request-process scheduler | Unsupported | Callback presence alone does not schedule sole Audio DAG |
 | CLAP dynamic ports/latency/restart | Partially Supported | Sticky request/control path; actual canonical graph candidate installation unfinished |
-| CLAP complete vendor/platform certification | Blocked | No installed independent CLAP binary found; permitted corpus and other platforms still need provisioning |
+| CLAP complete vendor/platform certification | Blocked | Independent Windows corpora include Airwindows, Ring Out and Surge XT Effects; finite discovery/metadata evidence does not certify processing, GUI, instruments or other platforms |
 | OpenFX Filter CPU execution | Partially Supported | Current-frame full-frame progressive RGBA Float32 Source/Output, resident instances and explicit alpha contract |
 | OpenFX numeric/text/resource parameters | Partially Supported | Canonical curves/transactions; spatial/hierarchy/custom/dynamic/plugin-origin edits incomplete |
 | OpenFX Generator/Transition/General/Retimer | Unsupported | Do not adapt these silently to a single-input Filter |
@@ -135,7 +149,7 @@ has current-round `Verified` status.
 | OpenFX overlay/interact | Unsupported | A descriptor/API presence is not a product interactive workflow |
 | OpenFX GPU interoperability | Unsupported | wgpu numeric Mix is not an OpenFX GPU Suite; no native-resource/sync contract |
 | OpenFX discovery shutdown in qualified Windows cases | Verified | Actual blocked discovery/describe Host Drop settles child and thread without publication; OS-wide failure/latency guarantees remain unqualified |
-| OpenFX full vendor/platform certification | Blocked | Official Basic and owned SessionProbe qualify a finite subset; broader vendor corpus and Linux/macOS/native UI/hardware execution remain unavailable |
+| OpenFX full vendor/platform certification | Blocked | Official Basic, owned SessionProbe and third-party BitCrush have finite Windows evidence; BitCrush qualification is limited to Source31/43/44 selected CPU Float32 Filter cases; other contexts, temporal/GPU workflows and platforms remain unqualified |
 
 The `Verified` category applies to source recovery/provenance and the finite
 current Windows COM and process-supervision controls above. It does not upgrade
@@ -1707,7 +1721,11 @@ receipts remain. `surge-acquisition-resume-r2/archive-admission.json` records
 acquisition only: no extraction, installation or native/plugin compatibility
 result is established by it. Static package and license inventory follows.
 
-## Source40: CLAP startup refusal consumer position
+## Accepted Source40 checkpoint: CLAP startup refusal consumer position
+
+Implementation checkpoint `1f6c715...` and documentation checkpoint `96ddd561...`
+retain their original scope. Audio359 and strict workspace results at Source40
+do not automatically qualify later Source42/43 artifacts.
 
 `mondrian-audio/src/processor_isolation/clap_worker.rs` appends one fixed
 `validation_site` only to the existing detailed parameter-validation refusal:
@@ -1812,13 +1830,15 @@ budgets were preserved. Only r3 reached the four actual native Lists above.
 
 Source40 native baselines were also copied to the external artifact store:
 Audio24, normal Product19 and its actual Cargo-listed PDB. All three archive
-hashes match the originals, which remain present. Actual retention receipt
+hashes match the originals, which remained present at the archive checkpoint.
+Later builds may replace the local target aliases; the external copies retain
+the Source40 binaries. Actual retention receipt
 `source40-retained-native-baselines-r1.json`, SHA256
 `AD7B3571FAAC3AF4784AC67862049F1B9BB0EAE78E442F8DE3782D4050737773`,
 and independent acceptance94EE6F24... preserve this recovery checkpoint; archival
 does not add a compatibility or performance result.
 
-OpenFX current-Source IsIdentity remains a scratch candidate. Independent review
+At the Source40 checkpoint, OpenFX IsIdentity remained a scratch candidate. Independent review
 found that recoverable persistent Error could mask native fatal/error status;
 the revised candidate fixes this precedence and adds conjunction/retirement
 controls, with actual RED/GREEN pending. The existing Render/ROI/EndSequence path
@@ -1828,8 +1848,447 @@ recoverable persistent Error. The sealed28-artifact candidate and formatted
 19-artifact RED installer passed independent static review. Thirteen native
 groups are planned, including six failure conjunctions, two recoverable positive
 controls and five existing regressions. Installation, compilation and actual
-RED/GREEN remain pending; static approval is not native qualification. This
+RED/GREEN were pending at that checkpoint; static approval is not native qualification. This
 existing-path fix must pass before the identity feature is rebased and integrated.
 Note DSP/instruments, GUI, Preview/Export equivalence, other platforms, native GPU
 interoperability and full standard compatibility remain outside these verified
 finite gates.
+
+### Source41–42 OpenFX Render priority reproduction checkpoint
+
+The formatted legacy Render RED controls were installed with four owned writes;
+the native host implementation stayed byte-identical. The first installer
+refused before writing because its full compiler closure wrongly required the
+separately pinned fixture README. The corrected installer admitted the four
+compiled owned inputs plus that separate document. Five preimage backups and
+the original refusal are retained. Source41 has 1796 compiler inputs and exactly
+three changed compiled controls. Both App libtest and `openfx_host` integration
+test binaries compiled successfully; no native test was run in this checkpoint.
+
+Fresh fixture builds exposed three distinct setup failures, all preserved:
+MSBuild rejected inherited `PATH`/`Path` aliases; the dedicated child CMake
+wrapper then leaked `VoidTaskResult` objects into its integer return; after
+that correction, MSVC parsed existing UTF-8 literals using CP936 and failed
+to compile SessionProbe. These failures are not expected plugin test failures.
+The child wrapper now normalizes only its own environment and suppresses the
+two async drain results. An actual child environment control preserved the
+parent's complete environment, and a pure .NET control reproduced and corrected
+the extra return objects. Neither control qualifies plugin processing.
+
+Source42 changes only the SessionProbe MSVC compile option `/utf-8` from
+Source41. The official Basic target, Unicode literals, assertions, three RED
+controls and old native host remain unchanged. Actual fresh configuration and
+build exited `[0, 0]`; the generated SessionProbe project contains `/utf-8`.
+Both DLLs were produced with full source post-checks and no cleanup errors:
+SessionProbe is 186880 bytes, SHA256 `2329E455...`; Basic is 32256 bytes,
+SHA256 `D6452183...`. The successful producer receipt is
+`ofx-legacy-render-source42-fixture-build-r1/producer-receipt.json`, SHA256
+`5701026C4B47FB69B43242FEB41830814779B13052C0C5EDD5092A04219C742B`.
+Its Source42 freeze is `A1C8773A...`; this success does not rewrite the rejected
+Source41 receipts.
+
+Source42 Rust libtest, integration and normal Product21 rebuilds and current
+metadata completed. Product21 was built last, with its normal opt-level1,
+debuginfo2, default-feature profile; its actual Cargo artifact is fresh=false.
+Its successful retry receipt is `app-native-build-r21-retry-r1-source-receipt.json`,
+SHA256 `F6ABA1A743708C599ECC09B09748BF33D09C9945D3A0D70D9A7275A95914EB50`.
+The DATA generation receipt is `ofx-legacy-priority-source42-data-r1/generation-receipt.json`,
+SHA256 `852A1308CC9028606D0A2C1ADEDFCF13F5AD4DEE4C4F636AD9FCCF89D857EDCE`.
+Independent admission983D26DE... checked1886 unique current inputs, all1796
+compiler sources, three current PEs, LAST ordering and13 original positive
+manifests. DATA generation does not qualify native execution.
+The first Source42 libtest rebuild failed at `link.exe` with LNK1318
+(`PDB LIMIT (12)`); source post-checks passed and the build-finished record is
+false. Its 84762624-byte failed PDB was copied to the external artifact store,
+hash-verified and removed only from its local build alias. An unchanged-profile
+retry succeeded with the same profile. The exact PDB-error cause is not
+established; no tests or assertions were relaxed.
+The first normal Product21 build failed while compiling the dev-profile App
+library: LLVM reported `no space on device`, and Cargo exited101. Its original
+receipt and logs remain unchanged. Eleven older scratch PE backups were copied
+to `E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/`, each hash-verified
+before its single local alias was removed. No current target artifact or source
+was removed. The retention observations `ofx-source42-old-build-retention-root-observation-r1.json`
+and `ofx-source42-old-build-retention-root-observation-r2.json` record exact
+old-to-retained paths and hashes for restoration.
+An unchanged-profile Product21 retry uses separate create-only output files.
+
+The first actual RED execution completed both exact ignored-test Lists, then
+the Render-fatal-plus-Error ABI test failed at its intended strict assertion:
+actual `Err(UserBlocked(...))`, expected `Err(Rejected(5))`. The original native
+owner reported exit101, no deadline, no surviving descendants and successful
+reaping. The adapter then refused the Rust panic heading because the current
+runtime includes a decimal thread identifier after the selected test name.
+Root terminal0fc13e exited1; the aggregate receipt870E91B2... remains incomplete,
+with no accepted groups or completed aggregate source post-check. This is one
+observed target assertion failure, not acceptance of six RED tests. A separate
+reader revision and pure controls are being prepared; the original receipt,
+test assertions, selectors and deadlines remain unchanged. Production Render
+is still byte-identical to the old implementation. Complete RED/GREEN,
+recoverable controls, regressions and real BitCrush renders remain pending.
+
+The immutable r3 reader adds only an optional bounded ASCII decimal thread
+identifier to that selected panic heading. Twenty new pure controls and21
+original controls passed; selectors, assertion oracles, positive expected1,
+deadlines and owner requirements did not change. New actual DATA-r2 receipt
+`C064763E...` retains the same Source42 producers and current source hashes.
+The subsequent six-group run completed: Root session17285, terminale6651f
+exit0; receipt `ofx-legacy-priority-source42-red-execution-r2/execution-receipt.json`,
+SHA256 `585347AA9AB610E66511D2F39A76FF29069AE4AFEF32E47F6AAEED2432C2D186`.
+Each of the three failure modes failed its original ABI and resident assertion
+with actual UserBlocked. All six original native owners report exit101, no
+deadline, no surviving descendants, successful reaping and no owner errors;
+all six original controllers retain failed positive gates. Aggregate source
+post-checks passed, with no cleanup errors. Independent six-RED acceptance is
+complete: `ofx-source42-actual-six-red-independent-acceptance-r1.json`, SHA256
+`23BEBC344E8B6EA86B0B0291030DF82E63DE51AD932D84B966E2059A98A367DA`.
+Downstream rejection/publication/retirement assertions were not reached
+under RED and remain required GREEN checks; these reproductions do not establish
+third-party compatibility.
+
+The current Source42 libtest, integration, Product21 PE and its Cargo-listed PDB
+were copied to `E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/source42-red-baseline-r1/`.
+The four copies total900226560 bytes, match hashes and lengths of held originals,
+and leave the originals present. Retention receipt `3B6DC2DD...` and independent
+acceptance `DA7DCC86...` preserve this recovery baseline before future builds
+replace target aliases; no additional native qualification follows from copying.
+
+### Source43 native Render correction and rebuild checkpoint
+
+Root applied the exact six-line correction after independent acceptance of the
+six RED observations and final installer review. Original installer session23605
+ended at terminal2d3a77 with exit0, including handle release. Mutation receipt
+`E953DF36...`, independent actual acceptance `FF28AEF3...` and the retained exact
+B9D71E65 native preimage record the sole production write. Render, ROI or
+EndSequence failure and incomplete output now take precedence over recoverable
+persistent Error. Image-lifetime and auxiliary-fatal priorities stay ahead of
+that refusal; successful finite Error-only recovery still requires GREEN tests.
+
+Source43 freeze `82C9AC9D...` retains all1796 Source42 paths, changes only native
+Render to0493913E, and separately pins the unchanged fixture README. Its original
+issuer session78991 ended at terminalb3b90a with exit0. Independent acceptance
+`5CE2BF4A...` verified the complete current source closure. Fresh CMake built
+SessionProbe and official Basic with both command exits0; its producer receipt
+`0477BF66...` and new metadata receipt `E2C84709...` passed independent finite
+acceptance `6DA58006...`. Neither compilation nor freezing qualifies processing.
+
+The first Source43 App LibTest build failed before native tests: original
+session48880 ended at terminald8b6a4 with exit1; Cargo returned101 and stderr
+reported `rustc-LLVM ERROR: out of memory` and `Allocation failed`. Failed receipt
+`DC7AEAEF...` retains full source post-checks and zero cleanup errors; independent
+failure review `D07CB7BF...` preserves it. This does not establish a disk, physical
+memory or paging root cause. The retry reduces Cargo jobs from2 to1 without
+changing commands, profiles, source or test assertions.
+
+That retry reached linking but failed with MSVC LNK1318, PDB LIMIT(12), a distinct
+failure from the first LLVM allocation failure. Original session67809 ended at
+terminal52b9e1 with exit1; receipt `619FF44A...` and raw diagnostics are retained.
+The exact failed PDB (69151794 bytes,1E1055A8...) was copied and verified before
+its sole local alias was removed; retention receipt `40BDA8CE...` records the
+mapping. No specific PDB corruption or memory/disk cause is established.
+The third unchanged-profile jobs1 build completed: session27636 ended at
+terminalb4d3e4 with exit0, source receipt `556BB39E...`, actual fresh LibTest
+opt0/debug0/default features PE `07FB3FEC...`,144931328 bytes. Full source
+post-checks passed and cleanup errors were empty. No native tests ran in this
+build. Integration subsequently completed at terminal3cd92f/exit0, receipt
+`C541295C...`, current opt0/debug0 test PE `3F3D47CC...` (44130304 bytes).
+External test completed at terminalf379a5/exit0, receipt `9E4F4C8E...`, current
+test PE `A31329F9...` (31644160 bytes). Independent reviews `B54C2910...` and
+`476D654D...` accepted those finite builds, with full 1796-source post-checks.
+
+The normal product was built last, after all three test producers, under the
+same Source43 freeze. Root session64949/start0dd01a ended at terminalb62a7f
+with exit0. Receipt `54407A11...` binds the original normal-profile command,
+actual fresh=false opt1/debug2/default-feature PE `860EBABF...` (95335424
+bytes), PDB `DE4FD64F...` (615829504 bytes), producer `9E9F095C...` and log
+`E8750F4A...`. The jobs1 entry script `D98A9D8E...` preserves the product
+command and profile. This is build evidence only; native GREEN and regressions
+still require execution and independent acceptance.
+
+Actual GREEN DATA preparation used the admitted thin caller `230C44B3...`
+and unchanged original r3 Prepare. Session94847/start802e8b ended at
+terminale4a04d/exit0; generation receipt `D75CAA63...` is accepted DATA ONLY,
+with current Source43 Lib/Integration/Product images. It does not prove a
+native gate passed. Independent actual cohort acceptance `05B23531...`
+confirmed all four current PEs and normal-product LAST. Actual DATA admission
+`3294893F...` checked all 3696 input bindings and the thirteen unchanged
+positive manifests; Root then started the original GREEN13 Run.
+
+The current Source43 App ordinary gate completed first: Root
+session44812/startb94c52 ended at terminal0cc1c7/exit0. Its three actual Lists
+selected 2778 ordinary tests, with ignored native tests excluded by exact
+names. Execution receipt `7C8F310F...` and original controller receipt
+`292F5B1E...` report all 2778 passed, native/runner exit0, no deadline or
+outliving descendants, and successful descendant reaping. Native whole-gate
+elapsed time was 637134 ms under the original 1800-second budget. This is a
+regression execution measurement, not plugin processing or host-overhead
+performance evidence. Independent actual regression acceptance `1BFD62B4...`
+confirmed all three Lists (2904 total, 126 ignored, 2778 ordinary), each of
+the 2778 successful test lines against the exact ordinary List, the sole
+2778/0/0/126 summary and native Job settlement. This does not qualify the
+ignored plugin tests or the whole workspace.
+
+The original GREEN13 Run completed at Root terminal8ed751/exit0
+(session25519/startb36553). Execution receipt `1B4CB6DF...` reports all
+thirteen selected positive gates passed, full source post-checks passed,
+empty cleanup errors and no primary failure. This covers three joint native
+failure/Error cases in direct ABI and product residency, two complete-frame
+Error recovery controls, and five existing Error/official Basic controls.
+Independent actual runtime acceptance `B566602B...` checked all thirteen
+original controller receipts, exact one-test positive summaries and native,
+runner and controller exit0/settlement. This acceptance is limited to those
+controls; missing/nonfinite output combined with Error was not separately
+exercised.
+
+Supplemental13 actual DATA receipt `6D4E6B23...` was independently admitted
+by `8D2C80EE...`; it preserves the thirteen older image/lifecycle/parameter
+controls and does not substitute for the joint-error priority gates. Fresh
+BitCrush cases and manifests were generated under Source43 in Root
+session10551/startbf59e1, terminalab1f8b/exit0. Root DATA receipt
+`401BEA6B...`, case generation `37EC8585...`, packet `82B7795B...` and
+adapter receipt `612ABD18...` are DATA ONLY. The original plugin, pixel oracle,
+parameters and two 60-second positive rounds are preserved; their native
+execution completed at Root terminal9054e9/exit0 (session44810/start2621bb).
+Receipt `29778BD6...` reports both positive rounds passed with native, runner
+and controller exit0, source post-checks passed and empty cleanup errors.
+Independent runtime acceptance `DA005662...` verified all 18 output rasters,
+the original positive selectors and settled cleanup. PID-to-handle acquisition
+races and unavailable graph-worker PID observation remain explicit limitations.
+Same-input whole-test wall
+clocks were 3047/2883 ms in Source43 versus historical 2151/2091 ms in
+Source31; libtest summaries were 2.58/2.58 s versus 1.95/1.89 s. These are
+two smoke-test points including startup, metadata, I/O and lifecycle, without
+load control or repeated statistics. They establish neither a DSP regression
+nor a host-overhead performance target.
+
+Supplemental13 did not pass. Root session80468/start7c5f85 ended at
+terminal6e025b/exit1, aggregate `360211F1...`. Six gates passed before
+`supplemental-unfetched-resident` failed; the remaining six were not run.
+Its original native exit101/runner1/controller1 were settled and reaped without
+deadline or outliving descendants. The actual failure was before the first
+native frame: `CustomProcessorBudgetExceeded`, required34792928 bytes versus
+budget34636496 bytes, at the original integration test line1352. The failed
+aggregate's source post-check is false because the failure short-circuited that
+step; independent review `E55FB734...` checked all current 1796 sources and
+inputs separately and found matching hashes. The original failed receipt was
+preserved. This is an unresolved acceptance failure, not a passing native
+retirement test. No commit or compatibility upgrade is permitted on its basis.
+
+Read-only diagnosis locates the refusal in the Effects pre-DSP graph budget,
+which includes factory storage and feedback routing. The old test supplies
+only bare OpenFX session storage plus two rasters, and its retained-byte
+expectation likewise omits the factory's retained GUI pointer. Those test and
+production budget paths predate the current six-line native fix. The native
+render guard was not reached. A minimal test-only correction must preserve
+strict typed one-byte-shortfall and exact-fit controls, same-worker unfetched
+output rejection, unchanged input pixels, retirement and fresh-generation
+recovery. No production budget relaxation or hard-coded 156432-byte addition
+is authorized; the correction still requires independent review and actual
+validation under a new source freeze.
+
+Source43 strict workspace checking completed in Root
+session54985/start51d537, terminal18be6b/exit0. Receipt `C16AA915...`
+records the original `cargo clippy --locked --workspace --all-targets
+--all-features -- -D warnings`, jobs1/incremental0, 1796 source leases,
+four actual current PE pins, matching source/artifact post-checks and empty
+cleanup errors. Independent strict acceptance `55397DA3...` confirmed the full
+source/artifact bindings and the original command and terminal exit. A static-check pass does
+not remove the unresolved Supplemental13 runtime failure.
+
+Old build artifacts were retained with verified copies before individual local
+cleanup: six unbound scratch PEs (303347712 bytes) and sixteen stale target cache
+files (2081924946 bytes). Copy and cleanup receipts `53FC3EB7...`/`117A5DC2...`
+and `7ADF50BB...`/`29ADA736...` map the original paths to the external artifact
+store. The latter action excluded every current evidence binding and all selected
+filenames of current and failed producers. Source files, raw logs, fingerprints
+and current product/test artifacts were preserved. Historical runs referring to
+removed old paths require restoration from those mappings.
+
+Source43's four current executables and normal Product PDB were copied to a
+fresh external recovery directory without deleting their original files.
+Actual retention `E3B445B8...` and independent acceptance `F63A1D4F...`
+confirmed all five hashes and lengths (931870720 bytes total). This checkpoint
+preserves the already executed successes and the old Supplemental13 failure.
+
+The formatted test-only budget correction has passed independent static review
+`F9909E46...`, with integration preimage `274C4BC7...` and proposed image
+`2CB6BEB2...`. It queries the typed cold budget boundary, explicitly rejects
+minimum minus one without instances or quarantine changes, and admits the
+exact minimum. Its retained-byte assertion includes the complete factory and
+public feedback-route terms. Original positive pixels, same-worker stale-output
+rejection, retirement and fresh-generation recovery remain intact. This is
+permission to enter a new Source44 validation batch, not an executed native
+pass; Source43's failed receipt remains immutable.
+
+The controlled installation completed in Root session38511/start65efea,
+terminalbf5ed9/exit0. Mutation receipt `01498D75...` and independent actual
+acceptance `2E78179F...` confirm the exact integration change and its verified
+old-file backup, empty cleanup errors and all 1796 source hashes. New Source44
+freeze `89B37442...` has the same path set as Source43, with that one test-only
+delta; native Render remains `0493913E...`. The initial unexecuted installer
+was rejected for missing failure rollback; the admitted r2 restores the held
+verified preimage on mutation failure and preserves the primary error.
+
+Fresh Source44 CMake fixture build `3A40D1FD...` completed with the original r7
+producer and metadata capture completed under the new freeze. A separately
+recorded timestamp refresh `AE75C543...` changes only the native Render file's
+last-write time, with its 49597 bytes and hash unchanged, to trigger real Cargo
+recompilation. It deletes no cache and does not claim any Cargo artifact yet.
+Source44 Rust build, full positive native gates, ordinary regression and strict
+Clippy are still pending. Source43 outcomes are historical evidence and are
+not substituted for this new batch.
+
+The first Source44 Lib build did not produce a qualified artifact. Root
+session63022/start95e8ef ended at terminald74a95/exit1; receipt `D8A897FD...`
+records Cargo101, no selected artifact, matching source post-checks and empty
+cleanup errors. The raw LLVM error is an output-stream failure for lack of
+space. Independent review `2036777A...` verified this failed observation;
+it is neither a test failure nor a new native pass. The specific failed device
+and peak physical storage cost were not instrumented.
+
+Before retry, two old Product43 aliases at target/debug/mondrian.exe and
+target/debug/mondrian.pdb were removed only after matching their retained E
+copies. Cleanup `22C56A18...` and independent review `2036777A...` record
+711164928 bytes of logical file lengths, not a measured physical-space gain.
+The historical artifacts remain recoverable through `E3B445B8...`/`F63A1D4F...`.
+Further cache retention completed in Root session52747/startcf03e7,
+terminal3607c4/exit0. Receipt `A319BB9B...` records 406 verified recovery
+copies (2534582139 logical bytes), with matching source post-hashes and no
+cleanup errors. Root subsequently removed only the 243 copied symbols and
+failed Source44 codegen objects with no known current producer filename
+reference. Cleanup `8AF0D3B1...`/Root af66db/exit0 preserves the 163 PDBs
+referenced by current producer records, recovery mappings, source files,
+executables, Rust libraries, fingerprints and raw logs. The removed objects
+total 1991481211 logical bytes; observed C free space changed from
+1645944832 to 2948648960 bytes, without attributing that physical delta solely
+to this action. Historical paths require restoration from the retained copies.
+Source44 Lib retry r2 stopped without a terminal producer record: its tool
+handle became absent, and Root af2697/exit0 observed no Cargo, rustc or linker
+process. Observation `9B4ED9E7...` preserves the partial 565248-byte JSONL,
+zero-byte compiler log and absent source receipt. No Cargo exit or stopping
+cause is known; the current Lib executable was still the historical Source43
+artifact. This run qualifies neither a build pass nor an executed test failure.
+Retry r3 invokes the same admitted builder in a hidden helper; launch
+`63FED617...` records PID29264 and unchanged arguments. Root d29a0e/exit0
+observed that helper and its Cargo/rustc processes alive. Source bytes,
+jobs1/incremental0, test assertions and timeout budgets remain fixed; the new
+retry subsequently completed: original helper launch session80323 ended at
+Root fdfc8f/exit0. Receipt `D32508B7...` records Cargo0, a fresh=false Lib
+artifact `C8CBF8F0...` (144931328 bytes), all 1796 source leases and matching
+post-hashes, with no cleanup errors. This is build evidence only.
+
+Source44 Integration then completed at Root session32302/terminal9a3fb8/exit0.
+Receipt `EB6A437A...` selects fresh=false `F28EED8A...` (44135936 bytes)
+under the same freeze and original test command. External completed at Root
+session80328/terminal85d1a2/exit0; receipt `15A99F0A...` selects fresh=false
+`08778C0B...` (31644160 bytes). Both record source post-hashes and empty
+cleanup errors. Normal Product23 is now building last using the unchanged
+normal opt1/debug2 command, jobs1/incremental0; launch `894D38C6...` records
+hidden helper PID3136. Independent four-artifact validation and all Source44
+runtime gates remain pending.
+
+Normal Product23 subsequently completed: Root session65415 ended at
+terminal390a57/exit0. Receipt `E22D299A...` binds the full1796 Source44 freeze
+and actual JSONL `1FCAB888...`; its sole normal mondrian artifact is
+fresh=false, default features, opt1/debug2/test=false, with current executable
+`A20C67C9...` (95335424 bytes). Product started at 01:45:50.1162421Z,
+after External finished at 01:45:06.3720515Z and the other two test producers.
+Independent four-PE same-freeze/LAST acceptance `2FDA90B1...`/14b09a/exit0
+confirmed all four actual Cargo records, current PE hashes, original profiles,
+terminal success, one refreshed full1796 source pass and the recorded LAST
+ordering. Its target/source streams were released before DATA generation.
+No runtime result is implied by these builds.
+
+Independent resource review `B3877C97...`/001e9c/exit0 checked all 406
+retained E copies once, exact removed and preserved reference sets, and all
+1796 current source bytes. Its scope covers copy/cleanup custody and the r2
+unknown-stop observation; it asserts neither a global absence of historical
+references nor a Cargo exit or cause for the interrupted r2.
+
+Both admitted Source44 thin callers executed once at Root session48971,
+terminal403407/exit0. Main13 generation `D33E328C...` and Supplemental13
+generation `FE04A7F5...` record real Source44 Lib/Integration/Product inputs,
+fresh Source44 fixture and metadata, and the original plans and fixed executor
+pins. External is covered separately by the four-PE acceptance. Both DATA
+outputs have 13 groups, source1796/post-check=true, NativeExecuted=false and
+SelectedGatesPassed=false. Independent DATA admission `61505E7E...`/
+7ef79c/exit0 confirmed the actual 26 manifests, original plans and literal
+selectors, unchanged positive oracles and budgets, current source/artifact
+bindings and executor/host/shim pins. Main13 local execution began while this
+read-only review was finishing; it found no anomaly requiring interruption.
+
+Source44 Main13 completed at Root session72299/terminal1d80ad/exit0.
+Execution `BF65844D...` records 13 selected group passes, source1796 with
+matching post-checks, no failure and empty cleanup errors. Independent runtime
+acceptance `442E684E...`/02176a/exit0 confirmed all 13 actual native/runner/
+controller exits0, exact passed1/failed0/ignored0 output, source/artifact
+post-matches and complete reaping without deadlines or outliving descendants.
+It retains the original PID acquisition limitations and does not qualify full
+standard compatibility. Source43's Supplemental failure remains historical.
+
+Source44 Supplemental13 completed in Root session66986/terminalba5ebb/exit0.
+Execution `099620E7...` records all 13 selected passes, source1796/post=true,
+no failure and empty cleanup errors. This includes the old group7 and the
+previously unexecuted later six groups. Its selected whole test now passes
+the new typed cold refusal, minimum-minus-one refusal and exact-minimum
+controls along with the preserved stale-output, retirement and new-generation
+suffix. Independent raw acceptance `897FEF69...`/8b9da0/exit0 confirmed the
+complete original selected test body, all 13 native/runner/controller exits0,
+sole passed1 summaries, reaping without deadlines or outliving descendants,
+same44 source/artifact post-checks and empty cleanup errors. It separately
+preserved the actual old Source43 failure and does not claim global memory
+accounting or full standards compatibility.
+
+Source44 Bitcrush DATA preparation completed at Root session47275/
+terminald40dac/exit0 using the admitted BDBE thin caller. Packet `0A62D6B4...`
+and adapter `93BFFE1F...` bind the actual Product23 and External producers,
+same44 sources and original corpus/generator/Prepare/executor. Two cases were
+generated; no native plugin or Cargo operation ran. Independent DATA admission
+`ECDA1F6A...`/aa914a/exit0 confirmed the actual same44 bindings, original
+corpus, oracles, literal selectors and two whole60s positive budgets.
+
+The original Bitcrush executor then completed in Root session97006/
+terminald79fe5/exit0. Execution `A5891738...` records both selected rounds,
+native/runner/controller exits0, source1796/post=true, no failure and empty
+cleanup errors. Independent raw acceptance `3C22F360...`/d197e9/exit0
+confirmed all 62 native evidence files, two selected passed1/failed0/ignored0
+summaries, unchanged six-parameter descriptions and canonical authored values,
+graph-owner lifecycle, explicit shutdown/drop, and all 18 240-byte rasters
+byte-equal to the original neutral/posterized baselines. It preserves the PID
+acquisition race and unexposed graph PID limitations. Workflow elapsed time
+does not measure DSP cost; these selected passes do not qualify GUI, complete
+state handling, full compatibility or comparative performance.
+
+Ordinary App regression is running through the original generic 340F wrapper
+with the actual Source44 Lib proof and full freeze. Hidden helper launch
+`C2A7C964...` records PID19828/Root session95482, fresh output and unchanged
+arguments. Root 134528/exit0 observed the helper, libtest and runner alive.
+The original wrapper completed at Root session95482/terminalebb460/exit0,
+with actual helper exit0. Receipt `E1642FE9...` records Accepted=true,
+expected ordinary2778 and source1796. The raw terminal summary is 2778 passed,
+0 failed, 0 ignored, 126 filtered out, finished in 666.06s. Stderr is preserved,
+including the existing explicit panic_any test at audio_device_catalog.rs66;
+no test or assertion was removed. Independent ordinary acceptance `00FFEAF7...`
+/41c18d/exit0 confirmed all 2778 passed names, exact inventories2904/126/2778,
+original1800s/two-thread gate, native/runner exits0, reaping and all1796 current
+source bindings. Final stderr is 58429 bytes/C54543AF..., matching its retained
+controller binding; this final retained binding corrects the earlier reported
+57425-byte size.
+
+Strict Clippy is now running serially through the unchanged 6FA9 script and
+the exact four actual Source44 PE pins. Hidden launch `D997CEC8...`/
+Root session75003 records PID38312 and the complete literal invocation,
+with no source/profile/command modification. Its original workspace/
+all-targets/all-features/-D warnings checks completed at Root session75003/
+terminal14ac8b/exit0 with actual helper exit0. Receipt `E90BC989...` records
+Accepted=true, source1796/all source leases1796, all four current PE pins with
+matching source/artifact post-checks, jobs1/incremental0 and empty cleanup
+errors. Clippy raw log `82B17117...` ends in successful compilation. Helper
+stdout and stderr are retained separately. Independent strict acceptance
+`D3DA3245...`/322134/exit0 confirmed the original command, profiles/resources,
+source/artifact post-checks and actual exit0. The 2557-byte helper stderr
+`A183F5CA...` contains exactly two information CLIXML records from the original
+MSVC/StaticDXC enter script. The decoded invocation hash uses its actual
+UTF16LE encoding; no script or check was changed. All review streams are
+released. Final exact-scope code/document review gates the local commit;
+these checks do not qualify plugin compatibility or performance.
