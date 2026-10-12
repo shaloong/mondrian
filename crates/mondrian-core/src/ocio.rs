@@ -3607,10 +3607,11 @@ fn cpu_processor_from_static(
     let processor = processor
         .lock()
         .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
-    // Preserve OCIO's default optimizations and independent dynamic properties,
-    // but use precise native CPU log/exp/pow. SSE approximations can exceed the
-    // shared CPU/GPU parity bound when PQ decoding amplifies numerical error.
-    let flags = OptimizationFlags::DEFAULT.0 & !OptimizationFlags::FAST_LOG_EXP_POW.0;
+    // Preserve default graph optimizations and independent dynamic properties,
+    // but use precise native math and inverse-LUT evaluation. Approximate pow
+    // and rebaked forward LUTs introduce avoidable CPU error, amplified by PQ.
+    let approximate = OptimizationFlags::FAST_LOG_EXP_POW.0 | OptimizationFlags::LUT_INV_FAST.0;
+    let flags = OptimizationFlags::DEFAULT.0 & !approximate;
     let cpu = processor
         .optimized_cpu_processor(u64::from(flags))
         .map_err(|err| format!("OCIO CPU processor creation failed: {err}"))?;
