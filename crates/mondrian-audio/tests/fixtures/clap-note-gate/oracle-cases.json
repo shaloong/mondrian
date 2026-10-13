@@ -1,0 +1,74 @@
+{
+  "status": "DECLARED_INDEPENDENT_NATIVE_PCM_ORACLES_NOT_EXECUTED",
+  "class_id": "org.mondrian.fixture.note-gate",
+  "input_note_port_ids": [0, 2147483671],
+  "events_apply_before_sample": true,
+  "normal_note_end_header_time": 4294967295,
+  "ends_emit_after_named_sample": true,
+  "cases": [
+    {
+      "name": "zero_on_two_ports_gain_and_independent_release",
+      "frames": 14,
+      "input_pcm": "ones",
+      "initial_gain": 1,
+      "initial_scenario": 0,
+      "events": [
+        {"sample": 2, "kind": "on", "pckn": [0,0,60,10], "velocity": 0},
+        {"sample": 2, "kind": "on", "pckn": [1,0,60,11], "velocity": 1},
+        {"sample": 4, "kind": "parameter", "parameter_id": 17, "value": 0.5},
+        {"sample": 5, "kind": "off", "pckn": [0,0,60,10], "velocity": 0.25},
+        {"sample": 9, "kind": "off", "pckn": [1,0,60,11], "velocity": 1}
+      ],
+      "expected_pcm_rationals": ["0","0","5/32","5/32","5/64","5/64","19/256","9/128","17/256","1/16","3/64","1/32","1/64","0"],
+      "expected_note_ends": [
+        {"after_sample": 8, "pckn": [0,0,60,10]},
+        {"after_sample": 12, "pckn": [1,0,60,11]}
+      ],
+      "expected_exact_off_count": 2,
+      "alternate_block_partitions": [[14],[3,2,4,5],[1,1,1,1,1,1,1,1,1,1,1,1,1,1]]
+    },
+    {
+      "name": "same_port_same_key_distinct_ids_do_not_merge",
+      "frames": 11,
+      "input_pcm": "ones",
+      "initial_gain": 1,
+      "initial_scenario": 0,
+      "events": [
+        {"sample": 0, "kind": "on", "pckn": [0,0,60,20], "velocity": 0},
+        {"sample": 0, "kind": "on", "pckn": [0,0,60,21], "velocity": 1},
+        {"sample": 1, "kind": "off", "pckn": [0,0,60,20], "velocity": 0},
+        {"sample": 6, "kind": "off", "pckn": [0,0,60,21], "velocity": 0}
+      ],
+      "expected_pcm_rationals": ["3/32","3/32","11/128","5/64","9/128","1/16","1/16","3/64","1/32","1/64","0"],
+      "expected_note_ends": [
+        {"after_sample": 4, "pckn": [0,0,60,20]},
+        {"after_sample": 9, "pckn": [0,0,60,21]}
+      ],
+      "expected_exact_off_count": 2,
+      "alternate_block_partitions": [[11],[2,3,6]]
+    },
+    {
+      "name": "early_end_then_original_off_and_later_new_voice",
+      "frames": 10,
+      "input_pcm": "ones",
+      "initial_gain": 0.25,
+      "initial_scenario": 1,
+      "events": [
+        {"sample": 0, "kind": "on", "pckn": [1,3,61,30], "velocity": 0.5},
+        {"sample": 2, "kind": "parameter", "parameter_id": 17, "value": 0.5},
+        {"sample": 3, "kind": "parameter", "parameter_id": 19, "value": 0},
+        {"sample": 4, "kind": "off", "pckn": [1,3,61,30], "velocity": 0},
+        {"sample": 4, "kind": "on", "pckn": [0,0,60,31], "velocity": 1},
+        {"sample": 5, "kind": "off", "pckn": [0,0,60,31], "velocity": 0}
+      ],
+      "expected_pcm_rationals": ["3/128","3/128","0","0","1/32","1/32","3/128","1/64","1/128","0"],
+      "expected_note_ends": [
+        {"after_sample": 1, "pckn": [1,3,61,30]},
+        {"after_sample": 8, "pckn": [0,0,60,31]}
+      ],
+      "expected_exact_off_count": 2,
+      "alternate_block_partitions": [[10],[1,1,3,5]],
+      "negative_variant": "change first Off tuple to [0,3,61,30]; fixture returns Process Error and exact_off_count remains zero"
+    }
+  ]
+}

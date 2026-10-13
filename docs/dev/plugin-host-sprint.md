@@ -3349,3 +3349,60 @@ It rechecks the last inventory/execution and1987 current input hashes, retains
 the original negative evidence and distinct source scopes, and finds no blocker
 for this finite M1 submission. The next implementation is M2's existing Track
 rack/worker Note and copied End route, followed by M3 zero-input admission.
+
+### 2026-10-14 Owned CLAP NoteGate fixture controls
+
+The original MIT fixture is integrated at
+`crates/mondrian-audio/tests/fixtures/clap-note-gate`. It uses only the existing
+official CLAP1.2.10 ABI, one mono PCM input/output, two stable Note input IDs
+(0 and0x80000017), eight fixed native voice/pair records and a four-sample
+release. Its controlled End modes and three independent dyadic PCM vectors
+are test inputs, not plugin-name compatibility rules or an instrument graph.
+
+Independent R1 reviewCB28211F found constant-input/in-place feedback and a
+factory-thread-bound destroy leak. The integrated implementation caches the
+original constant scalar and destroys on the actual main/inactive lifecycle,
+including failed init. Root also removed the unnecessary main/audio predicate
+exclusivity, permitted by the official ThreadCheck contract. Four real ABI
+controls exercise factory creation on another OS thread, successful and failed
+main init/Box destruction, dual-role main lifecycle, and exact in-place versus
+disjoint PCM with zero-velocity On and an in-block Gain change. Three pure DSP
+controls cover same-key distinct IDs, release and early-End pairing capacity.
+The ABI controls call the fixture's actual tables and callbacks in the libtest;
+they do not dynamically load the fixture DLL or route Notes through Mondrian.
+
+The first strict run failed only for a collapsible_if in flush, receipt
+`8C730902C25F1FEDD49DF0169079A515912368679A604E805BB7353C283D10FD`.
+It is retained with its original source/artifacts. An equivalent let-chain
+preserves the original assertions. Current99-input freeze is
+`6461D28E167E5B0A58791D0212C8817E4CF401993EFFD9A5554A7164064D3D20`.
+Offline locked fresh DLL/test builds passed, receiptsED625B49/EACEEC58;
+DLL is `B239C594F9547EE3A9F3FA107622A6FE663AAF73425E11248BDB1E0A0F32AF1D`,
+test PE is `D8853048B326775FBB0E87E969CCB1E8B6C3ED26CE29EE0A1D7A441A9E2DC148`.
+All-targets/all-features Clippy -D warnings passed with zero diagnostics,
+receiptCF65C8C0, and formatting passed. No dependency download or new license
+restriction was introduced. This separate fixture graph does not require a
+normal Product rebuild or a new FFmpeg ABI claim.
+
+The existing bounded native inventory preserves seven ordinary/no ignored tests.
+Two fixed native groups each passed7/0; each actual inventory name occurs once
+as ok in each raw output. The original controller's exact summary and Job owner
+gates passed, with native/runner0, descendants reaped, no deadline, outliving,
+input change or cleanup failures. Execution receipt is
+`2DD7E2E808072E03944E10DEEEFE675454412DDBE865475046DC77CD043E1EFA`.
+This qualifies the observed Windows fixture controls only. Actual copied End
+callbacks across block partitions, dynamic DLL/worker/DAG Note delivery,
+parameter/Off/On ordering, root admission, physical realtime, third-party
+compatibility and M3 zero-input processing remain pending.
+
+The private parent Note ledger is still a scratch candidate, not installed or
+compiled. Root requested preparation of unbound fixed storage before successful
+Enter/bind so the first epoch cannot introduce allocation; actual whole-window
+reservations, port/wire binding and Hosted custody must precede M2 acceptance.
+
+Final fixture-only independent review is
+`.scratch/plugin-host-sprint/note-gate-actual-commit-review-r1/report.md`.
+It confirms the actual source/producer/strict/inventory/two native groups,
+checks exact old-source reconstruction for the flush style change, retains
+the negative strict record, and finds no blocker to this finite fixture commit.
+Review SHA-256: `BE23EFB246E34D21C30C8D048CB5AD8AD60B52D951FBF4D4C8374C07D092D63A`.

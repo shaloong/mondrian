@@ -1,0 +1,14 @@
+[package]
+name = "mondrian-clap-note-gate-fixture"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+clap-sys = { path = "../../../../../vendor/clap-sys" }
+
+[workspace]
