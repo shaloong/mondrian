@@ -2841,3 +2841,164 @@ Final independent actual R2/R3/quality and scoped integration review is
 (SHA-256 `CF6357AA45E89400F2AF25A984893F442446F98D17B7616C242E8C134C5A85C4`).
 It accepts integration of the private fail-closed diagnostic behavior while
 retaining the initial unexplained Windows startup failure as an open risk.
+
+## Same-call CLAP parameter observations — current unintegrated checkpoint
+
+The next slice preserves the original count/info/value callbacks and parameter
+admission rules. An exact private environment opt-in records fixed owned numeric
+scalars from those same callbacks, after native return and original conversion.
+Missing/false output is unavailable; current values stay separate from defaults.
+No extra query, native pointer/cookie retention, callback I/O, parameter authority
+or processing path is introduced. Capture is capped at 1024 rows; failure text
+appends an ASCII suffix capped at 640 bytes, subject to the existing outer packet
+limit and explicit truncation. The ordinary path remains off.
+
+Current Audio no-run source manifest SHA-256 is
+`799FFC80E6594E7E9582E7ED053F5B76EC587392818FC07475381ACC20101C04`;
+receipt SHA-256 is
+`F954A189D9EFC310D18E823EC23B3C3D8251A14307E471F61F36D9F00791BB83`.
+The actual opt1/debug0 normal Audio test PE is
+`2F4A012556DE60C057A5137194E43299D7A6DEA608DAAF8C132CB83BA5D4FD04`.
+All 1903 selected source inputs were unchanged with empty cleanup failures.
+The real owned typed-instance collector/public-method test passed one/zero;
+seven scalar/structure contract tests passed seven/zero. Actual inventory is
+464 total, 76 ignored, 388 ordinary, preserving all previous entries.
+
+The first owned selection controller exceeded the Windows command-line extent
+with 557 arguments. It produced no native owner or test-body output; its failed
+receipt remains `443E2E0E41643E96CFD4768DAEC31E3FF875AFF94C9BEA187E1B8AF00293EE37`.
+The successor proves two short selections contain exactly the same eight oracles.
+Its ordinary Audio execution **failed**: 387 passed, one failed at the unchanged
+successful-child fixture with `0xc0000142`. Receipt SHA-256 is
+`F7E58E02E3229C7433B06F4A9605246C83FC60D9A055629EAEDB1A764E988203`.
+The native owner exited 101, runner one, with all descendants reaped and no
+deadline/outliving/errors. Inputs remained unchanged and cleanup was empty.
+The failure is the previously recorded Windows initialization symptom; these
+results establish neither its root cause nor a regression caused by observation.
+Ordinary regression and integration remain unaccepted.
+
+Audio strict all-target/all-feature Clippy and fmt passed. The standalone Clack
+strict gate first rejected two existing MSRV/constant-assertion issues, minimally
+repaired without changing the integer bits or width predicate. The next strict
+gate rejected `borrowed_box` on the pre-existing complete-allocation owner API;
+independent review confirms that retaining `&Box<T>` has a real ownership-proof
+purpose. Its narrowly justified quality repair and recheck remain pending. The
+actual negative quality receipt remains
+`3A98BB1A5A925EE6FA4B7950C12238233553A68825FCE32B3530E624A93CC340`.
+
+Independent actual source/producer/R3 review is
+`.scratch/plugin-host-sprint/clap-airwindows-observation-slice-r1/audio-current2-r3-actual-review-r1.md`
+(`2F4379C3C8A7812DB265BBF72C3489DF47A3C9A60C78B3B17771F274728F9B32`).
+The same directory retains the next Windows ETW diagnosis proposal and the
+Box-owner lint review. No actual loader trace or module attribution is claimed.
+Fresh normal Product compilation then passed, opt1/debug2, normal features and
+FFmpeg ABI 62/60, with zero compiler errors and ten existing OFX warnings. Its
+receipt SHA-256 is
+`4C4313EFD45B36EB4265D6A632203E630FBB3E48746EB05008735D5D2DB1FBB2`;
+PE SHA-256 is
+`AEA76E779A0F9044C8CFA2156B98C3C91CA0B41C2D17DE34DBBB8F013BCA1987`.
+Product and Audio contain the same 1903 source records; their container JSON
+hashes differ because Product wraps the source array. Inputs remained unchanged
+and cleanup was empty. This is a build result, not GUI or regression acceptance.
+
+Two explicit off/on pairs then ran the original exact ignored Airwindows PCM
+test with its original expected-one gate and 180-second native deadline. All
+four original positive gates failed, native exit101/runner1; all four owners
+settled without deadline/outliving/errors. Inputs remained unchanged with empty
+cleanup. Evidence-only replay receipt SHA-256 is
+`0FFE0EEE9A455D53E1EC7EAE7F78B0F3599A4204D043E5A292AA940BA1F34489`.
+Only pair1/on contains the new complete scalar suffix: the actual `get_info`
+callback returned true at parameter index8/nativeID2944917348 with default bits
+`C79D08E100000000`, outside min/max `0000000000000000`/`3FF0000000000000`.
+Raw, converted and copied default bits are identical; current bits remain zero.
+The capture reports14 rows, no incomplete flag and suffix truncation zero. The
+fresh zeroed-constructor numeric fact is not a generic native writer trace.
+This excludes a conversion/copy change in that observation; it does not identify
+the native instruction or authenticate plugin behavior. The pinned official
+`vendor/clap-sys/official/include/clap/ext/params.h:255` requires the default to
+be within min/max. The original rejection remains appropriate for this sample.
+
+Other rounds fail at structural default comparison or the earlier author schema
+comparison; their successful query captures were not retained and must not be
+represented as raw observations. There are no qualified complete PCM partitions.
+Airwindows compatibility, binary/source root-cause attribution, other platforms,
+realtime and full standard qualification remain false. This slice is implemented
+but not fully verified and is not yet committed or integrated.
+
+Final independent actual Product/replay review is
+`.scratch/plugin-host-sprint/same-call-consumer-independent-review-r1/fresh-product-actual-off-on-replay-review-r1.md`
+(`B15AAA8A4CDD7D3FD22F93F780E17965151E0CA89419C5E80C57BB949BA2ABA8`),
+including 2061 actual retained input rechecks with no mismatch. The unchanged
+Clack source verifier also ran against the new source and rejected its unupdated
+local-delta shipped hash. Actual negative provenance receipt is
+`CEE145DD25CDCC3DECFA8671A08839FD5776E86E11674A2E75E8412939413EA0`.
+The new API/Common local-delta documentation must be closed using the original
+checker before integration; no provenance rule was weakened. Recovery state and
+the external, repository-excluded ROADMAP location are recorded in
+`.scratch/plugin-host-sprint/clap-param-observation-progress-r1.json`.
+### 2026-10-13 current3 Clack quality and source closure
+
+The current2 source/build/replay results above are historical. The current3
+source array is `E4CCBFE791D46D5601EBC55A30D8DE812A019B4A882284EF3C2204F47A880C40`
+(1903 records). Audio no-run receipt is
+`4559B795561200E211D056A9780369F5C8A0FB39921D9937F027A671F6063B66`,
+with actual opt1/debug0/features[] test PE
+`ED30972B3DE3ACEEF91B0C08FBA6E7511523BB2E7AE6C6BC47C4156574C5A2F5`.
+No current3 ordinary execution or startup repair is claimed at this checkpoint.
+The current2 Audio/Product binaries and their source manifests were copied to
+`clap-param-current2-native-archive-r1` before target reuse; receipt
+`B1EF76C6E68CA720AE4697643733553356F29302099598A943AD3D9AC62C87C1`.
+
+Clack retains the complete-allocation `&Box<T>` API, with only a function-local,
+justified `borrowed_box` expectation. Its common integer conversion preserves
+nonnegative bits and Rust 1.85 compatibility; the width assertion is unchanged.
+The next strict gate exposed the new observer test module's placement and four
+missing formal Safety sections. Those were fixed without changing signatures,
+function bodies or the two tests' 33 assertions. Independent source review is
+`param-api-safety-quality-followup-review-r1.md`, SHA-256
+`5609053644C3282AC65F6B89EE8824BA7F94A8A8657D090004A948EEEC7D81C3`.
+All previous strict failures remain retained.
+
+Current3 strict Clack four-feature/all-target and Audio all-target/all-feature
+Clippy passed with `-D warnings`, zero errors/warnings, and both Vendor and
+Workspace format checks passed. Actual receipt is
+`E526CDB48E0E2E07A04C9F6A8E38574D159177898AC02CBDB0F4CF8A62CB4394`.
+Fresh standalone Vendor no-run receipt is
+`557CC9AAD4392AF920BC3E31FD6F1C44A367AEF94AE23FC59D4CD08A4BC02FFF`,
+with opt0/debug2 PE
+`1DE99E8A6FCE363333D49CD0E682C376F1E36AEE02C1536DE08252A4F507F4E5`.
+The two exact owned SDK callback tests passed 2/0 through the original finite
+Job/deadline/settlement controller, with no cleanup failures or changed inputs;
+receipt `2BF0429F544A38E34FCD69ED5DE06724CF01C05E5628F63E907118D2BB607542`.
+This qualifies that SDK contract subset, not native third-party processing.
+
+The original, unmodified Clack source checker now passes all 252 shipped files.
+Current provenance binds parameter source E238/29391B and preserves the old C986
+history endpoint; current manifest SHA-256 is
+`AC97D7514BB6ADBA5D33F305E2076AC7C6BC15DADD7BF44E690B640DF95D3B5C`.
+Actual checker receipt is
+`0C6AAF2FA47CDEACFDD6DB7FB554C062928CAC84E52E9656F975A640A2226666`.
+An intermediate WindowsApps Python alias failed to launch (Exit null); its
+negative r3 receipt is retained, and supplies no checker execution evidence.
+The successful r4 invokes the bundled Python explicitly. Source verification
+is separate from runtime, ABI, realtime, platform and compatibility qualification.
+
+Windows ETW admission returned OS AccessDenied; no ETL/session/native workload
+was created. This was an OS privilege limit after tool approval, not an automatic
+approval-review rejection. Receipt is
+`C656AAE4EBE55A692E3CC234A701625B69C2AEAFABB8634470730AED81E2314A`.
+A default-off Windows cfg(test) diagnostic now observes the original success
+fixture's wait result and a parent-held fixture-entry marker. It changes no
+creation flags, polling, process owner, deadline or assertion. It has been
+independently reviewed and compiled; native evidence is pending. Diagnostic I/O
+changes the experimental condition; a missing marker is not proof of pre-main
+failure, and raw handle text does not prove handle inheritance. The earlier
+ordinary 387/1 and real Airwindows four failed gates remain unaccepted.
+
+A01 shared-event CCR `3A13F51A1FC80F10826E377F6CD42A0BBB25334B6A453F75102DDF55D5E495EC`
+confirms that historical sealed proposals are not implemented author/note DSP.
+Root approved only an isolated M1 author/persistence/selected-preparation-refusal
+candidate using the existing AudioProgram/transactions/compiler. M2 NoteGate,
+IPC/voice ownership and M3 zero-input Track generators remain unimplemented.
+The complete, live task ROADMAP is maintained outside this repository, with its
+path and recovery state in the existing scratch progress record.

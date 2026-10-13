@@ -50,6 +50,10 @@ impl<'a> HostStorageRef<'a> {
     }
 
     /// Borrow a complete Box allocation, including a DST's actual extent.
+    #[expect(
+        clippy::borrowed_box,
+        reason = "Box ownership proves a complete allocation; a generic payload reference does not"
+    )]
     pub fn from_box<T: ?Sized>(owner: &'a Box<T>) -> Self {
         Self::boxed_value(owner.as_ref())
     }

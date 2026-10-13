@@ -94,8 +94,9 @@
     {
       "path": "host/src/storage.rs",
       "upstream_sha256": null,
-      "shipped_sha256": "c9c16ef728dcbba15ca725fa4b4d40280179e65d66f1ac900709edf9d2fbff3b",
-      "reason": "borrowed SDK storage observers; explicit Arc payload/provider boundary; actual dense entry cache owner; repository format replay and declared module documentation ordering correction"
+      "shipped_sha256": "d05a4704a8c19d130b2b13874ef896e16c08062b5ae05d5f3abc8ae633998542",
+      "reason": "borrowed SDK storage observers; explicit Arc payload/provider boundary; actual dense entry cache owner; repository format replay and declared module documentation ordering correction; function-local borrowed_box lint expectation preserves Box-owned CompleteAllocation type proof, constructor body and ArcPayload distinction",
+      "shipped_bytes": 4489
     },
     {
       "path": "host/tests/sdk-storage.rs",
@@ -136,8 +137,9 @@
     {
       "path": "MONDRIAN.md",
       "upstream_sha256": null,
-      "shipped_sha256": "bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158",
-      "reason": "local packaging note + bounded Host Log callback contract/oracle; no upstream byte-identity or unapplied ABI migration claim; thread-safe GUI false-reply documentation matches sealed clap-gui-refusal-v1 iteration-1 manifest; repaired stale metadata only"
+      "shipped_sha256": "637495f8922be3fa144403256fe793b69fa2223d95818a0f640f5c04428424b3",
+      "reason": "local packaging note + bounded Host Log callback contract/oracle; no upstream byte-identity or unapplied ABI migration claim; thread-safe GUI false-reply documentation matches sealed clap-gui-refusal-v1 iteration-1 manifest; repaired stale metadata only; document same-call diagnostic API and opt-in startup consumer, MSRV expression and Box owner lint proof; preserve historical formatting/note-port and runtime qualification boundaries",
+      "shipped_bytes": 6376
     },
     {
       "path": "host/tests/log_observation.rs",
@@ -286,14 +288,22 @@
     {
       "path": "extensions/src/params/host.rs",
       "upstream_sha256": "eec403506a0068459dc5941538a538064b62ea809c2db88dcdad8c1c25695fa8",
-      "shipped_sha256": "46f4adefb823d163a2ff5fe164abf0a5bb1bccb4815c125da10abbf851599d91",
-      "reason": "retain original parameter rescan/clear/info flag bits for bounded typed native-source admission; unknown flags are not silently truncated"
+      "shipped_sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
+      "reason": "retain original parameter rescan/clear/info flag bits for bounded typed native-source admission; unknown flags are not silently truncated; additive same-call diagnostic observer shares the original single native query and Option conversion; missing/false raw output unavailable; no extra query or admission change; formal Safety documentation for the four new unsafe helpers/callbacks and owned test module moved after production items without body changes",
+      "shipped_bytes": 29391
     },
     {
       "path": "extensions/src/note_ports/host.rs",
       "upstream_sha256": "2d71c1c0eb5ee98f7c44d88c573a295eebddf5dc6f918560f512e499d6cdb011",
       "shipped_sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
       "reason": "Additive immutable raw NotePort metadata count/get availability and owned zero-initialized POD accessors; typed API unchanged; candidate not compiled/native qualified"
+    },
+    {
+      "path": "common/src/utils/abi_field_values.rs",
+      "upstream_sha256": null,
+      "shipped_sha256": "9ee75ac5f19a98345f2a7822d14df72e276bdf9e1984cb03e3441141f2ae831c",
+      "shipped_bytes": 27472,
+      "reason": "local checked ABI value projection retained; const native-endian nonnegative u32 conversion and inline-const target-width guard fit MSRV 1.85 with identical predicates/carrier types"
     }
   ],
   "shipped_files": [
@@ -314,8 +324,8 @@
     },
     {
       "path": "MONDRIAN.md",
-      "sha256": "bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158",
-      "bytes": 3274
+      "sha256": "637495f8922be3fa144403256fe793b69fa2223d95818a0f640f5c04428424b3",
+      "bytes": 6376
     },
     {
       "path": "README.md",
@@ -799,8 +809,8 @@
     },
     {
       "path": "extensions/src/params/host.rs",
-      "sha256": "46f4adefb823d163a2ff5fe164abf0a5bb1bccb4815c125da10abbf851599d91",
-      "bytes": 11285
+      "sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
+      "bytes": 29391
     },
     {
       "path": "extensions/src/params/plugin.rs",
@@ -1204,8 +1214,8 @@
     },
     {
       "path": "host/src/storage.rs",
-      "sha256": "c9c16ef728dcbba15ca725fa4b4d40280179e65d66f1ac900709edf9d2fbff3b",
-      "bytes": 4338
+      "sha256": "d05a4704a8c19d130b2b13874ef896e16c08062b5ae05d5f3abc8ae633998542",
+      "bytes": 4489
     },
     {
       "path": "host/src/util.rs",
@@ -1554,8 +1564,8 @@
     },
     {
       "path": "common/src/utils/abi_field_values.rs",
-      "sha256": "c24b934f1923b9d379e5cf96e4eafd50f4aa43e6f5f9ba2bf8dc11aecd6a0ac3",
-      "bytes": 27359
+      "sha256": "9ee75ac5f19a98345f2a7822d14df72e276bdf9e1984cb03e3441141f2ae831c",
+      "bytes": 27472
     }
   ],
   "self_receipt": "PROVENANCE.json is independently hashed by collection/validation; it is not recursively listed in shipped_files",
@@ -1572,6 +1582,70 @@
     "file_count": 37,
     "official_input_bytes_unchanged": true,
     "generated_abi_bytes_unchanged": true,
+    "runtime_qualification": false
+  },
+  "local_same_call_and_quality_revision": {
+    "schema": 1,
+    "status": "DECLARED_LOCAL_REVISION_NOT_RUNTIME_QUALIFICATION",
+    "previous_provenance_sha256_raw": "6b0c98f886f807fa454a7324fb25fe2824d250072c06c00dac68a5b3146424b8",
+    "historical_formatting_receipt_sha256_raw": "616b67d39bbd90ef55eacfc6a577a07959e035084e452097cbf1df241ed0ec1f",
+    "historical_note_port_receipt_sha256_raw": "f938f528e3f7331b1d93d9235a73710702df05bfdd94676dc935ec0861547e7c",
+    "sealed_receipts_unchanged": true,
+    "files": [
+      {
+        "path": "extensions/src/params/host.rs",
+        "previous_shipped_sha256": "46f4adefb823d163a2ff5fe164abf0a5bb1bccb4815c125da10abbf851599d91",
+        "previous_reported_bytes": 11285,
+        "apply_preimage_sha256": "c9865e5889fdc1c589d635ae1b3b83b661b75993a9dae145dda04736cecc8220",
+        "apply_preimage_bytes": 28572,
+        "shipped_sha256": "c9865e5889fdc1c589d635ae1b3b83b661b75993a9dae145dda04736cecc8220",
+        "shipped_bytes": 28572,
+        "reason": "additive same-call diagnostic observer shares the original single native query and Option conversion; missing/false raw output unavailable; no extra query or admission change"
+      },
+      {
+        "path": "common/src/utils/abi_field_values.rs",
+        "previous_shipped_sha256": "c24b934f1923b9d379e5cf96e4eafd50f4aa43e6f5f9ba2bf8dc11aecd6a0ac3",
+        "previous_reported_bytes": 27359,
+        "apply_preimage_sha256": "9ee75ac5f19a98345f2a7822d14df72e276bdf9e1984cb03e3441141f2ae831c",
+        "apply_preimage_bytes": 27472,
+        "shipped_sha256": "9ee75ac5f19a98345f2a7822d14df72e276bdf9e1984cb03e3441141f2ae831c",
+        "shipped_bytes": 27472,
+        "reason": "local checked ABI value projection retained; const native-endian nonnegative u32 conversion and inline-const target-width guard fit MSRV 1.85 with identical predicates/carrier types"
+      },
+      {
+        "path": "host/src/storage.rs",
+        "previous_shipped_sha256": "c9c16ef728dcbba15ca725fa4b4d40280179e65d66f1ac900709edf9d2fbff3b",
+        "previous_reported_bytes": 4338,
+        "apply_preimage_sha256": "c9c16ef728dcbba15ca725fa4b4d40280179e65d66f1ac900709edf9d2fbff3b",
+        "apply_preimage_bytes": 4338,
+        "shipped_sha256": "d05a4704a8c19d130b2b13874ef896e16c08062b5ae05d5f3abc8ae633998542",
+        "shipped_bytes": 4489,
+        "reason": "function-local borrowed_box lint expectation preserves Box-owned CompleteAllocation type proof, constructor body and ArcPayload distinction"
+      },
+      {
+        "path": "MONDRIAN.md",
+        "previous_shipped_sha256": "bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158",
+        "previous_reported_bytes": 3274,
+        "apply_preimage_sha256": "bc1801148ce69b8d375fd07c00ded9fa248f242c98499e3b46e41918855e5158",
+        "apply_preimage_bytes": 4071,
+        "shipped_sha256": "637495f8922be3fa144403256fe793b69fa2223d95818a0f640f5c04428424b3",
+        "shipped_bytes": 6376,
+        "reason": "document same-call diagnostic API and opt-in startup consumer, MSRV expression and Box owner lint proof; preserve historical formatting/note-port and runtime qualification boundaries"
+      }
+    ],
+    "verification": "Current checker verifies shipped hashes and upstream identities; this additive history is independently reviewed and PROVENANCE itself is externally hashed, never recursive",
+    "runtime_qualification": false
+  },
+  "local_param_query_quality_followup": {
+    "schema": 1,
+    "status": "SAFETY_DOCUMENTATION_AND_TEST_ORDER_CORRECTION_NOT_RUNTIME_QUALIFICATION",
+    "previous_provenance_sha256_raw": "5b13a3714134fec058241b1bac191710da97f7cfc6295ad10bb6c4e01df66c9e",
+    "path": "extensions/src/params/host.rs",
+    "previous_shipped_sha256": "c9865e5889fdc1c589d635ae1b3b83b661b75993a9dae145dda04736cecc8220",
+    "previous_shipped_bytes": 28572,
+    "shipped_sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
+    "shipped_bytes": 29391,
+    "reason": "Add formal Safety sections for the original new single-query helpers and owned C callbacks; move the two-test module after production items. Signatures, callback counts, function bodies and assertions remain unchanged; original strict failures and historical revision endpoints are preserved.",
     "runtime_qualification": false
   }
 }

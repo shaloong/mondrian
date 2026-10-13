@@ -20,7 +20,8 @@ const fn checked_i32_to_u16(value: i32) -> u16 {
 
 const fn checked_i32_to_u32(value: i32) -> u32 {
     assert!(value >= 0);
-    value.cast_unsigned()
+    // Preserve the nonnegative integer bits using const APIs available at our MSRV.
+    u32::from_ne_bytes(value.to_ne_bytes())
 }
 
 const fn checked_i32_to_u64(value: i32) -> u64 {
@@ -38,7 +39,7 @@ const fn checked_i32_to_u64(value: i32) -> u64 {
 
 const fn checked_i32_to_usize(value: i32) -> usize {
     assert!(value >= 0);
-    assert!(usize::BITS >= u32::BITS);
+    const { assert!(usize::BITS >= u32::BITS) };
     // Parameter bounds above prove every accepted value fits.
     #[allow(
         clippy::cast_possible_truncation,

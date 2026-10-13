@@ -67,3 +67,41 @@ plugin background thread, after warming the real wrappers. Thread construction,
 teardown, assertions and printing are outside its System allocation interval.
 This narrow control does not establish a product GUI lifetime, audio-role
 deadline, all SDK allocation ownership or third-party plugin compatibility.
+
+## Same-call parameter query observer
+
+The additive `get_info_observed` and `get_value_observed` methods report owned
+numeric evidence from the one existing native callback and its original
+conversion. Ordinary methods share that core with no observer. Missing or false
+metadata output is unavailable and is never read; successful raw and converted
+numeric bits remain separate, including a reserved identity rejected by the
+original conversion. Current value is separate from metadata default. A fresh
+buffer construction fact is not a generic before-memory snapshot.
+
+These are diagnostic main-thread, non-realtime APIs. Observers must be bounded,
+must not requery or service the plugin, and must not change admission. Formatting
+and file publication belong to an outer owner. Observer panic behavior remains
+caller policy. Mondrian's private startup consumer is disabled unless
+`MONDRIAN_INTERNAL_CLAP_PARAMETER_SAME_CALL` is exactly `1`; it preserves the
+original queries, first refusal and structure comparison and appends a bounded
+error-only suffix. It does not use Host Log ingress or establish third-party,
+processing, performance, platform or hardware qualification.
+
+## MSRV and borrowed owner proof
+
+The Common checked nonnegative i32-to-u32 projection uses native-endian byte
+roundtrip const APIs available at MSRV1.85; its original negative-value guard
+remains. The unchanged usize target-width assertion is evaluated in inline
+const. Neither change alters an ABI carrier, exported constant or value range.
+
+`HostStorageRef::from_box` intentionally accepts `&Box<T>` to prove a complete
+Box allocation. A generic `&T` would also admit stack or Arc payload references
+under that label. Its function-local `clippy::borrowed_box` expectation documents
+this type proof while preserving the signature, body and distinct ArcPayload
+constructor. This does not relax a lint group or establish full allocator closure.
+
+The new source/documentation deltas inherit the unchanged upstream input and
+historical formatting/note-port receipts. Those sealed receipts retain their
+original endpoints; they do not claim to have formatted or qualified this later
+revision. PROVENANCE.json records the new actual shipped hashes and byte counts;
+its own hash is supplied independently by collection/validation.
