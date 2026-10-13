@@ -9,7 +9,9 @@ use super::clap_discovery::{
     fingerprint_clap_binary, inspect_audio_inputs, list_parameters, list_parameters_observed,
     probe_clap_plugin_registration_with_state, validate_parameters, ParameterQueryCapture,
 };
-use super::clap_main_services::{ClapHostMainThread, ClapNativeServicesShared};
+use super::clap_main_services::{
+    ClapHostMainThread, ClapNativeServicesOwner, ClapNativeServicesShared,
+};
 use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
 use super::clap_parameter_events::ClapInputEvents;
 use super::clap_signal_fields::ClapSignalFields;
@@ -112,6 +114,11 @@ impl ClapHostShared {
         Ok(())
     }
 
+    // Read the existing bounded callback source without retiring requests.
+    pub(super) fn has_unserviced_callbacks(&self) -> bool {
+        self.callback_requested.load(Ordering::Acquire)
+    }
+
     pub(super) fn restart_requested(&self) -> bool {
         self.restart_requested.snapshot().pending()
     }
@@ -201,7 +208,7 @@ impl HostHandlers for ClapHost {
 /// It is pinned by the existing HostWrapper allocation, not a second log Arc.
 pub(super) struct ClapNativeHostShared {
     pub(super) control: ClapHostShared,
-    pub(super) services: ClapNativeServicesShared,
+    pub(super) services: ClapNativeServicesOwner,
     pub(super) logs: super::native_audio_log::NativeAudioLogIngress,
 }
 
@@ -209,11 +216,26 @@ impl ClapHostShared {
     pub(super) fn with_native_logs(self) -> Result<ClapNativeHostShared, AudioProcessorHostError> {
         Ok(ClapNativeHostShared {
             control: self,
-            services: ClapNativeServicesShared::new(),
+            services: ClapNativeServicesOwner::Inline(ClapNativeServicesShared::new()),
             logs: super::native_audio_log::NativeAudioLogIngress::new()?,
         })
     }
 }
+impl ClapHostShared {
+    /// Explicit query-only ownership: caller and SDK refer to the one Arc
+    /// payload until native destroy returns. Other operations use inline services.
+    pub(super) fn with_retained_native_services(
+        self,
+        services: Arc<ClapNativeServicesShared>,
+    ) -> Result<ClapNativeHostShared, AudioProcessorHostError> {
+        Ok(ClapNativeHostShared {
+            control: self,
+            services: ClapNativeServicesOwner::Retained(services),
+            logs: super::native_audio_log::NativeAudioLogIngress::new()?,
+        })
+    }
+}
+
 impl<'a> SharedHandler<'a> for ClapNativeHostShared {
     fn initializing(&self, handle: clack_host::prelude::InitializingPluginHandle<'a>) {
         self.services.timer_available.store(

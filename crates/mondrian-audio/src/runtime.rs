@@ -1,5 +1,6 @@
 pub(crate) mod native_author;
 mod native_author_scope;
+mod preparation_admission;
 
 use crate::dependency::{
     select_program_window, selected_contribution_source_window, AudioDependencyClosure,
@@ -1311,6 +1312,21 @@ impl AudioProgramRuntime {
                 }
                 Arc::new(program)
             };
+            // Keep the selected-score M1 refusal and its endpoint error order.
+            // Empty-score Plans can already reserve their existing logical
+            // graph policy before descendants/media and immutable preparation.
+            // A pending ancestor remains in this same ledger while children
+            // are built; completion replaces only this local reservation.
+            let prepared_reservation =
+                if program.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
+                    Some(ledger.reserve_prepared_plan(
+                        sequence.id,
+                        output_id,
+                        PreparedAudioPlan::requested_base_logical_bytes(&program)?,
+                    )?)
+                } else {
+                    None
+                };
             let execution_demand = program.execution_demand();
             let nested_cache_frames =
                 contract.max_block_frames.clamp(1, NESTED_SOURCE_CACHE_FRAMES);
@@ -1460,7 +1476,11 @@ impl AudioProgramRuntime {
                 processor_resolver,
             )?);
             let session_footprint = plan.session_resource_footprint()?;
-            ledger.reserve_session(sequence.id, output_id, session_footprint)?;
+            if let Some(reservation) = prepared_reservation {
+                ledger.complete_prepared_session(reservation, session_footprint)?;
+            } else {
+                ledger.reserve_session(sequence.id, output_id, session_footprint)?;
+            }
             let session = AudioRenderSession::new(plan)?;
             let capacity = session.capacity();
             let realized_compensation_bytes = capacity

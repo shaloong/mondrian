@@ -28,6 +28,9 @@ mod processor_inspection_tests;
 #[path = "tests/note_model.rs"]
 mod note_model_tests;
 
+#[path = "tests/prepared_admission.rs"]
+mod prepared_admission_tests;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,

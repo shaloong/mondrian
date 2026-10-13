@@ -32,7 +32,8 @@ pub(super) enum NotePortFailure {
     ExhaustedCohort,
 }
 
-/// Inline in the actual SDK Shared owner. Raw callback flags are monotonic
+/// One actual SDK services owner: inline by default, retained only for v2
+/// query destruction observation. Raw callback flags are monotonic
 /// evidence; only the exact successfully scanned legal cohort may be retired.
 pub(super) struct NotePortRequests {
     cohort: NativeRequestMarker,
@@ -416,6 +417,295 @@ pub(super) fn probe_loaded(
     Ok(result)
 }
 
+/// Full same-instance metadata response; it does not grant Note execution.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClapNoteProcessingOfferV2 {
+    /// Exact full-processing response version; currently two.
+    pub schema_version: u32,
+    /// Same-instance identity/render/Note facts, with no execution authority.
+    pub notes: ClapNoteInputContractProbe,
+    pub(super) processing: super::clap_discovery::ProbeResult,
+}
+
+impl ClapNoteProcessingOfferV2 {
+    /// Borrow same-instance parameter facts; no copying or execution authority.
+    pub fn parameters(&self) -> &[super::ClapParameterDescriptor] {
+        super::clap_discovery::note_processing_parameters(&self.processing)
+    }
+    /// Borrow ordered auxiliary keys/layouts without exposing the private wire DTO.
+    pub fn auxiliary_inputs(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&str, mondrian_core::AudioChannelLayout)> + '_ {
+        super::clap_discovery::note_processing_auxiliary_inputs(&self.processing)
+    }
+    /// Actual activated instance's captured native latency, in sample frames.
+    pub fn latency_frames(&self) -> u32 {
+        self.processing.latency_frames
+    }
+    /// Actual activated instance's tail, expressed in the existing audio domain.
+    pub fn tail(&self) -> crate::AudioProcessorTail {
+        super::clap_discovery::note_processing_tail(&self.processing)
+    }
+    /// Exact requested mode, validated against the same-instance processing facts.
+    pub fn processing_mode(&self) -> crate::AudioProcessingMode {
+        super::clap_discovery::note_processing_mode(&self.processing)
+    }
+}
+
+fn check_processing_control(shared: &ClapHostShared) -> Result<(), AudioProcessorHostError> {
+    let source = shared.parameter_source.snapshot();
+    if shared.restart_requested() || shared.has_unserviced_callbacks() {
+        return Err(unavailable(
+            "CLAP Note processing offer has unresolved restart/main callback",
+        ));
+    }
+    if source.incomplete != 0
+        || source.publishing_output
+        || source.pending_output != 0
+        || source.pending_author_output != 0
+        || source.pending_controls != 0
+        || source.open_parameter_gestures != 0
+    {
+        return Err(unavailable(format!(
+            "CLAP Note processing offer has unresolved parameter source: {source:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn check_processing_sources(
+    shared: &ClapNativeHostShared,
+    inactive: bool,
+) -> Result<(), AudioProcessorHostError> {
+    check_role(shared, inactive)?;
+    if shared.services.wrong_thread.load(Ordering::Acquire)
+        || shared.services.flush_requested.load(Ordering::Acquire)
+    {
+        return Err(unavailable(
+            "CLAP Note processing offer has unresolved native role/flush request",
+        ));
+    }
+    check_processing_control(&shared.control)
+}
+
+fn check_destroyed_processing_services(
+    services: &super::clap_main_services::ClapNativeServicesShared,
+) -> Result<(), AudioProcessorHostError> {
+    services.note_ports.check()?;
+    if services.note_ports.snapshot().pending() {
+        return Err(unavailable(
+            "CLAP Note processing destroy left an unscanned raw Note request",
+        ));
+    }
+    if services.active.load(Ordering::Acquire)
+        || services.wrong_thread.load(Ordering::Acquire)
+        || services.flush_requested.load(Ordering::Acquire)
+    {
+        return Err(unavailable(
+            "CLAP Note processing destroy left active/role/flush observations",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn probe_loaded_processing_v2(
+    entry: &PluginEntry,
+    plugin_id: &str,
+    binary_sha256: [u8; 32],
+    state: Option<&[u8]>,
+    render: AudioRenderContract,
+) -> Result<ClapNoteProcessingOfferV2, AudioProcessorHostError> {
+    super::clap_note_input_metadata::validate_request(plugin_id, state)?;
+    let max_frames = u32::try_from(render.max_block_frames)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .ok_or_else(|| invalid("CLAP Note processing probe block extent is invalid"))?;
+    if render.sample_rate == 0 {
+        return Err(invalid("CLAP Note processing probe rate is invalid"));
+    }
+    let id = std::ffi::CString::new(plugin_id)
+        .map_err(|_| invalid("CLAP Note plugin ID contains NUL"))?;
+    let factory = entry
+        .get_plugin_factory()
+        .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
+    validate_factory_plugin_id(&factory, &id)?;
+    let info = HostInfo::new(
+        "Mondrian",
+        "Mondrian",
+        "https://github.com/shaloong/mondrian",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| invalid(format!("CLAP host identity is invalid: {error}")))?;
+    let shared = ClapHostShared::new_with_note_input();
+    let services = std::sync::Arc::new(super::clap_main_services::ClapNativeServicesShared::new());
+    let native_shared = shared.clone().with_retained_native_services(services.clone())?;
+    let mut instance = PluginInstance::<ClapHost>::new(
+        |_| native_shared,
+        |shared| super::clap_main_services::ClapHostMainThread::new(shared),
+        entry,
+        &id,
+        &info,
+    )
+    .map_err(|error| {
+        unavailable(format!(
+            "CLAP Note processing probe instance failed: {error}"
+        ))
+    })?;
+    shared.service_callbacks(&mut instance)?;
+    instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    if let Some(state) = state {
+        let handle = instance.plugin_handle();
+        let extension = handle
+            .get_extension::<PluginState>()
+            .ok_or_else(|| unavailable("CLAP Note plugin lacks state restoration"))?;
+        let mut reader = state;
+        extension
+            .load(&handle, &mut reader)
+            .map_err(|error| unavailable(format!("CLAP Note state restore failed: {error}")))?;
+    }
+    shared.service_callbacks(&mut instance)?;
+    instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    configure_render_mode(&instance.plugin_handle(), render.processing_mode)?;
+    shared.service_callbacks(&mut instance)?;
+    instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    let (parameters, auxiliary_inputs) = {
+        let handle = instance.plugin_handle();
+        let mut capture = super::clap_discovery::ParameterQueryCapture::from_environment();
+        let parameters =
+            super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
+        let auxiliary_inputs =
+            super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?.contract;
+        (parameters, auxiliary_inputs)
+    };
+    instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    let binding = scan(&mut instance, offered_limits(), None, false)?;
+    instance.access_shared_handler(|host| check_processing_sources(host, true))?;
+    let configuration = clack_host::prelude::PluginAudioConfiguration {
+        sample_rate: f64::from(render.sample_rate),
+        min_frames_count: 1,
+        max_frames_count: max_frames,
+    };
+    // Failed activate leaves an inactive instance and never enters cleanup.
+    let mut processor: clack_host::prelude::PluginAudioProcessor<ClapHost> = instance
+        .activate(|_, _| (), configuration)
+        .map_err(|error| {
+            unavailable(format!(
+                "CLAP Note processing probe activation failed: {error}"
+            ))
+        })?
+        .into();
+    instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
+    let captured = (|| -> Result<_, AudioProcessorHostError> {
+        shared.service_callbacks(&mut instance)?;
+        service_names(&mut instance, &binding)?;
+        instance.access_shared_handler(|host| check_processing_sources(host, false))?;
+        let latency = {
+            let handle = instance.plugin_handle();
+            handle
+                .get_extension::<clack_extensions::latency::PluginLatency>()
+                .map(|extension| extension.get(&handle))
+                .unwrap_or(0)
+        };
+        instance.access_shared_handler(|host| check_processing_sources(host, false))?;
+        let tail = {
+            let _audio_role = shared.enter_audio_thread();
+            let handle = processor.plugin_handle();
+            handle
+                .get_extension::<clack_extensions::tail::PluginTail>()
+                .map(|extension| extension.get(&handle))
+                .unwrap_or(clack_extensions::tail::TailLength::Finite(0))
+        };
+        shared.service_callbacks(&mut instance)?;
+        service_names(&mut instance, &binding)?;
+        instance.access_shared_handler(|host| check_processing_sources(host, false))?;
+        super::clap_discovery::processing_result_for_notes(
+            plugin_id,
+            render,
+            parameters,
+            auxiliary_inputs,
+            latency,
+            tail,
+        )
+    })();
+    // Cleanup executes for every post-activation success or failure. No start
+    // or process is needed for a metadata offer; Tail uses the real audio role.
+    {
+        let _audio_role = shared.enter_audio_thread();
+        processor.ensure_processing_stopped();
+    }
+    drop(processor);
+    // ALL is legal inside the actual deactivate callback, before SDK returns.
+    instance.access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+    let cleanup = instance
+        .try_deactivate()
+        .map_err(|error| {
+            unavailable(format!(
+                "CLAP Note processing probe deactivate failed: {error}"
+            ))
+        })
+        .and_then(|()| shared.service_callbacks(&mut instance))
+        .and_then(|()| instance.access_shared_handler(|host| check_processing_sources(host, true)))
+        .and_then(|()| {
+            if let Ok(processing) = &captured {
+                let handle = instance.plugin_handle();
+                let mut capture = super::clap_discovery::ParameterQueryCapture::from_environment();
+                let parameters =
+                    super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
+                let audio =
+                    super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?
+                        .contract;
+                super::clap_discovery::revalidate_processing_metadata_for_notes(
+                    processing,
+                    &parameters,
+                    &audio,
+                )?;
+            }
+            instance.access_shared_handler(|host| check_processing_sources(host, true))
+        })
+        .and_then(|()| {
+            scan(
+                &mut instance,
+                binding.contract.limits,
+                Some(&binding),
+                false,
+            )
+            .map(|_| ())
+        })
+        .and_then(|()| instance.access_shared_handler(|host| check_processing_sources(host, true)));
+    let processing = match (captured, cleanup) {
+        (Ok(processing), Ok(())) => processing,
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(_), Err(cleanup)) => return Err(cleanup),
+        (Err(error), Err(cleanup)) => {
+            return Err(unavailable(format!(
+                "CLAP Note processing probe failed: {error}; cleanup failed: {cleanup}",
+            )))
+        }
+    };
+    let notes = ClapNoteInputContractProbe {
+        schema_version: 1,
+        plugin_id: plugin_id.to_owned(),
+        binary_sha256,
+        state_sha256: super::clap_note_input_metadata::state_digest(state),
+        sample_rate: render.sample_rate,
+        channel_layout: render.channel_layout,
+        max_block_frames: render.max_block_frames,
+        offline: render.processing_mode == crate::AudioProcessingMode::Offline,
+        contract: binding.contract,
+    };
+    // The retained Arc is the SDK callback owner's same services payload, not
+    // copied observations or a reference into the destroyed HostWrapper.
+    drop(instance);
+    check_destroyed_processing_services(&services)?;
+    check_processing_control(&shared)?;
+    Ok(ClapNoteProcessingOfferV2 { schema_version: 2, notes, processing })
+}
+
 #[cfg(test)]
 #[path = "clap_note_input_contract_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "clap_note_processing_offer_tests.rs"]
+mod processing_offer_tests;

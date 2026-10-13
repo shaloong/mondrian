@@ -32,6 +32,24 @@ pub(super) struct ClapNativeServicesShared {
     pub(super) wrong_thread: AtomicBool,
 }
 
+/// Default instances retain services inline. Only the explicit v2 metadata
+/// operation shares this SAME services owner through native destroy. Deref
+/// reaches the actual callback source; neither variant mirrors its observations.
+pub(super) enum ClapNativeServicesOwner {
+    Inline(ClapNativeServicesShared),
+    Retained(std::sync::Arc<ClapNativeServicesShared>),
+}
+
+impl std::ops::Deref for ClapNativeServicesOwner {
+    type Target = ClapNativeServicesShared;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Inline(services) => services,
+            Self::Retained(services) => services,
+        }
+    }
+}
+
 impl ClapNativeServicesShared {
     pub(super) const fn new() -> Self {
         Self {

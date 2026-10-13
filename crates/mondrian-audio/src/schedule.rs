@@ -418,6 +418,21 @@ impl PreparedAudioPlan {
         self.schedule.summary
     }
 
+    /// Read the existing non-Note logical policy before any graph preparation.
+    ///
+    /// Successful projection reads immutable author facts without allocation or
+    /// factory IO. Sidechain rows are a pre-probe upper bound; existing native
+    /// bus validation and final actual <= reserved verification remain required.
+    /// This does not admit Notes execution or prove a physical allocation peak.
+    pub(crate) fn requested_base_logical_bytes(
+        program: &CompiledAudioProgram,
+    ) -> Result<usize, AudioCompileError> {
+        let shape = PreparedLogicalShape::requested(program)
+            .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))?;
+        prepared_logical_bytes_for_shape(shape)
+            .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))
+    }
+
     /// Calculate the allocation envelope before constructing a mutable Session.
     ///
     /// This is used by closure-wide admission so nested Sessions cannot each
@@ -497,10 +512,146 @@ fn validate_selected_note_preparation(
     Ok(())
 }
 
-fn session_resource_footprint(
-    contract: AudioRenderContract,
-    summary: PreparedAudioScheduleSummary,
-) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PreparedLogicalShape {
+    nodes: usize,
+    routes: usize,
+    sidechain_bindings: usize,
+    contributions: usize,
+    processors: usize,
+    automation_curves: usize,
+    automation_spans: usize,
+    transition_bindings: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum PreparedLogicalShapeError {
+    #[error("requested prepared logical shape overflowed")]
+    ExtentOverflow,
+    #[error("requested prepared Bus is absent from semantic IR")]
+    MissingBus,
+    #[error("requested prepared Contribution Scope is absent")]
+    MissingScope,
+}
+
+impl PreparedLogicalShape {
+    fn from_summary(summary: PreparedAudioScheduleSummary) -> Self {
+        Self {
+            nodes: summary.node_count,
+            routes: summary.route_count,
+            sidechain_bindings: summary.sidechain_binding_count,
+            contributions: summary.contribution_count,
+            processors: summary.processor_occurrence_count,
+            automation_curves: summary.automation_curve_count,
+            automation_spans: summary.automation_event_span_count,
+            transition_bindings: summary.transition_binding_count,
+        }
+    }
+
+    // No allocation, native/factory query, key copy, endpoint lowering, or
+    // prepared_segments() occurs here. This is shape, not graph validation.
+    fn requested(program: &CompiledAudioProgram) -> Result<Self, PreparedLogicalShapeError> {
+        let mut shape = Self {
+            nodes: program
+                .track_channels
+                .len()
+                .checked_add(program.bus_order.len())
+                .and_then(|count| count.checked_add(1))
+                .ok_or(PreparedLogicalShapeError::ExtentOverflow)?,
+            routes: program.routes.len(),
+            contributions: program.contributions.len(),
+            ..Self::default()
+        };
+        for channel in program.track_channels.values() {
+            shape.add_strip(&channel.strip, program)?;
+        }
+        // Actual build consumes bus_order, not all BTreeMap values.
+        for bus_id in &program.bus_order {
+            let strip = program.buses.get(bus_id).ok_or(PreparedLogicalShapeError::MissingBus)?;
+            shape.add_strip(strip, program)?;
+        }
+        shape.add_strip(&program.output, program)?;
+        for route in &program.routes {
+            shape.add_curve(route.gain_automation.as_ref())?;
+        }
+        for contribution in &program.contributions {
+            let scope = program
+                .processing_scopes
+                .get(&contribution.processing_scope)
+                .ok_or(PreparedLogicalShapeError::MissingScope)?;
+            // Shared author Scope != shared execution occurrence.
+            shape.add_curve(scope.input_gain_automation.as_ref())?;
+            shape.add_curve(contribution.volume_automation.as_ref())?;
+            shape.add_curve(contribution.pan_automation.as_ref())?;
+            shape.add_rack(&scope.rack, program)?;
+            for transition in &program.transitions {
+                // Exactly append_transition_bindings' if/else-if consumer:
+                // the equal left/right edit contributes one binding, not two.
+                if transition.left == contribution.edit_id
+                    || transition.right == contribution.edit_id
+                {
+                    Self::add(&mut shape.transition_bindings, 1)?;
+                }
+            }
+        }
+        Ok(shape)
+    }
+
+    fn add(value: &mut usize, delta: usize) -> Result<(), PreparedLogicalShapeError> {
+        *value = value.checked_add(delta).ok_or(PreparedLogicalShapeError::ExtentOverflow)?;
+        Ok(())
+    }
+    fn add_curve(
+        &mut self,
+        curve: Option<&ExactAutomationCurve>,
+    ) -> Result<(), PreparedLogicalShapeError> {
+        if let Some(curve) = curve {
+            Self::add(&mut self.automation_curves, 1)?;
+            // Core prepared_segments: windows(2), then prepared span_count + 1.
+            Self::add(&mut self.automation_spans, curve.keyframes.len().max(1))?;
+        }
+        Ok(())
+    }
+    fn add_strip(
+        &mut self,
+        strip: &CompiledChannelStrip,
+        program: &CompiledAudioProgram,
+    ) -> Result<(), PreparedLogicalShapeError> {
+        self.add_curve(strip.fader_automation.as_ref())?;
+        self.add_rack(&strip.pre_fader, program)?;
+        self.add_rack(&strip.post_fader, program)
+    }
+    fn add_rack(
+        &mut self,
+        rack: &CompiledRack,
+        program: &CompiledAudioProgram,
+    ) -> Result<(), PreparedLogicalShapeError> {
+        Self::add(&mut self.processors, rack.processors.len())?;
+        for processor in &rack.processors {
+            for parameter in processor.parameters.values() {
+                self.add_curve(parameter.automation.as_ref())?;
+            }
+            // Auxiliary contracts have unique bus keys. This upper bound adds
+            // every processor-ID match once for the occurrence; different
+            // occurrences can expose different buses, so actual <= requested.
+            for route in program
+                .sidechain_routes
+                .iter()
+                .filter(|route| route.processor_id == processor.instance_id)
+            {
+                Self::add(&mut self.sidechain_bindings, 1)?;
+                self.add_curve(route.gain_automation.as_ref())?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn prepared_logical_bytes_for_shape(
+    shape: PreparedLogicalShape,
+) -> Result<usize, AudioResourceFootprintError> {
+    // Prospective shape and actual prepared summary share this existing logical
+    // policy. These weights are not allocator or native resource telemetry.
     const PREPARED_BASE_BYTES: usize = 4 * 1024;
     const PREPARED_NODE_BYTES: usize = 2 * 1024;
     const PREPARED_ROUTE_BYTES: usize = 512;
@@ -509,27 +660,29 @@ fn session_resource_footprint(
     const PREPARED_AUTOMATION_CURVE_BYTES: usize = 512;
     const PREPARED_AUTOMATION_SPAN_BYTES: usize = 64;
     const PREPARED_TRANSITION_BYTES: usize = 512;
+    checked_sum([
+        PREPARED_BASE_BYTES,
+        checked_product([shape.nodes, PREPARED_NODE_BYTES])?,
+        checked_product([shape.routes, PREPARED_ROUTE_BYTES])?,
+        checked_product([shape.sidechain_bindings, PREPARED_ROUTE_BYTES])?,
+        checked_product([shape.contributions, PREPARED_CONTRIBUTION_BYTES])?,
+        checked_product([shape.processors, PREPARED_PROCESSOR_BYTES])?,
+        checked_product([shape.automation_curves, PREPARED_AUTOMATION_CURVE_BYTES])?,
+        checked_product([shape.automation_spans, PREPARED_AUTOMATION_SPAN_BYTES])?,
+        checked_product([shape.transition_bindings, PREPARED_TRANSITION_BYTES])?,
+    ])
+}
+
+fn session_resource_footprint(
+    contract: AudioRenderContract,
+    summary: PreparedAudioScheduleSummary,
+) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
     const PROCESSOR_INSTANCE_METADATA_BYTES: usize = 256;
     const METER_CHANNEL_STATE_BYTES: usize = 64;
     const SESSION_BASE_BYTES: usize = 4 * 1024;
 
-    let prepared_logical_bytes = checked_sum([
-        PREPARED_BASE_BYTES,
-        checked_product([summary.node_count, PREPARED_NODE_BYTES])?,
-        checked_product([summary.route_count, PREPARED_ROUTE_BYTES])?,
-        checked_product([summary.sidechain_binding_count, PREPARED_ROUTE_BYTES])?,
-        checked_product([summary.contribution_count, PREPARED_CONTRIBUTION_BYTES])?,
-        checked_product([summary.processor_occurrence_count, PREPARED_PROCESSOR_BYTES])?,
-        checked_product([
-            summary.automation_curve_count,
-            PREPARED_AUTOMATION_CURVE_BYTES,
-        ])?,
-        checked_product([
-            summary.automation_event_span_count,
-            PREPARED_AUTOMATION_SPAN_BYTES,
-        ])?,
-        checked_product([summary.transition_binding_count, PREPARED_TRANSITION_BYTES])?,
-    ])?;
+    let prepared_logical_bytes =
+        prepared_logical_bytes_for_shape(PreparedLogicalShape::from_summary(summary))?;
 
     let channels = contract.channel_count();
     let block_samples = checked_product([contract.max_block_frames, channels])?;
@@ -2067,4 +2220,455 @@ fn assign_liveness_scratch(
         node.scratch_slot = scratch_slot;
     }
     scratch_live_until.len()
+}
+
+// Prospective logical policy controls use actual Plan preparation and summaries.
+// These owned tests qualify logical shape/bound behavior within their fixtures.
+// These controls consume actual PreparedAudioPlan preparation and summaries.
+// Metadata factories never create native or Rust DSP instances, and no Notes
+// are present. Passing them would qualify only logical shape/bound behavior.
+
+#[cfg(test)]
+mod prospective_prepared_plan_parity_tests {
+    use super::*;
+    use crate::plan::{
+        CompiledAudioSource, CompiledProcessor, CompiledProcessorSidechainRoute, CompiledRoute,
+        CompiledSourceTimeMap,
+    };
+    use crate::{
+        AudioProcessor, AudioProcessorAuxiliaryInputBusContract,
+        AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract,
+        AudioProcessorFactory, AudioProcessorHostError, AudioProcessorPrepareRequest,
+    };
+    use mondrian_core::{
+        AssetId, AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId,
+        AudioProcessorInstanceId, AudioRouteId, AudioSourceComponentId, ClipId,
+        ExactAutomationKeyframe, MixBusId, ProgramOutputId, SourceSamplingBoundary, TimeScale,
+        TimelineTimeRange, TrackId,
+    };
+    use mondrian_timeline::audio::{
+        gain_parameter_schema, AudioChannelStripOutputPort, AudioComponentChannelMapping,
+        AudioProcessorDefinitionRef, AudioProcessorParameter, AudioTransitionCurve,
+        CLIP_PAN_PARAMETER_ID, CLIP_VOLUME_DB_PARAMETER_ID, FADER_DB_PARAMETER_ID,
+        GAIN_DB_PARAMETER_ID, INPUT_GAIN_DB_PARAMETER_ID, ROUTE_GAIN_DB_PARAMETER_ID,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn curve(parameter_id: &'static str, key_count: usize) -> ExactAutomationCurve {
+        let mut result = ExactAutomationCurve::new(ParameterId::new_static(parameter_id), 0.0)
+            .expect("finite fixture curve");
+        for index in 0..key_count {
+            result
+                .set_keyframe(ExactAutomationKeyframe::linear(
+                    TimelineTime::new(i64::try_from(index).expect("small fixture"), 1)
+                        .expect("fixture time"),
+                    index as f64,
+                ))
+                .expect("ordered fixture key");
+        }
+        result
+    }
+
+    fn processor(key_count: usize) -> CompiledProcessor {
+        let automated_id = ParameterId::new_static(GAIN_DB_PARAMETER_ID);
+        let unautomated_id = ParameterId::new_static("shape.discovered.unautomated");
+        let mut unautomated_schema = gain_parameter_schema();
+        unautomated_schema.parameter_id = unautomated_id.clone();
+        CompiledProcessor {
+            instance_id: AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "owned-shape-metadata-control".to_owned(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            parameters: BTreeMap::from([
+                (
+                    automated_id,
+                    AudioProcessorParameter {
+                        schema: gain_parameter_schema(),
+                        automation: Some(curve(GAIN_DB_PARAMETER_ID, key_count)),
+                        ui: Default::default(),
+                    },
+                ),
+                (
+                    unautomated_id,
+                    AudioProcessorParameter {
+                        schema: unautomated_schema,
+                        automation: None,
+                        ui: Default::default(),
+                    },
+                ),
+            ]),
+            opaque_state: None,
+        }
+    }
+
+    fn strip() -> CompiledChannelStrip {
+        CompiledChannelStrip {
+            input_trim_db: 0.0,
+            pre_fader: CompiledRack { processors: vec![processor(2)] },
+            fader_db: 0.0,
+            fader_automation: Some(curve(FADER_DB_PARAMETER_ID, 1)),
+            post_fader: CompiledRack { processors: vec![processor(3)] },
+        }
+    }
+
+    fn contribution(
+        track_id: TrackId,
+        scope_id: AudioProcessingScopeId,
+    ) -> CompiledAudioContribution {
+        CompiledAudioContribution {
+            edit_id: AudioComponentEditId::new(),
+            clip_id: ClipId::new(),
+            track_id,
+            sequence_range: TimelineTimeRange::new(
+                TimelineTime::ZERO,
+                TimelineTime::new(3, 1).expect("fixture duration"),
+            )
+            .expect("fixture range"),
+            source_time_map: CompiledSourceTimeMap {
+                sequence_start: TimelineTime::ZERO,
+                source_origin: TimelineTime::ZERO,
+                scale: TimeScale::ONE,
+                sampling_boundary: SourceSamplingBoundary::Covering,
+            },
+            source: CompiledAudioSource::Media {
+                asset_id: AssetId::new(),
+                component_id: AudioSourceComponentId::primary(),
+            },
+            channel_mapping: AudioComponentChannelMapping::Standard,
+            processing_scope: scope_id,
+            scope_in: TimelineTime::ZERO,
+            local_time_in: TimelineTime::ZERO,
+            volume_db: 0.0,
+            volume_automation: Some(curve(CLIP_VOLUME_DB_PARAMETER_ID, 1)),
+            pan: 0.0,
+            pan_automation: Some(curve(CLIP_PAN_PARAMETER_ID, 2)),
+            fade_in: None,
+            fade_out: None,
+        }
+    }
+
+    struct Fixture {
+        program: Arc<CompiledAudioProgram>,
+        auxiliary_processor_id: AudioProcessorInstanceId,
+        second_edit_id: AudioComponentEditId,
+    }
+
+    fn fixture() -> Fixture {
+        let main = TrackId::new();
+        let detector = TrackId::new();
+        let bus = MixBusId::new();
+        let output = ProgramOutputId::new();
+        let scope_id = AudioProcessingScopeId::new();
+        let scope_processors = vec![processor(3), processor(0)];
+        let auxiliary_processor_id = scope_processors[0].instance_id;
+        let left = contribution(main, scope_id);
+        let right = contribution(main, scope_id);
+        let second_edit_id = right.edit_id;
+        let source = |track_id| AudioRouteSource::Track {
+            track_id,
+            port: AudioChannelStripOutputPort::PostMute,
+        };
+        let main_route = |source, destination| CompiledRoute {
+            id: AudioRouteId::new(),
+            source,
+            destination,
+            gain_db: 0.0,
+            gain_automation: Some(curve(ROUTE_GAIN_DB_PARAMETER_ID, 2)),
+        };
+        let transition_range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
+            .expect("fixture transition range");
+        let program = CompiledAudioProgram {
+            output_id: output,
+            transitions: vec![
+                CompiledTransition {
+                    left: left.edit_id,
+                    right: right.edit_id,
+                    sequence_range: transition_range,
+                    curve: AudioTransitionCurve::ConstantGain,
+                },
+                // Private IR consumer edge control: author-validity of a
+                // self-transition is deliberately not claimed by this fixture.
+                CompiledTransition {
+                    left: left.edit_id,
+                    right: left.edit_id,
+                    sequence_range: transition_range,
+                    curve: AudioTransitionCurve::ConstantGain,
+                },
+            ],
+            contributions: vec![left, right],
+            processing_scopes: BTreeMap::from([(
+                scope_id,
+                CompiledProcessingScope {
+                    id: scope_id,
+                    input_gain_db: 0.0,
+                    input_gain_automation: Some(curve(INPUT_GAIN_DB_PARAMETER_ID, 0)),
+                    rack: CompiledRack { processors: scope_processors },
+                },
+            )]),
+            track_channels: BTreeMap::from([
+                (
+                    main,
+                    crate::plan::CompiledTrackChannel { muted: false, strip: strip() },
+                ),
+                (
+                    detector,
+                    crate::plan::CompiledTrackChannel { muted: false, strip: strip() },
+                ),
+            ]),
+            buses: BTreeMap::from([(bus, strip())]),
+            bus_order: vec![bus],
+            output: strip(),
+            routes: vec![
+                main_route(source(main), AudioRouteDestination::Output(output)),
+                main_route(source(detector), AudioRouteDestination::Bus(bus)),
+                main_route(
+                    AudioRouteSource::Bus {
+                        bus_id: bus,
+                        port: AudioChannelStripOutputPort::PostMute,
+                    },
+                    AudioRouteDestination::Output(output),
+                ),
+            ],
+            sidechain_routes: vec![CompiledProcessorSidechainRoute {
+                id: AudioRouteId::new(),
+                source: source(detector),
+                processor_id: auxiliary_processor_id,
+                bus_key: "detector".to_owned(),
+                gain_db: 0.0,
+                gain_automation: Some(curve(ROUTE_GAIN_DB_PARAMETER_ID, 3)),
+            }],
+            note_lanes: Vec::new(),
+        };
+        Fixture {
+            program: Arc::new(program),
+            auxiliary_processor_id,
+            second_edit_id,
+        }
+    }
+
+    #[derive(Default)]
+    struct Calls {
+        resolves: AtomicUsize,
+        creates: AtomicUsize,
+    }
+
+    struct MetadataResolver {
+        auxiliary_processor_id: AudioProcessorInstanceId,
+        omit_auxiliary_on_edit: Option<AudioComponentEditId>,
+        calls: Arc<Calls>,
+    }
+
+    impl AudioProcessorResolver for MetadataResolver {
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            self.calls.resolves.fetch_add(1, Ordering::SeqCst);
+            assert!(!request.note_input_requested());
+            let occurrence = request.occurrence();
+            let omit = matches!(occurrence.owner,
+                AudioProcessorOccurrenceOwner::Contribution { edit_id, .. }
+                    if Some(edit_id) == self.omit_auxiliary_on_edit);
+            Ok(Arc::new(MetadataFactory {
+                layout: request.render_contract().channel_layout,
+                has_auxiliary: occurrence.instance_id == self.auxiliary_processor_id && !omit,
+                calls: Arc::clone(&self.calls),
+            }))
+        }
+    }
+
+    struct MetadataFactory {
+        layout: AudioChannelLayout,
+        has_auxiliary: bool,
+        calls: Arc<Calls>,
+    }
+
+    impl AudioProcessorFactory for MetadataFactory {
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            AudioProcessorExecutionContract::stateless()
+        }
+
+        fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
+            AudioProcessorAuxiliaryInputContract {
+                buses: if self.has_auxiliary {
+                    vec![AudioProcessorAuxiliaryInputBusContract {
+                        bus_key: "detector".to_owned(),
+                        channel_layout: self.layout,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            }
+        }
+
+        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            self.calls.creates.fetch_add(1, Ordering::SeqCst);
+            Err(AudioProcessorHostError::Unavailable(
+                "shape metadata factory must never create DSP".to_owned(),
+            ))
+        }
+    }
+
+    fn render_contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 16,
+            processing_mode: crate::AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        }
+    }
+
+    fn prepare(
+        fixture: &Fixture,
+        omit: Option<AudioComponentEditId>,
+        calls: &Arc<Calls>,
+    ) -> PreparedAudioPlan {
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            Arc::clone(&fixture.program),
+            render_contract(),
+            AudioKernelBackend::ScalarReference,
+            &MetadataResolver {
+                auxiliary_processor_id: fixture.auxiliary_processor_id,
+                omit_auxiliary_on_edit: omit,
+                calls: Arc::clone(calls),
+            },
+        )
+        .expect("actual schedule preparation, metadata only")
+    }
+
+    #[test]
+    fn prospective_shape_matches_actual_plan_for_repeated_scope_and_automated_sidechains() {
+        let fixture = fixture();
+        let calls = Arc::new(Calls::default());
+        let requested =
+            PreparedLogicalShape::requested(fixture.program.as_ref()).expect("borrowed shape");
+        assert_eq!(calls.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+        let plan = prepare(&fixture, None, &calls);
+        let summary = plan.schedule_summary();
+        let actual = PreparedLogicalShape::from_summary(summary);
+        assert_eq!(requested, actual);
+        assert_eq!(
+            (
+                actual.nodes,
+                actual.routes,
+                actual.sidechain_bindings,
+                actual.contributions,
+                actual.processors,
+                actual.automation_curves,
+                actual.automation_spans,
+                actual.transition_bindings
+            ),
+            (4, 3, 2, 2, 12, 27, 52, 3)
+        );
+        assert_eq!(summary.processor_parameter_lane_count, 24);
+        assert_eq!(summary.maximum_parameter_events_per_block, 16);
+        assert_eq!(summary.processor_auxiliary_bus_count, 2);
+        assert_eq!(summary.sidechain_source_count, 1);
+        assert_eq!(calls.resolves.load(Ordering::SeqCst), 12);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            prepared_logical_bytes_for_shape(requested),
+            Ok(plan
+                .session_resource_footprint()
+                .expect("actual footprint")
+                .prepared_logical_bytes)
+        );
+        // Equal left/right picks the Falling branch once; ordinary endpoints
+        // add Falling(left) and Rising(right), for three actual bindings.
+        assert_eq!(plan.schedule.transitions.len(), 3);
+        assert_eq!(
+            plan.schedule
+                .transitions
+                .iter()
+                .filter(|binding| binding.direction == PreparedTransitionDirection::Falling)
+                .count(),
+            2
+        );
+        assert_eq!(
+            plan.schedule
+                .transitions
+                .iter()
+                .filter(|binding| binding.direction == PreparedTransitionDirection::Rising)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prospective_sidechain_shape_bounds_a_successful_occurrence_with_no_matching_bus() {
+        let fixture = fixture();
+        let calls = Arc::new(Calls::default());
+        let requested = PreparedLogicalShape::requested(fixture.program.as_ref())
+            .expect("borrowed upper shape");
+        let plan = prepare(&fixture, Some(fixture.second_edit_id), &calls);
+        let actual = PreparedLogicalShape::from_summary(plan.schedule_summary());
+        assert_eq!(requested.sidechain_bindings, actual.sidechain_bindings + 1);
+        assert_eq!(requested.automation_curves, actual.automation_curves + 1);
+        assert_eq!(requested.automation_spans, actual.automation_spans + 3);
+        assert_eq!(
+            (
+                requested.nodes,
+                requested.routes,
+                requested.contributions,
+                requested.processors,
+                requested.transition_bindings
+            ),
+            (
+                actual.nodes,
+                actual.routes,
+                actual.contributions,
+                actual.processors,
+                actual.transition_bindings
+            )
+        );
+        assert_eq!(actual.sidechain_bindings, 1);
+        assert_eq!(plan.schedule_summary().processor_auxiliary_bus_count, 1);
+        assert_eq!(calls.resolves.load(Ordering::SeqCst), 12);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+        let actual_bytes = plan
+            .session_resource_footprint()
+            .expect("actual footprint")
+            .prepared_logical_bytes;
+        let requested_bytes =
+            prepared_logical_bytes_for_shape(requested).expect("checked upper footprint");
+        // One sidechain route record + one curve + its three event spans.
+        assert_eq!(
+            requested_bytes.checked_sub(actual_bytes),
+            Some(512 + 512 + 3 * 64)
+        );
+        assert_eq!(prepared_logical_bytes_for_shape(actual), Ok(actual_bytes));
+    }
+
+    #[test]
+    fn prospective_bus_shape_consumes_bus_order_instead_of_unlisted_map_values() {
+        let Fixture { program, auxiliary_processor_id, second_edit_id } = fixture();
+        let mut program = program.as_ref().clone();
+        // Private IR consumer edge control, not compiler validity evidence.
+        program.buses.insert(MixBusId::new(), strip());
+        assert_eq!(program.buses.len(), 2);
+        assert_eq!(program.bus_order.len(), 1);
+        let fixture = Fixture {
+            program: Arc::new(program),
+            auxiliary_processor_id,
+            second_edit_id,
+        };
+        let requested = PreparedLogicalShape::requested(fixture.program.as_ref())
+            .expect("borrowed selected Bus order");
+        let calls = Arc::new(Calls::default());
+        let plan = prepare(&fixture, None, &calls);
+        assert_eq!(
+            requested,
+            PreparedLogicalShape::from_summary(plan.schedule_summary())
+        );
+        assert_eq!(requested.nodes, 4);
+        assert_eq!(requested.processors, 12);
+        assert_eq!(calls.resolves.load(Ordering::SeqCst), 12);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+    }
 }

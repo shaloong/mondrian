@@ -98,15 +98,40 @@ Source guard while retaining record phases, tuples, counters and native IDs.
 Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
 table and validate the restored, render-bound port cohort. Raw rescan flags and
 wrong-thread/unsupported observations stay bounded and sticky. Metadata-only
-probes retain their original unsupported service. The current separate ProbeNotes
-offer is not a complete processing offer: the application Resolver must later
-obtain audio layout, parameters, latency, tail and Notes from the same enabled
-instance, rather than combining ordinary and Notes probe results.
+probes retain their original unsupported service. ProbeNotes schema 1 remains
+the original Note-only offer. Schema 2 captures audio layout, parameters,
+latency, tail, render mode and Notes from one restored, Notes-enabled native
+instance; its public facade borrows the captured processing facts. The
+application Resolver must consume this coherent offer before author Notes can
+be enabled, rather than combining ordinary and Notes probe results.
+
+The schema-2 query validates inactive metadata before activation and after
+deactivation, without starting DSP. Existing unsupported callback, thread,
+parameter-source or port-cohort observations cause refusal. Only this query
+retains the same native-services owner beyond destruction, so callbacks during
+destroy remain observable through the original source. Default probes and
+workers keep inline services. This adds no second mutable authority; it also
+does not establish complete accounting for SDK wrapper layouts, Arc ownership
+or physical memory.
+
+For empty selected scores, Runtime preparation projects a borrowed upper bound
+using the existing prepared-logical policy before media resolution or processor
+creation. The existing closure ledger charges that local Plan while children
+are prepared; pending ancestors and completed siblings remain charged. A private
+non-cloneable receipt is consumed once by the synchronous builder. Completion
+requires actual policy bytes not to exceed the projection, then atomically
+replaces the local reservation using the unchanged Session admission checks.
+This is policy accounting, not a native execution permit or allocator/RSS bound.
+Before auxiliary metadata exists, sidechain counting is conservative and can
+reject a graph whose eventual actual policy would fit. Existing final footprint
+values and limits are preserved.
 
 Public nonempty-score Plan preparation still runs the allocation-free M1
 validation and returns typed Unsupported before projection/factory resolution.
-Initial IR preparation peak and author-handoff clone admission must be charged
-to the existing prepared-resource grant before lifting this gate. Owned model
+Initial Note IR preparation peak and author-handoff clone admission, including
+all externally retained prepared handoff handles, must be charged to the existing
+prepared-resource grant before lifting this gate. Empty-score policy admission
+does not discharge those obligations. Owned model
 tests and direct fixture-DLL processing verify only their named boundaries;
 they do not establish production Timeline Notes, Parent IPC, instruments,
 realtime safety, comparative performance or third-party compatibility.

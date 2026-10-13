@@ -571,3 +571,96 @@ fn owned_windows_dynamic_note_gate_early_end_wrong_original_off_is_native_proces
     // Failed direct adapter PCM is not a successful root/IPC publication. No
     // completion credit, author Ack or partial-output acceptance is inferred.
 }
+
+// Append to the existing Windows native_clap_note_gate child module so its
+// exact pinned_dll()/DLL_ENV/DLL_PATH/B239 bytes gate remains the single source.
+// This optional control qualifies coherent child/parent metadata query only.
+#[test]
+#[ignore = "requires normal Product helper and the explicit fixed owned B239 DLL"]
+fn native_owned_note_gate_v2_parent_query_binds_complete_same_instance_facts() {
+    let helper = PathBuf::from(
+        std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .expect("set MONDRIAN_CLAP_TEST_HELPER to the newly built normal Product"),
+    );
+    assert!(helper.is_absolute());
+    assert!(std::fs::metadata(&helper).unwrap().is_file());
+    let path = pinned_dll();
+    let mut state = [0_u8; 16];
+    state[..4].copy_from_slice(b"MNG1");
+    state[4..12].copy_from_slice(&0.5_f64.to_le_bytes());
+    state[12..].copy_from_slice(&2_u32.to_le_bytes());
+    for opaque in [None, Some(state.as_slice())] {
+        let offer = super::super::clap_discovery::probe_clap_note_processing_offer(
+            &helper,
+            &path,
+            "org.mondrian.fixture.note-gate",
+            render(),
+            opaque,
+        )
+        .expect("actual schema2 normal helper, full capture and parent decoder");
+        assert_eq!(
+            pinned_dll(),
+            path,
+            "producer bytes remain accepted after query"
+        );
+        assert_eq!(offer.schema_version, 2);
+        assert_eq!(offer.notes.schema_version, 1);
+        assert_eq!(offer.notes.plugin_id, "org.mondrian.fixture.note-gate");
+        assert_eq!(
+            offer.notes.binary_sha256,
+            fingerprint_clap_binary(&path).unwrap()
+        );
+        assert_eq!(
+            offer.notes.state_sha256,
+            super::super::clap_note_input_metadata::state_digest(opaque)
+        );
+        assert_eq!(offer.notes.sample_rate, 48_000);
+        assert_eq!(offer.notes.channel_layout, AudioChannelLayout::Mono);
+        assert_eq!(offer.notes.max_block_frames, 14);
+        assert!(offer.notes.offline);
+        assert_eq!(
+            offer.notes.contract.limits,
+            AudioNoteExecutionLimits {
+                input_events: crate::AUDIO_NOTE_EVENTS_PER_BLOCK,
+                output_ends: crate::AUDIO_NOTE_ENDS_PER_BLOCK,
+                retained_records: crate::AUDIO_NOTE_RECORDS,
+                live_voices: crate::AUDIO_NOTE_RECORDS,
+            }
+        );
+        assert_eq!(
+            offer
+                .notes
+                .contract
+                .ports
+                .iter()
+                .map(|port| (port.native_id, port.native_index, port.port_key.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, 0, "clap.note-input.0"),
+                (0x8000_0017, 1, "clap.note-input.2147483671")
+            ]
+        );
+        let mut parameters = parameter_definitions();
+        if opaque.is_some() {
+            parameters[0].current_value = 0.5;
+            parameters[1].current_value = 2.0;
+        }
+        assert_eq!(offer.parameters(), parameters.as_slice());
+        assert_eq!(offer.auxiliary_inputs().len(), 0);
+        assert_eq!(offer.latency_frames(), 0);
+        assert_eq!(offer.tail(), AudioProcessorTail::Finite(4));
+        assert_eq!(offer.processing_mode(), AudioProcessingMode::Offline);
+        let facts = serde_json::to_value(&offer).unwrap();
+        let processing = &facts["processing"];
+        assert_eq!(processing["plugin_id"], "org.mondrian.fixture.note-gate");
+        assert_eq!(processing["latency_frames"], 0);
+        assert_eq!(processing["tail"], serde_json::json!({"Finite":4}));
+        assert_eq!(processing["offline"], true);
+        assert_eq!(
+            processing["parameters"],
+            serde_json::to_value(parameters).unwrap()
+        );
+        assert_eq!(processing["auxiliary_buses"], serde_json::json!([]));
+        assert_eq!(processing["captured_state"], serde_json::Value::Null);
+    }
+}

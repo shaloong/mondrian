@@ -1,5 +1,9 @@
 //! Bounded out-of-process discovery of installed CLAP descriptors.
 
+#[cfg(test)]
+#[path = "clap_note_processing_offer_wire_tests.rs"]
+mod note_processing_wire_tests;
+
 use super::clap_worker::{configure_render_mode, ClapHost, ClapHostShared};
 use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::ClapPluginRegistration;
@@ -319,6 +323,11 @@ enum DiscoveryOperation {
     List,
     NoteInputMetadata(super::clap_note_input_metadata::NoteInputMetadataRequest),
     ProbeNotes {
+        #[serde(
+            default = "default_note_probe_schema",
+            skip_serializing_if = "legacy_note_probe_schema"
+        )]
+        schema_version: u32,
         plugin_id: String,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
@@ -569,6 +578,7 @@ pub fn probe_clap_note_input_contract(
         helper_executable,
         &canonical,
         DiscoveryOperation::ProbeNotes {
+            schema_version: 1,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render.sample_rate,
             channel_layout: render.channel_layout,
@@ -608,6 +618,259 @@ pub fn probe_clap_note_input_contract(
             ));
         }
     }
+    Ok(result)
+}
+
+fn default_note_probe_schema() -> u32 {
+    1
+}
+fn legacy_note_probe_schema(version: &u32) -> bool {
+    *version == 1
+}
+
+pub(super) fn processing_result_for_notes(
+    plugin_id: &str,
+    render: AudioRenderContract,
+    parameters: Vec<ClapParameterDescriptor>,
+    auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    latency_frames: u32,
+    tail: TailLength,
+) -> Result<ProbeResult, AudioProcessorHostError> {
+    validate_parameters(&parameters)?;
+    auxiliary_inputs.validate(render.channel_layout)?;
+    Ok(ProbeResult {
+        plugin_id: plugin_id.to_owned(),
+        offline: render.processing_mode == AudioProcessingMode::Offline,
+        latency_frames,
+        tail: match tail {
+            TailLength::Finite(0) => ProbeTail::None,
+            TailLength::Finite(frames) => ProbeTail::Finite(frames),
+            TailLength::Infinite => ProbeTail::Infinite,
+        },
+        parameters,
+        auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+        captured_state: None,
+    })
+}
+
+fn validate_processing_result_for_notes(
+    processing: &ProbeResult,
+    plugin_id: &str,
+    render: AudioRenderContract,
+) -> Result<(), AudioProcessorHostError> {
+    if processing.plugin_id != plugin_id
+        || processing.offline != (render.processing_mode == AudioProcessingMode::Offline)
+        || processing.captured_state.is_some()
+        || processing.auxiliary_buses.len() >= MAX_INPUT_PORTS as usize
+    {
+        return Err(invalid(
+            "CLAP Note processing response changed its contract identity",
+        ));
+    }
+    validate_parameters(&processing.parameters)?;
+    auxiliary_from_wire(processing.auxiliary_buses.clone()).validate(render.channel_layout)?;
+    let tail = match &processing.tail {
+        ProbeTail::None => AudioProcessorTail::None,
+        ProbeTail::Finite(frames) => AudioProcessorTail::Finite(*frames as usize),
+        ProbeTail::Infinite => AudioProcessorTail::Infinite,
+    };
+    AudioProcessorExecutionContract::new(
+        processing.latency_frames as usize,
+        tail,
+        true,
+        render.processing_mode == AudioProcessingMode::Realtime,
+        render.processing_mode == AudioProcessingMode::Offline,
+        0,
+    )?;
+    Ok(())
+}
+
+pub(super) fn note_processing_parameters(processing: &ProbeResult) -> &[ClapParameterDescriptor] {
+    &processing.parameters
+}
+
+pub(super) fn note_processing_auxiliary_inputs(
+    processing: &ProbeResult,
+) -> impl ExactSizeIterator<Item = (&str, AudioChannelLayout)> + '_ {
+    processing
+        .auxiliary_buses
+        .iter()
+        .map(|bus| (bus.bus_key.as_str(), bus.channel_layout))
+}
+
+pub(super) fn note_processing_tail(processing: &ProbeResult) -> AudioProcessorTail {
+    match &processing.tail {
+        ProbeTail::None => AudioProcessorTail::None,
+        ProbeTail::Finite(frames) => AudioProcessorTail::Finite(*frames as usize),
+        ProbeTail::Infinite => AudioProcessorTail::Infinite,
+    }
+}
+
+pub(super) fn note_processing_mode(processing: &ProbeResult) -> AudioProcessingMode {
+    if processing.offline {
+        AudioProcessingMode::Offline
+    } else {
+        AudioProcessingMode::Realtime
+    }
+}
+
+pub(super) fn revalidate_processing_metadata_for_notes(
+    processing: &ProbeResult,
+    parameters: &[ClapParameterDescriptor],
+    auxiliary_inputs: &AudioProcessorAuxiliaryInputContract,
+) -> Result<(), AudioProcessorHostError> {
+    if processing.parameters != parameters
+        || auxiliary_from_wire(processing.auxiliary_buses.clone()) != *auxiliary_inputs
+    {
+        return Err(unavailable(
+            "CLAP Note processing metadata changed across activation/deactivation",
+        ));
+    }
+    Ok(())
+}
+
+// Only the v2 branch uses this bounded pure serializer. Legacy wire/paths stay
+// unchanged. Both passes serialize owned DTOs after native destruction.
+fn encode_processing_offer_v2(
+    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV2,
+) -> Result<Vec<u8>, AudioProcessorHostError> {
+    struct Count(usize);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .filter(|size| *size as u64 <= MAX_RESPONSE_BYTES)
+                .ok_or_else(|| {
+                    io::Error::other("CLAP Note processing response exceeds metadata limit")
+                })?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)
+        .map_err(|error| invalid(format!("CLAP Note response measurement failed: {error}")))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(count.0)
+        .map_err(|_| invalid("CLAP Note response allocation failed"))?;
+    if bytes.capacity() != count.0 {
+        return Err(invalid("CLAP Note response allocation exceeded admission"));
+    }
+    struct Exact<'a> {
+        bytes: &'a mut Vec<u8>,
+        limit: usize,
+    }
+    impl Write for Exact<'_> {
+        fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+            if self.bytes.len().checked_add(input.len()).is_none_or(|size| size > self.limit) {
+                return Err(io::Error::other(
+                    "CLAP Note response changed during encoding",
+                ));
+            }
+            self.bytes.extend_from_slice(input);
+            Ok(input.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Exact { bytes: &mut bytes, limit: count.0 }, value)
+        .map_err(|error| invalid(format!("CLAP Note response encoding failed: {error}")))?;
+    if bytes.len() != count.0 {
+        return Err(invalid("CLAP Note response encoding extent changed"));
+    }
+    Ok(bytes)
+}
+
+/// Query one Notes-enabled instance's complete processing facts in the bounded child.
+///
+/// Activation and metadata collection do not prove DSP, real-time behavior or
+/// installed ownership. Native Score resolvers still refuse Note preparation.
+pub fn probe_clap_note_processing_offer(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render: AudioRenderContract,
+    state: Option<&[u8]>,
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV2, AudioProcessorHostError> {
+    super::clap_note_input_metadata::validate_request(plugin_id, state)?;
+    if !helper_executable.is_absolute()
+        || !library_path.is_absolute()
+        || render.sample_rate == 0
+        || u32::try_from(render.max_block_frames).ok().is_none_or(|frames| frames == 0)
+    {
+        return Err(invalid(
+            "CLAP Note processing probe paths/render extent are invalid",
+        ));
+    }
+    let canonical = fs::canonicalize(library_path)
+        .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+    let fingerprint = fingerprint_clap_binary(&canonical)?;
+    let (library_path, bytes, _process) = request_discovery_bytes(
+        helper_executable,
+        &canonical,
+        DiscoveryOperation::ProbeNotes {
+            schema_version: 2,
+            plugin_id: plugin_id.to_owned(),
+            sample_rate: render.sample_rate,
+            channel_layout: render.channel_layout,
+            max_block_frames: render.max_block_frames,
+            offline: render.processing_mode == AudioProcessingMode::Offline,
+            state: state.map(ToOwned::to_owned),
+        },
+    )?;
+    if fingerprint_clap_binary(&library_path)? != fingerprint {
+        return Err(unavailable(
+            "CLAP binary changed during Note processing negotiation",
+        ));
+    }
+    decode_processing_offer_v2(&bytes, plugin_id, fingerprint, state, render)
+}
+
+fn decode_processing_offer_v2(
+    bytes: &[u8],
+    plugin_id: &str,
+    fingerprint: [u8; 32],
+    state: Option<&[u8]>,
+    render: AudioRenderContract,
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV2, AudioProcessorHostError> {
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err(invalid(
+            "CLAP Note processing response exceeds metadata limit",
+        ));
+    }
+    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV2 =
+        serde_json::from_slice(bytes).map_err(|error| {
+            invalid(format!("CLAP Note processing response is invalid: {error}"))
+        })?;
+    let notes = &result.notes;
+    if result.schema_version != 2
+        || notes.schema_version != 1
+        || notes.plugin_id != plugin_id
+        || notes.binary_sha256 != fingerprint
+        || notes.state_sha256 != super::clap_note_input_metadata::state_digest(state)
+        || notes.sample_rate != render.sample_rate
+        || notes.channel_layout != render.channel_layout
+        || notes.max_block_frames != render.max_block_frames
+        || notes.offline != (render.processing_mode == AudioProcessingMode::Offline)
+        || notes.contract.ports.is_empty()
+        || notes.contract.limits != super::clap_note_input_contract::offered_limits()
+    {
+        return Err(invalid(
+            "CLAP Note processing response changed requested identity/state/render/offer",
+        ));
+    }
+    notes.contract.validate()?;
+    for port in &notes.contract.ports {
+        if port.port_key != format!("clap.note-input.{}", port.native_id) {
+            return Err(invalid("CLAP Note processing response changed native key"));
+        }
+    }
+    validate_processing_result_for_notes(&result.processing, plugin_id, render)?;
     Ok(result)
 }
 
@@ -759,9 +1022,17 @@ fn run_clap_discovery_worker_inner(
         )?;
     }
     if let DiscoveryOperation::ProbeNotes {
-        plugin_id, state, sample_rate, max_block_frames, ..
+        schema_version,
+        plugin_id,
+        state,
+        sample_rate,
+        max_block_frames,
+        ..
     } = &request.operation
     {
+        if !matches!(*schema_version, 1 | 2) {
+            return Err(invalid("unsupported CLAP Note probe schema version"));
+        }
         super::clap_note_input_metadata::validate_request(plugin_id, state.as_deref())?;
         if *sample_rate == 0
             || u32::try_from(*max_block_frames).ok().is_none_or(|frames| frames == 0)
@@ -840,6 +1111,7 @@ fn run_clap_discovery_worker_inner(
             serde_json::to_vec(&DiscoveryResponse { descriptors: Vec::new(), probe: Some(probe) })
         }
         DiscoveryOperation::ProbeNotes {
+            schema_version,
             plugin_id,
             sample_rate,
             channel_layout,
@@ -850,33 +1122,55 @@ fn run_clap_discovery_worker_inner(
             *stage = DiscoveryErrorStage::NoteInputContract;
             let fingerprint = metadata_fingerprint
                 .ok_or_else(|| invalid("CLAP Note probe fingerprint is missing"))?;
-            let result = super::clap_note_input_contract::probe_loaded(
-                &entry,
-                &plugin_id,
-                fingerprint,
-                state.as_deref(),
-                AudioRenderContract {
-                    sample_rate,
-                    channel_layout,
-                    max_block_frames,
-                    processing_mode: if offline {
-                        AudioProcessingMode::Offline
-                    } else {
-                        AudioProcessingMode::Realtime
-                    },
-                    processor_session_scratch_budget_bytes: usize::MAX,
-                    public_output_lookahead_budget_frames: usize::MAX,
-                    compensation_delay_scratch_budget_bytes: usize::MAX,
+            let render = AudioRenderContract {
+                sample_rate,
+                channel_layout,
+                max_block_frames,
+                processing_mode: if offline {
+                    AudioProcessingMode::Offline
+                } else {
+                    AudioProcessingMode::Realtime
                 },
-            )?;
-            *stage = DiscoveryErrorStage::BinaryFingerprint;
-            if fingerprint_clap_binary(&request.library_path)? != fingerprint {
-                return Err(unavailable(
-                    "CLAP binary changed during native Note contract negotiation",
-                ));
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            };
+            if schema_version == 1 {
+                // Legacy request omission and response bytes keep their original path.
+                let result = super::clap_note_input_contract::probe_loaded(
+                    &entry,
+                    &plugin_id,
+                    fingerprint,
+                    state.as_deref(),
+                    render,
+                )?;
+                *stage = DiscoveryErrorStage::BinaryFingerprint;
+                if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                    return Err(unavailable(
+                        "CLAP binary changed during native Note contract negotiation",
+                    ));
+                }
+                *stage = DiscoveryErrorStage::ResponseEncoding;
+                serde_json::to_vec(&result)
+            } else {
+                // The complete offer is captured from one actual Notes-enabled
+                // restored/render-configured/activated instance, then destroyed.
+                let result = super::clap_note_input_contract::probe_loaded_processing_v2(
+                    &entry,
+                    &plugin_id,
+                    fingerprint,
+                    state.as_deref(),
+                    render,
+                )?;
+                *stage = DiscoveryErrorStage::BinaryFingerprint;
+                if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                    return Err(unavailable(
+                        "CLAP binary changed during native Note processing negotiation",
+                    ));
+                }
+                *stage = DiscoveryErrorStage::ResponseEncoding;
+                Ok(encode_processing_offer_v2(&result)?)
             }
-            *stage = DiscoveryErrorStage::ResponseEncoding;
-            serde_json::to_vec(&result)
         }
     }
     .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;

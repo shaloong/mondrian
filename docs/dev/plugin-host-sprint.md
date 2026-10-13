@@ -3607,3 +3607,169 @@ capacity refusal before earlier media/DSP/PCM/ID mutation; actual bad-End poison
 live selected/unselected three-phase handoff and Ack retry; zero-frame dispatch;
 then zero-input instruments, replay/nesting and product editing. Third-party,
 physical realtime, comparative performance and macOS/Linux remain unqualified.
+
+## A01 M2 prepared policy and coherent CLAP offer (2026-10-14)
+
+This slice extends the same Runtime ledger and supervised discovery operation.
+It does not enable public Note Score execution. Its compiled cohort is 1,925
+source inputs, SHA-256
+`0096DAF8D5BC3CA90271586F64E1910661E057C14A97B585EB7708845433423A`.
+Documentation is outside that compiled selector.
+
+### Existing prepared policy admitted before construction
+
+`PreparedAudioPlan::requested_base_logical_bytes` reads the actual compiled
+graph without preparing segments or cloning author curves. The prospective
+shape and actual prepared summary use one factored version of the existing
+logical policy: base4,096, node2,048, route/sidechain512, contribution4,096,
+processor4,096, curve512, span64 and transition512 bytes. Nodes follow actual
+Track channels, reachable Bus order and selected Output. Scope processors are
+counted per Contribution occurrence; curve span counting borrows keyframes.
+Sidechain counting before native auxiliary metadata is an upper bound, including
+different auxiliary layouts on repeated author-instance occurrences. It can
+conservatively refuse a graph that its eventual actual charge would allow.
+
+For empty selected scores, the existing Runtime admission ledger reserves the
+local Plan before media/processor creation, retains pending ancestor charges
+through child preparation, and completes the local charge only after actual
+Session admission succeeds. The private receipt is consumed once by the
+synchronous builder. Completion verifies actual logical bytes <= requested,
+stages replacement of only that local reservation, and applies unchanged
+occurrence/fixed-resident/logical ceilings before publishing the new footprint.
+There is no second grant map, Note ledger or native execution permit. The private
+receipt relies on that single-builder/same-ledger invariant; it does not carry
+a cross-ledger identity token. Existing final footprint values are unchanged.
+
+Eight new controls exercise checked arithmetic, pending ancestors/completed
+siblings, completion refusal without accounting mutation, actual graph policy
+parity, root/child rejection before media and processor factory calls, and
+exact-grant output equality. Their earlier A02/1,923 selected run passes eight
+exact1/0 groups (receiptEACE6D0D...0B998F2). Independent actual evidence review
+is `.scratch/plugin-host-sprint/a01-m2-preparation-budget-evidence-review-r1/report-r1.md`,
+SHA `F6CA55AC794756525094160A39384BCDC61CE47217CE390129BDFC26812C5D45`.
+The final current cohort also executes all eight controls in each ordinary round.
+This verifies the existing logical policy, not complete graph allocation,
+physical allocator/RSS, SDK heap or realtime safety.
+
+### One Notes-enabled native processing offer
+
+ProbeNotes schema2 captures parameter definitions/current values, ordered
+auxiliary audio layouts, latency, tail, processing mode and the Note contract
+from one actual enabled instance. Optional state restore and render negotiation
+precede inactive metadata validation. The same instance activates without
+starting DSP, captures latency/tail on the required roles, deactivates, rechecks
+inactive metadata, and is destroyed before publishing bounded owned output.
+The parent validates format/instance identity, binary/state/render fingerprints,
+schemas, stable port keys and finite execution policy. Public read-only
+accessors borrow private captured processing facts; mode does not read the
+separately mutable public Note metadata. The premeasured serializer refuses
+oversize output before reserving its bounded512KiB buffer.
+
+Ordinary Probe, metadata and schema1 remain separate existing operations.
+Schema1 is still omitted from legacy request serialization. Unsupported schema
+versions refuse before loading. The existing five-second discovery deadline,
+request limit and ProcessOwner remain the sole process supervision path.
+Existing restart/unserviced callbacks, incomplete/publishing parameter sources,
+open gestures, Note flags/cohort changes, wrong-thread and flush observations
+cause refusal; they are not cleared or acknowledged to manufacture a valid offer.
+AudioPorts/Latency/Tail host callbacks are not registered, so this does not claim
+observation of those optional notifications.
+
+Independent source review initially found two defects: inline services could
+lose destroy-time observations, and captured facts lacked a public Rust facade.
+Both are corrected. Only schema2 retains one Arc-backed services owner beyond
+native destruction; its final check reads the same original Note/flush/thread
+sources. Ordinary probes/workers retain inline services without new services
+heap allocation. Enum/SDK-wrapper layout changes and Arc/nested ownership remain
+an explicitly unqualified physical-accounting frontier; no Mondrian consumer of
+the SDK allocation visitor was found. The new facade exposes the existing
+private payload without creating a second processing-state authority.
+
+Eight processing controls comprise seven real raw ABI/lifecycle tests and one
+pure source-snapshot test. Four cached destroy-time situations cover illegal
+Note flags, legal pending Names, a joined wrong-thread Note callback, and legal
+main-thread flush. Two wire controls preserve legacy request bytes and exercise
+schema/identity/state/render/policy, missing-processing, unknown-field and
+oversize refusal. These owned controls do not qualify third-party plugins.
+
+### Current finite regression evidence
+
+External receipts below are under
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/`.
+
+| Receipt | SHA-256 | Actual result |
+| --- | --- | --- |
+| `a01-m2-coherent-budget-audio-r3.receipt.json` | `442AEA1F952338B70E70740D3DD1D936127D9AFBB0A2742BDA5051DAAF784E5B` | Default Audio test producer Cargo0, current1,925 source inputs unchanged |
+| `a01-m2-coherent-budget-native-r1/receipt.json` | `D5CF775A51B1EBB43C10ED8B6FC5A49427EE5014BE66599DFEDFAB49C065E91B` | Two actual ordinary rounds, each481/0 |
+| `a01-m2-coherent-budget-strict-r1.receipt.json` | `C39ABA95D13DBF85F402FB2DE365FF43218DAF9B21D09F09846881694575E2D5` | Five affected crates, all-targets/all-features, Cargo0 |
+| `a01-m2-coherent-budget-product-r1.receipt.json` | `F5B216FF6D2793043CEF8D9DFA5F2BD8166511F57A1AE1FFD5A45C045251B1AF` | Normal Product rebuild, Cargo0, current compiled inputs unchanged |
+| `a01-m2-coherent-parent-query-r2/receipt.json` | `409B4A6FE3185A9C3F48E7C5C822F74B82C70AB6AA3B41029F257D8FCDE470C6` | Fixed owned DLL, actual Product helper and parent decoder, exact1/0 |
+
+Actual inventory is566 names /85 ignored /481 ordinary. All previous547 names
+and84 ignored names remain; the19 additions are18 ordinary and one optional
+fixed-DLL parent-query control. Each481-name round executes every expected name
+once, with zero ignored; exact85-name skip set is retained. Native owner and
+runner exits are0, descendants are reaped, and deadline, outliving, owner,
+input-mutation and cleanup gates pass. Retained current Audio PE is
+`3CCFD38721689B2A3D18477232153C7D841429CB59B0CFECD33CCA1A2D35A10D`
+(13,581,824 bytes). This is a scoped Audio regression, not current whole-Workspace
+or physical realtime qualification.
+
+Current normal Product PE is
+`3870C8621E05A91C2798B8C55F75352AE0FFB0384A8D0A3DBBB3A2D24635586E`
+(97,172,992 bytes), producer55405E8B...9FA7C9. Its actual profile is default
+features[], opt1, debug2, freshfalse; ten existing normal warnings remain.
+ffmpeg-sys8.1.0 binds D55A6C9C...A15B89, codec62/util60 and the selected
+FFmpeg8.1.2 release link directory. R2 retains the image create-only and pins
+the same SDK runtime DLLs plus present SDK-named executable-directory copies.
+The actual ignored parent-query control passes1/0: without state and with
+16-byte MNG1 state restore, it checks independent literal parameters, Mono,
+latency0, finite tail4, mode, original high-bit port IDs/current indexes and
+binary/state/render/finite-contract binding. Native owner/runner exits are0,
+descendants are reaped and no timeout, error, input mutation or cleanup failure
+occurs. This qualifies the complete owned metadata query through the normal
+Product helper, not Note DSP, a zero-input instrument or a third-party plugin.
+
+The initial query R1 remains failed, receipt
+`0E634EE28543CD2028CF5B8A0A22CB0D597A5A76A8933909D3A382552C7A74A3`.
+The actual helper exited0xc0000135 before discovery; its copied image directory
+lacked the FFmpeg8 runtime environment. The test owner exited101 and reaped
+descendants without deadline/owner errors. PE imports show the five FFmpeg8
+DLL names. R2 changes only the lab environment and input pinning, reuses the
+same compiled PE/test/DLL bytes and original assertions, and passes with the
+selected SDK bin/tools paths. This establishes the selected environment fix,
+not a general DLL-loader causal or platform-stability claim. R1's uncompleted
+post-run comparison and original negative receipt are not rewritten.
+
+Original Cargo101 for the new parity control's missing CompiledRoute import is
+retained as27B1D632...8E989F. The correction adds only the import; independent
+in-memory reversal reconstructs the original complete file and assertions.
+Original source review AF88C606...7E73B is retained unchanged. Separate correction
+source closure is1DF849FF...7489 in
+`.scratch/plugin-host-sprint/a01-m2-clap-coherent-offer-independent-review-r1/correction-source-closure-r1.md`.
+No original failed producer or finding is relabeled passed.
+
+Independent actual finite review is B3B2F7CA...338A45 at
+`.scratch/plugin-host-sprint/a01-m2-clap-coherent-offer-independent-review-r1/actual-finite-acceptance-r1.md`.
+It records native/strict acceptance with Product/query still pending at creation;
+later Product/query and submission closure are recorded separately in that
+directory. The final submission corrects only two stale ordinary Rust comment
+lines in schedule.rs after all gates. Their line count is preserved and
+in-memory reversal reconstructs the complete compiled file CBD7D1F8...54E490;
+all other1,924 compiled inputs remain byte-identical. Projection receipt
+`.scratch/plugin-host-sprint/a01-m2-coherent-final-source-projection-r1.json`
+is C6ABBF06...3C7C7E. Documentation updates and that comment-only correction
+are not a claim that the final checkout is byte-identical to the compiled cohort
+or that another build/native run occurred.
+
+Public nonempty Note Score still runs the original allocation-free M1 guard.
+Remaining dependencies include Note-IR temporary peak admission; author clone
+preflight and all externally retained prepared handoff handles; application
+Resolver consumption of the coherent offer; actual native Root/DAG/ParentIPC
+Note DSP, whole-root capacity refusal before earlier work, bad-End poisoning,
+live all-peer phase handoff/Ack retry, zero-frame dispatch, replay and nesting.
+Source review identifies author locals allocated before overlap admission and
+external prepared handles absent from the running Root footprint. This is a
+specific unresolved accounting frontier, not a reproduced budget-bypass claim.
+Third-party instruments/effects, comparative performance, physical realtime,
+macOS/Linux and native GPU qualification require separate evidence.

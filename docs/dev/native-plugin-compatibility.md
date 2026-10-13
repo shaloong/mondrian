@@ -397,3 +397,51 @@ platforms still need their respective acceptance evidence. The current normal
 Product build passes with FFmpeg8.1.2; it is not a native execution result.
 See the [sprint record](plugin-host-sprint.md#a01-m2-exclusive-hosted-ledger-and-native-noteports-2026-10-14)
 for full receipts, retained failures, architecture boundaries and review records.
+
+## Coherent CLAP query and prepared logical policy (2026-10-14)
+
+The next compiled cohort has1,925 source inputs, SHA-256
+`0096DAF8D5BC3CA90271586F64E1910661E057C14A97B585EB7708845433423A`.
+Actual inventory566/85ignored/481ordinary retains every previous547 test name.
+Two owned Windows ordinary rounds each pass481/0, including18 new controls.
+ReceiptD5CF775A...65E91B binds current retained Audio PE3CCFD387...35A10D,
+unchanged sources and actual error-free, deadline-free, reaped process owners.
+Five affected model crates pass strict all-targets/all-features checks.
+
+Schema2 ProbeNotes now captures parameters, auxiliary audio layout, latency,
+tail, render mode and Notes from one restored, Notes-enabled native instance.
+It retains the same services owner through destruction and rejects unsupported
+or unserviced observations before publication. Seven raw ABI/lifecycle tests,
+one pure source snapshot and two wire controls are **Verified within these
+owned controls**. Ordinary probes/schema1 retain their existing behavior.
+Application Resolver integration and product Note Score remain **Unsupported**.
+
+The fixed B239C594...F32AF1D owned DLL also passes the actual schema2 parent
+query through current normal Product3870C862...635586E, exact1/0 (two scenarios:
+without state and with16-byte state restore). Independent literal parameters,
+Mono layout, latency0/tail4, mode, high-bit port IDs and complete fingerprint/
+finite-policy binding pass. Receipt409B4A6F...DE470C6 has actual0/reaped owners
+and unchanged inputs. This is **Verified within this owned Windows metadata
+query**, not Note DSP or third-party compatibility. Initial helper startup
+failure0xc0000135 remains recorded as0E634EE2...7A74A3; R2 pins and selects the
+existing FFmpeg8 runtime environment without changing product/test/fixture bytes.
+Normal Product build passes with FFmpeg8.1.2 and ten existing warnings.
+
+Empty-score Runtime preparation now reserves the existing prepared-logical
+upper-bound policy before local media/processor creation, retaining ancestor
+charges while preparing children. Eight controls verify actual policy parity,
+checked accounting and no earlier calls on root/child refusal. This does not
+qualify Note IR peaks, author clone/all external prepared-handoff residency,
+SDK/Arc allocation ownership, physical memory or realtime safety. Public
+nonempty Note Score retains the original allocation-free M1 refusal.
+
+After these gates, only two stale ordinary Rust comment lines are corrected;
+complete-file in-memory reversal proves the compiled schedule.rs hash and all
+other1,924 compiled input hashes remain unchanged. Later repository documents
+are outside the compiled selector. No new build/native or final checkout
+byte-identity claim follows from these documentation changes.
+
+See the [sprint record](plugin-host-sprint.md#a01-m2-prepared-policy-and-coherent-clap-offer-2026-10-14)
+for current receipts, retained original failures, source review and remaining
+dependencies. Query qualification does not establish Note DSP, instruments,
+third-party compatibility, comparative performance or another platform.
