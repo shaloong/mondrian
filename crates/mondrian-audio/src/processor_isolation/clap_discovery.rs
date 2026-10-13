@@ -46,6 +46,158 @@ pub(super) const MAX_PARAMETERS: u32 = 1024;
 const MAX_INPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
+// Private optional discovery-error transport; never parameter or playback authority.
+const ERROR_ENV: &str = "MONDRIAN_INTERNAL_CLAP_DISCOVERY_ERROR";
+const MAX_DISCOVERY_ERROR_TEXT_BYTES: usize = 1024;
+const MAX_DISCOVERY_ERROR_PACKET_BYTES: u64 = 8 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DiscoveryErrorStage {
+    Arguments,
+    RequestRead,
+    RequestDecode,
+    RequestValidation,
+    BinaryFingerprint,
+    LibraryLoad,
+    List,
+    NoteInputMetadata,
+    Probe,
+    ResponseEncoding,
+    ResponseWrite,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryErrorPacket {
+    schema_version: u32,
+    stage: DiscoveryErrorStage,
+    error_debug: String,
+    truncated: bool,
+}
+
+struct DiscoveryErrorText {
+    text: String,
+    truncated: bool,
+}
+
+impl std::fmt::Write for DiscoveryErrorText {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let available = MAX_DISCOVERY_ERROR_TEXT_BYTES.saturating_sub(self.text.len());
+        let mut count = available.min(text.len());
+        while !text.is_char_boundary(count) {
+            count -= 1;
+        }
+        self.text.push_str(&text[..count]);
+        if count < text.len() {
+            self.truncated = true;
+            Err(std::fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn discovery_error_packet(
+    stage: DiscoveryErrorStage,
+    error: &AudioProcessorHostError,
+) -> DiscoveryErrorPacket {
+    let mut writer = DiscoveryErrorText {
+        text: String::with_capacity(MAX_DISCOVERY_ERROR_TEXT_BYTES),
+        truncated: false,
+    };
+    // Rust main's Result termination prints Error: followed by the error's Debug.
+    // This records that host-returned error, not arbitrary native stderr output.
+    if std::fmt::write(&mut writer, format_args!("Error: {error:?}")).is_err() {
+        writer.truncated = true;
+    }
+    DiscoveryErrorPacket {
+        schema_version: 1,
+        stage,
+        error_debug: writer.text,
+        truncated: writer.truncated,
+    }
+}
+
+fn write_discovery_error(
+    path: &Path,
+    stage: DiscoveryErrorStage,
+    error: &AudioProcessorHostError,
+) -> io::Result<()> {
+    let packet = discovery_error_packet(stage, error);
+    // A 1024-byte text can escape to at most 6144 JSON bytes; fixed metadata fits
+    // inside the 8192-byte packet cap. This formatting is outside native callbacks.
+    let bytes = serde_json::to_vec(&packet).map_err(io::Error::other)?;
+    if bytes.len() as u64 > MAX_DISCOVERY_ERROR_PACKET_BYTES {
+        return Err(io::Error::other(
+            "CLAP discovery error packet exceeds its bound",
+        ));
+    }
+    // Parent created this ordinary file before spawning. Never create a new sink.
+    let mut file = fs::OpenOptions::new().write(true).open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other(
+            "CLAP discovery error sink is not an ordinary file",
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(&bytes)
+}
+
+fn run_discovery_with_error_report(
+    path: Option<&Path>,
+    run: impl FnOnce(&mut DiscoveryErrorStage) -> Result<(), AudioProcessorHostError>,
+) -> Result<(), AudioProcessorHostError> {
+    let mut stage = DiscoveryErrorStage::Arguments;
+    let result = run(&mut stage);
+    if let (Err(error), Some(path)) = (&result, path) {
+        // Capture failure is secondary: preserve the exact original business Err
+        // and its existing main/worker exit behavior. Never report on success.
+        let _ = write_discovery_error(path, stage, error);
+    }
+    result
+}
+
+fn read_discovery_error(file: &mut fs::File) -> Option<DiscoveryErrorPacket> {
+    use std::io::{Seek, SeekFrom};
+    // Read the parent's held ordinary descriptor, never re-open the child-writable
+    // path. Replacement of that path cannot redirect the parent to a FIFO/pipe.
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_DISCOVERY_ERROR_PACKET_BYTES {
+        return None;
+    }
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut bytes = Vec::with_capacity(MAX_DISCOVERY_ERROR_PACKET_BYTES as usize + 1);
+    file.take(MAX_DISCOVERY_ERROR_PACKET_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_DISCOVERY_ERROR_PACKET_BYTES {
+        return None;
+    }
+    let packet: DiscoveryErrorPacket = serde_json::from_slice(&bytes).ok()?;
+    if packet.schema_version != 1
+        || packet.error_debug.is_empty()
+        || packet.error_debug.len() > MAX_DISCOVERY_ERROR_TEXT_BYTES
+    {
+        return None;
+    }
+    Some(packet)
+}
+
+fn discovery_failed_status(
+    status: std::process::ExitStatus,
+    diagnostic: Option<&mut fs::File>,
+) -> AudioProcessorHostError {
+    let original = format!("CLAP discovery worker failed with status {status}");
+    let Some(packet) = diagnostic.and_then(read_discovery_error) else {
+        return unavailable(original);
+    };
+    unavailable(format!(
+        "{original}; worker stage={:?}: {}{}",
+        packet.stage,
+        packet.error_debug,
+        if packet.truncated { " [truncated]" } else { "" }
+    ))
+}
+
 pub(super) fn fingerprint_clap_binary(
     library_path: &Path,
 ) -> Result<[u8; 32], AudioProcessorHostError> {
@@ -401,6 +553,7 @@ fn request_discovery_bytes(
         .map_err(|error| unavailable(format!("CLAP discovery staging failed: {error}")))?;
     let request_path = temp.path().join("request.json");
     let response_path = temp.path().join("response.json");
+    let error_path = temp.path().join("error.json");
     let request =
         serde_json::to_vec(&DiscoveryRequest { library_path: library_path.clone(), operation })
             .map_err(|error| invalid(format!("CLAP discovery request failed: {error}")))?;
@@ -409,51 +562,72 @@ fn request_discovery_bytes(
     }
     fs::write(&request_path, request)
         .map_err(|error| unavailable(format!("CLAP discovery request write failed: {error}")))?;
+    // Diagnostics are optional. Retain the create_new ordinary descriptor so the
+    // parent never reopens a path that native code in the child could replace.
+    let mut diagnostic = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&error_path)
+        .ok();
+    let mut command = Command::new(helper_executable);
+    command
+        .arg(CLAP_DISCOVERY_WORKER_ARGUMENT)
+        .env(REQUEST_ENV, &request_path)
+        .env(RESPONSE_ENV, &response_path)
+        .env_remove(ERROR_ENV)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if diagnostic.is_some() {
+        command.env(ERROR_ENV, &error_path);
+    }
     // Adopt the child and staging immediately; every post-spawn failure/unwind
     // uses the same existing OS owner as audio workers, without claiming that
     // permanent OS refusal or a successful-kill wait is kernel-time bounded.
     let mut process = super::supervisor::ProcessOwner::with_staging(
-        Command::new(helper_executable)
-            .arg(CLAP_DISCOVERY_WORKER_ARGUMENT)
-            .env(REQUEST_ENV, &request_path)
-            .env(RESPONSE_ENV, &response_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                unavailable(format!("CLAP discovery worker failed to start: {error}"))
-            })?,
+        command.spawn().map_err(|error| {
+            unavailable(format!("CLAP discovery worker failed to start: {error}"))
+        })?,
         temp,
     );
+    let outcome = wait_for_discovery_worker(&mut process, diagnostic.as_mut());
+    drop(diagnostic);
+    outcome?;
+    let response = read_bounded(&response_path, "response", MAX_RESPONSE_BYTES)?;
+    // The caller retains this owner through decoding (and metadata identity
+    // verification), so directory lifetime covers the complete response use.
+    Ok((library_path, response, process))
+}
+
+// The existing fixed wait policy has one production consumer; owned child tests
+// use this same loop, not a second deadline or process-ownership implementation.
+fn wait_for_discovery_worker(
+    process: &mut super::supervisor::ProcessOwner,
+    diagnostic: Option<&mut fs::File>,
+) -> Result<(), AudioProcessorHostError> {
     let deadline = Instant::now() + DISCOVERY_DEADLINE;
     loop {
         match process.try_wait() {
-            Ok(Some(status)) if status.success() => break,
+            Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
-                return Err(unavailable(format!(
-                    "CLAP discovery worker failed with status {status}"
-                )));
+                return Err(discovery_failed_status(status, diagnostic));
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 return Err(retire_discovery_failure(
-                    &mut process,
+                    process,
                     AudioProcessorHostError::WorkerDeadlineExceeded { operation: "CLAP discovery" },
                 ));
             }
             Err(error) => {
                 return Err(retire_discovery_failure(
-                    &mut process,
+                    process,
                     unavailable(format!("CLAP discovery worker wait failed: {error}")),
                 ));
             }
         }
     }
-    let response = read_bounded(&response_path, "response", MAX_RESPONSE_BYTES)?;
-    // The caller retains this owner through decoding (and metadata identity
-    // verification), so directory lifetime covers the complete response use.
-    Ok((library_path, response, process))
 }
 
 pub(super) fn retire_discovery_failure(
@@ -466,6 +640,13 @@ pub(super) fn retire_discovery_failure(
 
 /// Execute the hidden discovery mode before any UI, GPU, or media initialization.
 pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
+    let error_path = std::env::var_os(ERROR_ENV).map(PathBuf::from);
+    run_discovery_with_error_report(error_path.as_deref(), run_clap_discovery_worker_inner)
+}
+
+fn run_clap_discovery_worker_inner(
+    stage: &mut DiscoveryErrorStage,
+) -> Result<(), AudioProcessorHostError> {
     let mut args = std::env::args_os();
     let _executable = args.next();
     if args.next().as_deref() != Some(OsStr::new(CLAP_DISCOVERY_WORKER_ARGUMENT))
@@ -479,9 +660,12 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
     let response_path = std::env::var_os(RESPONSE_ENV)
         .map(PathBuf::from)
         .ok_or_else(|| invalid("CLAP discovery response path is missing"))?;
+    *stage = DiscoveryErrorStage::RequestRead;
     let request = read_bounded(&request_path, "request", MAX_REQUEST_BYTES)?;
+    *stage = DiscoveryErrorStage::RequestDecode;
     let request: DiscoveryRequest = serde_json::from_slice(&request)
         .map_err(|error| invalid(format!("CLAP discovery request is invalid: {error}")))?;
+    *stage = DiscoveryErrorStage::RequestValidation;
     if !request.library_path.is_absolute() {
         return Err(invalid("CLAP discovery library path must be absolute"));
     }
@@ -496,18 +680,23 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
     }
     let metadata_fingerprint =
         if matches!(&request.operation, DiscoveryOperation::NoteInputMetadata(_)) {
+            *stage = DiscoveryErrorStage::BinaryFingerprint;
             Some(fingerprint_clap_binary(&request.library_path)?)
         } else {
             None
         };
+    *stage = DiscoveryErrorStage::LibraryLoad;
     let entry = unsafe { PluginEntry::load(request.library_path.as_os_str()) }
         .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
     let response = match request.operation {
-        DiscoveryOperation::List => serde_json::to_vec(&DiscoveryResponse {
-            descriptors: list_loaded(&entry)?,
-            probe: None,
-        }),
+        DiscoveryOperation::List => {
+            *stage = DiscoveryErrorStage::List;
+            let descriptors = list_loaded(&entry)?;
+            *stage = DiscoveryErrorStage::ResponseEncoding;
+            serde_json::to_vec(&DiscoveryResponse { descriptors, probe: None })
+        }
         DiscoveryOperation::NoteInputMetadata(query) => {
+            *stage = DiscoveryErrorStage::NoteInputMetadata;
             let fingerprint = metadata_fingerprint
                 .ok_or_else(|| invalid("CLAP note metadata fingerprint is missing"))?;
             let metadata = super::clap_note_input_metadata::inspect_loaded(
@@ -516,11 +705,13 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
                 fingerprint,
                 query.state.as_deref(),
             )?;
+            *stage = DiscoveryErrorStage::BinaryFingerprint;
             if fingerprint_clap_binary(&request.library_path)? != fingerprint {
                 return Err(unavailable(
                     "CLAP binary changed during native note metadata inspection",
                 ));
             }
+            *stage = DiscoveryErrorStage::ResponseEncoding;
             serde_json::to_vec(&metadata)
         }
         DiscoveryOperation::Probe {
@@ -531,9 +722,9 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             offline,
             state,
             capture_default_state,
-        } => serde_json::to_vec(&DiscoveryResponse {
-            descriptors: Vec::new(),
-            probe: Some(probe_loaded(
+        } => {
+            *stage = DiscoveryErrorStage::Probe;
+            let probe = probe_loaded(
                 &entry,
                 &plugin_id,
                 AudioRenderContract {
@@ -551,8 +742,10 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
                 },
                 state.as_deref(),
                 capture_default_state,
-            )?),
-        }),
+            )?;
+            *stage = DiscoveryErrorStage::ResponseEncoding;
+            serde_json::to_vec(&DiscoveryResponse { descriptors: Vec::new(), probe: Some(probe) })
+        }
     }
     .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;
     if response.len() as u64 > MAX_RESPONSE_BYTES {
@@ -560,6 +753,7 @@ pub fn run_clap_discovery_worker() -> Result<(), AudioProcessorHostError> {
             "CLAP discovery response exceeds the metadata limit",
         ));
     }
+    *stage = DiscoveryErrorStage::ResponseWrite;
     fs::write(response_path, response)
         .map_err(|error| unavailable(format!("CLAP discovery response write failed: {error}")))
 }
@@ -983,6 +1177,341 @@ pub(super) fn unavailable(detail: impl Into<String>) -> AudioProcessorHostError 
 
 #[cfg(test)]
 mod tests {
+    mod discovery_error_tests {
+        use super::*;
+        use std::io::{Seek, SeekFrom};
+
+        const CHILD_MODE_ENV: &str = "MONDRIAN_CLAP_DISCOVERY_ERROR_TEST_MODE";
+        const CHILD_READY_ENV: &str = "MONDRIAN_CLAP_DISCOVERY_ERROR_TEST_READY";
+
+        fn held_file(path: &Path) -> fs::File {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .expect("create parent-owned ordinary diagnostic")
+        }
+
+        fn rejected_status() -> std::process::ExitStatus {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(17)
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(17 << 8)
+            }
+        }
+
+        fn original_status_error() -> AudioProcessorHostError {
+            unavailable(format!(
+                "CLAP discovery worker failed with status {}",
+                rejected_status()
+            ))
+        }
+
+        #[test]
+        fn returned_error_text_and_coarse_stage_are_preserved() {
+            let error = invalid("CLAP parameter metadata is invalid or ambiguous: index=0 native_id=7 reason=default_out_of_range");
+            let packet = discovery_error_packet(DiscoveryErrorStage::Probe, &error);
+            assert_eq!(packet.schema_version, 1);
+            assert_eq!(packet.stage, DiscoveryErrorStage::Probe);
+            assert_eq!(packet.error_debug, format!("Error: {error:?}"));
+            assert!(!packet.truncated);
+        }
+
+        #[test]
+        fn bounded_writer_preserves_utf8_and_exact_byte_boundary() {
+            use std::fmt::Write as _;
+            let mut exact = DiscoveryErrorText { text: String::new(), truncated: false };
+            exact.write_str(&"x".repeat(MAX_DISCOVERY_ERROR_TEXT_BYTES)).unwrap();
+            assert_eq!(exact.text.len(), MAX_DISCOVERY_ERROR_TEXT_BYTES);
+            assert!(!exact.truncated);
+            assert!(exact.write_str("y").is_err());
+            assert!(exact.truncated);
+            let mut unicode = DiscoveryErrorText { text: String::new(), truncated: false };
+            unicode.write_str(&"x".repeat(MAX_DISCOVERY_ERROR_TEXT_BYTES - 2)).unwrap();
+            assert!(unicode.write_str("中").is_err());
+            assert_eq!(unicode.text.len(), MAX_DISCOVERY_ERROR_TEXT_BYTES - 2);
+            assert!(unicode.truncated);
+            assert!(std::str::from_utf8(unicode.text.as_bytes()).is_ok());
+        }
+
+        #[test]
+        fn formatted_error_and_escaped_wire_are_both_bounded() {
+            for text in ["中".repeat(4096), "\u{0001}\"\\\n".repeat(4096)] {
+                let packet =
+                    discovery_error_packet(DiscoveryErrorStage::LibraryLoad, &unavailable(text));
+                assert!(packet.truncated);
+                assert!(packet.error_debug.len() <= MAX_DISCOVERY_ERROR_TEXT_BYTES);
+                let bytes = serde_json::to_vec(&packet).unwrap();
+                assert!(bytes.len() as u64 <= MAX_DISCOVERY_ERROR_PACKET_BYTES);
+                let decoded: DiscoveryErrorPacket = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(decoded.error_debug, packet.error_debug);
+                assert_eq!(decoded.stage, DiscoveryErrorStage::LibraryLoad);
+            }
+        }
+
+        #[test]
+        fn missing_empty_truncated_invalid_or_oversized_diagnostic_keeps_status() {
+            assert_eq!(
+                discovery_failed_status(rejected_status(), None),
+                original_status_error()
+            );
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let mut file = held_file(&path);
+            let valid = serde_json::to_vec(&discovery_error_packet(
+                DiscoveryErrorStage::Probe,
+                &invalid("original"),
+            ))
+            .unwrap();
+            let mut bad_version = serde_json::from_slice::<serde_json::Value>(&valid).unwrap();
+            bad_version["schema_version"] = 2.into();
+            let mut unknown_field = serde_json::from_slice::<serde_json::Value>(&valid).unwrap();
+            unknown_field["surprise"] = true.into();
+            let mut oversized_text = serde_json::from_slice::<serde_json::Value>(&valid).unwrap();
+            oversized_text["error_debug"] = "x".repeat(MAX_DISCOVERY_ERROR_TEXT_BYTES + 1).into();
+            let mut empty_text = serde_json::from_slice::<serde_json::Value>(&valid).unwrap();
+            empty_text["error_debug"] = "".into();
+            let mut unknown_stage = serde_json::from_slice::<serde_json::Value>(&valid).unwrap();
+            unknown_stage["stage"] = "invented_stage".into();
+            for bytes in [
+                Vec::new(),
+                valid[..valid.len() / 2].to_vec(),
+                b"not json".to_vec(),
+                vec![0xff, 0xfe],
+                vec![b'x'; MAX_DISCOVERY_ERROR_PACKET_BYTES as usize + 1],
+                serde_json::to_vec(&bad_version).unwrap(),
+                serde_json::to_vec(&unknown_field).unwrap(),
+                serde_json::to_vec(&oversized_text).unwrap(),
+                serde_json::to_vec(&empty_text).unwrap(),
+                serde_json::to_vec(&unknown_stage).unwrap(),
+            ] {
+                fs::write(&path, bytes).unwrap();
+                assert_eq!(
+                    discovery_failed_status(rejected_status(), Some(&mut file)),
+                    original_status_error()
+                );
+            }
+        }
+
+        #[test]
+        fn held_descriptor_ignores_replacement_of_child_writable_path() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let mut file = held_file(&path);
+            let original = invalid("original inode diagnostic");
+            write_discovery_error(&path, DiscoveryErrorStage::Probe, &original).unwrap();
+            fs::rename(&path, temp.path().join("detached-error.json")).unwrap();
+            let _replacement = held_file(&path);
+            write_discovery_error(
+                &path,
+                DiscoveryErrorStage::LibraryLoad,
+                &invalid("replacement diagnostic"),
+            )
+            .unwrap();
+            let packet = read_discovery_error(&mut file).expect("held original descriptor");
+            assert_eq!(packet.stage, DiscoveryErrorStage::Probe);
+            assert_eq!(packet.error_debug, format!("Error: {original:?}"));
+        }
+
+        #[test]
+        fn diagnostic_write_failure_preserves_exact_business_error() {
+            let temp = tempfile::tempdir().unwrap();
+            let error = invalid("business error is authoritative");
+            for path in [temp.path().join("missing.json"), temp.path().to_path_buf()] {
+                let result = run_discovery_with_error_report(Some(&path), |stage| {
+                    *stage = DiscoveryErrorStage::RequestDecode;
+                    Err(error.clone())
+                });
+                assert_eq!(result, Err(error.clone()));
+            }
+            assert_eq!(
+                run_discovery_with_error_report(None, |_| Err(error.clone())),
+                Err(error)
+            );
+        }
+
+        #[test]
+        fn successful_worker_does_not_write_or_clear_diagnostic() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            fs::write(&path, b"preexisting child data").unwrap();
+            run_discovery_with_error_report(Some(&path), |_| Ok(())).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"preexisting child data");
+            run_discovery_with_error_report(None, |_| Ok(())).unwrap();
+        }
+
+        fn child_command(mode: &str, path: &Path, ready: &Path) -> Command {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            let module = module_path!().split_once("::").expect("crate-qualified module path").1;
+            command
+                .args([
+                    "--ignored",
+                    "--exact",
+                    &format!("{module}::owned_child_fixture"),
+                    "--test-threads=1",
+                ])
+                .env(CHILD_MODE_ENV, mode)
+                .env(ERROR_ENV, path)
+                .env(CHILD_READY_ENV, ready)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command
+        }
+
+        #[test]
+        #[ignore = "private subprocess entry; ordinary parent tests select exact fixture"]
+        fn owned_child_fixture() {
+            let Some(mode) = std::env::var_os(CHILD_MODE_ENV) else {
+                return;
+            };
+            let path = PathBuf::from(std::env::var_os(ERROR_ENV).expect("parent sidecar"));
+            let ready =
+                PathBuf::from(std::env::var_os(CHILD_READY_ENV).expect("parent ready path"));
+            let error = invalid("owned child returned business error");
+            match mode.to_str().unwrap() {
+                "error" => {
+                    assert_eq!(
+                        run_discovery_with_error_report(Some(&path), |stage| {
+                            *stage = DiscoveryErrorStage::RequestValidation;
+                            Err(error.clone())
+                        }),
+                        Err(error)
+                    );
+                    std::process::exit(17);
+                }
+                "legacy" => std::process::exit(17),
+                "success" => {
+                    write_discovery_error(&path, DiscoveryErrorStage::Probe, &error).unwrap();
+                }
+                "timeout" => {
+                    write_discovery_error(&path, DiscoveryErrorStage::Probe, &error).unwrap();
+                    fs::write(ready, b"written before hang").unwrap();
+                    thread::sleep(Duration::from_secs(60));
+                    panic!("parent did not terminate timed-out child");
+                }
+                other => panic!("unknown child fixture {other}"),
+            }
+        }
+
+        #[test]
+        fn owned_nonzero_child_preserves_actual_status_and_returned_error() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let ready = temp.path().join("ready");
+            let mut file = held_file(&path);
+            let child = child_command("error", &path, &ready).spawn().unwrap();
+            let mut process =
+                super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
+            let error = wait_for_discovery_worker(&mut process, Some(&mut file))
+                .expect_err("native nonzero exit");
+            assert_eq!(process.try_wait().unwrap().unwrap(), rejected_status());
+            assert_eq!(error, unavailable(format!("CLAP discovery worker failed with status {}; worker stage=RequestValidation: Error: InvalidContract(\"owned child returned business error\")", rejected_status())));
+        }
+
+        #[test]
+        fn owned_legacy_helper_empty_sidecar_preserves_original_status() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let ready = temp.path().join("ready");
+            let mut file = held_file(&path);
+            let child = child_command("legacy", &path, &ready).spawn().unwrap();
+            let mut process =
+                super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
+            assert_eq!(
+                wait_for_discovery_worker(&mut process, Some(&mut file)),
+                Err(original_status_error())
+            );
+            assert_eq!(process.try_wait().unwrap().unwrap(), rejected_status());
+        }
+
+        #[test]
+        fn owned_successful_child_ignores_diagnostic_even_when_present() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let ready = temp.path().join("ready");
+            let mut file = held_file(&path);
+            let child = child_command("success", &path, &ready).spawn().unwrap();
+            let mut process =
+                super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
+            wait_for_discovery_worker(&mut process, Some(&mut file)).unwrap();
+            assert!(process.try_wait().unwrap().unwrap().success());
+            assert_eq!(
+                file.stream_position().unwrap(),
+                0,
+                "success did not read sidecar"
+            );
+            assert!(
+                file.metadata().unwrap().len() > 0,
+                "child actually wrote diagnostic"
+            );
+        }
+
+        #[test]
+        fn owned_timeout_uses_fixed_deadline_and_ignores_written_unsettled_diagnostic() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("error.json");
+            let ready = temp.path().join("ready");
+            let mut file = held_file(&path);
+            let child = child_command("timeout", &path, &ready).spawn().unwrap();
+            let mut process =
+                super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
+            let started = Instant::now();
+            assert_eq!(
+                wait_for_discovery_worker(&mut process, Some(&mut file)),
+                Err(AudioProcessorHostError::WorkerDeadlineExceeded {
+                    operation: "CLAP discovery"
+                })
+            );
+            assert!(started.elapsed() >= DISCOVERY_DEADLINE);
+            assert_eq!(
+                fs::read(ready).unwrap(),
+                b"written before hang",
+                "diagnostic was present before timeout"
+            );
+            assert_eq!(
+                file.stream_position().unwrap(),
+                0,
+                "timeout did not read sidecar"
+            );
+            assert!(
+                process.try_wait().unwrap().is_some(),
+                "original owner reaped child"
+            );
+            file.seek(SeekFrom::Start(0)).unwrap();
+            assert!(
+                read_discovery_error(&mut file).is_some(),
+                "valid packet was deliberately ignored"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires freshly built normal Mondrian helper with diagnostic sidecar support"]
+        fn installed_worker_library_load_failure_reports_phase_and_original_error() {
+            let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+                .map(PathBuf::from)
+                .expect("freshly built normal Mondrian helper");
+            let temp = tempfile::tempdir().unwrap();
+            let library = temp.path().join("not-a-native-plugin.clap");
+            fs::write(&library, b"ordinary file, deliberately invalid library").unwrap();
+            let error = scan_clap_library_descriptors(&helper, &library)
+                .expect_err("native library load must fail");
+            assert!(
+                matches!(error, AudioProcessorHostError::Unavailable(ref detail)
+                if detail.starts_with("CLAP discovery worker failed with status ")
+                    && detail.contains("worker stage=LibraryLoad: Error: Unavailable(")
+                    && detail.contains("CLAP library load failed:")),
+                "actual discovery error: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn note_metadata_legacy_list_request_and_response_bytes_are_unchanged() {
         assert_eq!(
@@ -2241,6 +2770,43 @@ mod tests {
             assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
             assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
             assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn probe_render_error_diagnostic_preserves_owned_abi_failure_and_destruction() {
+            let temp = tempfile::tempdir().expect("diagnostic staging");
+            let path = temp.path().join("error.json");
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .expect("parent sidecar");
+            let mut original = None;
+            let result = run_discovery_with_error_report(Some(&path), |stage| {
+                *stage = DiscoveryErrorStage::Probe;
+                let (result, audit) = run::<RENDER_ERROR>();
+                let error = result.err().expect("actual owned ABI render refusal");
+                assert!(
+                    matches!(&error, AudioProcessorHostError::Unavailable(message)
+                    if message.contains("render mode was declined"))
+                );
+                assert_eq!(audit.activations.load(Ordering::SeqCst), 0);
+                assert_eq!(audit.deactivations.load(Ordering::SeqCst), 0);
+                assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+                assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+                assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+                assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+                assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+                original = Some(error.clone());
+                Err(error)
+            });
+            let original = original.expect("original owned ABI error");
+            assert_eq!(result, Err(original.clone()));
+            let packet = read_discovery_error(&mut file).expect("bounded diagnostic");
+            assert_eq!(packet.stage, DiscoveryErrorStage::Probe);
+            assert_eq!(packet.error_debug, format!("Error: {original:?}"));
+            assert!(!packet.truncated);
         }
 
         #[test]

@@ -2692,3 +2692,152 @@ helper execution is not qualified. Native entry init/deinit, exceptional
 post-activation unwind, third-party PCM, GUI, other platforms and comparative
 performance are outside this slice. The earlier 8291-test workspace acceptance
 remains tied to merge `44b84553`; it is not relabeled as a new full-workspace run.
+
+## Fresh marker Product and Airwindows project replay
+
+The normal Product was rebuilt at `53cf68e4`, with the explicit debug-info-two
+command and unchanged 1903 source inputs. Its source manifest SHA-256 is
+`A57F206544071B37838F825D6E52366C4BA90BD6EDFC62835F4C5A9ED92BB120`;
+every path, size and hash equals the previously accepted GREEN Audio source
+array. Actual Product PE SHA-256 is
+`900E48084A3BF0C24466A8A26C6BCCD1D647B8F423DE536CCB0F00ED73D073A8`
+(normal features, opt level one, debug info two). Cargo exited zero, inputs
+were unchanged and cleanup was empty. The same ten existing OFX diagnostic
+warnings remain. Generated and retained FFmpeg bindings remain ABI 62/60 and
+select the accepted 8.1.2 SDK link path. Build receipt SHA-256:
+`D841F5ED8E4E54A40C8146E0B9EB7A3DF2AD49AE73073005B529E18239DD436F`.
+
+That actual PE passed the existing `--verify-runtime` route with the unique
+ready line, native/runner exit zero, complete reaping and 1949 unchanged inputs.
+Smoke receipt SHA-256:
+`6F1179D3AC774E3FDD97FFA0187C2EFB06C07E54E4AACA067601BF2F49462DD1`.
+The unchanged DF68 launcher remains a tool from its earlier producer; this
+does not relabel the launcher as a fresh full-source build or qualify GUI/GPU.
+
+Two new real Airwindows CLAP rounds used this normal helper and same-source
+Audio PE C2D9, the unchanged MIT-licensed binary `6388EA29...4094FAA`, and the
+historical 314-byte opaque project state and captured metadata. The historical
+inputs were retained unchanged; they are not fresh captures. The original
+ignored exact-one positive test, 180-second outer Job budget, internal worker
+budgets and parameter predicates were preserved. Both positive gates failed
+before any complete PCM partition, with native exit 101, runner exit one,
+observed parent exit, no timeout/outliving/errors and reaped descendants.
+New failure observations are:
+
+| Round | Actual failure point | Expected/actual default bits at index 5, native ID 2944917345 |
+| --- | --- | --- |
+| 1 | Original factory validation including shutdown | `0000000000000000` / `3DA62625A0000000` |
+| 2 | Fresh native processing child startup | `0000000000000000` / `378FFE4000000000` |
+
+Both remain the `native_after_state_render_mode` comparison projection, not
+independent raw callback buffers or evidence identifying the native writer.
+Current compatibility remains failed and root cause remains unestablished.
+Replay receipt SHA-256:
+`60A84B052F6CF3D5F58089D558CFF4A63588D59A1F67B9364051A0DBFF466578`.
+
+Independent static review identified a replay-driver gap: it could launch a
+second round after an unsettled first failure, and a passing flag was not
+finally bound to input/cleanup checks. Inspection of the actual two original
+receipts confirms both were settled and both failed; no positive qualification
+was made. The original A053 driver and actual receipts remain unchanged. The
+R2 successor requires completed unique native owners before another launch and
+ties final compatibility to input/cleanup admission. Its SHA-256 is
+`C6E6F303064D58A6CBFE84B90972C3BE21BF3CF6D58057ABB5F7C2403E463F2E`;
+it parses successfully but has not been executed. Subsequent work first adds
+bounded returned-error diagnostics, then separately reviews same-call scalar
+observations without extra queries or altered parameter/source rules.
+
+Independent fresh Product/startup review is retained in
+`.scratch/plugin-host-sprint/clap-airwindows-observation-slice-r1/fresh-product-review-r1.md`
+(SHA-256 `CFDBECDF34033A06C048AF5917C9528ED6131EF595CF1877F715645D524D5A6C`).
+Independent replay review is in the same directory, `replay-review-r1.md`
+(SHA-256 `F10F71AF1E18AB1EA8BF84BBC427BD45065BC2ED30C3FF4B46A2403CBFA8831D`).
+
+## Bounded CLAP discovery returned-error diagnostics
+
+The next private slice adds an optional diagnostic file to the existing discovery
+worker. Only an observed nonzero child exit reads the parent's held ordinary-file
+descriptor. Success, timeout, legacy helpers and missing or malformed diagnostics
+retain their previous behavior. Error text is capped at 1024 UTF-8 bytes, the
+JSON packet at 8192 bytes, and truncation is explicit. There is no new parameter
+authority, callback query, native ownership system or processing path. The
+original five-second discovery deadline and ten-millisecond polling remain.
+
+This transports the worker's returned Rust error and coarse stage; it does not
+identify a native memory writer or authenticate native plugin reports. The child
+still opens its supplied sink path, so arbitrary native path replacement or
+kernel I/O refusal is outside the diagnostic writer's bounded guarantee. The
+existing process owner and deadline retain responsibility for child termination.
+
+Current source SHA-256 is
+`951E6D8950CBE296B1D768E9EF5258E66FFF483642DA3BFA5F03FBDAAE2B21DF`.
+The final Audio no-run build passed with unchanged 1903 source inputs and empty
+cleanup; receipt SHA-256 is
+`383F4DB96184E1BD89FE2AB9E0FE46D3A57B9ADD66B1102DBE07A1341278CA21`.
+The first build's new-test `expect_err` Debug-bound failure remains recorded;
+using `result.err().expect` repairs that test without changing production types.
+The consumer's original predicate is retained, with an actual-error assertion
+message added for truthful RED evidence. Independent static review is
+`error-slice-review-r1.md` in the observation directory
+(SHA-256 `CDBF6937A38338E722DDC94FB77D46E927F4601A80038852A708B0D3661D6CA2`).
+Compilation alone does not qualify this slice or Airwindows compatibility.
+The following execution results retain their separate source and runtime scope.
+
+The first scoped execution completed: all twelve new ordinary diagnostic/owned
+ABI tests passed, and the exact ignored consumer rejected the historical normal
+helper as expected. Its original positive expected-one gate remained false:
+zero passed, one failed, native exit 101, runner exit one. The actual error was
+`Unavailable("CLAP discovery worker failed with status exit code: 1")`, without
+the expected diagnostic stage or loader reason. This RED is a reproduction of
+missing diagnostics, not positive compatibility. Both groups settled with no
+deadline/outliving/error, and inputs remained unchanged with empty cleanup.
+Receipt SHA-256:
+`850E792F06C763459F14251DF3BFE3F5545ED735FA439807FFA77451AD68EABB`.
+Actual inventory is 456 tests, 76 ignored, preserving all previous 442/74 entries
+and adding only the named fourteen/two tests. Independent producer/controller and
+actual owned/RED review is `final-audio-producer-controller-review-r1.md` in the
+observation directory (SHA-256
+`19B23C7C76377A3790A690BFE7E8670B32BFAA6C20561ED870AC162FA25A5437`).
+
+The fresh normal Product then built successfully with the same 1903 source
+records as Audio, opt level one/debug info two, normal features and ABI 62/60
+using the selected FFmpeg 8.1.2 SDK. Product PE SHA-256 is
+`FF981C42923582D750047CC6C595D570E3B61E04B17BDEFB9AF23E649F8D88D1`;
+build receipt SHA-256 is
+`1CFBF7816FFB7137C0E20CDB69D8C43C215D62C7E259F0A742E4D82A066C0899`.
+There were zero compiler errors and the same ten existing OFX warnings. The
+actual installed-helper consumer passed its original stage/error predicate in
+all three execution rounds. The first ordinary Audio run still failed: 379
+passed, one failed when the new successful-child test received exit status
+`0xc0000142` before its expected successful completion. Its original positive
+gate remains false and receipt remains
+`A47727ACC2D438F371168615B0DD4FAFE7DD0FAA9424E72B85A74A057A67A818`.
+Independent new Product/consumer GREEN and ordinary-negative review is
+`fresh-error-product-green-review-r1.md` (SHA-256
+`5C5A51E6C99BD37415176BFEBED0CC79B80DAFE6001EA7F0354BB82AB1E1F54E`).
+
+Two subsequent unchanged executions each passed all 380 ordinary Audio tests,
+using the original two test threads, original assertions and deadlines. R2 and
+R3 execution receipt SHA-256 values are, respectively,
+`F97A74CDD5FDF97780189065159923C3B81D2C8067E44193ED00F2A2E1A19634`
+and `CAF31ED92AA8B741AF5B03646F5F2E271BC3CFEC12E8BCC78C7731AE81F80EF1`.
+All three rounds observed and reaped native children without timeout/outliving
+or cleanup errors, and all retained inputs remained unchanged. No retry was
+added to production or tests. The first Windows child-initialization failure
+remains unexplained; subsequent passing runs do not establish that it is fixed.
+This is a known validation risk, not evidence of complete platform reliability.
+
+Audio all-target/all-feature Clippy with `-D warnings` and workspace fmt check
+both passed, with zero compiler errors/warnings, unchanged inputs and empty
+cleanup. Quality receipt SHA-256:
+`F5E3A22CD78AC21E0576459B3D7F0A716E4C570646B0FD93C9CEB8BBAD2CFE41`.
+This does not replace the earlier full-workspace acceptance or qualify real
+Airwindows processing, macOS/Linux execution, GPU interoperability or realtime
+performance. Airwindows compatibility remains failed pending same-call native
+parameter evidence; its current metadata predicates are unchanged.
+
+Final independent actual R2/R3/quality and scoped integration review is
+`private-error-slice-final-integration-review-r1.md` in the observation directory
+(SHA-256 `CF6357AA45E89400F2AF25A984893F442446F98D17B7616C242E8C134C5A85C4`).
+It accepts integration of the private fail-closed diagnostic behavior while
+retaining the initial unexplained Windows startup failure as an open risk.
