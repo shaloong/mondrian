@@ -67,7 +67,7 @@ enum DiscoveryOperation {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum DiscoveryResponse {
+pub(super) enum DiscoveryResponse {
     List {
         descriptors: Vec<Vst3PluginDescriptor>,
     },
@@ -479,7 +479,7 @@ fn request(
     }
     fs::write(&request_path, bytes)
         .map_err(|error| unavailable(format!("VST3 discovery request write failed: {error}")))?;
-    let mut child = {
+    let process = {
         let mut command = Command::new(helper_executable);
         command
             .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
@@ -490,13 +490,27 @@ fn request(
             .stderr(Stdio::null());
         #[cfg(windows)]
         super::supervisor::configure_background_worker_start(&mut command);
-        command.spawn().map_err(|error| {
-            unavailable(format!("VST3 discovery worker failed to start: {error}"))
-        })?
+        // Own Child and its staging immediately. No fallible post-spawn step may
+        // release a bare child or delete files while termination is unconfirmed.
+        super::supervisor::ProcessOwner::with_staging(
+            command.spawn().map_err(|error| {
+                unavailable(format!("VST3 discovery worker failed to start: {error}"))
+            })?,
+            temp,
+        )
     };
+    finish_discovery_request(process, &response_path)
+}
+
+// One real production consumer and the owned-child controls share this exact
+// wait/read/decode scope. The owner retains staging until complete response use.
+pub(super) fn finish_discovery_request(
+    mut process: super::supervisor::ProcessOwner,
+    response_path: &Path,
+) -> Result<DiscoveryResponse, AudioProcessorHostError> {
     let deadline = Instant::now() + DEADLINE;
     loop {
-        match child.try_wait() {
+        match process.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(status)) => {
                 return Err(unavailable(format!(
@@ -505,24 +519,30 @@ fn request(
             }
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(AudioProcessorHostError::WorkerDeadlineExceeded {
-                    operation: "VST3 discovery",
-                });
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    AudioProcessorHostError::WorkerDeadlineExceeded { operation: "VST3 discovery" },
+                ));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unavailable(format!(
-                    "VST3 discovery worker wait failed: {error}"
-                )));
+                return Err(retire_discovery_failure(
+                    &mut process,
+                    unavailable(format!("VST3 discovery worker wait failed: {error}")),
+                ));
             }
         }
     }
-    let bytes = read_bounded(&response_path, MAX_RESPONSE_BYTES)?;
+    let bytes = read_bounded(response_path, MAX_RESPONSE_BYTES)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("VST3 discovery response is invalid: {error}")))
+}
+
+pub(super) fn retire_discovery_failure(
+    process: &mut super::supervisor::ProcessOwner,
+    primary: AudioProcessorHostError,
+) -> AudioProcessorHostError {
+    process.terminate_reported("VST3 discovery failure");
+    primary
 }
 
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, AudioProcessorHostError> {

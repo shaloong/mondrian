@@ -2070,5 +2070,241 @@ mod control_timeout_worker_lifecycle {
                 "following Settled shutdown is idempotent"
             );
         }
+
+        #[test]
+        #[ignore = "direct success child fixture; invoke only through a Job-contained VST3 owner control"]
+        fn vst3_discovery_successful_child_fixture() {
+            require_actual_job();
+        }
+
+        fn successful_vst3_owner(staging: TempDir) -> ProcessOwner {
+            require_actual_job();
+            let mut command = Command::new(std::env::current_exe().expect("current libtest"));
+            command.args([
+                "--exact",
+                "processor_isolation::supervisor::control_timeout_worker_lifecycle::process_retirement_tests::vst3_discovery_successful_child_fixture",
+                "--ignored", "--nocapture", "--test-threads=1",
+            ]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            configure_background_worker_start(&mut command);
+            ProcessOwner::with_staging(
+                command.spawn().expect("spawn actual Job-contained success child"),
+                staging,
+            )
+        }
+
+        #[test]
+        #[ignore = "actual outer Job required; VST3 production retirement consumer with refused kill"]
+        fn vst3_discovery_refused_kill_preserves_primary_staging_and_zero_wait() {
+            let (mut owner, directory) = sleeping_owner();
+            let staging = tempfile::tempdir().expect("VST3 staging");
+            let path = staging.path().to_owned();
+            owner.staging = Some(staging);
+            owner.cleanup_hooks = Some((
+                Child::try_wait,
+                refuse_discovery_kill,
+                forbidden_discovery_wait,
+            ));
+            DISCOVERY_WAIT_CALLS.with(|calls| calls.set(0));
+            let primary =
+                AudioProcessorHostError::WorkerDeadlineExceeded { operation: "VST3 discovery" };
+            assert_eq!(
+                super::super::super::vst3_discovery::retire_discovery_failure(
+                    &mut owner,
+                    primary.clone()
+                ),
+                primary
+            );
+            assert_eq!(owner.state, ProcessState::Retiring);
+            assert!(path.exists());
+            owner.cleanup_hooks = Some((
+                refuse_discovery_observation,
+                refuse_discovery_kill,
+                forbidden_discovery_wait,
+            ));
+            let primary = AudioProcessorHostError::Unavailable(
+                "VST3 discovery worker wait failed: injected observation refusal".to_owned(),
+            );
+            assert_eq!(
+                super::super::super::vst3_discovery::retire_discovery_failure(
+                    &mut owner,
+                    primary.clone()
+                ),
+                primary
+            );
+            let observer = retain_process(&owner.child);
+            drop(owner);
+            assert!(
+                path.exists(),
+                "unconfirmed actual child retains staging through Drop"
+            );
+            DISCOVERY_WAIT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+            request_natural_exit(&directory);
+            assert_handle_settled(&observer);
+            assert!(path.is_absolute() && path.parent() == Some(std::env::temp_dir().as_path()));
+            std::fs::remove_dir_all(path).expect("remove only settled retained staging");
+        }
+
+        #[test]
+        #[ignore = "actual outer Job required; VST3 finish consumer preserves nonzero status"]
+        fn vst3_discovery_finish_preserves_nonzero_status_and_releases_staging() {
+            let (mut owner, directory) = sleeping_owner();
+            let staging = tempfile::tempdir().expect("VST3 staging");
+            let path = staging.path().to_owned();
+            let response = path.join("response.json");
+            std::fs::write(&response, b"not valid JSON")
+                .expect("response must not be decoded on failure");
+            owner.staging = Some(staging);
+            request_natural_exit(&directory);
+            let status = await_exit(&mut owner.child);
+            assert_eq!(status.code(), Some(7));
+            assert!(path.exists());
+            let result =
+                super::super::super::vst3_discovery::finish_discovery_request(owner, &response);
+            match result {
+                Err(error) => assert_eq!(
+                    error,
+                    AudioProcessorHostError::Unavailable(format!(
+                        "VST3 discovery worker failed: {status}"
+                    ))
+                ),
+                Ok(_) => panic!("nonzero child must not publish response"),
+            }
+            assert!(
+                !path.exists(),
+                "confirmed exit releases staging after finish error"
+            );
+        }
+
+        #[test]
+        #[ignore = "actual outer Job required; VST3 real finish response/cap/decode controls"]
+        fn vst3_discovery_finish_holds_staging_through_success_and_decode_refusal() {
+            use super::super::super::vst3_discovery::{
+                finish_discovery_request, DiscoveryResponse,
+            };
+            for case in 0..5 {
+                let staging = tempfile::tempdir().expect("VST3 response staging");
+                let path = staging.path().to_owned();
+                let response = path.join("response.json");
+                match case {
+                    0 => std::fs::write(&response, br#"{"kind":"list","descriptors":[]}"#).unwrap(),
+                    1 => std::fs::write(&response, br#"{"kind":"probe","class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
+                    2 => {},
+                    3 => std::fs::write(&response, b"not valid JSON").unwrap(),
+                    4 => std::fs::write(&response, vec![b' '; 512 * 1024 + 1]).unwrap(),
+                    _ => unreachable!(),
+                }
+                assert!(path.exists());
+                let owner = successful_vst3_owner(staging);
+                let result = finish_discovery_request(owner, &response);
+                match (case, result) {
+                    (0, Ok(DiscoveryResponse::List { descriptors })) => {
+                        assert!(descriptors.is_empty())
+                    }
+                    (
+                        1,
+                        Ok(DiscoveryResponse::Probe {
+                            class_id,
+                            parameters,
+                            current_values,
+                            captured_state,
+                            auxiliary_buses,
+                            ..
+                        }),
+                    ) => {
+                        assert_eq!(class_id, "0123456789ABCDEF0123456789ABCDEF");
+                        assert!(
+                            parameters.is_empty()
+                                && current_values.is_empty()
+                                && auxiliary_buses.is_empty()
+                        );
+                        assert!(captured_state.is_none());
+                    }
+                    (2, Err(AudioProcessorHostError::Unavailable(detail))) => {
+                        assert!(detail.starts_with("VST3 discovery file is unavailable: "))
+                    }
+                    (3, Err(AudioProcessorHostError::InvalidContract(detail))) => {
+                        assert!(detail.starts_with("VST3 discovery response is invalid: "))
+                    }
+                    (4, Err(error)) => assert_eq!(
+                        error,
+                        AudioProcessorHostError::InvalidContract(
+                            "VST3 discovery file exceeds its limit".to_owned()
+                        )
+                    ),
+                    _ => panic!("unexpected VST3 finish response or primary for case {case}"),
+                }
+                assert!(
+                    !path.exists(),
+                    "staging is released after complete read/decode attempt"
+                );
+            }
+        }
+
+        thread_local! {
+            static VST3_PANIC_OBSERVATION_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+
+        fn panic_once_vst3_observation(child: &mut Child) -> io::Result<Option<ExitStatus>> {
+            if VST3_PANIC_OBSERVATION_ONCE.with(|flag| flag.replace(false)) {
+                panic!("injected unwind in actual VST3 retirement consumer");
+            }
+            child.try_wait()
+        }
+
+        #[test]
+        #[ignore = "actual outer Job required; unwind across VST3 production retire consumer"]
+        fn vst3_discovery_retirement_unwind_releases_or_keeps_actual_staging() {
+            for refuse in [false, true] {
+                let (mut owner, directory) = sleeping_owner();
+                let staging = tempfile::tempdir().expect("VST3 unwind staging");
+                let path = staging.path().to_owned();
+                owner.staging = Some(staging);
+                let hooks: CleanupHooks = if refuse {
+                    (
+                        panic_once_vst3_observation,
+                        refuse_discovery_kill,
+                        forbidden_discovery_wait,
+                    )
+                } else {
+                    (panic_once_vst3_observation, Child::kill, Child::wait)
+                };
+                owner.cleanup_hooks = Some(hooks);
+                let observer = retain_process(&owner.child);
+                DISCOVERY_WAIT_CALLS.with(|calls| calls.set(0));
+                VST3_PANIC_OBSERVATION_ONCE.with(|flag| flag.set(true));
+                let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let mut process = owner;
+                    super::super::super::vst3_discovery::retire_discovery_failure(
+                        &mut process,
+                        AudioProcessorHostError::WorkerDeadlineExceeded {
+                            operation: "VST3 discovery",
+                        },
+                    );
+                }));
+                assert!(
+                    unwind.is_err(),
+                    "same production retirement boundary propagates injected panic"
+                );
+                if refuse {
+                    assert!(
+                        path.exists(),
+                        "refused cleanup keeps actual staging even on unwind"
+                    );
+                    DISCOVERY_WAIT_CALLS.with(|calls| assert_eq!(calls.get(), 0));
+                    request_natural_exit(&directory);
+                    assert_handle_settled(&observer);
+                    assert!(
+                        path.is_absolute() && path.parent() == Some(std::env::temp_dir().as_path())
+                    );
+                    std::fs::remove_dir_all(path).expect("settled retained staging");
+                } else {
+                    assert_handle_settled(&observer);
+                    assert!(
+                        !path.exists(),
+                        "real kill/reap after unwind releases actual staging"
+                    );
+                }
+            }
+        }
     }
 }

@@ -3147,3 +3147,79 @@ M1 author/save/history/duplicate/local-Plan refusal with23 proposed tests. M2/M3
 note execution, voice ownership and instruments remain unsupported. The complete
 task ROADMAP stays outside Git; source and raw evidence recovery pointers remain
 in the existing scratch progress record.
+
+### 2026-10-13 VST3 discovery ownership slice acceptance
+
+VST3 discovery previously retained a bare Child after spawn. Its timeout and
+wait-error branches ignored kill failure and then called wait unconditionally;
+post-spawn unwinding could also release staging before confirmed retirement.
+The existing ProcessOwner now adopts Child and staging immediately. The Command
+builder remains local to the spawn block. A private finish function retains the
+owner through the original poll, bounded read and decode; failed retirement is
+reported separately while the original discovery error remains authoritative.
+The existing ten-second deadline, ten-millisecond poll, 512-KiB response limit,
+wire format, success/nonzero semantics and Windows launch policy are unchanged.
+This reuses the existing ownership abstraction without changing its production
+implementation or introducing a second execution system.
+
+Four appended ignored controls use real owned OS children: refused kill must
+not enter wait and must preserve the primary error/staging; nonzero exit must
+retain its original status; response success/read/decode failures retain staging
+through use; and injected cleanup-observer unwind reaches the real Drop path.
+The fifth appended ignored test is a child utility, not an acceptance gate.
+All previous tests and assertions remain intact. The actual inventory is
+469 total / 81 ignored / 388 ordinary, with exactly five added ignored names
+and no removed names. The four controls passed 1/0 each, and both fixed ordinary
+rounds passed 388/0. Receipt SHA-256 is
+`7D98DDD0F9E8AD908D6CB7766B274241FFDB4E3C25F13176B2EAB36D53F16F81`.
+
+Fresh Audio and normal Product builds bind identical 1903 source records.
+Audio PE is `3F30E3DC498389A280091D4DA7521ABF97334414715B3307E45B0508B4FD8824`;
+Product PE is `BE295F17A62C298BB6873E73590D180C13A51BA71C7B6B5CE4806CFE7CC9BEFA`.
+The actual normal Product producer follows completed Audio, with the original
+features and profiles. Complete producer admission is
+`35BD114BFAAD9D046E7C41FCC307EAE24EEF79FAD4232D32EFFDC1D7D4EB374D`.
+
+The existing pure-Rust stateful-gain VST3 fixture was rebuilt offline with locked
+dependencies and one job. The first build driver incorrectly dot-sourced MSVC
+setup into its parameter scope, clearing the target directory. Cargo returned0,
+but this result was rejected: receipt
+`C1617CA95FF40E45E45448FDF01807129D5F5EA360A9F4F36B711E531DEBADD7`.
+All33 unintended root output files were hash-verified and moved to the external
+negative-evidence archive, without admitting its DLL or deleting unknown files.
+The successor isolates MSVC parameter scope and validates target/argv/environment
+before Cargo. Accepted build receipt is
+`B46821903442727BF816EB2686B8500E769E8AF27E04EBEDF1FF35A5D5C9DEC5`;
+its DLL is `5BCE5142E67CE3B45F0F18B7F26249AEE3B120EBF631CAF25ED4F8C29DA4EB58`.
+The31 fixture inputs contain29 matching current host source records and two
+separately pinned, noncompiled license copies. Existing runtime MIT/Apache and
+SDK MIT notices remain; no new native SDK or core dependency was introduced.
+
+The two existing SDK tests each ran twice in a fixed schedule against that DLL,
+fresh Audio and normal Product. Their original public parent List/Probe APIs
+cross request, ProcessOwner and finish; their gain, parameter queue and state
+round-trip assertions are unchanged. All four original gates passed 1/0.
+All owners settled and reaped, with no deadlines, outliving, input changes or
+cleanup failures. Receipt is
+`BDDCC49F837DD4E68DC858936DF0CED9EF66F5A01F8B3BEC707F6711BC133034`.
+Audio/Vendor strict Clippy and both formatting checks passed with zero diagnostics;
+strict r7 receipt is
+`EABD302864B21AE2E9B78A0C79441C89B197652F94756A98C3CBF4CBAC897FD1`.
+
+Independent first-stage review is10DE1979; the finite second-stage source,
+fixture, producer and strict acceptance report is
+`.scratch/plugin-host-sprint/clap-airwindows-observation-slice-r1/vst3-owner-second-stage-quality-cohort-actual-review-r1.md`,
+SHA-256 `0634C761EA562729DF1332B5E28C10723D971ABDFBA9B0A198A96D143C01FBE0`.
+It rechecks2037 retained inputs and reports no submission blocker. Raw receipts
+remain in the external develop-alignment-evidence-r1 directory and linked scratch
+records. This accepts the finite Windows ownership/owned-fixture slice only.
+Successful kill followed by Child.wait may still block in the kernel; permanent
+kill refusal retains staging and still requires outer Job closure. It does not
+qualify a hard kernel cleanup bound, physical realtime, third-party compatibility,
+full VST3 lifecycle/standard, other platforms or comparative performance.
+
+The next unimplemented slice remains M1's single Note author model, persistence,
+history/duplicate and local-Plan preparation refusal, with23 proposed tests.
+M2 event/voice ownership and M3 zero-input instrument execution remain unsupported.
+The ROADMAP outside Git records these boundaries and the completed gates
+so context recovery does not repeat them.
