@@ -1,5 +1,9 @@
 //! CLAP ABI execution inside the supervised audio worker process.
 
+#[cfg(all(test, windows))]
+#[path = "tests/native_clap_note_gate.rs"]
+mod native_note_gate_controls;
+
 use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
 use super::clap_discovery::{
     fingerprint_clap_binary, inspect_audio_inputs, list_parameters, list_parameters_observed,
@@ -55,6 +59,7 @@ pub(super) struct ClapHost;
 
 #[derive(Clone)]
 pub(super) struct ClapHostShared {
+    pub(super) note_input_enabled: bool,
     restart_requested: Arc<NativeRequestMarker>,
     callback_requested: Arc<AtomicBool>,
     main_thread: ThreadId,
@@ -64,7 +69,16 @@ pub(super) struct ClapHostShared {
 
 impl ClapHostShared {
     pub(super) fn new() -> Self {
+        Self::new_mode(false)
+    }
+
+    pub(super) fn new_with_note_input() -> Self {
+        Self::new_mode(true)
+    }
+
+    fn new_mode(note_input_enabled: bool) -> Self {
         Self {
+            note_input_enabled,
             restart_requested: Arc::new(NativeRequestMarker::new()),
             callback_requested: Arc::new(AtomicBool::new(false)),
             main_thread: thread::current().id(),
@@ -165,8 +179,12 @@ impl HostHandlers for ClapHost {
     type MainThread<'a> = ClapHostMainThread<'a>;
     type AudioProcessor<'a> = ();
 
-    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+    fn declare_extensions(builder: &mut HostExtensions<Self>, shared: &Self::Shared<'_>) {
         builder.register::<HostThreadCheck>().register::<HostLog>();
+        if shared.control.note_input_enabled {
+            // One same-ID raw/shared table, never also legacy HostNotePorts.
+            builder.register::<clack_extensions::note_ports::HostNotePortsRaw>();
+        }
         #[cfg(windows)]
         builder
             .register::<clack_extensions::gui::HostGui>()
@@ -764,6 +782,28 @@ fn output_source_reservation_bytes(
         .ok_or_else(|| invalid("CLAP output source reservation overflowed"))
 }
 
+fn note_source_reservation_bytes(
+    parameter_count: usize,
+    notes: &crate::AudioProcessorNoteInputContract,
+) -> Result<usize, AudioProcessorHostError> {
+    let original = output_source_reservation_bytes(parameter_count)?;
+    let extra_ends =
+        ClapOutputEvents::reservation_bytes_with_notes(parameter_count, notes.limits.output_ends)?
+            .checked_sub(ClapOutputEvents::reservation_bytes(parameter_count)?)
+            .ok_or_else(|| invalid("CLAP Note output reservation underflowed"))?;
+    original
+        .checked_add(extra_ends)
+        .and_then(|bytes| {
+            bytes.checked_add(
+                super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
+                    notes.ports.len(),
+                )
+                .ok()?,
+            )
+        })
+        .ok_or_else(|| invalid("CLAP Note owner reservation overflowed"))
+}
+
 fn parameter_input_capacity(
     render: crate::AudioRenderContract,
     parameter_lanes: usize,
@@ -814,15 +854,12 @@ fn prepare_loaded_on_main(
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
     let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
-    if !request.note_input_contract().ports.is_empty() {
-        // Carrier/IPC support alone cannot grant a restored instance's dialects.
-        // The later port-negotiation slice must replace this explicit refusal.
-        return Err(unavailable(
-            "CLAP executable Note port negotiation is not yet available",
-        ));
-    }
-    let input_events = ClapInputEvents::try_with_note_capacity(event_capacity, 0)?;
-    if output_source_reservation_bytes(expected_parameters.len())?
+    request.note_input_contract().validate()?;
+    let notes_enabled = !request.note_input_contract().ports.is_empty();
+    let note_limits = request.note_input_contract().limits;
+    let input_events =
+        ClapInputEvents::try_with_note_capacity(event_capacity, note_limits.input_events)?;
+    if note_source_reservation_bytes(expected_parameters.len(), request.note_input_contract())?
         .checked_add(input_events.allocated_bytes()?)
         .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
         > request.render_contract().processor_session_scratch_budget_bytes
@@ -834,17 +871,7 @@ fn prepare_loaded_on_main(
     let factory = entry
         .get_plugin_factory()
         .ok_or_else(|| unavailable("CLAP library has no plugin factory"))?;
-    if factory
-        .plugin_descriptors()
-        .filter(|descriptor| descriptor.id() == Some(plugin_id))
-        .take(2)
-        .count()
-        != 1
-    {
-        return Err(unavailable(
-            "CLAP plugin ID is missing or duplicated in the library",
-        ));
-    }
+    super::clap_note_input_metadata::validate_factory_plugin_id(&factory, plugin_id)?;
     let info = HostInfo::new(
         "Mondrian",
         "Mondrian",
@@ -852,10 +879,17 @@ fn prepare_loaded_on_main(
         env!("CARGO_PKG_VERSION"),
     )
     .map_err(|error| invalid(format!("invalid CLAP host identity: {error}")))?;
-    let shared = ClapHostShared::new();
-    let output_events =
-        ClapOutputEvents::new(expected_parameters, Arc::clone(&shared.parameter_source))
-            .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
+    let shared = if notes_enabled {
+        ClapHostShared::new_with_note_input()
+    } else {
+        ClapHostShared::new()
+    };
+    let output_events = ClapOutputEvents::new_with_note_capacity(
+        expected_parameters,
+        Arc::clone(&shared.parameter_source),
+        note_limits.output_ends,
+    )
+    .map_err(|error| parameter_refusal_at_site(error, "expected_output_contract"))?;
     let native_shared = shared.clone().with_native_logs()?;
     let mut instance = PluginInstance::<ClapHost>::new(
         |_| native_shared,
@@ -942,6 +976,24 @@ fn prepare_loaded_on_main(
         return Err(invalid("CLAP auxiliary ports changed since contract probe"));
     }
 
+    let note_inputs = if notes_enabled {
+        Some(super::clap_note_input_contract::negotiate_restored(
+            &mut instance,
+            request.note_input_contract(),
+        )?)
+    } else {
+        None
+    };
+    if note_inputs.as_ref().map_or(Ok(0), |inputs| inputs.allocated_bytes())?
+        > super::clap_note_input_contract::RestoredNoteInputs::reservation_bytes(
+            request.note_input_contract().ports.len(),
+        )?
+    {
+        return Err(invalid(
+            "CLAP restored Note binding exceeds admitted storage",
+        ));
+    }
+
     let render = request.render_contract();
     let configuration = PluginAudioConfiguration {
         sample_rate: f64::from(render.sample_rate),
@@ -954,6 +1006,21 @@ fn prepare_loaded_on_main(
         .map_err(|error| unavailable(format!("CLAP activation failed: {error}")))?
         .into();
     instance.access_shared_handler(|host| host.services.active.store(true, Ordering::Release));
+    if let Some(inputs) = &note_inputs
+        && let Err(error) = super::clap_note_input_contract::service_names(&mut instance, inputs)
+    {
+        {
+            let _audio_role = shared.enter_audio_thread();
+            processor.ensure_processing_stopped();
+        }
+        drop(processor);
+        // ALL is explicitly legal from the native deactivate callback.
+        instance.access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
+        instance.try_deactivate().map_err(|cleanup| {
+            unavailable(format!("CLAP Note activation cleanup failed: {cleanup}"))
+        })?;
+        return Err(error);
+    }
     let handle = instance.plugin_handle();
     let latency = handle
         .get_extension::<PluginLatency>()
@@ -1033,6 +1100,7 @@ fn prepare_loaded_on_main(
         input,
         output,
         auxiliary_inputs,
+        note_inputs,
         input_names: input_metadata.names,
         input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
@@ -1047,6 +1115,7 @@ fn prepare_loaded_on_main(
 }
 
 struct ClapWorker {
+    note_inputs: Option<super::clap_note_input_contract::RestoredNoteInputs>,
     #[cfg(windows)]
     gui: super::clap_gui_owner::ClapGuiOwner,
     native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
@@ -1083,6 +1152,12 @@ struct ClapWorker {
 }
 
 impl ClapWorker {
+    fn service_note_ports(&mut self) -> Result<(), AudioProcessorHostError> {
+        if let Some(inputs) = &self.note_inputs {
+            super::clap_note_input_contract::service_names(&mut self.instance, inputs)?;
+        }
+        Ok(())
+    }
     #[cfg(windows)]
     fn native_editor_binding_matches(&self, request: crate::NativeAudioObjectBindRequest) -> bool {
         self.native_binding.is_some_and(|receipt| {
@@ -1094,6 +1169,11 @@ impl ClapWorker {
 }
 
 impl IsolatedAudioProcessorWorker for ClapWorker {
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        self.note_inputs
+            .as_ref()
+            .map_or_else(Default::default, |inputs| inputs.contract.clone())
+    }
     fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
         self.native_lane
     }
@@ -1136,6 +1216,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         };
         Ok(super::IsolatedAudioProcessorWorkerSplit {
             main: Box::new(ClapMainRole {
+                note_inputs: self.note_inputs.as_ref(),
                 instance: &mut self.instance,
                 gui: &mut self.gui,
                 shared: &self.shared,
@@ -1255,6 +1336,14 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         &mut self,
         request: super::NativeConfigurationControlRequest<'_>,
     ) -> Result<super::NativeConfigurationControlOutcome, AudioProcessorHostError> {
+        if self.note_inputs.is_some() {
+            // This slice never reuses a Note binding across native reactivation.
+            // Root's coordinated configuration/contract migration remains an
+            // explicit subsequent consumer; no cohort/marker is cleared here.
+            return Ok(super::NativeConfigurationControlOutcome::CapabilityRefused(
+                super::NativeConfigurationRefusal::UnsupportedAdapter,
+            ));
+        }
         use super::native_configuration_control::{
             observed_contract, FixedConfigurationWriter, NativeConfigurationPhase as Phase,
         };
@@ -1538,6 +1627,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         &mut self,
         block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
+        self.service_note_ports()?;
         let processor = self.processor.as_mut().ok_or_else(|| {
             AudioProcessorHostError::Process("CLAP processor is closed".to_owned())
         })?;
@@ -1555,6 +1645,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             shared: &self.shared,
         };
         signal.process(processor, block)?;
+        self.instance.access_shared_handler(|host| host.services.note_ports.check())?;
         super::clap_main_services::service_main_tick(&self.shared, &mut self.instance)
     }
 }
@@ -1655,6 +1746,8 @@ impl Drop for ClapWorker {
             }
             drop(processor);
         }
+        self.instance
+            .access_shared_handler(|host| host.services.active.store(false, Ordering::Release));
         let _ = self.instance.try_deactivate();
     }
 }
@@ -3993,6 +4086,7 @@ mod clap_output_owner_contracts;
 
 #[cfg(windows)]
 struct ClapMainRole<'a> {
+    note_inputs: Option<&'a super::clap_note_input_contract::RestoredNoteInputs>,
     instance: &'a mut PluginInstance<ClapHost>,
     gui: &'a mut super::clap_gui_owner::ClapGuiOwner,
     shared: &'a ClapHostShared,
@@ -4015,6 +4109,9 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
     }
 
     fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
+        if let Some(inputs) = self.note_inputs {
+            super::clap_note_input_contract::service_names(self.instance, inputs)?;
+        }
         self.gui.service(self.instance)?;
         super::clap_main_services::service_main_tick(self.shared, self.instance)
     }
@@ -4108,7 +4205,9 @@ impl super::IsolatedAudioProcessorProcessingRole for ClapDspRole<'_> {
         &mut self,
         block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
-        self.signal.process(self.native, block)
+        self.native.access_shared_handler(|host| host.services.note_ports.check())?;
+        self.signal.process(self.native, block)?;
+        self.native.access_shared_handler(|host| host.services.note_ports.check())
     }
 
     fn idle_service_interval(&self) -> Option<std::time::Duration> {

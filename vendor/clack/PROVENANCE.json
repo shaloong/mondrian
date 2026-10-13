@@ -228,8 +228,8 @@
     {
       "path": "extensions/src/note_ports.rs",
       "upstream_sha256": "0ff5a5013358843636e9de69bab1e17d387e18ddb3fb04f52a888c4dab766af0",
-      "shipped_sha256": "306ac1f8042b2d42d6a138b9ef3827b8be4cc11def6d530f6a7d03cca613d20f",
-      "reason": "official generated 1.2.10 ABI/carrier source migration; repository format replay and declared module documentation ordering correction; preferred dialect facade uses the official unsigned note-port field carrier rather than the C enum typedef"
+      "shipped_sha256": "cdd07c575e52829e89e9968270174181a0a6203ce3081c3d825dad8068ab7bde",
+      "reason": "official generated 1.2.10 ABI/carrier source migration; repository format replay and declared module documentation ordering correction; preferred dialect facade uses the official unsigned note-port field carrier rather than the C enum typedef; explicit same-ID shared/raw NotePorts registration and untruncated callback observations; correct single-reference native ABI table pointer (both raw and legacy)"
     },
     {
       "path": "extensions/src/param_indication.rs",
@@ -295,8 +295,8 @@
     {
       "path": "extensions/src/note_ports/host.rs",
       "upstream_sha256": "2d71c1c0eb5ee98f7c44d88c573a295eebddf5dc6f918560f512e499d6cdb011",
-      "shipped_sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
-      "reason": "Additive immutable raw NotePort metadata count/get availability and owned zero-initialized POD accessors; typed API unchanged; candidate not compiled/native qualified"
+      "shipped_sha256": "2889bc6ef21cd8e12884ed7434b4325c8f4c8a8e0e9a8669d0fac63872756d16",
+      "reason": "Additive immutable raw NotePort metadata count/get availability and owned zero-initialized POD accessors; typed API unchanged; candidate not compiled/native qualified; explicit same-ID shared/raw NotePorts registration and untruncated callback observations; correct single-reference native ABI table pointer (both raw and legacy)"
     },
     {
       "path": "common/src/utils/abi_field_values.rs",
@@ -324,7 +324,7 @@
     },
     {
       "path": "MONDRIAN.md",
-      "sha256": "637495f8922be3fa144403256fe793b69fa2223d95818a0f640f5c04428424b3",
+      "sha256": "ad7a9b3c142f040b1b7288a22fedaec2578552fe90bf0ef9ef771ba048ac971d",
       "bytes": 6376
     },
     {
@@ -784,12 +784,12 @@
     },
     {
       "path": "extensions/src/note_ports.rs",
-      "sha256": "306ac1f8042b2d42d6a138b9ef3827b8be4cc11def6d530f6a7d03cca613d20f",
+      "sha256": "cdd07c575e52829e89e9968270174181a0a6203ce3081c3d825dad8068ab7bde",
       "bytes": 6622
     },
     {
       "path": "extensions/src/note_ports/host.rs",
-      "sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
+      "sha256": "2889bc6ef21cd8e12884ed7434b4325c8f4c8a8e0e9a8669d0fac63872756d16",
       "bytes": 5172
     },
     {
@@ -1646,6 +1646,29 @@
     "shipped_sha256": "e23819de1d4e33b53ff8c2eafcefcb9f00b9130ff8c58eb86d8635043376a8b3",
     "shipped_bytes": 29391,
     "reason": "Add formal Safety sections for the original new single-query helpers and owned C callbacks; move the two-test module after production items. Signatures, callback counts, function bodies and assertions remain unchanged; original strict failures and historical revision endpoints are preserved.",
+    "runtime_qualification": false
+  },
+  "local_raw_note_ports_host": {
+    "schema": 1,
+    "status": "RAW_NOTE_PORTS_ABI_SOURCE_UPDATE_NOT_RUNTIME_QUALIFICATION",
+    "previous_provenance_sha256": "AC97D7514BB6ADBA5D33F305E2076AC7C6BC15DADD7BF44E690B640DF95D3B5C",
+    "changes": [
+      {
+        "path": "extensions/src/note_ports.rs",
+        "previous_shipped_sha256": "306ac1f8042b2d42d6a138b9ef3827b8be4cc11def6d530f6a7d03cca613d20f",
+        "shipped_sha256": "cdd07c575e52829e89e9968270174181a0a6203ce3081c3d825dad8068ab7bde",
+        "shipped_bytes": 7332
+      },
+      {
+        "path": "extensions/src/note_ports/host.rs",
+        "previous_shipped_sha256": "644b22be7fa1f375a3fbf92f298a8d61617a0be33dbd57a1ded6e95f8c7cf41b",
+        "shipped_sha256": "2889bc6ef21cd8e12884ed7434b4325c8f4c8a8e0e9a8669d0fac63872756d16",
+        "shipped_bytes": 7154
+      }
+    ],
+    "raw_same_identifier_single_registration": true,
+    "legacy_api_signatures_preserved": true,
+    "pointer_table_correction": "single reference, not pointer slot",
     "runtime_qualification": false
   }
 }

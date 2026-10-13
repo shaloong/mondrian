@@ -1,6 +1,8 @@
 //! Plan-time processor resolution and Session-owned callback dispatch.
 
 pub(crate) mod native_author;
+mod note_ledger;
+mod notes;
 pub(crate) mod state_entry;
 
 use crate::processor_parameters::{prepare_parameter_event_batch, ProcessorParameterEventScratch};
@@ -198,9 +200,34 @@ struct MainBusAudioIo<'a> {
     pcm: &'a mut [f32],
     auxiliary_buses: &'a [PreparedProcessorAuxiliaryBus],
     auxiliary_pcm: &'a [f32],
+    notes: Option<NoteBlockIo<'a>>,
+}
+
+struct NoteBlockIo<'a> {
+    inputs: &'a [crate::AudioNoteEvent],
+    ends: &'a mut Vec<crate::AudioNoteEndEvent>,
+    end_limit: usize,
+    ports: usize,
+    refused: &'a mut bool,
 }
 
 impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
+    fn note_events(&self) -> &[crate::AudioNoteEvent] {
+        self.notes.as_ref().map_or(&[], |notes| notes.inputs)
+    }
+
+    fn try_push_note_end(&mut self, end: crate::AudioNoteEndEvent) -> bool {
+        let Some(notes) = &mut self.notes else {
+            return false;
+        };
+        if *notes.refused || !end.valid(notes.ports) || notes.ends.len() >= notes.end_limit {
+            *notes.refused = true;
+            return false;
+        }
+        notes.ends.push(end);
+        true
+    }
+
     fn main_layout(&self) -> AudioChannelLayout {
         self.channel_layout
     }
@@ -253,6 +280,7 @@ struct HostedProcessorInstance {
     occurrence: AudioProcessorOccurrence,
     processor: Box<dyn AudioProcessor>,
     continuity: HostedProcessorContinuity,
+    notes: Option<Box<notes::HostedNoteState>>,
     native_binding: crate::native_runtime_owner::NativeHostedBinding,
     native_author_outstanding: Option<native_author::NativeHostedAuthorDelivery>,
     native_editor_detached: Option<mondrian_core::NativeAudioEditorTarget>,
@@ -302,6 +330,7 @@ pub(crate) struct PreparedProcessorHost {
     auxiliary_pcm: Vec<f32>,
     sidechain_frame_db: Vec<f64>,
     sidechain_gains: Vec<f32>,
+    prepared_notes: Vec<Option<Box<notes::HostedNoteState>>>,
 }
 
 impl PreparedProcessorHost {
@@ -1074,7 +1103,12 @@ impl PreparedProcessorHost {
             })
             .ok_or(AudioExecutionError::BufferTooLarge)?;
         if session_scratch_bytes != schedule.summary.processor_session_scratch_bytes
-            || session_scratch_bytes > render_contract.processor_session_scratch_budget_bytes
+            || session_scratch_bytes
+                .checked_add(
+                    Self::note_storage_bytes(schedule)
+                        .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                )
+                .is_none_or(|bytes| bytes > render_contract.processor_session_scratch_budget_bytes)
         {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
@@ -1088,6 +1122,25 @@ impl PreparedProcessorHost {
             .max_block_frames
             .checked_mul(render_contract.channel_count())
             .ok_or(AudioExecutionError::BufferTooLarge)?;
+        // All Note storage is admitted and allocated before ANY native create.
+        let mut prepared_notes = Vec::new();
+        if !schedule.notes.is_empty() {
+            prepared_notes
+                .try_reserve_exact(schedule.processors.len())
+                .map_err(|_| notes::refusal("Note occurrence storage unavailable"))?;
+            if prepared_notes.capacity() != schedule.processors.len() {
+                return Err(notes::refusal("Note occurrence allocation exceeds admission").into());
+            }
+            for (slot, processor) in schedule.processors.iter().enumerate() {
+                prepared_notes.push(
+                    if schedule.notes.targets().iter().any(|target| target.processor_slot == slot) {
+                        notes::HostedNoteState::prepare(processor.factory.note_inputs())?
+                    } else {
+                        None
+                    },
+                );
+            }
+        }
         Ok(Self {
             instances: Vec::with_capacity(schedule.processors.len()),
             entry_binding: None,
@@ -1107,6 +1160,7 @@ impl PreparedProcessorHost {
             ],
             sidechain_frame_db: vec![0.0; render_contract.max_block_frames],
             sidechain_gains: vec![0.0; block_samples],
+            prepared_notes,
         })
     }
 
@@ -1119,7 +1173,7 @@ impl PreparedProcessorHost {
         if !self.instances.is_empty() || self.instances.capacity() < schedule.processors.len() {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
-        for processor in &schedule.processors {
+        for (slot, processor) in schedule.processors.iter().enumerate() {
             let continuity = if processor.factory.contract().requires_state_entry() {
                 HostedProcessorContinuity::Unentered
             } else {
@@ -1129,6 +1183,7 @@ impl PreparedProcessorHost {
                 occurrence: processor.occurrence,
                 processor: processor.factory.create()?,
                 continuity,
+                notes: self.prepared_notes.get_mut(slot).and_then(Option::take),
                 native_binding: crate::native_runtime_owner::NativeHostedBinding::Unbound,
                 native_author_outstanding: None,
                 native_editor_attachment: None,
@@ -1265,7 +1320,18 @@ impl PreparedProcessorHost {
                     epoch: entry.epoch,
                     next_sample: signal_start_sample,
                 };
-                Self::bind_entered_instance(instance, entry_binding.as_ref(), cancellation)?;
+                if let Err(error) =
+                    Self::bind_entered_instance(instance, entry_binding.as_ref(), cancellation)
+                        .map_err(AudioExecutionError::from)
+                        .and_then(|()| Self::bind_note_cold_entry(instance))
+                {
+                    // Preserve the existing note-free cancellation evidence.
+                    // A Note owner cannot resume an unconfirmed ledger entry.
+                    if instance.notes.is_some() {
+                        instance.continuity = HostedProcessorContinuity::Failed;
+                    }
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -1276,6 +1342,7 @@ impl PreparedProcessorHost {
         &mut self,
         rack: &PreparedRack,
         processors: &[PreparedProcessor],
+        score: &crate::schedule::PreparedNoteScore,
         processor_auxiliary_buses: &[PreparedProcessorAuxiliaryBus],
         sidechain_bindings: &[PreparedSidechainBinding],
         request: AudioRenderRequest,
@@ -1407,16 +1474,50 @@ impl PreparedProcessorHost {
                 .get_mut(processor_index)
                 .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
                 .delay_interleaved_in_place(pcm);
-            let mut audio = MainBusAudioIo {
-                channel_layout,
-                frames: request.frames,
-                pcm,
-                auxiliary_buses,
-                auxiliary_pcm: &auxiliary_pcm[..auxiliary_samples],
+            let note_origin = if instance.notes.is_some() {
+                Some(notes::origin(instance)?)
+            } else {
+                None
             };
-            if let Err(error) = isolate_adapter_call("block processing", || {
-                instance.processor.process(context, &mut audio, batch)
-            }) {
+            if let Some(state) = &mut instance.notes
+                && let Err(error) = state.prepare_admitted_block(
+                    score,
+                    processor_index,
+                    note_origin.expect("Note operation origin"),
+                    signal_request,
+                )
+            {
+                instance.continuity = HostedProcessorContinuity::Failed;
+                return Err(error.into());
+            }
+            let result = {
+                let note_io = instance.notes.as_mut().map(|state| NoteBlockIo {
+                    inputs: &state.inputs,
+                    ends: &mut state.ends,
+                    end_limit: state.end_limit,
+                    ports: state.ports,
+                    refused: &mut state.output_refused,
+                });
+                let mut audio = MainBusAudioIo {
+                    channel_layout,
+                    frames: request.frames,
+                    pcm,
+                    auxiliary_buses,
+                    auxiliary_pcm: &auxiliary_pcm[..auxiliary_samples],
+                    notes: note_io,
+                };
+                isolate_adapter_call("block processing", || {
+                    instance.processor.process(context, &mut audio, batch)
+                })
+            };
+            if let Err(error) = result {
+                instance.continuity = HostedProcessorContinuity::Failed;
+                return Err(error.into());
+            }
+            if let Some(state) = &mut instance.notes
+                && let Err(error) =
+                    state.accept_native_return(note_origin.expect("Note operation origin"))
+            {
                 instance.continuity = HostedProcessorContinuity::Failed;
                 return Err(error.into());
             }

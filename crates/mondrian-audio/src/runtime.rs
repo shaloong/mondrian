@@ -346,6 +346,95 @@ pub struct AudioProgramRuntime {
 }
 
 impl AudioProgramRuntime {
+    #[cfg(test)]
+    pub(crate) fn prepare_owned_note_model_for_test(
+        &mut self,
+        program: Arc<crate::CompiledAudioProgram>,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        if self.native_installation.verifier.is_some()
+            || self.native_installation.claim.is_some()
+            || self.native_installation.entry_context.is_some()
+            || self.native_installation.prepared.is_some()
+            || self.native_author_scope.is_some()
+            || !self.session.is_unentered_for_owned_note_control()
+            || self
+                .sources
+                .entries
+                .values()
+                .any(|source| matches!(source, RuntimeSource::Nested(_)))
+        {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
+        }
+        let old = self.session.resource_plan().session_resource_footprint()?;
+        let plan = Arc::new(self.session.resource_plan().with_owned_note_score_for_test(program)?);
+        let next = plan.session_resource_footprint()?;
+        // Only Note immutable/fixed payload changes. Other categories remain the
+        // same prepared base graph, and every original policy ceiling is retained.
+        if (
+            old.render_scratch_bytes,
+            old.processor_session_bytes,
+            old.compensation_delay_bytes,
+            old.parameter_event_bytes,
+        ) != (
+            next.render_scratch_bytes,
+            next.processor_session_bytes,
+            next.compensation_delay_bytes,
+            next.parameter_event_bytes,
+        ) {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
+        }
+        let checked =
+            |value: Option<usize>| value.ok_or(AudioRuntimeBuildError::InvalidResourceReplacement);
+        let peak_fixed = checked(
+            self.resource_footprint
+                .fixed_resident_bytes
+                .checked_add(next.fixed_resident_bytes),
+        )?;
+        let peak_logical = checked(
+            self.resource_footprint
+                .prepared_logical_bytes
+                .checked_add(next.prepared_logical_bytes),
+        )?;
+        for (category, required, granted) in [
+            (
+                AudioRuntimeResourceCategory::FixedResidentBytes,
+                peak_fixed,
+                self.resource_grant.max_fixed_resident_bytes,
+            ),
+            (
+                AudioRuntimeResourceCategory::PreparedLogicalBytes,
+                peak_logical,
+                self.resource_grant.max_prepared_logical_bytes,
+            ),
+        ] {
+            if required > granted {
+                return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                    category,
+                    required,
+                    granted,
+                });
+            }
+        }
+        let final_fixed = checked(
+            self.resource_footprint
+                .fixed_resident_bytes
+                .checked_sub(old.fixed_resident_bytes)
+                .and_then(|bytes| bytes.checked_add(next.fixed_resident_bytes)),
+        )?;
+        let final_logical = checked(
+            self.resource_footprint
+                .prepared_logical_bytes
+                .checked_sub(old.prepared_logical_bytes)
+                .and_then(|bytes| bytes.checked_add(next.prepared_logical_bytes)),
+        )?;
+        // Existing canonical allocator/population; no Enter, Bind, lease or origin.
+        let session = AudioRenderSession::allocate_storage(plan)?.populate()?;
+        self.session = session;
+        self.resource_footprint.fixed_resident_bytes = final_fixed;
+        self.resource_footprint.prepared_logical_bytes = final_logical;
+        Ok(())
+    }
+
     /// Bind one read-only registration supplied by the actual Media slot owner.
     /// A second unrelated pair cannot replace this Runtime's registration.
     /// This metadata operation performs no foreign native work.
@@ -1565,6 +1654,7 @@ impl AudioProgramRuntime {
         if cancellation.is_canceled() {
             return Err(crate::AudioNativeOwnerError::Cancelled.into());
         }
+        self.reject_nested_note_execution()?;
         // A retired actual slot must refuse before even Preserve/PollPending.
         if let Some(verifier) = &self.native_installation.verifier {
             let claim = verifier.current_claim().map_err(crate::AudioNativeOwnerError::from)?;
@@ -1599,6 +1689,8 @@ impl AudioProgramRuntime {
         if cancellation.is_canceled() {
             return Err(crate::AudioNativeOwnerError::Cancelled.into());
         }
+        // Unsupported score entry must retain every existing installed owner.
+        self.session.validate_note_entry_context(entry, context.is_some())?;
         self.revoke_native_bindings_for_entry_recursively();
         self.set_native_entry_context_recursively(context.clone());
         let result = self
@@ -1688,13 +1780,14 @@ impl AudioProgramRuntime {
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
-        self.preflight_render_cancellable(cancellation)?;
+        self.preflight_render_cancellable(request, cancellation)?;
         self.render_into_admitted_cancellable(request, destination, cancellation)
     }
 
     /// Shared cancellation and whole-root native admission before public-window checks.
     pub(crate) fn preflight_render_cancellable(
         &mut self,
+        request: AudioRenderRequest,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
         // A canceled public request must never query a foreign processor. The
@@ -1704,7 +1797,24 @@ impl AudioProgramRuntime {
                 "audio render generation was canceled before execution".to_owned(),
             ));
         }
-        self.preflight_native_control()
+        self.reject_nested_note_execution()?;
+        self.preflight_native_control()?;
+        self.session.preflight_note_window(request)
+    }
+
+    fn reject_nested_note_execution(&self) -> Result<(), AudioExecutionError> {
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                if nested.runtime.session.has_notes() {
+                    return Err(crate::AudioProcessorHostError::NoteExecutionRefused(
+                        "nested Note score replay is unsupported",
+                    )
+                    .into());
+                }
+                nested.runtime.reject_nested_note_execution()?;
+            }
+        }
+        Ok(())
     }
 
     fn preflight_native_control(&mut self) -> Result<(), AudioExecutionError> {
@@ -1727,12 +1837,14 @@ impl AudioProgramRuntime {
         destination: &mut [f32],
         cancellation: &ExecutionCancellationToken,
     ) -> Result<(), AudioExecutionError> {
-        self.sources.cancellation = cancellation.clone();
         if cancellation.is_canceled() {
             return Err(AudioExecutionError::SourceUnavailable(
                 "audio render generation was canceled before execution".to_owned(),
             ));
         }
+        self.reject_nested_note_execution()?;
+        self.session.preflight_note_window(request)?;
+        self.sources.cancellation = cancellation.clone();
         let result = self.session.render_into_admitted(
             &mut self.sources,
             request,

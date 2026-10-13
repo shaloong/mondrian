@@ -3,7 +3,7 @@
 //! DSP, restore native state, issue an owner lease or acknowledge a callback.
 
 use super::*;
-use crate::plan::CompiledProcessor;
+use crate::plan::{CompiledNoteLane, CompiledProcessor};
 use mondrian_core::{
     NativeAudioEditorInsertion as Insertion, NativeAudioEditorLocator,
     NativeAudioEditorOccurrenceOwner as Owner,
@@ -83,11 +83,36 @@ fn compatible_strip(
     )
 }
 
+// Plain AudioNote PartialEq loses the distinction between -0.0 and +0.0.
+// Cached Note IR must preserve the complete immutable score and velocity bits.
+fn same_note_score(old: &[CompiledNoteLane], next: &[CompiledNoteLane]) -> bool {
+    old.len() == next.len()
+        && old.iter().zip(next).all(|(old, next)| {
+            old.id == next.id
+                && old.target == next.target
+                && old.notes.len() == next.notes.len()
+                && old.notes.iter().zip(&next.notes).all(|(old, next)| {
+                    old.id == next.id
+                        && old.start == next.start
+                        && old.end == next.end
+                        && old.channel == next.channel
+                        && old.key == next.key
+                        && old.on_velocity.to_bits() == next.on_velocity.to_bits()
+                        && old.off_velocity.to_bits() == next.off_velocity.to_bits()
+                })
+        })
+}
+
 fn compatible_program(
     old: &CompiledAudioProgram,
     next: &CompiledAudioProgram,
     locator: NativeAudioEditorLocator,
 ) -> Result<(), AudioCompileError> {
+    if !same_note_score(&old.note_lanes, &next.note_lanes) {
+        return Err(refused(
+            "native author handoff changed immutable Note score",
+        ));
+    }
     if old.output_id != next.output_id
         || old.contributions != next.contributions
         || old.transitions != next.transitions
@@ -309,5 +334,159 @@ impl PreparedAudioPlan {
             kernel_backend: self.kernel_backend,
             schedule,
         })
+    }
+}
+
+#[cfg(test)]
+mod note_handoff_tests {
+    use super::*;
+    use crate::plan::CompiledTrackChannel;
+    use mondrian_core::{
+        AudioNoteId, AudioNoteLaneId, AudioProcessorInstanceId, ProgramOutputId, SequenceId,
+        TrackId,
+    };
+    use mondrian_timeline::audio::{AudioNote, AudioNoteTarget, AudioProcessorDefinitionRef};
+    use std::collections::BTreeMap;
+
+    fn score() -> Vec<CompiledNoteLane> {
+        vec![CompiledNoteLane {
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: TrackId::new(),
+                processor_id: AudioProcessorInstanceId::new(),
+                input_port_key: " exact.port ".to_owned(),
+            },
+            notes: vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::ZERO,
+                end: TimelineTime::new(1, 1).unwrap(),
+                channel: 4,
+                key: 60,
+                on_velocity: -0.0,
+                off_velocity: f64::from_bits(0x3fd3_3333_3333_3335),
+            }],
+        }]
+    }
+
+    #[test]
+    fn unchanged_score_retains_exact_velocity_bits_including_signed_zero() {
+        let original = score();
+        assert!(same_note_score(&original, &original.clone()));
+        let mut changed = original.clone();
+        changed[0].notes[0].on_velocity = 0.0;
+        assert_eq!(changed, original); // Ordinary f64 PartialEq loses this bit.
+        assert!(!same_note_score(&original, &changed));
+        let mut original = original;
+        // Comparator-only malformed author fixture: this checks bit equality,
+        // not permission for a nonfinite velocity to enter a validated score.
+        original[0].notes[0].off_velocity = f64::from_bits(0x7ff8_0000_0000_0001);
+        let mut changed = original.clone();
+        assert!(same_note_score(&original, &changed));
+        changed[0].notes[0].off_velocity = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert!(!same_note_score(&original, &changed));
+    }
+
+    #[test]
+    fn every_note_identity_target_endpoint_and_scalar_change_refuses_reuse() {
+        let original = score();
+        let mutations: &[fn(&mut [CompiledNoteLane])] = &[
+            |value| value[0].id = AudioNoteLaneId::new(),
+            |value| value[0].target.track_id = TrackId::new(),
+            |value| value[0].target.processor_id = AudioProcessorInstanceId::new(),
+            |value| value[0].target.input_port_key = "exact.port".to_owned(),
+            |value| value[0].notes[0].id = AudioNoteId::new(),
+            |value| value[0].notes[0].start = TimelineTime::new(1, 2).unwrap(),
+            |value| value[0].notes[0].end = TimelineTime::new(2, 1).unwrap(),
+            |value| value[0].notes[0].channel = 5,
+            |value| value[0].notes[0].key = 61,
+            |value| value[0].notes[0].on_velocity = 0.5,
+            |value| value[0].notes[0].off_velocity = f64::from_bits(0x3fd3_3333_3333_3334),
+        ];
+        for mutate in mutations {
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert!(!same_note_score(&original, &changed));
+        }
+    }
+
+    #[test]
+    fn note_and_lane_extents_and_order_are_part_of_the_cached_ir_guard() {
+        let mut original = score();
+        let mut second_note = original[0].notes[0].clone();
+        second_note.id = AudioNoteId::new();
+        original[0].notes.push(second_note);
+        let mut second_lane = original[0].clone();
+        second_lane.id = AudioNoteLaneId::new();
+        original.push(second_lane);
+        let mut changed = original.clone();
+        changed.reverse();
+        assert!(!same_note_score(&original, &changed));
+        changed = original.clone();
+        changed[0].notes.reverse();
+        assert!(!same_note_score(&original, &changed));
+        changed = original.clone();
+        changed.pop();
+        assert!(!same_note_score(&original, &changed));
+        changed = original.clone();
+        changed[0].notes.pop();
+        assert!(!same_note_score(&original, &changed));
+        assert!(!same_note_score(&[], &original));
+        assert!(same_note_score(&[], &[]));
+    }
+
+    #[test]
+    fn actual_compatible_program_checks_score_before_any_schedule_clone() {
+        let lanes = score();
+        let target = lanes[0].target.clone();
+        let strip = CompiledChannelStrip {
+            input_trim_db: 0.0,
+            pre_fader: CompiledRack::default(),
+            fader_db: 0.0,
+            fader_automation: None,
+            post_fader: CompiledRack::default(),
+        };
+        let mut track = CompiledTrackChannel { muted: false, strip: strip.clone() };
+        track.strip.pre_fader.processors.push(CompiledProcessor {
+            instance_id: target.processor_id,
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "owned.handoff.metadata".to_owned(),
+                schema_version: 1,
+                binary_sha256: Some([1; 32]),
+            },
+            parameters: BTreeMap::new(),
+            opaque_state: None,
+        });
+        let program = CompiledAudioProgram {
+            output_id: ProgramOutputId::new(),
+            contributions: Vec::new(),
+            processing_scopes: BTreeMap::new(),
+            transitions: Vec::new(),
+            track_channels: BTreeMap::from([(target.track_id, track)]),
+            buses: BTreeMap::new(),
+            bus_order: Vec::new(),
+            output: strip,
+            routes: Vec::new(),
+            sidechain_routes: Vec::new(),
+            note_lanes: lanes,
+        };
+        let locator = NativeAudioEditorLocator {
+            sequence: SequenceId::new(),
+            instance: target.processor_id,
+            owner: Owner::Track(target.track_id),
+            insertion: Insertion::PreFader,
+        };
+        assert!(compatible_program(&program, &program.clone(), locator).is_ok());
+        let mut changed = program.clone();
+        changed.note_lanes[0].notes[0].on_velocity = 0.0;
+        assert_eq!(
+            compatible_program(&program, &changed, locator),
+            Err(refused(
+                "native author handoff changed immutable Note score"
+            ))
+        );
+        assert_eq!(
+            program.note_lanes[0].notes[0].on_velocity.to_bits(),
+            (-0.0_f64).to_bits()
+        );
     }
 }

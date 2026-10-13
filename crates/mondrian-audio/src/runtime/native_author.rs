@@ -225,7 +225,7 @@ impl AudioProgramRuntime {
             for plan in std::iter::once(current.resource_plan())
                 .chain(local.plan.iter().map(|plan| plan.next_plan().as_ref()))
             {
-                plan.visit_factory_host_owned_storage(&mut |owner| {
+                plan.visit_native_host_owned_storage(&mut |owner| {
                     if let Some(owner) = owner.complete_allocation() {
                         extra.push(owner);
                     } else {

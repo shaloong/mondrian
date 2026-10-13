@@ -1,0 +1,931 @@
+//! Immutable score-grid lowering and cached factory-port binding.
+//!
+//! Projection consumes exact author endpoints once. Later phases contain only
+//! integer samples and cannot quantize again. This is metadata, not permission
+//! to process notes, assign native IDs, enter state or create a Session ledger.
+
+use super::{AudioResourceFootprintError, PreparedProcessor};
+use crate::plan::{CompiledAudioProgram, CompiledNoteLane};
+use crate::{
+    AudioCompileError, AudioNoteExecutionLimits, AudioProcessorFactoryStorageBorrow,
+    AudioProcessorFactoryStorageError, AudioProcessorInsertionPoint, AudioProcessorOccurrence,
+    AudioProcessorOccurrenceOwner,
+};
+use mondrian_core::{
+    AudioNoteId, AudioNoteLaneId, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
+};
+use mondrian_timeline::audio::{AudioNoteTarget, AudioProcessorDefinitionRef};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub(crate) enum PreparedNotePhase {
+    Off = 0,
+    On = 1,
+}
+
+/// Complete author identity plus once-projected absolute Sequence sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PreparedNoteEvent {
+    pub(crate) sample: i64,
+    pub(crate) phase: PreparedNotePhase,
+    pub(crate) lane_id: AudioNoteLaneId,
+    pub(crate) note_id: AudioNoteId,
+    /// Stable lane-ID rank into this score's target array, never a native ID.
+    pub(crate) target_slot: usize,
+    pub(crate) channel: u8,
+    pub(crate) key: u8,
+    pub(crate) velocity: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectedLane {
+    lane_id: AudioNoteLaneId,
+    target: AudioNoteTarget,
+}
+
+/// No factory query, native port or mutable execution state exists in this IR.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectedNoteScore {
+    sample_rate: u32,
+    lanes: Vec<ProjectedLane>,
+    events: Vec<PreparedNoteEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequestedTarget {
+    lane_id: AudioNoteLaneId,
+    occurrence: AudioProcessorOccurrence,
+    input_port_key: String,
+}
+
+/// Purely resolved Track/rack requests; factory creation remains a separate step.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RequestedNoteScore {
+    sample_rate: u32,
+    targets: Vec<RequestedTarget>,
+    events: Vec<PreparedNoteEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedNoteTarget {
+    pub(crate) lane_id: AudioNoteLaneId,
+    pub(crate) processor_slot: usize,
+    pub(crate) occurrence: AudioProcessorOccurrence,
+    pub(crate) input_port_key: String,
+    /// Stable actual input-port ID supplied by the frozen factory contract.
+    pub(crate) native_port_id: u32,
+    /// Current restored input ABI index, not a UUID hash or author list position.
+    pub(crate) native_port_index: u16,
+    pub(crate) limits: AudioNoteExecutionLimits,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedNoteScore {
+    sample_rate: u32,
+    targets: Vec<PreparedNoteTarget>,
+    events: Vec<PreparedNoteEvent>,
+}
+
+fn invalid(detail: &str) -> AudioCompileError {
+    AudioCompileError::InvalidPreparedGraph(detail.to_owned())
+}
+
+fn reserve<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
+    count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| invalid("prepared Note storage allocation refused"))?;
+    Ok(values)
+}
+
+impl ProjectedNoteScore {
+    pub(crate) fn project(
+        lanes: &[CompiledNoteLane],
+        rate: AudioSampleRate,
+    ) -> Result<Self, AudioCompileError> {
+        let mut event_count = 0_usize;
+        let mut lane_count = 0_usize;
+        for lane in lanes {
+            event_count = event_count
+                .checked_add(
+                    lane.notes
+                        .len()
+                        .checked_mul(2)
+                        .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                )
+                .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+            if !lane.notes.is_empty() {
+                lane_count =
+                    lane_count.checked_add(1).ok_or(AudioCompileError::NoteEventCountOverflow)?;
+            }
+        }
+        let mut projected_lanes = reserve::<ProjectedLane>(lane_count)?;
+        for lane in lanes.iter().filter(|lane| !lane.notes.is_empty()) {
+            projected_lanes.push(ProjectedLane { lane_id: lane.id, target: lane.target.clone() });
+        }
+        projected_lanes.sort_unstable_by_key(|lane| lane.lane_id);
+        if projected_lanes.windows(2).any(|pair| pair[0].lane_id == pair[1].lane_id) {
+            return Err(invalid("prepared Note lane identities are not unique"));
+        }
+        let mut events = reserve::<PreparedNoteEvent>(event_count)?;
+        // All selected endpoints finish (or report their exact error) before a
+        // target-format decision or any caller can begin factory resolution.
+        for lane in lanes {
+            if lane.notes.is_empty() {
+                continue;
+            }
+            let target_slot = projected_lanes
+                .binary_search_by_key(&lane.id, |value| value.lane_id)
+                .map_err(|_| invalid("prepared Note lane rank is absent"))?;
+            for note in &lane.notes {
+                let project = |time| {
+                    AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Ceil)
+                        .map(|position| position.sample())
+                        .map_err(|source| AudioCompileError::NoteSampleProjection {
+                            lane_id: lane.id,
+                            note_id: note.id,
+                            source,
+                        })
+                };
+                let start = project(note.start)?;
+                let end = project(note.end)?;
+                if end <= start {
+                    return Err(AudioCompileError::CollapsedNoteDuration {
+                        lane_id: lane.id,
+                        note_id: note.id,
+                        start_sample: start,
+                        end_sample: end,
+                    });
+                }
+                events.push(PreparedNoteEvent {
+                    sample: start,
+                    phase: PreparedNotePhase::On,
+                    lane_id: lane.id,
+                    note_id: note.id,
+                    target_slot,
+                    channel: note.channel,
+                    key: note.key,
+                    velocity: note.on_velocity,
+                });
+                events.push(PreparedNoteEvent {
+                    sample: end,
+                    phase: PreparedNotePhase::Off,
+                    lane_id: lane.id,
+                    note_id: note.id,
+                    target_slot,
+                    channel: note.channel,
+                    key: note.key,
+                    velocity: note.off_velocity,
+                });
+            }
+        }
+        events.sort_unstable_by_key(|event| {
+            (event.sample, event.phase, event.lane_id, event.note_id)
+        });
+        Ok(Self {
+            sample_rate: rate.hz(),
+            lanes: projected_lanes,
+            events,
+        })
+    }
+
+    /// Deliberate current runtime boundary. Removing this guard alone is not an
+    /// execution grant: Root must first connect whole-root admission and ledger.
+    pub(crate) fn require_runtime_support(&self) -> Result<(), AudioCompileError> {
+        if let Some(lane) = self.lanes.first() {
+            return Err(AudioCompileError::NoteExecutionNotSupported {
+                lane_id: lane.lane_id,
+                processor_id: lane.target.processor_id,
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolve every selected target's format/occurrence before factory IO. Bus,
+    /// Output, Scope and nested IDs cannot substitute for the exact Track rack.
+    pub(crate) fn resolve_targets(
+        self,
+        program: &CompiledAudioProgram,
+    ) -> Result<RequestedNoteScore, AudioCompileError> {
+        let mut targets = reserve::<RequestedTarget>(self.lanes.len())?;
+        for lane in self.lanes {
+            let channel = program
+                .track_channels
+                .get(&lane.target.track_id)
+                .ok_or_else(|| invalid("prepared Note target Track is absent"))?;
+            let mut matched = None;
+            for (insertion, rack) in [
+                (
+                    AudioProcessorInsertionPoint::PreFader,
+                    &channel.strip.pre_fader,
+                ),
+                (
+                    AudioProcessorInsertionPoint::PostFader,
+                    &channel.strip.post_fader,
+                ),
+            ] {
+                for processor in &rack.processors {
+                    if processor.instance_id != lane.target.processor_id {
+                        continue;
+                    }
+                    if matched.is_some() {
+                        return Err(invalid("prepared Note target occurrence is ambiguous"));
+                    }
+                    matched = Some((insertion, processor));
+                }
+            }
+            let (insertion, processor) = matched.ok_or_else(|| {
+                invalid("prepared Note target processor is absent from its Track rack")
+            })?;
+            if !matches!(
+                &processor.definition,
+                AudioProcessorDefinitionRef::Clap { .. }
+            ) {
+                return Err(AudioCompileError::NoteExecutionNotSupported {
+                    lane_id: lane.lane_id,
+                    processor_id: lane.target.processor_id,
+                });
+            }
+            targets.push(RequestedTarget {
+                lane_id: lane.lane_id,
+                occurrence: AudioProcessorOccurrence {
+                    instance_id: processor.instance_id,
+                    owner: AudioProcessorOccurrenceOwner::Track(lane.target.track_id),
+                    insertion,
+                },
+                input_port_key: lane.target.input_port_key,
+            });
+        }
+        Ok(RequestedNoteScore {
+            sample_rate: self.sample_rate,
+            targets,
+            events: self.events,
+        })
+    }
+}
+
+impl RequestedNoteScore {
+    /// Future prepare_rack opt-in must consult this exact occurrence. Current
+    /// ordinary prepare keeps the runtime guard and passes false to all racks.
+    pub(crate) fn requests_input_for(&self, occurrence: AudioProcessorOccurrence) -> bool {
+        self.targets.iter().any(|target| target.occurrence == occurrence)
+    }
+
+    /// Only cached factory metadata is read; no resolver/create/native query.
+    /// Moves the already quantized events unchanged into the immutable Plan.
+    pub(crate) fn bind(
+        self,
+        processors: &[PreparedProcessor],
+        rate: AudioSampleRate,
+    ) -> Result<PreparedNoteScore, AudioCompileError> {
+        if self.sample_rate != rate.hz() {
+            return Err(AudioCompileError::InvalidRenderContract);
+        }
+        let mut targets = reserve::<PreparedNoteTarget>(self.targets.len())?;
+        for request in self.targets {
+            let mut matches = processors
+                .iter()
+                .enumerate()
+                .filter(|(_, processor)| processor.occurrence == request.occurrence);
+            let (processor_slot, processor) = matches
+                .next()
+                .ok_or_else(|| invalid("prepared Note factory occurrence is absent"))?;
+            if matches.next().is_some() {
+                return Err(invalid("prepared Note factory occurrence is ambiguous"));
+            }
+            let contract = processor.factory.note_inputs();
+            let port = contract
+                .ports
+                .iter()
+                .find(|port| port.port_key == request.input_port_key)
+                .ok_or_else(|| {
+                invalid(
+                    "prepared Note stable input-port key is absent from the exact factory contract",
+                )
+            })?;
+            targets.push(PreparedNoteTarget {
+                lane_id: request.lane_id,
+                processor_slot,
+                occurrence: request.occurrence,
+                input_port_key: request.input_port_key,
+                native_port_id: port.native_id,
+                native_port_index: port.native_index,
+                limits: contract.limits,
+            });
+        }
+        for event in &self.events {
+            let target = targets
+                .get(event.target_slot)
+                .ok_or_else(|| invalid("prepared Note event target rank is absent"))?;
+            if target.lane_id != event.lane_id {
+                return Err(invalid("prepared Note event target identity differs"));
+            }
+        }
+        Ok(PreparedNoteScore {
+            sample_rate: self.sample_rate,
+            targets,
+            events: self.events,
+        })
+    }
+}
+
+impl PreparedNoteScore {
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        targets: Vec<PreparedNoteTarget>,
+        mut events: Vec<PreparedNoteEvent>,
+    ) -> Self {
+        events.sort_unstable_by_key(|event| {
+            (event.sample, event.phase, event.lane_id, event.note_id)
+        });
+        Self { sample_rate: 48_000, targets, events }
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+    pub(crate) const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+    pub(crate) fn events(&self) -> &[PreparedNoteEvent] {
+        &self.events
+    }
+    pub(crate) fn targets(&self) -> &[PreparedNoteTarget] {
+        &self.targets
+    }
+
+    /// Actual retained allocation-requested payload, not len estimates or
+    /// allocator overhead. The enclosing Plan header has its existing coverage.
+    pub(crate) fn storage_bytes(&self) -> Result<usize, AudioResourceFootprintError> {
+        let event_bytes = self
+            .events
+            .capacity()
+            .checked_mul(std::mem::size_of::<PreparedNoteEvent>())
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        let target_bytes = self
+            .targets
+            .capacity()
+            .checked_mul(std::mem::size_of::<PreparedNoteTarget>())
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        self.targets.iter().try_fold(
+            event_bytes
+                .checked_add(target_bytes)
+                .ok_or(AudioResourceFootprintError::ExtentOverflow)?,
+            |bytes, target| {
+                bytes
+                    .checked_add(target.input_port_key.capacity())
+                    .ok_or(AudioResourceFootprintError::ExtentOverflow)
+            },
+        )
+    }
+
+    pub(crate) fn visit_host_owned_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), AudioProcessorFactoryStorageError>,
+    ) -> Result<(), AudioProcessorFactoryStorageError> {
+        visitor(AudioProcessorFactoryStorageBorrow::complete(&self.events)?)?;
+        visitor(AudioProcessorFactoryStorageBorrow::complete(&self.targets)?)?;
+        for target in &self.targets {
+            visitor(AudioProcessorFactoryStorageBorrow::complete(
+                &target.input_port_key,
+            )?)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::{
+        CompiledChannelStrip, CompiledProcessor, CompiledRack, CompiledTrackChannel,
+    };
+    use crate::{
+        AudioProcessingMode, AudioProcessor, AudioProcessorAuxiliaryInputContract,
+        AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
+        AudioProcessorPrepareRequest, AudioProcessorResolver, AudioProcessorTail,
+        AudioRenderContract,
+    };
+    use mondrian_core::{AudioProcessorInstanceId, ProgramOutputId, TimelineTime, TrackId};
+    use mondrian_timeline::audio::AudioNote;
+    use std::collections::BTreeMap;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn rate(value: u32) -> AudioSampleRate {
+        AudioSampleRate::new(value).unwrap()
+    }
+    fn time(n: i64, d: i64) -> TimelineTime {
+        TimelineTime::new(n, d).unwrap()
+    }
+    fn target() -> AudioNoteTarget {
+        AudioNoteTarget {
+            track_id: TrackId::new(),
+            processor_id: AudioProcessorInstanceId::new(),
+            input_port_key: " notes.é ".to_owned(),
+        }
+    }
+    fn note(start: TimelineTime, end: TimelineTime) -> AudioNote {
+        AudioNote {
+            id: AudioNoteId::new(),
+            start,
+            end,
+            channel: 3,
+            key: 60,
+            on_velocity: -0.0,
+            off_velocity: f64::from_bits(0x3fd3_3333_3333_3335),
+        }
+    }
+    fn lane(target: &AudioNoteTarget, notes: Vec<AudioNote>) -> CompiledNoteLane {
+        CompiledNoteLane {
+            id: AudioNoteLaneId::new(),
+            target: target.clone(),
+            notes,
+        }
+    }
+    fn strip() -> CompiledChannelStrip {
+        CompiledChannelStrip {
+            input_trim_db: 0.0,
+            pre_fader: CompiledRack::default(),
+            fader_db: 0.0,
+            fader_automation: None,
+            post_fader: CompiledRack::default(),
+        }
+    }
+    fn clap() -> AudioProcessorDefinitionRef {
+        AudioProcessorDefinitionRef::Clap {
+            plugin_id: "owned-metadata-only".to_owned(),
+            schema_version: 1,
+            binary_sha256: Some([1; 32]),
+        }
+    }
+    fn program(
+        lanes: Vec<CompiledNoteLane>,
+        definition: AudioProcessorDefinitionRef,
+        insertion: AudioProcessorInsertionPoint,
+    ) -> CompiledAudioProgram {
+        let mut channels = BTreeMap::new();
+        for lane in &lanes {
+            let channel = channels
+                .entry(lane.target.track_id)
+                .or_insert_with(|| CompiledTrackChannel { muted: false, strip: strip() });
+            let rack = if insertion == AudioProcessorInsertionPoint::PreFader {
+                &mut channel.strip.pre_fader
+            } else {
+                &mut channel.strip.post_fader
+            };
+            if !rack
+                .processors
+                .iter()
+                .any(|processor| processor.instance_id == lane.target.processor_id)
+            {
+                rack.processors.push(CompiledProcessor {
+                    instance_id: lane.target.processor_id,
+                    definition: definition.clone(),
+                    parameters: BTreeMap::new(),
+                    opaque_state: None,
+                });
+            }
+        }
+        // Pure semantic fixture for projection/target checks. No routing/audio
+        // execution or real compiled-author validation is claimed by it.
+        CompiledAudioProgram {
+            output_id: ProgramOutputId::new(),
+            contributions: Vec::new(),
+            processing_scopes: BTreeMap::new(),
+            transitions: Vec::new(),
+            track_channels: channels,
+            buses: BTreeMap::new(),
+            bus_order: Vec::new(),
+            output: strip(),
+            routes: Vec::new(),
+            sidechain_routes: Vec::new(),
+            note_lanes: lanes,
+        }
+    }
+    fn render() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: mondrian_core::AudioChannelLayout::Mono,
+            max_block_frames: 16,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        }
+    }
+    fn port_contract() -> crate::AudioProcessorNoteInputContract {
+        crate::AudioProcessorNoteInputContract {
+            ports: vec![
+                crate::AudioProcessorNoteInputPort {
+                    port_key: "other".to_owned(),
+                    native_id: 7,
+                    native_index: 0,
+                },
+                crate::AudioProcessorNoteInputPort {
+                    port_key: " notes.é ".to_owned(),
+                    native_id: 123,
+                    native_index: 1,
+                },
+            ],
+            limits: AudioNoteExecutionLimits {
+                input_events: 8,
+                output_ends: 8,
+                retained_records: 8,
+                live_voices: 8,
+            },
+        }
+    }
+
+    struct MetadataFactory {
+        notes: crate::AudioProcessorNoteInputContract,
+        queries: Arc<AtomicUsize>,
+    }
+    impl AudioProcessorFactory for MetadataFactory {
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, false, true, true, 0)
+                .unwrap()
+        }
+        fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
+            AudioProcessorAuxiliaryInputContract::default()
+        }
+        fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+            self.queries.fetch_add(1, Ordering::Relaxed);
+            self.notes.clone()
+        }
+        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            Err(AudioProcessorHostError::Unavailable(
+                "metadata fixture cannot create/DSP".to_owned(),
+            ))
+        }
+    }
+    struct MetadataResolver {
+        factory: Arc<MetadataFactory>,
+    }
+    impl AudioProcessorResolver for MetadataResolver {
+        fn prepare(
+            &self,
+            _: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            Ok(self.factory.clone())
+        }
+    }
+    fn prepared(
+        occurrence: AudioProcessorOccurrence,
+        contract: crate::AudioProcessorNoteInputContract,
+        queries: Arc<AtomicUsize>,
+    ) -> PreparedProcessor {
+        let resolver = MetadataResolver {
+            factory: Arc::new(MetadataFactory { notes: contract, queries }),
+        };
+        let definition = clap();
+        let parameters = BTreeMap::new();
+        let factory = crate::processor_host::PreparedProcessorFactoryBinding::resolve(
+            &resolver,
+            AudioProcessorPrepareRequest::new(occurrence, &definition, &parameters, None, render())
+                .with_note_input_requested(true),
+        )
+        .unwrap();
+        PreparedProcessor {
+            occurrence,
+            parameter_ids: Vec::new(),
+            parameter_curves: Vec::new(),
+            owner_time_offset: TimelineTime::ZERO,
+            main_compensation_delay_frames: 0,
+            input_signal_delay_frames: 0,
+            auxiliary_buses: 0..0,
+            factory,
+        }
+    }
+
+    #[test]
+    fn endpoints_use_one_selected_ceil_and_keep_original_uuid_and_velocity_bits() {
+        let target = target();
+        let note = note(time(1001, 30000), time(2002, 30000));
+        let id = note.id;
+        let lane = lane(&target, vec![note]);
+        for (hz, start, end) in [(44_100, 1472, 2943), (48_000, 1602, 3204)] {
+            let score = ProjectedNoteScore::project(std::slice::from_ref(&lane), rate(hz)).unwrap();
+            assert_eq!(score.events.len(), 2);
+            assert_eq!(
+                (score.events[0].sample, score.events[1].sample),
+                (start, end)
+            );
+            assert_eq!((score.events[0].note_id, score.events[1].note_id), (id, id));
+            assert_eq!(score.events[0].velocity.to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(score.events[1].velocity.to_bits(), 0x3fd3_3333_3333_3335);
+        }
+    }
+
+    #[test]
+    fn stable_sample_phase_lane_and_note_id_order_ignores_author_list_order() {
+        let target = target();
+        let mut lanes = vec![
+            lane(
+                &target,
+                vec![
+                    note(time(0, 1), time(1, 48000)),
+                    note(time(0, 1), time(1, 48000)),
+                ],
+            ),
+            lane(&target, vec![note(time(1, 48000), time(2, 48000))]),
+        ];
+        let original = ProjectedNoteScore::project(&lanes, rate(48000)).unwrap();
+        lanes.reverse();
+        for lane in &mut lanes {
+            lane.notes.reverse();
+        }
+        let reversed = ProjectedNoteScore::project(&lanes, rate(48000)).unwrap();
+        assert_eq!(reversed, original);
+        let keys: Vec<_> = original
+            .events
+            .iter()
+            .map(|event| (event.sample, event.phase, event.lane_id, event.note_id))
+            .collect();
+        assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        let at_one: Vec<_> = original
+            .events
+            .iter()
+            .filter(|event| event.sample == 1)
+            .map(|event| event.phase)
+            .collect();
+        assert_eq!(
+            at_one,
+            [
+                PreparedNotePhase::Off,
+                PreparedNotePhase::Off,
+                PreparedNotePhase::On
+            ]
+        );
+    }
+
+    #[test]
+    fn collapse_and_overflow_are_checked_before_runtime_or_target_refusal() {
+        let target = target();
+        let mut lanes = vec![
+            lane(&target, vec![note(time(0, 1), time(1, 1))]),
+            lane(&target, vec![note(time(1, 192000), time(1, 96000))]),
+        ];
+        let bad_lane = lanes[1].id;
+        let bad_note = lanes[1].notes[0].id;
+        assert_eq!(
+            ProjectedNoteScore::project(&lanes, rate(48000)).unwrap_err(),
+            AudioCompileError::CollapsedNoteDuration {
+                lane_id: bad_lane,
+                note_id: bad_note,
+                start_sample: 1,
+                end_sample: 1
+            }
+        );
+        lanes[1].notes[0].start = time(i64::MAX - 1, 1);
+        lanes[1].notes[0].end = time(i64::MAX, 1);
+        assert!(matches!(
+            ProjectedNoteScore::project(&lanes, rate(48000)),
+            Err(AudioCompileError::NoteSampleProjection {
+                source: mondrian_core::AudioTimeError::PositionOverflow,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn builtin_and_vst_targets_keep_the_original_typed_unsupported_result() {
+        let target = target();
+        let lane = lane(&target, vec![note(time(0, 1), time(1, 1))]);
+        let expected = AudioCompileError::NoteExecutionNotSupported {
+            lane_id: lane.id,
+            processor_id: target.processor_id,
+        };
+        for definition in [
+            AudioProcessorDefinitionRef::BuiltIn {
+                definition_id: "gain".to_owned(),
+                schema_version: 1,
+            },
+            AudioProcessorDefinitionRef::Vst3 {
+                class_id: "owned".to_owned(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: Some([1; 32]),
+            },
+        ] {
+            let program = program(
+                vec![lane.clone()],
+                definition,
+                AudioProcessorInsertionPoint::PreFader,
+            );
+            let projected = ProjectedNoteScore::project(&program.note_lanes, rate(48000)).unwrap();
+            assert_eq!(projected.resolve_targets(&program).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn exact_track_pre_post_occurrence_and_cached_port_bind_without_extra_factory_query() {
+        for insertion in [
+            AudioProcessorInsertionPoint::PreFader,
+            AudioProcessorInsertionPoint::PostFader,
+        ] {
+            let target = target();
+            let lane = lane(&target, vec![note(time(0, 1), time(1, 1))]);
+            let program = program(vec![lane.clone()], clap(), insertion);
+            let projected = ProjectedNoteScore::project(&program.note_lanes, rate(48000)).unwrap();
+            let before = projected.events.clone();
+            let requested = projected.resolve_targets(&program).unwrap();
+            let occurrence = AudioProcessorOccurrence {
+                instance_id: target.processor_id,
+                owner: AudioProcessorOccurrenceOwner::Track(target.track_id),
+                insertion,
+            };
+            assert!(requested.requests_input_for(occurrence));
+            assert!(!requested.requests_input_for(AudioProcessorOccurrence {
+                owner: AudioProcessorOccurrenceOwner::Track(TrackId::new()),
+                ..occurrence
+            }));
+            let queries = Arc::new(AtomicUsize::new(0));
+            let processor = prepared(occurrence, port_contract(), queries.clone());
+            assert_eq!(queries.load(Ordering::Relaxed), 1); // actual binding capture
+            let bound = requested.bind(&[processor], rate(48000)).unwrap();
+            assert_eq!(queries.load(Ordering::Relaxed), 1); // no getter/native query in bind
+            assert_eq!(bound.events(), before.as_slice());
+            assert_eq!(bound.sample_rate(), 48000);
+            assert_eq!(bound.targets()[0].occurrence, occurrence);
+            assert_eq!(bound.targets()[0].native_port_id, 123);
+            assert_eq!(bound.targets()[0].native_port_index, 1);
+            assert_eq!(bound.targets()[0].input_port_key, " notes.é ");
+            assert_eq!(bound.targets()[0].limits, port_contract().limits);
+        }
+    }
+
+    #[test]
+    fn binding_refuses_wrong_grid_occurrence_and_nonexact_port_key() {
+        let target = target();
+        let program = program(
+            vec![lane(&target, vec![note(time(0, 1), time(1, 1))])],
+            clap(),
+            AudioProcessorInsertionPoint::PreFader,
+        );
+        let requested = ProjectedNoteScore::project(&program.note_lanes, rate(48000))
+            .unwrap()
+            .resolve_targets(&program)
+            .unwrap();
+        let occurrence = requested.targets[0].occurrence;
+        let queries = Arc::new(AtomicUsize::new(0));
+        let processor = prepared(occurrence, port_contract(), queries);
+        assert!(matches!(
+            requested.clone().bind(std::slice::from_ref(&processor), rate(44100)),
+            Err(AudioCompileError::InvalidRenderContract)
+        ));
+        let mut wrong_key = requested.clone();
+        wrong_key.targets[0].input_port_key = "notes.é".to_owned();
+        assert!(wrong_key.bind(std::slice::from_ref(&processor), rate(48000)).is_err());
+        let wrong = prepared(
+            AudioProcessorOccurrence {
+                owner: AudioProcessorOccurrenceOwner::Bus(mondrian_core::MixBusId::new()),
+                ..occurrence
+            },
+            port_contract(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        assert!(requested.clone().bind(&[wrong], rate(48000)).is_err());
+        assert!(requested.bind(&[], rate(48000)).is_err());
+    }
+
+    #[test]
+    fn retained_capacity_and_actual_note_storage_visits_include_vec_and_key_owners() {
+        let target = target();
+        let program = program(
+            vec![lane(&target, vec![note(time(0, 1), time(1, 1))])],
+            clap(),
+            AudioProcessorInsertionPoint::PreFader,
+        );
+        let requested = ProjectedNoteScore::project(&program.note_lanes, rate(48000))
+            .unwrap()
+            .resolve_targets(&program)
+            .unwrap();
+        let processor = prepared(
+            requested.targets[0].occurrence,
+            port_contract(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let mut bound = requested.bind(&[processor], rate(48000)).unwrap();
+        bound.events.reserve_exact(5);
+        bound.targets.reserve_exact(3);
+        bound.targets[0].input_port_key.reserve_exact(11);
+        let expected = bound.events.capacity() * std::mem::size_of::<PreparedNoteEvent>()
+            + bound.targets.capacity() * std::mem::size_of::<PreparedNoteTarget>()
+            + bound.targets[0].input_port_key.capacity();
+        assert_eq!(bound.storage_bytes().unwrap(), expected);
+        assert!(
+            expected
+                > bound.events.len() * std::mem::size_of::<PreparedNoteEvent>()
+                    + bound.targets.len() * std::mem::size_of::<PreparedNoteTarget>()
+                    + bound.targets[0].input_port_key.len()
+        );
+        let mut visited = Vec::new();
+        bound
+            .visit_host_owned_storage(&mut |storage| {
+                visited.push(storage);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited.len(), 3);
+        assert_eq!(visited[0].address(), bound.events.as_ptr() as usize);
+        assert_eq!(visited[1].address(), bound.targets.as_ptr() as usize);
+        assert_eq!(
+            visited[2].address(),
+            bound.targets[0].input_port_key.as_ptr() as usize
+        );
+        assert_eq!(
+            visited.iter().map(|storage| storage.layout().size()).sum::<usize>(),
+            expected
+        );
+        assert!(visited
+            .iter()
+            .all(|storage| storage.kind()
+                == crate::AudioProcessorFactoryStorageKind::CompleteAllocation));
+    }
+
+    #[derive(Default)]
+    struct NeverResolver {
+        calls: AtomicUsize,
+    }
+    impl AudioProcessorResolver for NeverResolver {
+        fn prepare(
+            &self,
+            _: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(AudioProcessorHostError::Unavailable(
+                "must be refused before factory".to_owned(),
+            ))
+        }
+    }
+
+    #[test]
+    fn ordinary_prepare_keeps_endpoint_errors_and_valid_clap_runtime_refusal_before_factory() {
+        let target = target();
+        let mut program = program(
+            vec![lane(&target, vec![note(time(1, 192000), time(1, 96000))])],
+            clap(),
+            AudioProcessorInsertionPoint::PreFader,
+        );
+        let resolver = NeverResolver::default();
+        let prepare = |program: CompiledAudioProgram| {
+            super::super::PreparedAudioPlan::prepare_with_processor_resolver(
+                Arc::new(program),
+                render(),
+                super::super::AudioKernelBackend::ScalarReference,
+                &resolver,
+            )
+        };
+        assert!(matches!(
+            prepare(program.clone()),
+            Err(AudioCompileError::CollapsedNoteDuration { .. })
+        ));
+        program.note_lanes[0].notes[0].start = time(i64::MAX - 1, 1);
+        program.note_lanes[0].notes[0].end = time(i64::MAX, 1);
+        assert!(matches!(
+            prepare(program.clone()),
+            Err(AudioCompileError::NoteSampleProjection {
+                source: mondrian_core::AudioTimeError::PositionOverflow,
+                ..
+            })
+        ));
+        program.note_lanes[0].notes[0].start = TimelineTime::ZERO;
+        program.note_lanes[0].notes[0].end = time(1, 1);
+        assert_eq!(
+            prepare(program.clone()).unwrap_err(),
+            AudioCompileError::NoteExecutionNotSupported {
+                lane_id: program.note_lanes[0].id,
+                processor_id: target.processor_id
+            }
+        );
+        assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn empty_scores_keep_zero_payload_and_do_not_request_a_factory_port() {
+        let program = program(Vec::new(), clap(), AudioProcessorInsertionPoint::PreFader);
+        let projected = ProjectedNoteScore::project(&[], rate(48000)).unwrap();
+        assert!(projected.require_runtime_support().is_ok());
+        let requested = projected.resolve_targets(&program).unwrap();
+        let bound = requested.bind(&[], rate(48000)).unwrap();
+        assert!(bound.is_empty());
+        assert!(bound.targets().is_empty());
+        assert_eq!(bound.storage_bytes().unwrap(), 0);
+    }
+
+    #[test]
+    fn impossible_event_extent_refuses_before_any_storage_request() {
+        assert!(matches!(
+            reserve::<PreparedNoteEvent>(usize::MAX),
+            Err(AudioCompileError::NoteEventCountOverflow)
+        ));
+        assert!(reserve::<PreparedNoteEvent>(0).unwrap().is_empty());
+    }
+}

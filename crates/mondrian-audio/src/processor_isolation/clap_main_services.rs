@@ -24,6 +24,7 @@ pub(super) const MAX_TIMERS: usize = 32;
 /// Fixed shared observations; callbacks never allocate, wait or invoke the GUI.
 /// Main's request consumption is separate from Root/Session author admission.
 pub(super) struct ClapNativeServicesShared {
+    pub(super) note_ports: super::clap_note_input_contract::NotePortRequests,
     pub(super) timer_available: AtomicBool,
     pub(super) active: AtomicBool,
     pub(super) flush_requested: AtomicBool,
@@ -34,6 +35,7 @@ pub(super) struct ClapNativeServicesShared {
 impl ClapNativeServicesShared {
     pub(super) const fn new() -> Self {
         Self {
+            note_ports: super::clap_note_input_contract::NotePortRequests::new(),
             timer_available: AtomicBool::new(false),
             active: AtomicBool::new(false),
             flush_requested: AtomicBool::new(false),
@@ -270,6 +272,32 @@ impl HostParamsImplShared for ClapNativeHostShared {
         // One scheduling intent, not an author event or a request to create PCM.
         // The same exclusive DSP role claims it before process or idle flush.
         self.services.flush_requested.store(true, Ordering::Release);
+    }
+}
+
+impl clack_extensions::note_ports::HostNotePortsRawImpl for ClapNativeHostShared {
+    fn supported_dialects_raw(&self) -> u32 {
+        use clack_extensions::thread_check::HostThreadCheckImpl;
+        if !self.control.is_main_thread() {
+            self.services
+                .note_ports
+                .fail(super::clap_note_input_contract::NotePortFailure::WrongThread);
+            return 0;
+        }
+        if !self.control.note_input_enabled {
+            return 0;
+        }
+        super::clap_note_input_contract::NATIVE_CLAP_DIALECT
+    }
+
+    fn rescan_raw(&self, flags: u32) {
+        use clack_extensions::thread_check::HostThreadCheckImpl;
+        self.services.note_ports.record(
+            flags,
+            self.control.is_main_thread(),
+            self.control.note_input_enabled,
+            self.services.active.load(Ordering::Acquire),
+        );
     }
 }
 

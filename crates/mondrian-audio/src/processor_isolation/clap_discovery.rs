@@ -62,6 +62,7 @@ enum DiscoveryErrorStage {
     LibraryLoad,
     List,
     NoteInputMetadata,
+    NoteInputContract,
     Probe,
     ResponseEncoding,
     ResponseWrite,
@@ -317,6 +318,14 @@ struct DiscoveryRequest {
 enum DiscoveryOperation {
     List,
     NoteInputMetadata(super::clap_note_input_metadata::NoteInputMetadataRequest),
+    ProbeNotes {
+        plugin_id: String,
+        sample_rate: u32,
+        channel_layout: AudioChannelLayout,
+        max_block_frames: usize,
+        offline: bool,
+        state: Option<Vec<u8>>,
+    },
     Probe {
         plugin_id: String,
         sample_rate: u32,
@@ -533,7 +542,76 @@ pub fn probe_clap_note_input_metadata(
     Ok(response)
 }
 
-// Both concrete response decoders share the existing supervisor and bounds.
+/// Explicit restored-instance native Note port/storage offer. This operation
+/// registers CLAP-only host Notes; the original facts-only metadata never does.
+/// The concrete processing instance must independently revalidate this offer.
+pub fn probe_clap_note_input_contract(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render: AudioRenderContract,
+    state: Option<&[u8]>,
+) -> Result<super::clap_note_input_contract::ClapNoteInputContractProbe, AudioProcessorHostError> {
+    super::clap_note_input_metadata::validate_request(plugin_id, state)?;
+    if !helper_executable.is_absolute()
+        || !library_path.is_absolute()
+        || render.sample_rate == 0
+        || u32::try_from(render.max_block_frames).ok().is_none_or(|frames| frames == 0)
+    {
+        return Err(invalid(
+            "CLAP Note contract probe paths/render extent are invalid",
+        ));
+    }
+    let canonical = fs::canonicalize(library_path)
+        .map_err(|error| unavailable(format!("CLAP library is unavailable: {error}")))?;
+    let fingerprint = fingerprint_clap_binary(&canonical)?;
+    let (library_path, bytes, _process) = request_discovery_bytes(
+        helper_executable,
+        &canonical,
+        DiscoveryOperation::ProbeNotes {
+            plugin_id: plugin_id.to_owned(),
+            sample_rate: render.sample_rate,
+            channel_layout: render.channel_layout,
+            max_block_frames: render.max_block_frames,
+            offline: render.processing_mode == AudioProcessingMode::Offline,
+            state: state.map(ToOwned::to_owned),
+        },
+    )?;
+    if fingerprint_clap_binary(&library_path)? != fingerprint {
+        return Err(unavailable(
+            "CLAP binary changed during Note contract negotiation",
+        ));
+    }
+    let result: super::clap_note_input_contract::ClapNoteInputContractProbe =
+        serde_json::from_slice(&bytes)
+            .map_err(|error| invalid(format!("CLAP Note contract response is invalid: {error}")))?;
+    if result.schema_version != 1
+        || result.plugin_id != plugin_id
+        || result.binary_sha256 != fingerprint
+        || result.state_sha256 != super::clap_note_input_metadata::state_digest(state)
+        || result.sample_rate != render.sample_rate
+        || result.channel_layout != render.channel_layout
+        || result.max_block_frames != render.max_block_frames
+        || result.offline != (render.processing_mode == AudioProcessingMode::Offline)
+        || result.contract.ports.is_empty()
+        || result.contract.limits != super::clap_note_input_contract::offered_limits()
+    {
+        return Err(invalid(
+            "CLAP Note contract response changed identity/render/finite offer",
+        ));
+    }
+    result.contract.validate()?;
+    for port in &result.contract.ports {
+        if port.port_key != format!("clap.note-input.{}", port.native_id) {
+            return Err(invalid(
+                "CLAP Note contract response changed its stable native key",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+// Concrete response decoders share the existing supervisor and bounds.
 fn request_discovery_bytes(
     helper_executable: &Path,
     library_path: &Path,
@@ -680,13 +758,26 @@ fn run_clap_discovery_worker_inner(
             query.state.as_deref(),
         )?;
     }
-    let metadata_fingerprint =
-        if matches!(&request.operation, DiscoveryOperation::NoteInputMetadata(_)) {
-            *stage = DiscoveryErrorStage::BinaryFingerprint;
-            Some(fingerprint_clap_binary(&request.library_path)?)
-        } else {
-            None
-        };
+    if let DiscoveryOperation::ProbeNotes {
+        plugin_id, state, sample_rate, max_block_frames, ..
+    } = &request.operation
+    {
+        super::clap_note_input_metadata::validate_request(plugin_id, state.as_deref())?;
+        if *sample_rate == 0
+            || u32::try_from(*max_block_frames).ok().is_none_or(|frames| frames == 0)
+        {
+            return Err(invalid("CLAP Note probe render extent is invalid"));
+        }
+    }
+    let metadata_fingerprint = if matches!(
+        &request.operation,
+        DiscoveryOperation::NoteInputMetadata(_) | DiscoveryOperation::ProbeNotes { .. }
+    ) {
+        *stage = DiscoveryErrorStage::BinaryFingerprint;
+        Some(fingerprint_clap_binary(&request.library_path)?)
+    } else {
+        None
+    };
     *stage = DiscoveryErrorStage::LibraryLoad;
     let entry = unsafe { PluginEntry::load(request.library_path.as_os_str()) }
         .map_err(|error| unavailable(format!("CLAP library load failed: {error}")))?;
@@ -747,6 +838,45 @@ fn run_clap_discovery_worker_inner(
             )?;
             *stage = DiscoveryErrorStage::ResponseEncoding;
             serde_json::to_vec(&DiscoveryResponse { descriptors: Vec::new(), probe: Some(probe) })
+        }
+        DiscoveryOperation::ProbeNotes {
+            plugin_id,
+            sample_rate,
+            channel_layout,
+            max_block_frames,
+            offline,
+            state,
+        } => {
+            *stage = DiscoveryErrorStage::NoteInputContract;
+            let fingerprint = metadata_fingerprint
+                .ok_or_else(|| invalid("CLAP Note probe fingerprint is missing"))?;
+            let result = super::clap_note_input_contract::probe_loaded(
+                &entry,
+                &plugin_id,
+                fingerprint,
+                state.as_deref(),
+                AudioRenderContract {
+                    sample_rate,
+                    channel_layout,
+                    max_block_frames,
+                    processing_mode: if offline {
+                        AudioProcessingMode::Offline
+                    } else {
+                        AudioProcessingMode::Realtime
+                    },
+                    processor_session_scratch_budget_bytes: usize::MAX,
+                    public_output_lookahead_budget_frames: usize::MAX,
+                    compensation_delay_scratch_budget_bytes: usize::MAX,
+                },
+            )?;
+            *stage = DiscoveryErrorStage::BinaryFingerprint;
+            if fingerprint_clap_binary(&request.library_path)? != fingerprint {
+                return Err(unavailable(
+                    "CLAP binary changed during native Note contract negotiation",
+                ));
+            }
+            *stage = DiscoveryErrorStage::ResponseEncoding;
+            serde_json::to_vec(&result)
         }
     }
     .map_err(|error| invalid(format!("CLAP discovery response encoding failed: {error}")))?;

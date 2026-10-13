@@ -339,7 +339,7 @@ impl AudioProgramRuntime {
                 Ok(())
             })?;
             for plan in [current.resource_plan(), local.next.plan()] {
-                plan.visit_factory_host_owned_storage(&mut |owner| {
+                plan.visit_native_host_owned_storage(&mut |owner| {
                     if owner.complete_allocation().is_some() {
                         owner_count = owner_count.checked_add(1).ok_or(
                             crate::AudioProcessorFactoryStorageError::Owner(
@@ -401,7 +401,7 @@ impl AudioProgramRuntime {
                 .find_resource_session(local.current)
                 .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
             for plan in [current.resource_plan(), local.next.plan()] {
-                plan.visit_factory_host_owned_storage(&mut |owner| {
+                plan.visit_native_host_owned_storage(&mut |owner| {
                     if let Some(owner) = owner.complete_allocation() {
                         ledger.record(owner)?;
                     }

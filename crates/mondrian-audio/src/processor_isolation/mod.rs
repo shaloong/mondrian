@@ -11,7 +11,10 @@ mod clap_discovery;
 mod clap_gui_owner;
 mod clap_gui_requests;
 mod clap_main_services;
+mod clap_note_input_contract;
 mod clap_note_input_metadata;
+pub use clap_discovery::probe_clap_note_input_contract;
+pub use clap_note_input_contract::ClapNoteInputContractProbe;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
 pub mod clap_output_events;

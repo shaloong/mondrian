@@ -36,6 +36,7 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
+| Bounded Note execution infrastructure | Typed carrier/IPC v9, private once-projected score, exclusive Hosted ledger, whole-window admission and restored CLAP NotePorts; finite owned Windows model and direct fixture-DLL controls | Public score admission remains Unsupported; preparation peak/grant, same-instance application processing offer, Parent IPC/DAG native Notes, zero-input instruments, replay/nesting and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -365,3 +366,34 @@ resolver payload, native observed editable values and the unchanged184-byte
 default state. Both raw owners and root wrapper exit0 with successful cleanup
 and source checks. Native plugin version remains Unknown. No PCM, nondefault
 private-state, Note/instrument, realtime or performance qualification follows.
+
+## Finite M2 Note Runtime and direct DLL qualification (2026-10-14)
+
+Final compiled source has 1921 inputs, SHA-256
+`87C7F45275B988698BCC6AB83BEE6B92AAD7B8D5A7C4EB2B48B915A46D3613D6`.
+The actual Audio inventory is 547 names /84 ignored /463 ordinary, preserving
+all previous names. Two ordinary runs each pass463/0 under the unchanged
+controller/owner gates; 44 ordinary and three separately selected ignored DLL
+controls are new relative to carrier commit1110a611. Strict all-targets/
+all-features checks of the five affected model crates have zero diagnostics.
+
+The fixed owned MIT NoteGate DLL B239C594...F32AF1D is actually dynamically
+loaded and processed by the CLAP adapter. Inline and borrowed DSP-role controls
+compare independent literal PCM, parameters and copied Ends across partitions;
+a third control observes native rejection of the wrong original Off after early
+End. Each selected control passes1/0. Ordinary receipt is2D44FE16...1C9F8AF;
+final DLL receipt is2C9D8F81...D2D8757. Source/inputs remain unchanged, actual
+owners exit0 and reap descendants, with no timeout, outliving or cleanup error.
+
+Qualification is **Verified within those owned Windows controls**. The DLL is
+a mono PCM-input effect, not a third-party plugin or zero-input instrument.
+Its adapter tests do not traverse Parent IPC or with_processing_scope. The
+Installed-root model test uses an owned Rust factory, not this native DLL.
+Public nonempty Note Score remains allocation-free Unsupported; full processing
+offer/resolver, preparation peak admission, actual whole-root capacity refusal,
+bad-End poisoning, live all-peer handoff/Ack retry, zero-frame dispatch, replay,
+nesting, product author controls, physical realtime, performance and other
+platforms still need their respective acceptance evidence. The current normal
+Product build passes with FFmpeg8.1.2; it is not a native execution result.
+See the [sprint record](plugin-host-sprint.md#a01-m2-exclusive-hosted-ledger-and-native-noteports-2026-10-14)
+for full receipts, retained failures, architecture boundaries and review records.

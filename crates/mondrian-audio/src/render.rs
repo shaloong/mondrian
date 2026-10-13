@@ -265,6 +265,11 @@ enum SessionContinuity {
 }
 
 impl AudioRenderSession {
+    #[cfg(test)]
+    pub(crate) fn is_unentered_for_owned_note_control(&self) -> bool {
+        matches!(self.continuity, SessionContinuity::Unentered)
+    }
+
     /// Allocate all scratch storage before realtime execution begins.
     pub fn new(plan: Arc<PreparedAudioPlan>) -> Result<Self, AudioExecutionError> {
         Self::allocate_storage(plan)?.populate()
@@ -461,6 +466,7 @@ impl AudioRenderSession {
 
     /// Reset mutable execution history and enter one fresh continuity epoch.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
+        self.validate_note_entry_context(entry, false)?;
         self.processor_host.set_native_entry_context(None, self.native_owner_identity());
         self.preflight_native_control()?;
         self.enter_state_admitted(entry, None)
@@ -488,6 +494,7 @@ impl AudioRenderSession {
         cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
         self.validate_state_entry(entry)?;
+        self.processor_host.validate_note_entry(entry)?;
         // State entry can reset several delay/processor instances before one
         // later instance fails. Consume and poison the new epoch first so a
         // partially reset Session can never resume either old or new history.
@@ -511,6 +518,14 @@ impl AudioRenderSession {
             alignment_primed: self.public_output_lookahead_frames() == 0,
         };
         Ok(())
+    }
+
+    pub(crate) fn validate_note_entry_context(
+        &self,
+        entry: AudioStateEntry,
+        installed_root: bool,
+    ) -> Result<(), AudioExecutionError> {
+        self.processor_host.validate_note_entry_context(entry, installed_root)
     }
 
     /// Exact existing Plan/Session identity; not native or installation authority.
@@ -906,6 +921,58 @@ impl AudioRenderSession {
         self.pending_reprepare_ticket
     }
 
+    pub(crate) fn has_notes(&self) -> bool {
+        !self.plan.schedule.notes.is_empty()
+    }
+
+    /// Admit the entire prospective DSP window before any source, delay, meter
+    /// or caller PCM changes. No IDs, records or cursors are committed here.
+    pub(crate) fn preflight_note_window(
+        &mut self,
+        request: AudioRenderRequest,
+    ) -> Result<(), AudioExecutionError> {
+        if !self.has_notes() {
+            return Ok(());
+        }
+        let contract = self.plan.contract();
+        if request.frames > contract.max_block_frames {
+            return Err(AudioExecutionError::BlockTooLarge);
+        }
+        checked_advance_sample(request.start_sample, request.frames)?;
+        let (execution_start, primed) = match self.continuity {
+            SessionContinuity::Unentered => return Err(AudioExecutionError::StateEntryRequired),
+            SessionContinuity::Poisoned { epoch } => {
+                return Err(AudioExecutionError::ContinuityPoisoned(epoch))
+            }
+            SessionContinuity::Active { epoch, next_public_sample, .. }
+                if next_public_sample != request.start_sample =>
+            {
+                return Err(AudioExecutionError::NonContiguousBlock {
+                    epoch,
+                    expected_start_sample: next_public_sample,
+                    actual_start_sample: request.start_sample,
+                });
+            }
+            SessionContinuity::Active { next_execution_sample, alignment_primed, .. } => {
+                (next_execution_sample, alignment_primed)
+            }
+        };
+        let priming_frames = if primed || request.frames == 0 {
+            0
+        } else {
+            self.public_output_lookahead_frames()
+        };
+        let frames = priming_frames
+            .checked_add(request.frames)
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        self.processor_host.preflight_notes(
+            &self.plan.schedule,
+            execution_start,
+            frames,
+            priming_frames,
+        )
+    }
+
     pub(crate) fn render_into_admitted(
         &mut self,
         source: &mut impl AudioPcmSource,
@@ -924,6 +991,7 @@ impl AudioRenderSession {
         if destination.len() != samples {
             return Err(AudioExecutionError::OutputSizeMismatch);
         }
+        self.preflight_note_window(request)?;
         destination.fill(0.0);
 
         let next_public_sample = checked_advance_sample(request.start_sample, request.frames)?;
@@ -1287,6 +1355,7 @@ fn render_track_contributions(
         processor_host.process_rack(
             &contribution.scope_rack,
             &schedule.processors,
+            &schedule.notes,
             &schedule.processor_auxiliary_buses,
             &schedule.sidechain_bindings,
             AudioRenderRequest {
@@ -1613,6 +1682,7 @@ fn process_strip(
         processor_host.process_rack(
             &node.pre_rack,
             &schedule.processors,
+            &schedule.notes,
             &schedule.processor_auxiliary_buses,
             &schedule.sidechain_bindings,
             request,
@@ -1657,6 +1727,7 @@ fn process_strip(
     processor_host.process_rack(
         &node.post_rack,
         &schedule.processors,
+        &schedule.notes,
         &schedule.processor_auxiliary_buses,
         &schedule.sidechain_bindings,
         request,

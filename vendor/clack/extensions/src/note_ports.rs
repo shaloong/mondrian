@@ -22,6 +22,13 @@ pub struct PluginNotePorts(RawExtension<PluginExtensionSide, clap_plugin_note_po
 #[allow(dead_code)]
 pub struct HostNotePorts(RawExtension<HostExtensionSide, clap_host_note_ports>);
 
+/// Same native ABI with immutable shared raw callbacks. Hosts must register
+/// exactly one note-ports implementation for this ID. This form permits role
+/// refusal before borrowing a non-Sync main handler and retains raw flag bits.
+#[derive(Copy, Clone)]
+#[allow(dead_code)]
+pub struct HostNotePortsRaw(RawExtension<HostExtensionSide, clap_host_note_ports>);
+
 bitflags! {
     /// Flags to indicate what note port information has changed and needs to be rescanned by the host.
     #[repr(C)]
@@ -120,6 +127,16 @@ unsafe impl Extension for HostNotePorts {
     #[inline]
     unsafe fn from_raw(raw: RawExtension<Self::ExtensionSide>) -> Self {
         // SAFETY: the guarantee that this pointer is of the correct type is upheld by the caller.
+        Self(unsafe { raw.cast() })
+    }
+}
+
+// SAFETY: identical official clap_host_note_ports ABI and host-side identifier.
+unsafe impl Extension for HostNotePortsRaw {
+    const IDENTIFIERS: &[&CStr] = &[CLAP_EXT_NOTE_PORTS];
+    type ExtensionSide = HostExtensionSide;
+
+    unsafe fn from_raw(raw: RawExtension<Self::ExtensionSide>) -> Self {
         Self(unsafe { raw.cast() })
     }
 }

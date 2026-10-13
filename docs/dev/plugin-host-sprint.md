@@ -3476,3 +3476,134 @@ SHA `AE7C47716BFFA948CBE740F5F486F8DCDA068BDCE9B9D413192264D4A2F1164C`.
 It verifies actual producer, retained PE, all419 raw names per round, unchanged
 ignored set, original controller/Job gates and all retained negative records;
 its separately recorded Product closure preserves the original pending review.
+
+## A01 M2 exclusive Hosted ledger and native NotePorts (2026-10-14)
+
+This finite slice deepens the existing Audio DAG and processor call. No second
+event scheduler, parameter transaction owner, Source lease issuer or native
+voice ledger is introduced. Checked authored endpoints are projected once;
+cached stable port keys/native IDs/current indexes bind to exact Track pre/post
+rack occurrences. `processor_host/note_ledger.rs` owns monotonic non-reused
+native IDs, original tuples, pressed/release-pending/ended-until-Off phases and
+bounded voice/record accounting. `processor_host/notes.rs` owns its single
+non-cloneable ledger plus preallocated input/End/admission storage. Storage is
+allocated unbound before any factory creation, moved into the Hosted instance,
+charged by actual retained capacity and included in the allocation visitor.
+
+Whole-window Root/Session preflight covers priming and the requested window,
+per-call event capacity and every new On without future Off/End credit. Input
+signal delay is subtracted once. Admission precedes destination clearing,
+media access and DSP; actual Note delivery uses MainBusAudioIo and the existing
+processor process method. Copied End acceptance follows successful native
+return. Partial preparation/output refusal fails the owner and poisons the
+Session. The current cold Note entry accepts public origin zero, requires the
+existing Installed owner, and checks refusal before revoking the prior binding.
+Nested entry, destructive state entry and Note-enabled native reconfiguration
+remain explicit refusals. Continuing parameter handoff prevalidates all peers
+and exact score/velocity bits, then publishes all new lease origins under the
+existing Source guard while preserving their records and counters.
+
+Note-enabled CLAP probe/worker instances advertise the actual shared NotePorts
+ABI table. Main/lifecycle checks precede mutable access; supported dialects,
+preferred dialect, full input order, stable unsigned IDs and rescan cohorts
+are revalidated against the restored render-bound instance. Unsupported flags,
+wrong-thread calls and active ALL rescans are retained as explicit failures.
+Metadata-only probes keep the original unavailable extension. Limits are the
+shared finite input/End/record/voice policy, not the fixture's name or eight
+native voices. The separate ProbeNotes v1 offer does not yet carry the same
+instance's full processing contract and is not wired into the application Spec
+Resolver. Public nonempty Note Score retains the allocation-free M1 refusal
+before any projected IR allocation or factory resolution. Its initial/author
+clone preparation peak must enter the existing resource grant before admission.
+
+### Actual evidence and finite acceptance
+
+Evidence root is external
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/`.
+All final gates below bind source1921 SHA-256
+`87C7F45275B988698BCC6AB83BEE6B92AAD7B8D5A7C4EB2B48B915A46D3613D6`.
+
+| Actual artifact | SHA-256 | Result |
+| --- | --- | --- |
+| `a01-m2-runtime-audio-lib-r5.receipt.json` | `EE947B31AED2BF8CA6E2211BC816EA813F5A709AEB1F6E29E835BD60079CD20F` | Cargo0, fresh actual default-feature libtest |
+| `a01-m2-runtime-strict-r2.receipt.json` | `0BAD957FAF38FBF68AB5523E8D87DE7E571DE41BA1690D60E1EE309D1CAEFC86` | Core/Timeline/Audio/EditorState/Project all-targets/all-features -D warnings; zero diagnostics |
+| `a01-m2-runtime-native-r4/receipt.json` | `2D44FE1627D97726D1A0D10F8CC4FABEE19FBFE88BD95886E4A35A2CB1C9F8AF` | Two actual ordinary rounds, each463/0 |
+| `a01-m2-dynamic-note-gate-r2/receipt.json` | `2C9D8F81B29E8CC5F2209A1A613F06A0C06F905EAF597D1C7D3949649D2D8757` | Three selected real owned-DLL controls, each1/0 |
+| `a01-m2-runtime-product-r1.receipt.json` | `8CB8F547AD22926FE38749EBF3D2FE8B18BFA34B940A666891C0D75B7AA730DA` | Normal Product Cargo0, features[], opt1/debug2, fresh=false |
+| `a01-m2-runtime-product-retained-r1/receipt.json` | `E795908CD211B808E2A7DA688AF7E0C032DDEA4D04D4D64D9774720863DEBC32` | Create-only retained normal Product PE |
+
+The actual Audio inventory retains all547 names /84 ignored /463 ordinary.
+Relative to accepted1110a611 there are44 new ordinary controls and three new
+ignored DLL selectors, with no prior name removed. Each ordinary raw log has
+all463 expected names exactly once and no extra name; original note-free
+cancellation/source-revoke assertions and seven real raw NotePorts controls
+pass in both rounds. The original controller sees zero ignored with the actual
+84-name exact skip set. Actual runners/native owners exit0 and reap descendants;
+no deadline, outliving, owner error, input mutation or cleanup failure occurs.
+Retained Audio PE is
+`6FBDE065D8381762C0401A5FCEE876FDD63532B89E8D36C7F0EE3609AF07E0C5`
+(13246976 bytes), producer736A1AA3...A9A73A6.
+
+The pinned fixture DLL remains B239C594...F32AF1D /214528 bytes. Direct inline
+and borrowed DSP-role tests use independent literal PCM and End oracles;
+the third actually receives ProcessError for the wrong original Off after an
+early End. The positive loops and passing controls imply18 instances and98
+successful calls, plus one negative instance/call; these are derived counts,
+not global instrumented measurements. This establishes finite direct adapter
+behavior only, not Parent IPC/with_processing_scope or product Timeline Notes.
+The Installed-root control separately proves zero-origin entry, preservation
+of actual old owner/lease/cursors on nonzero entry refusal, original Off delivery
+and monotonic next ID using an owned Rust factory. Its cfg(test) preparation
+seam cannot grant production execution or realtime qualification.
+
+Normal Product PE is
+`300A5AED1F6968455B64281EDA9CABAE6B7B29CADB84B30D0B64ED2DDA861352`
+(97112576 bytes), actual producer6A55041C...87418B3. It is retained create-only
+under `a01-m2-runtime-product-retained-r1`. Actual ffmpeg-sys8.1.0 output still
+binds D55A6C9C...A15B89, codec62/util60 and the selected FFmpeg8.1.2 link
+directory. Ten existing normal Product warnings remain; the five affected
+crates' strict scope has zero diagnostics. No Product native or full Workspace
+execution was added. The252-file shipped clack source check passes exit0,
+source B096AE6E...A33E3B; its receipt is AE066E31...7E900. Provenance documents
+the new shared/raw callback seam and the corrected ABI table registration.
+
+### Preserved failures and remaining work
+
+The initial native run actually crashed with0xC0000005; isolated raw controls
+reproduced it in six Notes-enabled cases while metadata-only passed. Both
+records remain unchanged: C621CF41...A34B32C and A061B571...4968F2B2. The
+confirmed root cause was passing `&&clap_host_note_ports` to erased extension
+registration: the native reader received a pointer-slot address rather than
+the C callback table. Both raw and legacy registrations now use one reference.
+Seven raw controls and the final native cohorts verify that correction.
+
+The next ordinary run was460/2, receiptF0F9B13E...5C788: the new cold-entry
+error handler incorrectly failed note-free instances during existing cancellation.
+Only actual Note owners now receive the new failure mark. Existing assertions
+and names were preserved. Cargo101 for one cfg(test) unqualified type name is
+retained as98E3A3B3...6C558A; the type is now explicitly crate-qualified.
+Strict R1 failed only four collapsible_if checks, receipt468E7E98...AD44.
+Independent in-memory reversal of their original diagnostic spans reconstructs
+all four prior complete files exactly; the final equivalent let-chains preserve
+predicates, error bodies and assertions. No failed record is relabeled passed.
+
+Final independent scoped review is
+`.scratch/plugin-host-sprint/a01-m2-ledger-runtime-independent-review-r1/final-finite-runtime-scoped-review-r1.md`,
+SHA `DD26117D17785795DC180920CA6AD8BCB061D0967BC3238E45F38756DAB76268`.
+It finds no blocker within the named finite controls, verifies actual raw names,
+producer/source hashes, final DLL scope and preserved negatives, and retains
+Product as pending at its creation. Actual Product closure is separately saved
+in the same directory as `final-runtime-product-closure-r1.md`, SHA
+`5A37BAE99E6EC014798E8302866F384CFEA99ED5D8BAA821D7263B07C8E6480B`;
+the pending report is not rewritten. Subsequent changes to the three
+repository documentation files describe these results; compiled Rust/vendor
+source remains the accepted snapshot rather than a blanket byte-identity claim
+for those later documentation files.
+
+The next acceptance dependencies are explicit: prepared IR/clone peak admission
+using the existing resource ledger; one coherent Notes-enabled processing offer
+and application Resolver; actual native parent/worker/DAG Notes; whole-root
+capacity refusal before earlier media/DSP/PCM/ID mutation; actual bad-End poison;
+live selected/unselected three-phase handoff and Ack retry; zero-frame dispatch;
+then zero-input instruments, replay/nesting and product editing. Third-party,
+physical realtime, comparative performance and macOS/Linux remain unqualified.

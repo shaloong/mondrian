@@ -107,13 +107,64 @@ pub trait HostNotePortsImpl {
     fn rescan(&self, flags: NotePortRescanFlags);
 }
 
+/// Numeric raw callback facts on a thread-safe shared owner. The native ABI
+/// remains main-thread only; implementations check actual thread/lifecycle
+/// first and retain illegal callback observations without touching main state.
+pub trait HostNotePortsRawImpl {
+    /// Raw dialect mask, with native role rejection represented as zero.
+    fn supported_dialects_raw(&self) -> u32;
+    /// Original untruncated native rescan flags, including unknown bits.
+    fn rescan_raw(&self, flags: u32);
+}
+
+// SAFETY: this is the same official extension ABI; registration selects this
+// shared-only callback table instead of, never alongside, the legacy table.
+unsafe impl<H> ExtensionImplementation<H> for HostNotePortsRaw
+where
+    for<'h> H: HostHandlers<Shared<'h>: HostNotePortsRawImpl>,
+{
+    const IMPLEMENTATION: RawExtensionImplementation =
+        RawExtensionImplementation::new(&clap_host_note_ports {
+            supported_dialects: Some(supported_dialects_raw::<H>),
+            rescan: Some(rescan_raw::<H>),
+        });
+}
+
+unsafe extern "C" fn supported_dialects_raw<H>(host: *const clap_host) -> u32
+where
+    for<'h> H: HostHandlers<Shared<'h>: HostNotePortsRawImpl>,
+{
+    // SAFETY: ABI caller supplies the matching live H wrapper. The observer
+    // borrows only immutable Shared; no lazy initialization/main borrow/log I/O.
+    unsafe {
+        HostWrapper::<H>::handle_observation(host, |wrapper| {
+            Ok(wrapper.shared().supported_dialects_raw())
+        })
+    }
+    .unwrap_or(0)
+}
+
+unsafe extern "C" fn rescan_raw<H>(host: *const clap_host, flags: u32)
+where
+    for<'h> H: HostHandlers<Shared<'h>: HostNotePortsRawImpl>,
+{
+    // SAFETY: identical lifetime/type precondition. Raw bits reach the one
+    // shared observation owner even when native role or semantics are refused.
+    let _ = unsafe {
+        HostWrapper::<H>::handle_observation(host, |wrapper| {
+            wrapper.shared().rescan_raw(flags);
+            Ok(())
+        })
+    };
+}
+
 // SAFETY: The given struct is the CLAP extension struct for the matching side of this extension.
 unsafe impl<H> ExtensionImplementation<H> for HostNotePorts
 where
     for<'h> H: HostHandlers<MainThread<'h>: HostNotePortsImpl>,
 {
     const IMPLEMENTATION: RawExtensionImplementation =
-        RawExtensionImplementation::new(&&clap_host_note_ports {
+        RawExtensionImplementation::new(&clap_host_note_ports {
             supported_dialects: Some(supported_dialects::<H>),
             rescan: Some(rescan::<H>),
         });

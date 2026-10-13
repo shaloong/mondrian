@@ -70,10 +70,46 @@ original input P/C/K address (including those wildcards) and raw flags are copie
 Callbacks return no voice credit. End refusal is sticky through native return;
 parent rejection after DSP permanently fails that adapter, preventing repeated
 delivery. Flush preserves unconsumed Process End observations. The sole Hosted
-ledger, prepared score and whole-root admission are still required before product
-Note execution: selected scores retain the M1 refusal, native CLAP/VST3 Note
-requests are explicitly refused and HostNotePorts is not yet advertised. Carrier
-controls alone grant no instrument, realtime or third-party qualification.
+ledger, prepared score and whole-root admission were still pending in that
+carrier-only slice: selected scores retained the M1 refusal, native CLAP/VST3
+Note requests were explicitly refused and HostNotePorts was not advertised.
+Carrier controls alone grant no instrument, realtime or third-party qualification.
+
+The next finite M2 slice projects checked Note endpoints once onto the Render
+Contract grid and binds definition-owned port keys to cached native IDs/current
+indexes at the exact selected Track rack occurrence. One Hosted processor owns
+one non-cloneable Note ledger and bounded input, copied-End and admission scratch.
+All targeted storage is prepared unbound before factory creation; only successful
+existing Installed-root binding and entry establish its origin. Native Note IDs
+are monotonically issued and never reused across cold epochs. Original input
+tuples survive release-pending and early-End phases until their authored Off;
+future Off/End events cannot finance current voice or record admission.
+
+Root/Session window admission accounts for every priming and requested call,
+subtracts the prepared stage's input-signal delay once, and checks all occurrences
+before destination clearing, media access or DSP. Cold Note entry currently
+requires public origin zero; nested Note entry and destructive state/reconfiguration
+are explicitly refused. Inputs and copied Ends use the existing processor call.
+Unrecoverable partial delivery or rejected output poisons that owner rather than
+allowing a retry. Continuing parameter handoff prevalidates the unchanged score
+and every bound peer, then publishes the new existing lease origin under the
+Source guard while retaining record phases, tuples, counters and native IDs.
+
+Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
+table and validate the restored, render-bound port cohort. Raw rescan flags and
+wrong-thread/unsupported observations stay bounded and sticky. Metadata-only
+probes retain their original unsupported service. The current separate ProbeNotes
+offer is not a complete processing offer: the application Resolver must later
+obtain audio layout, parameters, latency, tail and Notes from the same enabled
+instance, rather than combining ordinary and Notes probe results.
+
+Public nonempty-score Plan preparation still runs the allocation-free M1
+validation and returns typed Unsupported before projection/factory resolution.
+Initial IR preparation peak and author-handoff clone admission must be charged
+to the existing prepared-resource grant before lifting this gate. Owned model
+tests and direct fixture-DLL processing verify only their named boundaries;
+they do not establish production Timeline Notes, Parent IPC, instruments,
+realtime safety, comparative performance or third-party compatibility.
 
 An authored Processor Instance is unique across all Sequence insertion points.
 Preparation preserves Rack order and materializes generated processor

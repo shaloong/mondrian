@@ -110,6 +110,12 @@ impl PreparedProcessorHost {
         old: &PreparedAudioSchedule,
         next: &PreparedAudioSchedule,
     ) -> Result<(), AudioExecutionError> {
+        if self.instances.iter().any(|instance| instance.notes.is_some()) {
+            return Err(notes::refusal(
+                "native state-entry author replacement with Note score is unsupported",
+            )
+            .into());
+        }
         if self.instances.len() != old.processors.len()
             || old.processors.len() != next.processors.len()
             || self.instances.iter().zip(old.processors.iter().zip(&next.processors)).any(
@@ -118,6 +124,7 @@ impl PreparedProcessorHost {
                         || old.occurrence != next.occurrence
                         || old.factory.contract() != next.factory.contract()
                         || old.factory.auxiliary_inputs() != next.factory.auxiliary_inputs()
+                        || old.factory.note_inputs() != next.factory.note_inputs()
                         || old.parameter_ids != next.parameter_ids
                 },
             )
@@ -128,6 +135,9 @@ impl PreparedProcessorHost {
     }
     pub(crate) fn swap_state_entry_instances(&mut self, next: &mut Self) {
         std::mem::swap(&mut self.instances, &mut next.instances);
+        // Fresh preallocated Note boxes retire with the unused destination;
+        // the actual producer carries its sole retained ledger into next.
+        std::mem::swap(&mut self.prepared_notes, &mut next.prepared_notes);
         for instance in &mut next.instances {
             instance.continuity = match instance.continuity {
                 HostedProcessorContinuity::Stateless => HostedProcessorContinuity::Stateless,
@@ -141,6 +151,16 @@ impl PreparedProcessorHost {
         visitor: &mut dyn FnMut(Storage<'a>) -> Result<(), AudioProcessorFactoryStorageError>,
     ) -> Result<(), AudioProcessorFactoryStorageError> {
         visitor(Storage::complete(&self.instances)?)?;
+        visitor(Storage::complete(&self.prepared_notes)?)?;
+        for state in self
+            .prepared_notes
+            .iter()
+            .flatten()
+            .chain(self.instances.iter().filter_map(|instance| instance.notes.as_ref()))
+        {
+            visitor(Storage::complete(state)?)?;
+            state.visit_storage(visitor)?;
+        }
         let (events, lanes) = self.parameter_events.resource_buffers();
         visitor(Storage::complete(events)?)?;
         visitor(Storage::complete(lanes)?)?;

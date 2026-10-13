@@ -357,7 +357,7 @@ impl AudioProgramDeliveryRuntime {
             .ok_or(AudioDeliveryError::SampleExtentOverflow)?;
         // The same whole-root preflight must win over queued later-window
         // coordinate errors while native control retains the first window.
-        self.runtime.preflight_render_cancellable(cancellation)?;
+        self.runtime.preflight_render_cancellable(request, cancellation)?;
         let next_start_sample =
             crate::render::checked_advance_sample(request.start_sample, request.frames)?;
         if let Some(cursor) = self.submitted_window

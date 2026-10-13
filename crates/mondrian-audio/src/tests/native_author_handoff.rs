@@ -8,6 +8,9 @@ use mondrian_core::{
 };
 use std::num::{NonZeroU32, NonZeroU64};
 
+#[path = "native_author_handoff_note_controls.rs"]
+mod note_controls;
+
 #[derive(Default)]
 struct HandoffProbe {
     revision: u64,

@@ -105,3 +105,21 @@ historical formatting/note-port receipts. Those sealed receipts retain their
 original endpoints; they do not claim to have formatted or qualified this later
 revision. PROVENANCE.json records the new actual shipped hashes and byte counts;
 its own hash is supplied independently by collection/validation.
+
+## Explicit raw Note Ports operation
+
+Mondrian registers the additive HostNotePortsRaw table only for explicit Note
+operations, under the one official note-ports identifier. Its callbacks observe
+immutable Shared state before checking thread and lifecycle facts; no main-state
+borrow or lazy initialization occurs on a rejected foreign thread. Raw rescan
+bits and sticky failure facts survive without truncation. The existing typed
+legacy API remains, with its native implementation table pointer corrected to
+one reference as required by RawExtensionImplementation::new.
+
+The first actual new native regression crashed with 0xC0000005; isolated Notes
+controls reproduced it while the metadata-only control passed. A double reference
+had exposed a pointer slot as the official function table. Both table registrations
+now pass the table itself. Original failures remain in the sprint evidence; this
+source change alone does not certify successful native processing or the complete
+host. Product Note Score execution remains gated pending whole-root preparation,
+consumer and DSP verification. No third-party, realtime or platform claim follows.

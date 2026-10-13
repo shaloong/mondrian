@@ -138,6 +138,9 @@ pub enum AudioProcessorTail {
 /// Failure while resolving, instantiating, resetting, or executing a processor.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioProcessorHostError {
+    /// Bounded Note admission/pairing refusal, without callback-path allocation.
+    #[error("audio Note execution refused: {0}")]
+    NoteExecutionRefused(&'static str),
     /// The exact native parameter source has no exclusive publication role.
     /// This callback-path refusal owns no diagnostic String or allocation.
     #[error("native parameter source publication is unavailable")]

@@ -1,5 +1,6 @@
 //! Parameter-plan bindings on actual retained Hosted records, never public minting.
 
+use super::note_ledger::LedgerOrigin;
 use super::*;
 use crate::native_runtime_owner::NativeHostedBinding;
 use crate::{AudioNativeOwnerError, AudioSessionCursorIdentity, NativeAudioAuthorAdmissionError};
@@ -271,6 +272,29 @@ impl PreparedProcessorHost {
                 binding: mondrian_core::AudioProcessorBindingId::new(),
                 expected_object: object,
             };
+            let next_address = crate::AudioNativeProcessorAddress {
+                root: next_root,
+                local: next_local,
+                occurrence: instance.occurrence,
+                epoch: lease.address().epoch,
+            };
+            if let Some(notes) = &instance.notes {
+                notes
+                    .ledger
+                    .preflight_continuing_rebind(
+                        LedgerOrigin {
+                            address: lease.address(),
+                            binding: lease.binding(),
+                            object,
+                        },
+                        LedgerOrigin {
+                            address: next_address,
+                            binding: request.binding,
+                            object,
+                        },
+                    )
+                    .map_err(|_| AudioNativeOwnerError::OwnerUnavailable)?;
+            }
             let receipt = match isolate_adapter_call("parameter handoff native Bind", || {
                 instance.processor.bind_native_audio_object(request)
             })? {
@@ -290,12 +314,7 @@ impl PreparedProcessorHost {
                 index,
                 prior_lease: lease,
                 object,
-                address: crate::AudioNativeProcessorAddress {
-                    root: next_root,
-                    local: next_local,
-                    occurrence: instance.occurrence,
-                    epoch: lease.address().epoch,
-                },
+                address: next_address,
                 receipt,
             });
         }
@@ -322,6 +341,23 @@ impl PreparedProcessorHost {
             {
                 return Err(AudioNativeOwnerError::OwnerUnavailable);
             }
+            if let Some(notes) = &instance.notes {
+                notes
+                    .ledger
+                    .preflight_continuing_rebind(
+                        LedgerOrigin {
+                            address: record.prior_lease.address(),
+                            binding: record.prior_lease.binding(),
+                            object: record.object,
+                        },
+                        LedgerOrigin {
+                            address: record.address,
+                            binding: record.receipt.binding(),
+                            object: record.object,
+                        },
+                    )
+                    .map_err(|_| AudioNativeOwnerError::OwnerUnavailable)?;
+            }
         }
         Ok(())
     }
@@ -340,6 +376,17 @@ impl PreparedProcessorHost {
                 serial,
             );
             let instance = &mut self.instances[record.index];
+            // Every same-object peer is prevalidated before the final Source
+            // guard. Move only its origin with this installed lease; retain all
+            // IDs, tuples, phases and capacity counters. Selected Ack remains
+            // a separate retryable native operation and must not migrate twice.
+            if let Some(notes) = &mut instance.notes {
+                notes.ledger.commit_prevalidated_continuing_rebind(LedgerOrigin {
+                    address: lease.address(),
+                    binding: lease.binding(),
+                    object: record.object,
+                });
+            }
             instance.native_binding =
                 NativeHostedBinding::Installed { lease, object: record.object };
             if let Some(retained) = &mut instance.native_author_outstanding {

@@ -166,7 +166,7 @@ pub(super) fn validate_response(
     Ok(())
 }
 
-fn inspect_inputs(
+pub(super) fn inspect_inputs(
     handle: &PluginMainThreadHandle<'_>,
     shared: &ClapHostShared,
 ) -> Result<(bool, Vec<ClapNoteInputDescriptor>), AudioProcessorHostError> {
@@ -215,7 +215,7 @@ fn inspect_inputs(
     Ok((true, inputs))
 }
 
-fn validate_factory_plugin_id(
+pub(super) fn validate_factory_plugin_id(
     factory: &clack_host::factory::plugin::PluginFactory<'_>,
     plugin_id: &std::ffi::CStr,
 ) -> Result<(), AudioProcessorHostError> {

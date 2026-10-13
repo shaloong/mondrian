@@ -1,7 +1,12 @@
 //! Render-contract-specific lowering from semantic audio IR to dense execution data.
 
 mod native_author;
+#[cfg(test)]
+pub(crate) use prepared_notes::{PreparedNoteEvent, PreparedNoteTarget};
+pub(crate) use prepared_notes::{PreparedNotePhase, PreparedNoteScore};
+mod prepared_notes;
 pub(crate) use native_author::processor;
+use prepared_notes::ProjectedNoteScore;
 
 use crate::latency::{solve_prepared_latency, PreparedLatencyGraph, PreparedNodeLatency};
 use crate::plan::{
@@ -245,6 +250,36 @@ pub struct PreparedAudioPlan {
 }
 
 impl PreparedAudioPlan {
+    #[cfg(test)]
+    pub(crate) fn with_owned_note_score_for_test(
+        &self,
+        program: Arc<CompiledAudioProgram>,
+    ) -> Result<Self, AudioCompileError> {
+        let mut scoreless = program.as_ref().clone();
+        scoreless.note_lanes.clear();
+        if &scoreless != self.program() || !self.program().note_lanes.is_empty() {
+            return Err(AudioCompileError::InvalidPreparedGraph(
+                "owned Note control changed the prepared base graph".to_owned(),
+            ));
+        }
+        let rate = AudioSampleRate::new(self.contract.sample_rate)
+            .map_err(|_| AudioCompileError::InvalidRenderContract)?;
+        let notes = ProjectedNoteScore::project(&program.note_lanes, rate)?
+            .resolve_targets(program.as_ref())?
+            .bind(&self.schedule.processors, rate)?;
+        if notes.is_empty() {
+            return Err(AudioCompileError::InvalidPreparedGraph(
+                "owned Note control needs a nonempty actual authored score".to_owned(),
+            ));
+        }
+        let mut next = self.clone();
+        next.preparation_id = mondrian_core::AudioPreparedPlanId::new();
+        next.program = program;
+        next.schedule.notes = notes;
+        next.schedule.summary.requires_state_entry = true;
+        Ok(next)
+    }
+
     /// Visit actual factory bindings in this local prepared Plan without DSP or
     /// new instance creation. Shared factory Arc payloads keep one identity so
     /// the caller can deduplicate aliases in its existing local union.
@@ -262,6 +297,28 @@ impl PreparedAudioPlan {
             processor.factory.visit_host_owned_storage(visitor)?;
         }
         Ok(())
+    }
+
+    /// Visit the actual immutable prepared Note Vec/String payload separately
+    /// from factory owners. This does not inventory Session ledgers/reservations,
+    /// enclosing Plan Arc overhead or grant executable Note capability.
+    pub fn visit_note_host_owned_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        self.schedule.notes.visit_host_owned_storage(visitor)
+    }
+
+    pub(crate) fn visit_native_host_owned_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        self.visit_factory_host_owned_storage(visitor)?;
+        self.visit_note_host_owned_storage(visitor)
     }
 
     pub(crate) const fn preparation_id(&self) -> mondrian_core::AudioPreparedPlanId {
@@ -314,12 +371,23 @@ impl PreparedAudioPlan {
         processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
         contract.validate()?;
+        // Preserve the accepted allocation-free endpoint/error precedence until
+        // Note preparation has its actual preallocation grant and runtime gate.
         validate_selected_note_preparation(program.as_ref(), contract.sample_rate)?;
+        let rate = AudioSampleRate::new(contract.sample_rate)
+            .map_err(|_| AudioCompileError::InvalidRenderContract)?;
+        let projected_notes = ProjectedNoteScore::project(&program.note_lanes, rate)?;
+        // No runtime Note permission is granted by IR/port preparation. Keep
+        // the original typed refusal before ANY factory until Root connects
+        // whole-root admission, actual Hosted ledger and capacity charges.
+        projected_notes.require_runtime_support()?;
+        let requested_notes = projected_notes.resolve_targets(program.as_ref())?;
         let schedule = PreparedAudioSchedule::build(
             program.as_ref(),
             contract,
             dependencies,
             processor_resolver,
+            requested_notes,
         )?;
         Ok(Self {
             preparation_id: mondrian_core::AudioPreparedPlanId::new(),
@@ -357,7 +425,18 @@ impl PreparedAudioPlan {
     pub fn session_resource_footprint(
         &self,
     ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
-        session_resource_footprint(self.contract, self.schedule.summary)
+        let mut footprint = session_resource_footprint(self.contract, self.schedule.summary)?;
+        footprint.prepared_logical_bytes = footprint
+            .prepared_logical_bytes
+            .checked_add(self.schedule.notes.storage_bytes()?)
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        footprint.fixed_resident_bytes = footprint
+            .fixed_resident_bytes
+            .checked_add(
+                crate::processor_host::PreparedProcessorHost::note_storage_bytes(&self.schedule)?,
+            )
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        Ok(footprint)
     }
 
     /// Internal lookahead needed to return Timeline-aligned public PCM.
@@ -371,8 +450,6 @@ impl PreparedAudioPlan {
     }
 }
 
-// Model-only M1: validate every selected endpoint before returning unsupported,
-// before factory resolution, schedule allocation or a mutable Session exists.
 fn validate_selected_note_preparation(
     program: &CompiledAudioProgram,
     sample_rate: u32,
@@ -550,6 +627,7 @@ fn checked_sum<const N: usize>(values: [usize; N]) -> Result<usize, AudioResourc
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedAudioSchedule {
+    pub(crate) notes: PreparedNoteScore,
     pub(crate) nodes: Vec<PreparedNode>,
     pub(crate) execution_order: Vec<(usize, AudioChannelSignalStage)>,
     pub(crate) routes: Vec<PreparedRoute>,
@@ -839,6 +917,7 @@ impl PreparedAudioSchedule {
         contract: AudioRenderContract,
         dependencies: &AudioPreparationDependencies,
         processor_resolver: &dyn AudioProcessorResolver,
+        requested_notes: prepared_notes::RequestedNoteScore,
     ) -> Result<Self, AudioCompileError> {
         let sample_rate = AudioSampleRate::new(contract.sample_rate).map_err(|error| {
             AudioCompileError::InvalidPreparedGraph(format!(
@@ -864,6 +943,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 processor_resolver,
+                &requested_notes,
                 &mut processors,
             )?;
             let post_rack = prepare_rack(
@@ -874,6 +954,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 processor_resolver,
+                &requested_notes,
                 &mut processors,
             )?;
             nodes.push(PreparedNode {
@@ -911,6 +992,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 processor_resolver,
+                &requested_notes,
                 &mut processors,
             )?;
             let post_rack = prepare_rack(
@@ -921,6 +1003,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 processor_resolver,
+                &requested_notes,
                 &mut processors,
             )?;
             nodes.push(PreparedNode {
@@ -950,6 +1033,7 @@ impl PreparedAudioSchedule {
             sample_rate,
             contract,
             processor_resolver,
+            &requested_notes,
             &mut processors,
         )?;
         let post_rack = prepare_rack(
@@ -960,6 +1044,7 @@ impl PreparedAudioSchedule {
             sample_rate,
             contract,
             processor_resolver,
+            &requested_notes,
             &mut processors,
         )?;
         nodes.push(PreparedNode {
@@ -1122,6 +1207,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 processor_resolver,
+                &requested_notes,
                 &mut processors,
             )?;
             let volume_automation = prepare_optional_curve(
@@ -1495,6 +1581,7 @@ impl PreparedAudioSchedule {
                 budget_bytes: contract.compensation_delay_scratch_budget_bytes,
             });
         }
+        let notes = requested_notes.bind(&processors, sample_rate)?;
         let summary = PreparedAudioScheduleSummary {
             node_count: nodes.len(),
             track_count,
@@ -1532,7 +1619,8 @@ impl PreparedAudioSchedule {
                 .iter()
                 .map(|binding| binding.compensation_delay_frames)
                 .fold(latency.maximum_compensation_frames, usize::max),
-            requires_state_entry: latency.output_algorithmic_latency_frames > 0
+            requires_state_entry: !notes.is_empty()
+                || latency.output_algorithmic_latency_frames > 0
                 || latency.maximum_compensation_frames > 0
                 || sidechain_bindings.iter().any(|binding| binding.compensation_delay_frames > 0)
                 || contributions.iter().any(|contribution| {
@@ -1544,6 +1632,7 @@ impl PreparedAudioSchedule {
                 }),
         };
         Ok(Self {
+            notes,
             nodes,
             execution_order,
             routes,
@@ -1805,6 +1894,7 @@ fn prepare_rack(
     sample_rate: AudioSampleRate,
     contract: AudioRenderContract,
     processor_resolver: &dyn AudioProcessorResolver,
+    requested_notes: &prepared_notes::RequestedNoteScore,
     destination: &mut Vec<PreparedProcessor>,
 ) -> Result<PreparedRack, AudioCompileError> {
     let start = destination.len();
@@ -1815,8 +1905,13 @@ fn prepare_rack(
             owner,
             insertion,
         };
-        let factory =
-            prepare_processor_factory(processor_resolver, processor, occurrence, contract, false)?;
+        let factory = prepare_processor_factory(
+            processor_resolver,
+            processor,
+            occurrence,
+            contract,
+            requested_notes.requests_input_for(occurrence),
+        )?;
         let processor_algorithmic_latency_frames = factory.contract().algorithmic_latency_frames();
         let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
         let mut parameter_curves = Vec::with_capacity(processor.parameters.len());
