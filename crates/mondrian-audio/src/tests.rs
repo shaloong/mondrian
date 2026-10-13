@@ -25,6 +25,9 @@ mod lookahead_limiter_tests;
 #[path = "tests/processor_inspection.rs"]
 mod processor_inspection_tests;
 
+#[path = "tests/note_model.rs"]
+mod note_model_tests;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,

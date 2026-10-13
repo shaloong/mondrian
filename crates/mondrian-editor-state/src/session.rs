@@ -1577,6 +1577,265 @@ mod tests {
     use mondrian_core::{ProgramOutputId, ProjectColorEnvironment, ProjectSettings, TimelineTime};
     use mondrian_timeline::{AudioRouteDestination, Clip, SequenceCollection, SequenceSettings};
 
+    fn insert_note_model_fixture(sequence: &mut Sequence) -> mondrian_timeline::AudioNoteLane {
+        use mondrian_core::{AudioNoteId, AudioNoteLaneId, AuthoringList};
+        use mondrian_timeline::{
+            AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorInstance,
+        };
+        let track_id = sequence.audio_tracks[0].id;
+        let processor =
+            AudioProcessorInstance::built_in(mondrian_timeline::BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        let lane = AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "  notes.音符  ".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("start"),
+                end: TimelineTime::new(2002, 30000).expect("end"),
+                channel: 3,
+                key: 60,
+                on_velocity: -0.0,
+                off_velocity: 0.5,
+            }]),
+        };
+        sequence.audio_program.note_lanes.push(lane.clone());
+        lane
+    }
+
+    #[test]
+    fn note_model_session_commit_noop_undo_redo_preserves_score_identity() {
+        let mut session = session_with_two_sequences(true);
+        let id = session.active_sequence().expect("active").id;
+        let generation = session.author_generation();
+        let revision = session.sequence(id).expect("origin").revision;
+        let (lane, commit) = session
+            .edit_sequence(id, "Add score", |sequence| {
+                Ok(insert_note_model_fixture(sequence))
+            })
+            .expect("validated score transaction");
+        assert!(commit.expect("actual author change").undo_retained);
+        assert!(session.author_generation() > generation);
+        assert!(session.sequence(id).expect("committed").revision > revision);
+        assert_eq!(
+            session
+                .snapshot()
+                .expect("new execution snapshot")
+                .document
+                .sequences
+                .sequence(id)
+                .expect("snapshot Sequence")
+                .audio_program
+                .note_lanes[0],
+            lane
+        );
+
+        session
+            .edit_sequence(id, "Change note", |sequence| {
+                sequence.audio_program.note_lanes[0].notes[0].on_velocity = 0.25;
+                Ok(())
+            })
+            .expect("same-ID value edit");
+        let generation = session.author_generation();
+        let history = session.history.diagnostics();
+        let (_, noop) = session
+            .edit_sequence(id, "Same value", |sequence| {
+                sequence.audio_program.note_lanes[0].notes[0].on_velocity = 0.25;
+                Ok(())
+            })
+            .expect("no-op");
+        assert!(noop.is_none());
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(session.history.diagnostics(), history);
+        session.undo().expect("Undo note value").expect("retained value edit");
+        let restored = &session.sequence(id).expect("restored").audio_program.note_lanes[0];
+        assert_eq!(restored.id, lane.id);
+        assert_eq!(restored.notes[0].id, lane.notes[0].id);
+        assert_eq!(
+            restored.notes[0].on_velocity.to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        session.redo().expect("Redo value").expect("retained value edit");
+        let restored = &session.sequence(id).expect("redone").audio_program.note_lanes[0];
+        assert_eq!(restored.id, lane.id);
+        assert_eq!(restored.target, lane.target);
+        assert_eq!(restored.notes[0].id, lane.notes[0].id);
+        assert_eq!(restored.notes[0].on_velocity, 0.25);
+        session.undo().expect("Undo value again");
+        session.undo().expect("Undo score insertion");
+        assert!(session.sequence(id).expect("origin").audio_program.note_lanes.is_empty());
+        session.redo().expect("Redo score insertion");
+        assert_eq!(
+            session.sequence(id).expect("score restored").audio_program.note_lanes[0],
+            lane
+        );
+    }
+
+    #[test]
+    fn note_model_invalid_lone_removal_is_atomic_and_combined_removal_commits() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("active").id;
+        let (lane, _) = session
+            .edit_sequence(id, "Add score", |sequence| {
+                Ok(insert_note_model_fixture(sequence))
+            })
+            .expect("seed score");
+        let before = session.document().clone();
+        let generation = session.author_generation();
+        let history = session.history.diagnostics();
+        assert!(session
+            .edit_sequence(id, "Invalid processor removal", |sequence| {
+                sequence
+                    .audio_program
+                    .track_channels
+                    .get_mut(&lane.target.track_id)
+                    .expect("channel")
+                    .strip
+                    .pre_fader
+                    .processors
+                    .clear();
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(session.document(), &before);
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(session.history.diagnostics(), history);
+        let (_, commit) = session
+            .edit_sequence(id, "Remove processor and score", |sequence| {
+                sequence
+                    .audio_program
+                    .track_channels
+                    .get_mut(&lane.target.track_id)
+                    .expect("channel")
+                    .strip
+                    .pre_fader
+                    .processors
+                    .clear();
+                sequence.audio_program.note_lanes.clear();
+                Ok(())
+            })
+            .expect("atomic strong-reference removal");
+        assert!(commit.is_some());
+        assert!(session.sequence(id).expect("removed").audio_program.note_lanes.is_empty());
+        session.undo().expect("Undo both");
+        assert_eq!(
+            session.sequence(id).expect("restored").audio_program.note_lanes[0],
+            lane
+        );
+    }
+
+    #[test]
+    fn note_model_existing_rack_inspection_blocks_locked_score_edit_without_commit() {
+        use mondrian_timeline::{
+            inspect_audio_processor_rack, AudioChannelStripOwner, AudioChannelStripRack,
+            AudioProcessorRackAddress,
+        };
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("active").id;
+        let (lane, _) = session
+            .edit_sequence(id, "Add score", |sequence| {
+                Ok(insert_note_model_fixture(sequence))
+            })
+            .expect("seed");
+        session
+            .edit_sequence(id, "Lock Track", |sequence| {
+                sequence.audio_tracks[0].is_locked = true;
+                Ok(())
+            })
+            .expect("lock intent");
+        let before = session.document().clone();
+        let generation = session.author_generation();
+        let history = session.history.diagnostics();
+        let result = session.edit_sequence(id, "Edit locked score", |sequence| {
+            let address = AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: lane.target.track_id },
+                rack: AudioChannelStripRack::PreFader,
+            };
+            let inspection = inspect_audio_processor_rack(sequence, &address)
+                .map_err(|error| session_error("note_model_edit", error.to_string()))?;
+            if let Some(blocker) = inspection.edit_blocker() {
+                return Err(session_error("note_model_edit", blocker.to_string()));
+            }
+            sequence.audio_program.note_lanes[0].notes[0].key = 61;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(session.document(), &before);
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(session.history.diagnostics(), history);
+    }
+
+    #[test]
+    fn note_model_pending_score_budget_failure_preserves_document_origin_and_history() {
+        let mut session = session_with_two_sequences(false);
+        let id = session.active_sequence().expect("active").id;
+        session
+            .edit_sequence(id, "Add score", |sequence| {
+                insert_note_model_fixture(sequence);
+                Ok(())
+            })
+            .expect("seed");
+        let gesture = mondrian_core::AuthoringGestureId::new();
+        session.begin_sequence_gesture(gesture, id).expect("calibrate");
+        session
+            .edit_sequence_in_gesture(gesture, id, "one note value", |sequence| {
+                sequence.audio_program.note_lanes[0].notes[0].key = 61;
+                Ok(())
+            })
+            .expect("calibrate score charge");
+        let charge = session.history.diagnostics().pending_retained_bytes;
+        assert!(charge > 0);
+        session.cancel_sequence_gesture(gesture).expect("restore origin");
+        session.history = AuthoringHistory::with_budget(
+            crate::history::AuthoringHistoryBudget::new(1, 1024 * 1024, charge),
+        );
+        session.begin_sequence_gesture(gesture, id).expect("bounded gesture");
+        session
+            .edit_sequence_in_gesture(gesture, id, "one note value", |sequence| {
+                sequence.audio_program.note_lanes[0].notes[0].key = 61;
+                Ok(())
+            })
+            .expect("same pending charge fits");
+        let before = session.document().clone();
+        let generation = session.author_generation();
+        let history = session.history.diagnostics();
+        assert!(session
+            .edit_sequence_in_gesture(gesture, id, "oversized score", |sequence| {
+                let notes = &mut sequence.audio_program.note_lanes[0].notes;
+                let template = notes[0].clone();
+                for _ in 0..2048 {
+                    let mut note = template.clone();
+                    note.id = mondrian_core::AudioNoteId::new();
+                    notes.push(note);
+                }
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(session.document(), &before);
+        assert_eq!(session.author_generation(), generation);
+        assert_eq!(session.history.diagnostics(), history);
+        assert!(session.sequence_gesture_is_current(gesture, id));
+        session.cancel_sequence_gesture(gesture).expect("cancel retained score origin");
+        assert_eq!(
+            session.sequence(id).expect("origin").audio_program.note_lanes[0].notes[0].key,
+            60
+        );
+    }
+
     #[test]
     fn net_zero_gesture_preserves_the_original_redo_branch_and_charge() {
         let mut session = session_with_two_sequences(false);

@@ -47,6 +47,20 @@ Buses and Outputs use their own IDs. The entities reuse `AudioChannelStrip` and
 Routes name typed source ports (`PreFader`, `PostFaderPreMute`, `PostMute`) and
 typed destinations. Instantaneous cycles are invalid.
 
+The same Audio Program owns default-empty, versioned `AudioNoteLane` values.
+Each lane and note has its own stable typed author identity. A lane strongly
+references an existing audio Track and a processor in its pre/post rack, even
+when its score is empty or its target is bypassed. Notes retain exact Sequence
+times, concrete channel/key and finite on/off velocities; velocity-zero On is
+still On. The port key is opaque author intent until native preparation binds
+it. It is not a ParameterId or a scan index. Footprint, snapshots and Undo/Redo
+use the existing author aggregate. Track removal prunes its lanes; Sequence
+duplication forks lane/note IDs and remaps their Track/processor references.
+Removing only a strongly referenced processor is invalid; removing its lane in
+the same transaction is valid. Document schema32 protects this data, with an
+explicit absent/empty31 migration; archive format and library schema stay intact.
+Stored score data does not itself grant Note execution or instrument support.
+
 An `AudioTransition` strongly references two `AudioComponentEditId` values and
 an exact Sequence-time range. It affects only those endpoints. Ordinary overlap
 is ordinary summing. Structural edits prune transitions whose endpoints or

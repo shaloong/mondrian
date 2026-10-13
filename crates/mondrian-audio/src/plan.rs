@@ -1,11 +1,12 @@
 use mondrian_core::{
-    AudioChannelLayout, AudioComponentEditId, AudioProcessingScopeId, AudioProcessorInstanceId,
-    ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId, SourceSampleTarget, TimeScale,
-    TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioComponentEditId, AudioNoteLaneId, AudioProcessingScopeId,
+    AudioProcessorInstanceId, ExactAutomationCurve, MixBusId, ProgramOutputId, SequenceId,
+    SourceSampleTarget, TimeScale, TimelineTime, TimelineTimeRange, TrackId,
 };
 use mondrian_timeline::audio::{
-    AudioComponentChannelMapping, AudioFadeCurve, AudioProcessorDefinitionRef,
-    AudioProcessorParameter, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
+    AudioComponentChannelMapping, AudioFadeCurve, AudioNote, AudioNoteTarget,
+    AudioProcessorDefinitionRef, AudioProcessorParameter, AudioRouteDestination, AudioRouteSource,
+    AudioTransitionCurve,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -205,6 +206,14 @@ pub(crate) struct CompiledTransition {
     pub(crate) curve: AudioTransitionCurve,
 }
 
+/// Selected immutable author score, not an executable native event stream.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CompiledNoteLane {
+    pub(crate) id: AudioNoteLaneId,
+    pub(crate) target: AudioNoteTarget,
+    pub(crate) notes: Vec<AudioNote>,
+}
+
 /// Context-independent exact-time semantic Signal Closure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAudioProgram {
@@ -218,6 +227,7 @@ pub struct CompiledAudioProgram {
     pub(crate) output: CompiledChannelStrip,
     pub(crate) routes: Vec<CompiledRoute>,
     pub(crate) sidechain_routes: Vec<CompiledProcessorSidechainRoute>,
+    pub(crate) note_lanes: Vec<CompiledNoteLane>,
 }
 
 /// Whether one compiled Program Output can be omitted without changing PCM.

@@ -1,10 +1,13 @@
 use crate::plan::{
     AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
-    CompiledChannelStrip, CompiledProcessingScope, CompiledProcessor,
+    CompiledChannelStrip, CompiledNoteLane, CompiledProcessingScope, CompiledProcessor,
     CompiledProcessorSidechainRoute, CompiledRack, CompiledRoute, CompiledSourceTimeMap,
     CompiledTrackChannel, CompiledTransition,
 };
-use mondrian_core::{AudioProcessingScopeId, MixBusId, ProgramOutputId, TrackId};
+use mondrian_core::{
+    AudioNoteId, AudioNoteLaneId, AudioProcessingScopeId, AudioProcessorInstanceId, MixBusId,
+    ProgramOutputId, TrackId,
+};
 use mondrian_timeline::audio::{
     AudioChannelStrip, AudioChannelStripOutputPort, AudioComponentSource, AudioProcessorRack,
     AudioProcessorSidechainRoute, AudioProgramOutput, AudioRoute, AudioRouteDestination,
@@ -320,6 +323,29 @@ pub fn compile_audio_program(
         .collect::<Vec<_>>();
     sidechain_routes.sort_by_key(|route| route.id);
 
+    // Only the selected active Track rack is a Note consumer. Required Track
+    // presence alone does not retain a pruned post-fader or bypassed processor.
+    let mut note_lanes = sequence
+        .audio_program
+        .note_lanes
+        .iter()
+        .filter(|lane| {
+            !lane.notes.is_empty()
+                && track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                    [&channel.strip.pre_fader, &channel.strip.post_fader]
+                        .into_iter()
+                        .flat_map(|rack| &rack.processors)
+                        .any(|processor| processor.instance_id == lane.target.processor_id)
+                })
+        })
+        .map(|lane| {
+            let mut notes = lane.notes.iter().cloned().collect::<Vec<_>>();
+            notes.sort_by_key(|note| note.id);
+            CompiledNoteLane { id: lane.id, target: lane.target.clone(), notes }
+        })
+        .collect::<Vec<_>>();
+    note_lanes.sort_by_key(|lane| lane.id);
+
     Ok(CompiledAudioProgram {
         output_id: request.output_id,
         contributions,
@@ -331,6 +357,7 @@ pub fn compile_audio_program(
         output: compiled_output,
         routes,
         sidechain_routes,
+        note_lanes,
     })
 }
 
@@ -616,6 +643,32 @@ pub enum AudioCompileError {
     /// Semantic projection authoring is preserved but not executable yet.
     #[error("semantic audio output projection is not executable yet")]
     SemanticProjectionNotExecutableYet,
+    /// A selected note cannot be projected onto the requested sample grid.
+    #[error("audio note {note_id} in lane {lane_id} cannot be projected: {source}")]
+    NoteSampleProjection {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+        source: mondrian_core::AudioTimeError,
+    },
+    /// Strict exact-time duration can collapse after single-grid projection.
+    #[error(
+        "audio note {note_id} in lane {lane_id} collapses to samples {start_sample}..{end_sample}"
+    )]
+    CollapsedNoteDuration {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+        start_sample: i64,
+        end_sample: i64,
+    },
+    /// A selected score is preserved but has no admitted Note executor yet.
+    #[error("audio note execution is unsupported for lane {lane_id}, processor {processor_id}")]
+    NoteExecutionNotSupported {
+        lane_id: AudioNoteLaneId,
+        processor_id: AudioProcessorInstanceId,
+    },
+    /// The finite score's potential On/Off count must fit the host address range.
+    #[error("audio note event count exceeds the supported address range")]
+    NoteEventCountOverflow,
     /// Instantaneous Route cycle reached compilation.
     #[error("audio routing contains a cycle")]
     RouteCycle,

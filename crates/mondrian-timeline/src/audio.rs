@@ -6,13 +6,14 @@
 
 use crate::{clip::Clip, track::Track};
 use mondrian_core::{
-    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioProcessingScopeId,
-    AudioProcessorInstanceId, AudioRoleId, AudioRouteId, AudioSourceComponentId, AudioTransitionId,
-    AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
-    AuthoringMap, AutomationSegmentInterpolation, ClipId, ExactAutomationCurve, MixBusId,
-    ParameterCacheImpact, ParameterId, ParameterInterpolation, ParameterInvalidValuePolicy,
-    ParameterNumericContract, ParameterNumericRange, ParameterSchema, ParameterUnit,
-    ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
+    AudioChannelLayout, AudioChannelMixMatrix, AudioComponentEditId, AudioNoteId, AudioNoteLaneId,
+    AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId, AudioRouteId,
+    AudioSourceComponentId, AudioTransitionId, AuthoringFootprint, AuthoringFootprintCollector,
+    AuthoringFootprintError, AuthoringList, AuthoringMap, AutomationSegmentInterpolation, ClipId,
+    ExactAutomationCurve, MixBusId, ParameterCacheImpact, ParameterId, ParameterInterpolation,
+    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange, ParameterSchema,
+    ParameterUnit, ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime,
+    TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -940,6 +941,95 @@ pub struct AudioTransition {
     pub curve: AudioTransitionCurve,
 }
 
+/// Strong reference to an existing processor in one owning audio Track rack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNoteTarget {
+    /// Existing editorial audio Track identity.
+    pub track_id: TrackId,
+    /// Existing author instance in that Track's pre- or post-fader rack.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Definition-owned input-port key, retained exactly as authored.
+    pub input_port_key: String,
+}
+
+/// Exact Sequence-local authored note; this does not contain native voice state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNote {
+    /// Stable author identity, preserved by edits and ordinary snapshot clones.
+    pub id: AudioNoteId,
+    /// Exact Sequence-local start, before sample-grid projection.
+    pub start: TimelineTime,
+    /// Exact exclusive authored end, strictly after start.
+    pub end: TimelineTime,
+    /// Zero-based channel in the initial note subset.
+    pub channel: u8,
+    /// Key in the initial note subset.
+    pub key: u8,
+    /// Plain note-on velocity in [0, 1]; zero remains a note-on.
+    pub on_velocity: f64,
+    /// Plain note-off velocity in [0, 1].
+    pub off_velocity: f64,
+}
+
+/// Versioned finite score lane retained by the canonical AudioProgram.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNoteLane {
+    /// This author shape currently admits version 1 only.
+    pub schema_version: u32,
+    /// Stable lane identity.
+    pub id: AudioNoteLaneId,
+    /// Strong processor reference; an empty lane still retains its target.
+    pub target: AudioNoteTarget,
+    /// Authored notes; list order is not execution rank.
+    pub notes: AuthoringList<AudioNote>,
+}
+
+fn note_lanes_are_empty(lanes: &AuthoringList<AudioNoteLane>) -> bool {
+    lanes.is_empty()
+}
+
+impl AuthoringFootprint for AudioNoteTarget {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { track_id: _, processor_id: _, input_port_key } = self;
+        collector.collect(input_port_key)
+    }
+}
+
+impl AuthoringFootprint for AudioNote {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self {
+            id: _,
+            start: _,
+            end: _,
+            channel: _,
+            key: _,
+            on_velocity: _,
+            off_velocity: _,
+        } = self;
+        Ok(())
+    }
+}
+
+impl AuthoringFootprint for AudioNoteLane {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        let Self { schema_version: _, id: _, target, notes } = self;
+        collector.collect(target)?;
+        collector.collect(notes)
+    }
+}
+
 /// Sequence-owned audio author aggregate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioProgram {
@@ -960,6 +1050,9 @@ pub struct AudioProgram {
     /// Explicit typed processor auxiliary-input Routes.
     #[serde(default)]
     pub sidechain_routes: AuthoringList<AudioProcessorSidechainRoute>,
+    /// Exact authored score, preserved even when note execution is unsupported.
+    #[serde(default, skip_serializing_if = "note_lanes_are_empty")]
+    pub note_lanes: AuthoringList<AudioNoteLane>,
 }
 
 impl AuthoringFootprint for AudioProcessorDefinitionRef {
@@ -1306,6 +1399,7 @@ impl AuthoringFootprint for AudioProgram {
             outputs,
             routes,
             sidechain_routes,
+            note_lanes,
         } = self;
         collector.collect(processing_scopes)?;
         collector.collect(transitions)?;
@@ -1313,7 +1407,8 @@ impl AuthoringFootprint for AudioProgram {
         collector.collect(buses)?;
         collector.collect(outputs)?;
         collector.collect(routes)?;
-        collector.collect(sidechain_routes)
+        collector.collect(sidechain_routes)?;
+        collector.collect(note_lanes)
     }
 }
 
@@ -1371,6 +1466,7 @@ impl AudioProgram {
             outputs: AuthoringList::from(vec![output]),
             routes: AuthoringList::from(routes),
             sidechain_routes: AuthoringList::new(),
+            note_lanes: AuthoringList::new(),
         }
     }
 
@@ -1407,11 +1503,66 @@ impl AudioProgram {
             .flat_map(|rack| rack.processors.iter().map(|processor| processor.id))
             .collect::<BTreeSet<_>>();
         self.track_channels.remove(&track_id);
+        self.note_lanes.retain(|lane| lane.target.track_id != track_id);
         self.routes.retain(|route| route.source.track_id() != Some(track_id));
         self.sidechain_routes.retain(|route| {
             route.source.track_id() != Some(track_id)
                 && !removed_processor_ids.contains(&route.processor_id)
         });
+    }
+
+    /// Validate score scalars and strong targets before compilation or persistence.
+    fn validate_note_lanes(&self, audio_tracks: &[Track]) -> Result<(), AudioAuthoringError> {
+        let mut lane_ids = BTreeSet::new();
+        let mut note_ids = BTreeSet::new();
+        for lane in &self.note_lanes {
+            if !lane_ids.insert(lane.id) {
+                return Err(AudioAuthoringError::DuplicateNoteLane(lane.id));
+            }
+            if lane.schema_version != 1 {
+                return Err(AudioAuthoringError::UnsupportedNoteLaneVersion {
+                    lane_id: lane.id,
+                    version: lane.schema_version,
+                });
+            }
+            let key = &lane.target.input_port_key;
+            if key.trim().is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+                return Err(AudioAuthoringError::InvalidNotePortKey(lane.id));
+            }
+            let is_audio_track = audio_tracks.iter().any(|track| {
+                track.id == lane.target.track_id && track.track_type == crate::TrackType::Audio
+            });
+            let has_target =
+                self.track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                    [&channel.strip.pre_fader, &channel.strip.post_fader]
+                        .into_iter()
+                        .flat_map(|rack| &rack.processors)
+                        .any(|processor| processor.id == lane.target.processor_id)
+                });
+            if !is_audio_track || !has_target {
+                return Err(AudioAuthoringError::InvalidNoteTarget(lane.id));
+            }
+            for note in &lane.notes {
+                if !note_ids.insert(note.id) {
+                    return Err(AudioAuthoringError::DuplicateNote(note.id));
+                }
+                if note.start < TimelineTime::ZERO
+                    || note.end <= note.start
+                    || note.channel > 15
+                    || note.key > 127
+                    || !note.on_velocity.is_finite()
+                    || !note.off_velocity.is_finite()
+                    || !(0.0..=1.0).contains(&note.on_velocity)
+                    || !(0.0..=1.0).contains(&note.off_velocity)
+                {
+                    return Err(AudioAuthoringError::InvalidNote {
+                        lane_id: lane.id,
+                        note_id: note.id,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remove Transitions whose strong endpoint no longer exists and discard unused scopes.
@@ -1542,6 +1693,7 @@ impl AudioProgram {
             }
         }
         validate_roles(audio_roles, &role_ids)?;
+        self.validate_note_lanes(audio_tracks)?;
 
         let mut edits = BTreeMap::<AudioComponentEditId, (&Clip, TrackId)>::new();
         for track in audio_tracks {
@@ -2021,6 +2173,30 @@ pub(crate) fn author_routing_graph(
 /// Invalid author state. Such state cannot enter an immutable execution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAuthoringError {
+    /// Each score lane identity is unique in the Sequence.
+    #[error("duplicate audio note lane {0}")]
+    DuplicateNoteLane(AudioNoteLaneId),
+    /// Each note identity is unique across all Sequence score lanes.
+    #[error("duplicate audio note {0}")]
+    DuplicateNote(AudioNoteId),
+    /// Unknown lane author schemas cannot be silently interpreted.
+    #[error("audio note lane {lane_id} has unsupported version {version}")]
+    UnsupportedNoteLaneVersion {
+        lane_id: AudioNoteLaneId,
+        version: u32,
+    },
+    /// The original opaque key must fit the admitted lexical representation.
+    #[error("audio note lane {0} has an invalid input-port key")]
+    InvalidNotePortKey(AudioNoteLaneId),
+    /// The target must be a strong reference to the same audio Track's rack.
+    #[error("audio note lane {0} targets an absent or different Track processor")]
+    InvalidNoteTarget(AudioNoteLaneId),
+    /// Exact author endpoints and scalar fields must fit the note subset.
+    #[error("audio note {note_id} in lane {lane_id} has invalid authored values")]
+    InvalidNote {
+        lane_id: AudioNoteLaneId,
+        note_id: AudioNoteId,
+    },
     /// Built-in processors require a host value and cannot delegate it to native state.
     #[error("built-in audio parameter requires a host automation reference")]
     ParameterAutomationRequired,
@@ -2146,6 +2322,211 @@ pub enum AudioAuthoringError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn note_program_fixture() -> (Track, AudioProgram) {
+        let track = Track::new_audio("score");
+        let mut program = AudioProgram::for_tracks([track.id]);
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        program
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track.id,
+                processor_id,
+                input_port_key: "  opaque.音符  ".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("exact start"),
+                end: TimelineTime::new(2002, 30000).expect("exact end"),
+                channel: 15,
+                key: 127,
+                on_velocity: -0.0,
+                off_velocity: 1.0,
+            }]),
+        });
+        (track, program)
+    }
+
+    #[test]
+    fn note_model_legacy_empty_field_is_omitted_and_new_shapes_reject_unknown_fields() {
+        let original = AudioProgram::for_tracks([TrackId::new()]);
+        let absent = serde_json::to_value(&original).expect("legacy shape");
+        assert!(absent.get("note_lanes").is_none());
+        let restored: AudioProgram = serde_json::from_value(absent.clone()).expect("absent field");
+        assert_eq!(restored, original);
+        let mut explicit_empty = absent.clone();
+        explicit_empty["note_lanes"] = serde_json::json!([]);
+        let restored: AudioProgram = serde_json::from_value(explicit_empty).expect("empty field");
+        assert_eq!(
+            serde_json::to_value(restored).expect("canonical empty"),
+            absent
+        );
+
+        let (_, program) = note_program_fixture();
+        let lane = serde_json::to_value(&program.note_lanes[0]).expect("lane");
+        let mut unknown_lane = lane.clone();
+        unknown_lane["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNoteLane>(unknown_lane).is_err());
+        let mut unknown_target = lane["target"].clone();
+        unknown_target["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNoteTarget>(unknown_target).is_err());
+        let mut unknown_note = lane["notes"][0].clone();
+        unknown_note["unknown"] = true.into();
+        assert!(serde_json::from_value::<AudioNote>(unknown_note).is_err());
+    }
+
+    #[test]
+    fn note_model_validates_exact_scalars_versions_and_sequence_wide_identities() {
+        let (track, program) = note_program_fixture();
+        let validate = |program: &AudioProgram| {
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo,
+            )
+        };
+        validate(&program).expect("zero-on velocity is valid author data");
+        let lane_id = program.note_lanes[0].id;
+        let note_id = program.note_lanes[0].notes[0].id;
+        let mut invalid = program.clone();
+        invalid.note_lanes[0].schema_version = 2;
+        assert_eq!(
+            validate(&invalid),
+            Err(AudioAuthoringError::UnsupportedNoteLaneVersion { lane_id, version: 2 })
+        );
+        let mut duplicate_lane = program.clone();
+        duplicate_lane.note_lanes.push(program.note_lanes[0].clone());
+        assert_eq!(
+            validate(&duplicate_lane),
+            Err(AudioAuthoringError::DuplicateNoteLane(lane_id))
+        );
+        let mut duplicate_note = program.clone();
+        let mut second_lane = program.note_lanes[0].clone();
+        second_lane.id = AudioNoteLaneId::new();
+        duplicate_note.note_lanes.push(second_lane);
+        assert_eq!(
+            validate(&duplicate_note),
+            Err(AudioAuthoringError::DuplicateNote(note_id))
+        );
+
+        for case in 0..8 {
+            let mut invalid = program.clone();
+            let note = &mut invalid.note_lanes[0].notes[0];
+            match case {
+                0 => note.start = TimelineTime::new(-1, 1).expect("negative time"),
+                1 => note.end = note.start,
+                2 => note.channel = 16,
+                3 => note.key = 128,
+                4 => note.on_velocity = f64::NAN,
+                5 => note.off_velocity = f64::INFINITY,
+                6 => note.on_velocity = -0.01,
+                7 => note.off_velocity = 1.01,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate(&invalid),
+                Err(AudioAuthoringError::InvalidNote { lane_id, note_id })
+            );
+        }
+    }
+
+    #[test]
+    fn note_model_keys_and_empty_lanes_keep_strong_track_rack_references() {
+        let (track, mut program) = note_program_fixture();
+        let lane_id = program.note_lanes[0].id;
+        let original_key = program.note_lanes[0].target.input_port_key.clone();
+        let validate = |program: &AudioProgram| {
+            program.validate(
+                std::slice::from_ref(&track),
+                &[],
+                AudioChannelLayout::Stereo,
+            )
+        };
+        validate(&program).expect("opaque key");
+        assert_eq!(program.note_lanes[0].target.input_port_key, original_key);
+        program.note_lanes[0].target.input_port_key = "é".repeat(64);
+        validate(&program).expect("128 UTF8 bytes");
+        for key in [" ".to_owned(), "x\n".to_owned(), "x".repeat(129)] {
+            let mut invalid = program.clone();
+            invalid.note_lanes[0].target.input_port_key = key;
+            assert_eq!(
+                validate(&invalid),
+                Err(AudioAuthoringError::InvalidNotePortKey(lane_id))
+            );
+        }
+        program.note_lanes[0].notes.clear();
+        program
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors[0]
+            .bypassed = true;
+        validate(&program).expect("empty lane and bypass preserve intent");
+        let mut missing = program.clone();
+        missing
+            .track_channels
+            .get_mut(&track.id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .clear();
+        assert_eq!(
+            validate(&missing),
+            Err(AudioAuthoringError::InvalidNoteTarget(lane_id))
+        );
+        missing.note_lanes.clear();
+        validate(&missing).expect("atomic processor and lane removal");
+        let mut wrong = program.clone();
+        wrong.note_lanes[0].target.track_id = TrackId::new();
+        assert_eq!(
+            validate(&wrong),
+            Err(AudioAuthoringError::InvalidNoteTarget(lane_id))
+        );
+        program.remove_track(track.id);
+        assert!(program.note_lanes.is_empty());
+        program
+            .validate(&[], &[], AudioChannelLayout::Stereo)
+            .expect("removed Track closure");
+    }
+
+    #[test]
+    fn note_model_footprint_deduplicates_shared_score_and_charges_detached_notes() {
+        let (_, original) = note_program_fixture();
+        let mut edited = original.clone();
+        let measure = |other: Option<&AudioProgram>| {
+            let mut collector = AuthoringFootprintCollector::new();
+            collector.collect(&original).expect("original footprint");
+            if let Some(other) = other {
+                collector.collect(other).expect("other footprint");
+            }
+            collector.finish().total_bytes()
+        };
+        assert_eq!(measure(None), measure(Some(&edited)));
+        assert!(edited.note_lanes.shares_allocation_with(&original.note_lanes));
+        edited.note_lanes[0].notes[0].key = 60;
+        assert!(!edited.note_lanes.shares_allocation_with(&original.note_lanes));
+        assert!(!edited.note_lanes[0].notes.shares_allocation_with(&original.note_lanes[0].notes));
+        assert!(edited.track_channels.shares_allocation_with(&original.track_channels));
+        assert!(measure(Some(&edited)) > measure(None));
+        assert_eq!(original.note_lanes[0].notes[0].key, 127);
+        assert_eq!(
+            edited.note_lanes[0].notes[0].id,
+            original.note_lanes[0].notes[0].id
+        );
+    }
 
     #[test]
     fn plugin_parameter_ui_snapshot_round_trips_without_changing_schema() {

@@ -38,6 +38,18 @@ It combines those facts with the attached `AudioComponentEdit` and referenced
 not persistent routable entities. Every generated operation retains typed
 author origins for diagnostics and future state allocation.
 
+Compilation retains nonempty Note lanes only for their actual selected active
+Track rack processors, ordered by stable author IDs. Unselected/bypassed score
+intent remains in the author aggregate. In the model-only M1 implementation,
+Plan preparation checks event-count overflow and projects both endpoints with
+the existing Ceil sample conversion; collapsed or overflowing endpoints are
+typed errors. It then explicitly refuses selected Note execution before that
+Plan's schedule/factory preparation. Empty or unselected score retains the
+existing path. This per-Plan guard is not a whole-root no-media-I/O guarantee
+for nested preparation. Executable events must later deepen the same pipeline
+with explicit port, occurrence, epoch and resource admission; they cannot use
+a separate vendor Timeline or bypass the existing Routing DAG.
+
 An authored Processor Instance is unique across all Sequence insertion points.
 Preparation preserves Rack order and materializes generated processor
 occurrences keyed by the author instance plus exact Contribution or Routing

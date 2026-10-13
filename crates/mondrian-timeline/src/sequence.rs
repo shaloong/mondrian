@@ -2143,6 +2143,13 @@ impl Sequence {
             .into_iter()
             .zip(audio_processor_ids(&self.audio_program))
             .collect::<HashMap<_, _>>();
+        for lane in &mut self.audio_program.note_lanes {
+            lane.id = mondrian_core::AudioNoteLaneId::new();
+            lane.target.processor_id = processor_ids[&lane.target.processor_id];
+            for note in &mut lane.notes {
+                note.id = mondrian_core::AudioNoteId::new();
+            }
+        }
         for route in &mut self.audio_program.routes {
             route.id = AudioRouteId::new();
             rekey_optional_exact_curve(&mut route.gain_automation);
@@ -2299,6 +2306,10 @@ impl Sequence {
             if let AudioRouteSource::Track { track_id, .. } = &mut route.source {
                 *track_id = track_ids[track_id];
             }
+        }
+
+        for lane in &mut self.audio_program.note_lanes {
+            lane.target.track_id = track_ids[&lane.target.track_id];
         }
 
         for transition in &mut self.video_transitions {
@@ -3975,6 +3986,73 @@ mod tests {
             .validate_author_identities()
             .expect_err("ambiguous simultaneous Transitions must fail");
         assert!(error.to_string().contains("must not overlap"));
+    }
+
+    #[test]
+    fn note_model_sequence_duplicate_forks_score_and_preserves_internal_targets() {
+        use crate::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
+        let mut original = Sequence::new("score duplicate");
+        let track_id = original.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        original
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        original.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: mondrian_core::AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "notes.0".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: mondrian_core::AudioNoteId::new(),
+                start: TimelineTime::new(1001, 30000).expect("start"),
+                end: TimelineTime::new(2002, 30000).expect("end"),
+                channel: 3,
+                key: 60,
+                on_velocity: 0.5,
+                off_velocity: -0.0,
+            }]),
+        });
+        let original_score = original.audio_program.note_lanes.clone();
+        let mut duplicate = original.clone();
+        assert_eq!(duplicate.audio_program.note_lanes, original_score);
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        let lane = &duplicate.audio_program.note_lanes[0];
+        let copied_track = duplicate.audio_tracks[0].id;
+        assert_ne!(copied_track, track_id);
+        assert_ne!(lane.id, original_score[0].id);
+        assert_ne!(lane.notes[0].id, original_score[0].notes[0].id);
+        assert_ne!(lane.target.processor_id, processor_id);
+        assert_eq!(lane.target.track_id, copied_track);
+        assert_eq!(
+            lane.target.processor_id,
+            duplicate.audio_program.track_channels[&copied_track].strip.pre_fader.processors[0].id
+        );
+        assert_eq!(
+            lane.target.input_port_key,
+            original_score[0].target.input_port_key
+        );
+        assert_eq!(lane.notes[0].start, original_score[0].notes[0].start);
+        assert_eq!(lane.notes[0].end, original_score[0].notes[0].end);
+        assert_eq!(lane.notes[0].off_velocity.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(original.audio_program.note_lanes, original_score);
+        duplicate
+            .audio_program
+            .validate(
+                &duplicate.audio_tracks,
+                &duplicate.audio_roles,
+                duplicate.settings.audio_channel_layout,
+            )
+            .expect("duplicated strong references");
     }
 
     #[test]

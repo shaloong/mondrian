@@ -314,6 +314,7 @@ impl PreparedAudioPlan {
         processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
         contract.validate()?;
+        validate_selected_note_preparation(program.as_ref(), contract.sample_rate)?;
         let schedule = PreparedAudioSchedule::build(
             program.as_ref(),
             contract,
@@ -368,6 +369,55 @@ impl PreparedAudioPlan {
     pub fn requires_state_entry(&self) -> bool {
         self.schedule.summary.requires_state_entry
     }
+}
+
+// Model-only M1: validate every selected endpoint before returning unsupported,
+// before factory resolution, schedule allocation or a mutable Session exists.
+fn validate_selected_note_preparation(
+    program: &CompiledAudioProgram,
+    sample_rate: u32,
+) -> Result<(), AudioCompileError> {
+    let rate =
+        AudioSampleRate::new(sample_rate).map_err(|_| AudioCompileError::InvalidRenderContract)?;
+    let mut event_count = 0_usize;
+    for lane in &program.note_lanes {
+        let count = lane
+            .notes
+            .len()
+            .checked_mul(2)
+            .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+        event_count = event_count
+            .checked_add(count)
+            .ok_or(AudioCompileError::NoteEventCountOverflow)?;
+        for note in &lane.notes {
+            let project = |time| {
+                AudioSamplePosition::from_timeline_time(time, rate, AudioSampleRounding::Ceil)
+                    .map(|position| position.sample())
+                    .map_err(|source| AudioCompileError::NoteSampleProjection {
+                        lane_id: lane.id,
+                        note_id: note.id,
+                        source,
+                    })
+            };
+            let start_sample = project(note.start)?;
+            let end_sample = project(note.end)?;
+            if end_sample <= start_sample {
+                return Err(AudioCompileError::CollapsedNoteDuration {
+                    lane_id: lane.id,
+                    note_id: note.id,
+                    start_sample,
+                    end_sample,
+                });
+            }
+        }
+    }
+    if let Some(lane) = program.note_lanes.iter().find(|lane| !lane.notes.is_empty()) {
+        return Err(AudioCompileError::NoteExecutionNotSupported {
+            lane_id: lane.id,
+            processor_id: lane.target.processor_id,
+        });
+    }
+    Ok(())
 }
 
 fn session_resource_footprint(

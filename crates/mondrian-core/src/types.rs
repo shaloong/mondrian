@@ -70,6 +70,11 @@ define_id!(AudioComponentEditId, "音频组件编辑 ID");
 define_id!(AudioProcessingScopeId, "音频处理作用域 ID");
 define_id!(AudioSourceComponentId, "音频源组件 ID");
 define_id!(AudioTransitionId, "音频转场 ID");
+define_id!(
+    AudioNoteLaneId,
+    "Sequence-owned authored audio note lane identity"
+);
+define_id!(AudioNoteId, "Sequence-owned authored audio note identity");
 define_id!(VideoTransitionId, "视频转场 ID");
 define_id!(AudioRouteId, "音频路由 ID");
 define_id!(

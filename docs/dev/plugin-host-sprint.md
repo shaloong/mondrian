@@ -216,7 +216,7 @@ has current-round `Verified` status.
 | VST3 sample-offset parameters | Implemented — Not Fully Verified | Normalized bounded queues; native output, saturation, allocation and full callback deadline gates |
 | VST3 state | Partially Supported | Bounded component/controller envelope; arbitrary DSP checkpoint not implied |
 | VST3 transport | Partially Supported | Exact signed signal sample/rate; unavailable musical facts remain unavailable |
-| VST3 MIDI/notes/instruments | Unsupported | Vendor event APIs exist; product author/event/output routing does not |
+| VST3 MIDI/notes/instruments | Unsupported | M1 supplies the canonical Note author model and persistence; native event/instrument execution is not implemented |
 | VST3 GUI | Partially Supported | Windows same-object editor path; later destructive entry, DPI/focus/keyboard and vendor matrix pending |
 | VST3 dynamic reprepare/PDC | Partially Supported | Cohort/hold/seed controls; canonical installation and retained author acceptance pending |
 | VST3 complete vendor/platform certification | Blocked | Limited independent Windows discovery/metadata/state controls exist; repeated stress, broader vendor behavior and other platforms remain unqualified |
@@ -225,7 +225,7 @@ has current-round `Verified` status.
 | CLAP parameter events | Implemented — Not Fully Verified | Plain scalar values, ordered bounded carrier; full allocation/deadline and author closure pending |
 | CLAP state | Partially Supported | Bounded state/configuration; state seed is not proven DSP continuity |
 | CLAP transport | Partially Supported | Exact signed seconds; musical time/tempo-map facts unavailable |
-| CLAP note/MIDI/polyphonic modulation | Unsupported | No canonical product event route or note-port execution |
+| CLAP note/MIDI/polyphonic modulation | Unsupported | M1 supplies the canonical Note author model and persistence; note-port dispatch, voice ownership and instruments remain pending |
 | CLAP GUI/main services | Partially Supported | Windows same-object roles/timers exist; exact callbacks and native platform loops need separate gates |
 | CLAP sleep/request-process scheduler | Unsupported | Callback presence alone does not schedule sole Audio DAG |
 | CLAP dynamic ports/latency/restart | Partially Supported | Sticky request/control path; actual canonical graph candidate installation unfinished |
@@ -3223,3 +3223,129 @@ history/duplicate and local-Plan preparation refusal, with23 proposed tests.
 M2 event/voice ownership and M3 zero-input instrument execution remain unsupported.
 The ROADMAP outside Git records these boundaries and the completed gates
 so context recovery does not repeat them.
+
+### 2026-10-13 M1 Note author model: actual tests, integration pending
+
+The reviewed M1 packet17BB and nested-runtime addendum4689 are now applied and
+formatted in the working tree. They add a default-empty Note lane list to the
+existing AudioProgram, typed lane/note identities, strong Track/rack references,
+the existing author footprint/history integration and duplicate/removal rules.
+Selected notes retain exact authored times. Preparation projects their endpoints
+with the existing Ceil contract, reports overflow/collapse, and then explicitly
+refuses unsupported Note execution before that Plan's resolver. Empty/unselected
+notes retain the previous execution path. This is not a whole-root guarantee
+against source I/O or resolver work before a nested child is prepared.
+
+Document schema32 protects this new author data from older readers; archive
+format1, library schema6 and certificate version1 remain unchanged. The31-to32
+migration admits absent/empty score data and rejects nonempty or malformed data
+mislabeled31. The new legacy-v31 fixture preserves the old fixture's exact bytes.
+Current owned tests exercise actual archive load/save/reopen, IDs/time/velocity
+bits, author transactions/Undo/Redo, strong-reference refusal, duplicate remaps,
+budgets, selected closure and nested child preparation. No second author model,
+execution scheduler, parameter authority or native dependency was introduced.
+
+The five-package no-run command actually returned Cargo0 with one successful
+build-finished record and five freshfalse ordinary libtest producers. Its first
+registration script incorrectly required a FFmpeg-sys row in a dependency graph
+that contains no FFmpeg package, then attempted to hash a null artifact in its
+cleanup observer. That registration remains rejected, receipt
+`10B209D05C6D75FCF799D43E7F1C7EA5458686B4C4FA5DD6C771B1DD3177CD04`.
+There was no Cargo retry or forced rebuild. Independent admission rechecks the
+retained raw Cargo, actual package/profile/features/PE identities and all1905
+current source records. Its receipt is
+`65D920500761C94EA582605AB6D94321CA9559349C3F7CD89947C6888C28F0CB`;
+separate producer admission is
+`59DF488147BE26AC39A3A7216DBAF37F773D584AE47A7D2F2383565AFAECA0C7`.
+Original raw Cargo/source bytes are copied unchanged, and the rejected record
+is separately pinned. This admission makes no compiled FFmpeg ABI claim; the
+later full normal Product still requires the original FFmpeg62/60 ABI/link gate.
+
+Actual bounded inventory proves complete old-name/ignored preservation and
+exactly23 new ordinary names. Inventory receipt is
+`C74E173424BECF8F35F2250F1C3F4E4407B77A95D6E37C0A2FEAD2EBA409F5C1`;
+catalog is `AEA65E3CEF70512F5EBA65A157140E474D812673C4000A38EABD62BDF0892142`.
+The original six fixed ordinary gates then all passed:
+
+| Package | Actual passed / failed | New ordinary tests |
+| --- | --- | --- |
+| Core | 501 / 0 | 0 |
+| Timeline | 252 / 0 | 5 |
+| Audio | 397 / 0, twice | 9 |
+| EditorState | 187 / 0 | 4 |
+| Project | 54 / 0 | 5 |
+
+Every new selector occurs as a unique ok result in its complete ordinary group;
+all original assertions, ignored skips, two threads and1800-second deadlines
+remain. Owners settled/reaped without timeout, outliving, source changes or
+cleanup failures. Actual execution receipt is
+`ED776A4B562E0877C0E86635F75E1F44680A48BE4FA90A6E5E660EFFC63860AD`.
+The finite independent inventory/execution report is
+`.scratch/plugin-host-sprint/clap-airwindows-observation-slice-r1/a01-m1-inventory-execution-actual-independent-review-r1.md`,
+SHA-256 `8B9AF401E688209A6E8D0B11AB0FE6BF272A2A57F64EF936430E957D9D4A31E7`.
+It rechecks2081 unique current inputs and each raw owner/name/summary gate.
+Editor's historical baseline enabled default,test-support whereas this run uses
+default only: the baseline proves old-name preservation, not identical-feature
+behavior or test-support qualification. Other package baselines retain their
+declared limited source/profile scope.
+
+At this checkpoint, current normal Product is building; scoped strict checks,
+final independent acceptance and the M1 commit are pending. Model tests do not
+qualify Note dispatch, instruments, UI authoring, M2 voice/IPC execution, M3
+zero-input processing, third-party compatibility, physical realtime, memory
+performance or other platforms. Legacy31 migration still takes the existing
+Value fallback, whose peak RSS remains unmeasured. Recovery state is
+`.scratch/plugin-host-sprint/a01-m1-integration-progress-r1.json`; the full task
+ROADMAP remains outside Git. Do not reapply the packet, rerun Cargo no-run or
+repeat the accepted inventory/ordinary gates merely after context compression.
+
+### 2026-10-14 M1 final build and regression checkpoint
+
+Normal Product built successfully with its unchanged production profile and the
+FFmpeg 62/60 binding/link gate. Receipt is
+`34A80ABD0883E3AF2C4C6D923F4BF984DA7EA6C00A7BDC72A5642E6589D7C97D`;
+Product PE is `E6EC18084CEFEA7F94865D117603B779C126F89F644E55A58CD7FF25D7C0EFAB`.
+Independent normal Product review is8DE7225F. This is build evidence, not a
+new native Product run or full Workspace regression.
+
+The first strict check returned101 for one collapsible_if in the new test;
+failed receipt57134E91 is retained. Only that cfg(test) initializer changed to
+an equivalent let-chain; no assertion or production code changed. The exact
+five-package all-targets/all-features Clippy check with -D warnings then returned0
+with zero diagnostics, receipt
+`A93D1EF36104FA685311952584DA3A6AEF08EE5C58BEDDBF093139A8BD75B4BA`.
+Formatting passed. Current1905 source receipt2D09A454 differs from the earlier
+source by that one test file. Actual normal Audio dep-info excludes both test
+modules; the normal Product retains the production compiled-source projection,
+not byte identity with every file of the later1905 test snapshot.
+
+Post-fix no-run returned0, receiptBE16FFFE: Audio rebuilt to PE
+`F065CFB124568CF73C63A3766D1DA0AE03D1D2C5A5EC0D1635D8B3AA7F94A362`;
+the other four test PEs were actual cached, byte-identical producers, so their
+accepted ordinary results were retained. The new Audio inventory preserves all
+478 names /81 ignored /397 ordinary and all9 new selectors. Its receipt is
+`B2BA34F6D2B9A06898426B8F06BBB562FD5DCADE11798A81297899D9221594A1`.
+One affected Audio ordinary run passed397/0, including every new selector once,
+with the original assertions, ignored skips, two threads and owner gates.
+Execution receipt is
+`6ACA9FD08B6742C213CBDAE6734CF53169FE73DE46DB0AE99E6ABC6CCA239F5B`.
+The owner exited0 and reaped descendants without deadline, outliving, input
+changes or cleanup failures. No additional Product rebuild or broad test sweep
+was required by this test-only style correction.
+
+Together with the earlier23 new model tests, these results qualify the finite
+Windows M1 author/persistence/validation/local-Plan refusal slice. Native Note
+processing, instruments, GUI authoring, seek replay, third-party compatibility,
+physical realtime, comparative performance and other platforms remain pending.
+The owned CLAP PCM-input NoteGate fixture is now a scratch source candidate,
+manifest59766157; it has not been built or executed. M2 must extend the existing
+Audio DAG and worker protocol under a single parent Session voice owner before
+that candidate can verify actual Note dispatch.
+
+Final independent submission review is
+`.scratch/plugin-host-sprint/clap-airwindows-observation-slice-r1/a01-m1-final-scoped-submit-review-r1.md`,
+SHA-256 `23B6E024FE1398934466E7024F1A90604B3E90BBD3CF2F4A9930B2D0FE10D9E6`.
+It rechecks the last inventory/execution and1987 current input hashes, retains
+the original negative evidence and distinct source scopes, and finds no blocker
+for this finite M1 submission. The next implementation is M2's existing Track
+rack/worker Note and copied End route, followed by M3 zero-input admission.
