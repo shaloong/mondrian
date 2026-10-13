@@ -436,6 +436,7 @@ mod tests {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut parent)
             .expect("terminal request");
@@ -478,6 +479,7 @@ mod tests {
                         start_sample,
                         frames: 0,
                         event_count: 0,
+                        note_count: 0,
                     }
                     .write_to(&mut socket)
                     .expect("queued parent request");
@@ -620,6 +622,7 @@ mod tests {
             start_sample: 17,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut wire)
         .expect("current typed header");
@@ -653,6 +656,7 @@ mod tests {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut wire)
         .expect("current typed header");

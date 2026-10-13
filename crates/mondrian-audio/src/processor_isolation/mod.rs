@@ -52,7 +52,8 @@ use crate::{
 use mondrian_core::{AudioChannelLayout, ParameterId};
 use mondrian_timeline::audio::AudioProcessorDefinitionRef;
 use protocol::{
-    CommandKind, SharedBlockLayout, SharedParameterEvent, WorkerCommand, MAX_CONTROL_FRAME_BYTES,
+    CommandKind, SharedBlockLayout, SharedNoteEnd, SharedNoteEvent, SharedParameterEvent,
+    WorkerCommand, MAX_CONTROL_FRAME_BYTES,
 };
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -120,6 +121,7 @@ pub struct IsolatedAudioProcessorWorkerSpec {
     preparation_payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    note_input_contract: crate::AudioProcessorNoteInputContract,
     parameter_ids: Vec<ParameterId>,
     render_contract: AudioRenderContract,
     startup_timeout: Duration,
@@ -154,6 +156,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             preparation_payload,
             plugin_execution_contract,
             auxiliary_inputs,
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             parameter_ids,
             render_contract,
             startup_timeout: Duration::from_secs(5),
@@ -178,6 +181,17 @@ impl IsolatedAudioProcessorWorkerSpec {
     pub fn with_dispatch_argument(mut self, argument: Option<OsString>) -> Self {
         self.dispatch_argument = argument;
         self
+    }
+
+    /// Bind the exact restored input-port and fixed Note capacity contract.
+    pub fn with_note_input_contract(
+        mut self,
+        contract: crate::AudioProcessorNoteInputContract,
+    ) -> Result<Self, AudioProcessorHostError> {
+        contract.validate()?;
+        self.note_input_contract = contract;
+        self.validate()?;
+        Ok(self)
     }
 
     /// Declare the concrete adapter's measured additional native lane request.
@@ -228,6 +242,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             ));
         }
         self.auxiliary_inputs.validate(self.render_contract.channel_layout)?;
+        self.note_input_contract.validate()?;
         let mut parameter_ids = BTreeSet::new();
         if self
             .parameter_ids
@@ -254,6 +269,7 @@ impl fmt::Debug for IsolatedAudioProcessorWorkerSpec {
             .field("helper_executable", &self.helper_executable)
             .field("plugin_execution_contract", &self.plugin_execution_contract)
             .field("auxiliary_inputs", &self.auxiliary_inputs)
+            .field("note_input_contract", &self.note_input_contract)
             .field("parameter_count", &self.parameter_ids.len())
             .field("render_contract", &self.render_contract)
             .field("startup_timeout", &self.startup_timeout)
@@ -299,11 +315,17 @@ impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
         }
         let expected_contract = request.render_contract();
         let expected_parameter_ids = request.parameters().keys().cloned().collect::<Vec<_>>();
+        let note_input_requested = request.note_input_requested();
         let spec = self.external.resolve(request)?;
         if spec.render_contract != expected_contract || spec.parameter_ids != expected_parameter_ids
         {
             return Err(invalid_contract(
                 "external resolver changed the prepared render contract or parameter-lane identity",
+            ));
+        }
+        if note_input_requested && spec.note_input_contract.ports.is_empty() {
+            return Err(invalid_contract(
+                "external adapter does not admit requested Note input",
             ));
         }
         IsolatedAudioProcessorFactory::prepare(spec)
@@ -357,6 +379,7 @@ impl IsolatedAudioProcessorFactory {
             preparation_payload,
             plugin_execution_contract: self.spec.plugin_execution_contract,
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            note_input_contract: self.spec.note_input_contract.clone(),
             parameter_ids: self.spec.parameter_ids.clone(),
             render_contract: self.spec.render_contract,
             startup_timeout: self.spec.startup_timeout,
@@ -383,6 +406,10 @@ impl IsolatedAudioProcessorFactory {
             spec.render_contract.channel_count(),
             spec.auxiliary_inputs.buses.len(),
             spec.parameter_ids.len(),
+        )?
+        .with_notes(
+            spec.note_input_contract.limits.input_events,
+            spec.note_input_contract.limits.output_ends,
         )?;
         let execution_contract = spec
             .plugin_execution_contract
@@ -435,6 +462,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         for bus in &self.spec.auxiliary_inputs.buses {
             visitor(Storage::complete(&bus.bus_key)?)?;
         }
+        visitor(Storage::complete(&self.spec.note_input_contract.ports)?)?;
+        for port in &self.spec.note_input_contract.ports {
+            visitor(Storage::complete(&port.port_key)?)?;
+        }
         visitor(Storage::complete(&self.spec.parameter_ids)?)?;
         for id in &self.spec.parameter_ids {
             visitor(Storage::complete(id.storage_owner())?)?;
@@ -460,6 +491,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         self.spec.auxiliary_inputs.clone()
     }
 
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        self.spec.note_input_contract.clone()
+    }
+
     fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
         self.input_names.clone()
     }
@@ -471,6 +506,7 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
             worker,
             parameter_ids: self.spec.parameter_ids.clone(),
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            note_input_contract: self.spec.note_input_contract.clone(),
             render_contract: self.spec.render_contract,
             failed: false,
             pending_reprepare: None,
@@ -566,6 +602,7 @@ struct IsolatedAudioProcessor {
     worker: SupervisedAudioWorker,
     parameter_ids: Vec<ParameterId>,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    note_input_contract: crate::AudioProcessorNoteInputContract,
     render_contract: AudioRenderContract,
     failed: bool,
     pending_reprepare: Option<mondrian_core::NativeAudioReprepareRequest>,
@@ -802,6 +839,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             },
         ) {
             Ok(pending) => {
@@ -826,6 +864,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 start_sample,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             },
         );
         match result {
@@ -878,6 +917,55 @@ impl AudioProcessor for IsolatedAudioProcessor {
             .checked_mul(channel_count)
             .ok_or_else(|| invalid_contract("isolated processor block extent overflowed"))?;
         let layout = self.worker.layout();
+        let note_count =
+            {
+                let notes = audio.note_events();
+                let note_count = notes.len();
+                if note_count > layout.note_event_capacity {
+                    return Err(invalid_contract(
+                        "isolated Note input exceeds admitted capacity",
+                    ));
+                }
+                let mut previous_note = None;
+                for event in notes {
+                    let packed = SharedNoteEvent::capture(
+                        *event,
+                        request.frames,
+                        self.note_input_contract.ports.len(),
+                    )?;
+                    let order = (packed.sample_offset, packed.kind);
+                    if previous_note.is_some_and(|previous| previous > order) {
+                        return Err(invalid_contract(
+                            "isolated Note input is not in prepared sample/phase order",
+                        ));
+                    }
+                    previous_note = Some(order);
+                }
+                // Validate the single borrowed input slice before shared PCM or
+                // any native call; its count, validation and copy use that same view.
+                let byte_count = layout
+                    .note_event_capacity
+                    .checked_mul(size_of::<SharedNoteEvent>())
+                    .ok_or_else(|| invalid_contract("isolated Note input bytes overflowed"))?;
+                let end = layout
+                    .note_events_offset
+                    .checked_add(byte_count)
+                    .ok_or_else(|| invalid_contract("isolated Note input range overflowed"))?;
+                let storage: &mut [SharedNoteEvent] = bytemuck::try_cast_slice_mut(
+                    self.worker.shared_mut().get_mut(layout.note_events_offset..end).ok_or_else(
+                        || invalid_contract("isolated Note input range is unavailable"),
+                    )?,
+                )
+                .map_err(|_| invalid_contract("isolated Note input storage is not aligned"))?;
+                for (destination, event) in storage.iter_mut().zip(notes) {
+                    *destination = SharedNoteEvent::capture(
+                        *event,
+                        request.frames,
+                        self.note_input_contract.ports.len(),
+                    )?;
+                }
+                note_count
+            };
         let mut event_count = 0_usize;
         {
             let shared = self.worker.shared_mut();
@@ -968,7 +1056,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 }
             }
         }
-        let result = self.worker.invoke(
+        let result = self.worker.invoke_process(
             "block processing",
             WorkerCommand {
                 kind: CommandKind::Process,
@@ -977,10 +1065,15 @@ impl AudioProcessor for IsolatedAudioProcessor {
                     .map_err(|_| invalid_contract("block extent is not protocol-representable"))?,
                 event_count: u32::try_from(event_count)
                     .map_err(|_| invalid_contract("event count is not protocol-representable"))?,
+                note_count: u32::try_from(note_count)
+                    .map_err(|_| invalid_contract("Note count is not protocol-representable"))?,
             },
         );
-        match result {
-            Ok(pending) => self.pending_reprepare = pending.or(self.pending_reprepare),
+        let note_end_count = match result {
+            Ok((pending, note_end_count)) => {
+                self.pending_reprepare = pending.or(self.pending_reprepare);
+                note_end_count
+            }
             Err(AudioProcessorHostError::ReprepareRequired(request)) => {
                 self.pending_reprepare = Some(request);
                 return Err(AudioProcessorHostError::ReprepareRequired(request));
@@ -988,6 +1081,49 @@ impl AudioProcessor for IsolatedAudioProcessor {
             Err(error) => {
                 self.failed = true;
                 return Err(error);
+            }
+        };
+        // Native DSP has returned. Every subsequent refusal must retire this
+        // adapter; no retry can repeat the already delivered input events.
+        self.failed = true;
+        let note_mode = !self.note_input_contract.ports.is_empty();
+        if note_mode != note_end_count.is_some()
+            || note_end_count.is_some_and(|count| count as usize > layout.note_end_capacity)
+        {
+            self.failed = true;
+            return Err(invalid_contract(
+                "isolated Process reply has another Note mode/count",
+            ));
+        }
+        let end_count = note_end_count.unwrap_or(0) as usize;
+        let end_bytes = end_count
+            .checked_mul(size_of::<SharedNoteEnd>())
+            .ok_or_else(|| invalid_contract("isolated Note End bytes overflowed"))?;
+        let end_range = layout
+            .note_ends_offset
+            .checked_add(end_bytes)
+            .ok_or_else(|| invalid_contract("isolated Note End range overflowed"))?;
+        let copied_ends: &[SharedNoteEnd] = bytemuck::try_cast_slice(
+            self.worker
+                .shared_mut()
+                .get(layout.note_ends_offset..end_range)
+                .ok_or_else(|| invalid_contract("isolated Note End range is unavailable"))?,
+        )
+        .map_err(|_| invalid_contract("isolated Note End storage is not aligned"))?;
+        // Validate the entire copied prefix before pushing any observation. Its
+        // origin is the retained actual command, never a field in these events.
+        for end in copied_ends {
+            if let Err(error) = end.realize(self.note_input_contract.ports.len()) {
+                self.failed = true;
+                return Err(error);
+            }
+        }
+        for end in copied_ends {
+            if !audio.try_push_note_end(end.realize(self.note_input_contract.ports.len())?) {
+                self.failed = true;
+                return Err(invalid_contract(
+                    "parent refused copied Note End output after native processing",
+                ));
             }
         }
         let shared = self.worker.shared_mut();
@@ -1002,6 +1138,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
         )
         .map_err(|_| invalid_contract("isolated output storage is not aligned"))?;
         audio.main_interleaved().copy_from_slice(output);
+        self.failed = false;
         Ok(())
     }
 }
@@ -1012,6 +1149,7 @@ pub struct IsolatedAudioProcessorWorkerPrepareRequest {
     payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    note_input_contract: crate::AudioProcessorNoteInputContract,
     parameter_ids: Vec<ParameterId>,
     render_contract: AudioRenderContract,
 }
@@ -1043,6 +1181,11 @@ impl IsolatedAudioProcessorWorkerPrepareRequest {
         &self.auxiliary_inputs
     }
 
+    /// Exact admitted input-port and fixed Note capacities, including empty.
+    pub const fn note_input_contract(&self) -> &crate::AudioProcessorNoteInputContract {
+        &self.note_input_contract
+    }
+
     /// Stable prepared parameter-lane order.
     pub fn parameter_ids(&self) -> &[ParameterId] {
         &self.parameter_ids
@@ -1071,6 +1214,10 @@ pub trait IsolatedAudioProcessorWorkerFactory {
 
 /// Exclusive native processor instance owned entirely by one Worker process.
 pub trait IsolatedAudioProcessorWorker {
+    /// Revalidated restored instance's Note input contract; empty by default.
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        crate::AudioProcessorNoteInputContract::default()
+    }
     /// Exact request matched before native load and retained by this actual owner.
     fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
         None
@@ -1258,6 +1405,49 @@ pub struct IsolatedAudioParameterEvents<'a> {
     index: usize,
 }
 
+/// Allocation-free ordered input Note view, validated before native dispatch.
+pub struct IsolatedAudioNoteEvents<'a> {
+    events: std::slice::Iter<'a, SharedNoteEvent>,
+}
+
+impl Iterator for IsolatedAudioNoteEvents<'_> {
+    type Item = crate::AudioNoteEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let event = *self.events.next()?;
+        Some(crate::AudioNoteEvent {
+            sample_offset: event.sample_offset,
+            native_note_id: event.native_id,
+            port_index: event.port_index as u16,
+            channel: event.channel as u8,
+            key: event.key as u8,
+            kind: if event.kind == 0 {
+                crate::AudioNoteEventKind::Off
+            } else {
+                crate::AudioNoteEventKind::On
+            },
+            velocity: event.velocity,
+        })
+    }
+}
+
+static EMPTY_NOTE_INPUT_CONTRACT: crate::AudioProcessorNoteInputContract =
+    crate::AudioProcessorNoteInputContract {
+        ports: Vec::new(),
+        limits: crate::AudioNoteExecutionLimits {
+            input_events: 0,
+            output_ends: 0,
+            retained_records: 0,
+            live_voices: 0,
+        },
+    };
+
+struct WorkerNoteOutput<'a> {
+    events: &'a mut [SharedNoteEnd],
+    count: &'a std::cell::Cell<usize>,
+    refused: &'a std::cell::Cell<bool>,
+}
+
 impl Iterator for IsolatedAudioParameterEvents<'_> {
     type Item = IsolatedAudioParameterEvent;
 
@@ -1285,6 +1475,9 @@ pub struct IsolatedAudioProcessorWorkerBlock<'a> {
     auxiliary: &'a [f32],
     parameter_ids: &'a [ParameterId],
     events: &'a [SharedParameterEvent],
+    note_input_contract: Option<&'a crate::AudioProcessorNoteInputContract>,
+    note_events: &'a [SharedNoteEvent],
+    note_output: Option<WorkerNoteOutput<'a>>,
 }
 
 impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
@@ -1308,7 +1501,57 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
             auxiliary,
             parameter_ids,
             events,
+            note_input_contract: None,
+            note_events: &[],
+            note_output: None,
         }
+    }
+
+    fn with_note_regions(
+        mut self,
+        contract: &'a crate::AudioProcessorNoteInputContract,
+        events: &'a [SharedNoteEvent],
+        ends: &'a mut [SharedNoteEnd],
+        count: &'a std::cell::Cell<usize>,
+        refused: &'a std::cell::Cell<bool>,
+    ) -> Self {
+        self.note_input_contract = Some(contract);
+        self.note_events = events;
+        self.note_output = Some(WorkerNoteOutput { events: ends, count, refused });
+        self
+    }
+
+    /// Exact restored Note input metadata borrowed from this prepared operation.
+    pub fn note_input_contract(&self) -> &crate::AudioProcessorNoteInputContract {
+        self.note_input_contract.unwrap_or(&EMPTY_NOTE_INPUT_CONTRACT)
+    }
+
+    /// Iterate original f64 Note values in the admitted prepared order.
+    pub fn note_events(&self) -> IsolatedAudioNoteEvents<'_> {
+        IsolatedAudioNoteEvents { events: self.note_events.iter() }
+    }
+
+    /// Copy a bounded End address without a worker-side voice ledger. Any
+    /// refusal remains latched for the whole call, even if its return is ignored.
+    pub fn try_push_note_end(&mut self, event: crate::AudioNoteEndEvent) -> bool {
+        let ports = self.note_input_contract().ports.len();
+        let Some(output) = self.note_output.as_mut() else {
+            return false;
+        };
+        if output.refused.get() {
+            return false;
+        }
+        let Ok(event) = SharedNoteEnd::capture(event, ports) else {
+            output.refused.set(true);
+            return false;
+        };
+        let Some(destination) = output.events.get_mut(output.count.get()) else {
+            output.refused.set(true);
+            return false;
+        };
+        *destination = event;
+        output.count.set(output.count.get() + 1);
+        true
     }
 
     /// First absolute Sequence-domain sample in this block.
@@ -1391,6 +1634,122 @@ pub fn run_isolated_audio_processor_worker(
     factory: &dyn IsolatedAudioProcessorWorkerFactory,
 ) -> Result<(), AudioProcessorHostError> {
     worker::run_worker(factory)
+}
+
+#[cfg(test)]
+mod note_spec_contracts {
+    use super::*;
+
+    fn spec() -> IsolatedAudioProcessorWorkerSpec {
+        IsolatedAudioProcessorWorkerSpec::new(
+            PathBuf::from("typed-only-not-launched"),
+            Vec::new(),
+            AudioProcessorExecutionContract::new(
+                0,
+                crate::AudioProcessorTail::None,
+                false,
+                true,
+                true,
+                0,
+            )
+            .unwrap(),
+            AudioProcessorAuxiliaryInputContract::default(),
+            Vec::new(),
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 2,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: 0,
+                public_output_lookahead_budget_frames: 0,
+                compensation_delay_scratch_budget_bytes: 0,
+            },
+        )
+        .unwrap()
+    }
+
+    fn contract() -> crate::AudioProcessorNoteInputContract {
+        crate::AudioProcessorNoteInputContract {
+            ports: vec![crate::AudioProcessorNoteInputPort {
+                port_key: "main-notes".to_owned(),
+                native_id: 27,
+                native_index: 0,
+            }],
+            limits: crate::AudioNoteExecutionLimits {
+                input_events: 2,
+                output_ends: 2,
+                retained_records: 2,
+                live_voices: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn note_spec_default_is_zero_and_invalid_or_boundary_plus_one_contract_refuses() {
+        assert_eq!(
+            spec().note_input_contract,
+            crate::AudioProcessorNoteInputContract::default()
+        );
+        let valid = contract();
+        assert_eq!(
+            spec().with_note_input_contract(valid.clone()).unwrap().note_input_contract,
+            valid
+        );
+        let mut invalid = valid.clone();
+        invalid.limits.input_events = 4097;
+        assert!(spec().with_note_input_contract(invalid).is_err());
+        let mut invalid = valid.clone();
+        invalid.limits.output_ends = 4097;
+        assert!(spec().with_note_input_contract(invalid).is_err());
+        let mut invalid = valid.clone();
+        invalid.ports[0].native_index = 1;
+        assert!(spec().with_note_input_contract(invalid).is_err());
+        let mut invalid = crate::AudioProcessorNoteInputContract::default();
+        invalid.limits.input_events = 1;
+        assert!(spec().with_note_input_contract(invalid).is_err());
+        let mut max = valid;
+        max.limits.input_events = 4096;
+        max.limits.output_ends = 4096;
+        assert!(spec().with_note_input_contract(max).is_ok());
+    }
+
+    #[test]
+    fn note_contract_clone_and_actual_factory_visitor_preserve_complete_metadata_owners() {
+        let spec = spec().with_note_input_contract(contract()).unwrap();
+        let cloned = spec.clone();
+        assert_eq!(cloned.note_input_contract, spec.note_input_contract);
+        assert_ne!(
+            cloned.note_input_contract.ports.as_ptr(),
+            spec.note_input_contract.ports.as_ptr()
+        );
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
+        // Manual metadata fixture: no validation launch or native qualification.
+        let factory = IsolatedAudioProcessorFactory {
+            input_names: Vec::new(),
+            execution_contract: spec.plugin_execution_contract,
+            spec,
+            layout,
+        };
+        assert_eq!(factory.note_input_contract(), contract());
+        let mut visited = Vec::new();
+        factory
+            .visit_host_owned_storage(&mut |storage| {
+                visited.push(storage);
+                Ok(())
+            })
+            .unwrap();
+        let ports = &factory.spec.note_input_contract.ports;
+        let key = &ports[0].port_key;
+        assert!(visited.iter().any(|storage| storage.kind()
+            == crate::AudioProcessorFactoryStorageKind::CompleteAllocation
+            && storage.address() == ports.as_ptr() as usize
+            && storage.layout().size()
+                == ports.capacity() * size_of::<crate::AudioProcessorNoteInputPort>()));
+        assert!(visited.iter().any(|storage| storage.kind()
+            == crate::AudioProcessorFactoryStorageKind::CompleteAllocation
+            && storage.address() == key.as_ptr() as usize
+            && storage.layout().size() == key.capacity()));
+    }
 }
 
 fn invalid_contract(detail: &str) -> AudioProcessorHostError {

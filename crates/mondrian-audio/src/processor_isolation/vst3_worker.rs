@@ -345,6 +345,11 @@ impl Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Vst3Worker, AudioProcessorHostError> {
+        if !request.note_input_contract().ports.is_empty() {
+            return Err(unavailable(
+                "VST3 Note input is not supported by this adapter",
+            ));
+        }
         let payload: Vst3Payload = serde_json::from_slice(request.payload())
             .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
         let registration = Vst3PluginRegistration {

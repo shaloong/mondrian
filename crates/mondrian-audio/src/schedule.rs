@@ -1816,7 +1816,7 @@ fn prepare_rack(
             insertion,
         };
         let factory =
-            prepare_processor_factory(processor_resolver, processor, occurrence, contract)?;
+            prepare_processor_factory(processor_resolver, processor, occurrence, contract, false)?;
         let processor_algorithmic_latency_frames = factory.contract().algorithmic_latency_frames();
         let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
         let mut parameter_curves = Vec::with_capacity(processor.parameters.len());

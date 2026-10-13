@@ -33,6 +33,7 @@ mod processor;
 mod processor_host;
 mod processor_inspection;
 mod processor_isolation;
+mod processor_notes;
 mod processor_parameters;
 mod render;
 mod resource_overlap;
@@ -73,6 +74,7 @@ pub use plan::*;
 pub use processor::*;
 pub use processor_inspection::*;
 pub use processor_isolation::*;
+pub use processor_notes::*;
 pub use render::{
     render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
     AudioRenderRequest, AudioRenderSession, AudioStateEntry,

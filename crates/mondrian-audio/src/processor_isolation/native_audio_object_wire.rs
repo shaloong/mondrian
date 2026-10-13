@@ -621,8 +621,8 @@ mod native_object_wire_contracts {
         assert_eq!(bytes.len(), 40);
         assert_eq!(
             &bytes[..12],
-            &[77, 65, 79, 66, 8, 0, 0, 0, 3, 0, 0, 0],
-            "single current V8 schema"
+            &[77, 65, 79, 66, 9, 0, 0, 0, 3, 0, 0, 0],
+            "single current V9 schema"
         );
         assert_eq!(
             read_bind_reply(&mut Cursor::new(bytes.clone()), request).expect("same binding/object"),
@@ -699,10 +699,11 @@ mod native_object_wire_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         };
         let mut bytes = Vec::new();
         command.write_to(&mut bytes).expect("current header");
-        assert_eq!(&bytes[4..12], &[8, 0, 0, 0, 9, 0, 0, 0]);
+        assert_eq!(&bytes[4..12], &[9, 0, 0, 0, 9, 0, 0, 0]);
         let mut old = bytes.clone();
         old[4..8].copy_from_slice(&5_u32.to_le_bytes());
         assert!(
@@ -783,7 +784,7 @@ mod native_log_wire_contracts {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&expected))
             .expect("one bounded current response");
-        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 8, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 9, 0, 0, 0, 1, 0, 0, 0]);
         assert_eq!(
             &bytes[17..29],
             &[0; 12],

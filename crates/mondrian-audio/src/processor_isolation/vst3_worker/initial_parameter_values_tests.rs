@@ -50,6 +50,7 @@ fn prepare(gain: f64, mode: u32) -> Vst3Worker {
         parameter_ids: vec![0],
     };
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: native_worker_lane_profile().expect("actual known layout"),
         payload: serde_json::to_vec(&payload).expect("exact authored fixture payload"),
         plugin_execution_contract: AudioProcessorExecutionContract::new(

@@ -5,7 +5,7 @@
 
 use super::native_worker_ingress::{FixedSlot, NativeSlotReceive, NATIVE_MAIN_SERVICE_INTERVAL};
 use super::protocol::{CommandKind, WorkerCommand};
-use super::worker::WorkerProcessContext;
+use super::worker::{WorkerProcessCompletion, WorkerProcessContext};
 use super::{IsolatedAudioProcessorMainRole, IsolatedAudioProcessorWorkerSplit};
 use crate::{AudioProcessingMode, AudioProcessorHostError};
 use mondrian_audio_scheduling::{
@@ -21,7 +21,7 @@ enum NativeDspJob {
 }
 
 enum NativeDspCompletion {
-    Pcm,
+    Pcm(WorkerProcessCompletion),
     AuthorParameterFlush(crate::NativeAudioAuthorParameterFlushOutcome),
 }
 
@@ -74,7 +74,7 @@ impl NativeDspDispatch<'_> {
     ) -> Result<crate::NativeAudioAuthorParameterFlushOutcome, AudioProcessorHostError> {
         match self.receive_completion(main)? {
             NativeDspCompletion::AuthorParameterFlush(outcome) => Ok(outcome),
-            NativeDspCompletion::Pcm => {
+            NativeDspCompletion::Pcm(_) => {
                 Err(failed("PCM completion cannot settle an author control job"))
             }
         }
@@ -83,9 +83,9 @@ impl NativeDspDispatch<'_> {
     pub(super) fn complete(
         &self,
         main: &mut dyn IsolatedAudioProcessorMainRole,
-    ) -> Result<(), AudioProcessorHostError> {
+    ) -> Result<WorkerProcessCompletion, AudioProcessorHostError> {
         match self.receive_completion(main)? {
-            NativeDspCompletion::Pcm => Ok(()),
+            NativeDspCompletion::Pcm(completion) => Ok(completion),
             NativeDspCompletion::AuthorParameterFlush(_) => {
                 Err(failed("author control completion cannot publish PCM"))
             }
@@ -217,7 +217,7 @@ pub(super) fn with_processing_scope<T>(
                             let result = match command {
                                 NativeDspJob::Pcm(command) => context
                                     .process(|block| processor.process(block), shared, command)
-                                    .map(|()| NativeDspCompletion::Pcm),
+                                    .map(NativeDspCompletion::Pcm),
                                 NativeDspJob::AuthorParameterFlush => processor
                                     .flush_native_author_parameters()
                                     .map(NativeDspCompletion::AuthorParameterFlush),

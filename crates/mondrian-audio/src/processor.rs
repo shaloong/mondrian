@@ -277,6 +277,7 @@ pub struct AudioProcessorPrepareRequest<'a> {
     parameters: &'a BTreeMap<ParameterId, AudioProcessorParameter>,
     opaque_state: Option<&'a [u8]>,
     render_contract: AudioRenderContract,
+    note_input_requested: bool,
 }
 
 impl<'a> AudioProcessorPrepareRequest<'a> {
@@ -293,6 +294,7 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
             parameters,
             opaque_state,
             render_contract,
+            note_input_requested: false,
         }
     }
 
@@ -324,6 +326,17 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
     /// Exact sample-rate/layout/block/mode contract being prepared.
     pub const fn render_contract(&self) -> AudioRenderContract {
         self.render_contract
+    }
+
+    pub(crate) const fn with_note_input_requested(mut self, requested: bool) -> Self {
+        self.note_input_requested = requested;
+        self
+    }
+
+    /// Whether this occurrence has selected authored Notes to bind. Metadata
+    /// discovery alone remains separate from actual Note execution admission.
+    pub const fn note_input_requested(&self) -> bool {
+        self.note_input_requested
     }
 }
 
@@ -369,6 +382,13 @@ pub trait AudioProcessorFactory: Send + Sync {
     /// declared key and exact semantic layout.
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
         AudioProcessorAuxiliaryInputContract::default()
+    }
+
+    /// Concrete Note inputs and fixed limits for this exact restored instance.
+    /// The empty default admits no Notes. Native adapters must preserve this
+    /// contract through state seeding and validate it on actual creation.
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        crate::AudioProcessorNoteInputContract::default()
     }
 
     /// Optional control-side native names keyed by admitted auxiliary buses.
@@ -763,6 +783,19 @@ impl AudioProcessorAuxiliaryInputContract {
 /// auxiliary lookup is the stable extension point for sidechains; absent buses
 /// return `None` instead of being silently mixed into the main input.
 pub trait AudioProcessorAudioIo {
+    /// Borrow the admitted Note stream for this same process call. The empty
+    /// default preserves parameter/PCM-only consumers. Unsupported adapters
+    /// must reject nonempty input before touching PCM or native DSP.
+    fn note_events(&self) -> &[crate::AudioNoteEvent] {
+        &[]
+    }
+    /// Retain one copied completion within the prepared output capacity. True
+    /// means retained, never discarded. Adapters must report any refusal even
+    /// if a plugin ignores its failed output callback. No author mutation or
+    /// voice-capacity credit occurs here; the parent applies it after return.
+    fn try_push_note_end(&mut self, _event: crate::AudioNoteEndEvent) -> bool {
+        false
+    }
     /// Negotiated main-bus layout.
     fn main_layout(&self) -> AudioChannelLayout;
     /// Exact frame count.

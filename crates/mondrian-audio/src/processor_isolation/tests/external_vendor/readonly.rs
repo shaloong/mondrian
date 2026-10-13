@@ -653,6 +653,7 @@ fn readonly_worker_lane_refusal_precedes_library_access() {
             "state":metadata.captured_state,"parameters":metadata.parameters,"parameter_ids":[descriptor.id],
         })).expect("forged native lane payload");
         let prepared = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: factory
                 .native_worker_lane_resources()
                 .expect("actual adapter lane profile"),

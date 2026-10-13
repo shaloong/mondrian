@@ -416,6 +416,7 @@ mod seed_wire_tests {
     #[test]
     fn native_configuration_seed_wire_reply_uses_independent_version_eight_prefix_and_exact_receipt(
     ) {
+        // Retain this historical CI identity while independently asserting v9.
         let request = seed_request(&[7, 1, 2], 19);
         let receipt = NativeConfigurationSeedReceipt {
             ticket: request.ticket,
@@ -429,7 +430,7 @@ mod seed_wire_tests {
         .expect("reply");
         assert_eq!(
             &bytes[..16],
-            &[77, 65, 83, 68, 8, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
+            &[77, 65, 83, 68, 9, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
         );
         assert!(
             matches!(read_reply(&mut bytes.as_slice(), request.ticket, 19).expect("same-child receipt"),

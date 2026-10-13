@@ -1,4 +1,4 @@
-//! One bounded V8 command interpretation on the authenticated worker stream.
+//! One bounded current command interpretation on the authenticated worker stream.
 //! Inline native adapters use it directly; native objects stay with the sole
 //! owner dispatcher. This module adds no reader thread or editor authority.
 
@@ -123,6 +123,7 @@ mod inline_command_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
     }
 
@@ -171,7 +172,7 @@ mod inline_command_contracts {
                 command.write_to(&mut wire).expect("existing command codec");
                 assert_eq!(
                     &wire[4..12],
-                    &[8, 0, 0, 0, tag as u8, 0, 0, 0],
+                    &[9, 0, 0, 0, tag as u8, 0, 0, 0],
                     "independent version/tag contract"
                 );
                 use std::io::Write;
@@ -263,6 +264,7 @@ mod inline_command_contracts {
                 start_sample: -93,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             };
             next.write_to(parent).expect("next command on same connection");
             assert!(matches!(

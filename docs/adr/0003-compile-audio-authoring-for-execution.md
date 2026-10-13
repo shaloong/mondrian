@@ -50,6 +50,31 @@ for nested preparation. Executable events must later deepen the same pipeline
 with explicit port, occurrence, epoch and resource admission; they cannot use
 a separate vendor Timeline or bypass the existing Routing DAG.
 
+The first M2 infrastructure slice adds concrete Note input and copied End
+observations to the existing processor block IO and supervised process command,
+without changing the processor invocation or parameter transaction stream.
+An immutable factory Note contract binds definition-owned port keys, native
+stable IDs/current indexes and finite input/output/retained-record/voice extents.
+Its default is explicit zero support. Seed replacement and instance creation
+recheck that same contract; existing allocation visitation observes its actual
+Vec/String owners. Protocol v9 uses the reserved command count field and checked
+appended shared regions; Note-free PCM/parameter offsets and total bytes remain
+unchanged. A successful Note-mode Process returns its actual bounded End count
+alongside any pending reprepare request through the same inline/scoped completion.
+
+CLAP typed input retains exact f64 velocity, including zero On, and sorts sample
+offset, parameter/Off/On phase, then source order using actual charged owner
+layouts. Core NoteEnd is extent-checked before payload access and before the
+parameter clock path: its time and velocity are unusable, while concrete Note ID,
+original input P/C/K address (including those wildcards) and raw flags are copied.
+Callbacks return no voice credit. End refusal is sticky through native return;
+parent rejection after DSP permanently fails that adapter, preventing repeated
+delivery. Flush preserves unconsumed Process End observations. The sole Hosted
+ledger, prepared score and whole-root admission are still required before product
+Note execution: selected scores retain the M1 refusal, native CLAP/VST3 Note
+requests are explicitly refused and HostNotePorts is not yet advertised. Carrier
+controls alone grant no instrument, realtime or third-party qualification.
+
 An authored Processor Instance is unique across all Sequence insertion points.
 Preparation preserves Rack order and materializes generated processor
 occurrences keyed by the author instance plus exact Contribution or Routing

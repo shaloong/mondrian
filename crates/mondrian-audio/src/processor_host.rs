@@ -30,6 +30,7 @@ use std::sync::Arc;
 pub(crate) struct PreparedProcessorFactoryBinding {
     contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    note_inputs: crate::AudioProcessorNoteInputContract,
     factory: Arc<dyn AudioProcessorFactory>,
 }
 
@@ -47,12 +48,16 @@ impl PreparedProcessorFactoryBinding {
             factory.auxiliary_input_contract()
         })?;
         auxiliary_inputs.validate(render_contract.channel_layout)?;
+        let note_inputs = isolate_adapter_value("Note input contract query", || {
+            factory.note_input_contract()
+        })?;
+        note_inputs.validate()?;
         if !contract.admits(mode) {
             return Err(AudioProcessorHostError::InvalidContract(format!(
                 "processor does not admit {mode:?} execution"
             )));
         }
-        Ok(Self { contract, auxiliary_inputs, factory })
+        Ok(Self { contract, auxiliary_inputs, note_inputs, factory })
     }
 
     pub(crate) fn visit_host_owned_storage<'a>(
@@ -67,6 +72,10 @@ impl PreparedProcessorFactoryBinding {
         for bus in &self.auxiliary_inputs.buses {
             visitor(Storage::complete(&bus.bus_key)?)?;
         }
+        visitor(Storage::complete(&self.note_inputs.ports)?)?;
+        for port in &self.note_inputs.ports {
+            visitor(Storage::complete(&port.port_key)?)?;
+        }
         isolate_adapter_value("factory storage observation", || {
             self.factory.visit_host_owned_storage(visitor)
         })?
@@ -78,6 +87,10 @@ impl PreparedProcessorFactoryBinding {
 
     pub(crate) fn auxiliary_inputs(&self) -> &AudioProcessorAuxiliaryInputContract {
         &self.auxiliary_inputs
+    }
+
+    pub(crate) fn note_inputs(&self) -> &crate::AudioProcessorNoteInputContract {
+        &self.note_inputs
     }
 
     pub(crate) fn input_names(
@@ -109,7 +122,14 @@ impl PreparedProcessorFactoryBinding {
         let auxiliary_inputs = isolate_adapter_value("native seed auxiliary-input query", || {
             factory.auxiliary_input_contract()
         })?;
-        if contract != self.contract || auxiliary_inputs != self.auxiliary_inputs {
+        let note_inputs = isolate_adapter_value("native seed Note-input query", || {
+            factory.note_input_contract()
+        })?;
+        note_inputs.validate()?;
+        if contract != self.contract
+            || auxiliary_inputs != self.auxiliary_inputs
+            || note_inputs != self.note_inputs
+        {
             return Err(AudioProcessorHostError::InvalidContract(
                 "native state seed changed the prepared factory contract".to_owned(),
             ));
@@ -124,7 +144,7 @@ impl PreparedProcessorFactoryBinding {
                 "native state seed changed the prepared auxiliary-input names".to_owned(),
             ));
         }
-        Ok(Self { contract, auxiliary_inputs, factory })
+        Ok(Self { contract, auxiliary_inputs, note_inputs, factory })
     }
 
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
@@ -147,6 +167,16 @@ impl PreparedProcessorFactoryBinding {
                     .to_owned(),
             ));
         }
+        let current_note_inputs =
+            isolate_adapter_value("Note input contract revalidation", || {
+                self.factory.note_input_contract()
+            })?;
+        if current_note_inputs != self.note_inputs {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "prepared factory changed its Note input contract before Session creation"
+                    .to_owned(),
+            ));
+        }
         isolate_adapter_call("instance creation", || self.factory.create())
     }
 }
@@ -157,6 +187,7 @@ impl fmt::Debug for PreparedProcessorFactoryBinding {
             .debug_struct("PreparedProcessorFactoryBinding")
             .field("contract", &self.contract)
             .field("auxiliary_inputs", &self.auxiliary_inputs)
+            .field("note_inputs", self.note_inputs())
             .finish_non_exhaustive()
     }
 }
@@ -1572,6 +1603,7 @@ pub(crate) fn prepare_processor_factory(
     processor: &crate::plan::CompiledProcessor,
     occurrence: AudioProcessorOccurrence,
     contract: AudioRenderContract,
+    note_input_requested: bool,
 ) -> Result<PreparedProcessorFactoryBinding, AudioProcessorHostError> {
     PreparedProcessorFactoryBinding::resolve(
         resolver,
@@ -1581,6 +1613,7 @@ pub(crate) fn prepare_processor_factory(
             &processor.parameters,
             processor.opaque_state.as_deref(),
             contract,
-        ),
+        )
+        .with_note_input_requested(note_input_requested),
     )
 }

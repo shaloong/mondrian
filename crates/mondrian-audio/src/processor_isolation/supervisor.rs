@@ -275,6 +275,7 @@ impl SupervisedAudioWorker {
             payload: spec.preparation_payload.clone(),
             execution_contract: ExecutionContractWire::capture(spec.plugin_execution_contract)?,
             auxiliary_buses: auxiliary_to_wire(&spec.auxiliary_inputs),
+            note_input_contract: spec.note_input_contract.clone(),
             parameter_ids: spec.parameter_ids.clone(),
             sample_rate: contract.sample_rate,
             channel_layout: contract.channel_layout,
@@ -305,7 +306,12 @@ impl SupervisedAudioWorker {
             ));
         }
         let input_names = match ready.result {
-            ReadyResultWire::Ready { execution_contract, auxiliary_buses, input_names } => {
+            ReadyResultWire::Ready {
+                execution_contract,
+                auxiliary_buses,
+                note_input_contract,
+                input_names,
+            } => {
                 let worker_contract = match execution_contract.realize() {
                     Ok(contract) => contract,
                     Err(error) => {
@@ -316,6 +322,7 @@ impl SupervisedAudioWorker {
                 let worker_auxiliary = auxiliary_from_wire(auxiliary_buses);
                 if worker_contract != spec.plugin_execution_contract
                     || worker_auxiliary != spec.auxiliary_inputs
+                    || note_input_contract != spec.note_input_contract
                 {
                     process.terminate_reported("audio startup failure");
                     return Err(worker_failed_detail(
@@ -368,6 +375,40 @@ impl SupervisedAudioWorker {
         operation: &'static str,
         command: WorkerCommand,
     ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+        self.request(operation, command, false).map(|(pending, _)| pending)
+    }
+
+    pub(super) fn invoke_process(
+        &mut self,
+        operation: &'static str,
+        command: WorkerCommand,
+    ) -> Result<
+        (
+            Option<mondrian_core::NativeAudioReprepareRequest>,
+            Option<u32>,
+        ),
+        AudioProcessorHostError,
+    > {
+        if command.kind != super::protocol::CommandKind::Process {
+            return Err(invalid_contract(
+                "only Process may receive Note completion observations",
+            ));
+        }
+        self.request(operation, command, self.layout.note_event_capacity != 0)
+    }
+
+    fn request(
+        &mut self,
+        operation: &'static str,
+        command: WorkerCommand,
+        notes_response: bool,
+    ) -> Result<
+        (
+            Option<mondrian_core::NativeAudioReprepareRequest>,
+            Option<u32>,
+        ),
+        AudioProcessorHostError,
+    > {
         if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
@@ -385,8 +426,26 @@ impl SupervisedAudioWorker {
             WorkerResponse::read_from(&mut self.control)
         })();
         match result {
-            Ok(WorkerResponse::Completed) => Ok(None),
-            Ok(WorkerResponse::CompletedWithPending(request)) => Ok(Some(request)),
+            Ok(WorkerResponse::Completed) if !notes_response => Ok((None, None)),
+            Ok(WorkerResponse::CompletedWithPending(request)) if !notes_response => {
+                Ok((Some(request), None))
+            }
+            Ok(WorkerResponse::NotesCompleted { note_end_count, pending })
+                if notes_response && note_end_count as usize <= self.layout.note_end_capacity =>
+            {
+                Ok((pending, Some(note_end_count)))
+            }
+            Ok(
+                WorkerResponse::Completed
+                | WorkerResponse::CompletedWithPending(_)
+                | WorkerResponse::NotesCompleted { .. },
+            ) => {
+                self.terminate();
+                Err(worker_failed_detail(
+                    operation,
+                    "Worker completion differs from admitted Note operation",
+                ))
+            }
             Ok(WorkerResponse::DeferredForConfiguration(request)) => {
                 Err(AudioProcessorHostError::ReprepareRequired(request))
             }
@@ -468,6 +527,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             super::native_audio_object_wire::write_observation_request(
@@ -537,6 +597,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             super::native_audio_object_wire::write_bind_request(&mut self.control, request)?;
@@ -584,6 +645,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             super::native_audio_author_state_entry_wire::write_request(
@@ -666,6 +728,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             if let Some(request) = open {
@@ -709,6 +772,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             super::native_configuration_wire::read_cohort_reply(&mut self.control)
@@ -744,6 +808,7 @@ impl SupervisedAudioWorker {
                 start_sample: 0,
                 frames: 0,
                 event_count: 0,
+                note_count: 0,
             }
             .write_to(&mut self.control)?;
             wire::write_request(&mut self.control, &request)?;
@@ -808,8 +873,14 @@ impl SupervisedAudioWorker {
             return Err(worker_failed(operation, error));
         }
         let result = (|| -> io::Result<_> {
-            WorkerCommand { kind, start_sample: 0, frames: 0, event_count: 0 }
-                .write_to(&mut self.control)?;
+            WorkerCommand {
+                kind,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+                note_count: 0,
+            }
+            .write_to(&mut self.control)?;
             if let Some(request) = stage {
                 wire::write_stage(&mut self.control, request)?;
             } else {
@@ -852,6 +923,7 @@ impl SupervisedAudioWorker {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut self.control)
         .and_then(|_| WorkerResponse::read_from(&mut self.control))
@@ -1237,6 +1309,7 @@ mod control_timeout_worker_lifecycle {
                 0
             },
             event_count: 0,
+            note_count: 0,
         }
     }
 

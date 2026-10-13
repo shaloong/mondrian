@@ -490,6 +490,7 @@ fn owned_worker() -> Box<dyn IsolatedAudioProcessorWorker> {
     };
     prepare_loaded(
         IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: profile,
             payload: Vec::new(),
             plugin_execution_contract: contract,
@@ -565,6 +566,7 @@ fn clap_paused_gui_requests_actual_audio_flush_without_process_old_api() {
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &parameter_ids,
         render_contract: render_contract(),
     };
@@ -607,6 +609,7 @@ fn clap_paused_gui_requests_actual_audio_flush_without_process_old_api() {
                 start_sample: 0,
                 frames: 8,
                 event_count: 0,
+                note_count: 0,
             })?;
             dsp.complete(main)?;
             Ok(())
@@ -780,6 +783,7 @@ fn exchange_another_paused_gui_value(worker: &mut dyn IsolatedAudioProcessorWork
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &ids,
         render_contract: render_contract(),
     };
@@ -1175,6 +1179,7 @@ fn emit_paused_host_reference_controls(worker: &mut dyn IsolatedAudioProcessorWo
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &ids,
         render_contract: render_contract(),
     };

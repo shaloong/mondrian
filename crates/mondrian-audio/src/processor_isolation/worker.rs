@@ -1,7 +1,7 @@
 use super::protocol::{
     auxiliary_from_wire, auxiliary_to_wire, read_json_frame, write_json_frame, CommandKind,
-    PrepareWire, ReadyResultWire, ReadyWire, SharedBlockLayout, SharedParameterEvent,
-    WorkerCommand, WorkerResponse, PROTOCOL_VERSION,
+    PrepareWire, ReadyResultWire, ReadyWire, SharedBlockLayout, SharedNoteEnd, SharedNoteEvent,
+    SharedParameterEvent, WorkerCommand, WorkerResponse, PROTOCOL_VERSION,
 };
 use super::{
     IsolatedAudioProcessorWorker, IsolatedAudioProcessorWorkerBlock,
@@ -44,6 +44,7 @@ pub(super) fn run_worker(
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
     auxiliary_inputs.validate(prepare.channel_layout)?;
+    prepare.note_input_contract.validate()?;
     let plugin_execution_contract = prepare.execution_contract.realize()?;
     let render_contract = AudioRenderContract {
         sample_rate: prepare.sample_rate,
@@ -63,6 +64,10 @@ pub(super) fn run_worker(
         prepare.channel_layout.channel_count(),
         auxiliary_inputs.buses.len(),
         prepare.parameter_ids.len(),
+    )?
+    .with_notes(
+        prepare.note_input_contract.limits.input_events,
+        prepare.note_input_contract.limits.output_ends,
     )?;
     if u64::try_from(layout.total_bytes).ok() != Some(prepare.shared_bytes) {
         return Err(invalid_contract(
@@ -74,6 +79,7 @@ pub(super) fn run_worker(
         payload: prepare.payload,
         plugin_execution_contract,
         auxiliary_inputs: auxiliary_inputs.clone(),
+        note_input_contract: prepare.note_input_contract.clone(),
         parameter_ids: prepare.parameter_ids.clone(),
         render_contract,
     };
@@ -93,6 +99,7 @@ pub(super) fn run_worker(
         || processor.uses_native_processing_split() != native_lane.is_some()
         || processor.execution_contract() != plugin_execution_contract
         || processor.auxiliary_input_contract() != auxiliary_inputs
+        || processor.note_input_contract() != prepare.note_input_contract
     {
         write_ready_rejected(
             &mut control,
@@ -131,12 +138,14 @@ pub(super) fn run_worker(
         result: ReadyResultWire::Ready {
             execution_contract: prepare.execution_contract,
             auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+            note_input_contract: prepare.note_input_contract.clone(),
             input_names,
         },
     };
     let context = WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary_inputs,
+        note_input_contract: &prepare.note_input_contract,
         parameter_ids: &prepare.parameter_ids,
         render_contract,
     };
@@ -188,8 +197,16 @@ pub(super) fn run_worker(
 pub(super) struct WorkerProcessContext<'a> {
     pub(super) layout: SharedBlockLayout,
     pub(super) auxiliary_inputs: &'a crate::AudioProcessorAuxiliaryInputContract,
+    pub(super) note_input_contract: &'a crate::AudioProcessorNoteInputContract,
     pub(super) parameter_ids: &'a [mondrian_core::ParameterId],
     pub(super) render_contract: AudioRenderContract,
+}
+
+/// Successful actual Process completion carried through the existing DSP slot.
+/// None retains parameter-only response semantics; Some includes zero Ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WorkerProcessCompletion {
+    pub(super) note_end_count: Option<u32>,
 }
 
 impl WorkerProcessContext<'_> {
@@ -200,7 +217,7 @@ impl WorkerProcessContext<'_> {
         ) -> Result<(), AudioProcessorHostError>,
         shared: &mut [u8],
         command: WorkerCommand,
-    ) -> Result<(), AudioProcessorHostError> {
+    ) -> Result<WorkerProcessCompletion, AudioProcessorHostError> {
         if command.kind != CommandKind::Process {
             return Err(invalid_contract("non-Process command reached shared PCM"));
         }
@@ -208,11 +225,22 @@ impl WorkerProcessContext<'_> {
             .map_err(|_| invalid_contract("block frame extent exceeds Worker address space"))?;
         let event_count = usize::try_from(command.event_count)
             .map_err(|_| invalid_contract("event count exceeds Worker address space"))?;
+        let note_count = usize::try_from(command.note_count)
+            .map_err(|_| invalid_contract("Note count exceeds Worker address space"))?;
         if frames > self.render_contract.max_block_frames
             || event_count > self.layout.event_capacity
+            || note_count > self.layout.note_event_capacity
+            || note_count > crate::AUDIO_NOTE_EVENTS_PER_BLOCK
+            || self.layout.note_event_capacity != self.note_input_contract.limits.input_events
+            || self.layout.note_end_capacity != self.note_input_contract.limits.output_ends
         {
             return Err(invalid_contract(
                 "Worker command exceeds prepared shared capacity",
+            ));
+        }
+        if self.layout.total_bytes != shared.len() {
+            return Err(invalid_contract(
+                "Worker mapped extent differs from its prepared layout",
             ));
         }
         let samples = frames
@@ -250,7 +278,59 @@ impl WorkerProcessContext<'_> {
                 "Worker shared ranges exceed the mapped extent",
             ));
         }
-        let (before_events, events_and_after) = shared.split_at_mut(self.layout.events_offset);
+        let note_bytes = note_count
+            .checked_mul(size_of::<SharedNoteEvent>())
+            .ok_or_else(|| invalid_contract("Worker Note input bytes overflowed"))?;
+        let end_bytes = self
+            .layout
+            .note_end_capacity
+            .checked_mul(size_of::<SharedNoteEnd>())
+            .ok_or_else(|| invalid_contract("Worker Note End bytes overflowed"))?;
+        let note_end = self
+            .layout
+            .note_events_offset
+            .checked_add(note_bytes)
+            .ok_or_else(|| invalid_contract("Worker Note input range overflowed"))?;
+        let end_end = self
+            .layout
+            .note_ends_offset
+            .checked_add(end_bytes)
+            .ok_or_else(|| invalid_contract("Worker Note End range overflowed"))?;
+        if note_end > self.layout.note_ends_offset
+            || end_end > shared.len()
+            || self.layout.note_events_offset < event_end
+            || self.layout.note_ends_offset < self.layout.note_events_offset
+        {
+            return Err(invalid_contract(
+                "Worker Note ranges exceed the mapped extent",
+            ));
+        }
+        let (before_ends, ends_and_after) = shared.split_at_mut(self.layout.note_ends_offset);
+        let ends: &mut [SharedNoteEnd] = bytemuck::try_cast_slice_mut(
+            ends_and_after
+                .get_mut(..end_bytes)
+                .ok_or_else(|| invalid_contract("Worker Note End range is unavailable"))?,
+        )
+        .map_err(|_| invalid_contract("Worker Note End storage is not aligned"))?;
+        let (before_notes, notes_and_gap) =
+            before_ends.split_at_mut(self.layout.note_events_offset);
+        let notes: &[SharedNoteEvent] = bytemuck::try_cast_slice(
+            notes_and_gap
+                .get(..note_bytes)
+                .ok_or_else(|| invalid_contract("Worker Note input range is unavailable"))?,
+        )
+        .map_err(|_| invalid_contract("Worker Note input storage is not aligned"))?;
+        let mut previous_note = None;
+        for note in notes {
+            note.realize(frames, self.note_input_contract.ports.len())?;
+            let order = (note.sample_offset, note.kind);
+            if previous_note.is_some_and(|previous| previous > order) {
+                return Err(invalid_contract("Worker observed unordered input Notes"));
+            }
+            previous_note = Some(order);
+        }
+        let (before_events, events_and_after) =
+            before_notes.split_at_mut(self.layout.events_offset);
         let event_storage = events_and_after
             .get_mut(..event_bytes)
             .ok_or_else(|| invalid_contract("Worker event range is unavailable"))?;
@@ -277,6 +357,8 @@ impl WorkerProcessContext<'_> {
             .map_err(|_| invalid_contract("Worker main storage is not aligned"))?;
         let auxiliary: &[f32] = bytemuck::try_cast_slice(auxiliary_storage)
             .map_err(|_| invalid_contract("Worker auxiliary storage is not aligned"))?;
+        let note_end_count = std::cell::Cell::new(0_usize);
+        let note_output_refused = std::cell::Cell::new(false);
         let block = IsolatedAudioProcessorWorkerBlock::new(
             command.start_sample,
             frames,
@@ -286,14 +368,63 @@ impl WorkerProcessContext<'_> {
             auxiliary,
             self.parameter_ids,
             events,
+        )
+        .with_note_regions(
+            self.note_input_contract,
+            notes,
+            ends,
+            &note_end_count,
+            &note_output_refused,
         );
-        match catch_unwind(AssertUnwindSafe(|| process(block))) {
-            Ok(result) => result,
-            Err(_) => Err(AudioProcessorHostError::AdapterPanicked(
-                "isolated Worker block processing",
-            )),
+        let result = catch_unwind(AssertUnwindSafe(|| process(block)));
+        // A native adapter cannot hide output refusal by ignoring false or by
+        // returning Ok/ReprepareRequired later in the same actual operation.
+        if note_output_refused.get() {
+            return Err(invalid_contract(
+                "Worker Note End output was refused during native processing",
+            ));
         }
+        match result {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(AudioProcessorHostError::AdapterPanicked(
+                    "isolated Worker block processing",
+                ))
+            }
+        }
+        let count = u32::try_from(note_end_count.get())
+            .map_err(|_| invalid_contract("Worker Note End count is not protocol-representable"))?;
+        Ok(WorkerProcessCompletion {
+            note_end_count: if self.note_input_contract.ports.is_empty() {
+                None
+            } else {
+                Some(count)
+            },
+        })
     }
+}
+
+fn write_process_operation_result(
+    control: &mut TcpStream,
+    result: Result<WorkerProcessCompletion, AudioProcessorHostError>,
+    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+) -> Result<bool, AudioProcessorHostError> {
+    let response = match result {
+        Ok(WorkerProcessCompletion { note_end_count: Some(note_end_count) }) => {
+            WorkerResponse::NotesCompleted { note_end_count, pending }
+        }
+        Ok(WorkerProcessCompletion { note_end_count: None }) => pending.map_or(
+            WorkerResponse::Completed,
+            WorkerResponse::CompletedWithPending,
+        ),
+        Err(AudioProcessorHostError::ReprepareRequired(request)) => {
+            WorkerResponse::DeferredForConfiguration(request)
+        }
+        Err(error) => WorkerResponse::Failed(error.to_string()),
+    };
+    let success = !matches!(response, WorkerResponse::Failed(_));
+    response.write_to(control).map_err(|error| worker_failed("response", error))?;
+    Ok(success)
 }
 
 fn write_operation_result(
@@ -418,7 +549,7 @@ fn dispatch_native_owner_command(
                 }
                 CommandKind::Process => {
                     let result = context.process(|block| processor.process(block), shared, command);
-                    write_operation_result(control, Ok(result), processor.pending_reprepare())
+                    write_process_operation_result(control, result, processor.pending_reprepare())
                 }
                 CommandKind::PollPending
                 | CommandKind::PollConfigurationCohort
@@ -687,7 +818,7 @@ fn service_native_processing_scope(
             if header.kind == CommandKind::Process {
                 dsp.submit(*header)?;
                 let result = dsp.complete(main);
-                if !write_operation_result(control, Ok(result), main.pending_reprepare()?)? {
+                if !write_process_operation_result(control, result, main.pending_reprepare()?)? {
                     // No further native mutation or command is admitted after a
                     // failed DSP response. Scope teardown still explicitly joins.
                     ingress.acknowledge()?;
@@ -935,10 +1066,12 @@ mod inline_dispatch_contracts {
             compensation_delay_scratch_budget_bytes: 0,
         };
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let note_input_contract = crate::AudioProcessorNoteInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).expect("exact shared extent");
         let context = WorkerProcessContext {
             layout,
             auxiliary_inputs: &auxiliary,
+            note_input_contract: &note_input_contract,
             parameter_ids: &[],
             render_contract: contract,
         };
@@ -950,9 +1083,15 @@ mod inline_dispatch_contracts {
             (CommandKind::Process, -11, 2),
             (CommandKind::PollPending, 0, 0),
         ] {
-            WorkerCommand { kind, start_sample, frames, event_count: 0 }
-                .write_to(&mut parent)
-                .expect("real request");
+            WorkerCommand {
+                kind,
+                start_sample,
+                frames,
+                event_count: 0,
+                note_count: 0,
+            }
+            .write_to(&mut parent)
+            .expect("real request");
             let command = decode(&mut child, 0).expect("single decoder");
             assert!(dispatch_native_owner_command(
                 &mut worker,
@@ -978,6 +1117,7 @@ mod inline_dispatch_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut parent)
         .expect("pure query");
@@ -1017,6 +1157,7 @@ mod inline_dispatch_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut parent)
         .expect("control request header");
@@ -1041,6 +1182,7 @@ mod inline_dispatch_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut parent)
         .expect("stage header");
@@ -1073,6 +1215,7 @@ mod inline_dispatch_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut parent)
         .expect("next exact commit header");
@@ -1095,6 +1238,7 @@ mod inline_dispatch_contracts {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         }
         .write_to(&mut parent)
         .expect("shutdown request");
@@ -1110,5 +1254,390 @@ mod inline_dispatch_contracts {
         );
         assert_eq!(worker.entered, [-11]);
         assert_eq!(worker.processed, [-11]);
+    }
+}
+
+#[cfg(test)]
+mod note_process_contracts {
+    use super::*;
+    use crate::{
+        AudioNoteEndEvent, AudioNoteEvent, AudioNoteEventKind, AudioNoteExecutionLimits,
+        AudioProcessorNoteInputContract, AudioProcessorNoteInputPort,
+    };
+
+    fn render() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: mondrian_core::AudioChannelLayout::Mono,
+            max_block_frames: 2,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 0,
+            public_output_lookahead_budget_frames: 0,
+            compensation_delay_scratch_budget_bytes: 0,
+        }
+    }
+
+    fn notes(input: usize, output: usize) -> AudioProcessorNoteInputContract {
+        let contract = AudioProcessorNoteInputContract {
+            ports: vec![AudioProcessorNoteInputPort {
+                port_key: "main-notes".to_owned(),
+                native_id: 27,
+                native_index: 0,
+            }],
+            limits: AudioNoteExecutionLimits {
+                input_events: input,
+                output_ends: output,
+                retained_records: 2,
+                live_voices: 2,
+            },
+        };
+        contract.validate().unwrap();
+        contract
+    }
+
+    fn command(count: u32) -> WorkerCommand {
+        WorkerCommand {
+            kind: CommandKind::Process,
+            start_sample: -3,
+            frames: 2,
+            event_count: 0,
+            note_count: count,
+        }
+    }
+
+    fn packed() -> SharedNoteEvent {
+        SharedNoteEvent::capture(
+            AudioNoteEvent {
+                sample_offset: 0,
+                kind: AudioNoteEventKind::On,
+                port_index: 0,
+                channel: 4,
+                key: 60,
+                native_note_id: 7,
+                velocity: -0.0,
+            },
+            2,
+            1,
+        )
+        .unwrap()
+    }
+
+    fn put_notes(shared: &mut [u8], layout: SharedBlockLayout, events: &[SharedNoteEvent]) {
+        let end = layout.note_events_offset + std::mem::size_of_val(events);
+        let target: &mut [SharedNoteEvent] =
+            bytemuck::cast_slice_mut(&mut shared[layout.note_events_offset..end]);
+        target.copy_from_slice(events);
+    }
+
+    #[test]
+    fn worker_notes_preserve_exact_input_bits_and_copy_end_after_actual_return() {
+        let contract = notes(2, 2);
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; layout.total_bytes / 8];
+        let shared = bytemuck::cast_slice_mut(&mut storage);
+        let on = packed();
+        let off = SharedNoteEvent {
+            kind: 0,
+            velocity: f64::from_bits(0x3fd3_3333_3333_3335),
+            ..on
+        };
+        put_notes(shared, layout, &[off, on]);
+        let ended = AudioNoteEndEvent {
+            native_note_id: 7,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            flags: 3,
+        };
+        let mut calls = 0;
+        let result = context
+            .process(
+                |mut block| {
+                    calls += 1;
+                    assert_eq!(block.note_input_contract(), &contract);
+                    let events: Vec<_> = block.note_events().collect();
+                    assert_eq!(events.len(), 2);
+                    assert_eq!(events[0].kind, AudioNoteEventKind::Off);
+                    assert_eq!(events[0].velocity.to_bits(), 0x3fd3_3333_3333_3335);
+                    assert_eq!(events[1].kind, AudioNoteEventKind::On);
+                    assert_eq!(events[1].velocity.to_bits(), (-0.0_f64).to_bits());
+                    assert_eq!(
+                        (
+                            events[1].port_index,
+                            events[1].channel,
+                            events[1].key,
+                            events[1].native_note_id
+                        ),
+                        (0, 4, 60, 7)
+                    );
+                    assert!(block.try_push_note_end(ended));
+                    block.main_interleaved().fill(0.75);
+                    Ok(())
+                },
+                shared,
+                command(2),
+            )
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result, WorkerProcessCompletion { note_end_count: Some(1) });
+        let copied: &[SharedNoteEnd] =
+            bytemuck::cast_slice(&shared[layout.note_ends_offset..layout.note_ends_offset + 16]);
+        assert_eq!(copied[0].reserved, 0);
+        assert_eq!(copied[0].realize(1).unwrap(), ended);
+        let main: &[f32] = bytemuck::cast_slice(&shared[..8]);
+        assert_eq!(main, &[0.75, 0.75]);
+    }
+
+    #[test]
+    fn invalid_input_notes_never_call_processor_or_change_pcm() {
+        let contract = notes(2, 1);
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 1).unwrap();
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; layout.total_bytes / 8];
+        let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut storage);
+        let canonical = packed();
+        let invalid = [
+            SharedNoteEvent { kind: 2, ..canonical },
+            SharedNoteEvent { sample_offset: 2, ..canonical },
+            SharedNoteEvent { native_id: -1, ..canonical },
+            SharedNoteEvent { port_index: -1, ..canonical },
+            SharedNoteEvent { channel: 16, ..canonical },
+            SharedNoteEvent { key: 128, ..canonical },
+            SharedNoteEvent { velocity: f64::NAN, ..canonical },
+        ];
+        for event in invalid {
+            bytemuck::cast_slice_mut::<u8, f32>(&mut shared[..8]).copy_from_slice(&[5.0, 6.0]);
+            put_notes(shared, layout, &[event]);
+            let mut calls = 0;
+            assert!(context
+                .process(
+                    |_| {
+                        calls += 1;
+                        Ok(())
+                    },
+                    shared,
+                    command(1)
+                )
+                .is_err());
+            assert_eq!(calls, 0);
+            assert_eq!(bytemuck::cast_slice::<u8, f32>(&shared[..8]), &[5.0, 6.0]);
+        }
+        put_notes(
+            shared,
+            layout,
+            &[canonical, SharedNoteEvent { kind: 0, ..canonical }],
+        );
+        let mut calls = 0;
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                shared,
+                command(2)
+            )
+            .is_err());
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                shared,
+                command(3)
+            )
+            .is_err());
+        assert_eq!(calls, 0);
+        assert_eq!(bytemuck::cast_slice::<u8, f32>(&shared[..8]), &[5.0, 6.0]);
+    }
+
+    #[test]
+    fn ignored_note_end_overflow_or_invalid_push_remains_hard_failure() {
+        let contract = notes(1, 1);
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; layout.total_bytes / 8];
+        let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut storage);
+        let end = AudioNoteEndEvent {
+            native_note_id: 7,
+            port_index: 0,
+            channel: 4,
+            key: 60,
+            flags: 0,
+        };
+        let mut calls = 0;
+        assert!(context
+            .process(
+                |mut block| {
+                    calls += 1;
+                    assert!(block.try_push_note_end(end));
+                    assert!(!block.try_push_note_end(end));
+                    assert!(!block.try_push_note_end(end)); // refusal cannot be cleared
+                    Ok(()) // hostile/buggy adapter ignores the failed callback
+                },
+                shared,
+                command(0)
+            )
+            .is_err());
+        assert_eq!(calls, 1);
+        assert!(context
+            .process(
+                |mut block| {
+                    assert!(
+                        !block.try_push_note_end(AudioNoteEndEvent { native_note_id: -1, ..end })
+                    );
+                    assert!(!block.try_push_note_end(end));
+                    Err(AudioProcessorHostError::ReprepareRequired(
+                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                    ))
+                },
+                shared,
+                command(0)
+            )
+            .is_err_and(|error| !matches!(error, AudioProcessorHostError::ReprepareRequired(_))));
+        // A subsequent actual operation starts with its own zero count/latch;
+        // this pure Context is not a running/poisoned parent processor instance.
+        assert_eq!(
+            context
+                .process(
+                    |mut block| {
+                        assert!(block.try_push_note_end(end));
+                        Ok(())
+                    },
+                    shared,
+                    command(0)
+                )
+                .unwrap()
+                .note_end_count,
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn note_region_extent_or_alignment_refuses_before_native_call() {
+        let contract = notes(1, 1);
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; layout.total_bytes / 8 + 1];
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut storage);
+        let mut calls = 0;
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                &mut bytes[..layout.total_bytes - 1],
+                command(0)
+            )
+            .is_err());
+        let misaligned = &mut bytes[1..layout.total_bytes + 1];
+        let before = misaligned.to_vec();
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                misaligned,
+                command(0)
+            )
+            .is_err());
+        assert_eq!(calls, 0);
+        assert_eq!(misaligned, before.as_slice());
+    }
+
+    #[test]
+    fn empty_note_contract_keeps_legacy_completion_and_rejects_any_note_count() {
+        let contract = AudioProcessorNoteInputContract::default();
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(0, 0).unwrap();
+        assert_eq!(layout.total_bytes, 8);
+        let context = WorkerProcessContext {
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; 1];
+        let shared = bytemuck::cast_slice_mut(&mut storage);
+        assert_eq!(
+            context
+                .process(
+                    |mut block| {
+                        assert!(block.note_input_contract().ports.is_empty());
+                        assert_eq!(block.note_events().count(), 0);
+                        block.main_interleaved().fill(0.375);
+                        Ok(())
+                    },
+                    shared,
+                    command(0)
+                )
+                .unwrap(),
+            WorkerProcessCompletion { note_end_count: None }
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(&shared[..8]),
+            &[0.375, 0.375]
+        );
+        let mut calls = 0;
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                shared,
+                command(1)
+            )
+            .is_err());
+        assert_eq!(calls, 0);
+        assert!(context
+            .process(
+                |mut block| {
+                    assert!(!block.try_push_note_end(AudioNoteEndEvent {
+                        native_note_id: 0,
+                        port_index: -1,
+                        channel: -1,
+                        key: -1,
+                        flags: 0
+                    }));
+                    Ok(())
+                },
+                shared,
+                command(0)
+            )
+            .is_err());
     }
 }

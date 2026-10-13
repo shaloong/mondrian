@@ -3406,3 +3406,73 @@ It confirms the actual source/producer/strict/inventory/two native groups,
 checks exact old-source reconstruction for the flush style change, retains
 the negative strict record, and finds no blocker to this finite fixture commit.
 Review SHA-256: `BE23EFB246E34D21C30C8D048CB5AD8AD60B52D951FBF4D4C8374C07D092D63A`.
+
+## A01 M2 typed carrier and IPC infrastructure (2026-10-14)
+
+The existing processor block IO now carries concrete On/Off input and bounded
+copied End observations. Factory metadata retains definition-owned Note port
+keys, unsigned native IDs/current indexes and explicit storage extents; default
+support is empty. Seed/recreation revalidation and allocation visitation keep
+that exact contract. Protocol v9 appends checked 24-byte input and 16-byte End
+regions after the unchanged Note-free PCM/parameter prefix. Its fixed command
+uses the former reserved count bytes; non-Process commands reject nonzero Notes.
+Both inline and scoped DSP completions retain the actual End count and pending
+reprepare request through the same supervisor. Any post-DSP output refusal keeps
+the parent adapter failed, so already delivered input cannot be retried.
+
+The CLAP carrier owns concrete SDK Param/Off/On objects and a 12-byte ordinal,
+ordered by sample, phase and original stream order. Reservations and the existing
+allocation regression use those actual layouts. End extent/type recognition
+precedes payload access and parameter timing; MAX time and NaN velocity are
+ignored, original input tuples/raw flags are retained, and failed End pushes are
+sticky until return. Parameter source/gesture/author acknowledgement logic and
+flush authority remain in their existing owners. This slice contains no voice
+ledger and does not advertise HostNotePorts: M1 selected-score preparation and
+native CLAP/VST3 Note requests still explicitly refuse execution.
+
+The 1914-input current freeze is
+`89C8C054FEA8F2FD692E5780DAF35B1A3369B9371C1B635AF7D91E61B4E9401A`.
+Actual Audio build receipt is
+`5C9C734F603ABBB3F3E861DF723C800897F2C0DD3B5826FF7F3B5D6E4D600E33`;
+PE is `9D76F0E604FECD5A49494A0427E26EB60B3513F62EF83900CCF0235CE6A5CADA`
+(12789760 bytes), retained under external `a01-m2-carrier-native-r3` evidence.
+The actual inventory has 500 tests/81 ignored/419 ordinary; all prior names are
+preserved and 22 new ordinary controls cover typed events, shared layout/count,
+pre-call rejection, ignored-false output and actual metadata ownership. Two fixed
+groups each passed419/0; every selected name appears once, runner/native exit0,
+descendants reaped, no timeout/outliving/error, source unchanged and cleanup0.
+Native receipt is
+`234E9FA2289D77F3CCB6DDA7B49F203C30DD17AD3ECABFF8C6FF4071E7D38816`.
+Five affected crates passed all-targets/all-features Clippy -D warnings with zero
+diagnostics, receipt
+`57AB89EA366CA7B9E353A4CC936C8A8ABF81024B71F3B2D54788684191EBD1F6`.
+
+Negative records remain immutable: initial Cargo101 exposed SDK trait method
+resolution intercepting Vec::get (fixed by explicit as_slice); strict R1 found
+only a test manual-slice-size calculation (fixed by size_of_val). Native R1 was
+414/5 because five existing independent wire assertions still expected schema8;
+only their exact version bytes were migrated to9, preserving assertions/names.
+Native R2 actually passed419/0 and settled, but the unchanged controller rejected
+81 ignored: it requires0 ignored. R3 uses the actual ignored-name skip set with
+--exact, preserving419 ordinary selection and the original controller gate.
+Neither original failure nor explicit controller rejection is relabeled accepted.
+
+This qualifies finite owned Windows carrier/IPC controls and the observed
+parameter/storage regressions. The native NoteGate DLL has not been processed
+through this host; score projection, whole-root admission, Hosted ledger custody,
+restored native Note ports, real instruments, realtime/performance and other
+platforms remain unqualified. Normal Product actually rebuilt from that same
+1914-input freeze with features[], opt1/debug2 and fresh=false; receipt
+`84928BF41CC2E1059BD7EB5FDDE002B22FBFA76E7373EC08AB66287F2543377C`.
+PE `64112F66EA0F7AF5858553F445E11366EA22BC92DF9E2A6FAB9B9937BAD9065A`
+(96971776 bytes) is retained create-only in external
+`a01-m2-carrier-product-retained-r1`. Its actual FFmpeg-sys8.1.0 build output
+still has bindingsD55A6C9C, codec62/util60 and the selected8.1.2 native link
+directory. Ten existing normal Product warnings remain; the five affected
+crates' strict scope has zero diagnostics. No Product native or full Workspace
+run was added. Independent finite carrier review is
+`.scratch/plugin-host-sprint/a01-m2-carrier-final-scoped-review-r1/report.md`,
+SHA `AE7C47716BFFA948CBE740F5F486F8DCDA068BDCE9B9D413192264D4A2F1164C`.
+It verifies actual producer, retained PE, all419 raw names per round, unchanged
+ignored set, original controller/Job gates and all retained negative records;
+its separately recorded Product closure preserves the original pending review.

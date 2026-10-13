@@ -1,14 +1,15 @@
 use crate::{
-    AudioProcessingMode, AudioProcessorAuxiliaryInputBusContract,
-    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
-    AudioProcessorTail,
+    AudioNoteEndEvent, AudioNoteEvent, AudioNoteEventKind, AudioProcessingMode,
+    AudioProcessorAuxiliaryInputBusContract, AudioProcessorAuxiliaryInputContract,
+    AudioProcessorExecutionContract, AudioProcessorHostError, AudioProcessorNoteInputContract,
+    AudioProcessorTail, AUDIO_NOTE_ENDS_PER_BLOCK, AUDIO_NOTE_EVENTS_PER_BLOCK,
 };
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 8;
+pub(super) const PROTOCOL_VERSION: u32 = 9;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_WORKER_DETAIL_BYTES: usize = 4096;
 const COMMAND_MAGIC: u32 = u32::from_le_bytes(*b"MAPC");
@@ -93,6 +94,7 @@ pub(super) struct PrepareWire {
     pub payload: Vec<u8>,
     pub execution_contract: ExecutionContractWire,
     pub auxiliary_buses: Vec<AuxiliaryBusWire>,
+    pub note_input_contract: AudioProcessorNoteInputContract,
     pub parameter_ids: Vec<ParameterId>,
     pub sample_rate: u32,
     pub channel_layout: AudioChannelLayout,
@@ -114,6 +116,7 @@ pub(super) enum ReadyResultWire {
     Ready {
         execution_contract: ExecutionContractWire,
         auxiliary_buses: Vec<AuxiliaryBusWire>,
+        note_input_contract: AudioProcessorNoteInputContract,
         input_names: Vec<crate::AudioProcessorInputName>,
     },
     Rejected {
@@ -209,10 +212,12 @@ pub(super) struct WorkerCommand {
     pub start_sample: i64,
     pub frames: u32,
     pub event_count: u32,
+    pub note_count: u32,
 }
 
 impl WorkerCommand {
     pub(super) fn write_to(self, writer: &mut impl Write) -> io::Result<()> {
+        validate_note_count(self.kind, self.note_count)?;
         let kind = match self.kind {
             CommandKind::EnterState => 1_u32,
             CommandKind::Process => 2,
@@ -235,6 +240,7 @@ impl WorkerCommand {
         bytes[12..16].copy_from_slice(&self.frames.to_le_bytes());
         bytes[16..24].copy_from_slice(&self.start_sample.to_le_bytes());
         bytes[24..28].copy_from_slice(&self.event_count.to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.note_count.to_le_bytes());
         writer.write_all(&bytes)?;
         writer.flush()
     }
@@ -277,7 +283,9 @@ impl WorkerCommand {
             frames: u32::from_le_bytes(bytes[12..16].try_into().map_err(invalid_slice)?),
             start_sample: i64::from_le_bytes(bytes[16..24].try_into().map_err(invalid_slice)?),
             event_count: u32::from_le_bytes(bytes[24..28].try_into().map_err(invalid_slice)?),
+            note_count: u32::from_le_bytes(bytes[28..32].try_into().map_err(invalid_slice)?),
         };
+        validate_note_count(command.kind, command.note_count)?;
         if matches!(
             command.kind,
             CommandKind::PollPending
@@ -303,6 +311,10 @@ impl WorkerCommand {
 pub(super) enum WorkerResponse {
     Completed,
     CompletedWithPending(mondrian_core::NativeAudioReprepareRequest),
+    NotesCompleted {
+        note_end_count: u32,
+        pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+    },
     DeferredForConfiguration(mondrian_core::NativeAudioReprepareRequest),
     Failed(String),
 }
@@ -327,17 +339,45 @@ impl WorkerResponse {
                         ))
                     }
                 };
-                let mut bytes = [0_u8; 8];
+                let mut bytes = [0_u8; 12];
                 bytes[..4].copy_from_slice(&kind.to_le_bytes());
-                bytes[4..].copy_from_slice(&flags.to_le_bytes());
+                bytes[4..8].copy_from_slice(&flags.to_le_bytes());
                 (
                     if matches!(self, Self::DeferredForConfiguration(_)) {
                         3
                     } else {
                         2
                     },
-                    Some(bytes),
+                    Some((bytes, 8)),
                 )
+            }
+            Self::NotesCompleted { note_end_count, pending } => {
+                if (*note_end_count as usize) > AUDIO_NOTE_ENDS_PER_BLOCK {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Note End count exceeds protocol bound",
+                    ));
+                }
+                let (kind, flags) = match pending {
+                    None => (0_u32, 0_u32),
+                    Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
+                        if *flags != 0 =>
+                    {
+                        (1, *flags)
+                    }
+                    Some(mondrian_core::NativeAudioReprepareRequest::ClapRestart) => (2, 0),
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid pending Note response flags",
+                        ))
+                    }
+                };
+                let mut bytes = [0_u8; 12];
+                bytes[..4].copy_from_slice(&note_end_count.to_le_bytes());
+                bytes[4..8].copy_from_slice(&kind.to_le_bytes());
+                bytes[8..12].copy_from_slice(&flags.to_le_bytes());
+                (4, Some((bytes, 12)))
             }
         };
         let detail = match self {
@@ -346,7 +386,7 @@ impl WorkerResponse {
         };
         let length = payload.as_ref().map_or_else(
             || detail.as_ref().map_or(0, String::len),
-            |bytes| bytes.len(),
+            |(_, length)| *length,
         );
         let response_len = u32::try_from(length)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Worker detail too large"))?;
@@ -356,8 +396,8 @@ impl WorkerResponse {
         header[8..12].copy_from_slice(&status.to_le_bytes());
         header[12..16].copy_from_slice(&response_len.to_le_bytes());
         writer.write_all(&header)?;
-        if let Some(bytes) = payload {
-            writer.write_all(&bytes)?;
+        if let Some((bytes, length)) = payload {
+            writer.write_all(&bytes[..length])?;
         }
         if let Some(detail) = detail {
             writer.write_all(detail.as_bytes())?;
@@ -387,6 +427,39 @@ impl WorkerResponse {
                 io::ErrorKind::InvalidData,
                 "audio Worker detail exceeds the protocol bound",
             ));
+        }
+        if status == 4 {
+            if detail_len != 12 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Note response extent",
+                ));
+            }
+            let mut bytes = [0_u8; 12];
+            reader.read_exact(&mut bytes)?;
+            let count = u32::from_le_bytes(bytes[..4].try_into().map_err(invalid_slice)?);
+            let kind = u32::from_le_bytes(bytes[4..8].try_into().map_err(invalid_slice)?);
+            let flags = u32::from_le_bytes(bytes[8..12].try_into().map_err(invalid_slice)?);
+            if (count as usize) > AUDIO_NOTE_ENDS_PER_BLOCK {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Note End count exceeds protocol bound",
+                ));
+            }
+            let pending = match (kind, flags) {
+                (0, 0) => None,
+                (1, flags) if flags != 0 => {
+                    Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
+                }
+                (2, 0) => Some(mondrian_core::NativeAudioReprepareRequest::ClapRestart),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid pending Note response kind/flags",
+                    ))
+                }
+            };
+            return Ok(Self::NotesCompleted { note_end_count: count, pending });
         }
         if status == 2 || status == 3 {
             if detail_len != 8 {
@@ -448,6 +521,18 @@ fn invalid_slice(_: std::array::TryFromSliceError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid fixed protocol field")
 }
 
+fn validate_note_count(kind: CommandKind, count: u32) -> io::Result<()> {
+    if (count as usize) > AUDIO_NOTE_EVENTS_PER_BLOCK
+        || (kind != CommandKind::Process && count != 0)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Note command count",
+        ));
+    }
+    Ok(())
+}
+
 fn invalid_contract(detail: &str) -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(detail.to_owned())
 }
@@ -460,6 +545,118 @@ pub(super) struct SharedParameterEvent {
     pub value: f64,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub(super) struct SharedNoteEvent {
+    pub sample_offset: u32,
+    pub native_id: i32,
+    pub port_index: i16,
+    pub channel: i16,
+    pub key: i16,
+    pub kind: u16,
+    pub velocity: f64,
+}
+
+impl SharedNoteEvent {
+    pub(super) fn capture(
+        event: AudioNoteEvent,
+        frames: usize,
+        ports: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        if !event.valid(frames, ports) {
+            return Err(invalid_contract("invalid input Note event"));
+        }
+        Ok(Self {
+            sample_offset: event.sample_offset,
+            native_id: event.native_note_id,
+            port_index: i16::try_from(event.port_index)
+                .map_err(|_| invalid_contract("Note input port is not protocol-representable"))?,
+            channel: i16::from(event.channel),
+            key: i16::from(event.key),
+            kind: match event.kind {
+                AudioNoteEventKind::Off => 0,
+                AudioNoteEventKind::On => 1,
+            },
+            velocity: event.velocity,
+        })
+    }
+
+    pub(super) fn realize(
+        self,
+        frames: usize,
+        ports: usize,
+    ) -> Result<AudioNoteEvent, AudioProcessorHostError> {
+        let event = AudioNoteEvent {
+            sample_offset: self.sample_offset,
+            native_note_id: self.native_id,
+            port_index: u16::try_from(self.port_index)
+                .map_err(|_| invalid_contract("invalid input Note port"))?,
+            channel: u8::try_from(self.channel)
+                .map_err(|_| invalid_contract("invalid input Note channel"))?,
+            key: u8::try_from(self.key).map_err(|_| invalid_contract("invalid input Note key"))?,
+            kind: match self.kind {
+                0 => AudioNoteEventKind::Off,
+                1 => AudioNoteEventKind::On,
+                _ => return Err(invalid_contract("invalid input Note phase")),
+            },
+            velocity: self.velocity,
+        };
+        if !event.valid(frames, ports) {
+            return Err(invalid_contract("invalid input Note event"));
+        }
+        Ok(event)
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub(super) struct SharedNoteEnd {
+    pub native_id: i32,
+    pub port_index: i16,
+    pub channel: i16,
+    pub key: i16,
+    pub reserved: u16,
+    pub flags: u32,
+}
+
+impl SharedNoteEnd {
+    pub(super) fn capture(
+        event: AudioNoteEndEvent,
+        ports: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        if !event.valid(ports) {
+            return Err(invalid_contract("invalid Note End address/flags"));
+        }
+        Ok(Self {
+            native_id: event.native_note_id,
+            port_index: event.port_index,
+            channel: event.channel,
+            key: event.key,
+            reserved: 0,
+            flags: event.flags,
+        })
+    }
+
+    pub(super) fn realize(
+        self,
+        ports: usize,
+    ) -> Result<AudioNoteEndEvent, AudioProcessorHostError> {
+        let event = AudioNoteEndEvent {
+            native_note_id: self.native_id,
+            port_index: self.port_index,
+            channel: self.channel,
+            key: self.key,
+            flags: self.flags,
+        };
+        if self.reserved != 0 || !event.valid(ports) {
+            return Err(invalid_contract(
+                "invalid copied Note End address/flags/reserved field",
+            ));
+        }
+        Ok(event)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SharedBlockLayout {
     pub main_offset: usize,
@@ -468,6 +665,10 @@ pub(super) struct SharedBlockLayout {
     pub auxiliary_samples: usize,
     pub events_offset: usize,
     pub event_capacity: usize,
+    pub note_events_offset: usize,
+    pub note_event_capacity: usize,
+    pub note_ends_offset: usize,
+    pub note_end_capacity: usize,
     pub total_bytes: usize,
 }
 
@@ -515,8 +716,51 @@ impl SharedBlockLayout {
             auxiliary_samples,
             events_offset,
             event_capacity,
+            note_events_offset: total_bytes,
+            note_event_capacity: 0,
+            note_ends_offset: total_bytes,
+            note_end_capacity: 0,
             total_bytes,
         })
+    }
+
+    pub(super) fn with_notes(
+        mut self,
+        input_capacity: usize,
+        end_capacity: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        if input_capacity > AUDIO_NOTE_EVENTS_PER_BLOCK
+            || end_capacity > AUDIO_NOTE_ENDS_PER_BLOCK
+            || self.note_event_capacity != 0
+            || self.note_end_capacity != 0
+        {
+            return Err(invalid_contract(
+                "invalid or repeated isolated Note capacities",
+            ));
+        }
+        if input_capacity == 0 && end_capacity == 0 {
+            return Ok(self);
+        }
+        self.note_events_offset = align_up(self.total_bytes, align_of::<SharedNoteEvent>())?;
+        let note_bytes = input_capacity
+            .checked_mul(size_of::<SharedNoteEvent>())
+            .ok_or_else(|| invalid_contract("isolated Note input extent overflowed"))?;
+        self.note_ends_offset = align_up(
+            self.note_events_offset
+                .checked_add(note_bytes)
+                .ok_or_else(|| invalid_contract("isolated Note input range overflowed"))?,
+            align_of::<SharedNoteEnd>(),
+        )?;
+        let end_bytes = end_capacity
+            .checked_mul(size_of::<SharedNoteEnd>())
+            .ok_or_else(|| invalid_contract("isolated Note End extent overflowed"))?;
+        self.total_bytes = self
+            .note_ends_offset
+            .checked_add(end_bytes)
+            .ok_or_else(|| invalid_contract("isolated Note storage overflowed"))?;
+        self.note_event_capacity = input_capacity;
+        self.note_end_capacity = end_capacity;
+        Ok(self)
     }
 }
 
@@ -593,8 +837,8 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v5 wire bytes: MAPR, version=5, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v9 wire bytes: MAPR, version=9, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
@@ -615,7 +859,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 8, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 9, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -632,7 +876,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 8, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 9, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -724,6 +968,7 @@ mod pending_tests {
             start_sample: 0,
             frames: 0,
             event_count: 0,
+            note_count: 0,
         };
         query.write_to(&mut encoded).expect("encode query");
         assert_eq!(
@@ -754,6 +999,292 @@ mod pending_tests {
             })
             .write_to(&mut Vec::new())
             .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod note_protocol_tests {
+    use super::*;
+    use mondrian_core::NativeAudioReprepareRequest;
+
+    fn event() -> AudioNoteEvent {
+        AudioNoteEvent {
+            sample_offset: 1,
+            kind: AudioNoteEventKind::On,
+            port_index: 0,
+            channel: 15,
+            key: 127,
+            native_note_id: i32::MAX,
+            velocity: f64::from_bits(0x3fd3_3333_3333_3335),
+        }
+    }
+
+    #[test]
+    fn note_pod_has_exact_field_offsets_and_preserves_original_velocity_bits() {
+        assert_eq!(size_of::<SharedNoteEvent>(), 24);
+        assert_eq!(align_of::<SharedNoteEvent>(), 8);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, sample_offset), 0);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, native_id), 4);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, port_index), 8);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, channel), 10);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, key), 12);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, kind), 14);
+        assert_eq!(std::mem::offset_of!(SharedNoteEvent, velocity), 16);
+        assert_eq!(size_of::<SharedNoteEnd>(), 16);
+        assert_eq!(align_of::<SharedNoteEnd>(), 4);
+        assert_eq!(std::mem::offset_of!(SharedNoteEnd, reserved), 10);
+        assert_eq!(std::mem::offset_of!(SharedNoteEnd, flags), 12);
+        let original = event();
+        let packed = SharedNoteEvent::capture(original, 2, 1).unwrap();
+        let restored = packed.realize(2, 1).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(restored.velocity.to_bits(), 0x3fd3_3333_3333_3335);
+        let zero_on = AudioNoteEvent { velocity: -0.0, ..original };
+        let restored = SharedNoteEvent::capture(zero_on, 2, 1).unwrap().realize(2, 1).unwrap();
+        assert_eq!(restored.kind, AudioNoteEventKind::On);
+        assert_eq!(restored.velocity.to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn note_free_layout_retains_exact_pcm_parameter_prefix_and_notes_append() {
+        let old = SharedBlockLayout::new(3, 2, 1, 2).unwrap();
+        assert_eq!(
+            (
+                old.main_offset,
+                old.main_samples,
+                old.auxiliary_offset,
+                old.auxiliary_samples
+            ),
+            (0, 6, 24, 6)
+        );
+        assert_eq!(
+            (old.events_offset, old.event_capacity, old.total_bytes),
+            (48, 6, 144)
+        );
+        assert_eq!(old.with_notes(0, 0).unwrap(), old);
+        let notes = old.with_notes(1, 1).unwrap();
+        assert_eq!(
+            (
+                notes.main_offset,
+                notes.auxiliary_offset,
+                notes.events_offset,
+                notes.event_capacity
+            ),
+            (0, 24, 48, 6)
+        );
+        assert_eq!(
+            (
+                notes.note_events_offset,
+                notes.note_ends_offset,
+                notes.total_bytes
+            ),
+            (144, 168, 184)
+        );
+        let max = old.with_notes(4096, 4096).unwrap();
+        assert_eq!(max.total_bytes, 144 + 4096 * 24 + 4096 * 16);
+        assert!(old.with_notes(4097, 1).is_err());
+        assert!(old.with_notes(1, 4097).is_err());
+        assert!(notes.with_notes(1, 1).is_err());
+        let mut overflow = old;
+        overflow.total_bytes = usize::MAX;
+        assert!(overflow.with_notes(1, 1).is_err());
+    }
+
+    #[test]
+    fn command_uses_last_four_bytes_and_refuses_old_version_or_nonprocess_notes() {
+        let command = WorkerCommand {
+            kind: CommandKind::Process,
+            start_sample: -9,
+            frames: 2,
+            event_count: 3,
+            note_count: 4096,
+        };
+        let mut bytes = Vec::new();
+        command.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(&bytes[28..32], &4096_u32.to_le_bytes());
+        assert_eq!(
+            WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
+            command
+        );
+        let mut old = bytes.clone();
+        old[4..8].copy_from_slice(&8_u32.to_le_bytes());
+        assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
+        let mut too_many = bytes.clone();
+        too_many[28..32].copy_from_slice(&4097_u32.to_le_bytes());
+        assert!(WorkerCommand::read_from(&mut too_many.as_slice()).is_err());
+        for kind in [
+            CommandKind::EnterState,
+            CommandKind::Shutdown,
+            CommandKind::PollPending,
+            CommandKind::StageConfigurationSeed,
+        ] {
+            assert!(WorkerCommand { kind, ..command }.write_to(&mut Vec::new()).is_err());
+        }
+        bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(WorkerCommand::read_from(&mut bytes.as_slice()).is_err());
+    }
+
+    #[test]
+    fn notes_completed_fixed_bytes_preserve_none_clap_and_raw_vst_pending() {
+        for (pending, kind, flags) in [
+            (None, 0_u32, 0_u32),
+            (Some(NativeAudioReprepareRequest::ClapRestart), 2, 0),
+            (
+                Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0008 }),
+                1,
+                0x8000_0008,
+            ),
+        ] {
+            let response = WorkerResponse::NotesCompleted { note_end_count: 4096, pending };
+            let mut bytes = Vec::new();
+            response.clone().write_to(&mut bytes).unwrap();
+            assert_eq!(bytes.len(), 28);
+            assert_eq!(
+                &bytes[..16],
+                &[77, 65, 80, 82, 9, 0, 0, 0, 4, 0, 0, 0, 12, 0, 0, 0]
+            );
+            assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
+            assert_eq!(&bytes[20..24], &kind.to_le_bytes());
+            assert_eq!(&bytes[24..28], &flags.to_le_bytes());
+            assert_eq!(
+                WorkerResponse::read_from(&mut bytes.as_slice()).unwrap(),
+                response
+            );
+        }
+        let response = WorkerResponse::NotesCompleted { note_end_count: 0, pending: None };
+        let mut bytes = Vec::new();
+        response.clone().write_to(&mut bytes).unwrap();
+        assert_eq!(
+            WorkerResponse::read_from(&mut bytes.as_slice()).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn notes_completed_rejects_count_extent_old_version_and_noncanonical_pending() {
+        let mut bytes = Vec::new();
+        WorkerResponse::NotesCompleted { note_end_count: 1, pending: None }
+            .write_to(&mut bytes)
+            .unwrap();
+        for (offset, value) in [(4, 8_u32), (12, 8), (16, 4097), (20, 3), (24, 1)] {
+            let mut invalid = bytes.clone();
+            invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
+        }
+        for (kind, flags) in [(1_u32, 0_u32), (2, 1), (0, 9)] {
+            let mut invalid = bytes.clone();
+            invalid[20..24].copy_from_slice(&kind.to_le_bytes());
+            invalid[24..28].copy_from_slice(&flags.to_le_bytes());
+            assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
+        }
+        assert!(
+            WorkerResponse::NotesCompleted { note_end_count: 4097, pending: None }
+                .write_to(&mut Vec::new())
+                .is_err()
+        );
+        assert!(WorkerResponse::NotesCompleted {
+            note_end_count: 1,
+            pending: Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0 })
+        }
+        .write_to(&mut Vec::new())
+        .is_err());
+    }
+
+    #[test]
+    fn shared_note_scalar_and_end_reserved_checks_refuse_invalid_data() {
+        let canonical = SharedNoteEvent::capture(event(), 2, 1).unwrap();
+        for invalid in [
+            SharedNoteEvent { sample_offset: 2, ..canonical },
+            SharedNoteEvent { native_id: -1, ..canonical },
+            SharedNoteEvent { port_index: -1, ..canonical },
+            SharedNoteEvent { channel: 16, ..canonical },
+            SharedNoteEvent { key: 128, ..canonical },
+            SharedNoteEvent { kind: 2, ..canonical },
+            SharedNoteEvent { velocity: f64::NAN, ..canonical },
+            SharedNoteEvent { velocity: 1.01, ..canonical },
+        ] {
+            assert!(invalid.realize(2, 1).is_err());
+        }
+        let end = AudioNoteEndEvent {
+            native_note_id: i32::MAX,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            flags: 3,
+        };
+        let packed = SharedNoteEnd::capture(end, 1).unwrap();
+        assert_eq!(packed.realize(1).unwrap(), end);
+        assert!(SharedNoteEnd { reserved: 1, ..packed }.realize(1).is_err());
+        assert!(SharedNoteEnd { native_id: -1, ..packed }.realize(1).is_err());
+        assert!(SharedNoteEnd { port_index: 1, ..packed }.realize(1).is_err());
+        assert!(SharedNoteEnd { flags: 4, ..packed }.realize(1).is_err());
+    }
+
+    #[test]
+    fn v9_note_contract_is_mandatory_in_prepare_and_ready_json() {
+        let ready = ReadyWire {
+            schema_version: 9,
+            result: ReadyResultWire::Ready {
+                execution_contract: ExecutionContractWire::capture(
+                    AudioProcessorExecutionContract::new(
+                        0,
+                        AudioProcessorTail::None,
+                        false,
+                        true,
+                        true,
+                        0,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+                auxiliary_buses: Vec::new(),
+                input_names: Vec::new(),
+                note_input_contract: AudioProcessorNoteInputContract::default(),
+            },
+        };
+        let mut json = serde_json::to_value(&ready).unwrap();
+        json["result"].as_object_mut().unwrap().remove("note_input_contract");
+        assert!(serde_json::from_value::<ReadyWire>(json).is_err());
+        assert_eq!(
+            serde_json::from_value::<ReadyWire>(serde_json::to_value(&ready).unwrap()).unwrap(),
+            ready
+        );
+        let prepare = PrepareWire {
+            schema_version: 9,
+            native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
+                .unwrap(),
+            nonce: "typed-only-test".to_owned(),
+            payload: Vec::new(),
+            execution_contract: ExecutionContractWire::capture(
+                AudioProcessorExecutionContract::new(
+                    0,
+                    AudioProcessorTail::None,
+                    false,
+                    true,
+                    true,
+                    0,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            auxiliary_buses: Vec::new(),
+            note_input_contract: AudioProcessorNoteInputContract::default(),
+            parameter_ids: Vec::new(),
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 2,
+            realtime: false,
+            shared_path: "not-opened".to_owned(),
+            shared_bytes: 8,
+        };
+        let mut json = serde_json::to_value(&prepare).unwrap();
+        json.as_object_mut().unwrap().remove("note_input_contract");
+        assert!(serde_json::from_value::<PrepareWire>(json).is_err());
+        assert_eq!(
+            serde_json::from_value::<PrepareWire>(serde_json::to_value(&prepare).unwrap()).unwrap(),
+            prepare
         );
     }
 }

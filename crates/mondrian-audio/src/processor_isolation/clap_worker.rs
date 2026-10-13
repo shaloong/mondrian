@@ -7,7 +7,7 @@ use super::clap_discovery::{
 };
 use super::clap_main_services::{ClapHostMainThread, ClapNativeServicesShared};
 use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
-use super::clap_parameter_events::ClapParameterEvents;
+use super::clap_parameter_events::ClapInputEvents;
 use super::clap_signal_fields::ClapSignalFields;
 use super::native_request_cohort::{NativeRequestMarker, RecordedRequestCohort};
 use super::{
@@ -604,7 +604,12 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             self.helper_executable.clone(),
             payload,
             plugin.execution_contract.with_additional_session_scratch_bytes(
-                output_source_reservation_bytes(plugin.parameters.len())?,
+                output_source_reservation_bytes(plugin.parameters.len())?
+                    .checked_add(ClapInputEvents::reservation_bytes(
+                        parameter_input_capacity(request.render_contract(), parameter_ids.len())?,
+                        0,
+                    )?)
+                    .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?,
             )?,
             plugin.auxiliary_inputs.clone(),
             parameter_ids,
@@ -759,6 +764,17 @@ fn output_source_reservation_bytes(
         .ok_or_else(|| invalid("CLAP output source reservation overflowed"))
 }
 
+fn parameter_input_capacity(
+    render: crate::AudioRenderContract,
+    parameter_lanes: usize,
+) -> Result<usize, AudioProcessorHostError> {
+    render
+        .max_block_frames
+        .checked_mul(parameter_lanes)
+        .filter(|capacity| *capacity <= 1_048_576)
+        .ok_or_else(|| invalid("CLAP parameter event capacity exceeds the supported bound"))
+}
+
 #[cfg(test)]
 fn prepare_loaded(
     request: IsolatedAudioProcessorWorkerPrepareRequest,
@@ -797,7 +813,18 @@ fn prepare_loaded_on_main(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+    let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
+    if !request.note_input_contract().ports.is_empty() {
+        // Carrier/IPC support alone cannot grant a restored instance's dialects.
+        // The later port-negotiation slice must replace this explicit refusal.
+        return Err(unavailable(
+            "CLAP executable Note port negotiation is not yet available",
+        ));
+    }
+    let input_events = ClapInputEvents::try_with_note_capacity(event_capacity, 0)?;
     if output_source_reservation_bytes(expected_parameters.len())?
+        .checked_add(input_events.allocated_bytes()?)
+        .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?
         > request.render_contract().processor_session_scratch_budget_bytes
     {
         return Err(invalid(
@@ -888,7 +915,8 @@ fn prepare_loaded_on_main(
     .size();
     if output_events
         .allocated_bytes()?
-        .checked_add(signature_bytes)
+        .checked_add(input_events.allocated_bytes()?)
+        .and_then(|bytes| bytes.checked_add(signature_bytes))
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ClapWorker>()))
         .and_then(|bytes| {
             bytes.checked_add(std::mem::size_of::<
@@ -962,10 +990,6 @@ fn prepare_loaded_on_main(
         ));
     }
     let frames = render.max_block_frames;
-    let event_capacity = frames
-        .checked_mul(parameter_ids.len())
-        .filter(|capacity| *capacity <= 1_048_576)
-        .ok_or_else(|| invalid("CLAP parameter event capacity exceeds the supported bound"))?;
     let parameter_lanes = parameter_ids
         .iter()
         .map(|id| {
@@ -1013,7 +1037,7 @@ fn prepare_loaded_on_main(
         input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
         output_ports: AudioPorts::with_capacity(channel_count, 1),
         parameter_lanes,
-        input_events: ClapParameterEvents::with_capacity(event_capacity),
+        input_events,
         output_events,
         last_end: None,
         initial_signal_available: true,
@@ -1046,7 +1070,7 @@ struct ClapWorker {
     input_ports: AudioPorts,
     output_ports: AudioPorts,
     parameter_lanes: Vec<(ClapId, f64, f64, bool)>,
-    input_events: ClapParameterEvents,
+    input_events: ClapInputEvents,
     output_events: ClapOutputEvents,
     last_end: Option<i64>,
     // Actual accepted activation, consumed once by the first signal entry.
@@ -2153,6 +2177,7 @@ mod tests {
 
     fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
         IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
@@ -2901,6 +2926,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: b"not json".to_vec(),
             plugin_execution_contract: contract(),
@@ -2929,6 +2955,7 @@ mod tests {
         })
         .expect("payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: clap_native_worker_lane_profile().expect("actual native lane profile"),
             payload,
             plugin_execution_contract: contract(),
@@ -3012,6 +3039,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
@@ -3193,6 +3221,7 @@ mod tests {
         })
         .expect("encode worker payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload,
             plugin_execution_contract: registration.execution_contract,
@@ -3244,6 +3273,7 @@ mod tests {
         };
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("parameter identity")];
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: contract(),
@@ -3603,6 +3633,7 @@ mod tests {
             )
             .expect("mode facts");
             let request = IsolatedAudioProcessorWorkerPrepareRequest {
+                note_input_contract: crate::AudioProcessorNoteInputContract::default(),
                 native_lane: None,
                 payload: Vec::new(),
                 plugin_execution_contract: contract,
@@ -3772,6 +3803,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(
@@ -3818,6 +3850,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(

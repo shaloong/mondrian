@@ -307,6 +307,7 @@ fn prepared_worker(
     )
     .expect("SDK-owned reference entry");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::new(
@@ -360,7 +361,9 @@ fn clap_parameter_preparation_allocates_only_typed_events_ordinals_and_pcm_per_f
         let (large, large_counts) = prepared_worker(4096, mode);
         assert_eq!(large_counts.reallocations, small_counts.reallocations);
         assert_eq!(large_counts.allocations, small_counts.allocations);
-        let native_event_owners = 2 * (size_of::<ParamValueEvent>() + size_of::<usize>());
+        let native_event_owners =
+            super::super::clap_parameter_events::ClapInputEvents::reservation_bytes(2, 0)
+                .expect("actual concrete input owner layouts");
         let planar_pcm_owners = 2 * 2 * size_of::<f32>();
         assert_eq!(
             large_counts.requested_bytes.checked_sub(small_counts.requested_bytes),
@@ -520,6 +523,7 @@ fn prepared_log_worker(
         PluginEntry::load_from_clack::<SinglePluginEntry<LogOrderPlugin>>(c"/test/log-order")
             .expect("owned independent native logger entry");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::new(

@@ -2,7 +2,7 @@
 //! Inline and scoped DSP paths use the one production parameter/PCM algorithm.
 
 use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
-use super::clap_parameter_events::ClapParameterEvents;
+use super::clap_parameter_events::ClapInputEvents;
 use super::clap_worker::{clap_transport, invalid, ClapHost, ClapHostShared};
 use super::native_configuration_control::NativeConfigurationPhase;
 use super::IsolatedAudioProcessorWorkerBlock;
@@ -21,7 +21,7 @@ pub(super) struct ClapSignalFields<'a> {
     pub(super) input_ports: &'a mut AudioPorts,
     pub(super) output_ports: &'a mut AudioPorts,
     pub(super) parameter_lanes: &'a [(ClapId, f64, f64, bool)],
-    pub(super) input_events: &'a mut ClapParameterEvents,
+    pub(super) input_events: &'a mut ClapInputEvents,
     pub(super) output_events: &'a mut ClapOutputEvents,
     pub(super) last_end: &'a mut Option<i64>,
     pub(super) shared: &'a ClapHostShared,
@@ -129,6 +129,15 @@ impl ClapSignalFields<'_> {
                 }
             }
         }
+        let note_port_count = block.note_input_contract().ports.len();
+        let note_end_capacity = block.note_input_contract().limits.output_ends;
+        for event in block.note_events() {
+            if !self.input_events.try_push_note(event, frames, note_port_count) {
+                return Err(AudioProcessorHostError::Process(
+                    "CLAP Note events violate prepared capacity or input contract".to_owned(),
+                ));
+            }
+        }
         self.input_events.sort();
         for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
             for (channel, sample) in samples.iter().copied().enumerate() {
@@ -176,13 +185,20 @@ impl ClapSignalFields<'_> {
         }]);
         {
             let _audio_role = self.shared.enter_audio_thread();
+            let mut output = if note_port_count == 0 {
+                self.output_events
+                    .writer(output_origin)
+                    .map_err(|_| AudioProcessorHostError::NativeParameterSourceUnavailable)?
+            } else {
+                self.output_events.writer_with_notes(
+                    output_origin,
+                    note_port_count,
+                    note_end_capacity,
+                )?
+            };
             let processor = native.ensure_processing_started().map_err(|error| {
                 AudioProcessorHostError::Process(format!("CLAP start failed: {error}"))
             })?;
-            let mut output = self
-                .output_events
-                .writer(output_origin)
-                .map_err(|_| AudioProcessorHostError::NativeParameterSourceUnavailable)?;
             // Only this exclusive process/flush role may claim the request.
             // New requests during process remain set for a later actual service.
             let flush_claimed = processor.access_shared_handler(|host| {
@@ -207,6 +223,20 @@ impl ClapSignalFields<'_> {
                     }
                     AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
                 })?;
+        }
+        if note_port_count != 0 {
+            if self.output_events.note_failed() {
+                return Err(AudioProcessorHostError::Process(
+                    "CLAP rejected a NoteEnd callback in the native operation".to_owned(),
+                ));
+            }
+            for &end in self.output_events.note_ends() {
+                if !block.try_push_note_end(end) {
+                    return Err(AudioProcessorHostError::Process(
+                        "CLAP NoteEnd observations exceed admitted IPC storage".to_owned(),
+                    ));
+                }
+            }
         }
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
             for (channel, sample) in samples.iter_mut().enumerate() {

@@ -28,6 +28,7 @@ fn assert_callback_refusal(mode: AudioProcessingMode) {
         .expect("owned CLAP entry");
     let render = render(mode);
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::new(

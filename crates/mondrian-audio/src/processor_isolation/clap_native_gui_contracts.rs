@@ -431,6 +431,7 @@ fn owned_worker() -> Box<dyn IsolatedAudioProcessorWorker> {
         .expect("actual factory profile");
     prepare_loaded(
         IsolatedAudioProcessorWorkerPrepareRequest {
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: profile,
             payload: Vec::new(),
             plugin_execution_contract: contract,
@@ -523,6 +524,7 @@ fn clap_native_gui_idle_timer_and_callback_after_real_dsp_old_api() {
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &aux,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &[],
         render_contract: render_contract(),
     };
@@ -541,6 +543,7 @@ fn clap_native_gui_idle_timer_and_callback_after_real_dsp_old_api() {
                 start_sample: 0,
                 frames: 8,
                 event_count: 0,
+                note_count: 0,
             })?;
             dsp.complete(main)?;
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -601,6 +604,7 @@ fn clap_native_gui_closed_true_acknowledges_destroy_without_hide() {
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary_inputs,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &[],
         render_contract: render_contract(),
     };
@@ -748,6 +752,7 @@ fn native_entry_binding_clap_first_signal_keeps_real_idle_gui_without_reset_old_
     let context = super::super::worker::WorkerProcessContext {
         layout,
         auxiliary_inputs: &aux,
+        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
         parameter_ids: &[],
         render_contract: render_contract(),
     };
@@ -765,6 +770,7 @@ fn native_entry_binding_clap_first_signal_keeps_real_idle_gui_without_reset_old_
                 start_sample: -19,
                 frames: 8,
                 event_count: 0,
+                note_count: 0,
             })?;
             dsp.complete(main)?;
             let deadline = Instant::now() + Duration::from_secs(2);
