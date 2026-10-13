@@ -15,6 +15,18 @@ use std::time::{Duration, Instant};
 use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
+// Background audio and discovery workers run independently of a caller console.
+// Their private launch sites use NUL stdio and IPC, with no competing explicit flags.
+#[cfg(windows)]
+pub(super) fn configure_background_worker_start(command: &mut Command) -> u32 {
+    use std::os::windows::process::CommandExt;
+
+    // WinBase.h DETACHED_PROCESS; std also adds CREATE_UNICODE_ENVIRONMENT.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    command.creation_flags(DETACHED_PROCESS);
+    DETACHED_PROCESS
+}
+
 pub(super) struct SupervisedAudioWorker {
     process: ProcessOwner,
     control: TcpStream,
@@ -235,6 +247,8 @@ impl SupervisedAudioWorker {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(windows)]
+        configure_background_worker_start(&mut command);
         let mut process =
             ProcessOwner::new(command.spawn().map_err(|error| worker_failed("startup", error))?);
         let startup_deadline = Instant::now()

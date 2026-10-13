@@ -2,8 +2,8 @@
 
 use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
 use super::clap_discovery::{
-    fingerprint_clap_binary, inspect_audio_inputs, list_parameters,
-    probe_clap_plugin_registration_with_state, validate_parameters,
+    fingerprint_clap_binary, inspect_audio_inputs, list_parameters, list_parameters_observed,
+    probe_clap_plugin_registration_with_state, validate_parameters, ParameterQueryCapture,
 };
 use super::clap_main_services::{ClapHostMainThread, ClapNativeServicesShared};
 use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
@@ -864,13 +864,19 @@ fn prepare_loaded_on_main(
     {
         // Own the one existing query snapshot only through the original check;
         // its Vec is dropped before signature/port/activation work as before.
-        let parameters = list_parameters(&handle)
+        let mut capture = ParameterQueryCapture::from_environment();
+        let parameters = list_parameters_observed(&handle, capture.as_mut())
             .map_err(|error| parameter_refusal_at_site(error, "native_after_state_render_mode"))?;
         if !same_clap_parameter_structure(&parameters, expected_parameters) {
-            let detail = first_clap_parameter_structure_mismatch(&parameters, expected_parameters)
-                .unwrap_or_else(|| {
-                    "CLAP parameter metadata changed since contract probe".to_owned()
-                });
+            let detail = match capture.as_ref() {
+                Some(capture) => first_clap_parameter_structure_mismatch_observed(
+                    &parameters,
+                    expected_parameters,
+                    Some(capture),
+                ),
+                None => first_clap_parameter_structure_mismatch(&parameters, expected_parameters),
+            }
+            .unwrap_or_else(|| "CLAP parameter metadata changed since contract probe".to_owned());
             return Err(invalid(detail));
         }
     }
@@ -1554,11 +1560,23 @@ fn first_clap_parameter_structure_mismatch(
     actual: &[super::ClapParameterDescriptor],
     expected: &[super::ClapParameterDescriptor],
 ) -> Option<String> {
+    first_clap_parameter_structure_mismatch_observed(actual, expected, None)
+}
+
+fn first_clap_parameter_structure_mismatch_observed(
+    actual: &[super::ClapParameterDescriptor],
+    expected: &[super::ClapParameterDescriptor],
+    capture: Option<&ParameterQueryCapture>,
+) -> Option<String> {
     if actual.len() != expected.len() {
-        return Some(format!(
+        let mut detail = format!(
             "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode field=count expected_count={} actual_count={}",
             expected.len(), actual.len(),
-        ));
+        );
+        if let Some(capture) = capture {
+            detail.push_str(&capture.suffix(None, None));
+        }
+        return Some(detail);
     }
     for (index, (a, e)) in actual.iter().zip(expected).enumerate() {
         // IDs and booleans below are unsigned scalar projections; float fields
@@ -1586,10 +1604,14 @@ fn first_clap_parameter_structure_mismatch(
         } else {
             continue;
         };
-        return Some(format!(
+        let mut detail = format!(
             "CLAP parameter metadata changed since contract probe: validation_site=native_after_state_render_mode index={index} field={field} expected_native_id={} actual_native_id={} expected_bits={expected_bits:016X} actual_bits={actual_bits:016X}",
             e.id, a.id,
-        ));
+        );
+        if let Some(capture) = capture {
+            detail.push_str(&capture.suffix(Some(index), Some(a)));
+        }
+        return Some(detail);
     }
     None
 }
@@ -4154,3 +4176,75 @@ mod native_gui_contract_tests;
 #[cfg(all(test, windows))]
 #[path = "clap_paused_params_contracts.rs"]
 mod paused_parameter_contract_tests;
+
+#[cfg(test)]
+mod same_call_structure_contracts {
+    use super::*;
+
+    fn descriptor(id: u32) -> super::super::ClapParameterDescriptor {
+        super::super::ClapParameterDescriptor {
+            id,
+            name: "Mix".to_owned(),
+            min_value: 0.0,
+            max_value: 1.0,
+            default_value: 0.5,
+            current_value: 0.5,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        }
+    }
+
+    #[test]
+    fn same_call_structure_uses_original_first_index_and_ignores_legal_fields() {
+        let expected = [descriptor(7), descriptor(9)];
+        let mut actual = expected.clone();
+        actual[0].name = "新名称".to_owned();
+        actual[0].current_value = 0.25;
+        actual[0].hidden = true;
+        actual[0].min_value = -0.0;
+        let capture = ParameterQueryCapture::default();
+        assert!(same_clap_parameter_structure(&actual, &expected));
+        assert!(first_clap_parameter_structure_mismatch_observed(
+            &actual,
+            &expected,
+            Some(&capture)
+        )
+        .is_none());
+        actual[1].default_value = f64::from_bits(0x378F_FE40_0000_0000);
+        assert!(!same_clap_parameter_structure(&actual, &expected));
+        let original =
+            first_clap_parameter_structure_mismatch(&actual, &expected).expect("original mismatch");
+        let observed =
+            first_clap_parameter_structure_mismatch_observed(&actual, &expected, Some(&capture))
+                .expect("same mismatch");
+        assert!(original.contains("index=1 field=default_value expected_native_id=9 actual_native_id=9 expected_bits=3FE0000000000000 actual_bits=378FFE4000000000"));
+        assert_eq!(
+            observed,
+            original + &capture.suffix(Some(1), Some(&actual[1]))
+        );
+        assert!(observed
+            .contains("incomplete=1 selected_index=Some(1) selected_observation=unavailable"));
+        assert!(observed.contains("copied=00000009/01/0000000000000000/3FF0000000000000/378FFE4000000000/3FE0000000000000"));
+    }
+
+    #[test]
+    fn same_call_structure_count_mismatch_has_no_invented_parameter_index() {
+        let expected = [descriptor(7), descriptor(9)];
+        let actual = [descriptor(7)];
+        let capture = ParameterQueryCapture::default();
+        let original = first_clap_parameter_structure_mismatch(&actual, &expected)
+            .expect("original count mismatch");
+        let observed =
+            first_clap_parameter_structure_mismatch_observed(&actual, &expected, Some(&capture))
+                .expect("same count mismatch");
+        assert!(original.contains("field=count expected_count=2 actual_count=1"));
+        assert_eq!(observed, original + &capture.suffix(None, None));
+        assert!(observed
+            .contains("selected_index=None selected_observation=unavailable copied=unavailable"));
+        assert!(!observed.contains("before_origin=FreshZeroedConstructor"));
+        assert!(observed.is_ascii());
+    }
+}

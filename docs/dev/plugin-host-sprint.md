@@ -3002,3 +3002,148 @@ candidate using the existing AudioProgram/transactions/compiler. M2 NoteGate,
 IPC/voice ownership and M3 zero-input Track generators remain unimplemented.
 The complete, live task ROADMAP is maintained outside this repository, with its
 path and recovery state in the existing scratch progress record.
+### 2026-10-13 current3 original-flags child-start baseline
+
+The independently accepted Clack library/quality/source subset was committed as
+`173f92515a5cf59c9d8c5cd5a51e1835b66b627f`. Actual gate review is
+`f07-current3-quality-vendor-native-r4-review-r1.md`, SHA-256
+`FAEA92A81551D4792F776CEC38359BEF63D3477ABA3EBD3D6202EF2AFC1EBC4F`.
+The Audio private observation/diagnosis consumer remains uncommitted.
+
+The predeclared current3 Windows diagnostic ran the original exact parent once,
+then two full ordinary Audio rounds with the original two threads and 76 exact
+ignored skips. Original creation flags, assertions, polling, owner and 1800-second
+native deadlines stayed unchanged. Actual receipt is
+`2A43F1E135329EF833F0BDAAC40B8BB66555B698A3C4B88A573CB8A607F0FD33`.
+The exact parent passed 1/0; ordinary rounds were **386/2** and **388/0**. The
+first ordinary gate remains false, native101/runner1; the other original gates
+are true, native0/runner0. Every owner settled/reaped, without deadline,
+outliving, owner/cleanup errors or changed inputs. ObservationComplete means the
+fixed experiment finished, not that ordinary regression or startup repair passed.
+
+Both failed tests, the actual control-timeout worker lifecycle and isolated hung
+worker deadline tests, reported `0xc0000142` before the loopback control connection.
+They use the current test PE through `SupervisedAudioWorker::launch` and have not
+reached their control/block-timeout target assertions. The three successful
+discovery fixture diagnostics instead report original wait Ok, a 17-byte entry
+marker and unchanged parent-held handle text. Those markers do not describe the
+two failed worker children; actual inheritance remains unqueried. Independent
+actual review is `windows-child-start-baseline-r1-actual-review.md`, SHA-256
+`05A1CA9C7A1F33A5F6BE0C22A527A32241C87C567F8BC5D1C624481D9D9EAFC5`.
+
+The next diagnostic is a separately predeclared, same-cohort cfg(test) one-flag
+off/on experiment at the real shared-worker and fixture spawn seams. No
+production launch-policy fix, DLL attribution, realtime result or new compatibility
+qualification follows from this baseline. All previous failed gates remain
+available; a later passing round does not erase them.
+### 2026-10-13 controlled Windows child-start flag differential
+
+The test-only Windows candidate F984 was independently reviewed (8765460A),
+applied and compiled as current4. Audio no-run receipt is
+`6EB82BCA4ECDCB6282475753A452D08CDCD2FD7A7A56601702499AD933C292FB`,
+source1903 `B5CFB7DFD0A984A0A1D7E2D7FC1FD907A79C8FF2FF256A1239EA44D43950E46D`,
+actual opt1/debug0/features[] PE
+`39DAD30C154E042947184518B40A7A37456DDCA4A179EF1598FFACF09C7B0FD8`.
+Current4 Vendor/Audio strict Clippy and workspace formatting passed with zero
+errors/warnings and unchanged inputs; receipt
+`5333188FF5EC603EF7F75A2919126882EB7A337A6FFA304EB69D26F98E49F2F7`.
+Current3 Audio/source were copied before reuse, archive receipt
+`39C643ADDED3C466E8796623132E10F29B22BC0DD26F166A8AFD12F18F597EEB`.
+
+The frozen E830 controller and CC01 schedule ran all 16 gates in the predeclared
+off/on, then on/off order on that one current4 PE. All 12 exact gates passed
+1/0. Both off ordinary groups **failed 386/2**; both on ordinary groups passed
+**388/0**. Original two threads, 76 exact skips, assertions, timeout and owner
+gates were preserved. All owners settled/reaped without deadline/outliving,
+errors, changed inputs or cleanup failures. Receipt is
+`9F9DE4EDE56FC0AC1552827668F822532DA0E215FF704E93AD9DAB83861E061A`.
+The original all-positive qualification remains false. The schedule was fixed
+before outcomes; no failed observation was retried or erased.
+
+Both failed off ordinary groups include the success fixture returning
+0xc0000142 and another shared worker initialization failure. Their success-fixture
+captures report marker-created true, zero bytes, no read error and entry false,
+with explicit request0/changed false. Off exact-success fixtures instead enter
+and pass. On ordinary captures enter, read17 bytes and return Ok, with explicit
+request8/changed true. Effective OS flags and inheritance remain unqueried;
+missing marker is not a proof of pre-main failure or a DLL identity. The two
+actual native images are Windows CUI by a read-only PE-header check; that check
+does not attribute the loader failure. Fresh paths/nonces vary symmetrically,
+and diagnostic filesystem I/O may perturb conditions.
+
+These controlled observations support evaluating a Windows background-worker
+launch policy. They do not yet qualify a production fix: the experiment is
+cfg(test), and its flag override is not a product feature. Processing/respawn
+uses the shared supervisor, while CLAP and VST3 discovery have separate spawn
+sites. A proposed private shared policy must preserve NUL stdio, IPC, Job and
+existing deadlines, retire the experimental override, and be checked using a
+fresh normal helper plus the default ordinary cohort. Concrete DLL attribution,
+RT, reference-host performance and cross-platform compatibility remain absent.
+
+The separate M1 candidate17BB (ten existing/two new targets,21 proposed tests)
+passed independent static review6F0E9AAB without a source blocker. A two-test
+nested Runtime addendum4689 retains the original seven Audio model tests. It
+covers reachable child-score refusal versus the empty-score successful control.
+The refusal is local to each Plan, not a whole-root no-resolver/media-I/O guarantee;
+score-lock inspection follows existing caller discipline. Neither packet has
+been applied, formatted, compiled or executed. Source schema32/legacy31 migration
+and their footprint/history controls require actual gates before acceptance.
+
+### 2026-10-13 formal Windows background-worker policy acceptance
+
+The formal private Windows policy now applies DETACHED_PROCESS (requested 0x8)
+once before the shared audio-worker spawn and the separate CLAP/VST3 discovery
+spawns. It uses std CommandExt without a new dependency. These existing workers
+use NUL streams and private IPC. The cfg(test) flag override was retired; their
+original owners, args, protocol, polling, deadlines and admission predicates stay
+intact. Non-Windows flags stay untouched. The owned discovery fixture uses the
+same real helper; enabled test diagnostics report requested8, while the full OS
+flag word and inherited handles remain unqueried. Independent static review is
+`586EC3158565716E255DFD7FA1098F8B0EE3524F22EBC44AC1652241DED26939`.
+
+The Audio same-call consumer uses the committed Clack173 observation API only at
+the original discovery/prepare queries. Its exact env1 opt-in, bounded1024 rows,
+640-byte failure suffix and original default/bus predicates are retained. The
+owned typed CLAP ABI fixture plus seven observation controls remain in ordinary tests.
+Startup file diagnostics remain test-only and default-off.
+
+Fresh Audio production1 and normal Product were built serially with actual
+Cargo producer records, normal features[], opt1/debug0 and opt1/debug2 respectively.
+Audio PE is `BFD8FC88AF123D1DDC0E101EDD0B150385DE72E2F32FDEDCA44D5CCEDACF36EA`;
+Product PE is `86AE7F79362061ADB62B0F48AE724FF285F7B341D82FC3AB52C15D928058ED35`.
+Both bind the same1903 source path/byte/hash records, despite different JSON
+wrapper hashes, and actual Product construction followed completed Audio.
+The complete producer-admission receipt is
+`EA915725296525250640681C4C305BD5B1C31F33AF91A74F976A7551AE7486A2`.
+
+The independently reviewed R3 controller fixed six gates before execution:
+three original exact parents, two full ordinary rounds at two threads/76 exact
+ignored skips, then the original ignored fresh-helper library-load error consumer.
+All six original positive gates passed: **1/0,1/0,1/0,388/0,388/0,1/0**.
+All descendants reaped; no native/outer deadline, outliving, owner or cleanup
+error occurred, and all pinned inputs remained unchanged. Actual receipt is
+`9C0C1EFF4E0A685BFEC707001FB984AFEBDC5BD899EC13C7A81AD54B3FF9BE09`.
+Diagnostics and same-call observation were explicitly0. Three marker/directory/
+retired-override variables were deleted with local absence checks and omitted
+from the manifest; the earlier empty-value controller draft remains unexecuted.
+The original264 CLAP and118 supervisor assertions were preserved. The previous
+failed cohorts remain separate negative evidence, without retry substitution.
+
+Current strict Audio all-target/all-feature and Vendor four-feature Clippy,
+Vendor formatting and workspace formatting all passed with zero diagnostics,
+unchanged source and cleanup[]. Receipt is
+`63A058BC61677941F9A0F9F349DF183E9E5AF5BC69A18DC9CBCEC9D40AD456B3`.
+Independent actual acceptance of the six raw gates, current strict checks and
+complete same-source producer cohort is
+`6F109940543F9F30E568EA9C29203D59A71F84B2B7989B6EA44930EA3B544ECB`.
+This accepts a finite Windows default background-start cohort. Concrete loader
+attribution, general fault elimination, physical macOS/Linux, GUI, realtime and
+reference-host performance qualification remain absent. Airwindows's recorded
+parameter failures and unqualified PCM/compatibility status are unchanged.
+
+Next slices are independently reviewed scratch candidates, not live features:
+VST3 discovery ProcessOwner adoption/retirement controls (review D375BEE9), then
+M1 author/save/history/duplicate/local-Plan refusal with23 proposed tests. M2/M3
+note execution, voice ownership and instruments remain unsupported. The complete
+task ROADMAP stays outside Git; source and raw evidence recovery pointers remain
+in the existing scratch progress record.

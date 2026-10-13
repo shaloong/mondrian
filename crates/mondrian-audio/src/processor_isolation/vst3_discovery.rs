@@ -479,15 +479,21 @@ fn request(
     }
     fs::write(&request_path, bytes)
         .map_err(|error| unavailable(format!("VST3 discovery request write failed: {error}")))?;
-    let mut child = Command::new(helper_executable)
-        .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
-        .env(REQUEST_ENV, &request_path)
-        .env(RESPONSE_ENV, &response_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| unavailable(format!("VST3 discovery worker failed to start: {error}")))?;
+    let mut child = {
+        let mut command = Command::new(helper_executable);
+        command
+            .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
+            .env(REQUEST_ENV, &request_path)
+            .env(RESPONSE_ENV, &response_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        super::supervisor::configure_background_worker_start(&mut command);
+        command.spawn().map_err(|error| {
+            unavailable(format!("VST3 discovery worker failed to start: {error}"))
+        })?
+    };
     let deadline = Instant::now() + DEADLINE;
     loop {
         match child.try_wait() {

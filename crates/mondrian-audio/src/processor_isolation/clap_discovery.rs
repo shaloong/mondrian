@@ -582,6 +582,8 @@ fn request_discovery_bytes(
     if diagnostic.is_some() {
         command.env(ERROR_ENV, &error_path);
     }
+    #[cfg(windows)]
+    super::supervisor::configure_background_worker_start(&mut command);
     // Adopt the child and staging immediately; every post-spawn failure/unwind
     // uses the same existing OS owner as audio workers, without claiming that
     // permanent OS refusal or a successful-kill wait is kernel-time bounded.
@@ -853,7 +855,10 @@ pub(super) fn probe_loaded(
     configure_render_mode(&instance.plugin_handle(), render_contract.processing_mode)?;
     shared.service_callbacks(&mut instance)?;
     let handle = instance.plugin_handle();
-    let parameters = list_parameters(&handle)?;
+    let parameters = {
+        let mut capture = ParameterQueryCapture::from_environment();
+        list_parameters_observed(&handle, capture.as_mut())?
+    };
     let captured_state = if capture_default_state && state.is_none() {
         if let Some(extension) = handle.get_extension::<PluginState>() {
             let mut writer = BoundedStateWriter::default();
@@ -1004,33 +1009,293 @@ impl Write for BoundedStateWriter {
     }
 }
 
+// Private startup diagnostics only. None remains the default query path.
+const PARAMETER_SAME_CALL_ENV: &str = "MONDRIAN_INTERNAL_CLAP_PARAMETER_SAME_CALL";
+const MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES: usize = 640;
+
+#[derive(Clone, Copy)]
+struct ParameterQueryRecord {
+    index: u32,
+    info: Option<clack_extensions::params::ParamInfoQueryObservation>,
+    value: Option<clack_extensions::params::ParamValueQueryObservation>,
+}
+
+#[derive(Default)]
+pub(super) struct ParameterQueryCapture {
+    reported_count: Option<u32>,
+    rows: Vec<ParameterQueryRecord>,
+    allocation_or_capacity_loss: bool,
+}
+
+impl ParameterQueryCapture {
+    pub(super) fn from_environment() -> Option<Self> {
+        if std::env::var_os(PARAMETER_SAME_CALL_ENV).as_deref() != Some(OsStr::new("1")) {
+            return None;
+        }
+        Some(Self::default())
+    }
+
+    fn reserve(&mut self, count: u32) {
+        self.reported_count = Some(count);
+        if count > MAX_PARAMETERS || self.rows.try_reserve_exact(count as usize).is_err() {
+            self.allocation_or_capacity_loss = true;
+        }
+    }
+
+    fn begin_row(&mut self, index: u32) {
+        if self.rows.len() >= MAX_PARAMETERS as usize || self.rows.len() >= self.rows.capacity() {
+            self.allocation_or_capacity_loss = true;
+            return;
+        }
+        // Called immediately after this query's ParamInfoBuffer::new. This is a
+        // construction fact, not a reused-buffer read or native write coverage.
+        self.rows.push(ParameterQueryRecord { index, info: None, value: None });
+    }
+
+    fn record_info(
+        &mut self,
+        index: u32,
+        info: clack_extensions::params::ParamInfoQueryObservation,
+    ) {
+        if let Some(row) = self.rows.last_mut().filter(|row| row.index == index) {
+            row.info = Some(info);
+        } else {
+            self.allocation_or_capacity_loss = true;
+        }
+    }
+
+    fn record_value(
+        &mut self,
+        index: u32,
+        value: clack_extensions::params::ParamValueQueryObservation,
+    ) {
+        if let Some(row) = self.rows.last_mut().filter(|row| row.index == index) {
+            row.value = Some(value);
+        } else {
+            self.allocation_or_capacity_loss = true;
+        }
+    }
+
+    pub(super) fn suffix(
+        &self,
+        index: Option<usize>,
+        copied: Option<&ClapParameterDescriptor>,
+    ) -> String {
+        use std::fmt::Write as _;
+        const MARKER: &str = " observation_suffix_truncated=0";
+        let mut text = ParameterObservationText {
+            text: String::with_capacity(MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES),
+            truncated: false,
+        };
+        let row = index.and_then(|index| self.rows.iter().find(|row| row.index as usize == index));
+        let incomplete = self.allocation_or_capacity_loss
+            || self.reported_count.is_none_or(|count| self.rows.len() != count as usize)
+            || self.rows.iter().any(|row| row.info.is_none() || row.value.is_none());
+        let _ = write!(
+            text,
+            "; same_call count={:?} rows={} incomplete={} selected_index={index:?}",
+            self.reported_count,
+            self.rows.len(),
+            incomplete as u8
+        );
+        if let Some(row) = row {
+            let _ = write!(
+                text,
+                " before_origin=FreshZeroedConstructor before_numeric_fields=zero"
+            );
+            if let Some(info) = row.info {
+                let _ = write!(
+                    text,
+                    " info_return={:?} raw={} converted={}",
+                    info.native_return,
+                    ParameterInfoText(info.raw_after),
+                    ParameterInfoText(info.converted)
+                );
+            } else {
+                let _ = write!(text, " info_observation=unavailable");
+            }
+            if let Some(value) = row.value {
+                let _ = write!(
+                    text,
+                    " value_return={:?} value_before={:016X} value_raw={} value_converted={}",
+                    value.native_return,
+                    value.initialized_before_bits,
+                    ParameterBitsText(value.raw_after_bits),
+                    ParameterBitsText(value.converted_bits)
+                );
+            } else {
+                let _ = write!(text, " value_observation=NotCalled");
+            }
+        } else {
+            let _ = write!(text, " selected_observation=unavailable");
+        }
+        if let Some(p) = copied {
+            let mask = p.automatable as u8
+                | ((p.stepped as u8) << 1)
+                | ((p.enumeration as u8) << 2)
+                | ((p.read_only as u8) << 3)
+                | ((p.hidden as u8) << 4);
+            let _ = write!(
+                text,
+                " copied={:08X}/{mask:02X}/{:016X}/{:016X}/{:016X}/{:016X}",
+                p.id,
+                p.min_value.to_bits(),
+                p.max_value.to_bits(),
+                p.default_value.to_bits(),
+                p.current_value.to_bits()
+            );
+        } else {
+            let _ = write!(text, " copied=unavailable");
+        }
+        text.text.push_str(if text.truncated {
+            " observation_suffix_truncated=1"
+        } else {
+            MARKER
+        });
+        text.text
+    }
+}
+
+struct ParameterObservationText {
+    text: String,
+    truncated: bool,
+}
+impl std::fmt::Write for ParameterObservationText {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        if self.truncated {
+            return Err(std::fmt::Error);
+        }
+        const RESERVED: usize = " observation_suffix_truncated=0".len();
+        let available =
+            (MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES - RESERVED).saturating_sub(self.text.len());
+        let mut count = available.min(value.len());
+        while !value.is_char_boundary(count) {
+            count -= 1;
+        }
+        self.text.push_str(&value[..count]);
+        if count < value.len() {
+            self.truncated = true;
+            Err(std::fmt::Error)
+        } else {
+            Ok(())
+        }
+    }
+}
+struct ParameterInfoText(Option<clack_extensions::params::ParamInfoScalars>);
+impl std::fmt::Display for ParameterInfoText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(p) => write!(
+                f,
+                "{:08X}/{:08X}/{:016X}/{:016X}/{:016X}",
+                p.id, p.flags, p.min_bits, p.max_bits, p.default_bits
+            ),
+            None => f.write_str("unavailable"),
+        }
+    }
+}
+struct ParameterBitsText(Option<u64>);
+impl std::fmt::Display for ParameterBitsText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(bits) => write!(f, "{bits:016X}"),
+            None => f.write_str("unavailable"),
+        }
+    }
+}
+fn parameter_error_with_capture(
+    error: AudioProcessorHostError,
+    capture: Option<&ParameterQueryCapture>,
+    index: Option<usize>,
+    copied: Option<&ClapParameterDescriptor>,
+) -> AudioProcessorHostError {
+    match (error, capture) {
+        (AudioProcessorHostError::InvalidContract(mut detail), Some(capture)) => {
+            detail.push_str(&capture.suffix(index, copied));
+            invalid(detail)
+        }
+        (error, _) => error,
+    }
+}
+
 pub(super) fn list_parameters(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
+) -> Result<Vec<ClapParameterDescriptor>, AudioProcessorHostError> {
+    list_parameters_observed(handle, None)
+}
+
+// Private opt-in startup consumer. Existing callers/default tests use None.
+pub(super) fn list_parameters_observed(
+    handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
+    mut capture: Option<&mut ParameterQueryCapture>,
 ) -> Result<Vec<ClapParameterDescriptor>, AudioProcessorHostError> {
     let Some(extension) = handle.get_extension::<PluginParams>() else {
         return Ok(Vec::new());
     };
     let count = extension.count(handle);
     if count > MAX_PARAMETERS {
-        return Err(invalid("CLAP parameter count exceeds the supported bound"));
+        if let Some(capture) = capture.as_deref_mut() {
+            capture.reserve(count);
+        }
+        return Err(parameter_error_with_capture(
+            invalid("CLAP parameter count exceeds the supported bound"),
+            capture.as_deref(),
+            None,
+            None,
+        ));
     }
     let mut parameters = Vec::with_capacity(count as usize);
+    if let Some(capture) = capture.as_deref_mut() {
+        capture.reserve(count);
+    }
     for index in 0..count {
         let mut buffer = ParamInfoBuffer::new();
-        let info = extension
-            .get_info(handle, index, &mut buffer)
-            .ok_or_else(|| invalid("CLAP parameter metadata is missing"))?;
-        let name = std::str::from_utf8(info.name)
-            .map_err(|_| invalid("CLAP parameter name is not UTF-8"))?;
+        let info = match capture.as_deref_mut() {
+            Some(capture) => {
+                capture.begin_row(index);
+                extension.get_info_observed(handle, index, &mut buffer, |info| {
+                    capture.record_info(index, info);
+                })
+            }
+            None => extension.get_info(handle, index, &mut buffer),
+        }
+        .ok_or_else(|| {
+            parameter_error_with_capture(
+                invalid("CLAP parameter metadata is missing"),
+                capture.as_deref(),
+                Some(index as usize),
+                None,
+            )
+        })?;
+        let name = std::str::from_utf8(info.name).map_err(|_| {
+            parameter_error_with_capture(
+                invalid("CLAP parameter name is not UTF-8"),
+                capture.as_deref(),
+                Some(index as usize),
+                None,
+            )
+        })?;
         parameters.push(ClapParameterDescriptor {
             id: info.id.get(),
+            // Keep the original allocation/evaluation order before get_value.
             name: name.to_owned(),
             min_value: info.min_value,
             max_value: info.max_value,
             default_value: info.default_value,
-            current_value: extension
-                .get_value(handle, info.id)
-                .ok_or_else(|| invalid("CLAP parameter current value is unavailable"))?,
+            current_value: match capture.as_deref_mut() {
+                Some(capture) => extension.get_value_observed(handle, info.id, |value| {
+                    capture.record_value(index, value);
+                }),
+                None => extension.get_value(handle, info.id),
+            }
+            .ok_or_else(|| {
+                parameter_error_with_capture(
+                    invalid("CLAP parameter current value is unavailable"),
+                    capture.as_deref(),
+                    Some(index as usize),
+                    None,
+                )
+            })?,
             automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
             stepped: info.flags.contains(ParamInfoFlags::IS_STEPPED),
             enumeration: info.flags.contains(ParamInfoFlags::IS_ENUM),
@@ -1038,15 +1303,27 @@ pub(super) fn list_parameters(
             hidden: info.flags.contains(ParamInfoFlags::IS_HIDDEN),
         });
     }
-    validate_parameters(&parameters)?;
+    validate_parameters_observed(&parameters, capture.as_deref())?;
     Ok(parameters)
 }
 
 pub(super) fn validate_parameters(
     parameters: &[ClapParameterDescriptor],
 ) -> Result<(), AudioProcessorHostError> {
+    validate_parameters_observed(parameters, None)
+}
+
+fn validate_parameters_observed(
+    parameters: &[ClapParameterDescriptor],
+    capture: Option<&ParameterQueryCapture>,
+) -> Result<(), AudioProcessorHostError> {
     if parameters.len() > MAX_PARAMETERS as usize {
-        return Err(invalid("CLAP parameter count exceeds the supported bound"));
+        return Err(parameter_error_with_capture(
+            invalid("CLAP parameter count exceeds the supported bound"),
+            capture,
+            None,
+            None,
+        ));
     }
     let mut seen = std::collections::BTreeSet::new();
     for (index, parameter) in parameters.iter().enumerate() {
@@ -1117,14 +1394,14 @@ pub(super) fn validate_parameters(
         if let Some(reason) = reason {
             // ASCII only: never echo a plugin-provided name, reread a native
             // field, or normalize float values to construct this error.
-            return Err(invalid(format!(
+            return Err(parameter_error_with_capture(invalid(format!(
                 "CLAP parameter metadata is invalid or ambiguous: index={index} native_id={} reason={reason} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={:016X}",
                 parameter.id,
                 parameter.min_value.to_bits(),
                 parameter.max_value.to_bits(),
                 parameter.default_value.to_bits(),
                 parameter.current_value.to_bits(),
-            )));
+            )), capture, Some(index), Some(parameter)));
         }
     }
     Ok(())
@@ -1346,7 +1623,205 @@ mod tests {
             run_discovery_with_error_report(None, |_| Ok(())).unwrap();
         }
 
-        fn child_command(mode: &str, path: &Path, ready: &Path) -> Command {
+        #[cfg(windows)]
+        mod child_start_diagnostic {
+            use super::*;
+            use std::os::windows::io::AsRawHandle;
+
+            const ENABLE_ENV: &str = "MONDRIAN_CLAP_CHILD_START_DIAGNOSTIC";
+            const DIRECTORY_ENV: &str = "MONDRIAN_CLAP_CHILD_START_DIAGNOSTIC_DIRECTORY";
+            const MARKER_ENV: &str = "MONDRIAN_CLAP_CHILD_START_FIXTURE_MARKER";
+            const ENTRY_BYTES: &[u8] = b"fixture-entry-v1\n";
+            const TEXT_BYTES: usize = 1024;
+            const REPORT_BYTES: usize = 8 * 1024;
+
+            #[derive(Serialize)]
+            struct BoundedText {
+                value: String,
+                truncated: bool,
+            }
+
+            fn text(value: &str) -> BoundedText {
+                let mut length = value.len().min(TEXT_BYTES);
+                while !value.is_char_boundary(length) {
+                    length -= 1;
+                }
+                BoundedText {
+                    value: value[..length].to_owned(),
+                    truncated: length != value.len(),
+                }
+            }
+
+            fn enabled() -> bool {
+                std::env::var_os(ENABLE_ENV).as_deref() == Some(OsStr::new("1"))
+            }
+
+            fn epoch_millis() -> Option<u128> {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_millis())
+            }
+
+            // A fixture-test entry witness, not a PE/Rust startup or native loader witness.
+            // Missing sink/write failure is secondary and changes no original fixture result.
+            pub(super) fn fixture_entry() {
+                if !enabled() {
+                    return;
+                }
+                let Some(path) = std::env::var_os(MARKER_ENV) else {
+                    return;
+                };
+                if let Ok(mut file) = fs::OpenOptions::new().write(true).open(path) {
+                    let _ = file.write_all(ENTRY_BYTES);
+                }
+            }
+
+            pub(super) struct Capture {
+                directory: PathBuf,
+                program: BoundedText,
+                arguments: Vec<BoundedText>,
+                parent_pid: u32,
+                original_sidecar_handle: String,
+                requested_explicit_creation_flags: u32,
+                marker: Option<fs::File>,
+                marker_created: bool,
+                before_spawn_epoch_millis: Option<u128>,
+            }
+
+            impl Capture {
+                pub(super) fn begin(
+                    command: &mut Command,
+                    sidecar: &fs::File,
+                    original_path: &Path,
+                    requested_explicit_creation_flags: u32,
+                ) -> Option<Self> {
+                    if !enabled() {
+                        return None;
+                    }
+                    let directory = PathBuf::from(std::env::var_os(DIRECTORY_ENV)?);
+                    // Root supplies an existing local, isolated evidence directory.
+                    // No diagnostic directory fallback, assertion or business error is introduced.
+                    if !directory.metadata().ok()?.is_dir() {
+                        return None;
+                    }
+                    let marker_path = original_path.with_extension("fixture-entry");
+                    let marker = fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker_path)
+                        .ok();
+                    command.env_remove(MARKER_ENV);
+                    if marker.is_some() {
+                        command.env(MARKER_ENV, &marker_path);
+                    }
+                    Some(Self {
+                        directory,
+                        program: text(&command.get_program().to_string_lossy()),
+                        arguments: command
+                            .get_args()
+                            .map(|argument| text(&argument.to_string_lossy()))
+                            .collect(),
+                        parent_pid: std::process::id(),
+                        original_sidecar_handle: format!("{:X}", sidecar.as_raw_handle() as usize),
+                        requested_explicit_creation_flags,
+                        marker_created: marker.is_some(),
+                        marker,
+                        before_spawn_epoch_millis: epoch_millis(),
+                    })
+                }
+
+                // No second try_wait/query/owner. This borrows the same original wait Result
+                // before its unchanged unwrap and observes only a parent-held ordinary marker FD.
+                pub(super) fn finish(
+                    mut self,
+                    child_pid: u32,
+                    result: &Result<(), AudioProcessorHostError>,
+                    sidecar: &fs::File,
+                ) {
+                    #[derive(Serialize)]
+                    struct Report<'a> {
+                        schema_version: u32,
+                        scope: &'static str,
+                        parent_pid: u32,
+                        child_pid: u32,
+                        before_spawn_epoch_millis: Option<u128>,
+                        after_original_wait_epoch_millis: Option<u128>,
+                        program: &'a BoundedText,
+                        arguments: &'a [BoundedText],
+                        original_wait_result: BoundedText,
+                        status_source: &'static str,
+                        original_sidecar_held: bool,
+                        original_sidecar_handle_before: &'a str,
+                        original_sidecar_handle_after: String,
+                        actual_inheritance_flags: &'static str,
+                        creation_flags_changed: bool,
+                        requested_explicit_creation_flags: u32,
+                        effective_os_creation_flags: &'static str,
+                        marker_created: bool,
+                        fixture_entry_observed: Option<bool>,
+                        marker_read_bytes: Option<usize>,
+                        marker_read_error: Option<BoundedText>,
+                    }
+                    let after_wait = epoch_millis();
+                    let (fixture_entry_observed, marker_read_bytes, marker_read_error) =
+                        if let Some(marker) = self.marker.as_mut() {
+                            let mut bytes = [0_u8; 17];
+                            match marker.read(&mut bytes) {
+                                Ok(count) => {
+                                    (Some(&bytes[..count] == ENTRY_BYTES), Some(count), None)
+                                }
+                                Err(error) => (None, None, Some(text(&error.to_string()))),
+                            }
+                        } else {
+                            (None, None, None)
+                        };
+                    let report = Report {
+                        schema_version: 1,
+                        scope: "cfg_test_original_success_child_wait_only",
+                        parent_pid: self.parent_pid,
+                        child_pid,
+                        before_spawn_epoch_millis: self.before_spawn_epoch_millis,
+                        after_original_wait_epoch_millis: after_wait,
+                        program: &self.program,
+                        arguments: &self.arguments,
+                        original_wait_result: text(&format!("{result:?}")),
+                        status_source: "original_wait_result_only_no_additional_process_poll",
+                        original_sidecar_held: true,
+                        original_sidecar_handle_before: &self.original_sidecar_handle,
+                        original_sidecar_handle_after: format!(
+                            "{:X}",
+                            sidecar.as_raw_handle() as usize
+                        ),
+                        actual_inheritance_flags: "unqueried",
+                        creation_flags_changed: self.requested_explicit_creation_flags != 0,
+                        requested_explicit_creation_flags: self.requested_explicit_creation_flags,
+                        effective_os_creation_flags: "unqueried",
+                        marker_created: self.marker_created,
+                        fixture_entry_observed,
+                        marker_read_bytes,
+                        marker_read_error,
+                    };
+                    let Ok(bytes) = serde_json::to_vec(&report) else {
+                        return;
+                    };
+                    if bytes.len() > REPORT_BYTES {
+                        return;
+                    }
+                    let path = self
+                        .directory
+                        .join(format!("child-start-{}-{child_pid}.json", self.parent_pid));
+                    if let Ok(mut output) =
+                        fs::OpenOptions::new().write(true).create_new(true).open(path)
+                    {
+                        let _ = output.write_all(&bytes);
+                    }
+                }
+            }
+        }
+
+        fn child_command(mode: &str, path: &Path, ready: &Path) -> (Command, u32) {
             let mut command = Command::new(std::env::current_exe().unwrap());
             let module = module_path!().split_once("::").expect("crate-qualified module path").1;
             command
@@ -1362,7 +1837,12 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            command
+            #[cfg(windows)]
+            let requested_explicit_creation_flags =
+                super::super::super::supervisor::configure_background_worker_start(&mut command);
+            #[cfg(not(windows))]
+            let requested_explicit_creation_flags = 0;
+            (command, requested_explicit_creation_flags)
         }
 
         #[test]
@@ -1374,6 +1854,8 @@ mod tests {
             let path = PathBuf::from(std::env::var_os(ERROR_ENV).expect("parent sidecar"));
             let ready =
                 PathBuf::from(std::env::var_os(CHILD_READY_ENV).expect("parent ready path"));
+            #[cfg(windows)]
+            child_start_diagnostic::fixture_entry();
             let error = invalid("owned child returned business error");
             match mode.to_str().unwrap() {
                 "error" => {
@@ -1406,7 +1888,7 @@ mod tests {
             let path = temp.path().join("error.json");
             let ready = temp.path().join("ready");
             let mut file = held_file(&path);
-            let child = child_command("error", &path, &ready).spawn().unwrap();
+            let child = child_command("error", &path, &ready).0.spawn().unwrap();
             let mut process =
                 super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
             let error = wait_for_discovery_worker(&mut process, Some(&mut file))
@@ -1421,7 +1903,7 @@ mod tests {
             let path = temp.path().join("error.json");
             let ready = temp.path().join("ready");
             let mut file = held_file(&path);
-            let child = child_command("legacy", &path, &ready).spawn().unwrap();
+            let child = child_command("legacy", &path, &ready).0.spawn().unwrap();
             let mut process =
                 super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
             assert_eq!(
@@ -1437,10 +1919,28 @@ mod tests {
             let path = temp.path().join("error.json");
             let ready = temp.path().join("ready");
             let mut file = held_file(&path);
-            let child = child_command("success", &path, &ready).spawn().unwrap();
+            let (mut command, requested_explicit_creation_flags) =
+                child_command("success", &path, &ready);
+            #[cfg(not(windows))]
+            let _ = requested_explicit_creation_flags;
+            #[cfg(windows)]
+            let diagnostic = child_start_diagnostic::Capture::begin(
+                &mut command,
+                &file,
+                &path,
+                requested_explicit_creation_flags,
+            );
+            let child = command.spawn().unwrap();
+            #[cfg(windows)]
+            let child_pid = child.id();
             let mut process =
                 super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
-            wait_for_discovery_worker(&mut process, Some(&mut file)).unwrap();
+            let result = wait_for_discovery_worker(&mut process, Some(&mut file));
+            #[cfg(windows)]
+            if let Some(diagnostic) = diagnostic {
+                diagnostic.finish(child_pid, &result, &file);
+            }
+            result.unwrap();
             assert!(process.try_wait().unwrap().unwrap().success());
             assert_eq!(
                 file.stream_position().unwrap(),
@@ -1459,7 +1959,7 @@ mod tests {
             let path = temp.path().join("error.json");
             let ready = temp.path().join("ready");
             let mut file = held_file(&path);
-            let child = child_command("timeout", &path, &ready).spawn().unwrap();
+            let child = child_command("timeout", &path, &ready).0.spawn().unwrap();
             let mut process =
                 super::super::super::supervisor::ProcessOwner::with_staging(child, temp);
             let started = Instant::now();
@@ -2376,7 +2876,8 @@ mod tests {
         };
         use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
         use clack_extensions::params::{
-            HostParams, ParamDisplayWriter, ParamInfoWriter, ParamRescanFlags,
+            HostParams, ParamDisplayWriter, ParamInfo, ParamInfoQueryObservation, ParamInfoScalars,
+            ParamInfoWriter, ParamQueryReturn, ParamRescanFlags, ParamValueQueryObservation,
             PluginAudioProcessorParams, PluginMainThreadParams, PluginParams,
         };
         use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
@@ -2397,6 +2898,9 @@ mod tests {
         const AFTER_DEACTIVATE_ALL: u8 = 1;
         const ACTIVATE_FALSE: u8 = 2;
         const RENDER_ERROR: u8 = 3;
+        const PARAM_QUERY_OBSERVATION: u8 = 4;
+        const PARAM_QUERY_DEFAULT_BITS: u64 = 0x378F_FE40_0000_0000;
+        const PARAM_QUERY_VALUE_BITS: u64 = 0x8000_0000_0000_0000;
 
         #[derive(Default)]
         struct Audit {
@@ -2418,6 +2922,10 @@ mod tests {
             destroy_host_active: AtomicBool,
             destroy_incomplete: AtomicU16,
             destroy_controls: AtomicU32,
+            parameter_count_calls: AtomicU32,
+            parameter_info_calls: AtomicU32,
+            parameter_value_calls: AtomicU32,
+            parameter_query_order: AtomicU32,
         }
 
         // Same test-thread setup convention as the existing CountingFactory fixture.
@@ -2481,8 +2989,8 @@ mod tests {
 
         impl<const CASE: u8> FixtureMain<'_, CASE> {
             fn host_observation(&self) -> (bool, u16, u32) {
-                // SAFETY: every fixture instance in this module is created only by
-                // probe_loaded with the live, actual ClapHost wrapper. This typed
+                // SAFETY: every fixture instance in this module is created with
+                // the live, actual ClapHost wrapper. This typed
                 // observer is not usable against an arbitrary installed host.
                 unsafe {
                     HostWrapper::<ClapHost>::handle_observation(self.host.as_raw(), |wrapper| {
@@ -2544,14 +3052,59 @@ mod tests {
             }
         }
 
-        // Explicitly expose an empty parameter set. No values/defaults or metadata
-        // are modified to manufacture the lifecycle observations.
+        // Original lifecycle cases retain their empty parameter set. Only the
+        // distinct owned-query case supplies fixed metadata/current-value controls.
+        impl<const CASE: u8> FixtureMain<'_, CASE> {
+            fn record_parameter_query(&self, code: u32) {
+                let _ = self.shared.audit.parameter_query_order.fetch_update(
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                    |order| Some((order << 4) | code),
+                );
+            }
+        }
+
         impl<const CASE: u8> PluginMainThreadParams for FixtureMain<'_, CASE> {
             fn count(&self) -> u32 {
+                if CASE == PARAM_QUERY_OBSERVATION {
+                    self.shared.audit.parameter_count_calls.fetch_add(1, Ordering::SeqCst);
+                    self.record_parameter_query(5);
+                    return 1;
+                }
                 0
             }
-            fn get_info(&self, _index: u32, _writer: &mut ParamInfoWriter) {}
-            fn get_value(&self, _id: ClapId) -> Option<f64> {
+            fn get_info(&self, index: u32, writer: &mut ParamInfoWriter) {
+                if CASE == PARAM_QUERY_OBSERVATION {
+                    self.shared.audit.parameter_info_calls.fetch_add(1, Ordering::SeqCst);
+                    self.record_parameter_query(match index {
+                        0 => 1,
+                        1 => 2,
+                        _ => 9,
+                    });
+                    if index == 0 {
+                        writer.set(&ParamInfo {
+                            id: ClapId::new(7),
+                            flags: ParamInfoFlags::from_bits_retain(0x8000_0000),
+                            cookie: Default::default(),
+                            name: b"Observed",
+                            module: b"Query",
+                            min_value: f64::from_bits(0x8000_0000_0000_0000),
+                            max_value: 1.0,
+                            default_value: f64::from_bits(PARAM_QUERY_DEFAULT_BITS),
+                        });
+                    }
+                }
+            }
+            fn get_value(&self, id: ClapId) -> Option<f64> {
+                if CASE == PARAM_QUERY_OBSERVATION {
+                    self.shared.audit.parameter_value_calls.fetch_add(1, Ordering::SeqCst);
+                    self.record_parameter_query(match id.get() {
+                        7 => 3,
+                        8 => 4,
+                        _ => 10,
+                    });
+                    return (id.get() == 7).then(|| f64::from_bits(PARAM_QUERY_VALUE_BITS));
+                }
                 None
             }
             fn value_to_text(
@@ -2705,6 +3258,255 @@ mod tests {
         }
 
         #[test]
+        fn parameter_observer_public_methods_preserve_owned_typed_handle_queries() {
+            let audit = Arc::new(Audit::default());
+            NEXT_AUDIT.with(|slot| {
+                assert!(
+                    slot.borrow().is_none(),
+                    "previous fixture setup was not consumed"
+                );
+                *slot.borrow_mut() = Some(Arc::clone(&audit));
+            });
+            let entry = PluginEntry::load_from_clack::<
+                SinglePluginEntry<Fixture<PARAM_QUERY_OBSERVATION>>,
+            >(c"/test/param-query-observation")
+            .expect("owned Clack entry");
+            let info = HostInfo::new("Mondrian test", "Mondrian", "https://example.invalid", "0")
+                .expect("host identity");
+            let shared = ClapHostShared::new();
+            let native_shared =
+                shared.clone().with_native_logs().expect("existing native host owner");
+            let mut instance = PluginInstance::<ClapHost>::new(
+                |_| native_shared,
+                |shared| super::super::super::clap_main_services::ClapHostMainThread::new(shared),
+                &entry,
+                c"org.mondrian.test.probe-active-rescan",
+                &info,
+            )
+            .expect("genuine owned PluginInstance");
+            NEXT_AUDIT.with(|slot| assert!(slot.borrow().is_none(), "fixture setup unused"));
+            let expected = ParamInfoScalars {
+                id: 7,
+                flags: 0x8000_0000,
+                min_bits: 0x8000_0000_0000_0000,
+                max_bits: 0x3FF0_0000_0000_0000,
+                default_bits: PARAM_QUERY_DEFAULT_BITS,
+            };
+            let scalar_view = |info: &ParamInfo<'_>| ParamInfoScalars {
+                id: info.id.get(),
+                flags: info.flags.bits(),
+                min_bits: info.min_value.to_bits(),
+                max_bits: info.max_value.to_bits(),
+                default_bits: info.default_value.to_bits(),
+            };
+            {
+                let handle = instance.plugin_handle();
+                let params = handle.get_extension::<PluginParams>().expect("matching params table");
+                let mut plain_buffer = ParamInfoBuffer::new();
+                let plain = params.get_info(&handle, 0, &mut plain_buffer).expect("plain metadata");
+                assert_eq!(scalar_view(&plain), expected);
+                assert_eq!(plain.name, b"Observed");
+                assert_eq!(plain.module, b"Query");
+                assert!(plain.cookie.as_raw().is_null());
+                assert_eq!(audit.parameter_info_calls.load(Ordering::SeqCst), 1);
+                let mut observed_buffer = ParamInfoBuffer::new();
+                let mut seen = None;
+                let mut emissions = 0;
+                {
+                    let observed = params
+                        .get_info_observed(&handle, 0, &mut observed_buffer, |event| {
+                            emissions += 1;
+                            seen = Some(event);
+                        })
+                        .expect("observed metadata");
+                    assert_eq!(scalar_view(&observed), expected);
+                    assert_eq!(observed.name, b"Observed");
+                    assert_eq!(observed.module, b"Query");
+                    assert!(observed.cookie.as_raw().is_null());
+                }
+                assert_eq!(audit.parameter_info_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(emissions, 1);
+                assert_eq!(
+                    seen,
+                    Some(ParamInfoQueryObservation {
+                        native_return: ParamQueryReturn::NativeTrue,
+                        raw_after: Some(expected),
+                        converted: Some(expected),
+                    })
+                );
+                // Defensive out-of-range control through the genuine wrapper.
+                assert!(params.get_info(&handle, 1, &mut plain_buffer).is_none());
+                assert_eq!(audit.parameter_info_calls.load(Ordering::SeqCst), 3);
+                seen = None;
+                assert!(params
+                    .get_info_observed(&handle, 1, &mut observed_buffer, |event| {
+                        emissions += 1;
+                        seen = Some(event);
+                    })
+                    .is_none());
+                assert_eq!(audit.parameter_info_calls.load(Ordering::SeqCst), 4);
+                assert_eq!(emissions, 2);
+                assert_eq!(
+                    seen,
+                    Some(ParamInfoQueryObservation {
+                        native_return: ParamQueryReturn::NativeFalse,
+                        raw_after: None,
+                        converted: None,
+                    })
+                );
+                assert_eq!(
+                    params.get_value(&handle, ClapId::new(7)).map(f64::to_bits),
+                    Some(PARAM_QUERY_VALUE_BITS)
+                );
+                assert_eq!(audit.parameter_value_calls.load(Ordering::SeqCst), 1);
+                let mut value_seen = None;
+                let mut value_emissions = 0;
+                assert_eq!(
+                    params
+                        .get_value_observed(&handle, ClapId::new(7), |event| {
+                            value_emissions += 1;
+                            value_seen = Some(event);
+                        })
+                        .map(f64::to_bits),
+                    Some(PARAM_QUERY_VALUE_BITS)
+                );
+                assert_eq!(audit.parameter_value_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(value_emissions, 1);
+                assert_eq!(
+                    value_seen,
+                    Some(ParamValueQueryObservation {
+                        native_return: ParamQueryReturn::NativeTrue,
+                        initialized_before_bits: 0,
+                        raw_after_bits: Some(PARAM_QUERY_VALUE_BITS),
+                        converted_bits: Some(PARAM_QUERY_VALUE_BITS),
+                    })
+                );
+                assert_eq!(params.get_value(&handle, ClapId::new(8)), None);
+                assert_eq!(audit.parameter_value_calls.load(Ordering::SeqCst), 3);
+                value_seen = None;
+                assert_eq!(
+                    params.get_value_observed(&handle, ClapId::new(8), |event| {
+                        value_emissions += 1;
+                        value_seen = Some(event);
+                    }),
+                    None
+                );
+                assert_eq!(audit.parameter_value_calls.load(Ordering::SeqCst), 4);
+                assert_eq!(value_emissions, 2);
+                assert_eq!(
+                    value_seen,
+                    Some(ParamValueQueryObservation {
+                        native_return: ParamQueryReturn::NativeFalse,
+                        initialized_before_bits: 0,
+                        raw_after_bits: None,
+                        converted_bits: None,
+                    })
+                );
+            }
+            assert_eq!(
+                audit.parameter_query_order.load(Ordering::SeqCst),
+                0x1122_3344
+            );
+            // The public-method 0x11223344 assertions above stay intact. These
+            // two independent collector cycles each reuse this same owned instance.
+            {
+                let handle = instance.plugin_handle();
+                let reset = || {
+                    audit.parameter_count_calls.store(0, Ordering::SeqCst);
+                    audit.parameter_info_calls.store(0, Ordering::SeqCst);
+                    audit.parameter_value_calls.store(0, Ordering::SeqCst);
+                    audit.parameter_query_order.store(0, Ordering::SeqCst);
+                };
+                let assert_cycle = || {
+                    assert_eq!(audit.parameter_count_calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(audit.parameter_info_calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(audit.parameter_value_calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(audit.parameter_query_order.load(Ordering::SeqCst), 0x513);
+                };
+                let expected_descriptor = ClapParameterDescriptor {
+                    id: 7,
+                    name: "Observed".to_owned(),
+                    min_value: f64::from_bits(0x8000_0000_0000_0000),
+                    max_value: f64::from_bits(0x3FF0_0000_0000_0000),
+                    default_value: f64::from_bits(PARAM_QUERY_DEFAULT_BITS),
+                    current_value: f64::from_bits(PARAM_QUERY_VALUE_BITS),
+                    automatable: false,
+                    stepped: false,
+                    enumeration: false,
+                    read_only: false,
+                    hidden: false,
+                };
+                let assert_copied_bits = |parameters: &[ClapParameterDescriptor]| {
+                    assert_eq!(parameters, std::slice::from_ref(&expected_descriptor));
+                    // PartialEq alone would not distinguish signed zero.
+                    assert_eq!(parameters[0].min_value.to_bits(), 0x8000_0000_0000_0000);
+                    assert_eq!(parameters[0].max_value.to_bits(), 0x3FF0_0000_0000_0000);
+                    assert_eq!(
+                        parameters[0].default_value.to_bits(),
+                        PARAM_QUERY_DEFAULT_BITS
+                    );
+                    assert_eq!(
+                        parameters[0].current_value.to_bits(),
+                        PARAM_QUERY_VALUE_BITS
+                    );
+                };
+                reset();
+                let plain = list_parameters(&handle).expect("plain genuine parameter collector");
+                assert_cycle();
+                assert_copied_bits(&plain);
+                reset();
+                let mut capture = ParameterQueryCapture::default();
+                let observed = list_parameters_observed(&handle, Some(&mut capture))
+                    .expect("observed genuine parameter collector");
+                assert_cycle();
+                assert_copied_bits(&observed);
+                assert_eq!(observed, plain);
+                assert_eq!(capture.reported_count, Some(1));
+                assert_eq!(capture.rows.len(), 1);
+                assert!(!capture.allocation_or_capacity_loss);
+                let row = &capture.rows[0];
+                assert_eq!(row.index, 0);
+                assert_eq!(
+                    row.info,
+                    Some(ParamInfoQueryObservation {
+                        native_return: ParamQueryReturn::NativeTrue,
+                        raw_after: Some(expected),
+                        converted: Some(expected),
+                    })
+                );
+                assert_eq!(
+                    row.value,
+                    Some(ParamValueQueryObservation {
+                        native_return: ParamQueryReturn::NativeTrue,
+                        initialized_before_bits: 0,
+                        raw_after_bits: Some(PARAM_QUERY_VALUE_BITS),
+                        converted_bits: Some(PARAM_QUERY_VALUE_BITS),
+                    })
+                );
+                let suffix = capture.suffix(Some(0), Some(&observed[0]));
+                assert!(suffix.contains("incomplete=0 selected_index=Some(0)"));
+                assert!(suffix.contains(
+                    "raw=00000007/80000000/8000000000000000/3FF0000000000000/378FFE4000000000"
+                ));
+                assert!(suffix.contains("converted=00000007/80000000/8000000000000000/3FF0000000000000/378FFE4000000000"));
+                assert!(
+                    suffix.contains("value_raw=8000000000000000 value_converted=8000000000000000")
+                );
+                assert!(suffix.contains("copied=00000007/00/8000000000000000/3FF0000000000000/378FFE4000000000/8000000000000000"));
+            }
+
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.latency_calls.load(Ordering::SeqCst), 0);
+            drop(instance);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
         fn probe_active_latency_all_is_retained_and_classified_active() {
             let (result, audit) = run::<ACTIVE_LATENCY_ALL>();
             assert_eq!(
@@ -2825,5 +3627,242 @@ mod tests {
             assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
             assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod same_call_consumer_contracts {
+    use super::*;
+    use clack_extensions::params::{
+        ParamInfoQueryObservation, ParamInfoScalars, ParamQueryReturn, ParamValueQueryObservation,
+    };
+
+    fn descriptor(id: u32, default_bits: u64) -> ClapParameterDescriptor {
+        ClapParameterDescriptor {
+            id,
+            name: "Mix".to_owned(),
+            min_value: -0.0,
+            max_value: 1.0,
+            default_value: f64::from_bits(default_bits),
+            current_value: 0.5,
+            automatable: true,
+            stepped: false,
+            enumeration: false,
+            read_only: false,
+            hidden: false,
+        }
+    }
+    fn empty_capture() -> ParameterQueryCapture {
+        ParameterQueryCapture {
+            reported_count: None,
+            rows: Vec::new(),
+            allocation_or_capacity_loss: false,
+        }
+    }
+    fn record(capture: &mut ParameterQueryCapture, index: u32, p: &ClapParameterDescriptor) {
+        capture.begin_row(index);
+        let scalars = ParamInfoScalars {
+            id: p.id,
+            flags: 0x8000_0000,
+            min_bits: p.min_value.to_bits(),
+            max_bits: p.max_value.to_bits(),
+            default_bits: p.default_value.to_bits(),
+        };
+        capture.record_info(
+            index,
+            ParamInfoQueryObservation {
+                native_return: ParamQueryReturn::NativeTrue,
+                raw_after: Some(scalars),
+                converted: Some(scalars),
+            },
+        );
+        capture.record_value(
+            index,
+            ParamValueQueryObservation {
+                native_return: ParamQueryReturn::NativeTrue,
+                initialized_before_bits: 0,
+                raw_after_bits: Some(p.current_value.to_bits()),
+                converted_bits: Some(p.current_value.to_bits()),
+            },
+        );
+    }
+    fn detail(error: AudioProcessorHostError) -> String {
+        match error {
+            AudioProcessorHostError::InvalidContract(detail) => detail,
+            other => panic!("original InvalidContract required: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_call_first_invalid_index_has_exact_raw_converted_copied_bits() {
+        let valid = descriptor(7, 0.5_f64.to_bits());
+        let bad = descriptor(9, 0x7FF8_0000_0000_0042);
+        let later = descriptor(11, 0x7FF8_0000_0000_0099);
+        let parameters = [valid, bad.clone(), later];
+        let mut capture = empty_capture();
+        capture.reserve(3);
+        for (index, p) in parameters.iter().enumerate() {
+            record(&mut capture, index as u32, p);
+        }
+        let original = detail(validate_parameters(&parameters).unwrap_err());
+        let observed =
+            detail(validate_parameters_observed(&parameters, Some(&capture)).unwrap_err());
+        assert!(original.contains("index=1 native_id=9 reason=default_nonfinite"));
+        assert_eq!(observed, original + &capture.suffix(Some(1), Some(&bad)));
+        assert!(observed.contains("selected_index=Some(1) before_origin=FreshZeroedConstructor"));
+        assert!(observed.contains("raw=00000009/80000000/8000000000000000/3FF0000000000000/7FF8000000000042 converted=00000009/80000000/8000000000000000/3FF0000000000000/7FF8000000000042"));
+        assert!(observed.contains("copied=00000009/01/8000000000000000/3FF0000000000000/7FF8000000000042/3FE0000000000000"));
+        assert!(!observed.contains("7FF8000000000099"));
+        assert!(observed.ends_with("observation_suffix_truncated=0"));
+        let packet = discovery_error_packet(DiscoveryErrorStage::Probe, &invalid(observed.clone()));
+        assert_eq!(
+            packet.error_debug,
+            format!("Error: {:?}", invalid(observed))
+        );
+        assert!(!packet.truncated);
+    }
+
+    #[test]
+    fn same_call_missing_false_conversion_failure_and_not_called_are_distinct() {
+        for outcome in [
+            ParamQueryReturn::MissingCallback,
+            ParamQueryReturn::NativeFalse,
+            ParamQueryReturn::NativeTrue,
+        ] {
+            let mut capture = empty_capture();
+            capture.reserve(1);
+            capture.begin_row(0);
+            let raw = (outcome == ParamQueryReturn::NativeTrue).then_some(ParamInfoScalars {
+                id: u32::MAX,
+                flags: u32::MAX,
+                min_bits: 0,
+                max_bits: 0,
+                default_bits: 0,
+            });
+            capture.record_info(
+                0,
+                ParamInfoQueryObservation {
+                    native_return: outcome,
+                    raw_after: raw,
+                    converted: None,
+                },
+            );
+            let suffix = capture.suffix(Some(0), None);
+            assert!(suffix.contains(&format!("info_return={outcome:?}")));
+            assert!(suffix.contains("converted=unavailable"));
+            assert!(suffix.contains("value_observation=NotCalled"));
+            assert!(suffix.contains("incomplete=1"));
+            if outcome == ParamQueryReturn::NativeTrue {
+                assert!(suffix.contains("raw=FFFFFFFF/FFFFFFFF/"));
+            } else {
+                assert!(suffix.contains("raw=unavailable"));
+            }
+        }
+    }
+
+    #[test]
+    fn same_call_missing_value_and_signed_zero_stay_separate_from_default() {
+        let p = descriptor(7, 0x378F_FE40_0000_0000);
+        let mut capture = empty_capture();
+        capture.reserve(1);
+        record(&mut capture, 0, &p);
+        capture.record_value(
+            0,
+            ParamValueQueryObservation {
+                native_return: ParamQueryReturn::NativeFalse,
+                initialized_before_bits: 0,
+                raw_after_bits: None,
+                converted_bits: None,
+            },
+        );
+        let suffix = capture.suffix(Some(0), Some(&p));
+        assert!(suffix.contains("378FFE4000000000"));
+        assert!(suffix.contains("8000000000000000"));
+        assert!(suffix.contains("value_return=NativeFalse value_before=0000000000000000 value_raw=unavailable value_converted=unavailable"));
+        assert!(!suffix.contains("value_observation=NotCalled"));
+        validate_parameters_observed(&[p], Some(&capture))
+            .expect("diagnostic value record does not become admission authority");
+    }
+
+    #[test]
+    fn same_call_capacity_loss_and_unknown_index_keep_primary_error_and_admission() {
+        let p = descriptor(7, 0.5_f64.to_bits());
+        let mut capture = empty_capture();
+        capture.reported_count = Some(1);
+        capture.begin_row(0); // No reservation simulates a loss without forcing OOM.
+        assert!(capture.rows.is_empty());
+        let suffix = capture.suffix(Some(0), Some(&p));
+        assert!(
+            suffix.contains("incomplete=1 selected_index=Some(0) selected_observation=unavailable")
+        );
+        validate_parameters_observed(std::slice::from_ref(&p), Some(&capture))
+            .expect("capture loss preserves success");
+        assert_eq!(
+            detail(parameter_error_with_capture(
+                invalid("primary"),
+                Some(&capture),
+                Some(0),
+                Some(&p)
+            )),
+            "primary".to_owned() + &suffix
+        );
+        let unavailable = AudioProcessorHostError::Unavailable("original".to_owned());
+        let debug = format!("{unavailable:?}");
+        assert_eq!(
+            format!(
+                "{:?}",
+                parameter_error_with_capture(unavailable, Some(&capture), None, None)
+            ),
+            debug
+        );
+        let mut oversized = empty_capture();
+        oversized.reserve(MAX_PARAMETERS + 1);
+        assert!(oversized.rows.is_empty());
+        assert!(oversized
+            .suffix(None, None)
+            .contains("selected_index=None selected_observation=unavailable"));
+    }
+
+    #[test]
+    fn same_call_suffix_has_explicit_bounded_ascii_truncation_marker() {
+        use std::fmt::Write as _;
+        let mut text = ParameterObservationText {
+            text: String::with_capacity(MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES),
+            truncated: false,
+        };
+        assert!(write!(
+            text,
+            "{}",
+            "x".repeat(MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES)
+        )
+        .is_err());
+        let prefix = text.text.clone();
+        assert!(write!(text, "must-not-append-after-loss").is_err());
+        assert_eq!(text.text, prefix);
+        text.text.push_str(" observation_suffix_truncated=1");
+        assert_eq!(text.text.len(), MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES);
+        assert!(text.text.is_ascii());
+        assert!(text.text.ends_with("observation_suffix_truncated=1"));
+        let p = descriptor(u32::MAX - 1, u64::MAX);
+        let mut capture = empty_capture();
+        capture.reserve(1);
+        record(&mut capture, 0, &p);
+        let suffix = capture.suffix(Some(0), Some(&p));
+        assert!(suffix.is_ascii());
+        assert!(suffix.len() <= MAX_PARAMETER_OBSERVATION_SUFFIX_BYTES);
+        assert!(suffix.ends_with("observation_suffix_truncated=0"));
+        let error = parameter_error_with_capture(
+            invalid("x".repeat(MAX_DISCOVERY_ERROR_TEXT_BYTES)),
+            Some(&capture),
+            Some(0),
+            Some(&p),
+        );
+        let packet = discovery_error_packet(DiscoveryErrorStage::Probe, &error);
+        assert!(
+            packet.truncated,
+            "outer 1024-byte packet must honestly report lost suffix"
+        );
+        assert_eq!(packet.error_debug.len(), MAX_DISCOVERY_ERROR_TEXT_BYTES);
+        assert!(packet.error_debug.starts_with("Error: InvalidContract(\"xxxx"));
     }
 }
