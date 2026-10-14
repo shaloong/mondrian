@@ -90,6 +90,17 @@ fn invalid(detail: &str) -> AudioCompileError {
     AudioCompileError::InvalidPreparedGraph(detail.to_owned())
 }
 
+// One accepted-capacity predicate for actual fresh arrays and cloned port keys.
+// It is logical payload policy, not a grant or a physical allocation ceiling.
+fn require_requested_capacity(actual: usize, requested: usize) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(invalid("prepared Note storage capacity exceeds request"));
+    }
+    Ok(())
+}
+
+// The real consumers are ProjectedLane, PreparedNoteEvent, RequestedTarget and
+// PreparedNoteTarget; all contain nonzero-sized identity/scalar fields.
 fn reserve<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
     count
         .checked_mul(std::mem::size_of::<T>())
@@ -98,6 +109,7 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
     values
         .try_reserve_exact(count)
         .map_err(|_| invalid("prepared Note storage allocation refused"))?;
+    require_requested_capacity(values.capacity(), count)?;
     Ok(values)
 }
 
@@ -124,7 +136,12 @@ impl ProjectedNoteScore {
         }
         let mut projected_lanes = reserve::<ProjectedLane>(lane_count)?;
         for lane in lanes.iter().filter(|lane| !lane.notes.is_empty()) {
-            projected_lanes.push(ProjectedLane { lane_id: lane.id, target: lane.target.clone() });
+            let target = lane.target.clone();
+            require_requested_capacity(
+                target.input_port_key.capacity(),
+                lane.target.input_port_key.len(),
+            )?;
+            projected_lanes.push(ProjectedLane { lane_id: lane.id, target });
         }
         projected_lanes.sort_unstable_by_key(|lane| lane.lane_id);
         if projected_lanes.windows(2).any(|pair| pair[0].lane_id == pair[1].lane_id) {
@@ -927,5 +944,315 @@ mod tests {
             Err(AudioCompileError::NoteEventCountOverflow)
         ));
         assert!(reserve::<PreparedNoteEvent>(0).unwrap().is_empty());
+    }
+
+
+    // Actual IR owner/capacity controls; no execution or allocator ceiling grant.
+    mod accepted_capacity_controls {
+        use super::*;
+
+        fn observed_vec_excess<T>() {
+            assert!(
+                std::mem::size_of::<T>() > 0,
+                "real reserve consumer is not ZST"
+            );
+            let values = Vec::<T>::with_capacity(8);
+            let actual = values.capacity();
+            assert!(actual > 1);
+            assert!(values.is_empty(), "length is not allocated capacity");
+            assert!(matches!(
+                require_requested_capacity(actual, 1),
+                Err(AudioCompileError::InvalidPreparedGraph(detail))
+                    if detail == "prepared Note storage capacity exceeds request"
+            ));
+            assert!(require_requested_capacity(actual, actual).is_ok());
+            assert_eq!(
+                values.capacity(),
+                actual,
+                "refusal does not resize an owner"
+            );
+        }
+
+        #[test]
+        fn real_overreserved_arrays_use_capacity_for_every_ir_reserve_consumer() {
+            observed_vec_excess::<ProjectedLane>();
+            observed_vec_excess::<PreparedNoteEvent>();
+            observed_vec_excess::<RequestedTarget>();
+            observed_vec_excess::<PreparedNoteTarget>();
+            for count in [0, 1, 3] {
+                assert!(reserve::<ProjectedLane>(count).unwrap().capacity() <= count);
+                assert!(reserve::<PreparedNoteEvent>(count).unwrap().capacity() <= count);
+                assert!(reserve::<RequestedTarget>(count).unwrap().capacity() <= count);
+                assert!(reserve::<PreparedNoteTarget>(count).unwrap().capacity() <= count);
+            }
+        }
+
+        #[test]
+        fn real_overreserved_string_is_refused_against_byte_length_without_mutation() {
+            let mut key = String::with_capacity(64);
+            key.push_str(" notes.é ");
+            let requested = key.len();
+            let actual = key.capacity();
+            let pointer = key.as_ptr();
+            assert!(requested > key.chars().count(), "request is UTF-8 bytes");
+            assert!(actual > requested);
+            assert!(matches!(
+                require_requested_capacity(actual, requested),
+                Err(AudioCompileError::InvalidPreparedGraph(detail))
+                    if detail == "prepared Note storage capacity exceeds request"
+            ));
+            assert_eq!(key.as_ptr(), pointer);
+            assert_eq!(key.capacity(), actual);
+            assert_eq!(key, " notes.é ");
+            assert!(require_requested_capacity(actual, actual).is_ok());
+        }
+
+        #[test]
+        fn project_checks_its_actual_owned_key_against_original_bytes() {
+            let target = target();
+            let mut program = program(
+                vec![lane(&target, vec![note(time(0, 1), time(1, 1))])],
+                clap(),
+                AudioProcessorInsertionPoint::PreFader,
+            );
+            let original = &mut program.note_lanes[0].target.input_port_key;
+            original.reserve_exact(64);
+            let original_capacity = original.capacity();
+            let original_pointer = original.as_ptr();
+            let original_length = original.len();
+            assert!(original_capacity > original_length);
+            let projected = ProjectedNoteScore::project(&program.note_lanes, rate(48000)).unwrap();
+            let cloned = &projected.lanes[0].target.input_port_key;
+            assert_eq!(cloned, &program.note_lanes[0].target.input_port_key);
+            assert!(cloned.capacity() <= original_length);
+            assert_ne!(
+                cloned.as_ptr(),
+                original_pointer,
+                "a new live String owns its clone"
+            );
+            assert_eq!(
+                program.note_lanes[0].target.input_port_key.capacity(),
+                original_capacity
+            );
+            assert_eq!(
+                program.note_lanes[0].target.input_port_key.as_ptr(),
+                original_pointer
+            );
+        }
+
+        #[test]
+        fn consuming_ir_transitions_move_events_and_each_key_once_with_literal_bits() {
+            let target = target();
+            let first = note(time(0, 1), time(1, 1));
+            let second = note(time(1, 1), time(2, 1));
+            let first_id = first.id;
+            let second_id = second.id;
+            let program = program(
+                vec![lane(&target, vec![first]), lane(&target, vec![second])],
+                clap(),
+                AudioProcessorInsertionPoint::PostFader,
+            );
+            let projected = ProjectedNoteScore::project(&program.note_lanes, rate(48000)).unwrap();
+            assert_eq!(projected.lanes.len(), 2);
+            assert_eq!(projected.events.len(), 4);
+            assert!(projected.lanes.capacity() <= 2);
+            assert!(projected.events.capacity() <= 4);
+            let event_pointer = projected.events.as_ptr();
+            let event_capacity = projected.events.capacity();
+            let keys: Vec<_> = projected
+                .lanes
+                .iter()
+                .map(|lane| {
+                    (
+                        lane.lane_id,
+                        lane.target.input_port_key.as_ptr(),
+                        lane.target.input_port_key.capacity(),
+                    )
+                })
+                .collect();
+            let expected = [
+                (
+                    0,
+                    PreparedNotePhase::On,
+                    program.note_lanes[0].id,
+                    first_id,
+                    0x8000_0000_0000_0000,
+                ),
+                (
+                    48000,
+                    PreparedNotePhase::Off,
+                    program.note_lanes[0].id,
+                    first_id,
+                    0x3FD3_3333_3333_3335,
+                ),
+                (
+                    48000,
+                    PreparedNotePhase::On,
+                    program.note_lanes[1].id,
+                    second_id,
+                    0x8000_0000_0000_0000,
+                ),
+                (
+                    96000,
+                    PreparedNotePhase::Off,
+                    program.note_lanes[1].id,
+                    second_id,
+                    0x3FD3_3333_3333_3335,
+                ),
+            ];
+            for (event, &(sample, phase, lane_id, note_id, velocity)) in
+                projected.events.iter().zip(&expected)
+            {
+                assert_eq!(
+                    (
+                        event.sample,
+                        event.phase,
+                        event.lane_id,
+                        event.note_id,
+                        event.velocity.to_bits()
+                    ),
+                    (sample, phase, lane_id, note_id, velocity)
+                );
+                assert_eq!((event.channel, event.key), (3, 60));
+            }
+            let requested = projected.resolve_targets(&program).unwrap();
+            assert_eq!(requested.targets.len(), 2);
+            assert!(requested.targets.capacity() <= 2);
+            assert_eq!(requested.events.as_ptr(), event_pointer);
+            assert_eq!(requested.events.capacity(), event_capacity);
+            for target in &requested.targets {
+                let &(_, pointer, capacity) =
+                    keys.iter().find(|key| key.0 == target.lane_id).unwrap();
+                assert_eq!(target.input_port_key.as_ptr(), pointer);
+                assert_eq!(target.input_port_key.capacity(), capacity);
+            }
+            let queries = Arc::new(AtomicUsize::new(0));
+            let processor = prepared(
+                requested.targets[0].occurrence,
+                port_contract(),
+                queries.clone(),
+            );
+            let frozen_queries = queries.load(Ordering::Relaxed);
+            let bound = requested.bind(&[processor], rate(48000)).unwrap();
+            assert_eq!(bound.targets.len(), 2);
+            assert!(bound.targets.capacity() <= 2);
+            assert_eq!(bound.events.as_ptr(), event_pointer);
+            assert_eq!(bound.events.capacity(), event_capacity);
+            assert_eq!(
+                queries.load(Ordering::Relaxed),
+                frozen_queries,
+                "bind only borrows cached metadata"
+            );
+            for target in &bound.targets {
+                let &(_, pointer, capacity) =
+                    keys.iter().find(|key| key.0 == target.lane_id).unwrap();
+                assert_eq!(target.input_port_key.as_ptr(), pointer);
+                assert_eq!(target.input_port_key.capacity(), capacity);
+                assert_eq!(
+                    (
+                        target.processor_slot,
+                        target.native_port_id,
+                        target.native_port_index
+                    ),
+                    (0, 123, 1)
+                );
+            }
+            assert_eq!(bound.events.len(), expected.len());
+            for (event, &(sample, phase, lane_id, note_id, velocity)) in
+                bound.events.iter().zip(&expected)
+            {
+                assert_eq!(
+                    (
+                        event.sample,
+                        event.phase,
+                        event.lane_id,
+                        event.note_id,
+                        event.velocity.to_bits()
+                    ),
+                    (sample, phase, lane_id, note_id, velocity)
+                );
+            }
+        }
+
+        #[test]
+        fn empty_ir_stays_zero_capacity_through_all_consuming_stages() {
+            let target = target();
+            let program = program(
+                vec![lane(&target, Vec::new())],
+                clap(),
+                AudioProcessorInsertionPoint::PreFader,
+            );
+            let projected = ProjectedNoteScore::project(&program.note_lanes, rate(48000)).unwrap();
+            assert_eq!(
+                (projected.lanes.capacity(), projected.events.capacity()),
+                (0, 0)
+            );
+            assert!(projected.require_runtime_support().is_ok());
+            let requested = projected.resolve_targets(&program).unwrap();
+            assert_eq!(
+                (requested.targets.capacity(), requested.events.capacity()),
+                (0, 0)
+            );
+            let bound = requested.bind(&[], rate(48000)).unwrap();
+            assert_eq!((bound.targets.capacity(), bound.events.capacity()), (0, 0));
+            assert_eq!(bound.storage_bytes().unwrap(), 0);
+        }
+
+        #[test]
+        fn accepted_capacity_checks_keep_existing_projection_and_binding_error_order() {
+            let target = target();
+            let bad = lane(&target, vec![note(time(1, 192000), time(1, 96000))]);
+            assert_eq!(
+                ProjectedNoteScore::project(std::slice::from_ref(&bad), rate(48000)).unwrap_err(),
+                AudioCompileError::CollapsedNoteDuration {
+                    lane_id: bad.id,
+                    note_id: bad.notes[0].id,
+                    start_sample: 1,
+                    end_sample: 1
+                }
+            );
+            let program = program(
+                vec![lane(&target, vec![note(time(0, 1), time(1, 1))])],
+                clap(),
+                AudioProcessorInsertionPoint::PreFader,
+            );
+            let requested = ProjectedNoteScore::project(&program.note_lanes, rate(48000))
+                .unwrap()
+                .resolve_targets(&program)
+                .unwrap();
+            assert_eq!(
+                requested.bind(&[], rate(44100)).unwrap_err(),
+                AudioCompileError::InvalidRenderContract,
+                "grid refusal precedes target/factory absence"
+            );
+            assert!(matches!(
+                reserve::<PreparedNoteEvent>(usize::MAX),
+                Err(AudioCompileError::NoteEventCountOverflow)
+            ));
+        }
+
+        #[test]
+        fn public_nonempty_guard_still_refuses_before_any_factory_resolution() {
+            let target = target();
+            let program = program(
+                vec![lane(&target, vec![note(time(0, 1), time(1, 1))])],
+                clap(),
+                AudioProcessorInsertionPoint::PreFader,
+            );
+            let expected = AudioCompileError::NoteExecutionNotSupported {
+                lane_id: program.note_lanes[0].id,
+                processor_id: target.processor_id,
+            };
+            let resolver = NeverResolver::default();
+            let error = super::super::super::PreparedAudioPlan::prepare_with_processor_resolver(
+                Arc::new(program),
+                render(),
+                super::super::super::AudioKernelBackend::ScalarReference,
+                &resolver,
+            )
+            .unwrap_err();
+            assert_eq!(error, expected);
+            assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+        }
     }
 }

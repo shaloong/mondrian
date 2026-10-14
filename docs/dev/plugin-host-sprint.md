@@ -4378,3 +4378,72 @@ processing, normal Product/helper execution, real-plugin exact query counters,
 raw rescan flags, complete destruction notifications, performance, realtime or
 other platforms. No plugin-name compatibility exception, duplicate schema or
 silent precision/default replacement is introduced.
+
+## M3 private Note IR accepted-capacity controls — 2026-10-14
+
+After the finite C04 diagnostic checkpoint ee12ca5f, this slice changes only
+the existing private prepared_notes.rs production consumer and adds seven
+ordinary controls inside its original test module. A shared private predicate
+checks actual Vec capacity immediately after try_reserve_exact succeeds for
+ProjectedLane, PreparedNoteEvent, RequestedTarget and PreparedNoteTarget. The
+first projected target-key clone is checked against the original UTF8 byte
+length before insertion. Excess capacity returns the existing typed graph
+error; no trimming, alternate identity, grant or ledger is introduced.
+
+Resolve and bind still move one event buffer and each port key through the
+existing IR stages. Literal sample/phase/UUID/velocity controls verify
+Off-before-On at the same boundary and actual pointer/capacity continuity.
+Cached port binding performs no extra metadata query. Empty payload remains
+zero capacity, and the original endpoint, grid, overflow and public nonempty
+unsupported errors retain their precedence. All ten old private IR tests and
+the rest of the old Audio inventory are retained byte-for-byte by complete
+reversal. Only the new test child was formatted.
+
+Actual installed prepared_notes source is
+EC91764B16820E8BC639A4754A8AE3953F033A6BEF9F5AEF3111EBB1F516BAC8
+(49855 bytes); its full inverse is94A91F87...691CCD. Fresh default Audio
+build, strict check and normal application check all bind the same1939-input
+source freeze FA7F462ACBDD124868424384A7C2FA2B608EBBD7C3DFEE93B816217220214AD0.
+The actual default test PE is037E752F...6672DE (14354944 bytes).
+
+- Focused: seven unique passes, zero failures/ignored,600 filtered out.
+- Ordinary:516 unique passes, zero failures/ignored,91 filtered out; exact
+  inventory607/91 preserves all old600/91 names and adds only the seven controls.
+- Five related crates, all targets/features, Clippy -D warnings: Cargo0 and
+  zero compiler-message records.
+- Normal mondrian-app target check: Cargo0, with ten warnings in unchanged OFX
+  resident diagnostic files. This is not an application-wide strict-zero result
+  or an executed normal Product/helper gate.
+
+Both actual test groups retain frozen inputs, exit0 and reap their owned Jobs
+without deadlines, outliving descendants or cleanup errors. The first focused
+driver's target-file/baseline-inventory binding was strengthened in a new
+create-only r2 before ordinary regression. The earlier executed r1 is preserved;
+its exact closed source/PE/baseline bindings are independently rechecked rather
+than rerun or relabelled.
+
+Closed evidence in develop-alignment-evidence-r1:
+m3-note-ir-capacity-audio-r1, focused-r1, ordinary-r1, strict-r1 and
+normal-check-r1. Local recovery packets: m3-note-ir-capacity-candidate-r1,
+m3-note-ir-capacity-installed-r1 and m3-note-ir-capacity-independent-review-r1.
+Root install and closed-gates proofs retain complete source/inverse/producer,
+actual selected names, warnings and settled owner records. Final source/docs/
+index review precedes local integration.
+
+This is accepted-capacity logical policy after ownership is obtained. Real
+overreserved Vec/String negatives exercise the common predicate; they do not
+force a natural reserve or String-clone overcapacity branch. The rejection can
+allocate error text and does not bound allocator metadata, failure temporaries,
+native heaps or physical residency. No zero-allocation, RT, performance,
+third-party compatibility or other-platform result is claimed. No new native
+gate was necessary for this private storage slice; C04's original native
+failure remains failed, and native OFX temporal access remains unadvertised.
+
+Remaining M3 dependencies are explicit: actual compiled Note payload A, owning
+project/resolve/bind peaks, the earliest selected compiler clone/sort boundary,
+one existing Root reservation/completion, fixed Hosted/factory preparation
+peaks, coherent same-instance offers and the public Score-to-Parent-DSP path.
+The next P1 accounting candidate is limited to common A/next-program/late clone
+acceptance; public nonempty notes, compiler wiring and new execution permission
+are not approved by that resource slice. VST3 event/PPQ/no-End/NoInput and OFX
+bounded temporal-query contracts remain separate format-specific dependencies.
