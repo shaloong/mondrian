@@ -122,6 +122,22 @@ hashes, and completion rechecks them. An unleased shared
 not a frozen qualification artifact. Test-profile correctness and release
 performance remain separate evidence.
 
+## Windows Surge XT Effects default-state observation (2026-10-15)
+
+Surge XT Effects 1.3.4 VST3 (`3B9F6C9B...`, class
+`ABCDEF019182FAEB566D624153465854`) completed default-state capture and loading
+of the exact 1150 captured bytes in a second fresh Product process. At 48 kHz,
+stereo, offline mode and maximum 64 frames, both probes reported the same 14
+parameter descriptors/current values, zero latency, 96000 tail frames and one
+auxiliary bus. All six recorded metadata groups matched exactly.
+
+Receipt `21DF420D...` under `develop-alignment-evidence-r1/surge-fx-vst3-capture-restore-r1`
+binds source `A4483DF2...`, normal Product `99014BC0...` and state `E24081FD...`.
+Both owned processes exited zero without a deadline or surviving descendants;
+inputs remained unchanged. This qualifies the bounded capture/load observation.
+DSP output, nondefault presets, Project reload, GUI, performance and other
+platforms remain unverified for this plugin.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in
