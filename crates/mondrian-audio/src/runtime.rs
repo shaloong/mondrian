@@ -1333,6 +1333,34 @@ impl AudioProgramRuntime {
                 }
                 Arc::new(program)
             };
+            // A CLAP Note candidate must be scoped and all targets checked before
+            // resolving dependencies or preparing any native factory. The original
+            // all-non-CLAP/Builtin family retains its accepted refusal/accounting.
+            let admitted_note_reservation = if PreparedAudioPlan::has_clap_note_targets(&program) {
+                PreparedAudioPlan::validate_admitted_root_note_preparation(&program, contract)?;
+                if depth != 0 || selection.is_some() || prepared_closure.is_some() {
+                    let lane = program
+                        .note_lanes
+                        .iter()
+                        .find(|lane| !lane.notes.is_empty())
+                        .expect("observed nonempty CLAP Note candidate");
+                    return Err(crate::AudioCompileError::NoteExecutionNotSupported {
+                        lane_id: lane.id,
+                        processor_id: lane.target.processor_id,
+                    }
+                    .into());
+                }
+                Some(
+                    note_reservation.take().ok_or(AudioRuntimeBuildError::Compile(
+                        crate::AudioCompileError::InvalidPreparedGraph(
+                            "admitted root Note preparation has no original ledger receipt"
+                                .to_owned(),
+                        ),
+                    ))?,
+                )
+            } else {
+                None
+            };
             // Carry one receipt through descendants and complete it once with
             // the actual common Session footprint. Empty/window/precompiled
             // families retain their existing admission and error boundaries.
@@ -1488,19 +1516,34 @@ impl AudioProgramRuntime {
                 };
                 entries.insert(contribution.edit_id, source);
             }
-            let plan = Arc::new(PreparedAudioPlan::prepare_with_dependencies(
-                program,
-                contract,
-                AudioKernelBackend::default(),
-                &dependencies,
-                processor_resolver,
-            )?);
-            let session_footprint = plan.session_resource_footprint()?;
-            if let Some(reservation) = prepared_reservation {
-                ledger.complete_prepared_session(reservation, session_footprint)?;
+            let (plan, session_footprint) = if let Some(reservation) = admitted_note_reservation {
+                // This helper consumes the sole local receipt and completes the
+                // original ledger once. Do not run ordinary completion again.
+                let plan = ledger.prepare_admitted_root_notes(
+                    reservation,
+                    program,
+                    contract,
+                    &dependencies,
+                    processor_resolver,
+                )?;
+                let footprint = plan.session_resource_footprint()?;
+                (plan, footprint)
             } else {
-                ledger.reserve_session(sequence.id, output_id, session_footprint)?;
-            }
+                let plan = Arc::new(PreparedAudioPlan::prepare_with_dependencies(
+                    program,
+                    contract,
+                    AudioKernelBackend::default(),
+                    &dependencies,
+                    processor_resolver,
+                )?);
+                let footprint = plan.session_resource_footprint()?;
+                if let Some(reservation) = prepared_reservation {
+                    ledger.complete_prepared_session(reservation, footprint)?;
+                } else {
+                    ledger.reserve_session(sequence.id, output_id, footprint)?;
+                }
+                (plan, footprint)
+            };
             let session = AudioRenderSession::new(plan)?;
             let capacity = session.capacity();
             let realized_compensation_bytes = capacity
@@ -1843,6 +1886,7 @@ impl AudioProgramRuntime {
                 "audio render generation was canceled before execution".to_owned(),
             ));
         }
+        self.session.reject_empty_note_request(request)?;
         self.reject_nested_note_execution()?;
         self.preflight_native_control()?;
         self.session.preflight_note_window(request)
@@ -2316,3 +2360,7 @@ pub enum AudioRuntimeBuildError {
 #[cfg(test)]
 #[path = "runtime/note_preclone_admission_tests.rs"]
 mod note_preclone_admission_tests;
+
+#[cfg(test)]
+#[path = "runtime/note_public_preparation_tests.rs"]
+mod note_public_preparation_tests;

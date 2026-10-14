@@ -17,6 +17,30 @@ pub(super) struct PreparedPlanReservation {
 }
 
 impl AudioRuntimeAdmissionLedger {
+    /// Consume the existing direct-root accounting receipt through actual Plan
+    /// preparation, then complete the sole closure ledger before Session create.
+    /// The caller checks root/window/precompiled scope before dependency IO.
+    pub(super) fn prepare_admitted_root_notes(
+        &mut self,
+        reservation: PreparedPlanReservation,
+        program: std::sync::Arc<crate::CompiledAudioProgram>,
+        contract: crate::AudioRenderContract,
+        dependencies: &crate::schedule::AudioPreparationDependencies,
+        processor_resolver: &dyn crate::AudioProcessorResolver,
+    ) -> Result<std::sync::Arc<crate::PreparedAudioPlan>, AudioRuntimeBuildError> {
+        if reservation.output_id != program.output_id() {
+            return Err(AudioRuntimeBuildError::StaleResourceAdmission);
+        }
+        let plan = std::sync::Arc::new(crate::PreparedAudioPlan::prepare_admitted_root_notes(
+            program,
+            contract,
+            dependencies,
+            processor_resolver,
+        )?);
+        self.complete_prepared_session(reservation, plan.session_resource_footprint()?)?;
+        Ok(plan)
+    }
+
     /// Admit only the direct unwindowed compiler's nonempty selected Note family.
     /// B0 and all four lowering phases use their existing consumers; Ac is the
     /// compiler's checked request. The receipt still belongs to this ledger.

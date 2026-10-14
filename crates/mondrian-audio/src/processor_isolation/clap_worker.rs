@@ -540,6 +540,52 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
+        if request.note_input_requested() {
+            let offer = super::probe_clap_note_processing_offer(
+                &self.helper_executable,
+                library_path,
+                plugin_id,
+                request.render_contract(),
+                request.opaque_state(),
+            )?;
+            if offer.notes.binary_sha256 != *fingerprint {
+                return Err(unavailable(
+                    "CLAP binary changed after descriptor discovery",
+                ));
+            }
+            let execution_contract = AudioProcessorExecutionContract::new(
+                offer.latency_frames() as usize,
+                offer.tail(),
+                true,
+                offer.processing_mode() == crate::AudioProcessingMode::Realtime,
+                offer.processing_mode() == crate::AudioProcessingMode::Offline,
+                0,
+            )?;
+            let registration = ClapPluginRegistration {
+                plugin_id: plugin_id.clone(),
+                library_path: library_path.clone(),
+                binary_sha256: offer.notes.binary_sha256,
+                execution_contract,
+                parameters: offer.parameters().to_vec(),
+                auxiliary_inputs: AudioProcessorAuxiliaryInputContract {
+                    buses: offer
+                        .auxiliary_inputs()
+                        .map(|(key, channel_layout)| {
+                            crate::AudioProcessorAuxiliaryInputBusContract {
+                                bus_key: key.to_owned(),
+                                channel_layout,
+                            }
+                        })
+                        .collect(),
+                },
+            };
+            return resolve_clap_registration(
+                &self.helper_executable,
+                &registration,
+                request,
+                offer.notes.contract,
+            );
+        }
         let registration = probe_clap_plugin_registration(
             &self.helper_executable,
             library_path,
@@ -588,7 +634,7 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
         &self,
         request: AudioProcessorPrepareRequest<'_>,
     ) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
-        let AudioProcessorDefinitionRef::Clap { plugin_id, schema_version, binary_sha256 } =
+        let AudioProcessorDefinitionRef::Clap { plugin_id, schema_version, .. } =
             request.definition()
         else {
             return Err(unavailable(
@@ -602,61 +648,99 @@ impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
             .plugins
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not registered")))?;
-        match binary_sha256 {
-            Some(expected) if *expected == plugin.binary_sha256 => {}
-            Some(_) => {
-                return Err(unavailable(format!(
-                    "CLAP plugin {plugin_id} binary revision differs from the authored instance"
-                )))
-            }
-            None => {
-                return Err(unavailable(format!(
-                    "CLAP plugin {plugin_id} has no authored binary revision; rebind it explicitly"
-                )))
-            }
-        }
-        let mut parameter_ids = Vec::with_capacity(request.parameters().len());
-        let mut clap_parameter_ids = Vec::with_capacity(request.parameters().len());
-        for (parameter_id, parameter) in request.parameters() {
-            let descriptor = plugin
-                .parameters
-                .iter()
-                .find(|descriptor| descriptor.parameter_id().as_ref().ok() == Some(parameter_id))
-                .ok_or_else(|| invalid("authored CLAP parameter is absent from the plugin"))?;
-            if descriptor.read_only || parameter.schema != descriptor.authoring_schema()? {
-                return Err(invalid(
-                    "authored CLAP parameter contract differs from the plugin",
-                ));
-            }
-            parameter_ids.push(parameter_id.clone());
-            clap_parameter_ids.push(descriptor.id);
-        }
-        let payload = serde_json::to_vec(&ClapPayload {
-            library_path: plugin.library_path.clone(),
-            plugin_id: plugin.plugin_id.clone(),
-            binary_sha256: plugin.binary_sha256,
-            state: request.opaque_state().map(ToOwned::to_owned),
-            parameters: plugin.parameters.clone(),
-            parameter_ids: clap_parameter_ids,
-        })
-        .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
-        Ok(IsolatedAudioProcessorWorkerSpec::new(
-            self.helper_executable.clone(),
-            payload,
-            plugin.execution_contract.with_additional_session_scratch_bytes(
-                output_source_reservation_bytes(plugin.parameters.len())?
-                    .checked_add(ClapInputEvents::reservation_bytes(
-                        parameter_input_capacity(request.render_contract(), parameter_ids.len())?,
-                        0,
-                    )?)
-                    .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?,
-            )?,
-            plugin.auxiliary_inputs.clone(),
-            parameter_ids,
-            request.render_contract(),
-        )?
-        .with_native_worker_lane_resources(clap_native_worker_lane_profile()?))
+        resolve_clap_registration(
+            &self.helper_executable,
+            plugin,
+            request,
+            crate::AudioProcessorNoteInputContract::default(),
+        )
     }
+}
+
+/// Adapter-local consumer of coherent processing metadata. The registration
+/// remains the existing payload interpreter; no second author/state registry.
+fn resolve_clap_registration(
+    helper_executable: &std::path::Path,
+    plugin: &ClapPluginRegistration,
+    request: AudioProcessorPrepareRequest<'_>,
+    notes: crate::AudioProcessorNoteInputContract,
+) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+    let AudioProcessorDefinitionRef::Clap { plugin_id, schema_version, binary_sha256 } =
+        request.definition()
+    else {
+        return Err(unavailable(
+            "only CLAP definitions are handled by this registry",
+        ));
+    };
+    if *schema_version != 1 {
+        return Err(unavailable("CLAP definition schema version is unsupported"));
+    }
+    notes.validate()?;
+    if request.note_input_requested() && notes.ports.is_empty() {
+        return Err(invalid(
+            "CLAP registry has no same-instance Note processing offer",
+        ));
+    }
+    match binary_sha256 {
+        Some(expected) if *expected == plugin.binary_sha256 => {}
+        Some(_) => {
+            return Err(unavailable(format!(
+                "CLAP plugin {plugin_id} binary revision differs from the authored instance"
+            )))
+        }
+        None => {
+            return Err(unavailable(format!(
+                "CLAP plugin {plugin_id} has no authored binary revision; rebind it explicitly"
+            )))
+        }
+    }
+    let mut parameter_ids = Vec::with_capacity(request.parameters().len());
+    let mut clap_parameter_ids = Vec::with_capacity(request.parameters().len());
+    for (parameter_id, parameter) in request.parameters() {
+        let descriptor = plugin
+            .parameters
+            .iter()
+            .find(|descriptor| descriptor.parameter_id().as_ref().ok() == Some(parameter_id))
+            .ok_or_else(|| invalid("authored CLAP parameter is absent from the plugin"))?;
+        if descriptor.read_only || parameter.schema != descriptor.authoring_schema()? {
+            return Err(invalid(
+                "authored CLAP parameter contract differs from the plugin",
+            ));
+        }
+        parameter_ids.push(parameter_id.clone());
+        clap_parameter_ids.push(descriptor.id);
+    }
+    let payload = serde_json::to_vec(&ClapPayload {
+        library_path: plugin.library_path.clone(),
+        plugin_id: plugin.plugin_id.clone(),
+        binary_sha256: plugin.binary_sha256,
+        state: request.opaque_state().map(ToOwned::to_owned),
+        parameters: plugin.parameters.clone(),
+        parameter_ids: clap_parameter_ids,
+    })
+    .map_err(|error| invalid(format!("CLAP worker payload encoding failed: {error}")))?;
+    let note_owner_reservation = if notes.ports.is_empty() {
+        output_source_reservation_bytes(plugin.parameters.len())?
+    } else {
+        note_source_reservation_bytes(plugin.parameters.len(), &notes)?
+    };
+    IsolatedAudioProcessorWorkerSpec::new(
+        helper_executable.to_path_buf(),
+        payload,
+        plugin.execution_contract.with_additional_session_scratch_bytes(
+            note_owner_reservation
+                .checked_add(ClapInputEvents::reservation_bytes(
+                    parameter_input_capacity(request.render_contract(), parameter_ids.len())?,
+                    notes.limits.input_events,
+                )?)
+                .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?,
+        )?,
+        plugin.auxiliary_inputs.clone(),
+        parameter_ids,
+        request.render_contract(),
+    )?
+    .with_native_worker_lane_resources(clap_native_worker_lane_profile()?)
+    .with_note_input_contract(notes)
 }
 
 // The concrete preparation codec remains the only interpreter for this format.

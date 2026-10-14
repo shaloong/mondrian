@@ -1723,3 +1723,11 @@ fn native_factory_storage_visitor_refusal_stops_without_loading_or_silently_omit
     ));
     assert_eq!(calls, 1);
 }
+
+#[cfg(all(test, windows))]
+#[path = "tests/native_clap_public_notes.rs"]
+mod native_clap_public_notes;
+
+#[cfg(all(test, windows))]
+#[path = "tests/native_clap_public_note_refusals.rs"]
+mod native_clap_public_note_refusals;

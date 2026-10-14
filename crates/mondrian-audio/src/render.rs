@@ -951,6 +951,7 @@ impl AudioRenderSession {
         request: AudioRenderRequest,
         destination: &mut [f32],
     ) -> Result<(), AudioExecutionError> {
+        self.reject_empty_note_request(request)?;
         self.preflight_native_control()?;
         self.render_into_admitted(source, request, destination, None)
     }
@@ -990,6 +991,20 @@ impl AudioRenderSession {
         !self.plan.schedule.notes.is_empty()
     }
 
+    /// Reject an unsupported empty Note request before any native control I/O.
+    pub(crate) fn reject_empty_note_request(
+        &self,
+        request: AudioRenderRequest,
+    ) -> Result<(), AudioExecutionError> {
+        if self.has_notes() && request.frames == 0 {
+            return Err(crate::AudioProcessorHostError::NoteExecutionRefused(
+                "Note score zero-frame processing is unsupported",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Admit the entire prospective DSP window before any source, delay, meter
     /// or caller PCM changes. No IDs, records or cursors are committed here.
     pub(crate) fn preflight_note_window(
@@ -999,6 +1014,7 @@ impl AudioRenderSession {
         if !self.has_notes() {
             return Ok(());
         }
+        self.reject_empty_note_request(request)?;
         let contract = self.plan.contract();
         if request.frames > contract.max_block_frames {
             return Err(AudioExecutionError::BlockTooLarge);

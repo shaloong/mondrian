@@ -29,7 +29,7 @@ use mondrian_core::{
 };
 use mondrian_timeline::audio::{
     AudioChannelSignalStage, AudioChannelStripOutputPort, AudioComponentChannelMapping,
-    AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
+    AudioProcessorDefinitionRef, AudioRouteDestination, AudioRouteSource, AudioTransitionCurve,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -399,6 +399,114 @@ impl PreparedAudioPlan {
         })
     }
 
+    /// Read immutable author targets only; no allocation or native query.
+    /// All-non-CLAP/Builtin scores retain their original public refusal family.
+    pub(crate) fn has_clap_note_targets(program: &CompiledAudioProgram) -> bool {
+        program.note_lanes.iter().filter(|lane| !lane.notes.is_empty()).any(|lane| {
+            program.track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                channel
+                    .strip
+                    .pre_fader
+                    .processors
+                    .iter()
+                    .chain(&channel.strip.post_fader.processors)
+                    .any(|processor| {
+                        processor.instance_id == lane.target.processor_id
+                            && matches!(
+                                &processor.definition,
+                                AudioProcessorDefinitionRef::Clap { .. }
+                            )
+                    })
+            })
+        })
+    }
+
+    /// Preflight the entire new CLAP family before dependency/factory IO.
+    /// Runtime also requires direct root, no window/precompiled, and the original
+    /// ledger receipt. This is not an execution permit or installed ownership.
+    pub(crate) fn validate_admitted_root_note_preparation(
+        program: &CompiledAudioProgram,
+        contract: AudioRenderContract,
+    ) -> Result<(), AudioCompileError> {
+        contract.validate()?;
+        validate_selected_note_endpoints(program, contract.sample_rate)?;
+        let first =
+            program.note_lanes.iter().find(|lane| !lane.notes.is_empty()).ok_or_else(|| {
+                AudioCompileError::InvalidPreparedGraph(
+                    "admitted root Note preparation requires a nonempty score".to_owned(),
+                )
+            })?;
+        if program.contributions().iter().any(|contribution| {
+            matches!(
+                contribution.source,
+                crate::CompiledAudioSource::NestedOutput { .. }
+            )
+        }) {
+            return Err(AudioCompileError::NoteExecutionNotSupported {
+                lane_id: first.id,
+                processor_id: first.target.processor_id,
+            });
+        }
+        for lane in program.note_lanes.iter().filter(|lane| !lane.notes.is_empty()) {
+            let target = program.track_channels.get(&lane.target.track_id).and_then(|channel| {
+                let mut targets = channel
+                    .strip
+                    .pre_fader
+                    .processors
+                    .iter()
+                    .chain(&channel.strip.post_fader.processors)
+                    .filter(|processor| processor.instance_id == lane.target.processor_id);
+                let target = targets.next()?;
+                if targets.next().is_some() {
+                    None
+                } else {
+                    Some(target)
+                }
+            });
+            if !target.is_some_and(|processor| {
+                matches!(
+                    &processor.definition,
+                    AudioProcessorDefinitionRef::Clap { .. }
+                )
+            }) {
+                return Err(AudioCompileError::NoteExecutionNotSupported {
+                    lane_id: lane.id,
+                    processor_id: lane.target.processor_id,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Private direct-root consumer. Original public preparation keeps both
+    /// Unsupported guards; only the existing ledger builder calls this route.
+    pub(crate) fn prepare_admitted_root_notes(
+        program: Arc<CompiledAudioProgram>,
+        contract: AudioRenderContract,
+        dependencies: &AudioPreparationDependencies,
+        processor_resolver: &dyn AudioProcessorResolver,
+    ) -> Result<Self, AudioCompileError> {
+        Self::validate_admitted_root_note_preparation(&program, contract)?;
+        let rate = AudioSampleRate::new(contract.sample_rate)
+            .map_err(|_| AudioCompileError::InvalidRenderContract)?;
+        let requested_notes = ProjectedNoteScore::project(&program.note_lanes, rate)?
+            .resolve_targets(program.as_ref())?;
+        let schedule = PreparedAudioSchedule::build(
+            program.as_ref(),
+            contract,
+            dependencies,
+            processor_resolver,
+            requested_notes,
+        )?;
+        Ok(Self {
+            preparation_id: mondrian_core::AudioPreparedPlanId::new(),
+            program,
+            contract,
+            kernel_backend: AudioKernelBackend::default(),
+            schedule,
+        })
+    }
+
     /// Concrete Render Contract used by Sessions.
     pub fn contract(&self) -> AudioRenderContract {
         self.contract
@@ -480,6 +588,20 @@ fn validate_selected_note_preparation(
     program: &CompiledAudioProgram,
     sample_rate: u32,
 ) -> Result<(), AudioCompileError> {
+    validate_selected_note_endpoints(program, sample_rate)?;
+    if let Some(lane) = program.note_lanes.iter().find(|lane| !lane.notes.is_empty()) {
+        return Err(AudioCompileError::NoteExecutionNotSupported {
+            lane_id: lane.id,
+            processor_id: lane.target.processor_id,
+        });
+    }
+    Ok(())
+}
+
+fn validate_selected_note_endpoints(
+    program: &CompiledAudioProgram,
+    sample_rate: u32,
+) -> Result<(), AudioCompileError> {
     let rate =
         AudioSampleRate::new(sample_rate).map_err(|_| AudioCompileError::InvalidRenderContract)?;
     let mut event_count = 0_usize;
@@ -513,12 +635,6 @@ fn validate_selected_note_preparation(
                 });
             }
         }
-    }
-    if let Some(lane) = program.note_lanes.iter().find(|lane| !lane.notes.is_empty()) {
-        return Err(AudioCompileError::NoteExecutionNotSupported {
-            lane_id: lane.id,
-            processor_id: lane.target.processor_id,
-        });
     }
     Ok(())
 }

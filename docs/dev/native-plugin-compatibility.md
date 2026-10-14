@@ -36,7 +36,7 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Bounded Note execution infrastructure | Typed carrier/IPC v9, private once-projected score with checked logical lowering payloads, direct unwindowed pre-clone admission in the existing ledger, exclusive Hosted ledger, whole-window admission and restored CLAP NotePorts; finite owned Windows model and direct fixture-DLL controls | Public nonempty score execution remains Unsupported; other preparation families, same-instance application processing offer, Parent IPC/DAG native Notes, zero-input instruments, replay/nesting and physical realtime |
+| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC v9 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, zero-input instruments, other event dialects, third-party processing and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -45,31 +45,44 @@ product consumers and pending closure for each feature family.
 | Product interaction | Shared Rack control identity preserves keyboard ownership through canonical refresh; focused text owns clipboard and bounded local Undo/Redo; single-line visual BiDi/EGC navigation and associated caret geometry; exact model ingress with one-line source projection | Remaining control adoption, accessible numeric names, multiline visual navigation and physical/native-editor acceptance |
 | Performance | Persistent children, bounded mappings, preallocated native audio buffers and execution budgets | Measured native DSP plus IPC percentiles/deadlines, video frame budgets, warm/cold/memory/overload and vendor/platform matrices |
 
-Note preparation and scoped admission qualification: the public compiler uses checked,
-fallible exact Note vector reserves, accepts actual capacities and reads final
-payload through the existing P1 reader. Its two Note ID sorts are in-place;
-complete author validation guarantees unique keys. String cloning remains
-infallible. Project, Resolve, Bind and Retained accept actual logical payloads,
-including simultaneous source/destination row backing while event/key buffers
-move once. Direct unwindowed builds with selected nonempty Notes now reserve
-checked B0 + compiler payload + maximum lowering-phase payload in the original
-ledger before creating Note owners. One receipt accompanies the complete Program
-through descendants to the existing common-footprint completion; it preserves
-pending ancestors and completed siblings. Failed builders abandon their ledger.
-Author/output/non-Note compiler errors still precede admission; a low grant now
-precedes later media, child, contract and endpoint errors. Empty, windowed and
-precompiled families retain their existing boundaries. Logical reservations and
-capacity acceptance do not bound physical allocation peaks.
-Windows controls passed 12 new admission cases and 550 ordinary Audio cases,
-including all previous compiler, Note model and lowering controls; 91 ignored
-cases retain exact membership. Five-crate strict Clippy has no diagnostics;
-normal App check has the same 10 OpenFX warnings. Final source freeze is
-`D245F559...`, test image `41D8B994...`, execution receipt `64A8986F...`;
-raw evidence is under
-`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/m3-note-preclone-admission-*`.
-Public nonempty Note execution and successful Note Session completion, native
-Note DSP, realtime, comparative performance and other platforms remain outside
-this qualification.
+Note preparation retains checked, fallible vector reserves, actual-capacity
+acceptance, in-place ID sorts and the existing Project/Resolve/Bind/Retained
+payload readers. String cloning remains infallible. Direct unwindowed selected
+scores reserve B0 + compiler payload + maximum lowering-phase payload before
+materialization; this logical reservation does not bound physical allocation
+peaks or replace the final native/IPC/Hosted and author-handoff grants. A private
+ledger helper carries the same non-cloneable receipt through actual Plan
+preparation and completes the original Session accounting once. It preflights
+every target before media, child or native-factory work. Only local CLAP Track
+pre/post targets in a direct root are admitted; ordinary standalone Plan APIs and
+windowed, precompiled, nested and mixed-format Note families retain refusals.
+
+Public Runtime Note processing requires an installed owner, cold entry at sample
+zero and positive contiguous forward blocks. Empty Note requests refuse before
+native control I/O; unsupported entry and changed-score handoff preserve the
+existing owner and clock. The discovered CLAP resolver uses the same restored
+instance's schema-2 processing offer, then the existing registration checks,
+worker specification, shared-block sizing, event merge and copied End ownership.
+Plugin parameter outputs still pass through canonical author compile,
+Source authorization/install, continuing immutable-score rebind and Ack.
+
+Verified on Windows with owned PCM-input fixture `B239C594...`: canonical authored
+two-port scores at 44.1/48 kHz match a literal per-sample oracle across whole,
+partitioned and single-frame calls, including release and actual parameter-output
+handoffs. The second native case checks uninstalled/invalid entry, zero-frame and
+noncontiguous refusal, changed-score refusal and subsequent original Off/release.
+Both native cases pass with the final normal Product and Audio executables from
+the same source freeze `E3421EAE...` (1949 inputs), images `90136DFB...` and
+`AD25DED0...`. Native receipt `8EBAE84F...` retains exact pass sets, exit zero,
+no deadline or outliving descendants, and successful reaping. The ordinary Audio
+suite passes 557 cases, including seven new preparation controls and all previous
+12 pre-clone cases; inventory is 650 total/93 ignored, with the two new native
+cases executed separately. Five-crate strict Clippy has zero diagnostics; normal
+App check retains the same ten OpenFX warnings. Evidence is under
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/public-note-canonical-*`.
+This qualifies the finite offline public Runtime path, not App Playback/Export,
+zero-input instruments, arbitrary third-party plugins, realtime performance or
+other platforms. Gate elapsed times are not DSP performance measurements.
 
 This table describes source capabilities. Each qualification below remains tied
 to its exact source revision, binary hashes, environment and named tests.
@@ -686,3 +699,9 @@ binding for the installed DLL. No epsilon, clamp, parameter-name exception or
 external-plugin repair was added. Airwindows processing compatibility, the
 normal Product/helper path, native exact callback counts, other platforms and
 performance remain unqualified by this experiment.
+
+A subsequent harmless debugger-launch control produced a helper report outside
+every Job, with `FILE_TYPE_CHAR` standard handles and no captured markers. The
+debugger Job's cleanup therefore cannot qualify target ownership or settlement;
+no target exit code was observed. Further writer observation requires a directly
+owned target and a separately settled observer, first validated without plugins.
