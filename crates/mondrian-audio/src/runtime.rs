@@ -2,6 +2,7 @@ pub(crate) mod native_author;
 mod native_author_scope;
 mod preparation_admission;
 mod native_author_preflight;
+mod native_author_logical_fees;
 
 use crate::dependency::{
     select_program_window, selected_contribution_source_window, AudioDependencyClosure,
@@ -344,6 +345,9 @@ pub struct AudioProgramRuntime {
     resource_grant: AudioRuntimeResourceGrant,
     native_installation: crate::native_runtime_owner::NativeRuntimeInstallation,
     native_diagnostic_cursor: usize,
+    // Only this exclusive Root enrolls extra logical Plan roles; actual owner
+    // receipts independently release them after their field drop glue retires.
+    native_held_plan_fees: Option<Arc<std::sync::atomic::AtomicUsize>>,
     native_author_scope: Option<Box<native_author_scope::NativeAuthorScopeCohort>>,
 }
 
@@ -1510,6 +1514,7 @@ impl AudioProgramRuntime {
                 native_installation:
                     crate::native_runtime_owner::NativeRuntimeInstallation::default(),
                 native_diagnostic_cursor: 0,
+                native_held_plan_fees: None,
                 native_author_scope: None,
             })
         })();
@@ -1590,7 +1595,12 @@ impl AudioProgramRuntime {
         &self,
         category: AudioRuntimeResourceCategory,
         required: usize,
-    ) -> Result<(), AudioRuntimeBuildError> {
+    ) -> Result<usize, AudioRuntimeBuildError> {
+        let required = if category == AudioRuntimeResourceCategory::PreparedLogicalBytes {
+            self.include_held_native_plan_logical_bytes(required)?
+        } else {
+            required
+        };
         let granted = match category {
             AudioRuntimeResourceCategory::RuntimeOccurrences => {
                 self.resource_grant.max_runtime_occurrences
@@ -1609,7 +1619,7 @@ impl AudioProgramRuntime {
                 granted,
             });
         }
-        Ok(())
+        Ok(required)
     }
 
     /// Admit prepared ordinary-parameter replacements against the original

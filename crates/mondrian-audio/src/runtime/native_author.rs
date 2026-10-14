@@ -5,6 +5,8 @@
 //! actual current Sessions, admits their overlap against the frozen root grant,
 //! and moves only already validated owners at the existing Source boundary.
 
+use super::native_author_logical_fees::LogicalPlanFee;
+use super::native_author_scope::{replace_runtime_weights, replace_weights};
 use super::*;
 use crate::processor_host::native_author::PreparedParameterNativeBindings;
 use crate::render::PreparedNativeAudioParameterPlan;
@@ -66,6 +68,7 @@ struct LocalReplacement {
     current: crate::AudioSessionCursorIdentity,
     plan: Option<PreparedNativeAudioParameterPlan>,
     bindings: PreparedParameterNativeBindings,
+    footprint: AudioRuntimeResourceFootprint,
 }
 
 impl LocalReplacement {
@@ -94,6 +97,8 @@ struct PreparedSameLiveParameterHandoff {
     unresolved_factory_owners: usize,
     retired_claim: Option<mondrian_core::AudioOwnerInstallationClaim>,
     retired_verifier: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    // Last: actual Plan/scratch and other retained owners retire before credit.
+    logical_fee: LogicalPlanFee,
 }
 
 /// Prepared same-live or explicit state-entry operation on one retained tree.
@@ -103,8 +108,8 @@ pub struct PreparedNativeAudioParameterHandoff {
 }
 
 enum PreparedParameterHandoffKind {
-    Preserved(PreparedSameLiveParameterHandoff),
-    StateEntry(super::native_author_scope::PreparedScopeHandle),
+    Preserved(Box<PreparedSameLiveParameterHandoff>),
+    StateEntry(Box<super::native_author_scope::PreparedScopeHandle>),
 }
 
 /// DSP-continuity fact, distinct from successful canonical author publication.
@@ -184,10 +189,10 @@ impl AudioProgramRuntime {
             return self
                 .prepare_native_author_scope_handoff(programs, proposal, destination, cancellation)
                 .map(|handle| PreparedNativeAudioParameterHandoff {
-                    kind: PreparedParameterHandoffKind::StateEntry(handle),
+                    kind: PreparedParameterHandoffKind::StateEntry(Box::new(handle)),
                 });
         }
-        self.preflight_native_author_logical_overlap(programs, proposal)?;
+        let requested_logical = self.preflight_native_author_logical_overlap(programs, proposal)?;
         let mut locals = Vec::new();
         self.prepare_parameter_locals(
             programs,
@@ -256,7 +261,18 @@ impl AudioProgramRuntime {
             .into_commit(self, &replacements)?;
         drop(extra);
         drop(replacements);
+        let (old_logical, new_logical) = resources.logical_role_weights();
+        if new_logical > requested_logical {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement.into());
+        }
 
+        // Compute every cached subtree weight before any foreign Bind. The one
+        // original admission receipt remains the authoritative Root result.
+        let mut cursor = 0;
+        let footprint = self.prepare_parameter_footprints(&mut locals, &mut cursor)?;
+        if cursor != locals.len() || footprint != resources.footprint() {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement.into());
+        }
         let next_root = locals[0].next_identity();
         let mut cursor = 0;
         self.prepare_parameter_bindings(
@@ -273,18 +289,27 @@ impl AudioProgramRuntime {
         if cursor != locals.len() || cancellation.is_canceled() {
             return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
         }
+        let logical_fee =
+            self.prepare_native_plan_logical_fee(old_logical, new_logical, resources.footprint())?;
+        // Keep the large storage owner out of the metadata enum. Allocate the
+        // complete owner before its fee is enrolled and before any final guard.
+        let mut prepared = Box::new(PreparedSameLiveParameterHandoff {
+            old_root,
+            old_serial,
+            proposal: proposal.clone(),
+            destination,
+            locals,
+            resources,
+            unresolved_factory_owners: unresolved,
+            retired_claim: None,
+            retired_verifier: None,
+            logical_fee,
+        });
+        // Only an assembled owning handle can enroll. No fallible/allocation
+        // step follows the successful increment before this owner is returned.
+        prepared.logical_fee.enroll()?;
         Ok(PreparedNativeAudioParameterHandoff {
-            kind: PreparedParameterHandoffKind::Preserved(PreparedSameLiveParameterHandoff {
-                old_root,
-                old_serial,
-                proposal: proposal.clone(),
-                destination,
-                locals,
-                resources,
-                unresolved_factory_owners: unresolved,
-                retired_claim: None,
-                retired_verifier: None,
-            }),
+            kind: PreparedParameterHandoffKind::Preserved(prepared),
         })
     }
 
@@ -321,6 +346,7 @@ impl AudioProgramRuntime {
             current: self.session.native_owner_identity(),
             plan,
             bindings: self.session.allocate_parameter_native_bindings(),
+            footprint: self.resource_footprint,
         });
         for source in self.sources.entries.values() {
             if let RuntimeSource::Nested(nested) = source {
@@ -333,6 +359,37 @@ impl AudioProgramRuntime {
             }
         }
         Ok(())
+    }
+
+    fn prepare_parameter_footprints(
+        &self,
+        locals: &mut [LocalReplacement],
+        cursor: &mut usize,
+    ) -> Result<AudioRuntimeResourceFootprint, AudioRuntimeBuildError> {
+        let index = *cursor;
+        *cursor += 1;
+        let local = locals.get(index).ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        if local.current != self.session.native_owner_identity() {
+            return Err(AudioRuntimeBuildError::StaleResourceAdmission);
+        }
+        let mut footprint = if let Some(plan) = &local.plan {
+            replace_weights(
+                self.resource_footprint,
+                self.session.current_resource_footprint()?,
+                plan.resource_footprint()?,
+            )?
+        } else {
+            self.resource_footprint
+        };
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                let after = nested.runtime.prepare_parameter_footprints(locals, cursor)?;
+                footprint =
+                    replace_runtime_weights(footprint, nested.runtime.resource_footprint, after)?;
+            }
+        }
+        locals[index].footprint = footprint;
+        Ok(footprint)
     }
 
     fn prepare_parameter_bindings(
@@ -416,6 +473,11 @@ impl AudioProgramRuntime {
             return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
         let footprint = prepared.resources.footprint();
+        if prepared.locals.first().map(|local| local.footprint) != Some(footprint) {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement.into());
+        }
+        let fee_retirement =
+            self.prepare_native_plan_fee_retirement(&prepared.logical_fee, footprint)?;
         let next_verifier = prepared.destination.clone();
         let commit = authorization.begin_commit(&prepared.destination)?;
         // The same actual tree and exclusive borrow were fully validated above.
@@ -424,6 +486,7 @@ impl AudioProgramRuntime {
         let mut cursor = 0;
         self.swap_parameter_plans(&mut prepared.locals, &mut cursor);
         self.resource_footprint = footprint;
+        prepared.logical_fee.retire(fee_retirement);
         prepared.retired_verifier = self.native_installation.verifier.replace(next_verifier);
         let generation = commit.generation();
         let mut cursor = 0;
@@ -469,6 +532,7 @@ impl AudioProgramRuntime {
         if let Some(plan) = &mut local.plan {
             self.session.swap_parameter_plan(plan);
         }
+        self.resource_footprint = local.footprint;
         *cursor += 1;
         for source in self.sources.entries.values_mut() {
             if let RuntimeSource::Nested(nested) = source {
@@ -561,3 +625,7 @@ impl AudioProgramRuntime {
             })
     }
 }
+
+#[cfg(test)]
+#[path = "native_author_charge_test_controls.rs"]
+pub(crate) mod charge_test_controls;

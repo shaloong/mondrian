@@ -287,6 +287,44 @@ law may gate the Scope tail without changing processor lifetime semantics.
 
 ## Consequences
 
+An ordinary native parameter replacement must remove the parameter component
+actually charged to its current Session. Initial Session admission retains
+the conservative Plan model; a successful ordinary replacement publishes the
+complete new scratch layouts and retains that charged value beside the Plan
+and scratch owners. The private local projection adjusts parameter and fixed
+weights by the same checked delta. StateEntry uses this projection for old
+storage and the initial model for its newly allocated destination. This local
+fact belongs to the existing resource grant; it creates no new budget issuer
+or claim of complete physical ownership.
+
+Before native Bind, ordinary preparation computes every retained Runtime's
+next subtree footprint and requires the Root result to equal existing overlap
+admission. Final Source publication moves prevalidated Plan/scratch/charge
+owners and publishes those cached subtree values together. All fallible
+arithmetic remains before the final guards. Caller-owned retirement and exact
+native Ack keep their existing lifecycle.
+
+The original Root also retains a private, lazily allocated subtotal H for
+logical Plan roles owned by actual pending and retired handoffs. Its published
+steady footprint C and frozen grant G remain distinct: preparation checks
+C+H+prospective N against G before ordinary local cloning. A receipt on the
+actual owner enrolls N after all preparation gates; successful installation
+checks C'=C-O+N and H'=H-N+O before Source guards, then applies one bounded atomic
+delta with the ownership swap. The receipt is the last owner field and credits
+only after preceding Plan/scratch owners finish destruction. Ack cannot retire
+an externally retained Preserved handoff. The actual Root-owned StateEntry
+cohort carries its own receipt through partial errors and retries, and exact
+Ack releases its storage on the existing lifecycle path.
+
+This is a logical-role policy, not an allocator union or a second state/grant
+authority. Only exclusive Root operations can increase H; concurrent receipt
+Drop can decrease it, so role changes use atomic RMW rather than stale stores.
+Owned Preserved and private receipt controls have actual finite qualification.
+Real StateEntry cohort fees, opaque native destructor ordering, full
+Runtime-first destruction, same-Source Superseded CAS, StateEntry admission
+before its first clone, accounting-metadata/fixed/physical completeness and
+real-time performance require separate acceptance.
+
 - `mondrian-timeline` owns author data and validation only.
 - `mondrian-audio` owns compiler, immutable plan, common DSP, recursive runtime,
   and source interfaces; it has no FFmpeg, CPAL, UI, or export dependency.

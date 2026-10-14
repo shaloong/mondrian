@@ -1,7 +1,8 @@
 //! Borrowed author logical-policy preflight before any Preserved local clone.
 //!
 //! This is a read-only check against the existing frozen Root policy. It is not
-//! a reservation, a physical allocator bound, or an external-handle inventory.
+//! a reservation or a physical allocator bound. Existing owned logical fees
+//! enter the same Root ceiling; caller inputs and temporary working buffers do not.
 
 use super::native_author::{NativeAudioAuthorProgram, NativeAudioParameterHandoffError};
 use super::*;
@@ -31,12 +32,13 @@ impl RequestedAuthorPlans {
 
 impl AudioProgramRuntime {
     /// Check the complete retained tree before its first local deep clone.
-    /// External prepared/retired handles remain an explicit later frontier.
+    /// The returned prospective Plan bound is checked before any local clone;
+    /// it is not a physical peak bound for temporary schedule lowering owners.
     pub(super) fn preflight_native_author_logical_overlap(
         &self,
         programs: &[NativeAudioAuthorProgram],
         proposal: &mondrian_core::NativeAudioAuthorProposal,
-    ) -> Result<(), NativeAudioParameterHandoffError> {
+    ) -> Result<usize, NativeAudioParameterHandoffError> {
         let requested = self.requested_native_author_plans(programs, proposal)?;
         if requested.affected_plans == 0 {
             return Err(NativeAudioParameterHandoffError::ProgramMismatch);
@@ -51,7 +53,7 @@ impl AudioProgramRuntime {
                 crate::AudioResourceFootprintError::ExtentOverflow,
             ))?;
         self.check_resource_ceiling(AudioRuntimeResourceCategory::PreparedLogicalBytes, required)?;
-        Ok(())
+        Ok(requested.inserted_logical_bytes)
     }
 
     fn requested_native_author_plans(

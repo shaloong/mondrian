@@ -3,6 +3,7 @@
 //! This is an explicit DSP discontinuity. Existing processors/children move;
 //! no resolver, factory creation, second evaluator or substitute PCM is used.
 
+use super::native_author_logical_fees::LogicalPlanFee;
 use super::*;
 use crate::processor_host::state_entry::{PreparedStateEntryRecords, StateEntryContext};
 use crate::render::PreparedAudioSessionStorage;
@@ -31,6 +32,8 @@ pub(super) struct NativeAuthorScopeCohort {
     installed: bool,
     retired_claim: Option<mondrian_core::AudioOwnerInstallationClaim>,
     retired_verifier: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    // Last: real cohort Sessions/Plans retire before its logical-role credit.
+    logical_fee: Option<LogicalPlanFee>,
 }
 
 /// Private exact operation handle, not author, resource or installation authority.
@@ -142,6 +145,12 @@ impl AudioProgramRuntime {
                     return Err(Error::ProgramMismatch);
                 }
             }
+            self.validate_native_plan_logical_fee(
+                cohort
+                    .logical_fee
+                    .as_ref()
+                    .ok_or(AudioRuntimeBuildError::StaleResourceAdmission)?,
+            )?;
         } else {
             let old_root = self.session.native_owner_identity();
             let old_serial = self.native_author_installation_serial()?;
@@ -154,12 +163,14 @@ impl AudioProgramRuntime {
             }
             let mut locals = Vec::new();
             let mut reserved = self.resource_footprint;
+            let prior_held_logical = self.held_native_plan_logical_bytes();
             self.allocate_scope_locals(
                 programs,
                 proposal,
                 &mut locals,
                 &mut reserved,
                 self.resource_grant,
+                prior_held_logical,
             )?;
             if !locals.iter().any(|local| local.affected) {
                 return Err(Error::ProgramMismatch);
@@ -181,14 +192,28 @@ impl AudioProgramRuntime {
                 installed: false,
                 retired_claim: None,
                 retired_verifier: None,
+                logical_fee: None,
             });
-            // Frozen known-owner/resource admission precedes ALL plugin calls.
-            self.admit_scope_overlap(&mut cohort)?;
+            // This batch is still stack-owned and excluded from prior held fees.
+            // Whole-StateEntry before-first-clone admission remains separate.
+            let (old_logical, new_logical) = self.admit_scope_overlap(&mut cohort)?;
             let mut cursor = 0;
             self.inspect_scope_sources(&mut cohort, &mut cursor, cancellation)?;
             if cursor != cohort.locals.len() {
                 return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
             }
+            cohort.logical_fee = Some(self.prepare_native_plan_logical_fee(
+                old_logical,
+                new_logical,
+                cohort.footprint,
+            )?);
+            cohort
+                .logical_fee
+                .as_mut()
+                .ok_or(AudioRuntimeBuildError::StaleResourceAdmission)?
+                .enroll()?;
+            // Persisted partial errors/cancellation keep the actual N owner fee;
+            // external metadata handles never release it or enroll another one.
             self.native_author_scope = Some(cohort);
         }
         // The cohort leaves its field only while this exclusive Runtime borrow
@@ -230,6 +255,7 @@ impl AudioProgramRuntime {
         locals: &mut Vec<ScopeLocal>,
         reserved: &mut AudioRuntimeResourceFootprint,
         grant: AudioRuntimeResourceGrant,
+        prior_held_logical: usize,
     ) -> Result<(), super::native_author::NativeAudioParameterHandoffError> {
         let affected = self.sequence_id == proposal.sequence();
         let plan = if affected {
@@ -262,10 +288,11 @@ impl AudioProgramRuntime {
             reserved.fixed_resident_bytes,
             requested.fixed_resident_bytes,
         )?;
-        if reserved.prepared_logical_bytes > grant.max_prepared_logical_bytes {
+        let required_logical = sum(reserved.prepared_logical_bytes, prior_held_logical)?;
+        if required_logical > grant.max_prepared_logical_bytes {
             return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
                 category: AudioRuntimeResourceCategory::PreparedLogicalBytes,
-                required: reserved.prepared_logical_bytes,
+                required: required_logical,
                 granted: grant.max_prepared_logical_bytes,
             }
             .into());
@@ -289,9 +316,14 @@ impl AudioProgramRuntime {
         });
         for source in self.sources.entries.values() {
             if let RuntimeSource::Nested(nested) = source {
-                nested
-                    .runtime
-                    .allocate_scope_locals(programs, proposal, locals, reserved, grant)?;
+                nested.runtime.allocate_scope_locals(
+                    programs,
+                    proposal,
+                    locals,
+                    reserved,
+                    grant,
+                    prior_held_logical,
+                )?;
             }
         }
         Ok(())
@@ -300,7 +332,7 @@ impl AudioProgramRuntime {
     fn admit_scope_overlap(
         &self,
         cohort: &mut Box<NativeAuthorScopeCohort>,
-    ) -> Result<(), super::native_author::NativeAudioParameterHandoffError> {
+    ) -> Result<(usize, usize), super::native_author::NativeAudioParameterHandoffError> {
         let mut next_logical = 0;
         let mut removed = crate::AudioSessionResourceFootprint::default();
         let mut inserted = crate::AudioSessionResourceFootprint::default();
@@ -310,15 +342,9 @@ impl AudioProgramRuntime {
             let current = self
                 .find_resource_session(local.current)
                 .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
-            let old = current
-                .resource_plan()
-                .session_resource_footprint()
-                .map_err(AudioRuntimeBuildError::from)?;
-            let next = local
-                .next
-                .plan()
-                .session_resource_footprint()
-                .map_err(AudioRuntimeBuildError::from)?;
+            let old = current.current_resource_footprint().map_err(AudioRuntimeBuildError::from)?;
+            let next =
+                local.next.current_resource_footprint().map_err(AudioRuntimeBuildError::from)?;
             next_logical = sum(next_logical, next.prepared_logical_bytes)?;
             removed = merge_session_weights(removed, old)?;
             inserted = merge_session_weights(inserted, next)?;
@@ -462,7 +488,10 @@ impl AudioProgramRuntime {
         }
         cohort.footprint = footprint;
         cohort.unresolved_owners = unresolved;
-        Ok(())
+        Ok((
+            removed.prepared_logical_bytes,
+            inserted.prepared_logical_bytes,
+        ))
     }
 
     fn inspect_scope_sources(
@@ -566,8 +595,8 @@ impl AudioProgramRuntime {
         let index = *cursor;
         *cursor += 1;
         let local = locals.get(index).ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
-        let old = self.session.resource_plan().session_resource_footprint()?;
-        let next = local.next.plan().session_resource_footprint()?;
+        let old = self.session.current_resource_footprint()?;
+        let next = local.next.current_resource_footprint()?;
         let mut footprint = replace_weights(self.resource_footprint, old, next)?;
         for source in self.sources.entries.values() {
             if let RuntimeSource::Nested(nested) = source {
@@ -623,12 +652,19 @@ impl AudioProgramRuntime {
             }
             // Target generation is replaced with the actual final CAS generation
             // below; this address never grants permission before publication.
+            let logical_fee = cohort
+                .logical_fee
+                .as_mut()
+                .ok_or(AudioRuntimeBuildError::StaleResourceAdmission)?;
+            let fee_retirement =
+                self.prepare_native_plan_fee_retirement(logical_fee, cohort.footprint)?;
             let next_verifier = cohort.destination.clone();
             let commit = authorization.begin_commit(&cohort.destination)?;
             let generation = commit.generation();
             let mut cursor = 0;
             self.swap_scope_sessions(&mut cohort.locals, &mut cursor);
             self.resource_footprint = cohort.footprint;
+            logical_fee.retire(fee_retirement);
             cohort.retired_verifier = self.native_installation.verifier.replace(next_verifier);
             let mut cursor = 0;
             self.publish_scope_bindings(&cohort.locals, &mut cursor, generation);
@@ -726,7 +762,7 @@ fn merge_session_weights(
     })
 }
 
-fn replace_weights(
+pub(super) fn replace_weights(
     mut current: AudioRuntimeResourceFootprint,
     old: crate::AudioSessionResourceFootprint,
     next: crate::AudioSessionResourceFootprint,
@@ -763,7 +799,7 @@ fn replace_weights(
     )?;
     Ok(current)
 }
-fn replace_runtime_weights(
+pub(super) fn replace_runtime_weights(
     current: AudioRuntimeResourceFootprint,
     old: AudioRuntimeResourceFootprint,
     next: AudioRuntimeResourceFootprint,

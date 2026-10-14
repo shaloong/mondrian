@@ -64,6 +64,8 @@ pub struct AudioParameterPlanResourceAdmission {
     footprint: AudioRuntimeResourceFootprint,
     peak_fixed_bytes: usize,
     peak_prepared_logical_bytes: usize,
+    removed_logical_bytes: usize,
+    inserted_logical_bytes: usize,
 }
 
 impl AudioParameterPlanResourceAdmission {
@@ -73,7 +75,7 @@ impl AudioParameterPlanResourceAdmission {
         self.peak_fixed_bytes
     }
 
-    /// Simultaneously retained old and new immutable-plan logical weights.
+    /// Checked Root logical peak including this batch and existing held roles.
     pub const fn peak_prepared_logical_bytes(&self) -> usize {
         self.peak_prepared_logical_bytes
     }
@@ -127,7 +129,21 @@ impl AudioParameterPlanResourceAdmission {
                 return Err(AudioRuntimeBuildError::StaleResourceAdmission);
             }
         }
-        Ok(AudioParameterPlanResourceCommit { root: self.root, footprint: self.footprint })
+        // This read-only query is not a continuing reservation: other valid
+        // preparations may have enrolled fees since the original observation.
+        runtime.check_resource_ceiling(
+            AudioRuntimeResourceCategory::PreparedLogicalBytes,
+            sum(
+                runtime.resource_footprint().prepared_logical_bytes,
+                self.inserted_logical_bytes,
+            )?,
+        )?;
+        Ok(AudioParameterPlanResourceCommit {
+            root: self.root,
+            footprint: self.footprint,
+            removed_logical_bytes: self.removed_logical_bytes,
+            inserted_logical_bytes: self.inserted_logical_bytes,
+        })
     }
 }
 
@@ -138,9 +154,15 @@ impl AudioParameterPlanResourceAdmission {
 pub struct AudioParameterPlanResourceCommit {
     root: AudioSessionCursorIdentity,
     footprint: AudioRuntimeResourceFootprint,
+    removed_logical_bytes: usize,
+    inserted_logical_bytes: usize,
 }
 
 impl AudioParameterPlanResourceCommit {
+    pub(crate) fn logical_role_weights(&self) -> (usize, usize) {
+        (self.removed_logical_bytes, self.inserted_logical_bytes)
+    }
+
     /// Read-only post-swap resource facts, not a new policy ceiling.
     pub const fn footprint(&self) -> AudioRuntimeResourceFootprint {
         self.footprint
@@ -202,7 +224,7 @@ pub(crate) fn admit(
         {
             return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
         }
-        let old = old_plan.session_resource_footprint()?;
+        let old = current.current_resource_footprint()?;
         let next = next_plan.session_resource_footprint()?;
         inserted_logical = sum(inserted_logical, next.prepared_logical_bytes)?;
         removed_logical = sum(removed_logical, old.prepared_logical_bytes)?;
@@ -214,10 +236,9 @@ pub(crate) fn admit(
             sum(event_layout.size(), lane_layout.size())?,
         )?;
     }
-    let peak_logical = sum(original.prepared_logical_bytes, inserted_logical)?;
-    runtime.check_resource_ceiling(
+    let peak_logical = runtime.check_resource_ceiling(
         AudioRuntimeResourceCategory::PreparedLogicalBytes,
-        peak_logical,
+        sum(original.prepared_logical_bytes, inserted_logical)?,
     )?;
 
     // Bookkeeping is bounded and charged before its first allocation. The
@@ -325,6 +346,8 @@ pub(crate) fn admit(
         footprint,
         peak_fixed_bytes: peak_fixed,
         peak_prepared_logical_bytes: peak_logical,
+        removed_logical_bytes: removed_logical,
+        inserted_logical_bytes: inserted_logical,
     })
 }
 

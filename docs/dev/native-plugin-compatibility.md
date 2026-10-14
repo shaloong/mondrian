@@ -474,3 +474,65 @@ handoff residency, physical/SDK/Arc memory, StateEntry peaks, native DLL DSP,
 NoteScore execution, instruments, third-party plugins, realtime processing,
 comparative performance or another platform. Nonempty public NoteScore remains
 Unsupported; separate work is required before that gate can be lifted.
+
+## Repeated parameter capacity accounting (2026-10-14)
+
+The current four-file repair is **Implemented — Not Fully Verified**. It
+keeps the initial conservative policy and records each Session's currently
+charged parameter component. Ordinary overlap and StateEntry remove that
+component consistently; ordinary publication also updates nested Runtime
+footprint caches before subsequent preparations consume them.
+
+The unchanged owned Scope control has a qualified actual Red followed by
+Green1/0: two real source polls deliver its second scalar proposal, then the
+second preparation/install/Ack and literal PCM assertions complete under the
+original grant. The same source projection passes strict checks for five
+affected crates. A separate nested-materialization regression and independent
+review are in progress. Mixed Preserved/StateEntry execution, all-held logical
+fees, full current ordinary regression, native SDK/third-party compatibility,
+physical memory, realtime and comparative performance are not qualified by
+this result. See the [sprint record](plugin-host-sprint.md#charged-parameter-component-original-scope-control-green-2026-10-14)
+for exact receipts and preserved failed entry attempts.
+
+The separate nested control now passes together with the original Scope control
+on its fresh1,931-source snapshot: two exact groups, each1/0. Three updates
+check local charges, both child caches, Root aggregation and literal PCM, and
+strict five-crate checks pass on that same source. The full490 ordinary batch
+remains failed at489/1, with only the unchanged B all-held desired-policy test
+failing. This provides finite owned-model regression evidence for the capacity
+repair; it does not qualify all-held lifetime policy or the mixed StateEntry
+sequence, nor does it mark the current integration fully accepted.
+
+## Held native parameter Plan roles (2026-10-14)
+
+The original Root now accounts logical pending/retired Plan roles separately
+from its published steady footprint, under the same frozen grant. Actual owner
+receipts enroll new Plan weight, transfer to old Plan weight on installation,
+and refund after the preceding storage fields finish destruction. Ack cannot
+refund an externally held Preserved owner; StateEntry fees belong to the actual
+Root-owned cohort rather than its external metadata handle.
+
+Source8742C89F...976BDD has actual22 exact passes and503/0 complete ordinary
+regression, with all prior names and85 ignored names preserved. The unchanged
+B assertion now observes exact required67776/granted45184 refusal while its
+old Plan is alive, and actual Drop enables the same-grant retry. This is
+**Verified within the owned Preserved logical-policy and private receipt
+controls**. A strict layout warning then required a small owning-container
+correction; current51F0AB47...688FCB passes the original five-crate strict gate
+and fresh default compilation. Its own execution and Product gates are tracked
+in the [sprint record](plugin-host-sprint.md#held-plan-logical-roles-owned-policy-qualification-2026-10-14),
+without transferring older-source evidence automatically.
+
+Real StateEntry fees, native opaque destructor/Runtime-first lifetimes,
+same-Source Superseded CAS, StateEntry before-first-clone, complete physical/
+fixed accounting and allocation cost, realtime, third-party/platform and
+NoteScore execution remain **Implemented — Not Fully Verified** or unsupported
+at their precise existing boundaries. Owned/private green tests do not upgrade
+those capabilities or establish production compatibility for all plugins.
+
+Current51F now has its own22 exact passes and two complete503/0 ordinary runs,
+under the original gates, independently reviewed alongside same-source strict
+checks. Its normal FFmpeg8.1.2 Product build also passes with actual[]/opt1/
+debug2/fresh=false, unchanged D55A FFI bindings and separately retained
+1CAC2719...54753 Product. Build success does not add Product execution, real
+StateEntry fees or native/third-party compatibility to the owned logical slice.

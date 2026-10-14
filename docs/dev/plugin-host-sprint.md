@@ -1,6 +1,6 @@
 # Plugin host engineering sprint
 
-Updated 2026-10-13 (Asia/Shanghai). This is the recoverable coordination record
+Updated 2026-10-14 (Asia/Shanghai). This is the recoverable coordination record
 for the OpenFX / VST3 / CLAP sprint. Detailed contracts remain in the existing
 [plugin architecture](../architecture/plugin-system.md),
 [audio pipeline](../architecture/audio-pipeline.md),
@@ -3891,3 +3891,284 @@ physical/SDK/Arc ownership, initial Note IR/author peaks, application Resolver,
 actual native NoteScore/DAG/Parent DSP IPC, zero-frame/replay/nesting, realtime,
 comparative performance and third-party/platform evidence remain separate.
 Public nonempty NoteScore retains its original allocation-free Unsupported gate.
+
+## Held Preserved owner: public API desired-policy red (2026-10-14)
+
+After accepted commit2bc63bac, one separate ordinary test keeps the actual
+retired Plan owner across successful installation and Ack, renders literal
+PCM1.5, then calls public prepare again. A Weak observes the original Plan
+without adding a strong owner. Production code is unchanged; the old A test
+file remains a complete byte prefix with only the child declaration appended.
+Independent source/wrapper review65BCDB61...0D7310 and corrected prefix review
+7B37627A...48EBC433 are under
+`.scratch/plugin-host-sprint/a01-m2-held-independent-review-r1/`.
+
+This tests public library reachability and the desired all-held logical policy.
+The existing installation docs describe releasing retired owners before Ack;
+the ordinary App follows that sequence. This case deliberately retains the
+owner and is not evidence that the ordinary App violates its documented order,
+nor a third-party/native/physical-memory compatibility result.
+
+Actual freshly compiled R2 has sourceB1F3CFC3...828D1B /1,928 records,
+producerD9D6452C...6B64F /features[] /opt1 /debug0 /freshfalse. Build receipt is
+`BE15DE0631B4980EC9EE8A72F477C9C06F72B79E71B191A54B03B33340080020`.
+Actual inventory573 /85 ignored /488 ordinary retains all old572 names and
+adds exactly one new function; its full name comes from that inventory.
+Retained PE58C52B8D...E06475B /13,650,432 bytes is bound to receipt
+`839FEC34C9A1E848D252F28079022BDAA15799EF2965D10861601E7BE3E3B066`.
+
+The exact test fails0 passed /1 failed at its desired resource-refusal assertion.
+Its raw facts are L0=L1=L2=22,592 logical bytes, original frozen grant45,184,
+current+next45,184 and all-live67,776. Old Plan remains alive and next prepare
+returns Ok /errorNone. Current Root/footprint/grant/Source claim checks pass;
+dropping external owners then retires the old Weak immediately. The conditional
+retry-after-correct-refusal branch is not executed in this failure. The aggregate
+keeps Acceptedfalse /ExpectedRedObservedtrue. The process owner exits101 and
+reaps descendants without errors/deadline/outliving; inputs stay unchanged and
+cleanup errors are empty. Observation-driver exit0 is not test acceptance.
+
+R1 had executed no B control: copying the candidate preserved a parent timestamp
+older than A's cached binary. Cargo reported freshtrue and reused03C50, while
+actual inventory572/85 contained no B function. Exact-count checks rejected
+Groups[]; receipt7CCFEBA0...2AF89FF remains a setup negative. Root touches only
+the parent's timestamp, preserving its bytes, and R2 requires an actual
+freshfalse default test producer as well as the real new-name inventory.
+The original generic prefix-check failure is also retained as invalid proof;
+corrected R2 actually copies/hashes the complete old prefix. No failed record is
+rewritten, ignored or promoted to compatibility acceptance.
+
+No all-held accounting implementation is accepted by this observation. A
+separate repeated-Scope prepare candidate examines model-versus-actual parameter
+capacity without retaining a handle across Ack. Role-adjusted logical fees,
+actual scratch facts, Drop/CAS/Ack lifetime, StateEntry and fixed/unknown owners
+must be coordinated before a production fix or wider resource claim.
+
+## Repeated Scope: entry qualification still open (2026-10-14)
+
+The separate two-occurrence Scope control leaves production and A/B assertions
+unchanged. Actual R1 compiles a fresh default test binary and fails0/1 at the new
+test's Source-generation-plus-one oracle: actual first claim4 versus expected3,
+receipt1D482B3A...B405E. First public prepare/install/Drop/Ack already returned;
+the second prepare was not reached. Core register and reserve_install both
+consume reserve_serial, so adjacent installed generations are not promised.
+Only the two new unsupported-plus-one assumptions are corrected to strict
+advance, retaining receipt/target/current-claim equality. Whole-file reversal
+restores DCEE9A3B...73D285; current child is C24375DC...460502. Independent
+supplement0B98876D...CE53BF retains its original2A8 source review and explicitly
+corrects that review's missed oracle. Root's first scratch diagnosis wrongly
+attributed the span to the occurrence limit; it is retained as invalid. Fixed
+64MiB and occurrence3 have not changed.
+
+Actual fresh R2 source632C27D5...99B98 /1,929 records keeps both prior test
+modules and adds one Scope function: actual574 /85 ignored /489 ordinary,
+all old573 names retained. Retained PE8B767798...1480E /13,693,440 bytes is in
+`a01-m2-scope-repeat-native-r2`; receipt
+`A57955B2F7103D309EED253F9F904DA02AD99B9CFCB1AA8B622A6CC8DF84A0DB`.
+First installation/Drop/Ack, two-object/cursor preservation and literal PCM3.0
+pass. The raw first-Ack log observes published parameter bytes32, Plan-model
+bytes48, logicalMAX/fixed67,108,864/occurrence3 and actual claim4. These are
+separate metadata/model facts, not an allocator-capacity receipt.
+
+The second callback calls the unchanged fixture's single public poll, which
+returns None at native_author_handoff.rs414 before a second proposal/compiler/
+prepare call exists. The exact control remains0 passed /1 failed; aggregate
+Acceptedfalse /ExpectedRedObservedfalse. Owner101 reaps descendants without
+errors, compiled inputs remain unchanged and cleanup is empty. This is not the
+intended resource-refusal reproduction. Multi-processor poll/source reachability
+needs instrumentation and contract review before a repeat-poll test or capacity
+fix can be justified. No old fixture, assertion, Source order or production
+resource policy is changed to force that entry.
+
+## Repeated Scope: qualified second-prepare resource failure (2026-10-14)
+
+R3 uses a test-private bounded fair cycle over the two actual observation
+sources. The first public poll returns None without consuming the selected
+queue; the second delivers the real Nonterminal/noState author proposal and
+its same-object attachment. Production polling, A/B assertions, old fixture
+helpers and the original logical/fixed/occurrence grants remain unchanged.
+Independent source review is7081A068...14674; actual review is
+`0453ADC62484E2449B8CF4787BC89146CE778719E189D43EAE3A14612D69B1CF`.
+
+Fresh default Audio R3 binds source44C103B4...EF125 /1,929 entries,
+producerB34C91F2...10F87 and retained PE7CC95B80...93996 /13,705,216 bytes.
+Actual inventory574/85 ignored retains every prior573 name. Only the exact
+Scope control ran, with0 passed /1 failed; this is not a full489-test run.
+Its closed receipt is
+`37C5DAAAFCFB0469B6F89401F74E7FC502D9C57A70DC091D5EBE030DE3CE1976`.
+First install/Drop-before-Ack, two-object/cursor checks and literal PCM3.0 pass.
+After the qualified second proposal, public prepare returns
+`Resources(InvalidResourceReplacement)`. Root, Source claim, published
+footprint, execution cursors and original grants remain unchanged. Second
+install/Ack/PCM did not execute. Owner exits101 and reaps descendants without
+errors or timeout; inputs stay unchanged and cleanup errors are empty.
+
+The source arithmetic uses old Plan-model parameter48 bytes to remove a
+component currently published as32 bytes. R3 qualifies this public refusal;
+the exact interior throw site was not separately instrumented. R1 remains its
+unsupported generation-plus-one oracle failure, and R2 remains its single-poll
+None entry failure. Their original receipts are not reclassified.
+
+After R3 qualification, Root approves narrow Choice A from read-only CCR
+`4645EE4D2F615B829C0D014F05C2026FB3086C6EA4BB8517556398323C57BA58`:
+retain initial conservative Plan-model admission, record each Session's current
+published parameter charge, prepare new scratch charge from complete actual
+layouts, and use the same current local projection for ordinary and StateEntry
+removal. Precompute and publish each nested Runtime subtree consistently before
+native Bind/Source guards. Reuse existing checked weight substitution; frozen
+grants, Source/CAS/Drop/Ack, immutable model summaries and owner alias checks
+remain authoritative. This is an approved repair contract and scratch candidate
+in progress, not an applied or accepted production fix. Nested and real VST3
+StateEntry consumers need focused regression evidence. It grants no all-held
+B closure, physical memory, real-time, third-party or broader platform claim.
+
+## Charged parameter component: original Scope control green (2026-10-14)
+
+The four-file Choice A candidate is centrally applied. The original Scope
+child remains byte-identical at6FC84A2B...DC43F, and B remains070AF3861...CF220.
+Current source5626C54B...61F1C /1,929 entries differs from the qualified Red
+snapshot only in those four production files. Fresh default Audio build
+receipt002268AD...D2943 has no compiler diagnostics. The new retained test PE
+isE8603631...248CC /13,727,744 bytes. Exact Scope execution receipt
+`C3B7468A9E408DF8078A446EFFB3A5945EF93A1F63FB7721E85CC836316784B8`
+is Accepted true:1 passed /0 failed, owner0/reaped, no timeout/errors, unchanged
+inputs and empty cleanup failures. First-Ack still records published32/model48;
+the real second proposal now prepares with accepted true/errorNone. Its
+following second install, exact Ack, identity/cursor/grant and literal PCM1.5
+assertions all execute. This is the original qualified Red-to-Green control,
+not a new oracle, full ordinary run, or SDK/third-party compatibility result.
+
+The same1,929-source projection passes strict all-targets/all-features checks
+for Core, Timeline, Audio, EditorState and Project. Independent source/actual
+review and a separate new nested test are ongoing. New nested cfg(test) cache
+snapshots and the new ordinary child have separate append-only parent-prefix
+proofs and require their own fresh source/PE/inventory. They do not inherit
+the original Scope Green result. B's all-held desired-policy Red and the real
+Preserved-to-StateEntry-to-Preserved source qualification gap remain open;
+no full current ordinary-regression or integrated commit is claimed yet.
+
+New source5CFAC384...4BC91 /1,931 records contains the two append-only parents
+and two new test children. It compiles a fresh default Audio PE8DCB0F8F...010F9
+/13,776,384 bytes. Receipt
+`9B92DEAD5AC365F099926F80AD2E056E67C8EBA01BB20BD0C8FB542F7E84342D`
+passes both exact controls, each1/0. The new nested control uses three actual
+Sessions and two native plus two unity Builtin processors. Three Preserved
+updates verify each local/current child subtree parameter and fixed component,
+the Root sum, source-window residues, unchanged equal-peer Plan identity,
+original grant/Source/object/cursors and literal PCM3.0/1.5/2.0. Both process
+owners exit0/reap without errors or timeout; inputs remain unchanged and cleanup
+is empty. Actual inventory575/85 retains all previous574 names. This1,931-source
+projection also passes the same five-crate strict checks with zero diagnostics.
+
+The full ordinary batch executes all490 unique names, omitting only the original
+85 ignored names, with the previous two-thread/180-second gate. Actual result
+is489 passed /1 failed /85 filtered. Every old ordinary test and the Scope and
+nested controls passes; the sole failure is the unchanged B held-handle control
+at its exact logical refusal assertion. It still observes22592 per Plan,
+original grant45184, all-live67776, oldPlanAlive=true and prepare Ok. Receipt
+`F79C750EEEBF07A15CA708C8FB8A88290B9ECAA0E89093E08340DD522D8AE606`
+keeps Accepted false. All490 outcome names are unique and equal the actual
+ordinary inventory. Native owner101/reaped has no timeout/errors, inputs remain
+unchanged and cleanup is empty. This failed full gate is not reduced to a
+successful489-test selection. All-held lifecycle repair remains a separate
+coordinated slice before full current regression or integration acceptance.
+
+The same current1,931-source projection also produces a fresh normal Product:
+features[], opt1/debug2, Cargo0, zero errors and the same ten existing warnings.
+Build receipt822E7CD9...73BD9F binds producer1BF5AEB1...BF2870 and actual
+FFmpeg8.1.2 SDK native link, codec62/util60 and unchanged generated binding
+D55A6C9C...A15B89. Create-only retention receipt28FCC4ED...E28D3 copies the
+actual97,178,624-byte Product PE atD55B6117...88766. The old2bc Product PE
+856855CB...686AB and its original retention receipt remain intact. No current
+Product execution, native DLL query or third-party processing was performed.
+
+Independent final1931 source/actual report7516DF0C...DAE70 and sealA8B65BD6...
+F8A29 confirm the two exact groups, current strict checks and the formally
+failed489/1 ordinary batch. Product compilation/retention has its own final
+review. B's conditional logical-fee CCR9F5B783F...5D5AE is now in scratch
+implementation: it must follow actual Preserved and Root-owned StateEntry
+owners through error/cancellation/retry, CAS role transfer and destruction.
+Ack alone is not retirement. No production fee implementation has been applied;
+whole-StateEntry before-first-clone remains a separate unaccepted prerequisite.
+This Scope change was not an integrated commit while that full gate failed.
+
+## Held Plan logical roles: owned-policy qualification (2026-10-14)
+
+The conditional B fee implementation is centrally applied, following CCR
+9F5B783F...5D5AE. Published steady C and original frozen G remain unchanged.
+Private lazy H counts actual extra pending/retired Plan roles. Preserved
+preflight checks C+H+prospective N before its first clone; actual N is checked
+against that prospective bound before Bind. A non-Clone receipt on the actual
+owner enrolls N after preparation, changes N to actual retired O at successful
+installation, and credits only as the owner's last field finishes Drop. It
+holds only the accounting Arc, not a strong Plan registry or Runtime pointer.
+StateEntry attaches the same receipt to the Root-owned cohort, preserving it
+through partial errors and retries. External StateEntry metadata is not an
+owner and cannot credit it. Actual StateEntry fee qualification remains open.
+
+All five before files and 38 literal edits reverse completely. Public R2 adds
+five controls, including a strengthened peer-fee refusal after dropping one of
+two retired handles; private eight controls exercise the concrete receipt and
+channel-ordered credits. Central R4 application preserves every old A/B/Scope/
+Nested/Handoff test body and the complete old test-parent prefix. The earlier
+format-only preflight rejections and basename collision are preserved; the
+latter was caught by the per-target hash gate and all five original sources
+were restored before correct application using full target identities. No
+compiler or native test consumed that rejected partial installation.
+
+Fresh default Audio source8742C89F...976BDD /1,934 records produces test PE
+E226CACB...13A30 /13,859,328 bytes, with actual inventory588/85/503 retaining
+all prior575 names. Exact receiptB8B2C63D...FC5AC passes22 groups, each1/0:
+the unchanged original B, A6, Scope/Nested, public5 and private8. B now reports
+22592 for each Plan, original G45184, old Plan alive and the exact desired
+typed refusal required67776/granted45184; its actual Drop and same-grant retry
+also execute. Ordinary receipt522EC905...73515 passes every503 unique ordinary
+name with only the original85 exact skips, threads2 and180-second gate.
+All owners exit0/reap with no timeout/errors, inputs are unchanged and cleanup
+is empty. Historical B Red and the earlier full489/1 failure remain failures.
+
+That source's strictR1 subsequently fails its original -D warnings gate for
+large_enum_variant: Preserved480 bytes versus StateEntry232. The gate is not
+suppressed. A local correction boxes both enum variants; the actual Preserved
+owner is allocated and assembled before enrollment, and StateEntry boxes only
+its metadata, leaving the actual fee-bearing cohort in the Root. The owner
+field order, bounded Source publication and fee transitions remain unchanged.
+The complete local delta reverses toBB06D717...5BCE3; current native_author.rs
+is72FE4B65...78F84E. Current source51F0AB47...688FCB /1,934 passes strict checks
+for the same five crates with zero compiler diagnostics, receipt9E8B0825...
+610E9. A fresh default AudioR2 producer5FACCBAC...61629 compiles that source.
+Current-source native results, Product retention and final independent actual
+review must qualify this correction; earlier8742 tests are not automatically
+transferred to51F.
+
+The accounting Arc/header and new owning-container allocation have unmeasured
+cost and incomplete fixed/physical accounting qualification. Private synthetic
+last-field Drop and Arc lifetime controls do not replace a real opaque native
+blocked destructor or full Runtime-first destruction. Foreign authorization
+rejection is WrongRegistration, not same-Source Superseded CAS. Genuine
+StateEntry cohort fee/error/retry/metadata/install/Ack tests are in a separate
+scratch-only workstream using the real VST3 editor/state producer and a minimal
+read-only cfg(test) observer. StateEntry before-first-clone, retained resource
+receipt recheck, physical/SDK memory, realtime/performance, third-party/platform
+and public NoteScore execution remain explicit later qualification gates.
+
+The current51F source subsequently closes its own actual gates. Receipt
+655BCE9D...9D7CDE passes all22 exact groups on retained PE2D96DD0F...4FB5C7F
+/13,859,328 bytes. Two independent complete ordinary runs pass503/0 each,
+receipts2886014D...C00976 and21BB1466...7E1083, with exact unique outcome sets,
+the original85 skips, threads2 and180-second gates. Actual owners/runner exit0,
+reap without errors/deadline/outliving, all inputs remain unchanged and cleanup
+is empty. Independent report3FD7723E...2C705 and sealB8B8C71C...D518D verify
+all1,934 source hashes/lengths, actual fresh default producer/PE/inventories,
+the22 groups, both503 runs and the zero-diagnostic strict gate. Old8742/strict
+failure and all original Red receipts remain unchanged.
+
+Current normal Product build54FACFFB...95821 also closes on51F: actual unique
+fresh features[]/opt1/debug2/test=false producer83285AEE...F8DDD, Cargo0,
+zero errors and the same ten existing warnings. FFmpeg8.1.2 SDK9e593bb... uses
+the admitted native link path and unchanged actual generated FFI binding
+D55A6C9C...A15B89/codec62/util60. Create-only retention verifies both current
+503 runs and copies Product1CAC2719...54753 /97,184,768 bytes independently.
+Earlier D55B6117 and856855CB snapshots remain preserved. This is build/ABI/
+retention qualification; no Product execution, current DLL query, physical
+GUI, native cohort fees or third-party processing is inferred. Final Product
+and staged-source/document review precede the local integration checkpoint.

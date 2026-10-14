@@ -9,6 +9,7 @@ use crate::schedule::{
     PreparedNode, PreparedNodeOrigin, PreparedTransitionBinding, PreparedTransitionDirection,
 };
 use crate::AudioRenderContract;
+use crate::NativeHostAllocationOwner;
 use mondrian_core::{
     AudioChannelLayout, AudioChannelPosition, AudioComponentEditId, AudioSampleRate,
     ExecutionCancellationToken, SourceSamplingBoundary, TimelineTime, TimelineTimeError,
@@ -187,6 +188,10 @@ pub struct AudioRenderSession {
     session_id: mondrian_core::AudioRenderSessionId,
     pending_reprepare_ticket: Option<crate::AudioProcessorReprepareTicket>,
     plan: Arc<PreparedAudioPlan>,
+    // Component currently included in this Session's published policy weight.
+    // Initially the Plan model; a parameter swap publishes its checked next
+    // owner layouts. This is not physical-memory completeness or a new grant.
+    parameter_event_charge_bytes: usize,
     node_buffers: Vec<NodeBuffers>,
     scratch: RenderScratch,
     contribution_delay_lines: Vec<FixedDelayLine>,
@@ -210,6 +215,12 @@ pub(crate) struct PreparedAudioSessionStorage {
 }
 
 impl PreparedAudioSessionStorage {
+    pub(crate) fn current_resource_footprint(
+        &self,
+    ) -> Result<crate::AudioSessionResourceFootprint, crate::AudioResourceFootprintError> {
+        self.session.current_resource_footprint()
+    }
+
     /// The canonical allocation envelope, derived by the same constructor body.
     pub(crate) fn capacity(&self) -> AudioRenderCapacity {
         self.session.capacity
@@ -234,12 +245,19 @@ pub(crate) struct PreparedNativeAudioParameterPlan {
     current: crate::AudioSessionCursorIdentity,
     next_plan: Arc<PreparedAudioPlan>,
     next_parameter_events: crate::processor_parameters::ProcessorParameterEventScratch,
+    next_parameter_event_charge_bytes: usize,
 }
 
 impl PreparedNativeAudioParameterPlan {
     pub(crate) fn next_plan(&self) -> &Arc<PreparedAudioPlan> {
         &self.next_plan
     }
+    pub(crate) fn resource_footprint(
+        &self,
+    ) -> Result<crate::AudioSessionResourceFootprint, crate::AudioResourceFootprintError> {
+        charged_parameter_footprint(&self.next_plan, self.next_parameter_event_charge_bytes)
+    }
+
     pub(crate) fn resource_buffers(
         &self,
     ) -> (
@@ -248,6 +266,22 @@ impl PreparedNativeAudioParameterPlan {
     ) {
         self.next_parameter_events.resource_buffers()
     }
+}
+
+/// Project the immutable local weights onto the component actually charged by
+/// this exact Session. Logical/other weights and the original grant are unchanged.
+fn charged_parameter_footprint(
+    plan: &PreparedAudioPlan,
+    parameter_charge: usize,
+) -> Result<crate::AudioSessionResourceFootprint, crate::AudioResourceFootprintError> {
+    let mut footprint = plan.session_resource_footprint()?;
+    footprint.fixed_resident_bytes = footprint
+        .fixed_resident_bytes
+        .checked_sub(footprint.parameter_event_bytes)
+        .and_then(|bytes| bytes.checked_add(parameter_charge))
+        .ok_or(crate::AudioResourceFootprintError::ExtentOverflow)?;
+    footprint.parameter_event_bytes = parameter_charge;
+    Ok(footprint)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,6 +314,10 @@ impl AudioRenderSession {
     pub(crate) fn allocate_storage(
         plan: Arc<PreparedAudioPlan>,
     ) -> Result<PreparedAudioSessionStorage, AudioExecutionError> {
+        let parameter_event_charge_bytes = plan
+            .session_resource_footprint()
+            .map_err(|_| AudioExecutionError::BufferTooLarge)?
+            .parameter_event_bytes;
         let contract = plan.contract();
         let samples = contract
             .max_block_frames
@@ -408,6 +446,7 @@ impl AudioRenderSession {
         Ok(PreparedAudioSessionStorage {
             session: Self {
                 plan,
+                parameter_event_charge_bytes,
                 node_buffers,
                 scratch: RenderScratch::new(contract.max_block_frames, samples, source_samples),
                 contribution_delay_lines,
@@ -591,7 +630,7 @@ impl AudioRenderSession {
         &self,
         next_program: Arc<crate::CompiledAudioProgram>,
         locator: mondrian_core::NativeAudioEditorLocator,
-    ) -> Result<PreparedNativeAudioParameterPlan, crate::AudioCompileError> {
+    ) -> Result<PreparedNativeAudioParameterPlan, crate::NativeAudioParameterHandoffError> {
         let next_plan =
             Arc::new(self.plan.prepare_native_author_parameters(next_program, locator)?);
         let maximum_lanes = next_plan
@@ -602,13 +641,29 @@ impl AudioRenderSession {
             .max()
             .unwrap_or(0);
         let events = next_plan.schedule.summary.maximum_parameter_events_per_block;
+        let next_parameter_events =
+            crate::processor_parameters::ProcessorParameterEventScratch::new(maximum_lanes, events);
+        let (event_owner, lane_owner) = next_parameter_events.resource_buffers();
+        let event_bytes = event_owner
+            .host_allocation()
+            .map_err(crate::AudioRuntimeBuildError::from)?
+            .layout()
+            .size();
+        let lane_bytes = lane_owner
+            .host_allocation()
+            .map_err(crate::AudioRuntimeBuildError::from)?
+            .layout()
+            .size();
+        let next_parameter_event_charge_bytes = event_bytes.checked_add(lane_bytes).ok_or(
+            crate::AudioRuntimeBuildError::ResourceFootprint(
+                crate::AudioResourceFootprintError::ExtentOverflow,
+            ),
+        )?;
         Ok(PreparedNativeAudioParameterPlan {
             current: self.native_owner_identity(),
             next_plan,
-            next_parameter_events: crate::processor_parameters::ProcessorParameterEventScratch::new(
-                maximum_lanes,
-                events,
-            ),
+            next_parameter_events,
+            next_parameter_event_charge_bytes,
         })
     }
 
@@ -699,11 +754,21 @@ impl AudioRenderSession {
         self.capacity.maximum_processor_parameter_lanes = maximum_lanes;
         self.capacity.parameter_event_capacity = event_capacity;
         std::mem::swap(&mut self.plan, &mut prepared.next_plan);
+        std::mem::swap(
+            &mut self.parameter_event_charge_bytes,
+            &mut prepared.next_parameter_event_charge_bytes,
+        );
         self.processor_host.swap_parameter_events(
             &mut prepared.next_parameter_events,
             maximum_lanes,
             event_capacity,
         );
+    }
+
+    pub(crate) fn current_resource_footprint(
+        &self,
+    ) -> Result<crate::AudioSessionResourceFootprint, crate::AudioResourceFootprintError> {
+        charged_parameter_footprint(&self.plan, self.parameter_event_charge_bytes)
     }
 
     pub(crate) fn shared_resource_plan(&self) -> &Arc<PreparedAudioPlan> {
