@@ -16,6 +16,79 @@ use mondrian_timeline::audio::{
 use mondrian_timeline::{AudioAuthoringError, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
 
+// Fresh compiler-owned Note payload acceptance; no Runtime grant or retained A.
+fn compiled_note_array_bytes<T>(count: usize) -> Result<usize, AudioCompileError> {
+    std::alloc::Layout::array::<T>(count)
+        .map(|layout| layout.size())
+        .map_err(|_| AudioCompileError::NoteEventCountOverflow)
+}
+
+fn compiled_note_payload_bytes(
+    lanes: usize,
+    note_bytes: usize,
+    key_bytes: usize,
+) -> Result<usize, AudioCompileError> {
+    compiled_note_array_bytes::<CompiledNoteLane>(lanes)?
+        .checked_add(note_bytes)
+        .and_then(|bytes| bytes.checked_add(key_bytes))
+        .ok_or(AudioCompileError::NoteEventCountOverflow)
+}
+
+fn requested_compiled_note_payload<'a>(
+    mut lanes: impl Iterator<Item = &'a mondrian_timeline::audio::AudioNoteLane>,
+) -> Result<(usize, usize), AudioCompileError> {
+    let (count, note_bytes, key_bytes) =
+        lanes.try_fold((0_usize, 0_usize, 0_usize), |(count, notes, keys), lane| {
+            Ok::<_, AudioCompileError>((
+                count.checked_add(1).ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                notes
+                    .checked_add(compiled_note_array_bytes::<
+                        mondrian_timeline::audio::AudioNote,
+                    >(lane.notes.len())?)
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                keys.checked_add(lane.target.input_port_key.len())
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+            ))
+        })?;
+    Ok((
+        count,
+        compiled_note_payload_bytes(count, note_bytes, key_bytes)?,
+    ))
+}
+
+fn require_compiled_note_capacity(
+    actual: usize,
+    requested: usize,
+) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(AudioCompileError::InvalidPreparedGraph(
+            "compiled Note storage capacity exceeds request".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn reserve_compiled_note_rows<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
+    compiled_note_array_bytes::<T>(count)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        AudioCompileError::InvalidPreparedGraph(
+            "compiled Note storage allocation refused".to_owned(),
+        )
+    })?;
+    require_compiled_note_capacity(values.capacity(), count)?;
+    Ok(values)
+}
+
+fn require_compiled_note_payload(actual: usize, requested: usize) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(AudioCompileError::InvalidPreparedGraph(
+            "compiled Note payload exceeds request".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Compile one public output from the validated Track/Clip placement authority.
 pub fn compile_audio_program(
     sequence: &Sequence,
@@ -325,28 +398,40 @@ pub fn compile_audio_program(
 
     // Only the selected active Track rack is a Note consumer. Required Track
     // presence alone does not retain a pruned post-fader or bypassed processor.
-    let mut note_lanes = sequence
-        .audio_program
-        .note_lanes
-        .iter()
-        .filter(|lane| {
-            !lane.notes.is_empty()
-                && track_channels.get(&lane.target.track_id).is_some_and(|channel| {
-                    [&channel.strip.pre_fader, &channel.strip.post_fader]
-                        .into_iter()
-                        .flat_map(|rack| &rack.processors)
-                        .any(|processor| processor.instance_id == lane.target.processor_id)
-                })
-        })
-        .map(|lane| {
-            let mut notes = lane.notes.iter().cloned().collect::<Vec<_>>();
-            notes.sort_by_key(|note| note.id);
-            CompiledNoteLane { id: lane.id, target: lane.target.clone(), notes }
-        })
-        .collect::<Vec<_>>();
-    note_lanes.sort_by_key(|lane| lane.id);
+    let selected_note_lane = |lane: &mondrian_timeline::audio::AudioNoteLane| {
+        !lane.notes.is_empty()
+            && track_channels.get(&lane.target.track_id).is_some_and(|channel| {
+                [&channel.strip.pre_fader, &channel.strip.post_fader]
+                    .into_iter()
+                    .flat_map(|rack| &rack.processors)
+                    .any(|processor| processor.instance_id == lane.target.processor_id)
+            })
+    };
+    let (lane_count, requested_payload) = requested_compiled_note_payload(
+        sequence.audio_program.note_lanes.iter().filter(|lane| selected_note_lane(lane)),
+    )?;
+    #[cfg(test)]
+    note_materialization_tests::observe_request(lane_count, requested_payload);
+    let mut note_lanes = reserve_compiled_note_rows::<CompiledNoteLane>(lane_count)?;
+    for lane in sequence.audio_program.note_lanes.iter().filter(|lane| selected_note_lane(lane)) {
+        let mut notes =
+            reserve_compiled_note_rows::<mondrian_timeline::audio::AudioNote>(lane.notes.len())?;
+        notes.extend(lane.notes.iter().cloned());
+        // Global author validation already rejects duplicate lane/note IDs.
+        // These two total-key sorts preserve canonical order without heap scratch.
+        notes.sort_unstable_by_key(|note| note.id);
+        let target = lane.target.clone();
+        require_compiled_note_capacity(
+            target.input_port_key.capacity(),
+            lane.target.input_port_key.len(),
+        )?;
+        note_lanes.push(CompiledNoteLane { id: lane.id, target, notes });
+    }
+    note_lanes.sort_unstable_by_key(|lane| lane.id);
+    #[cfg(test)]
+    note_materialization_tests::observe_owners(&note_lanes);
 
-    Ok(CompiledAudioProgram {
+    let program = CompiledAudioProgram {
         output_id: request.output_id,
         contributions,
         processing_scopes,
@@ -358,7 +443,12 @@ pub fn compile_audio_program(
         routes,
         sidechain_routes,
         note_lanes,
-    })
+    };
+    let actual_payload = program
+        .compiled_note_payload_bytes()
+        .map_err(|_| AudioCompileError::NoteEventCountOverflow)?;
+    require_compiled_note_payload(actual_payload, requested_payload)?;
+    Ok(program)
 }
 
 fn compile_scope(
@@ -706,3 +796,7 @@ pub enum AudioCompileError {
     #[error("invalid prepared audio graph: {0}")]
     InvalidPreparedGraph(String),
 }
+
+#[cfg(test)]
+#[path = "compiler/note_materialization_tests.rs"]
+mod note_materialization_tests;

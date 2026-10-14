@@ -45,19 +45,22 @@ product consumers and pending closure for each feature family.
 | Product interaction | Shared Rack control identity preserves keyboard ownership through canonical refresh; focused text owns clipboard and bounded local Undo/Redo; single-line visual BiDi/EGC navigation and associated caret geometry; exact model ingress with one-line source projection | Remaining control adoption, accessible numeric names, multiline visual navigation and physical/native-editor acceptance |
 | Performance | Persistent children, bounded mappings, preallocated native audio buffers and execution budgets | Measured native DSP plus IPC percentiles/deadlines, video frame budgets, warm/cold/memory/overload and vendor/platform matrices |
 
-Private Note lowering qualification (P2): Project, Resolve, Bind and Retained
-check their actual logical payload before delivering the next IR. Source and
-destination row allocations coexist while `IntoIter` retains its backing;
-events and UTF-8 key buffers move once. Retained storage still uses the existing
-single reader. Empty policy and original semantic-error priority are preserved.
-These are late acceptance checks, not pre-allocation grants or physical peaks.
-Windows owned controls passed 25/25 (8 new, 17 retained), ordinary Audio 531/531,
-and five-crate strict Clippy with no diagnostics; normal App check passed with
-10 existing OpenFX warnings. Final source freeze is `2F2F3041...`, test artifact
-`BE2F04E6...`, execution receipt `BC410F9A...`; raw receipts are under
-`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/m3-p2-note-phase-envelope-*`.
-Public nonempty Notes, native Note DSP, realtime and other platforms remain
-outside this qualification.
+Note preparation metadata qualification: the public compiler uses checked,
+fallible exact Note vector reserves, accepts actual capacities and reads final
+payload through the existing P1 reader. Its two Note ID sorts are in-place;
+complete author validation guarantees unique keys. String cloning remains
+infallible. Project, Resolve, Bind and Retained accept actual logical payloads,
+including simultaneous source/destination row backing while event/key buffers
+move once. Empty policy and original semantic-error priority remain intact.
+These are acceptance checks, not pre-allocation grants or physical peaks.
+Windows controls passed 7 new compiler cases, 9 retained Note model cases and
+538 ordinary Audio cases (including the P2 controls); 91 ignored cases retain
+exact membership. Five-crate strict Clippy has no diagnostics; normal App check
+has the same 10 OpenFX warnings. Final source freeze is `2D9B6A0A...`, test image
+`387DF86B...`, execution receipt `8948891A...`; raw evidence is under
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/m3-compiler-note-materialization-*`.
+Public nonempty Notes, native Note DSP, realtime, comparative performance and
+other platforms remain outside this qualification.
 
 This table describes source capabilities. Each qualification below remains tied
 to its exact source revision, binary hashes, environment and named tests.
