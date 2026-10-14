@@ -445,6 +445,10 @@ impl PreparedAudioPlan {
             .prepared_logical_bytes
             .checked_add(self.schedule.notes.storage_bytes()?)
             .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
+        footprint.prepared_logical_bytes = footprint
+            .prepared_logical_bytes
+            .checked_add(self.program.compiled_note_payload_bytes()?)
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
         footprint.fixed_resident_bytes = footprint
             .fixed_resident_bytes
             .checked_add(
@@ -2672,3 +2676,7 @@ mod prospective_prepared_plan_parity_tests {
         assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
     }
 }
+
+#[cfg(test)]
+#[path = "schedule/compiled_note_payload_tests.rs"]
+mod compiled_note_payload_tests;

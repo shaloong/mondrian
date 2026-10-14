@@ -4447,3 +4447,67 @@ The next P1 accounting candidate is limited to common A/next-program/late clone
 acceptance; public nonempty notes, compiler wiring and new execution permission
 are not approved by that resource slice. VST3 event/PPQ/no-End/NoInput and OFX
 bounded temporal-query contracts remain separate format-specific dependencies.
+
+## P1 actual compiled Note payload accounting — 2026-10-14
+
+Following the capacity checkpoint d5797c1a, three existing Audio source files
+add one checked, read-only compiled Note payload A calculation to the common
+Plan logical policy. If any retained lane has a note, A covers the entire
+outer lane capacity and every retained row's note-array/key-byte capacities;
+all-empty scores add zero policy weight, with real empty metadata explicitly
+excluded from physical qualification. The common local result is B0+S+A.
+Existing C/H/G, overlap O/N and retained fee consumers inherit it once per
+Plan role. Shared Program Arcs do not establish a physical-union deduction.
+
+Native-author requested preparation preserves the original eligibility and
+B0+cached-S checked-sum error order, then reads next_program A once. The sole
+generic schedule clone is followed immediately by actual aggregate S<=oldS
+acceptance before processor rebind or foreign interaction. The check occurs
+after allocation and can allocate detail error text. Compiler clone/sort,
+lowering simultaneous arrays and initial Root reservation are unchanged.
+Public nonempty Note guards, immutable bitwise score checks and all old tests
+retain their original bytes. The previous capacity file remains EC917.
+
+Sealed R2 has seven source hunks with complete raw inverse across the
+three parents, plus one new cfg(test) child. Only that child was formatted:
+42C15651D680FF94697F3D42D811E1AF1037984060ED1C3A0CC6243A86634C88,
+19751 bytes. Independent source/format/driver reviews bind the raw mirrors,
+old source preservation and common role propagation. Unsealed R1 drafts were
+not installed or counted as successful tests.
+
+All gates bind source DD4E9F6E2CD7D38259AFA56C648EE41AD6633663F460EFCE087564FBABC51629,
+1940 inputs. Focused/ordinary execution uses the default fresh Audio producer
+DACDDB17...B69F31B and Test PE12D4AB4E...41D0E3B (14404096 bytes). Strict and
+normal checks bind their own actual producers701F5706...FFF0D55 and
+770956BF...32457D8, respectively; they do not execute that test PE.
+
+- Seven new controls:7 unique passes,0 failures/ignored,607 filtered out.
+- Audio ordinary regression:523 unique passes,0 failures/ignored,91 filtered;
+  all614/ignored91 retain every old607/91 name and add only seven controls.
+- Five related crates, all targets/features, strict Clippy -D warnings:
+  Cargo0 and zero compiler-message records.
+- Normal application target check: Cargo0, ten unchanged OFX diagnostic
+  warnings and zero errors. No normal Product/helper was built or executed.
+
+The real owner controls use existing borrowed allocation receipts, actual
+spare capacities, next-program capacity deltas, clone shrink and complete
+UUID/event/velocity identities. One actual private model Runtime admits an
+overlap receipt under its original grant and checks C+N, O/N and C-O+N without
+publishing an install. Native SDK calls are not observed by these counters.
+All selected Jobs exit0 and reap, with no deadline/outliving/cleanup errors;
+their compiled inputs remain unchanged. No new native gate is run.
+
+Closed evidence uses m3-compiled-note-payload-{audio,focused,ordinary,strict,
+normal-check}-r2 in develop-alignment-evidence-r1. Root install/closed proofs
+and independent reports live in m3-compiled-note-payload-installed-r2 and
+m3-compiled-note-payload-independent-review-r2. The existing ADR0003 records
+the actual A/empty/per-role/next-owner/late-clone policy, with its whole earlier
+prefix preserved. Final actual/docs/index review precedes local integration.
+
+This closes retained logical accounting only. Natural clone-overcapacity
+refusal and impossible-layout overflow were not forced; nested/native fee,
+Scope/CAS/Ack/cohort/public Score/DSP/instrument behavior is not newly accepted.
+P2 stage peaks, P3 earliest compiler ownership and original-ledger reservation,
+Hosted/factory peaks and coherent offers/IPC remain explicit dependencies.
+C04's original third-party failure and native OFX temporal refusal remain.
+No physical/RT/allocation-free/performance/other-platform result follows.

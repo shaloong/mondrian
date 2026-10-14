@@ -252,6 +252,32 @@ impl AudioProgramExecutionDemand {
 }
 
 impl CompiledAudioProgram {
+    /// Actual retained selected Note payload for the existing logical policy.
+    /// All-empty scores add no executable Note weight; spare empty metadata is
+    /// outside this policy. This does not bound compiler or preparation peaks.
+    pub(crate) fn compiled_note_payload_bytes(
+        &self,
+    ) -> Result<usize, crate::AudioResourceFootprintError> {
+        use crate::AudioResourceFootprintError::ExtentOverflow;
+        use std::alloc::Layout;
+
+        if self.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
+            return Ok(0);
+        }
+        let lane_bytes = Layout::array::<CompiledNoteLane>(self.note_lanes.capacity())
+            .map_err(|_| ExtentOverflow)?
+            .size();
+        self.note_lanes.iter().try_fold(lane_bytes, |bytes, lane| {
+            let note_bytes = Layout::array::<AudioNote>(lane.notes.capacity())
+                .map_err(|_| ExtentOverflow)?
+                .size();
+            bytes
+                .checked_add(note_bytes)
+                .and_then(|bytes| bytes.checked_add(lane.target.input_port_key.capacity()))
+                .ok_or(ExtentOverflow)
+        })
+    }
+
     /// Public output produced by this Signal Closure.
     pub fn output_id(&self) -> ProgramOutputId {
         self.output_id

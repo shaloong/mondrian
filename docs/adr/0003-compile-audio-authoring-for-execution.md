@@ -353,3 +353,33 @@ require separate acceptance.
   lowering, processor sidechains, true-peak/loudness observation, and further
   stateful/lookahead processors must deepen this pipeline. They must not create
   alternate author or execution paths.
+
+## Retained compiled Note payload logical accounting
+
+The immutable Program's selected Note arrays and port-key strings contribute
+one actual retained payload A to each prepared Plan role. If any lane has a
+note, A is the checked outer CompiledNoteLane capacity layout plus every retained
+row's AudioNote capacity layout and raw key-byte capacity. Initialized empty
+rows are included in that case. An all-empty execution score contributes A0;
+retained empty caller metadata is explicitly outside this logical policy and
+must not be described as absent physical storage.
+
+The common local weight is B0 + actual prepared Note payload S + A. Existing
+Session projections, original Root C/H/G ceilings, overlap O/N roles and retained
+fees consume that same weight. Multiple Plan roles sharing one Program Arc can
+conservatively charge A per role; this is not exact physical union accounting
+and needs no separate Note ledger or identity registry.
+
+Native-author requested preparation reads next_program A after its original
+bitwise score/topology eligibility and original B0+cached-S checked sum. It does
+not replace a larger next owner with old-program capacity. Its generic schedule
+clone is checked immediately afterward: actual cloned S must fit the old actual
+S upper before processor rebind/foreign interaction. This is post-allocation
+logical acceptance; detail-string refusals can allocate.
+
+This accounting does not grant public nonempty Note execution. Compiler
+clone/sort allocation, simultaneous lowering arrays, initial original-ledger
+reservation, Hosted/factory peaks, coherent offers/IPC/lifetime and complete
+physical/native/RT qualification remain separate prerequisites. Public unsupported
+and endpoint errors keep their established order. No live Plan migration or
+grandfathered fee policy is introduced.
