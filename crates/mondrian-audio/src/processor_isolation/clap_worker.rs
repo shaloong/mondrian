@@ -4402,3 +4402,6 @@ mod same_call_structure_contracts {
         assert!(observed.is_ascii());
     }
 }
+
+#[cfg(test)]
+pub(crate) use parameter_allocation_tests::measure_host_allocations_for_test;

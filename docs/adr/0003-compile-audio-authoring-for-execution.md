@@ -126,6 +126,20 @@ Before auxiliary metadata exists, sidechain counting is conservative and can
 reject a graph whose eventual actual policy would fit. Existing final footprint
 values and limits are preserved.
 
+Preserved native parameter preparation also borrows the entire retained Runtime
+tree before its first local schedule clone or scratch allocation. It adds the
+current Root closure's logical footprint once, then only the requested weights
+of actual replacement local Plans. An equal nonselected peer contributes no new
+Plan; the selected Session retains the existing forced-replacement rule. The
+estimator first checks existing canonical Program compatibility, including the
+bitwise immutable Note score, and reuses current cached Note storage without
+reprojecting endpoints. It consults the same frozen Root grant. The final actual
+owner-union/overlap checks and Source installation, Drop, CAS and Ack semantics
+remain authoritative and unchanged. This preflight is a policy check, not a new
+reservation or lifetime-accounting issuer. StateEntry preparation and all
+externally retained new/retired Preserved handles still require their own
+admission work; this change does not close those frontiers.
+
 Public nonempty-score Plan preparation still runs the allocation-free M1
 validation and returns typed Unsupported before projection/factory resolution.
 Initial Note IR preparation peak and author-handoff clone admission, including

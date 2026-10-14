@@ -230,6 +230,22 @@ pub(crate) fn processor(
 }
 
 impl PreparedAudioPlan {
+    /// Borrow the compatible canonical Program before cloning any prepared data.
+    /// Cached immutable Note storage is carried by the exact bitwise score gate;
+    /// this is the existing logical policy, not a physical allocation bound.
+    pub(crate) fn requested_native_author_logical_bytes(
+        &self,
+        next_program: &CompiledAudioProgram,
+        locator: NativeAudioEditorLocator,
+    ) -> Result<usize, AudioCompileError> {
+        compatible_program(self.program.as_ref(), next_program, locator)?;
+        let base = Self::requested_base_logical_bytes(next_program)?;
+        let notes = self.schedule.notes.storage_bytes()
+            .map_err(|_| refused("native author cached Note storage extent overflow"))?;
+        base.checked_add(notes)
+            .ok_or_else(|| refused("native author prepared logical extent overflow"))
+    }
+
     /// Prepare a new immutable Plan for one canonical native author target.
     /// Every actual materialization of its shared Scope uses the same canonical
     /// curves/state. The caller must admit current/new/retired ownership overlap

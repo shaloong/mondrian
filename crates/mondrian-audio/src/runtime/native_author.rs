@@ -187,6 +187,7 @@ impl AudioProgramRuntime {
                     kind: PreparedParameterHandoffKind::StateEntry(handle),
                 });
         }
+        self.preflight_native_author_logical_overlap(programs, proposal)?;
         let mut locals = Vec::new();
         self.prepare_parameter_locals(
             programs,

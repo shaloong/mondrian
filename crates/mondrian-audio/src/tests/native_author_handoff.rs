@@ -1790,3 +1790,6 @@ fn native_scope_foreign_source_refused_before_native_binding_or_plan_mutation() 
     fixture.ack(&proposal);
     fixture.block(1, 0.75);
 }
+
+#[path = "native_author_preflight.rs"]
+mod native_author_preflight_tests;

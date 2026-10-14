@@ -3773,3 +3773,121 @@ external prepared handles absent from the running Root footprint. This is a
 specific unresolved accounting frontier, not a reproduced budget-bypass claim.
 Third-party instruments/effects, comparative performance, physical realtime,
 macOS/Linux and native GPU qualification require separate evidence.
+
+## Preserved parameter preparation logical preflight (2026-10-14)
+
+This slice adds a borrowed whole-tree policy check before the first Preserved
+local schedule clone, scratch construction or native Bind. It uses the existing
+Root grant and prepared-logical evaluator. The current closure-wide footprint
+is added once; recursion adds only actual changed local Plans and the existing
+selected-force replacement. Equal nonselected peers do not add another Plan.
+Existing canonical compatibility and bitwise immutable Note score checks bind
+the cached Note storage without reprojecting endpoints. Sidechain projection
+remains conservative. Final actual owner-union/overlap admission, native
+authority, Source CAS, external ownership, Drop and Ack are unchanged.
+StateEntry is dispatched through its original path before this new check.
+
+The initial test-only cohort genuinely compiled before installing the production
+preflight:1,926 inputs, source359215A6...B610FAE, Audio producer7EAB5E91...69D807,
+PEBD375E75...37A644F /13,633,536 bytes. Six new public-API controls use the
+existing sole const-TLS measuring allocator, independent Rust-owned processor
+objects, actual Runtime/Source installation and independent literal PCM.
+All proposal/compiler/registration data is built outside measured prepare.
+
+Actual Red selected receipt is
+`D6F578FF2644FDE54180678D95B79D9A26B3D00E47825A19C13AE6414A24D34E`.
+Three normal controls pass1/0; three tight-grant controls fail the zero-allocation
+assertion with these actual requested-allocation observations:
+
+| Refused preparation | Allocations | Reallocations | Requested bytes | Largest request |
+| --- | ---: | ---: | ---: | ---: |
+| Root | 34 | 2 | 13,519 | 3,624 |
+| Two actual nested placements | 65 | 3 | 26,206 | 3,624 |
+| Equal selected Scope with two Contributions | 39 | 2 | 15,138 | 3,624 |
+
+The aggregate retains Acceptedfalse /ExpectedRedObservedtrue; failed exact
+groups remain failed. Because the allocation assertion fails first, subsequent
+typed-error/native-counter/Root/claim assertions in these three negative tests
+were not yet executed. This proves the allocation-before-refusal defect within
+the measured owned cases, not their remaining postconditions, physical heap/RSS
+or a realtime-processing benchmark. All actual owners reap descendants without
+deadline, outliving or cleanup errors. Independent Red review is
+`.scratch/plugin-host-sprint/a01-m2-author-preflight-independent-review-r1/red-actual-evidence-r1.md`,
+SHA `75939105360B77E6B39A78C3C2EA70847CE6341D8001FC9E192557570224B11E`.
+
+After installing the independently reviewed preflight, the same six controls
+each pass1/0: receipt
+`18ED2E59CEDD3F7092B6924F322DF586996A0C058F51BD0DC27A9DA91A1AF0D8`,
+compiled sourceC95B6FFC...82B473 /1,927 records. Tight-grant public prepare now
+reports `[0,0,0,0]` requested allocation counters and executes its subsequent
+typed error, native-call count, Root/Source identity and PCM sentinel assertions.
+Normal exact-grant, shared-Scope and unchanged-peer controls check steady
+footprint, Preserved receipt, exact object incarnations, entries, Session epochs/
+sample cursors and literal PCM3.0/2.0. They cannot pass merely by creating new
+equivalent processors. This is owned portable model-contract evidence, not a
+native DLL or third-party result.
+
+Original source review is1B11819D...3D1342 in the same review directory. Seven
+existing files reconstruct their complete original hashes after reversing only
+new insertions/appends; old fixture defaults, test bodies and assertions remain.
+Root formats only new test/measurement appends and new scanner, preserving the
+complete four existing test prefixes. Three inserted production mirrors then
+normalize only one newly inserted CR byte each to LF; line counts are unchanged.
+Those steps are recorded separately under
+`.scratch/plugin-host-sprint/a01-m2-preserved-format-r1/prefix-proofs.json` and
+`a01-m2-preserved-production-newline-r1.json`.
+
+The first selected wrapper incorrectly guessed a module namespace and ran zero
+tests; exact-count gates rejected all six. ReceiptA6B0AC14...0FCEDE remains a
+setup failure. R2 supervises actual inventory but rejects its remaining wrong
+prefix before any control executes, receipt7BAF7677...093764. R3 uniquely derives
+full names from actual compiler inventory:572 total /85 ignored /487 ordinary,
+all old566 names retained and six new ordinary controls. Neither setup failure
+is relabeled a functional failure or pass. Strict R1's actual single
+clippy::int_plus_one error remains2EDAD27C...2C5B. The suggested predicate
+`current + local < required` is equivalent to the old expression for the
+fixture's positive checked required extent; in-memory reversal recovers the
+entire previous0CB19314...CACD88 test file. No assertion was removed or relaxed.
+
+Final1,927-source cohort is
+`ADB782DD25234EEB4F96B4B73DE440A7D65CD9E27B271CC9A92236A15562A9C6`.
+Five affected crates pass all-targets/all-features strict checks with zero
+compiler diagnostics; receipt
+`FAE84E1B4D0B9F073906DA35C9B6C8917DA7005DE58ED04852A9FFE9F44CCA1C`.
+The final Audio build receipt is
+`A12B08F07FE78A18A93A61C7CDAEAA4DE083C60E8446B1DBC50371D50CAB608A`.
+Its actual ordinary regression runs twice: each487 passed /0 failed, with all
+previous566 names and85 ignored names retained in the572-name inventory. The
+same six new controls are ordinary tests in both runs. Receipt
+`121119A024CFD6B3BAC5B41270D61A2EAE77F57E3DBF0AE9E20D560F6A96FA67`
+retains the actual PE03C50FFB...EAE6DF6 /13,634,048 bytes. Each native process
+owner exits0 and reaps descendants, without deadline/outliving/cleanup errors;
+compiled inputs remain unchanged. This owner supervises the Rust test binary,
+not a native plugin. Independent final Green/native/strict/format review is
+`green-native-strict-format-closure-r1.md` in the same review directory, SHA
+`404DD2B47756B1AEF3BA370B777ADD266683EA445928523880C194CF5825EAC5`.
+It independently compares all source transitions and actual unique outcome sets;
+original source/Red reports and failed wrappers/strict diagnostics stay intact.
+
+Normal current Product completes with Cargo0 and unchanged sameADB1,927 inputs:
+receipt `D33AD9D605687DB9EDED7E995B374F39D346144BACB24FC08DF43A854FA93B7A`,
+actual producerEAE2A9F7...5E2D89F. The normal `mondrian` bin is features[] /
+opt1 /debug2 /freshfalse, with ten existing warnings and no compiler errors.
+Retained Product PE856855CB...63686AB /97,177,600 bytes is a create-only copy,
+not a reconstructed or stripped binary; retention receipt
+`BB2B5705970B53A4130E5C2A4705B3D42418E58BEEF6D61F93255D01EAEE6301`.
+Actual ffmpeg-sys Cargo output links the selected FFmpeg8.1.2 SDK; generated
+FFI bindings retainD55A6C9C...15B89 with codec62/util60 and a separate original
+binding-file copy. Evidence is under
+`a01-m2-preserved-preflight-product-r1.receipt.json` and
+`a01-m2-preserved-preflight-product-r1-retained/receipt.json` in the existing
+external evidence directory. This qualifies the current normal build only.
+No current native DLL/GUI/whole Product regression was executed; the d7eb5dd9
+owned native metadata query remains a separately bound historical cohort.
+
+This preflight is not a reservation or external-handle lifetime registry.
+Externally retained new/retired Preserved handles, StateEntry clone peaks,
+physical/SDK/Arc ownership, initial Note IR/author peaks, application Resolver,
+actual native NoteScore/DAG/Parent DSP IPC, zero-frame/replay/nesting, realtime,
+comparative performance and third-party/platform evidence remain separate.
+Public nonempty NoteScore retains its original allocation-free Unsupported gate.

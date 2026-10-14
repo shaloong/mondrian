@@ -1,6 +1,7 @@
 pub(crate) mod native_author;
 mod native_author_scope;
 mod preparation_admission;
+mod native_author_preflight;
 
 use crate::dependency::{
     select_program_window, selected_contribution_source_window, AudioDependencyClosure,

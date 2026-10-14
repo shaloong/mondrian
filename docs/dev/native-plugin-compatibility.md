@@ -445,3 +445,32 @@ See the [sprint record](plugin-host-sprint.md#a01-m2-prepared-policy-and-coheren
 for current receipts, retained original failures, source review and remaining
 dependencies. Query qualification does not establish Note DSP, instruments,
 third-party compatibility, comparative performance or another platform.
+
+## Preserved author preparation preflight (2026-10-14)
+
+The Preserved parameter path now checks the existing prepared-logical policy
+over the whole retained Runtime tree before its first local deep clone. It
+counts the current Root once, adds each actual replacement's requested weight,
+and preserves the selected equal-program replacement rule. StateEntry dispatch,
+final observed overlap checks, Source publication, CAS, Drop and Ack stay on
+their existing paths.
+
+Three owned public-API controls first reproduce allocations before tight-grant
+refusal. After the fix, those calls refuse with typed budget errors and zero
+requested allocations/reallocations. Three positive controls verify exact-grant
+installation, shared Scope materializations and an unchanged nested peer, with
+original native object identities, epochs/cursors and literal PCM outputs.
+Final sourceADB782DD...562A9C6 /1,927 records passes two ordinary Audio rounds,
+each487/0, and strict checks for five affected crates with zero diagnostics.
+The same current normal Product build passes with FFmpeg8.1.2/codec62/util60;
+its actual product file and generated FFI bindings are retained independently.
+Product execution and a current native DLL query are not covered by that build.
+All old566 test names and85 ignored names remain. Actual receipts and retained
+negative records are in the [sprint record](plugin-host-sprint.md#preserved-parameter-preparation-logical-preflight-2026-10-14).
+
+This is **Verified within the owned Rust model's Preserved logical-policy
+preflight and installation controls**. It does not qualify all externally held
+handoff residency, physical/SDK/Arc memory, StateEntry peaks, native DLL DSP,
+NoteScore execution, instruments, third-party plugins, realtime processing,
+comparative performance or another platform. Nonempty public NoteScore remains
+Unsupported; separate work is required before that gate can be lifted.

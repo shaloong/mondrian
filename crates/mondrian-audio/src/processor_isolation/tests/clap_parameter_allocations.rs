@@ -701,3 +701,18 @@ fn native_factory_storage_actual_isolated_visitor_is_nonallocating_after_owners_
         "owning visitor/observation bookkeeping must not allocate"
     );
 }
+
+/// Reuse the one existing const-TLS measuring allocator for an actual host seam.
+/// Counts are requested allocations/reallocations/bytes/largest request, not RSS.
+pub(crate) fn measure_host_allocations_for_test<T>(execute: impl FnOnce() -> T) -> (T, [usize; 4]) {
+    let (result, counts) = measure(execute);
+    (
+        result,
+        [
+            counts.allocations,
+            counts.reallocations,
+            counts.requested_bytes,
+            counts.largest_request,
+        ],
+    )
+}

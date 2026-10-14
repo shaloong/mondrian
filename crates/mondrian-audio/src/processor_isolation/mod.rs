@@ -1768,3 +1768,6 @@ pub use native_worker_roles::{
     IsolatedAudioProcessorMainRole, IsolatedAudioProcessorProcessingRole,
     IsolatedAudioProcessorWorkerSplit,
 };
+
+#[cfg(test)]
+pub(crate) use clap_worker::measure_host_allocations_for_test;
