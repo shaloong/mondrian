@@ -324,10 +324,21 @@ Two repeated Windows owned VST3 editor scenarios also qualify real StateEntry
 cohort fees through partial preparation, cancellation/retry, metadata Drop,
 installation and exact Ack, plus pending nested Runtime destruction. They use
 actual unequal new/old weights and count the unchanged root Session role.
+Initial StateEntry preparation now borrows the complete retained tree to bound
+new local roles R before the first clone or Plan retain. Every affected local
+uses the existing requested logical policy, including equal/nonselected peers;
+unaffected locals contribute their local Plan weight once. Checked C+R goes
+through the original Root checker, which adds H once. Actual N must fit R before
+source inspection. Persisted-cohort retries keep their existing C+H validation
+without another R or enrollment. Repeated real Windows VST3 controls qualify
+root/nested tight logical rejection with zero measured host-thread allocations
+and root exact-grant partial retry/install/Ack/PCM. The finite native family has
+H0 initially and no sidechain, transitions or Notes; conservative R can exceed N
+in other shapes. This does not establish physical, fixed-budget or SDK bounds.
 Opaque native destructor ordering, installed Runtime-first destruction,
-same-Source Superseded CAS, native Ack refusal, StateEntry admission before its
-first clone, accounting-metadata/fixed/physical completeness and real-time
-performance still require separate acceptance.
+same-Source Superseded CAS, native Ack refusal, additional native budget shapes,
+accounting-metadata/fixed/physical completeness and real-time performance still
+require separate acceptance.
 
 - `mondrian-timeline` owns author data and validation only.
 - `mondrian-audio` owns compiler, immutable plan, common DSP, recursive runtime,

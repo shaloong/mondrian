@@ -578,3 +578,39 @@ Fixed/physical/SDK memory, realtime/performance, instruments/NoteScore,
 independent third-party plugins and macOS/Linux remain separate open gates.
 The next minimal contract adds a borrowed whole-tree logical check before the
 first StateEntry clone; it preserves the same grant, fee authority and retry.
+
+## Whole StateEntry logical preflight (2026-10-14)
+
+SourceB5AAEBC8...135366 /1,938 inputs adds one private Scope borrowed traversal
+and three real budget tests. It preserves the original allocator, persisted
+retry, resource authority and install/Ack tail. Source review A32C787D...6B97F8
+verifies R covers all affected locals and the unaffected local Plan roles once;
+actual N<=R remains a separate guard before source inspection.
+
+Original sourceDAFB3A36...64AEDA6 has two genuine desired-red tests. The root
+case returns exact required68,352/granted68,351 after127 host allocations and20
+reallocations; the nested case returns140,032/140,031 after270 allocations and21
+reallocations. Actual error, Source, every cursor, windows, no cohort/H0 and
+retirement checks pass before the final zero-allocation assertion fails. These
+failures and their original artifacts are retained.
+
+On the repaired source, both tight original grants return the same typed errors
+with measured [0,0,0,0] host-thread allocation/reallocation/byte counts. A third
+real root test freezes G=68,352, observes C=33,664/H=N=34,688 at the exact bound,
+and proves partial cleanup retries and metadata Drop keep that same cohort and
+charge once. Actual install N→O, exact native Ack, old Plan retirement, epoch702,
+known stereo PCM and native child identities pass. These three tests and the
+two original cohort-lifetime tests each pass twice on the same-source Product
+worker E0042742...5D71F7C and owned editor DLL D6D5403F...1D52E6B. Native owners
+exit0 without deadline/errors/outliving and with reaped descendants.
+
+The actual593/90/503 inventory retains previous tests. All503 ordinary tests,
+the original22 directed controls, five-crate strict all-targets/all-features
+with zero diagnostics and the normal FFmpeg8 Product build pass. This is
+**Verified finite Windows owned-fixture logical budget behavior**. The TLS
+meter covers this calling host thread, not SDK/worker heaps or process memory.
+No realtime benchmark, SDK/IPC zero-call count or physical allocation bound is
+inferred. Fixed-budget early refusal, nonzero prior native H, affected equal
+peers, native sidechain/Note shapes, installed Runtime-first/blocked destructors,
+native Ack refusal, same-Source CAS, independent third-party plugins and other
+platforms remain separately qualified or open at their precise boundaries.

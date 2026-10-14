@@ -4224,7 +4224,8 @@ logical bytes, then actual same-thread Runtime Drop releases stored Plans and
 credits H once. These scenarios qualify genuine owned Windows StateEntry
 lifetime behavior, not an exact-grant or physical allocation bound.
 
-Whole-StateEntry admission before first clone is still open. The minimal
+At the preceding checkpoint, whole-StateEntry admission before first clone
+remains open. The minimal
 scratch CCR6849FE54...43D0B96 requests one Scope-file borrowed recursive R,
 all affected locals without Preserved skip rules, unaffected local Plan weight
 once, C+H+R under original G, late actual N<=R before inspection, and unchanged
@@ -4233,3 +4234,66 @@ boundary counters require their own source review and actual execution.
 Installed Runtime-first/blocked opaque destruction, native Ack refusal,
 same-Source Superseded CAS, complete fixed/physical/SDK accounting, RT/throughput,
 NoteScore/instruments, third-party and other platforms remain unqualified.
+
+### Whole StateEntry logical budget: actual red to green (2026-10-14)
+
+The source-established late-allocation ordering is reproduced through real
+VST3 terminal proposals. Test-only sourceDAFB3A36...64AEDA6 /1,937 inputs keeps
+Scope1E355 unchanged. Two independently seeded controls observe actual new
+stored Session weights, destroy their generous Runtime, then build fresh
+original tight grants. ReceiptFE7A4606...DB0A9 records exact root68,352/68,351
+and nested140,032/140,031 PreparedLogicalBytes refusals. Both tests complete
+the error, Source, every Session/processor cursor, real windows, old PCM hold,
+no cohort/H0 and actual Runtime/Weak retirement checks; only their final zero
+host allocation assertion fails. TLS tuples are [127,20,32724,3624] and
+[270,21,54788,3624]. Independent actual-red report7F94EFF0...9037402 verifies
+these are the intended final failures, with actual owner101/reap/no timeout,
+not native setup failures or accepted over-grant execution. The older Product
+6D6E worker is explicitly admitted by complete production-byte equivalence
+under cfg(test) parent/new-child changes, not relabeled as the same full freeze.
+
+Scope-only candidate117958A4...F706735 adds a pure borrowed full-tree R before
+clone/Plan retain, checked C+R through the original H-aware Root checker, and
+late actual N<=R before source inspection. Affected locals have no Preserved
+changed/equal skip; unaffected locals use local Plan weight, not nested totals.
+Independent source reportA32C787D...6B97F8 verifies the three whole-file inverse
+hunks and untouched retry/allocator/admission/install/Ack bodies. Central
+installationBE329D90...4D0EBF preserves the original tight and fee test bytes,
+adds the separate exact-grant child and leaves all shared authority unchanged.
+
+CurrentB5AAEBC8...135366 /1,938 inputs compiles fresh default Audio, receipt
+349F6D16...13B1A0, producer1FDD3459...6A60DD, retained PEB824B536...DDFA2F
+/14,167,040 bytes. Actual inventory593/90/503 adds only three ignored budget
+tests. Complete ordinary receiptB7C65A27...5B7958 passes all503 unique outcomes,
+and legacy receipt802459C1...AB443E4 passes all22 original directed controls.
+Strict receiptAB8AE7CA...E1A952 passes the original five-crate all-targets/
+all-features -Dwarnings gate with zero compiler messages. Same-source normal
+Product receipt1C049F83...EB8463 has actual default/freshfalse opt1/debug2
+producer87E8B0A6...BB46DD. Its E0042742...5D71F7C /97,186,816-byte worker is
+retained independently in the native gates; actual FFmpeg8.1.2/9e593bb native
+link path and D55A/codec62/util60 bindings are unchanged.
+
+Native receipts7C256EB2...2123CC andC357DB0A...E19FC9 each pass all five exact
+ignored scenarios: the original two real cohort lifetime controls, root/nested
+tight original-grant refusal, and root exact original-grant partial retry.
+Both tight cases now measure [0,0,0,0] with exactly the same errors and all
+earlier state/retirement assertions. The exact case starts at C33,664+N34,688=
+G68,352, retains one actual cohort and H=N through two real cleanup failures,
+completion, metadata recreation and Drop, then installs N→O and exact-Acks
+H0/Plan retirement before fresh epoch702 literal [2.25,0.75] PCM and child/PID/
+view-close checks. A retry cannot fit a duplicate R/N under this original G.
+All ten actual groups exit0, reap without deadline/outliving/errors and retain
+unchanged inputs. Third-test source/actual green and final document/index
+qualification are recorded by independent review before local integration.
+
+This closes only the finite H0/no-sidechain/no-transition/no-Note logical family.
+The full-tree estimator is a borrowed policy upper, not a reservation or new
+ledger. Valid logical-budget denials in these tests allocate no calling-thread
+heap; SDK/worker allocations and call counts, fixed/physical bounds, RT deadlines
+and mature-host performance are unmeasured. Nonzero prior actual native H,
+equal/nonselected affected peers, native sidechain/Note cases, scalar overflow
+and missing-program native controls remain separate coverage. Installed
+Runtime-first/opaque blocked destruction, native Ack refusal, same-Source CAS,
+NoteScore/instruments, third-party and other platforms remain open. Existing
+native producers are intentionally preserved; future fixture consolidation must
+retain their independent input/output and failure oracles.

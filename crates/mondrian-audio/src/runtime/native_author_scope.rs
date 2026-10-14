@@ -161,6 +161,17 @@ impl AudioProgramRuntime {
             {
                 return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
             }
+            // Every new local Session, including unaffected shared Plans, is
+            // admitted under the one Root grant before any local clone/retain.
+            let (requested_logical, affected) =
+                self.requested_scope_logical_bytes(programs, proposal)?;
+            if !affected {
+                return Err(Error::ProgramMismatch);
+            }
+            self.check_resource_ceiling(
+                AudioRuntimeResourceCategory::PreparedLogicalBytes,
+                sum(self.resource_footprint.prepared_logical_bytes, requested_logical)?,
+            )?;
             let mut locals = Vec::new();
             let mut reserved = self.resource_footprint;
             let prior_held_logical = self.held_native_plan_logical_bytes();
@@ -195,8 +206,11 @@ impl AudioProgramRuntime {
                 logical_fee: None,
             });
             // This batch is still stack-owned and excluded from prior held fees.
-            // Whole-StateEntry before-first-clone admission remains separate.
+            // Its actual local weights must fit the borrowed whole-tree upper.
             let (old_logical, new_logical) = self.admit_scope_overlap(&mut cohort)?;
+            if new_logical > requested_logical {
+                return Err(AudioRuntimeBuildError::InvalidResourceReplacement.into());
+            }
             let mut cursor = 0;
             self.inspect_scope_sources(&mut cohort, &mut cursor, cancellation)?;
             if cursor != cohort.locals.len() {
@@ -246,6 +260,47 @@ impl AudioProgramRuntime {
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
         }
         Ok(handle)
+    }
+
+    /// Borrow the logical role of every complete new local Session before any
+    /// prepared clone, Plan Arc retain or storage allocation. Unlike Preserved,
+    /// StateEntry also migrates equal affected peers and unaffected locals.
+    fn requested_scope_logical_bytes(
+        &self,
+        programs: &[super::native_author::NativeAudioAuthorProgram],
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+    ) -> Result<(usize, bool), super::native_author::NativeAudioParameterHandoffError> {
+        let affected = self.sequence_id == proposal.sequence();
+        let current = self.session.resource_plan();
+        let mut requested = if affected {
+            let program = programs
+                .iter()
+                .find(|program| {
+                    program.sequence == self.sequence_id
+                        && program.program.output_id() == current.program().output_id()
+                })
+                .ok_or(super::native_author::NativeAudioParameterHandoffError::ProgramMismatch)?;
+            current.requested_native_author_logical_bytes(
+                program.program.as_ref(),
+                super::native_author::locator(proposal),
+            )?
+        } else {
+            // This is the local immutable weight, not the cached subtree total.
+            current
+                .session_resource_footprint()
+                .map_err(AudioRuntimeBuildError::from)?
+                .prepared_logical_bytes
+        };
+        let mut any_affected = affected;
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                let (next, nested_affected) =
+                    nested.runtime.requested_scope_logical_bytes(programs, proposal)?;
+                requested = sum(requested, next)?;
+                any_affected |= nested_affected;
+            }
+        }
+        Ok((requested, any_affected))
     }
 
     fn allocate_scope_locals(

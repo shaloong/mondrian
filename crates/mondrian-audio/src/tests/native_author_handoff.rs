@@ -1550,6 +1550,12 @@ mod scope_native {
     mod fee_lifecycle_controls {
         include!("native_author_scope_fee_tests.rs");
     }
+    mod whole_budget_controls {
+        include!("native_author_scope_budget_tests.rs");
+        mod exact_budget_control {
+            include!("native_author_scope_exact_budget_tests.rs");
+        }
+    }
 }
 
 #[test]
