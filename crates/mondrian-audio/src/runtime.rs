@@ -1,8 +1,8 @@
 pub(crate) mod native_author;
+mod native_author_logical_fees;
+mod native_author_preflight;
 mod native_author_scope;
 mod preparation_admission;
-mod native_author_preflight;
-mod native_author_logical_fees;
 
 use crate::dependency::{
     select_program_window, selected_contribution_source_window, AudioDependencyClosure,
@@ -1298,6 +1298,7 @@ impl AudioProgramRuntime {
                 })
                 .ok_or(AudioRuntimeBuildError::MissingProgramOutput(sequence.id))?;
             let output_id = compile_request.output_id;
+            let mut note_reservation = None;
             let program = if let Some(prepared_closure) = prepared_closure {
                 let window = selection.ok_or(AudioRuntimeBuildError::MissingPreparedProgram {
                     sequence_id: sequence.id,
@@ -1309,6 +1310,21 @@ impl AudioProgramRuntime {
                         output_id,
                     },
                 )?
+            } else if selection.is_none() {
+                // Choice A: author/non-Note errors precede checked request and
+                // grant refusal; later media/child/contract/endpoint errors
+                // follow. Only this direct unwindowed selected-Note family
+                // changes priority. There is still no Note execution permit.
+                let (program, reservation) =
+                    crate::compiler::compile_audio_program_with_note_admission(
+                        sequence,
+                        compile_request,
+                        |graph, notes| {
+                            ledger.reserve_compiled_note_plan(sequence.id, output_id, graph, notes)
+                        },
+                    )?;
+                note_reservation = reservation;
+                Arc::new(program)
             } else {
                 let mut program = compile_audio_program(sequence, compile_request)?;
                 if let Some(window) = selection {
@@ -1317,21 +1333,20 @@ impl AudioProgramRuntime {
                 }
                 Arc::new(program)
             };
-            // Keep the selected-score M1 refusal and its endpoint error order.
-            // Empty-score Plans can already reserve their existing logical
-            // graph policy before descendants/media and immutable preparation.
-            // A pending ancestor remains in this same ledger while children
-            // are built; completion replaces only this local reservation.
-            let prepared_reservation =
-                if program.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
-                    Some(ledger.reserve_prepared_plan(
-                        sequence.id,
-                        output_id,
-                        PreparedAudioPlan::requested_base_logical_bytes(&program)?,
-                    )?)
-                } else {
-                    None
-                };
+            // Carry one receipt through descendants and complete it once with
+            // the actual common Session footprint. Empty/window/precompiled
+            // families retain their existing admission and error boundaries.
+            let prepared_reservation = if note_reservation.is_some() {
+                note_reservation
+            } else if program.note_lanes.iter().all(|lane| lane.notes.is_empty()) {
+                Some(ledger.reserve_prepared_plan(
+                    sequence.id,
+                    output_id,
+                    PreparedAudioPlan::requested_base_logical_bytes(&program)?,
+                )?)
+            } else {
+                None
+            };
             let execution_demand = program.execution_demand();
             let nested_cache_frames =
                 contract.max_block_frames.clamp(1, NESTED_SOURCE_CACHE_FRAMES);
@@ -2297,3 +2312,7 @@ pub enum AudioRuntimeBuildError {
         reason: String,
     },
 }
+
+#[cfg(test)]
+#[path = "runtime/note_preclone_admission_tests.rs"]
+mod note_preclone_admission_tests;

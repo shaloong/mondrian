@@ -103,6 +103,12 @@ fn observed<R>(run: impl FnOnce() -> R) -> (R, Observation) {
     (result, observation)
 }
 
+// The same existing TLS observer brackets the real public Runtime producer.
+pub(super) fn observe_counts<R>(run: impl FnOnce() -> R) -> (R, usize, usize) {
+    let (result, observation) = observed(run);
+    (result, observation.requests, observation.deliveries)
+}
+
 fn time(n: i64, d: i64) -> TimelineTime {
     TimelineTime::new(n, d).unwrap()
 }

@@ -159,6 +159,24 @@ fn note_phase_payload_bytes(
         .ok_or_else(overflow)
 }
 
+/// Reuse each real phase's accepted requested payload for pre-clone admission.
+pub(crate) fn requested_note_lowering_peak_bytes(
+    lanes: usize,
+    events: usize,
+    key_bytes: usize,
+) -> Result<usize, AudioCompileError> {
+    [
+        NotePhaseRows::Project { lanes },
+        NotePhaseRows::Resolve { projected: lanes, requested: lanes },
+        NotePhaseRows::Bind { requested: lanes, prepared: lanes },
+        NotePhaseRows::Retained { prepared: lanes },
+    ]
+    .into_iter()
+    .try_fold(0_usize, |peak, rows| {
+        note_phase_payload_bytes(rows, events, key_bytes).map(|bytes| peak.max(bytes))
+    })
+}
+
 fn require_phase_payload(actual: usize, requested: usize) -> Result<(), AudioCompileError> {
     if actual > requested {
         return Err(invalid("prepared Note phase payload exceeds request"));
@@ -1459,3 +1477,7 @@ mod tests {
 #[cfg(test)]
 #[path = "prepared_notes/phase_envelope_tests.rs"]
 mod phase_envelope_tests;
+
+#[cfg(test)]
+#[path = "prepared_notes/admission_peak_tests.rs"]
+mod admission_peak_tests;

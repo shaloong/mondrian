@@ -17,6 +17,33 @@ pub(super) struct PreparedPlanReservation {
 }
 
 impl AudioRuntimeAdmissionLedger {
+    /// Admit only the direct unwindowed compiler's nonempty selected Note family.
+    /// B0 and all four lowering phases use their existing consumers; Ac is the
+    /// compiler's checked request. The receipt still belongs to this ledger.
+    pub(super) fn reserve_compiled_note_plan(
+        &mut self,
+        sequence_id: SequenceId,
+        output_id: ProgramOutputId,
+        graph: crate::plan::CompiledAudioGraph<'_>,
+        notes: crate::plan::CompiledNoteStorageRequest,
+    ) -> Result<PreparedPlanReservation, AudioRuntimeBuildError> {
+        let base = crate::PreparedAudioPlan::requested_base_logical_bytes_for_graph(graph)?;
+        let peak = crate::schedule::requested_note_lowering_peak_bytes(
+            notes.lanes,
+            notes.events,
+            notes.key_bytes,
+        )?;
+        let requested = base
+            .checked_add(notes.compiler_bytes)
+            .and_then(|bytes| bytes.checked_add(peak))
+            .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                category: AudioRuntimeResourceCategory::PreparedLogicalBytes,
+                sequence_id,
+                output_id,
+            })?;
+        self.reserve_prepared_plan(sequence_id, output_id, requested)
+    }
+
     pub(super) fn reserve_prepared_plan(
         &mut self,
         sequence_id: SequenceId,

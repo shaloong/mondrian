@@ -1,8 +1,8 @@
 use crate::plan::{
-    AudioCompileRequest, CompiledAudioContribution, CompiledAudioProgram, CompiledAudioSource,
-    CompiledChannelStrip, CompiledNoteLane, CompiledProcessingScope, CompiledProcessor,
-    CompiledProcessorSidechainRoute, CompiledRack, CompiledRoute, CompiledSourceTimeMap,
-    CompiledTrackChannel, CompiledTransition,
+    AudioCompileRequest, CompiledAudioContribution, CompiledAudioGraph, CompiledAudioProgram,
+    CompiledAudioSource, CompiledChannelStrip, CompiledNoteLane, CompiledNoteStorageRequest,
+    CompiledProcessingScope, CompiledProcessor, CompiledProcessorSidechainRoute, CompiledRack,
+    CompiledRoute, CompiledSourceTimeMap, CompiledTrackChannel, CompiledTransition,
 };
 use mondrian_core::{
     AudioNoteId, AudioNoteLaneId, AudioProcessingScopeId, AudioProcessorInstanceId, MixBusId,
@@ -36,9 +36,10 @@ fn compiled_note_payload_bytes(
 
 fn requested_compiled_note_payload<'a>(
     mut lanes: impl Iterator<Item = &'a mondrian_timeline::audio::AudioNoteLane>,
-) -> Result<(usize, usize), AudioCompileError> {
-    let (count, note_bytes, key_bytes) =
-        lanes.try_fold((0_usize, 0_usize, 0_usize), |(count, notes, keys), lane| {
+) -> Result<CompiledNoteStorageRequest, AudioCompileError> {
+    let (count, note_bytes, key_bytes, events) = lanes.try_fold(
+        (0_usize, 0_usize, 0_usize, 0_usize),
+        |(count, notes, keys, events), lane| {
             Ok::<_, AudioCompileError>((
                 count.checked_add(1).ok_or(AudioCompileError::NoteEventCountOverflow)?,
                 notes
@@ -48,12 +49,20 @@ fn requested_compiled_note_payload<'a>(
                     .ok_or(AudioCompileError::NoteEventCountOverflow)?,
                 keys.checked_add(lane.target.input_port_key.len())
                     .ok_or(AudioCompileError::NoteEventCountOverflow)?,
+                lane.notes
+                    .len()
+                    .checked_mul(2)
+                    .and_then(|count| events.checked_add(count))
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)?,
             ))
-        })?;
-    Ok((
-        count,
-        compiled_note_payload_bytes(count, note_bytes, key_bytes)?,
-    ))
+        },
+    )?;
+    Ok(CompiledNoteStorageRequest {
+        lanes: count,
+        events,
+        key_bytes,
+        compiler_bytes: compiled_note_payload_bytes(count, note_bytes, key_bytes)?,
+    })
 }
 
 fn require_compiled_note_capacity(
@@ -94,11 +103,30 @@ pub fn compile_audio_program(
     sequence: &Sequence,
     request: AudioCompileRequest,
 ) -> Result<CompiledAudioProgram, AudioCompileError> {
-    sequence.audio_program.validate(
-        &sequence.audio_tracks,
-        &sequence.audio_roles,
-        sequence.settings.audio_channel_layout,
-    )?;
+    compile_audio_program_with_note_admission(sequence, request, |_, _| {
+        Ok::<(), AudioCompileError>(())
+    })
+    .map(|(program, _)| program)
+}
+
+/// The sole Runtime caller supplies admission before selected Note ownership.
+/// The receipt leaves this function only with the complete, accepted Program.
+pub(crate) fn compile_audio_program_with_note_admission<R, E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    admit: impl FnOnce(CompiledAudioGraph<'_>, CompiledNoteStorageRequest) -> Result<R, E>,
+) -> Result<(CompiledAudioProgram, Option<R>), E>
+where
+    E: From<AudioCompileError>,
+{
+    sequence
+        .audio_program
+        .validate(
+            &sequence.audio_tracks,
+            &sequence.audio_roles,
+            sequence.settings.audio_channel_layout,
+        )
+        .map_err(AudioCompileError::from)?;
     let output = sequence
         .audio_program
         .outputs
@@ -106,7 +134,7 @@ pub fn compile_audio_program(
         .find(|output| output.id == request.output_id)
         .ok_or(AudioCompileError::OutputNotFound(request.output_id))?;
     if !matches!(output.main_source, ProgramOutputMainSource::RoutedInputs) {
-        return Err(AudioCompileError::SemanticProjectionNotExecutableYet);
+        return Err(AudioCompileError::SemanticProjectionNotExecutableYet.into());
     }
 
     let muted_tracks = sequence
@@ -329,7 +357,7 @@ pub fn compile_audio_program(
         .iter()
         .map(|contribution| contribution.edit_id)
         .collect::<BTreeSet<_>>();
-    let transitions = sequence
+    let transitions: Vec<CompiledTransition> = sequence
         .audio_program
         .transitions
         .iter()
@@ -407,9 +435,29 @@ pub fn compile_audio_program(
                     .any(|processor| processor.instance_id == lane.target.processor_id)
             })
     };
-    let (lane_count, requested_payload) = requested_compiled_note_payload(
+    let note_request = requested_compiled_note_payload(
         sequence.audio_program.note_lanes.iter().filter(|lane| selected_note_lane(lane)),
     )?;
+    let reservation = if note_request.lanes != 0 {
+        Some(admit(
+            CompiledAudioGraph {
+                contributions: &contributions,
+                processing_scopes: &processing_scopes,
+                transitions: &transitions,
+                track_channels: &track_channels,
+                buses: &buses,
+                bus_order: &bus_order,
+                output: &compiled_output,
+                routes: &routes,
+                sidechain_routes: &sidechain_routes,
+            },
+            note_request,
+        )?)
+    } else {
+        None
+    };
+    let lane_count = note_request.lanes;
+    let requested_payload = note_request.compiler_bytes;
     #[cfg(test)]
     note_materialization_tests::observe_request(lane_count, requested_payload);
     let mut note_lanes = reserve_compiled_note_rows::<CompiledNoteLane>(lane_count)?;
@@ -448,7 +496,7 @@ pub fn compile_audio_program(
         .compiled_note_payload_bytes()
         .map_err(|_| AudioCompileError::NoteEventCountOverflow)?;
     require_compiled_note_payload(actual_payload, requested_payload)?;
-    Ok(program)
+    Ok((program, reservation))
 }
 
 fn compile_scope(
@@ -800,3 +848,8 @@ pub enum AudioCompileError {
 #[cfg(test)]
 #[path = "compiler/note_materialization_tests.rs"]
 mod note_materialization_tests;
+
+#[cfg(test)]
+pub(crate) fn observe_note_materialization<R>(run: impl FnOnce() -> R) -> (R, usize, usize) {
+    note_materialization_tests::observe_counts(run)
+}

@@ -6,12 +6,13 @@ pub(crate) use prepared_notes::{PreparedNoteEvent, PreparedNoteTarget};
 pub(crate) use prepared_notes::{PreparedNotePhase, PreparedNoteScore};
 mod prepared_notes;
 pub(crate) use native_author::processor;
+pub(crate) use prepared_notes::requested_note_lowering_peak_bytes;
 use prepared_notes::ProjectedNoteScore;
 
 use crate::latency::{solve_prepared_latency, PreparedLatencyGraph, PreparedNodeLatency};
 use crate::plan::{
-    AudioRenderContract, CompiledAudioContribution, CompiledAudioProgram, CompiledChannelStrip,
-    CompiledProcessingScope, CompiledRack, CompiledTransition,
+    AudioRenderContract, CompiledAudioContribution, CompiledAudioGraph, CompiledAudioProgram,
+    CompiledChannelStrip, CompiledProcessingScope, CompiledRack, CompiledTransition,
 };
 use crate::processor_host::{
     default_processor_resolver, prepare_processor_factory, PreparedProcessorFactoryBinding,
@@ -427,7 +428,13 @@ impl PreparedAudioPlan {
     pub(crate) fn requested_base_logical_bytes(
         program: &CompiledAudioProgram,
     ) -> Result<usize, AudioCompileError> {
-        let shape = PreparedLogicalShape::requested(program)
+        Self::requested_base_logical_bytes_for_graph(program.graph())
+    }
+
+    pub(crate) fn requested_base_logical_bytes_for_graph(
+        graph: CompiledAudioGraph<'_>,
+    ) -> Result<usize, AudioCompileError> {
+        let shape = PreparedLogicalShape::requested_graph(graph)
             .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))?;
         prepared_logical_bytes_for_shape(shape)
             .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))
@@ -554,7 +561,12 @@ impl PreparedLogicalShape {
 
     // No allocation, native/factory query, key copy, endpoint lowering, or
     // prepared_segments() occurs here. This is shape, not graph validation.
+    #[cfg(test)]
     fn requested(program: &CompiledAudioProgram) -> Result<Self, PreparedLogicalShapeError> {
+        Self::requested_graph(program.graph())
+    }
+
+    fn requested_graph(program: CompiledAudioGraph<'_>) -> Result<Self, PreparedLogicalShapeError> {
         let mut shape = Self {
             nodes: program
                 .track_channels
@@ -570,15 +582,15 @@ impl PreparedLogicalShape {
             shape.add_strip(&channel.strip, program)?;
         }
         // Actual build consumes bus_order, not all BTreeMap values.
-        for bus_id in &program.bus_order {
+        for bus_id in program.bus_order {
             let strip = program.buses.get(bus_id).ok_or(PreparedLogicalShapeError::MissingBus)?;
             shape.add_strip(strip, program)?;
         }
-        shape.add_strip(&program.output, program)?;
-        for route in &program.routes {
+        shape.add_strip(program.output, program)?;
+        for route in program.routes {
             shape.add_curve(route.gain_automation.as_ref())?;
         }
-        for contribution in &program.contributions {
+        for contribution in program.contributions {
             let scope = program
                 .processing_scopes
                 .get(&contribution.processing_scope)
@@ -588,7 +600,7 @@ impl PreparedLogicalShape {
             shape.add_curve(contribution.volume_automation.as_ref())?;
             shape.add_curve(contribution.pan_automation.as_ref())?;
             shape.add_rack(&scope.rack, program)?;
-            for transition in &program.transitions {
+            for transition in program.transitions {
                 // Exactly append_transition_bindings' if/else-if consumer:
                 // the equal left/right edit contributes one binding, not two.
                 if transition.left == contribution.edit_id
@@ -619,7 +631,7 @@ impl PreparedLogicalShape {
     fn add_strip(
         &mut self,
         strip: &CompiledChannelStrip,
-        program: &CompiledAudioProgram,
+        program: CompiledAudioGraph<'_>,
     ) -> Result<(), PreparedLogicalShapeError> {
         self.add_curve(strip.fader_automation.as_ref())?;
         self.add_rack(&strip.pre_fader, program)?;
@@ -628,7 +640,7 @@ impl PreparedLogicalShape {
     fn add_rack(
         &mut self,
         rack: &CompiledRack,
-        program: &CompiledAudioProgram,
+        program: CompiledAudioGraph<'_>,
     ) -> Result<(), PreparedLogicalShapeError> {
         Self::add(&mut self.processors, rack.processors.len())?;
         for processor in &rack.processors {

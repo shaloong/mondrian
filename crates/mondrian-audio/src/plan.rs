@@ -214,6 +214,31 @@ pub(crate) struct CompiledNoteLane {
     pub(crate) notes: Vec<AudioNote>,
 }
 
+/// Borrowed non-Note graph facts for the existing prepared logical policy.
+/// The compiler can expose these immutable facts before creating Note owners,
+/// without constructing or publishing an incomplete executable Program.
+#[derive(Clone, Copy)]
+pub(crate) struct CompiledAudioGraph<'a> {
+    pub(crate) contributions: &'a [CompiledAudioContribution],
+    pub(crate) processing_scopes: &'a BTreeMap<AudioProcessingScopeId, CompiledProcessingScope>,
+    pub(crate) transitions: &'a [CompiledTransition],
+    pub(crate) track_channels: &'a BTreeMap<TrackId, CompiledTrackChannel>,
+    pub(crate) buses: &'a BTreeMap<MixBusId, CompiledChannelStrip>,
+    pub(crate) bus_order: &'a [MixBusId],
+    pub(crate) output: &'a CompiledChannelStrip,
+    pub(crate) routes: &'a [CompiledRoute],
+    pub(crate) sidechain_routes: &'a [CompiledProcessorSidechainRoute],
+}
+
+/// Stack-local selected Note requests, not retained payload or execution permission.
+#[derive(Clone, Copy)]
+pub(crate) struct CompiledNoteStorageRequest {
+    pub(crate) lanes: usize,
+    pub(crate) events: usize,
+    pub(crate) key_bytes: usize,
+    pub(crate) compiler_bytes: usize,
+}
+
 /// Context-independent exact-time semantic Signal Closure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAudioProgram {
@@ -252,6 +277,20 @@ impl AudioProgramExecutionDemand {
 }
 
 impl CompiledAudioProgram {
+    pub(crate) fn graph(&self) -> CompiledAudioGraph<'_> {
+        CompiledAudioGraph {
+            contributions: &self.contributions,
+            processing_scopes: &self.processing_scopes,
+            transitions: &self.transitions,
+            track_channels: &self.track_channels,
+            buses: &self.buses,
+            bus_order: &self.bus_order,
+            output: &self.output,
+            routes: &self.routes,
+            sidechain_routes: &self.sidechain_routes,
+        }
+    }
+
     /// Actual retained selected Note payload for the existing logical policy.
     /// All-empty scores add no executable Note weight; spare empty metadata is
     /// outside this policy. This does not bound compiler or preparation peaks.
