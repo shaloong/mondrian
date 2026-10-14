@@ -4172,3 +4172,64 @@ Earlier D55B6117 and856855CB snapshots remain preserved. This is build/ABI/
 retention qualification; no Product execution, current DLL query, physical
 GUI, native cohort fees or third-party processing is inferred. Final Product
 and staged-source/document review precede the local integration checkpoint.
+
+### Real StateEntry fee lifetime qualification (2026-10-14)
+
+The accepted5eed checkpoint remains the production implementation. A new
+two-declaration/two-child test slice qualifies its actual Root-owned StateEntry
+cohort. Central installation E5B8B913...48F1AE fully reverses both legacy parent
+files; the new children alone are formatted. Independent sealed source review
+592A0509...E59C64 and installed/build review E44BD68B...1C4C9C verify the
+read-only scalar observer, private accounting witness, old helpers, token
+equivalence, fresh producer and all1936 current source hashes/lengths.
+
+Fresh default Audio receipt FA5118C7...A5C5C5 binds source50FF5490...40E71EB,
+producer A9FD7756...C6CB56 and actual test PE2A7F1144...F113A91 /13,962,752
+bytes. Inventory590/87/503 retains every old588 full test name and85 old ignored
+names; only the two new actual native consumers are added as ignored tests.
+Complete ordinary receipt506FD659...1DBA66 passes503 unique outcomes with no
+failures under the original threads2/180-second gate. Strict receipt73182DED
+...52AF7 passes Core/Timeline/Audio/EditorState/Project all-targets/all-features
+with -Dwarnings and zero compiler diagnostics.
+
+Normal Product receipt40686F5F...8C5C88 also closes on50FF/1936: actual unique
+fresh default[]/opt1/debug2/test=false producer5ECDBF9E...B49BB8, zero errors
+and ten existing warnings. Its PE6D6E04B4...928AE88 /97,184,768 bytes is copied
+create-only into each native gate and hash-bound as the actual VST3 worker.
+FFmpeg8.1.2/SDK9e593bb and D55A generated bindings/codec62/util60 are unchanged.
+
+The repository-owned real editor fixture is rebuilt offline/locked in an
+isolated MSVC target. Receipt E9FE92ED...8266F9 binds25 inputs, SDK3.8.1
+provenance, three license sidecars and actual fresh default opt0/debug2 cdylib
+D6D5403F...1D52E6B /288,256 bytes. This is the real HWND/editor/MEV1 fixture,
+not the separate stateful-gain DLL and not an independent third-party sample.
+
+Actual native receipts A12F1592...EC81F and E1C40B0F...C04E48 each pass the two
+new ignored tests with one exact outcome per group, same Audio/helper/DLL and
+unchanged frozen inputs. The existing60-second exact gates and native Job
+runner report exit0, reaped descendants, no deadline/outliving/errors and empty
+cleanup. Root's R2 wrapper-generation failure is preserved and was rejected by
+the parser before any native launch; R3 uses literal source concatenation,
+fully reverses to the reviewed R1 wrapper and strengthens full old588 identity
+comparison. No test body or timeout was loosened.
+
+Actual non-nested O=33,664/N=34,688 is independently observed from stored
+Sessions. Real mode2 objects each produce typed CoherentPeerStateRequired;
+partial cancellation/retry and external metadata Drop retain one actual cohort
+and N once. Valid Source install changes the fee N→O, exact original-prefix
+native Ack retires the old cohort/Plan and sets H=0, and fresh stereo execution
+matches [2.25,0.75] per frame with unchanged native child identities. The nested
+pending-Runtime case observes N=70,528 including the unaffected root's22,016
+logical bytes, then actual same-thread Runtime Drop releases stored Plans and
+credits H once. These scenarios qualify genuine owned Windows StateEntry
+lifetime behavior, not an exact-grant or physical allocation bound.
+
+Whole-StateEntry admission before first clone is still open. The minimal
+scratch CCR6849FE54...43D0B96 requests one Scope-file borrowed recursive R,
+all affected locals without Preserved skip rules, unaffected local Plan weight
+once, C+H+R under original G, late actual N<=R before inspection, and unchanged
+retry. Tight/exact-grant native negatives/positives and optional test-only
+boundary counters require their own source review and actual execution.
+Installed Runtime-first/blocked opaque destruction, native Ack refusal,
+same-Source Superseded CAS, complete fixed/physical/SDK accounting, RT/throughput,
+NoteScore/instruments, third-party and other platforms remain unqualified.

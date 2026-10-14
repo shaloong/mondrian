@@ -1546,6 +1546,10 @@ mod scope_native {
     fn native_author_scope_repeated_nested_placements_complete_terminal_native_preparation() {
         run_scope_terminal_old_api(true);
     }
+
+    mod fee_lifecycle_controls {
+        include!("native_author_scope_fee_tests.rs");
+    }
 }
 
 #[test]

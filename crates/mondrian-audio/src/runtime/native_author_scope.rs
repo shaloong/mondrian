@@ -837,3 +837,7 @@ pub(super) fn replace_runtime_weights(
     )?;
     Ok(result)
 }
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "native_author_scope_fee_test_controls.rs"]
+pub(crate) mod fee_test_controls;

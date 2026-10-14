@@ -536,3 +536,45 @@ checks. Its normal FFmpeg8.1.2 Product build also passes with actual[]/opt1/
 debug2/fresh=false, unchanged D55A FFI bindings and separately retained
 1CAC2719...54753 Product. Build success does not add Product execution, real
 StateEntry fees or native/third-party compatibility to the owned logical slice.
+
+## Real StateEntry logical-role lifetime (2026-10-14)
+
+Source50FF5490...40E71EB /1,936 inputs adds only two Windows test declarations
+and two test modules to the accepted5eed production implementation. The old
+helpers remain byte-identical. Fresh default Audio compilation and actual
+590-test inventory retain all588 previous names;87 tests are ignored, and all
+503 ordinary tests pass. The original five-crate strict all-targets/all-features
+gate passes without diagnostics. Same-source normal Product6D6E04B4...928AE88
+uses the existing FFmpeg8.1.2 SDK and D55A bindings.
+
+Two explicit ignored tests run twice against that actual Product worker and
+fresh repository-owned VST3 editor DLL D6D5403F...1D52E6B /288,256 bytes. Its
+25-input build, SDK3.8.1 provenance and license sidecars are retained. These are
+**Verified finite Windows owned-fixture StateEntry lifetime scenarios**; they
+are not independent third-party compatibility or normal product GUI acceptance.
+
+The non-nested scenario observes actual O=33,664 and N=34,688 logical bytes.
+Two distinct real plugin objects independently produce typed partial cleanup
+failures. Cancellation, retry and metadata-handle Drop retain the same actual
+cohort/storage and charge N once. Actual install moves the role to O, preserves
+Source authority, and exact native Ack retires the cohort and its old Plan;
+H becomes zero. Fresh execution produces the independent stereo PCM oracle
+and retains the original native child identities. The nested scenario counts
+all three local Sessions, including22,016 logical bytes for the unaffected
+root, in N=70,528. Dropping the actual pending Runtime retires the cohort,
+releases old Plan Weak witnesses and credits H exactly once.
+
+Both native rounds exit0 with exact one-test passes, unchanged frozen inputs,
+no deadline/errors/outliving and reaped descendants under the existing native
+Job runner. A rejected generated execution script is preserved; its parse
+failure occurred before any native launch. The corrected controller adapter
+adds a complete comparison against the old588 names without changing tests,
+timeouts or the existing execution engine.
+
+These generous-grant tests do not qualify StateEntry rejection before its first
+clone, exact budget boundaries, installed Runtime-first destruction, blocked
+opaque native destructors, native Ack refusal or same-Source Superseded CAS.
+Fixed/physical/SDK memory, realtime/performance, instruments/NoteScore,
+independent third-party plugins and macOS/Linux remain separate open gates.
+The next minimal contract adds a borrowed whole-tree logical check before the
+first StateEntry clone; it preserves the same grant, fee authority and retry.

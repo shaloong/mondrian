@@ -320,10 +320,14 @@ This is a logical-role policy, not an allocator union or a second state/grant
 authority. Only exclusive Root operations can increase H; concurrent receipt
 Drop can decrease it, so role changes use atomic RMW rather than stale stores.
 Owned Preserved and private receipt controls have actual finite qualification.
-Real StateEntry cohort fees, opaque native destructor ordering, full
-Runtime-first destruction, same-Source Superseded CAS, StateEntry admission
-before its first clone, accounting-metadata/fixed/physical completeness and
-real-time performance require separate acceptance.
+Two repeated Windows owned VST3 editor scenarios also qualify real StateEntry
+cohort fees through partial preparation, cancellation/retry, metadata Drop,
+installation and exact Ack, plus pending nested Runtime destruction. They use
+actual unequal new/old weights and count the unchanged root Session role.
+Opaque native destructor ordering, installed Runtime-first destruction,
+same-Source Superseded CAS, native Ack refusal, StateEntry admission before its
+first clone, accounting-metadata/fixed/physical completeness and real-time
+performance still require separate acceptance.
 
 - `mondrian-timeline` owns author data and validation only.
 - `mondrian-audio` owns compiler, immutable plan, common DSP, recursive runtime,
