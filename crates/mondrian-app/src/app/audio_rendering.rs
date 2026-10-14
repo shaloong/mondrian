@@ -89,6 +89,7 @@ impl TimelineAudioPcmRenderer {
             audition,
             sample_rate,
             channel_layout,
+            MAX_AUDIO_RENDER_BLOCK_FRAMES,
             &BuiltInAudioProcessorResolver,
         )
     }
@@ -103,13 +104,20 @@ impl TimelineAudioPcmRenderer {
         audition: AudioAuditionOverlay,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
+        max_block_frames: usize,
         processor_resolver: &dyn AudioProcessorResolver,
     ) -> mondrian_core::Result<Self> {
+        if max_block_frames == 0 {
+            return Err(audio_render_error(
+                "timeline_audio_render_contract",
+                "prepared maximum block frames must be nonzero",
+            ));
+        }
         let program_channel_layout = sequence.settings.audio_channel_layout;
         let contract = AudioRenderContract {
             sample_rate,
             channel_layout: program_channel_layout,
-            max_block_frames: MAX_AUDIO_RENDER_BLOCK_FRAMES,
+            max_block_frames,
             processing_mode: AudioProcessingMode::Realtime,
             processor_session_scratch_budget_bytes:
                 AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
@@ -325,12 +333,14 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 ),
             ));
         }
-        if request.frame_count > MAX_AUDIO_RENDER_BLOCK_FRAMES {
+        let mut state = self.state.lock();
+        let max_block_frames = state.delivery.program_render_contract().max_block_frames;
+        if request.frame_count > max_block_frames {
             return Err(audio_render_error(
                 "timeline_audio_render_contract",
                 format!(
                     "requested {} frames but the prepared maximum is {}",
-                    request.frame_count, MAX_AUDIO_RENDER_BLOCK_FRAMES
+                    request.frame_count, max_block_frames
                 ),
             ));
         }
@@ -349,7 +359,6 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
                 audio_render_error("timeline_audio_sample_range", "audio window is too large")
             })?;
         let mut output = vec![0.0; samples];
-        let mut state = self.state.lock();
         let generation = request.continuity.generation();
         match request.continuity {
             AudioPcmContinuity::Enter(_) => {
@@ -754,6 +763,115 @@ fn handoff_continuity(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct QuantumRecordingResolver(Mutex<Vec<usize>>);
+
+    impl AudioProcessorResolver for QuantumRecordingResolver {
+        fn prepare(
+            &self,
+            request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+        ) -> Result<
+            Arc<dyn mondrian_audio::AudioProcessorFactory>,
+            mondrian_audio::AudioProcessorHostError,
+        > {
+            self.0.lock().push(request.render_contract().max_block_frames);
+            BuiltInAudioProcessorResolver.prepare(request)
+        }
+    }
+
+    #[test]
+    fn timeline_pcm_adapter_uses_the_prepared_quantum_before_entry() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-audio-quantum-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let library = AssetLibrary::open(root.clone()).expect("asset library");
+        let mut sequence = Sequence::new("configured quantum");
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        let resolver = QuantumRecordingResolver::default();
+        let prepare = |max_block_frames| {
+            TimelineAudioPcmRenderer::new_with_processor_resolver(
+                sequence.clone(),
+                Vec::new(),
+                Arc::clone(&library),
+                Arc::new(AudioSourceCache::new(48_000)),
+                test_runtime_grant(),
+                AudioAuditionOverlay::default(),
+                48_000,
+                AudioChannelLayout::Stereo,
+                max_block_frames,
+                &resolver,
+            )
+        };
+        assert!(
+            matches!(prepare(0), Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id, ..
+        }) if step_id == "timeline_audio_render_contract")
+        );
+        assert!(
+            resolver.0.lock().is_empty(),
+            "zero rejects before processor preparation"
+        );
+        let renderer = prepare(7).expect("configured renderer");
+        assert_eq!(*resolver.0.lock(), vec![7]);
+        assert_eq!(
+            renderer.state.lock().delivery.program_render_contract().max_block_frames,
+            7
+        );
+        let before = renderer.meter_observer().latest();
+        let generation = AudioPcmRenderGeneration::new(19);
+        let cancellation = ExecutionCancellationToken::new();
+        let request = |continuity, start_sample, frame_count| AudioPcmRenderRequest {
+            continuity,
+            start_sample,
+            frame_count,
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+        };
+        assert!(matches!(renderer.render(
+            request(AudioPcmContinuity::Enter(generation), i64::MAX, 8), &cancellation,
+        ), Err(mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id, reason,
+        }) if step_id == "timeline_audio_render_contract" && reason.contains("prepared maximum is 7")));
+        assert!(renderer.state.lock().generation.is_none());
+        assert_eq!(renderer.meter_observer().latest(), before);
+        for (continuity, start_sample) in [
+            (AudioPcmContinuity::Enter(generation), 0),
+            (AudioPcmContinuity::Continue(generation), 7),
+        ] {
+            let AudioPcmRenderOutcome::Rendered(output) = renderer
+                .render(request(continuity, start_sample, 7), &cancellation)
+                .expect("legal contiguous quantum after refusal")
+            else {
+                panic!("expected actual PCM");
+            };
+            assert_eq!(output.samples, vec![0.0; 14]);
+        }
+        drop(renderer);
+        let reference = TimelineAudioPcmRenderer::new(
+            Sequence::new("explicit reference contract"),
+            Vec::new(),
+            library,
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+            AudioAuditionOverlay::default(),
+            48_000,
+            AudioChannelLayout::Stereo,
+        )
+        .expect("reference renderer");
+        assert_eq!(
+            reference.state.lock().delivery.program_render_contract().max_block_frames,
+            MAX_AUDIO_RENDER_BLOCK_FRAMES
+        );
+        drop(reference);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn test_runtime_grant() -> AudioRuntimeResourceGrant {
         AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024)
     }
@@ -1051,6 +1169,7 @@ mod tests {
             AudioAuditionOverlay::default(),
             48_000,
             AudioChannelLayout::Stereo,
+            MAX_AUDIO_RENDER_BLOCK_FRAMES,
             resolver,
         )
         .expect("prepare native plugin preview");

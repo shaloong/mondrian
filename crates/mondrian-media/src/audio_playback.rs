@@ -1857,6 +1857,11 @@ enum CompletionAdmission {
 }
 
 impl AudioPlayback {
+    /// Maximum PCM frames requested by this owner's validated scheduler policy.
+    pub const fn render_chunk_frames(&self) -> usize {
+        self.config.chunk_frames
+    }
+
     /// Read actual producer entry/exit facts without implying deadline qualification.
     /// This ordinary control read is outside the device and DSP callback paths.
     pub fn producer_scheduling(&self) -> AudioPlaybackProducerScheduling {
@@ -7903,7 +7908,9 @@ mod tests {
         release_guard.0.store(true, Ordering::Release);
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut events = Vec::new();
-        while playback.native_control_hold.is_none() && Instant::now() < deadline {
+        while (playback.native_control_hold.is_none() || playback.pcm_journal.old_work_unsettled())
+            && Instant::now() < deadline
+        {
             let poll = playback
                 .poll(AudioPlaybackMode::Consume, sample_position(0))
                 .expect("deferred completion");
@@ -7913,6 +7920,10 @@ mod tests {
         assert!(
             playback.native_control_hold.is_some(),
             "typed deferred result not consumed"
+        );
+        assert!(
+            !playback.pcm_journal.old_work_unsettled(),
+            "old PCM completions must settle before output-token controls"
         );
         assert!(events.iter().any(
             |event| matches!(event, AudioPlaybackEvent::NativeReprepareRequired {

@@ -96,6 +96,13 @@ impl AppAudioPlayback {
         }
     }
 
+    fn render_chunk_frames(&self) -> Option<usize> {
+        match self {
+            Self::Available(playback) => Some(playback.render_chunk_frames()),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
     fn begin_endurance_shutdown(&mut self) {
         if let Self::Available(playback) = self {
             playback.begin_shutdown();
@@ -1686,6 +1693,9 @@ impl AppState {
         })?;
         let runtime_grant = self.execution_resources.decision().audio.runtime_grant;
         let audition = self.audio_monitoring.audition_overlay(authoring_session_id, sequence);
+        let max_block_frames = self.audio_playback.render_chunk_frames().ok_or_else(|| {
+            transport_action_error(action, "Audio Playback execution is unavailable")
+        })?;
         let mut renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
             sequence.clone(),
             self.sequences().to_vec(),
@@ -1695,6 +1705,7 @@ impl AppState {
             audition,
             self.audio_sample_rate,
             AUDIO_OUTPUT_LAYOUT,
+            max_block_frames,
             self.audio_processor_resolver.as_ref(),
         )
         .map_err(|error| transport_action_error(action, error))?;
@@ -5281,6 +5292,71 @@ mod tests {
     }
 
     struct NativeHoldPlatformOutput(Arc<parking_lot::Mutex<NativeHoldPlatformState>>);
+
+    #[test]
+    fn product_audio_renderer_uses_available_playback_quantum_and_skips_unavailable() {
+        struct Resolver(parking_lot::Mutex<Vec<usize>>);
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                self.0.lock().push(request.render_contract().max_block_frames);
+                mondrian_audio::BuiltInAudioProcessorResolver.prepare(request)
+            }
+        }
+        let mut state = state_with_sequence(20);
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        let mut sequence = state.active_sequence().expect("Sequence").clone();
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        state.test_set_sequence(Some(sequence));
+        let mut snapshot = audio_snapshot();
+        snapshot.active = false;
+        snapshot.buffered_frames = 0;
+        let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+            snapshot,
+            revision: 0,
+            acknowledged: 0,
+            auto_acknowledge: true,
+            queued: 0,
+        }));
+        let config = mondrian_media::AudioPlaybackConfig {
+            chunk_frames: 7,
+            ..mondrian_media::AudioPlaybackConfig::product_default()
+        };
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::with_output(config, Box::new(NativeHoldPlatformOutput(output)))
+                .expect("owned platform output"),
+        ));
+        let resolver = Arc::new(Resolver(parking_lot::Mutex::new(Vec::new())));
+        state.audio_processor_resolver = resolver.clone();
+        assert_eq!(state.audio_playback.render_chunk_frames(), Some(7));
+        let prepared = state
+            .audio_playback_renderer("quantum control")
+            .expect("actual App consumer")
+            .expect("selected processor needs execution");
+        assert_eq!(*resolver.0.lock(), vec![7]);
+        drop(prepared);
+        assert!(state.audio_playback.shutdown_and_wait(48_000).all_workers_terminated());
+        assert_eq!(state.audio_playback.render_chunk_frames(), None);
+        assert!(state
+            .audio_playback_renderer("unavailable quantum control")
+            .expect("unavailable remains inactive")
+            .is_none());
+        assert_eq!(
+            *resolver.0.lock(),
+            vec![7],
+            "inactive path prepares nothing"
+        );
+    }
 
     impl mondrian_media::AudioOutputAdapter for NativeHoldPlatformOutput {
         fn poll(&mut self) -> Option<mondrian_media::RealtimeAudioOutputEvent> {
