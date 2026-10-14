@@ -113,6 +113,59 @@ fn reserve<T>(count: usize) -> Result<Vec<T>, AudioCompileError> {
     Ok(values)
 }
 
+// One private lowering model, consumed by all four real IR phases. This counts
+// logical requested payload, not a Root grant, retained compiled A or an OS peak.
+// Consuming transitions include both row arrays while IntoIter owns its backing.
+enum NotePhaseRows {
+    Project { lanes: usize },
+    Resolve { projected: usize, requested: usize },
+    Bind { requested: usize, prepared: usize },
+    Retained { prepared: usize },
+}
+
+fn note_phase_payload_bytes(
+    rows: NotePhaseRows,
+    events: usize,
+    key_bytes: usize,
+) -> Result<usize, AudioCompileError> {
+    use std::alloc::Layout;
+
+    let overflow = || AudioCompileError::NoteEventCountOverflow;
+    let row_bytes = match rows {
+        NotePhaseRows::Project { lanes } => {
+            Layout::array::<ProjectedLane>(lanes).map_err(|_| overflow())?.size()
+        }
+        NotePhaseRows::Resolve { projected, requested } => {
+            let source = Layout::array::<ProjectedLane>(projected).map_err(|_| overflow())?.size();
+            let destination =
+                Layout::array::<RequestedTarget>(requested).map_err(|_| overflow())?.size();
+            source.checked_add(destination).ok_or_else(overflow)?
+        }
+        NotePhaseRows::Bind { requested, prepared } => {
+            let source =
+                Layout::array::<RequestedTarget>(requested).map_err(|_| overflow())?.size();
+            let destination =
+                Layout::array::<PreparedNoteTarget>(prepared).map_err(|_| overflow())?.size();
+            source.checked_add(destination).ok_or_else(overflow)?
+        }
+        NotePhaseRows::Retained { prepared } => {
+            Layout::array::<PreparedNoteTarget>(prepared).map_err(|_| overflow())?.size()
+        }
+    };
+    let event_bytes = Layout::array::<PreparedNoteEvent>(events).map_err(|_| overflow())?.size();
+    row_bytes
+        .checked_add(event_bytes)
+        .and_then(|bytes| bytes.checked_add(key_bytes))
+        .ok_or_else(overflow)
+}
+
+fn require_phase_payload(actual: usize, requested: usize) -> Result<(), AudioCompileError> {
+    if actual > requested {
+        return Err(invalid("prepared Note phase payload exceeds request"));
+    }
+    Ok(())
+}
+
 impl ProjectedNoteScore {
     pub(crate) fn project(
         lanes: &[CompiledNoteLane],
@@ -134,6 +187,23 @@ impl ProjectedNoteScore {
                     lane_count.checked_add(1).ok_or(AudioCompileError::NoteEventCountOverflow)?;
             }
         }
+        // Compute the model before allocating. Defer a new model error until
+        // the original projection/identity checks finish, preserving priority.
+        let requested_payload = lanes
+            .iter()
+            .filter(|lane| !lane.notes.is_empty())
+            .try_fold(0_usize, |bytes, lane| {
+                bytes
+                    .checked_add(lane.target.input_port_key.len())
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)
+            })
+            .and_then(|keys| {
+                note_phase_payload_bytes(
+                    NotePhaseRows::Project { lanes: lane_count },
+                    event_count,
+                    keys,
+                )
+            });
         let mut projected_lanes = reserve::<ProjectedLane>(lane_count)?;
         for lane in lanes.iter().filter(|lane| !lane.notes.is_empty()) {
             let target = lane.target.clone();
@@ -202,6 +272,20 @@ impl ProjectedNoteScore {
         events.sort_unstable_by_key(|event| {
             (event.sample, event.phase, event.lane_id, event.note_id)
         });
+        let requested_payload = requested_payload?;
+        let key_capacity = projected_lanes.iter().try_fold(0_usize, |bytes, lane| {
+            bytes
+                .checked_add(lane.target.input_port_key.capacity())
+                .ok_or(AudioCompileError::NoteEventCountOverflow)
+        })?;
+        let actual_payload = note_phase_payload_bytes(
+            NotePhaseRows::Project { lanes: projected_lanes.capacity() },
+            events.capacity(),
+            key_capacity,
+        )?;
+        require_phase_payload(actual_payload, requested_payload)?;
+        #[cfg(test)]
+        phase_envelope_tests::observe_project(&projected_lanes, &events);
         Ok(Self {
             sample_rate: rate.hz(),
             lanes: projected_lanes,
@@ -227,8 +311,41 @@ impl ProjectedNoteScore {
         self,
         program: &CompiledAudioProgram,
     ) -> Result<RequestedNoteScore, AudioCompileError> {
+        let source_capacity = self.lanes.capacity();
+        let lane_count = self.lanes.len();
+        let requested_payload = self
+            .lanes
+            .iter()
+            .try_fold(0_usize, |bytes, lane| {
+                bytes
+                    .checked_add(lane.target.input_port_key.len())
+                    .ok_or(AudioCompileError::NoteEventCountOverflow)
+            })
+            .and_then(|keys| {
+                note_phase_payload_bytes(
+                    NotePhaseRows::Resolve { projected: lane_count, requested: lane_count },
+                    self.events.len(),
+                    keys,
+                )
+            });
+        let key_capacity = self.lanes.iter().try_fold(0_usize, |bytes, lane| {
+            bytes
+                .checked_add(lane.target.input_port_key.capacity())
+                .ok_or(AudioCompileError::NoteEventCountOverflow)
+        });
         let mut targets = reserve::<RequestedTarget>(self.lanes.len())?;
-        for lane in self.lanes {
+        let mut source_lanes = self.lanes.into_iter();
+        #[cfg(test)]
+        phase_envelope_tests::observe_resolve(
+            &source_lanes,
+            source_capacity,
+            &targets,
+            &self.events,
+        );
+        for _ in 0..lane_count {
+            let Some(lane) = source_lanes.next() else {
+                break;
+            };
             let channel = program
                 .track_channels
                 .get(&lane.target.track_id)
@@ -275,7 +392,27 @@ impl ProjectedNoteScore {
                 },
                 input_port_key: lane.target.input_port_key,
             });
+            #[cfg(test)]
+            phase_envelope_tests::observe_resolve(
+                &source_lanes,
+                source_capacity,
+                &targets,
+                &self.events,
+            );
         }
+        // The emptied iterator still owns its original allocation. Count its
+        // captured backing capacity, not the remaining slice length, until Drop.
+        let requested_payload = requested_payload?;
+        let actual_payload = note_phase_payload_bytes(
+            NotePhaseRows::Resolve {
+                projected: source_capacity,
+                requested: targets.capacity(),
+            },
+            self.events.capacity(),
+            key_capacity?,
+        )?;
+        require_phase_payload(actual_payload, requested_payload)?;
+        drop(source_lanes);
         Ok(RequestedNoteScore {
             sample_rate: self.sample_rate,
             targets,
@@ -301,8 +438,42 @@ impl RequestedNoteScore {
         if self.sample_rate != rate.hz() {
             return Err(AudioCompileError::InvalidRenderContract);
         }
+        let source_capacity = self.targets.capacity();
+        let lane_count = self.targets.len();
+        let event_count = self.events.len();
+        let key_length = self.targets.iter().try_fold(0_usize, |bytes, target| {
+            bytes
+                .checked_add(target.input_port_key.len())
+                .ok_or(AudioCompileError::NoteEventCountOverflow)
+        });
+        let requested_payload = key_length
+            .as_ref()
+            .map_err(|_| AudioCompileError::NoteEventCountOverflow)
+            .and_then(|keys| {
+                note_phase_payload_bytes(
+                    NotePhaseRows::Bind { requested: lane_count, prepared: lane_count },
+                    event_count,
+                    *keys,
+                )
+            });
+        let key_capacity = self.targets.iter().try_fold(0_usize, |bytes, target| {
+            bytes
+                .checked_add(target.input_port_key.capacity())
+                .ok_or(AudioCompileError::NoteEventCountOverflow)
+        });
         let mut targets = reserve::<PreparedNoteTarget>(self.targets.len())?;
-        for request in self.targets {
+        let mut source_targets = self.targets.into_iter();
+        #[cfg(test)]
+        phase_envelope_tests::observe_bind(
+            &source_targets,
+            source_capacity,
+            &targets,
+            &self.events,
+        );
+        for _ in 0..lane_count {
+            let Some(request) = source_targets.next() else {
+                break;
+            };
             let mut matches = processors
                 .iter()
                 .enumerate()
@@ -332,6 +503,13 @@ impl RequestedNoteScore {
                 native_port_index: port.native_index,
                 limits: contract.limits,
             });
+            #[cfg(test)]
+            phase_envelope_tests::observe_bind(
+                &source_targets,
+                source_capacity,
+                &targets,
+                &self.events,
+            );
         }
         for event in &self.events {
             let target = targets
@@ -341,11 +519,34 @@ impl RequestedNoteScore {
                 return Err(invalid("prepared Note event target identity differs"));
             }
         }
-        Ok(PreparedNoteScore {
+        // Existing grid/occurrence/port/rank errors win over a new phase refusal.
+        let requested_payload = requested_payload?;
+        let actual_payload = note_phase_payload_bytes(
+            NotePhaseRows::Bind {
+                requested: source_capacity,
+                prepared: targets.capacity(),
+            },
+            self.events.capacity(),
+            key_capacity?,
+        )?;
+        require_phase_payload(actual_payload, requested_payload)?;
+        drop(source_targets);
+        let bound = PreparedNoteScore {
             sample_rate: self.sample_rate,
             targets,
             events: self.events,
-        })
+        };
+        let retained_upper = note_phase_payload_bytes(
+            NotePhaseRows::Retained { prepared: lane_count },
+            event_count,
+            key_length?,
+        )?;
+        let retained_actual =
+            bound.storage_bytes().map_err(|_| AudioCompileError::NoteEventCountOverflow)?;
+        require_phase_payload(retained_actual, retained_upper)?;
+        #[cfg(test)]
+        phase_envelope_tests::observe_retained(&bound);
+        Ok(bound)
     }
 }
 
@@ -946,7 +1147,6 @@ mod tests {
         assert!(reserve::<PreparedNoteEvent>(0).unwrap().is_empty());
     }
 
-
     // Actual IR owner/capacity controls; no execution or allocator ceiling grant.
     mod accepted_capacity_controls {
         use super::*;
@@ -1256,3 +1456,6 @@ mod tests {
         }
     }
 }
+#[cfg(test)]
+#[path = "prepared_notes/phase_envelope_tests.rs"]
+mod phase_envelope_tests;

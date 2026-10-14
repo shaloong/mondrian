@@ -36,7 +36,7 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Bounded Note execution infrastructure | Typed carrier/IPC v9, private once-projected score, exclusive Hosted ledger, whole-window admission and restored CLAP NotePorts; finite owned Windows model and direct fixture-DLL controls | Public score admission remains Unsupported; preparation peak/grant, same-instance application processing offer, Parent IPC/DAG native Notes, zero-input instruments, replay/nesting and physical realtime |
+| Bounded Note execution infrastructure | Typed carrier/IPC v9, private once-projected score with checked logical lowering payloads, exclusive Hosted ledger, whole-window admission and restored CLAP NotePorts; finite owned Windows model and direct fixture-DLL controls | Public score admission remains Unsupported; preparation peak/grant, same-instance application processing offer, Parent IPC/DAG native Notes, zero-input instruments, replay/nesting and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -44,6 +44,20 @@ product consumers and pending closure for each feature family.
 | OpenFX product callbacks | Native message/progress/timeline primitives exist | Typed application messages, real cancellation/progress/transport responses and consistent persistence |
 | Product interaction | Shared Rack control identity preserves keyboard ownership through canonical refresh; focused text owns clipboard and bounded local Undo/Redo; single-line visual BiDi/EGC navigation and associated caret geometry; exact model ingress with one-line source projection | Remaining control adoption, accessible numeric names, multiline visual navigation and physical/native-editor acceptance |
 | Performance | Persistent children, bounded mappings, preallocated native audio buffers and execution budgets | Measured native DSP plus IPC percentiles/deadlines, video frame budgets, warm/cold/memory/overload and vendor/platform matrices |
+
+Private Note lowering qualification (P2): Project, Resolve, Bind and Retained
+check their actual logical payload before delivering the next IR. Source and
+destination row allocations coexist while `IntoIter` retains its backing;
+events and UTF-8 key buffers move once. Retained storage still uses the existing
+single reader. Empty policy and original semantic-error priority are preserved.
+These are late acceptance checks, not pre-allocation grants or physical peaks.
+Windows owned controls passed 25/25 (8 new, 17 retained), ordinary Audio 531/531,
+and five-crate strict Clippy with no diagnostics; normal App check passed with
+10 existing OpenFX warnings. Final source freeze is `2F2F3041...`, test artifact
+`BE2F04E6...`, execution receipt `BC410F9A...`; raw receipts are under
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1/m3-p2-note-phase-envelope-*`.
+Public nonempty Notes, native Note DSP, realtime and other platforms remain
+outside this qualification.
 
 This table describes source capabilities. Each qualification below remains tied
 to its exact source revision, binary hashes, environment and named tests.
