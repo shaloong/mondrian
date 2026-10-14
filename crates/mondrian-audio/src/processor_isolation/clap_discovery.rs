@@ -1442,6 +1442,8 @@ struct ParameterQueryRecord {
     index: u32,
     info: Option<clack_extensions::params::ParamInfoQueryObservation>,
     value: Option<clack_extensions::params::ParamValueQueryObservation>,
+    #[cfg(all(test, windows))]
+    copied: Option<clap_deactivated_parameter_diagnostic::CopiedParameterObservation>,
 }
 
 #[derive(Default)]
@@ -1473,7 +1475,13 @@ impl ParameterQueryCapture {
         }
         // Called immediately after this query's ParamInfoBuffer::new. This is a
         // construction fact, not a reused-buffer read or native write coverage.
-        self.rows.push(ParameterQueryRecord { index, info: None, value: None });
+        self.rows.push(ParameterQueryRecord {
+            index,
+            info: None,
+            value: None,
+            #[cfg(all(test, windows))]
+            copied: None,
+        });
     }
 
     fn record_info(
@@ -1726,6 +1734,10 @@ pub(super) fn list_parameters_observed(
             read_only: info.flags.contains(ParamInfoFlags::IS_READONLY),
             hidden: info.flags.contains(ParamInfoFlags::IS_HIDDEN),
         });
+        #[cfg(all(test, windows))]
+        if let (Some(capture), Some(descriptor)) = (capture.as_deref_mut(), parameters.last()) {
+            capture.record_copied(index, descriptor);
+        }
     }
     validate_parameters_observed(&parameters, capture.as_deref())?;
     Ok(parameters)
@@ -4290,3 +4302,7 @@ mod same_call_consumer_contracts {
         assert!(packet.error_debug.starts_with("Error: InvalidContract(\"xxxx"));
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "clap_deactivated_parameter_diagnostic.rs"]
+mod clap_deactivated_parameter_diagnostic;

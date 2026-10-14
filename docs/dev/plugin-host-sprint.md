@@ -4297,3 +4297,84 @@ Runtime-first/opaque blocked destruction, native Ack refusal, same-Source CAS,
 NoteScore/instruments, third-party and other platforms remain open. Existing
 native producers are intentionally preserved; future fixture consolidation must
 retain their independent input/output and failure oracles.
+
+## C04 deactivated same-call observation consumer — 2026-10-14
+
+After checkpoint `71373a4d`, the next finite slice adds only Windows test-gated
+capture seams in `processor_isolation/clap_discovery.rs` and the private
+`clap_deactivated_parameter_diagnostic.rs` test child. The original collector,
+business Result, validators, short-circuit query sequence, product protocol and
+public Schema stay authoritative. Completed actual descriptors are copied
+before final numeric validation; failed construction has no invented copied
+row or name. The private helper stops after one metadata list and explicitly
+drops the still-deactivated instance on its creating thread. No DSP,
+activation, state save, audio-port, latency or tail query is added.
+
+The sealed candidate has six ordinary ABI controls and one ignored native
+consumer. A fresh default Audio build binds source
+`28CA8B77582E491D9EF532AC1F302DE6CA998663CBAC095F227F708DC5068D28`,
+1939 inputs, and actual test PE
+`4ABE6441D84EAE27DFE047937235ABDBBAD389073BAB1588753D48C0F2913138`
+(14304256 bytes). The precise focused gate passes six/zero/zero ignored;
+ordinary regression passes 509/zero/zero ignored, retaining the original 503
+names plus six new controls. The same-source five-crate strict check also passes
+with zero compiler diagnostics; its receipt is
+`CE540CF890E453477927A45C2F0A473128C342FA958B0C74F7575D34D4222D92`.
+Actual counts, ordering, render configuration and
+native destruction are asserted by independently fresh observed/plain ABI
+fixtures. They are not commercial-plugin counters or a Score/instrument gate.
+
+The new native experiment is one predeclared pair of fresh instances of the
+same loaded Airwindows library, both under the existing frozen Windows Job.
+It binds plugin `6388EA29...4094FAA`, class `com.airwindows.consolidated`,
+and the exact original 314-byte Galactic seed `835DFDE8...02DFC0B`.
+Each phase returns all 14 owned rows and completes deactivated destruction.
+Both original metadata Results are refused at index 6:
+`default_out_of_range`, default `BD327F8000000000`, current zero, min zero,
+max one, actual name `-`. Index 4 Dry/Wet remains default/current one; index 5
+has in-range tiny default `36A0000000000000`, while index 8 is zero. Every
+acquired numeric value is preserved raw-to-converted-to-copied. The negative
+default already occurs in the unseeded phase, narrowing the restore hypothesis.
+These values are compatible with Float32 widening; actual native writer and
+wrapper/JUCE dependency provenance are still not proved.
+
+This experiment is an original semantic **failure**, not an expected-red
+compatibility pass: native101/runner1, owner reaped, no deadline/outliving/error.
+The original failed receipt is retained. Initial outer extraction expected a
+line-start marker, but libtest placed its test-name prefix on the same line.
+The complete owned JSON was recovered from the closed raw stdout without a
+new native run, and every original input pin was rechecked. Earlier control
+startup/selection mistakes are also preserved separately: a null inventory
+working directory launched no test, then the first focused prefix included an
+ignored native case; the final selector explicitly skips it while retaining
+the controller's zero-ignored requirement.
+
+Evidence directories under
+`E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/develop-alignment-evidence-r1`:
+
+- `clap-deactivated-diagnostic-audio-r1`: fresh build and immutable producer.
+- `clap-deactivated-diagnostic-focused-r3`: six exact ABI controls.
+- `clap-deactivated-diagnostic-ordinary-r1`: all 509 ordinary regressions.
+- `clap-deactivated-diagnostic-strict-r1`: five-crate strict zero-diagnostic check.
+- `clap-deactivated-diagnostic-native-r1`: original failed native receipt,
+  raw snapshots and settled owner.
+
+Repository-local recovery packets under `.scratch/plugin-host-sprint`:
+
+- `clap-airwindows-causal-frontier-r1` and its independent review bind the old
+  four distinct failures and source evidence; only one old raw suffix existed.
+- `clap-same-call-diagnostic-contract-r1`, Root decision and
+  `clap-deactivated-same-call-candidate-r1` retain exact scope and reversal.
+- `clap-deactivated-diagnostic-installed-r1` binds the central install and
+  child formatting; original test bodies and non-test behavior are preserved.
+- `clap-deactivated-native-closed-analysis-r1` binds the recovered JSON and
+  actual same-call rows to the unchanged failed execution.
+- `m3-note-execution-frontier-r2`, `m3-note-preallocation-contract-r1` and
+  `o03-native-temporal-contract-frontier-r1` are source-only next contracts.
+  Public nonempty NoteScore and native OFX temporal admission remain refused.
+
+The new consumer supplies reproducible metadata evidence. It does not qualify
+processing, normal Product/helper execution, real-plugin exact query counters,
+raw rescan flags, complete destruction notifications, performance, realtime or
+other platforms. No plugin-name compatibility exception, duplicate schema or
+silent precision/default replacement is introduced.

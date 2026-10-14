@@ -614,3 +614,49 @@ inferred. Fixed-budget early refusal, nonzero prior native H, affected equal
 peers, native sidechain/Note shapes, installed Runtime-first/blocked destructors,
 native Ack refusal, same-Source CAS, independent third-party plugins and other
 platforms remain separately qualified or open at their precise boundaries.
+
+### Windows CLAP deactivated parameter observation, 2026-10-14
+
+A Windows test-only consumer now retains owned same-call metadata across both
+successful acquisition and the original numeric refusal. It uses the existing
+collector once per fresh instance, copies actual descriptors only after their
+original construction, and destroys the deactivated instance before exporting
+exact bit strings and bounded actual names. False metadata, invalid UTF-8 and
+false current-value returns retain their original early stop and unavailable
+copied fields. Product discovery, worker processing and public Schema do not
+gain a new parameter authority or a changed default-value policy.
+
+Six owned Clack ABI controls pass with exact count/order and destruction
+oracles, including success, numeric refusal and the three early-stop branches.
+The same-source Audio inventory is 600 tests, 91 ignored and 509 ordinary;
+all 509 ordinary tests pass. The same-source five-crate all-targets/all-features
+Clippy check with `-D warnings` passes with zero compiler diagnostics. These
+controls qualify the diagnostic consumer, not third-party processing or realtime
+behavior.
+
+One new supervised experiment used the original Airwindows Consolidated CLAP
+binary `6388EA29...4094FAA` and original 314-byte Galactic state
+`835DFDE8...02DFC0B`. Both predeclared fresh instances returned 14 owned rows
+and completed native destruction: one before state restore, one after loading
+that state. Actual names and values identify the Galactic active control
+Dry/Wet at index 4 with default/current 1. In both instances inactive index 6
+has name `-`, current zero and a negative default with exact bits
+`BD327F8000000000` despite an advertised range 0..1. Raw, converted and copied
+values agree bit for bit. The anomaly therefore occurs before state restore in
+this experiment; it is not introduced by a later Rust scalar conversion.
+
+The native test remains **failed**: test exit 101, runner exit 1, descendants
+reaped, no deadline, outliving child or owner error. The original default-range
+validator correctly rejects the native metadata. Its stdout contains both
+snapshots; a libtest name prefix on the same line initially confused the outer
+extractor. The retained closed log was extracted without rerunning the plugin
+or altering the failed receipt. Specific raw rescan flags remain unavailable;
+revision/count snapshots do not prove them or complete destruction callbacks.
+
+Pinned upstream source has an inactive float-default initialization omission,
+and the observed anomalies admit exact Float32-to-Float64 widening. This is
+supporting evidence, not a verified writer instruction or atomic source/build
+binding for the installed DLL. No epsilon, clamp, parameter-name exception or
+external-plugin repair was added. Airwindows processing compatibility, the
+normal Product/helper path, native exact callback counts, other platforms and
+performance remain unqualified by this experiment.
