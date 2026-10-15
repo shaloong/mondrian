@@ -1142,15 +1142,29 @@ impl PluginImpl {
             return;
         }
         self.drain_deferred_controller_sync();
-        if std::mem::take(&mut self.dirty_caches.midi_mapping) {
+        if self
+            ._host_app
+            .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+            && std::mem::take(&mut self.dirty_caches.midi_mapping)
+        {
             self.refresh_midi_mapping_cache();
         }
-        if std::mem::take(&mut self.dirty_caches.program_change) {
+        if self
+            ._host_app
+            .consumes_plugin_interface(crate::PluginInterface::UnitInfo)
+            && std::mem::take(&mut self.dirty_caches.program_change)
+        {
             self.refresh_program_change_cache();
         }
     }
 
     fn refresh_midi_mapping_cache(&mut self) {
+        if !self
+            ._host_app
+            .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+        {
+            return;
+        }
         let buses = unsafe {
             midi_mapping_bus_count(self.component.getBusCount(kEvent as i32, kInput as i32))
         };
@@ -1191,6 +1205,12 @@ impl PluginImpl {
     }
 
     fn refresh_program_change_cache(&mut self) {
+        if !self
+            ._host_app
+            .consumes_plugin_interface(crate::PluginInterface::UnitInfo)
+        {
+            return;
+        }
         self.program_change_cache.clear();
         let Some(controller) = self.controller.as_ref() else {
             return;
@@ -3017,12 +3037,23 @@ impl PluginInternal for PluginImpl {
                     // Prefer the channel-aware IMidiMapping route. Multi-timbral instruments
                     // commonly expose kCtrlProgramChange there without publishing their patch
                     // banks through IUnitInfo (OsTIrus is one example).
+                    let midi = self
+                        ._host_app
+                        .consumes_plugin_interface(crate::PluginInterface::MidiMapping);
+                    let units = self
+                        ._host_app
+                        .consumes_plugin_interface(crate::PluginInterface::UnitInfo);
+                    if !midi && !units {
+                        return Err(Error::InterfaceNotConsumed(
+                            crate::PluginInterface::MidiMapping,
+                        ));
+                    }
                     self.service_control_thread_caches();
                     let controller = ControllerNumbers_::kCtrlProgramChange as u16;
-                    if self
-                        .midi_mapping_cache
-                        .get(0, channel.as_index() as i16, controller)
-                        .is_some()
+                    if midi
+                        && self
+                            .checked_midi_cc_to_parameter(0, channel.as_index() as i16, controller)?
+                            .is_some()
                     {
                         return self.queue_mapped_midi_controller(
                             channel,
@@ -3035,7 +3066,7 @@ impl PluginInternal for PluginImpl {
                     // Otherwise use the root unit's IUnitInfo program-change parameter. A MIDI
                     // channel cannot be mapped to a unit generically, so this compatibility path
                     // targets the conventional root unit regardless of channel.
-                    if let Some(mapping) = self.cached_program_change(0) {
+                    if let Some(mapping) = units.then(|| self.cached_program_change(0)).flatten() {
                         let index = program as i32;
                         if index < mapping.program_count {
                             let value = if mapping.program_count > 1 {
@@ -3060,6 +3091,15 @@ impl PluginInternal for PluginImpl {
     }
 
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
+        if matches!(
+            &event.data,
+            crate::midi::PluginEventData::NoteExpressionValue { .. }
+                | crate::midi::PluginEventData::NoteExpressionText { .. }
+                | crate::midi::PluginEventData::NoteExpressionIntValue { .. }
+        ) {
+            self._host_app
+                .require_plugin_interface(crate::PluginInterface::NoteExpressionController)?;
+        }
         self.input_events.add_event(event);
         Ok(())
     }
@@ -3408,7 +3448,15 @@ impl PluginInternal for PluginImpl {
     }
 
     fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
-        self.midi_mapping_cache.get(bus, channel, cc)
+        // Legacy compatibility only; sensitive consumers use checked.
+        self.checked_midi_cc_to_parameter(bus, channel, cc)
+            .ok()
+            .flatten()
+    }
+    fn checked_midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Result<Option<u32>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::MidiMapping)?;
+        Ok(self.midi_mapping_cache.get(bus, channel, cc))
     }
 
     fn note_on(
@@ -3479,6 +3527,8 @@ impl PluginInternal for PluginImpl {
         value: f64,
         sample_offset: i32,
     ) -> Result<()> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::NoteExpressionController)?;
         unsafe {
             let mut ev: Event = std::mem::zeroed();
             ev.busIndex = 0;
@@ -3498,6 +3548,8 @@ impl PluginInternal for PluginImpl {
         bus: i32,
         channel: i16,
     ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::NoteExpressionController)?;
         use crate::midi::{NoteExpressionInfo, NoteExpressionType};
         let Some(ctrl) = self
             .controller
@@ -3534,6 +3586,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitInfo)?;
         use crate::plugin::PluginUnit;
         if thread::current().id() != self.control_thread {
             return Err(Error::Other(
@@ -3604,6 +3658,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitInfo)?;
         self.service_control_thread_caches();
         if self.cached_program_change(unit_id).is_none()
             && thread::current().id() == self.control_thread
@@ -3636,6 +3692,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn selected_unit(&self) -> Result<Option<i32>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitInfo)?;
         if thread::current().id() != self.control_thread {
             return Err(Error::Other(
                 "selected unit must be queried on the plugin control thread".to_string(),
@@ -3653,6 +3711,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn select_unit(&mut self, unit_id: i32) -> Result<()> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitInfo)?;
         if thread::current().id() != self.control_thread {
             return Err(Error::Other(
                 "unit selection must run on the plugin control thread".to_string(),
@@ -3678,6 +3738,8 @@ impl PluginInternal for PluginImpl {
         program_list_id: i32,
         program_index: i32,
     ) -> Result<Vec<crate::plugin::ProgramPitchName>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitInfo)?;
         if program_index < 0 {
             return Err(Error::InvalidParameter(format!(
                 "program index must be non-negative, got {program_index}"
@@ -3724,6 +3786,8 @@ impl PluginInternal for PluginImpl {
         program_list_id: i32,
         program_index: i32,
     ) -> Result<Option<Vec<u8>>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::ProgramListData)?;
         if program_index < 0 {
             return Err(Error::InvalidParameter(format!(
                 "program index must be non-negative, got {program_index}"
@@ -3764,6 +3828,8 @@ impl PluginInternal for PluginImpl {
         program_index: i32,
         data: &[u8],
     ) -> Result<()> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::ProgramListData)?;
         if program_index < 0 {
             return Err(Error::InvalidParameter(format!(
                 "program index must be non-negative, got {program_index}"
@@ -3811,6 +3877,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitData)?;
         self.ensure_control_thread("unit data read")?;
         let Some(data_interface) = self
             .controller
@@ -3840,6 +3908,8 @@ impl PluginInternal for PluginImpl {
     }
 
     fn set_unit_data(&mut self, unit_id: i32, data: &[u8]) -> Result<()> {
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::UnitData)?;
         self.ensure_stream_size(data)?;
         self.ensure_control_thread("unit data restore")?;
         let data_interface = self
@@ -4016,6 +4086,14 @@ impl PluginInternal for PluginImpl {
             self.ordinary_note_counts[index] = 0;
         }
 
+        // Core tracked NoteOff does not depend on optional mapping. Only the
+        // best-effort panic CC extension is omitted when it is undeclared.
+        if !self
+            ._host_app
+            .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+        {
+            return Ok(());
+        }
         // Also route the standard panic controllers through IMidiMapping for plugins that
         // explicitly expose them as parameters. Never place legacy-MIDI-out events on input.
         for channel in 0..MIDI_CHANNEL_COUNT {
@@ -4392,10 +4470,11 @@ impl PluginImpl {
     ) -> Result<()> {
         // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
         // thread, which must never make controller calls.
+        self._host_app
+            .require_plugin_interface(crate::PluginInterface::MidiMapping)?;
         self.service_control_thread_caches();
-        if let Some(id) = self
-            .midi_mapping_cache
-            .get(0, channel.as_index() as i16, controller)
+        if let Some(id) =
+            self.checked_midi_cc_to_parameter(0, channel.as_index() as i16, controller)?
         {
             self.queue_processor_parameter_at(id, normalized, sample_offset)?;
         }
@@ -6854,3 +6933,6 @@ pub(crate) fn native_editor_processing_layouts() -> [std::alloc::Layout; 2] {
         std::alloc::Layout::new::<PluginProcessFields<'static>>(),
     ]
 }
+
+#[cfg(test)]
+mod cache_policy_tests;

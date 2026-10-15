@@ -138,6 +138,30 @@ hashes, and completion rechecks them. An unleased shared
 not a frozen qualification artifact. Test-profile correctness and release
 performance remain separate evidence.
 
+## Windows VST3 declared optional consumers (2026-10-15)
+
+One immutable host declaration now gates MIDI/unit/program cache construction,
+refresh and consumption, direct unit/program streams and all three generic
+note-expression sends. Undeclared consumers return a typed local refusal; core
+tracked NoteOff remains available. Standalone defaults are preserved. Local
+checked MIDI mapping includes Program Change 130; the legacy remote backend
+explicitly refuses 130 without changing its IPC.
+
+Receipt `vst3-cache-policy-actual-r1/gates/receipt.json` records 275 vendor and
+558 Audio ordinary passes, three new native controls and seven existing SDK
+initialization/Source controls. All six groups have clean owned exits. Final
+builds share 1953-input freeze `F4E3FB2A...`; strict checks have zero diagnostics
+and normal Product `F0E19F73...` retains the ten-warning baseline and FFmpeg8 ABI.
+The controls count optional calls after replacing SDK interfaces; initial
+constructor/load query gating is source-reviewed, not instrumented by them.
+This qualifies finite owned Windows cache/consumer behavior. Source/feedback and
+restart flags 16/20 remain unconsumed; Surge PCM, other platforms and realtime
+performance remain open. The test alias build failure and a disqualified stale
+Cargo Product are retained; the gates bind the rebuilt Product, while these
+SDK controls execute inside the libtests without launching that Product.
+That build also contains the separately held OpenFX constructor candidate;
+this audio receipt does not accept that change.
+
 ## Windows Surge XT Effects default-state observation (2026-10-15)
 
 Surge XT Effects 1.3.4 VST3 (`3B9F6C9B...`, class

@@ -50,6 +50,10 @@ pub enum Error {
     #[error("VST3 interface error: {0}")]
     InterfaceError(String),
 
+    /// The embedding host did not declare this plug-in interface consumed.
+    #[error("host does not consume plug-in interface {0:?}")]
+    InterfaceNotConsumed(crate::PluginInterface),
+
     /// Process isolation error
     #[error("Process isolation error: {0}")]
     ProcessError(String),

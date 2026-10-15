@@ -107,6 +107,19 @@ impl Default for HostApplication {
 }
 
 impl HostApplication {
+    pub(crate) fn consumes_plugin_interface(&self, interface: crate::PluginInterface) -> bool {
+        self.interfaces.supports(interface)
+    }
+    pub(crate) fn require_plugin_interface(
+        &self,
+        interface: crate::PluginInterface,
+    ) -> crate::Result<()> {
+        if self.consumes_plugin_interface(interface) {
+            Ok(())
+        } else {
+            Err(crate::Error::InterfaceNotConsumed(interface))
+        }
+    }
     pub(crate) fn visit_progress_storage(
         &self,
         visitor: &mut dyn crate::host_storage::HostStorageVisitor,

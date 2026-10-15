@@ -1109,6 +1109,20 @@ pub(crate) trait PluginProcessingRole: Send {
     fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()>;
 }
 
+// The legacy remote helper calls the historical public Option API, whose
+// range ends at 129. Never turn its unsupported 130 into a successful None.
+fn checked_legacy_midi_mapping(
+    cc: u16,
+    query: impl FnOnce() -> Option<u32>,
+) -> Result<Option<u32>> {
+    if cc > 129 {
+        return Err(Error::Other(
+            "legacy MIDI mapping backend supports controller numbers 0..=129".to_owned(),
+        ));
+    }
+    Ok(query())
+}
+
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
     fn visit_retained_host_created_storage(
@@ -1541,6 +1555,9 @@ pub(crate) trait PluginInternal: Send {
     /// Defaults to `None` (plugin doesn't implement the interface, or no mapping).
     fn midi_cc_to_parameter(&self, _bus: i32, _channel: i16, _cc: u16) -> Option<u32> {
         None
+    }
+    fn checked_midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Result<Option<u32>> {
+        checked_legacy_midi_mapping(cc, || self.midi_cc_to_parameter(bus, channel, cc))
     }
     /// Serialize the plugin's current state to an opaque byte blob.
     fn save_state(&self) -> Result<Vec<u8>> {
@@ -2189,6 +2206,8 @@ impl Plugin {
     /// aftertouch / `129` pitch-bend). Returns the parameter id the controller drives, or
     /// `None` if the plugin doesn't implement `IMidiMapping` or the controller is unmapped.
     /// Works both in-process and across process isolation.
+    /// Legacy query: policy/backend errors become None; use the checked query
+    /// to distinguish policy refusal. The historical 0..=129 limit is retained.
     pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
         // VST3 controller numbers are 0..130 (0–127 MIDI CCs + the specials up to pitch-bend).
         // Reject out-of-range values rather than forwarding a meaningless controller number.
@@ -2198,6 +2217,28 @@ impl Plugin {
         self.internal
             .as_ref()?
             .midi_cc_to_parameter(bus, channel, cc)
+    }
+
+    /// Resolve mapping without collapsing local undeclared-interface refusal.
+    /// Local native hosts include the VST3 program-change controller (130).
+    /// Legacy remote backends explicitly refuse 130; 0..=129 retain their old
+    /// Option delegation. Their standalone default declarations and string IPC
+    /// are unchanged; this adds no typed policy transport.
+    pub fn checked_midi_cc_to_parameter(
+        &self,
+        bus: i32,
+        channel: i16,
+        cc: u16,
+    ) -> Result<Option<u32>> {
+        if cc > 130 {
+            return Err(Error::InvalidParameter(
+                "MIDI controller number exceeds 130".to_owned(),
+            ));
+        }
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_owned()))?
+            .checked_midi_cc_to_parameter(bus, channel, cc)
     }
 
     /// Get a parameter value by ID
@@ -3739,6 +3780,37 @@ mod vstpreset {
 #[cfg(test)]
 mod public_surface_tests {
     use super::*;
+
+    #[test]
+    fn checked_legacy_mapping_refuses_130_without_calling_legacy_delegate() {
+        let calls = std::cell::Cell::new(0);
+        let rejected = checked_legacy_midi_mapping(130, || {
+            calls.set(calls.get() + 1);
+            Some(42)
+        });
+        assert!(
+            matches!(rejected, Err(Error::Other(message)) if message.contains("legacy MIDI mapping backend"))
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            checked_legacy_midi_mapping(129, || {
+                calls.set(calls.get() + 1);
+                Some(42)
+            })
+            .unwrap(),
+            Some(42)
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            checked_legacy_midi_mapping(129, || {
+                calls.set(calls.get() + 1);
+                None
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(calls.get(), 2);
+    }
 
     /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
     /// surface performs *before* it reaches into `internal`.
