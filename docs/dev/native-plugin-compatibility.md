@@ -200,6 +200,52 @@ All current accepted groups have clean owned exits and unchanged inputs. This
 freeze includes a separately tested, still-failing Ring Out consumer candidate
 and the held OpenFX constructor candidate; neither is accepted by this slice.
 
+## Windows CLAP true zero-input Note execution (2026-10-16)
+
+CLAP processing now carries explicit native main-input presence through the
+processing probe, registration, worker payload and restored-state revalidation.
+An absent main input passes zero native audio buffers; the existing Graph output
+extent drives processing without a dummy Clip or media source. Inactive shape
+changes are refused before reactivation. Port count/get are never queried while
+active. The owned restart control first failed with four such queries on parent
+`2880647c`, then passed after the lifecycle correction.
+
+Current source `E2D61E32...` binds 1959 build inputs, including Clippy configuration.
+Audio and the five-crate strict gate pass; the exact inventory is 673 tests,
+104 ignored and 569 ordinary passes. Fresh normal Product `BF219085...` retains
+the ten-warning baseline and FFmpeg8.1.2 ABI. No Product source bridge is used.
+
+`clap-zero-input-native-r2/gates/receipt.json` (`1DC24E43...`) records four native
+passes: Ring Out's existing four cold Runtime scenarios, the original public
+Note positive/refusal controls with DLL `B239C594...`, and the new zero-input
+control with separately built DLL `582ADF58...`. The original positive test's
+complete 12693-byte source prefix is preserved. All four owners exit zero,
+reap descendants and retain unchanged inputs without deadline/cleanup errors.
+
+The new owned fixture qualifies mono/offline Note execution at 44.1/48kHz across
+three public render-request partitions: six fresh Runtime objects. Each passes
+the independent 14-sample literal PCM oracle, two native Note ports, canonical
+save/reopen and real Source handoff/Ack for four parameter callbacks. There are
+no media Clips, resolver calls or media-window bytes. Authenticated object facts
+remain stable through cold installation, Enter(0), PCM and handoffs; retained
+process handles confirm actual Drop exit zero. Fixture ABI controls retain the
+original seven tests plus three zero-input controls, passing twice with ten
+exact tests per round. The original explicit unbounded Root grant is preserved;
+native process callback counts and total physical memory are not instrumented.
+
+Retained failures include the initial five test-DTO migration failures, the
+fixture's test-only pointer-initialization lint, and a data adapter's refusal of
+one frozen Windows export-library linker message. The native gate above passed;
+its adapter subsequently rejected the zero-input test's split `--nocapture`
+named-pass line. Closed output evidence is reviewed without rerunning native
+tests; that original adapter remains failed. No plugin assertion or native
+deadline was relaxed.
+
+Third-party instruments, zero-input stereo DSP, dynamic port rescans, App
+note-only playback/export, GUI, realtime/performance and other platforms remain
+unverified or separately unsupported. The held OpenFX change is outside this
+acceptance.
+
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 
 The public non-RT owner observation returns the actual PID/load facts from the

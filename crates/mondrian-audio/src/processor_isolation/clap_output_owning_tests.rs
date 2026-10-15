@@ -130,6 +130,7 @@ fn clap_output_owning_actual_isolated_child_does_not_accept_and_discard_unsuppor
         )
         .expect("fresh actual plugin probe");
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_input: ClapMainAudioInput::Present,
             library_path: registration.library_path,
             plugin_id: registration.plugin_id,
             binary_sha256: registration.binary_sha256,

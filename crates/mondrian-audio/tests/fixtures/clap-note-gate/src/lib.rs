@@ -42,6 +42,41 @@ static DESCRIPTOR: clap_plugin_descriptor = clap_plugin_descriptor {
     features: FEATURES.0.as_ptr(),
 };
 
+// The sole immutable native audio topology; no host mode or mutable rescan state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    PcmInput,
+    ZeroInput,
+}
+impl Variant {
+    const fn input_count(self) -> u32 {
+        match self {
+            Self::PcmInput => 1,
+            Self::ZeroInput => 0,
+        }
+    }
+    const fn descriptor(self) -> &'static clap_plugin_descriptor {
+        match self {
+            Self::PcmInput => &DESCRIPTOR,
+            Self::ZeroInput => &ZERO_INPUT_DESCRIPTOR,
+        }
+    }
+}
+static ZERO_INPUT_FEATURES: FeaturePointers =
+    FeaturePointers([c"instrument".as_ptr(), c"mono".as_ptr(), ptr::null()]);
+static ZERO_INPUT_DESCRIPTOR: clap_plugin_descriptor = clap_plugin_descriptor {
+    clap_version: clap_sys::version::CLAP_VERSION,
+    id: c"org.mondrian.fixture.note-gate.zero-input".as_ptr(),
+    name: c"Mondrian owned zero-input NoteGate oracle".as_ptr(),
+    vendor: c"Mondrian".as_ptr(),
+    url: c"".as_ptr(),
+    manual_url: c"".as_ptr(),
+    support_url: c"".as_ptr(),
+    version: c"0.0.0".as_ptr(),
+    description: c"Fixed mono output, no audio inputs; original independent NoteGate".as_ptr(),
+    features: ZERO_INPUT_FEATURES.0.as_ptr(),
+};
+
 struct Dsp {
     gate: Gate,
     max_frames: u32,
@@ -50,6 +85,7 @@ struct Dsp {
 struct Instance {
     plugin: clap_plugin,
     host: *const clap_host,
+    variant: Variant,
     thread_check: AtomicPtr<clap_host_thread_check>,
     gain: AtomicU64,
     scenario: AtomicU32,
@@ -438,30 +474,36 @@ unsafe fn process_inner(owner: &Instance, process: *const clap_process) -> bool 
     let frames = block.frames_count;
     if frames == 0
         || frames > dsp.max_frames
-        || block.audio_inputs_count != 1
+        || block.audio_inputs_count != owner.variant.input_count()
         || block.audio_outputs_count != 1
-        || block.audio_inputs.is_null()
+        || (owner.variant == Variant::PcmInput && block.audio_inputs.is_null())
         || block.audio_outputs.is_null()
         || block.out_events.is_null()
         || unsafe { (*block.out_events).try_push }.is_none()
     {
         return false;
     }
-    let input = unsafe { block.audio_inputs.read() };
+    // A zero-count ABI array need not have a NULL pointer. Never inspect or
+    // dereference it, even for metadata, when the fixed variant declares zero.
+    let input = if owner.variant == Variant::PcmInput {
+        Some(unsafe { block.audio_inputs.read() })
+    } else {
+        None
+    };
     let output = unsafe { block.audio_outputs.read() };
-    if input.channel_count != 1
-        || output.channel_count != 1
-        || input.data32.is_null()
+    if output.channel_count != 1
         || output.data32.is_null()
-        || !input.data64.is_null()
         || !output.data64.is_null()
+        || input.as_ref().is_some_and(|port| {
+            port.channel_count != 1 || port.data32.is_null() || !port.data64.is_null()
+        })
     {
         return false;
     }
-    let constant_input = input.constant_mask & 1 != 0;
-    let input = unsafe { input.data32.read() };
+    let constant_input = input.as_ref().is_some_and(|port| port.constant_mask & 1 != 0);
+    let input = input.map_or(ptr::null_mut(), |port| unsafe { port.data32.read() });
     let output = unsafe { output.data32.read() };
-    if input.is_null() || output.is_null() {
+    if (owner.variant == Variant::PcmInput && input.is_null()) || output.is_null() {
         return false;
     }
     let bytes = frames as usize * size_of::<f32>();
@@ -471,7 +513,11 @@ unsafe fn process_inner(owner: &Instance, process: *const clap_process) -> bool 
     ) else {
         return false;
     };
-    if input != output && (input as usize) < out_end && (output as usize) < in_end {
+    if owner.variant == Variant::PcmInput
+        && input != output
+        && (input as usize) < out_end
+        && (output as usize) < in_end
+    {
         return false; // Only disjoint or exact in-place mono buffers are accepted.
     }
     let mut staged = [Input::Empty; MAX_EVENTS];
@@ -480,7 +526,11 @@ unsafe fn process_inner(owner: &Instance, process: *const clap_process) -> bool 
     };
     // Exact in-place output overwrites input[0]. Cache the original constant
     // before any output mutation; subsequent frames must never read feedback.
-    let constant_sample = if constant_input {
+    let constant_sample = if owner.variant == Variant::ZeroInput {
+        // One fixed native carrier reuses the original independent Gate math.
+        // No PCM input, host buffer or second voice/state machine supplies it.
+        Some(1.0)
+    } else if constant_input {
         Some(unsafe { input.read() })
     } else {
         None
@@ -554,9 +604,15 @@ unsafe extern "C" fn process(
 
 unsafe extern "C" fn on_main(_: *const clap_plugin) {}
 
-unsafe extern "C" fn audio_count(plugin: *const clap_plugin, _: bool) -> u32 {
+unsafe extern "C" fn audio_count(plugin: *const clap_plugin, input: bool) -> u32 {
     match unsafe { owner(plugin) } {
-        Some(owner) if unsafe { role(owner, false) } => 1,
+        Some(owner) if unsafe { role(owner, false) } => {
+            if input {
+                owner.variant.input_count()
+            } else {
+                1
+            }
+        }
         _ => 0,
     }
 }
@@ -569,7 +625,11 @@ unsafe extern "C" fn audio_get(
     let Some(owner) = (unsafe { owner(plugin) }) else {
         return false;
     };
-    if index != 0 || out.is_null() || !unsafe { role(owner, false) } {
+    if index != 0
+        || out.is_null()
+        || !unsafe { role(owner, false) }
+        || (input && owner.variant == Variant::ZeroInput)
+    {
         return false;
     }
     let mut port = clap_audio_port_info {
@@ -578,7 +638,13 @@ unsafe extern "C" fn audio_get(
         flags: CLAP_AUDIO_PORT_IS_MAIN as u32,
         channel_count: 1,
         port_type: CLAP_PORT_MONO.as_ptr(),
-        in_place_pair: if input { OUTPUT_ID } else { INPUT_ID },
+        in_place_pair: if owner.variant == Variant::ZeroInput {
+            CLAP_INVALID_ID
+        } else if input {
+            OUTPUT_ID
+        } else {
+            INPUT_ID
+        },
     };
     name(
         &mut port.name,
@@ -925,16 +991,16 @@ unsafe extern "C" fn extension(_: *const clap_plugin, id: *const c_char) -> *con
 }
 
 unsafe extern "C" fn descriptor_count(_: *const clap_plugin_factory) -> u32 {
-    1
+    2
 }
 unsafe extern "C" fn descriptor(
     _: *const clap_plugin_factory,
     index: u32,
 ) -> *const clap_plugin_descriptor {
-    if index == 0 {
-        &DESCRIPTOR
-    } else {
-        ptr::null()
+    match index {
+        0 => &DESCRIPTOR,
+        1 => &ZERO_INPUT_DESCRIPTOR,
+        _ => ptr::null(),
     }
 }
 unsafe extern "C" fn create(
@@ -942,18 +1008,19 @@ unsafe extern "C" fn create(
     host: *const clap_host,
     id: *const c_char,
 ) -> *const clap_plugin {
-    if host.is_null()
-        || id.is_null()
-        || unsafe { (*host).clap_version.major } != 1
-        || unsafe { CStr::from_ptr(id) } != c"org.mondrian.fixture.note-gate"
-    {
+    if host.is_null() || id.is_null() || unsafe { (*host).clap_version.major } != 1 {
         return ptr::null();
     }
+    let variant = match unsafe { CStr::from_ptr(id) } {
+        id if id == c"org.mondrian.fixture.note-gate" => Variant::PcmInput,
+        id if id == c"org.mondrian.fixture.note-gate.zero-input" => Variant::ZeroInput,
+        _ => return ptr::null(),
+    };
     // The only heap allocation in this original fixture is lifecycle creation;
     // destroy consumes it once after exclusive deactivate. No RT logging path.
     let mut owner = Box::new(Instance {
         plugin: clap_plugin {
-            desc: &DESCRIPTOR,
+            desc: variant.descriptor(),
             plugin_data: ptr::null_mut(),
             init: Some(init),
             destroy: Some(destroy),
@@ -967,6 +1034,7 @@ unsafe extern "C" fn create(
             on_main_thread: Some(on_main),
         },
         host,
+        variant,
         thread_check: AtomicPtr::new(ptr::null_mut()),
         gain: AtomicU64::new(1.0_f64.to_bits()),
         scenario: AtomicU32::new(0),

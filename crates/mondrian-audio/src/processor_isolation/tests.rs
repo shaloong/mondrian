@@ -729,6 +729,7 @@ fn assert_installed_clap_gain(
         "state": state,
         "parameters": registration.parameters,
         "parameter_ids": [1],
+        "main_audio_input": registration.main_audio_input,
     }))
     .expect("CLAP worker payload");
     let parameter_id = ParameterId::new("clap.param.1").expect("volume parameter ID");
@@ -1377,6 +1378,7 @@ pub(super) fn pure_seed_factory(
         NativeConfigurationFormat::ClapState => serde_json::json!({
             "library_path":"nonexistent-owned-plugin.clap", "plugin_id":"owned-pure-seed",
             "binary_sha256":vec![7_u8; 32], "state":state, "parameters":[], "parameter_ids":[],
+            "main_audio_input":ClapMainAudioInput::Present,
         }),
     };
     let mut spec = IsolatedAudioProcessorWorkerSpec::new(

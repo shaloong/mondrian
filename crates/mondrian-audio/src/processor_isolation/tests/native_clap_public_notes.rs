@@ -321,3 +321,325 @@ fn installed_clap_canonical_public_notes_produce_literal_pcm_across_partitions()
         }
     }
 }
+
+// No input media is authored for the fixed zero-input native variant. A hidden
+// ones-source, dummy Clip or accidental resolver fallback must fail this test.
+struct ZeroInputNoMedia(Arc<AtomicUsize>);
+impl AudioMediaResolver for ZeroInputNoMedia {
+    fn resolve(
+        &self,
+        _: AssetId,
+        _: AudioSourceComponentId,
+        _: u32,
+    ) -> Result<ResolvedAudioSource, String> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err("zero-input public Note case must not resolve any media".to_owned())
+    }
+}
+
+fn zero_input_fixture() -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var_os("MONDRIAN_ZERO_INPUT_NOTE_GATE_DLL")
+            .expect("separately retained zero-input fixture DLL"),
+    );
+    assert!(path.is_absolute());
+    let expected = std::env::var("MONDRIAN_ZERO_INPUT_NOTE_GATE_DLL_SHA256")
+        .expect("explicit separately produced fixture SHA256");
+    assert!(expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let actual = super::super::clap_discovery::fingerprint_clap_binary(&path)
+        .expect("current real zero-input fixture fingerprint");
+    let actual: String = actual.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(actual, expected.to_ascii_lowercase());
+    path
+}
+
+#[derive(Default)]
+struct ZeroInputCursors {
+    sessions: Vec<crate::AudioSessionCursorEvidence>,
+    processors: Vec<crate::AudioProcessorCursorEvidence>,
+}
+impl crate::AudioContinuityEvidenceVisitor for ZeroInputCursors {
+    fn session(
+        &mut self,
+        evidence: crate::AudioSessionCursorEvidence,
+    ) -> Result<(), crate::AudioExecutionError> {
+        self.sessions.push(evidence);
+        Ok(())
+    }
+    fn processor(
+        &mut self,
+        evidence: crate::AudioProcessorCursorEvidence,
+    ) -> Result<(), crate::AudioExecutionError> {
+        self.processors.push(evidence);
+        Ok(())
+    }
+}
+fn zero_input_owner(runtime: &AudioProgramRuntime) -> crate::AudioNativeProcessorOwnerLease {
+    let mut cursors = ZeroInputCursors::default();
+    runtime.visit_continuity_evidence(&mut cursors).unwrap();
+    assert_eq!((cursors.sessions.len(), cursors.processors.len()), (1, 1));
+    let processor = cursors.processors[0];
+    let epoch = match processor.state {
+        crate::AudioProcessorCursorState::Unentered => None,
+        crate::AudioProcessorCursorState::Active { epoch, .. } => Some(epoch),
+        _ => panic!("zero-input Note occurrence has no current native owner"),
+    };
+    runtime
+        .native_owner_lease(crate::AudioNativeProcessorAddress {
+            root: cursors.sessions[0].identity,
+            local: processor.identity,
+            occurrence: processor.occurrence,
+            epoch,
+        })
+        .expect("lease issued by this actual installed Runtime")
+}
+
+#[test]
+#[ignore = "requires separately pinned zero-input NoteGate DLL and fresh normal Product helper"]
+fn installed_clap_zero_input_public_notes_produce_literal_pcm_without_media() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+    };
+
+    let helper = PathBuf::from(
+        std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
+            .expect("fresh normal Product bound by external producer/owner gate"),
+    );
+    assert!(helper.is_absolute() && std::fs::metadata(&helper).unwrap().is_file());
+    let dll = zero_input_fixture();
+    let catalog = Arc::new(
+        DiscoveredClapAudioProcessorSpecResolver::discover(helper, [dll.clone()])
+            .expect("actual Product discovers the fixed zero-input native definition"),
+    );
+    let processors = IsolatedAudioProcessorResolver::new(catalog.clone());
+    // Same independent literal note weights/release as the original public
+    // gate, now with the fixture's own carrier1 and NO media Clip/source.
+    // Do not call Gate or calculate expected PCM from the native implementation.
+    let expected = [
+        0.0_f32,
+        0.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        5.0 / 64.0,
+        19.0 / 256.0,
+        9.0 / 128.0,
+        17.0 / 256.0,
+        1.0 / 16.0,
+        3.0 / 64.0,
+        1.0 / 32.0,
+        1.0 / 64.0,
+        0.0,
+    ];
+    for rate in [44_100, 48_000] {
+        let render = AudioRenderContract {
+            sample_rate: rate,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 14,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 16 * 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let mut state = vec![0_u8; 16];
+        state[..4].copy_from_slice(b"MNG1");
+        state[4..12].copy_from_slice(&0.5_f64.to_le_bytes());
+        let instance = catalog
+            .create_instance(
+                "org.mondrian.fixture.note-gate.zero-input",
+                render,
+                Some(state.clone()),
+            )
+            .expect("real zero-input native MNG1 restore and ordinary author snapshot");
+        assert!(!instance.bypassed);
+        assert_eq!(
+            instance.opaque_state.as_deref().map(Vec::as_slice),
+            Some(state.as_slice())
+        );
+        let processor_id = instance.id;
+        let mut authored = Sequence::new("canonical zero-audio-input owned public Note DSP");
+        authored.settings.audio_channel_layout = AudioChannelLayout::Mono;
+        let track_id = authored.audio_tracks[0].id;
+        authored
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(instance);
+        for (port, end, on_velocity, off_velocity) in
+            [(0_u32, 5, 0.0, 0.25), (0x8000_0017, 9, 1.0, 1.0)]
+        {
+            authored.audio_program.note_lanes.push(AudioNoteLane {
+                schema_version: 1,
+                id: AudioNoteLaneId::new(),
+                target: AudioNoteTarget {
+                    track_id,
+                    processor_id,
+                    input_port_key: format!("clap.note-input.{port}"),
+                },
+                notes: AuthoringList::from(vec![AudioNote {
+                    id: AudioNoteId::new(),
+                    start: time(2, rate),
+                    end: time(end, rate),
+                    channel: 0,
+                    key: 60,
+                    on_velocity,
+                    off_velocity,
+                }]),
+            });
+        }
+        assert!(authored.audio_tracks.iter().all(|track| track.clips.is_empty()));
+        let serialized = serde_json::to_vec(&authored).expect("canonical Sequence serialization");
+        assert!(serialized.len() <= 512 * 1024);
+        let reopened: Sequence =
+            serde_json::from_slice(&serialized).expect("canonical Sequence reopen");
+        assert_eq!(
+            serde_json::to_value(&reopened).unwrap(),
+            serde_json::to_value(&authored).unwrap(),
+            "canonical Sequence meaning survives serialization and reopen"
+        );
+        for partition in [&[14_usize][..], &[3, 2, 4, 5], &[1; 14]] {
+            let mut sequence = reopened.clone();
+            let resolves = Arc::new(AtomicUsize::new(0));
+            // Preserve the original explicit public Note grant. This is NOT a
+            // newly qualified finite Root ceiling or complete heap/RT claim.
+            let mut runtime =
+                AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+                    &sequence,
+                    &[],
+                    &ZeroInputNoMedia(resolves.clone()),
+                    &processors,
+                    render,
+                    None,
+                    AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+                )
+                .expect(
+                    "NoteScore alone retains the native Track rack without a dummy media source",
+                );
+            assert_eq!(resolves.load(Ordering::SeqCst), 0);
+            assert_eq!(runtime.resource_footprint().media_window_bytes, 0);
+            let source = AudioOwnerInstallationSource::new();
+            let (registration, verifier) = source.register().unwrap();
+            runtime.bind_native_owner_installation(verifier).unwrap();
+            let claim = source
+                .reserve_install(&registration, None)
+                .and_then(|reservation| source.begin_commit(reservation))
+                .unwrap()
+                .commit()
+                .unwrap();
+            runtime
+                .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+                .expect("actual zero-input child acknowledges the sole installed root");
+            let cold_lease = zero_input_owner(&runtime);
+            assert!(cold_lease.editor_target().continuity_epoch.is_none());
+            assert_eq!(cold_lease.editor_target().instance, processor_id);
+            let cold = runtime
+                .observe_native_owner_object(cold_lease)
+                .expect("actual cold object, independent of incremental parameter presentation");
+            runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .expect("actual cold author Source is closed, not a fake Ack");
+            runtime
+                .enter_state(AudioStateEntry {
+                    epoch: AudioContinuityEpoch::new(1),
+                    start_sample: 0,
+                })
+                .expect("installed zero-input native Session enters real origin zero");
+            let entered_lease = zero_input_owner(&runtime);
+            let entered = runtime.observe_native_owner_object(entered_lease).unwrap();
+            assert_eq!(entered, cold);
+            assert_eq!(entered_lease.editor_target().continuity_epoch, Some(1));
+            let pid = entered.process_id().get();
+            assert_ne!(pid, std::process::id());
+            // SAFETY: only this current installed Runtime's authenticated native
+            // object supplies PID. HANDLE has query/synchronize rights only and
+            // stays live through real PCM, Source handoffs and Runtime Drop.
+            let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+            assert!(!raw.is_null());
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+                258
+            );
+            let mut rendered = Vec::new();
+            let mut start = 0;
+            let mut parameter_outputs = 0;
+            for &frames in partition {
+                let mut pcm = vec![99.0; frames];
+                runtime.render_into(AudioRenderRequest {start_sample:start as i64,frames},&mut pcm)
+                    .expect("real NoteOn/Off/End through normal Product DSP IPC with zero native audio inputs");
+                assert!(pcm.iter().all(|value| value.is_finite()));
+                rendered.extend(pcm);
+                start += frames;
+                // Reuse the accepted canonical Plan/Source publication and real
+                // Ack, validating each actual Gain callback around native End.
+                parameter_outputs +=
+                    accept_actual_gain_outputs(&mut runtime, &mut sequence, &source);
+                let current = zero_input_owner(&runtime);
+                assert_eq!(
+                    runtime.observe_native_owner_object(current).unwrap(),
+                    entered
+                );
+                assert_eq!(current.editor_target().continuity_epoch, Some(1));
+                assert_eq!(resolves.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(start, expected.len());
+            assert_eq!(rendered, expected, "rate={rate}, partition={partition:?}");
+            assert_eq!(
+                parameter_outputs, 4,
+                "the same two actual Gain callbacks around each native End"
+            );
+            assert!(sequence.audio_tracks.iter().all(|track| track.clips.is_empty()));
+            assert_eq!(resolves.load(Ordering::SeqCst), 0);
+            runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .expect(
+                    "all actual native author Source was canonically accepted and acknowledged",
+                );
+            let current = zero_input_owner(&runtime);
+            assert_eq!(
+                runtime.observe_native_owner_object(current).unwrap(),
+                entered
+            );
+            let footprint = runtime.resource_footprint();
+            assert_eq!(footprint.media_window_bytes, 0);
+            let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+            drop(runtime);
+            let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+            let mut exit_code = 0;
+            let queried =
+                unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
+            let evidence=serde_json::to_string(&serde_json::json!({
+                "case":"owned-fixed-zero-input-public-notes", "sample_rate":rate,
+                "partitions":partition,"completed_frames":start,"media_resolve_calls":resolves.load(Ordering::SeqCst),
+                "media_window_bytes":footprint.media_window_bytes,"parameter_callbacks_accepted":parameter_outputs,
+                "native_pid":pid,"native_object_serial":entered.object_serial().get(),
+                "same_object_through_pcm_and_source_handoffs":true,
+                "alive_before_drop_wait_status":alive,"post_drop_wait_status":settled,
+                "exit_query_succeeded":queried!=0,"exit_code":exit_code,
+                "root_resource_footprint":format!("{footprint:?}"),
+                "root_grant_is_original_explicit_unbounded":true,
+                "fixture_enforces_native_audio_inputs_count_zero":true,
+                "native_process_callback_count_instrumented":false,
+                "third_party_instrument_qualified":false,"realtime_or_performance_qualified":false
+            })).unwrap();
+            assert!(evidence.len() <= 16 * 1024);
+            println!("{evidence}");
+            assert_eq!(alive, 258);
+            assert_eq!(
+                settled, 0,
+                "existing Runtime Drop settles the exact native child"
+            );
+            assert_ne!(queried, 0);
+            assert_eq!(exit_code, 0);
+            assert_eq!(
+                std::fs::canonicalize(zero_input_fixture()).unwrap(),
+                std::fs::canonicalize(&dll).unwrap()
+            );
+        }
+    }
+}

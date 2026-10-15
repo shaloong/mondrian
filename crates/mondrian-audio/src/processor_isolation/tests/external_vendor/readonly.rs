@@ -491,6 +491,7 @@ fn owned_resolver(metadata: &CapturedProbe) -> ClapAudioProcessorSpecResolver {
     ClapAudioProcessorSpecResolver::new(
         path.clone(),
         [ClapPluginRegistration {
+            main_audio_input: super::ClapMainAudioInput::Present,
             plugin_id: metadata.plugin_id.clone(),
             library_path: path,
             binary_sha256: [3; 32],
@@ -651,6 +652,7 @@ fn readonly_worker_lane_refusal_precedes_library_access() {
         let payload=serde_json::to_vec(&json!({
             "library_path":library,"plugin_id":metadata.plugin_id,"binary_sha256":vec![3_u8;32],
             "state":metadata.captured_state,"parameters":metadata.parameters,"parameter_ids":[descriptor.id],
+            "main_audio_input":ClapMainAudioInput::Present,
         })).expect("forged native lane payload");
         let prepared = IsolatedAudioProcessorWorkerPrepareRequest {
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),

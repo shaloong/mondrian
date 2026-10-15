@@ -12,6 +12,7 @@ const ID: &CStr = c"org.mondrian.owned.coherent-note-offer";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Good,
+    ZeroAudioInput,
     LoadFailure,
     RenderFailure,
     BadParameter,
@@ -295,7 +296,7 @@ unsafe extern "C" fn parameter_value(plugin: *const clap_plugin, id: u32, out: *
 unsafe extern "C" fn audio_count(plugin: *const clap_plugin, input: bool) -> u32 {
     let owner = unsafe { owner(plugin) };
     unsafe { role(owner, 5, false, false) };
-    if owner.mode == Mode::BadAudio {
+    if owner.mode == Mode::BadAudio || (input && owner.mode == Mode::ZeroAudioInput) {
         0
     } else if input && owner.notes.get() {
         2
@@ -591,12 +592,12 @@ fn configure(mode: Mode) -> (PluginEntry, Rc<Audit>) {
 fn captured(
     mode: Mode,
 ) -> (
-    Result<ClapNoteProcessingOfferV2, AudioProcessorHostError>,
+    Result<ClapNoteProcessingOfferV3, AudioProcessorHostError>,
     Rc<Audit>,
 ) {
     let (entry, audit) = configure(mode);
     (
-        probe_loaded_processing_v2(
+        probe_loaded_processing_v3(
             &entry,
             ID.to_str().unwrap(),
             [23; 32],
@@ -621,7 +622,7 @@ fn actual_abi_v2_captures_one_restored_rendered_notes_environment_and_inactive_r
     let mut offer = result.unwrap();
     cleanup(&audit, 1, 1);
     assert_eq!(audit.mask.get(), 1);
-    assert_eq!(offer.schema_version, 2);
+    assert_eq!(offer.schema_version, 3);
     // Public consumers access existing domain facts without private wire access.
     assert_eq!(offer.parameters()[0].current_value, 1.5);
     assert_eq!(offer.parameters()[0].max_value, 2.0);
@@ -822,4 +823,59 @@ fn actual_abi_v2_destroy_cached_legal_main_flush_refuses_after_native_release() 
     );
     cleanup(&audit, 1, 1);
     assert_eq!(audit.stages().last(), Some(&11));
+}
+
+#[test]
+fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_revalidation() {
+    let (result, audit) = captured(Mode::ZeroAudioInput);
+    let offer = result.unwrap();
+    cleanup(&audit, 1, 1);
+    assert_eq!(offer.schema_version, 3);
+    assert_eq!(
+        offer.main_audio_input(),
+        super::super::ClapMainAudioInput::Absent
+    );
+    assert_eq!(offer.auxiliary_inputs().len(), 0);
+    assert_eq!(offer.notes.contract.ports.len(), 2);
+    assert_eq!(offer.parameters()[0].current_value, 1.5);
+    assert_eq!(offer.latency_frames(), 33);
+    assert_eq!(offer.tail(), crate::AudioProcessorTail::Finite(9));
+    let stages = audit.stages();
+    let deactivate = stages.iter().position(|stage| *stage == 10).unwrap();
+    assert!(stages[deactivate + 1..].contains(&5));
+    let empty_aux = crate::AudioProcessorAuxiliaryInputContract::default();
+    for (admitted, observed) in [
+        (
+            super::super::ClapMainAudioInput::Absent,
+            super::super::ClapMainAudioInput::Present,
+        ),
+        (
+            super::super::ClapMainAudioInput::Present,
+            super::super::ClapMainAudioInput::Absent,
+        ),
+    ] {
+        let processing = super::super::clap_discovery::processing_result_for_notes(
+            "fixture",
+            render_contract(),
+            Vec::new(),
+            admitted,
+            empty_aux.clone(),
+            0,
+            clack_extensions::tail::TailLength::Finite(0),
+        )
+        .unwrap();
+        let audio = super::super::clap_discovery::ClapAudioInputMetadata {
+            main_audio_input: observed,
+            contract: empty_aux.clone(),
+            names: Vec::new(),
+        };
+        assert!(
+            super::super::clap_discovery::revalidate_processing_metadata_for_notes(
+                &processing,
+                &[],
+                &audio
+            )
+            .is_err()
+        );
+    }
 }

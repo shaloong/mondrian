@@ -603,7 +603,7 @@ fn native_owned_note_gate_v2_parent_query_binds_complete_same_instance_facts() {
             path,
             "producer bytes remain accepted after query"
         );
-        assert_eq!(offer.schema_version, 2);
+        assert_eq!(offer.schema_version, 3);
         assert_eq!(offer.notes.schema_version, 1);
         assert_eq!(offer.notes.plugin_id, "org.mondrian.fixture.note-gate");
         assert_eq!(

@@ -15,6 +15,7 @@ use clack_host::prelude::{
 
 pub(super) struct ClapSignalFields<'a> {
     pub(super) configuration_phase: &'a NativeConfigurationPhase,
+    pub(super) main_audio_input: super::ClapMainAudioInput,
     pub(super) input: &'a mut Vec<Vec<Vec<f32>>>,
     pub(super) output: &'a mut Vec<Vec<f32>>,
     pub(super) auxiliary_inputs: &'a AudioProcessorAuxiliaryInputContract,
@@ -89,7 +90,7 @@ impl ClapSignalFields<'_> {
         let channels = self.output.len();
         if *self.last_end != Some(block.start_sample())
             || frames == 0
-            || frames > self.input[0][0].len()
+            || frames > self.output[0].len()
             || block.main_interleaved().len() != frames * channels
         {
             return Err(AudioProcessorHostError::Process(
@@ -139,9 +140,11 @@ impl ClapSignalFields<'_> {
             }
         }
         self.input_events.sort();
-        for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
-            for (channel, sample) in samples.iter().copied().enumerate() {
-                self.input[0][channel][frame] = sample;
+        if self.main_audio_input == super::ClapMainAudioInput::Present {
+            for (frame, samples) in block.main_interleaved().chunks_exact(channels).enumerate() {
+                for (channel, sample) in samples.iter().copied().enumerate() {
+                    self.input[0][channel][frame] = sample;
+                }
             }
         }
         for (index, bus) in self.auxiliary_inputs.buses.iter().enumerate() {
@@ -155,7 +158,8 @@ impl ClapSignalFields<'_> {
             }
             for (frame, samples) in samples.chunks_exact(channels).enumerate() {
                 for (channel, sample) in samples.iter().copied().enumerate() {
-                    self.input[index + 1][channel][frame] = sample;
+                    self.input[index + self.main_audio_input.port_offset()][channel][frame] =
+                        sample;
                 }
             }
         }

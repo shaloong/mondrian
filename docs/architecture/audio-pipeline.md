@@ -33,6 +33,17 @@ the prepared worker. Realtime and offline may legitimately have different
 latency/tail; no mode-independent scheduling facts are inferred. Definition
 identity and authored opaque state remain independent of the execution mode.
 
+Native main-input presence is a required CLAP-local `Absent`/`Present` fact;
+an empty auxiliary list does not identify it. `Absent` passes zero native audio
+input buffers and permits no auxiliary ports. Graph working/output PCM still
+defines the render extent; it is never synthesized into a native input. The
+processing probe uses schema 2 and full same-instance Note offers use schema 3;
+old or incomplete processing payloads are refused. Read-only Note discovery
+retains its existing schema. State/mode revalidation scans audio ports only
+while deactivated and refuses changed shape before reactivation. Active
+parameter/latency/tail validation retains its original lifecycle. This adds no
+Graph, author-state or project-format authority and no dynamic-port-rescan claim.
+
 The isolated worker implements CLAP's thread-check extension with one fixed
 main OS-thread identity and an instance-owned symbolic audio-role guard.
 Reset, tail queries, start/process and stop are the only marked audio call

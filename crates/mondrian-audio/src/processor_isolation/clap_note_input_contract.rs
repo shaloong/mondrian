@@ -32,7 +32,7 @@ pub(super) enum NotePortFailure {
     ExhaustedCohort,
 }
 
-/// One actual SDK services owner: inline by default, retained only for v2
+/// One actual SDK services owner: inline by default, retained only for complete processing offers
 /// query destruction observation. Raw callback flags are monotonic
 /// evidence; only the exact successfully scanned legal cohort may be retired.
 pub(super) struct NotePortRequests {
@@ -420,15 +420,20 @@ pub(super) fn probe_loaded(
 /// Full same-instance metadata response; it does not grant Note execution.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClapNoteProcessingOfferV2 {
-    /// Exact full-processing response version; currently two.
+pub struct ClapNoteProcessingOfferV3 {
+    /// Exact full-processing response version; currently three.
     pub schema_version: u32,
     /// Same-instance identity/render/Note facts, with no execution authority.
     pub notes: ClapNoteInputContractProbe,
     pub(super) processing: super::clap_discovery::ProbeResult,
 }
 
-impl ClapNoteProcessingOfferV2 {
+impl ClapNoteProcessingOfferV3 {
+    /// Native main-input shape from the same Notes-enabled instance.
+    pub fn main_audio_input(&self) -> super::ClapMainAudioInput {
+        self.processing.main_audio_input
+    }
+
     /// Borrow same-instance parameter facts; no copying or execution authority.
     pub fn parameters(&self) -> &[super::ClapParameterDescriptor] {
         super::clap_discovery::note_processing_parameters(&self.processing)
@@ -509,13 +514,13 @@ fn check_destroyed_processing_services(
     Ok(())
 }
 
-pub(super) fn probe_loaded_processing_v2(
+pub(super) fn probe_loaded_processing_v3(
     entry: &PluginEntry,
     plugin_id: &str,
     binary_sha256: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<ClapNoteProcessingOfferV2, AudioProcessorHostError> {
+) -> Result<ClapNoteProcessingOfferV3, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     let max_frames = u32::try_from(render.max_block_frames)
         .ok()
@@ -569,14 +574,13 @@ pub(super) fn probe_loaded_processing_v2(
     configure_render_mode(&instance.plugin_handle(), render.processing_mode)?;
     shared.service_callbacks(&mut instance)?;
     instance.access_shared_handler(|host| check_processing_sources(host, true))?;
-    let (parameters, auxiliary_inputs) = {
+    let (parameters, audio) = {
         let handle = instance.plugin_handle();
         let mut capture = super::clap_discovery::ParameterQueryCapture::from_environment();
         let parameters =
             super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
-        let auxiliary_inputs =
-            super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?.contract;
-        (parameters, auxiliary_inputs)
+        let audio = super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?;
+        (parameters, audio)
     };
     instance.access_shared_handler(|host| check_processing_sources(host, true))?;
     let binding = scan(&mut instance, offered_limits(), None, false)?;
@@ -623,7 +627,8 @@ pub(super) fn probe_loaded_processing_v2(
             plugin_id,
             render,
             parameters,
-            auxiliary_inputs,
+            audio.main_audio_input,
+            audio.contract,
             latency,
             tail,
         )
@@ -653,8 +658,7 @@ pub(super) fn probe_loaded_processing_v2(
                 let parameters =
                     super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
                 let audio =
-                    super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?
-                        .contract;
+                    super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?;
                 super::clap_discovery::revalidate_processing_metadata_for_notes(
                     processing,
                     &parameters,
@@ -699,7 +703,7 @@ pub(super) fn probe_loaded_processing_v2(
     drop(instance);
     check_destroyed_processing_services(&services)?;
     check_processing_control(&shared)?;
-    Ok(ClapNoteProcessingOfferV2 { schema_version: 2, notes, processing })
+    Ok(ClapNoteProcessingOfferV3 { schema_version: 3, notes, processing })
 }
 
 #[cfg(test)]

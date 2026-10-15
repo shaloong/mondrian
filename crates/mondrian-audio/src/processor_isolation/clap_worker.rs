@@ -270,6 +270,36 @@ impl HostLogImpl for ClapNativeHostShared {
 /// Child-only CLAP factory. Plugin binaries are never loaded by the editor process.
 pub struct ClapAudioProcessorWorkerFactory;
 
+/// Native CLAP main-input shape, independent of the graph's output/working PCM.
+/// An absent main input never authorizes auxiliary native inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClapMainAudioInput {
+    Absent,
+    Present,
+}
+
+impl ClapMainAudioInput {
+    pub(super) fn port_offset(self) -> usize {
+        match self {
+            Self::Absent => 0,
+            Self::Present => 1,
+        }
+    }
+
+    pub(super) fn validate(
+        self,
+        auxiliary: &AudioProcessorAuxiliaryInputContract,
+    ) -> Result<(), AudioProcessorHostError> {
+        if self == Self::Absent && !auxiliary.buses.is_empty() {
+            return Err(invalid(
+                "CLAP absent main input cannot have auxiliary inputs",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Installed CLAP definition admitted by the application after discovery.
 #[derive(Debug, Clone)]
 pub struct ClapPluginRegistration {
@@ -283,6 +313,8 @@ pub struct ClapPluginRegistration {
     pub execution_contract: AudioProcessorExecutionContract,
     /// Definition-local parameter IDs and plain-value contracts from the probe.
     pub parameters: Vec<super::ClapParameterDescriptor>,
+    /// Actual native main-input presence captured from this restored instance.
+    pub main_audio_input: ClapMainAudioInput,
     /// Ordered auxiliary inputs captured after restoring the occurrence state.
     pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
 }
@@ -567,6 +599,7 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
                 binary_sha256: offer.notes.binary_sha256,
                 execution_contract,
                 parameters: offer.parameters().to_vec(),
+                main_audio_input: offer.main_audio_input(),
                 auxiliary_inputs: AudioProcessorAuxiliaryInputContract {
                     buses: offer
                         .auxiliary_inputs()
@@ -620,6 +653,7 @@ impl ClapAudioProcessorSpecResolver {
                 || plugin.binary_sha256 == [0; 32]
                 || !plugin.execution_contract.requires_state_entry()
                 || validate_parameters(&plugin.parameters).is_err()
+                || plugin.main_audio_input.validate(&plugin.auxiliary_inputs).is_err()
                 || by_id.insert(plugin.plugin_id.clone(), plugin).is_some()
             {
                 return Err(invalid("CLAP registrations need unique IDs, absolute libraries, and explicit state entry"));
@@ -676,6 +710,7 @@ fn resolve_clap_registration(
         return Err(unavailable("CLAP definition schema version is unsupported"));
     }
     notes.validate()?;
+    plugin.main_audio_input.validate(&plugin.auxiliary_inputs)?;
     if request.note_input_requested() && notes.ports.is_empty() {
         return Err(invalid(
             "CLAP registry has no same-instance Note processing offer",
@@ -714,6 +749,7 @@ fn resolve_clap_registration(
         library_path: plugin.library_path.clone(),
         plugin_id: plugin.plugin_id.clone(),
         binary_sha256: plugin.binary_sha256,
+        main_audio_input: plugin.main_audio_input,
         state: request.opaque_state().map(ToOwned::to_owned),
         parameters: plugin.parameters.clone(),
         parameter_ids: clap_parameter_ids,
@@ -772,6 +808,7 @@ pub(super) fn payload_with_configuration_seed(
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClapPayload {
+    main_audio_input: ClapMainAudioInput,
     library_path: PathBuf,
     plugin_id: String,
     binary_sha256: [u8; 32],
@@ -821,6 +858,7 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
                 "CLAP library path must be absolute and plugin ID nonempty",
             ));
         }
+        payload.main_audio_input.validate(request.auxiliary_inputs())?;
         validate_parameters(&payload.parameters)
             .map_err(|error| parameter_refusal_at_site(error, "decoded_payload"))?;
         if payload.parameter_ids.len() != request.parameter_ids().len() {
@@ -858,6 +896,7 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             entry,
             plugin_id.as_c_str(),
             payload.state.as_deref(),
+            payload.main_audio_input,
             &payload.parameters,
             &payload.parameter_ids,
         )
@@ -930,6 +969,27 @@ fn prepare_loaded(
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+    prepare_loaded_with_audio_input(
+        request,
+        entry,
+        plugin_id,
+        state,
+        ClapMainAudioInput::Present,
+        expected_parameters,
+        parameter_ids,
+    )
+}
+
+#[cfg(test)]
+fn prepare_loaded_with_audio_input(
+    request: IsolatedAudioProcessorWorkerPrepareRequest,
+    entry: PluginEntry,
+    plugin_id: &CStr,
+    state: Option<&[u8]>,
+    main_audio_input: ClapMainAudioInput,
+    expected_parameters: &[super::ClapParameterDescriptor],
+    parameter_ids: &[u32],
+) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
     #[cfg(windows)]
     let native_main = std::rc::Rc::new(
         vst3_host::window::WindowsEditorMainThread::initialize().map_err(|error| {
@@ -945,6 +1005,7 @@ fn prepare_loaded(
         entry,
         plugin_id,
         state,
+        main_audio_input,
         expected_parameters,
         parameter_ids,
     )
@@ -956,6 +1017,7 @@ fn prepare_loaded_on_main(
     entry: PluginEntry,
     plugin_id: &CStr,
     state: Option<&[u8]>,
+    main_audio_input: ClapMainAudioInput,
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
 ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
@@ -1078,7 +1140,10 @@ fn prepare_loaded_on_main(
     }
     let input_metadata = inspect_audio_inputs(&handle, request.render_contract().channel_layout)?;
     let auxiliary_inputs = input_metadata.contract;
-    if &auxiliary_inputs != request.auxiliary_inputs() {
+    main_audio_input.validate(request.auxiliary_inputs())?;
+    if input_metadata.main_audio_input != main_audio_input
+        || &auxiliary_inputs != request.auxiliary_inputs()
+    {
         return Err(invalid("CLAP auxiliary ports changed since contract probe"));
     }
 
@@ -1180,8 +1245,14 @@ fn prepare_loaded_on_main(
             ))
         })
         .collect::<Result<Vec<_>, AudioProcessorHostError>>()?;
-    let input_port_count = 1 + auxiliary_inputs.buses.len();
-    let input = vec![vec![vec![0.0; frames]; channel_count]; input_port_count];
+    let input_port_count = main_audio_input.port_offset() + auxiliary_inputs.buses.len();
+    // Vec's repeat expression evaluates its element even when count is zero;
+    // do not allocate a throwaway main/channel buffer for a native instrument.
+    let input = if input_port_count == 0 {
+        Vec::new()
+    } else {
+        vec![vec![vec![0.0; frames]; channel_count]; input_port_count]
+    };
     let output = vec![vec![0.0; frames]; channel_count];
     let native_object = next_clap_native_object()?;
     Ok(Box::new(ClapWorker {
@@ -1205,6 +1276,7 @@ fn prepare_loaded_on_main(
         contract: request.plugin_execution_contract(),
         input,
         output,
+        main_audio_input,
         auxiliary_inputs,
         note_inputs,
         input_names: input_metadata.names,
@@ -1239,6 +1311,7 @@ struct ClapWorker {
     instance: PluginInstance<ClapHost>,
     contract: AudioProcessorExecutionContract,
     input: Vec<Vec<Vec<f32>>>,
+    main_audio_input: ClapMainAudioInput,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     input_names: Vec<crate::AudioProcessorInputName>,
     output: Vec<Vec<f32>>,
@@ -1309,6 +1382,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             self.processor.as_mut().ok_or_else(|| unavailable("CLAP processor is closed"))?;
         let signal = ClapSignalFields {
             configuration_phase: &self.configuration_phase,
+            main_audio_input: self.main_audio_input,
             input: &mut self.input,
             output: &mut self.output,
             auxiliary_inputs: &self.auxiliary_inputs,
@@ -1562,7 +1636,9 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
         let metadata = inspect_audio_inputs(&handle, self.render.channel_layout)?;
-        if metadata.contract != self.auxiliary_inputs {
+        if metadata.main_audio_input != self.main_audio_input
+            || metadata.contract != self.auxiliary_inputs
+        {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
         let configuration = PluginAudioConfiguration {
@@ -1602,10 +1678,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         let observed = observed_contract(self.contract, latency, tail)?;
         self.shared.service_callbacks(&mut self.instance)?;
         let handle = self.instance.plugin_handle();
-        if !same_clap_parameter_structure(&list_parameters(&handle)?, &self.expected_parameters)
-            || inspect_audio_inputs(&handle, self.render.channel_layout)?.contract
-                != self.auxiliary_inputs
-        {
+        // CLAP audio-ports may only be scanned while deactivated. The inactive
+        // shape+auxiliary check above remains authoritative through activation;
+        // active changes require the existing restart/cohort control path.
+        if !same_clap_parameter_structure(&list_parameters(&handle)?, &self.expected_parameters) {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
         let Some(state) = handle.get_extension::<PluginState>() else {
@@ -1739,6 +1815,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         })?;
         let mut signal = ClapSignalFields {
             configuration_phase: &self.configuration_phase,
+            main_audio_input: self.main_audio_input,
             input: &mut self.input,
             output: &mut self.output,
             auxiliary_inputs: &self.auxiliary_inputs,
@@ -2228,7 +2305,7 @@ mod tests {
     }
 
     struct SidechainPlugin<const CASE: u8>;
-    struct SidechainShared(AtomicBool);
+    struct SidechainShared(AtomicBool, bool);
     struct SidechainMain<'a, const CASE: u8>(&'a SidechainShared);
     struct SidechainProcessor<'a>(&'a SidechainShared);
     static LATENCY_DEACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -2257,7 +2334,10 @@ mod tests {
         }
 
         fn new_shared(_host: HostSharedHandle<'_>) -> Result<SidechainShared, PluginError> {
-            Ok(SidechainShared(AtomicBool::new(false)))
+            Ok(SidechainShared(
+                AtomicBool::new(false),
+                matches!(CASE, 7 | 8),
+            ))
         }
 
         fn new_main_thread<'a>(
@@ -2283,7 +2363,9 @@ mod tests {
     impl<const CASE: u8> PluginAudioPortsImpl for SidechainMain<'_, CASE> {
         fn count(&self, is_input: bool) -> u32 {
             if is_input {
-                if CASE == 4 {
+                if matches!(CASE, 7 | 8) {
+                    0
+                } else if CASE == 4 {
                     33
                 } else {
                     3
@@ -2306,13 +2388,17 @@ mod tests {
             writer.set(&AudioPortInfo {
                 id: ClapId::new(id),
                 name: b"same display name",
-                channel_count: if CASE == 3 && index != 0 { 1 } else { 2 },
+                channel_count: if (CASE == 3 && index != 0) || CASE == 8 {
+                    1
+                } else {
+                    2
+                },
                 flags: if index == 0 || (CASE == 2 && index == 1) {
                     AudioPortFlags::IS_MAIN
                 } else {
                     AudioPortFlags::empty()
                 },
-                port_type: Some(if CASE == 3 && index != 0 {
+                port_type: Some(if (CASE == 3 && index != 0) || CASE == 8 {
                     AudioPortType::MONO
                 } else {
                     AudioPortType::STEREO
@@ -2345,7 +2431,16 @@ mod tests {
             mut audio: Audio,
             _events: Events,
         ) -> Result<ProcessStatus, PluginError> {
-            let mut expected = [[0.0; 4]; 2];
+            if self.0 .1 && (audio.input_port_count() != 0 || audio.output_port_count() != 1) {
+                return Err(PluginError::Message(
+                    "zero-input fixture received native audio input",
+                ));
+            }
+            let mut expected = if self.0 .1 {
+                [[0.375; 4], [-0.125; 4]]
+            } else {
+                [[0.0; 4]; 2]
+            };
             for (port_index, port) in audio.input_ports().enumerate() {
                 let gain = [2.0, 3.0, 5.0][port_index];
                 let channels =
@@ -2398,6 +2493,213 @@ mod tests {
                 public_output_lookahead_budget_frames: 4096,
                 compensation_delay_scratch_budget_bytes: 1024 * 1024,
             },
+        }
+    }
+
+    #[test]
+    fn clap_zero_input_uses_output_extent_and_never_passes_graph_main_as_native_input() {
+        for layout in [AudioChannelLayout::Mono, AudioChannelLayout::Stereo] {
+            let entry = if layout == AudioChannelLayout::Mono {
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<8>>>(
+                    c"/test/zero-input-mono",
+                )
+            } else {
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<7>>>(
+                    c"/test/zero-input-stereo",
+                )
+            }
+            .unwrap();
+            let mut request = sidechain_request();
+            request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+            request.render_contract.channel_layout = layout;
+            let render = request.render_contract;
+            let probe = super::super::clap_discovery::probe_loaded(
+                &entry,
+                "org.mondrian.test.sidechain",
+                render,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(probe.main_audio_input, ClapMainAudioInput::Absent);
+            assert!(probe.auxiliary_buses.is_empty());
+            let mut worker = prepare_loaded_with_audio_input(
+                request,
+                entry,
+                c"org.mondrian.test.sidechain",
+                None,
+                ClapMainAudioInput::Absent,
+                &[],
+                &[],
+            )
+            .unwrap();
+            worker.enter_state(0).unwrap();
+            let aux = AudioProcessorAuxiliaryInputContract::default();
+            let channels = layout.channel_count();
+            let mut start = 0;
+            for frames in [4, 1, 2] {
+                let mut graph_pcm = vec![19.0; frames * channels];
+                worker
+                    .process(IsolatedAudioProcessorWorkerBlock::new(
+                        start,
+                        frames,
+                        render,
+                        &mut graph_pcm,
+                        &aux,
+                        &[],
+                        &[],
+                        &[],
+                    ))
+                    .unwrap();
+                for frame in graph_pcm.chunks_exact(channels) {
+                    assert_eq!(frame[0].to_bits(), 0.375_f32.to_bits());
+                    if channels == 2 {
+                        assert_eq!(frame[1].to_bits(), (-0.125_f32).to_bits());
+                    }
+                }
+                start += frames as i64;
+            }
+            // Extent and continuity checks precede any slicing of output storage.
+            let mut oversized = vec![19.0; 5 * channels];
+            assert!(matches!(
+                worker.process(IsolatedAudioProcessorWorkerBlock::new(
+                    start,
+                    5,
+                    render,
+                    &mut oversized,
+                    &aux,
+                    &[],
+                    &[],
+                    &[]
+                )),
+                Err(AudioProcessorHostError::Process(_))
+            ));
+            assert!(oversized.iter().all(|sample| *sample == 19.0));
+            let mut final_pcm = vec![19.0; channels];
+            worker
+                .process(IsolatedAudioProcessorWorkerBlock::new(
+                    start,
+                    1,
+                    render,
+                    &mut final_pcm,
+                    &aux,
+                    &[],
+                    &[],
+                    &[],
+                ))
+                .unwrap();
+            assert_eq!(final_pcm[0], 0.375);
+        }
+    }
+
+    #[test]
+    fn clap_payload_requires_explicit_shape_and_rejects_legacy_or_unknown_fields() {
+        for shape in [ClapMainAudioInput::Absent, ClapMainAudioInput::Present] {
+            let payload = ClapPayload {
+                main_audio_input: shape,
+                library_path: std::env::current_exe().unwrap(),
+                plugin_id: "fixture".to_owned(),
+                binary_sha256: [7; 32],
+                state: None,
+                parameters: Vec::new(),
+                parameter_ids: Vec::new(),
+            };
+            let value = serde_json::to_value(payload).unwrap();
+            let parsed: ClapPayload = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(parsed.main_audio_input, shape);
+            let mut legacy = value.clone();
+            legacy.as_object_mut().unwrap().remove("main_audio_input");
+            assert!(serde_json::from_value::<ClapPayload>(legacy).is_err());
+            let mut unknown = value;
+            unknown["extra"] = serde_json::json!(true);
+            assert!(serde_json::from_value::<ClapPayload>(unknown).is_err());
+            assert!(shape.validate(&AudioProcessorAuxiliaryInputContract::default()).is_ok());
+        }
+        assert!(ClapMainAudioInput::Absent
+            .validate(&sidechain_request().auxiliary_inputs)
+            .is_err());
+        assert!(ClapMainAudioInput::Present
+            .validate(&sidechain_request().auxiliary_inputs)
+            .is_ok());
+    }
+
+    #[test]
+    fn clap_configuration_refuses_both_inactive_main_input_shape_changes_before_reactivation() {
+        for case in [9, 10] {
+            LIFECYCLE_AUDITS[case].clear();
+            let (entry, admitted) = if case == 9 {
+                (
+                    PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<9>>>(
+                        c"/test/absent-to-present",
+                    )
+                    .unwrap(),
+                    ClapMainAudioInput::Absent,
+                )
+            } else {
+                (
+                    PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<10>>>(
+                        c"/test/present-to-absent",
+                    )
+                    .unwrap(),
+                    ClapMainAudioInput::Present,
+                )
+            };
+            let mut request = sidechain_request();
+            request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+            request.render_contract.max_block_frames = 16;
+            request.plugin_execution_contract = AudioProcessorExecutionContract::new(
+                5,
+                AudioProcessorTail::Finite(5),
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap();
+            let mut worker = prepare_loaded_with_audio_input(
+                request,
+                entry,
+                c"org.mondrian.test.render-lifecycle",
+                None,
+                admitted,
+                &[],
+                &[],
+            )
+            .unwrap();
+            let cohort = worker.native_configuration_cohort().unwrap();
+            assert!(matches!(
+                worker
+                    .service_native_configuration(super::super::NativeConfigurationControlRequest {
+                        expected_cohort: cohort,
+                        control_token: std::num::NonZeroU64::new(73).unwrap(),
+                        canonical_constant_values: &[],
+                        configuration_limit_bytes: 64,
+                        control_buffer_grant_bytes: 128 * 1024,
+                    })
+                    .unwrap(),
+                super::super::NativeConfigurationControlOutcome::CapabilityRefused(
+                    super::super::NativeConfigurationRefusal::MetadataChanged
+                )
+            ));
+            assert_eq!(
+                worker.native_configuration_cohort(),
+                Some(cohort),
+                "refusal must not consume the actual request"
+            );
+            assert_eq!(
+                LIFECYCLE_AUDITS[case].activations.load(TestOrdering::SeqCst),
+                1,
+                "shape mismatch must refuse before a second activation"
+            );
+            assert_eq!(
+                LIFECYCLE_AUDITS[case].active_port_queries.load(TestOrdering::SeqCst),
+                0
+            );
+            drop(worker);
+            assert_eq!(
+                LIFECYCLE_AUDITS[case].failures.load(TestOrdering::SeqCst),
+                0
+            );
         }
     }
 
@@ -2633,6 +2935,7 @@ mod tests {
                 hidden,
             };
         let registration = ClapPluginRegistration {
+            main_audio_input: ClapMainAudioInput::Present,
             plugin_id: "org.example.gain".to_owned(),
             library_path: std::env::current_exe().expect("test executable path"),
             binary_sha256: [3; 32],
@@ -2669,6 +2972,7 @@ mod tests {
     fn registration_rejects_duplicate_identity_and_relative_paths() {
         let helper = std::env::current_exe().expect("test executable path");
         let registration = ClapPluginRegistration {
+            main_audio_input: ClapMainAudioInput::Present,
             plugin_id: "org.example.gain".to_owned(),
             library_path: helper.clone(),
             binary_sha256: [1; 32],
@@ -2703,6 +3007,7 @@ mod tests {
         let resolver = ClapAudioProcessorSpecResolver::new(
             helper.clone(),
             [ClapPluginRegistration {
+                main_audio_input: ClapMainAudioInput::Present,
                 plugin_id: "org.example.gain".to_owned(),
                 library_path: helper,
                 binary_sha256: [7; 32],
@@ -2840,6 +3145,7 @@ mod tests {
         request.native_lane =
             clap_native_worker_lane_profile().expect("actual native lane profile");
         request.payload = serde_json::to_vec(&ClapPayload {
+            main_audio_input: ClapMainAudioInput::Present,
             library_path,
             plugin_id: "org.mondrian.test.automated-gain".to_owned(),
             binary_sha256: [0; 32],
@@ -3145,6 +3451,7 @@ mod tests {
         let library = temp.path().join("gain.clap");
         std::fs::write(&library, b"replacement binary").expect("write fake plugin");
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_input: ClapMainAudioInput::Present,
             library_path: library,
             plugin_id: "org.example.gain".to_owned(),
             binary_sha256: [7; 32],
@@ -3411,6 +3718,7 @@ mod tests {
         .expect("probe Clack gain");
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("stable parameter ID")];
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_input: ClapMainAudioInput::Present,
             library_path: registration.library_path,
             plugin_id: registration.plugin_id,
             binary_sha256: registration.binary_sha256,
@@ -3530,6 +3838,8 @@ mod tests {
         case: usize,
         render_mode: AtomicU32,
         active: AtomicBool,
+        mode_configured: AtomicBool,
+        input_present: AtomicBool,
     }
     struct LifecycleMain<'a>(&'a LifecycleShared<'a>);
     struct LifecycleProcessor<'a, const CASE: usize> {
@@ -3540,20 +3850,26 @@ mod tests {
     struct LifecycleAudit {
         visited: AtomicU32,
         failures: AtomicU32,
+        active_port_queries: AtomicU32,
+        activations: AtomicU32,
     }
     impl LifecycleAudit {
         const fn new() -> Self {
             Self {
                 visited: AtomicU32::new(0),
                 failures: AtomicU32::new(0),
+                active_port_queries: AtomicU32::new(0),
+                activations: AtomicU32::new(0),
             }
         }
         fn clear(&self) {
             self.visited.store(0, TestOrdering::SeqCst);
             self.failures.store(0, TestOrdering::SeqCst);
+            self.active_port_queries.store(0, TestOrdering::SeqCst);
+            self.activations.store(0, TestOrdering::SeqCst);
         }
     }
-    static LIFECYCLE_AUDITS: [LifecycleAudit; 8] = [const { LifecycleAudit::new() }; 8];
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 11] = [const { LifecycleAudit::new() }; 11];
     static CALLBACK_COUNTS: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
     const INIT: u32 = 1;
     const CALLBACK: u32 = 2;
@@ -3581,6 +3897,13 @@ mod tests {
                 }
             } else if self.case >= 3 {
                 audit.failures.fetch_add(1, TestOrdering::SeqCst);
+            }
+        }
+        fn audio_port_query(&self) {
+            if self.active.load(TestOrdering::SeqCst) {
+                LIFECYCLE_AUDITS[self.case]
+                    .active_port_queries
+                    .fetch_add(1, TestOrdering::SeqCst);
             }
         }
         fn delay_frames(&self) -> usize {
@@ -3611,6 +3934,9 @@ mod tests {
                 .register::<PluginRender>()
                 .register::<PluginLatency>()
                 .register::<PluginTail>();
+            if matches!(CASE, 8..=10) {
+                builder.register::<PluginState>();
+            }
         }
     }
     impl<const CASE: usize> DefaultPluginFactory for LifecyclePlugin<CASE> {
@@ -3629,6 +3955,8 @@ mod tests {
                 case: CASE,
                 render_mode: AtomicU32::new(0),
                 active: AtomicBool::new(false),
+                mode_configured: AtomicBool::new(false),
+                input_present: AtomicBool::new(CASE != 9),
             };
             shared.check(INIT, false);
             if let Some(check) = host.get_extension::<HostThreadCheck>() {
@@ -3647,6 +3975,9 @@ mod tests {
                 }
             }
             host.request_callback();
+            if matches!(CASE, 8..=10) {
+                host.request_restart();
+            }
             Ok(shared)
         }
         fn new_main_thread<'a>(
@@ -3659,7 +3990,7 @@ mod tests {
     impl<'a> PluginMainThread<'a, LifecycleShared<'a>> for LifecycleMain<'a> {
         fn on_main_thread(&self) {
             self.0.check(CALLBACK, false);
-            if self.0.case >= 6 {
+            if matches!(self.0.case, 6 | 7) {
                 let count = CALLBACK_COUNTS[self.0.case - 6].fetch_add(1, TestOrdering::SeqCst) + 1;
                 let limit = if self.0.case == 6 { 40 } else { 16 };
                 if count < limit {
@@ -3669,10 +4000,16 @@ mod tests {
         }
     }
     impl PluginAudioPortsImpl for LifecycleMain<'_> {
-        fn count(&self, _is_input: bool) -> u32 {
-            1
+        fn count(&self, is_input: bool) -> u32 {
+            self.0.audio_port_query();
+            if is_input {
+                u32::from(self.0.input_present.load(TestOrdering::SeqCst))
+            } else {
+                1
+            }
         }
         fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
+            self.0.audio_port_query();
             if index == 0 {
                 writer.set(&AudioPortInfo {
                     id: ClapId::new(0),
@@ -3685,6 +4022,20 @@ mod tests {
             }
         }
     }
+    impl PluginStateImpl for LifecycleMain<'_> {
+        fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
+            output.write_all(&[0x43])?;
+            Ok(())
+        }
+        fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
+            let mut byte = [0];
+            input.read_exact(&mut byte)?;
+            if byte != [0x43] {
+                return Err(PluginError::Message("owned lifecycle state"));
+            }
+            Ok(())
+        }
+    }
     impl PluginRenderImpl for LifecycleMain<'_> {
         fn has_hard_realtime_requirement(&self) -> bool {
             self.0.check(RENDER, false);
@@ -3692,6 +4043,12 @@ mod tests {
         }
         fn set(&self, mode: RenderMode) -> Result<(), PluginError> {
             self.0.check(RENDER, false);
+            if matches!(self.0.case, 9 | 10)
+                && self.0.mode_configured.swap(true, TestOrdering::SeqCst)
+            {
+                assert!(!self.0.active.load(TestOrdering::SeqCst));
+                self.0.input_present.fetch_xor(true, TestOrdering::SeqCst);
+            }
             if self.0.case == 2 && mode == RenderMode::Offline {
                 return Err(PluginError::Message("offline rendering declined"));
             }
@@ -3728,6 +4085,7 @@ mod tests {
             _config: PluginConfig,
         ) -> Result<Self, PluginError> {
             shared.check(ACTIVATE, false);
+            LIFECYCLE_AUDITS[CASE].activations.fetch_add(1, TestOrdering::SeqCst);
             shared.active.store(true, TestOrdering::SeqCst);
             Ok(Self {
                 shared,
@@ -3793,6 +4151,68 @@ mod tests {
             self.shared.check(DEACTIVATE, false);
             self.shared.active.store(false, TestOrdering::SeqCst);
         }
+    }
+
+    #[test]
+    fn clap_configuration_service_scans_audio_ports_only_while_deactivated() {
+        LIFECYCLE_AUDITS[8].clear();
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<8>>>(
+            c"/test/configuration-port-phase",
+        )
+        .expect("owned configuration lifecycle fixture");
+        let mut request = sidechain_request();
+        request.auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
+        request.render_contract.max_block_frames = 16;
+        request.plugin_execution_contract = AudioProcessorExecutionContract::new(
+            5,
+            AudioProcessorTail::Finite(5),
+            true,
+            true,
+            true,
+            0,
+        )
+        .unwrap();
+        let mut worker = prepare_loaded(
+            request,
+            entry,
+            c"org.mondrian.test.render-lifecycle",
+            None,
+            &[],
+            &[],
+        )
+        .expect("actual one-input retained object");
+        let cohort = worker.native_configuration_cohort().expect("actual plugin request_restart");
+        assert_eq!(
+            cohort.request,
+            mondrian_core::NativeAudioReprepareRequest::ClapRestart
+        );
+        let outcome = worker
+            .service_native_configuration(super::super::NativeConfigurationControlRequest {
+                expected_cohort: cohort,
+                control_token: std::num::NonZeroU64::new(73).unwrap(),
+                canonical_constant_values: &[],
+                configuration_limit_bytes: 64,
+                control_buffer_grant_bytes: 128 * 1024,
+            })
+            .expect("actual configuration lifecycle");
+        let super::super::NativeConfigurationControlOutcome::ReadyForInstall(candidate) = outcome
+        else {
+            panic!("configuration was not captured: {outcome:?}");
+        };
+        assert_eq!(candidate.serviced_cohort, cohort);
+        assert_eq!(candidate.configuration, [0x43]);
+        assert_eq!(candidate.observed_contract.algorithmic_latency_frames(), 5);
+        assert_eq!(
+            candidate.observed_contract.tail(),
+            AudioProcessorTail::Finite(5)
+        );
+        drop(worker);
+        assert_eq!(LIFECYCLE_AUDITS[8].failures.load(TestOrdering::SeqCst), 0);
+        assert_eq!(
+            LIFECYCLE_AUDITS[8].active_port_queries.load(TestOrdering::SeqCst),
+            0,
+            "CLAP audio-ports count/get must not run while activated"
+        );
     }
 
     #[test]

@@ -313,3 +313,444 @@ fn constant_in_place_uses_original_scalar_and_matches_disjoint_actual_callbacks(
     assert_eq!(run_constant_native_case(false), expected);
     assert_eq!(DROPPED.load(Ordering::Acquire), before + 2);
 }
+
+// Own only the real native lifecycle. It supplies no voice/note/PCM model and
+// unwinds stop/deactivate/destroy while the actual borrowed host stays alive.
+struct LivePlugin<'a> {
+    plugin: *const clap_plugin,
+    context: &'a HostContext,
+    _host: &'a clap_host,
+}
+impl<'a> LivePlugin<'a> {
+    fn new(context: &'a HostContext, host: &'a clap_host, id: &CStr) -> Self {
+        let plugin = unsafe { FACTORY.create_plugin.unwrap()(&FACTORY, host, id.as_ptr()) };
+        assert!(!plugin.is_null());
+        let result = Self { plugin, context, _host: host };
+        assert!(unsafe { (*plugin).init.unwrap()(plugin) });
+        result
+    }
+    fn start(&self) {
+        assert!(unsafe { (*self.plugin).activate.unwrap()(self.plugin, 48_000.0, 1, 6) });
+        self.context.audio.store(true, Ordering::Release);
+        assert!(unsafe { (*self.plugin).start_processing.unwrap()(self.plugin) });
+    }
+    fn stop(&self) {
+        unsafe { (*self.plugin).stop_processing.unwrap()(self.plugin) };
+        self.context.audio.store(false, Ordering::Release);
+    }
+    fn deactivate(&self) {
+        // Actual inactive transition, not a host-side role/active annotation.
+        unsafe { (*self.plugin).deactivate.unwrap()(self.plugin) };
+    }
+    fn exact_offs(&self) -> f64 {
+        let mut value = f64::NAN;
+        assert!(unsafe { parameter_value(self.plugin, EXACT_OFFS, &mut value) });
+        value
+    }
+}
+impl Drop for LivePlugin<'_> {
+    fn drop(&mut self) {
+        // The native Instance is still live here. These facts only choose safe
+        // lifecycle cleanup; no expected PCM or pairing result is read from it.
+        let owner = unsafe { owner(self.plugin) }.unwrap();
+        if owner.processing.load(Ordering::Acquire) {
+            self.context.audio.store(true, Ordering::Release);
+            unsafe { (*self.plugin).stop_processing.unwrap()(self.plugin) };
+        }
+        self.context.audio.store(false, Ordering::Release);
+        if owner.active.load(Ordering::Acquire) {
+            unsafe { (*self.plugin).deactivate.unwrap()(self.plugin) };
+        }
+        unsafe { (*self.plugin).destroy.unwrap()(self.plugin) };
+    }
+}
+fn native_context() -> HostContext {
+    HostContext {
+        main_thread: std::thread::current().id(),
+        audio: AtomicBool::new(false),
+        expose_thread_check: true,
+    }
+}
+struct NativeInputs<'a> {
+    pointers: &'a [*const clap_event_header],
+}
+unsafe extern "C" fn native_size(list: *const clap_input_events) -> u32 {
+    unsafe { &*((*list).ctx.cast::<NativeInputs<'_>>()) }.pointers.len() as u32
+}
+unsafe extern "C" fn native_get(
+    list: *const clap_input_events,
+    index: u32,
+) -> *const clap_event_header {
+    unsafe { &*((*list).ctx.cast::<NativeInputs<'_>>()) }
+        .pointers
+        .get(index as usize)
+        .copied()
+        .unwrap_or(ptr::null())
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeOutput {
+    Gain { time: u32, bits: u64 },
+    End { time: u32, address: Address },
+}
+struct NativeOutputs {
+    records: Vec<NativeOutput>,
+}
+unsafe extern "C" fn capture_native(
+    list: *const clap_output_events,
+    event: *const clap_event_header,
+) -> bool {
+    if event.is_null() {
+        return false;
+    }
+    let output = unsafe { &mut *((*list).ctx.cast::<NativeOutputs>()) };
+    if output.records.len() == output.records.capacity() {
+        return false; // Bounded preallocation; never allocate in this callback.
+    }
+    let header = unsafe { event.read_unaligned() };
+    if header.space_id != CLAP_CORE_EVENT_SPACE_ID {
+        return false;
+    }
+    let record = if header.type_ == CLAP_EVENT_PARAM_VALUE as u16
+        && header.size as usize == size_of::<clap_event_param_value>()
+    {
+        let event = unsafe { event.cast::<clap_event_param_value>().read_unaligned() };
+        if event.param_id != GAIN || !event.value.is_finite() {
+            return false;
+        }
+        NativeOutput::Gain { time: header.time, bits: event.value.to_bits() }
+    } else if header.type_ == CLAP_EVENT_NOTE_END as u16
+        && header.size as usize == size_of::<clap_event_note>()
+    {
+        let event = unsafe { event.cast::<clap_event_note>().read_unaligned() };
+        NativeOutput::End {
+            time: header.time,
+            address: Address {
+                port: event.port_index,
+                channel: event.channel,
+                key: event.key,
+                id: event.note_id,
+            },
+        }
+    } else {
+        return false;
+    };
+    output.records.push(record);
+    true
+}
+fn note(kind: u16, time: u32, port: i16) -> clap_event_note {
+    clap_event_note {
+        header: clap_event_header {
+            size: size_of::<clap_event_note>() as u32,
+            time,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: kind,
+            flags: 0,
+        },
+        note_id: 10,
+        port_index: port,
+        channel: 0,
+        key: 60,
+        velocity: 0.0,
+    }
+}
+fn parameter(id: u32, time: u32, value: f64) -> clap_event_param_value {
+    clap_event_param_value {
+        header: clap_event_header {
+            size: size_of::<clap_event_param_value>() as u32,
+            time,
+            space_id: CLAP_CORE_EVENT_SPACE_ID,
+            type_: CLAP_EVENT_PARAM_VALUE as u16,
+            flags: 0,
+        },
+        param_id: id,
+        cookie: ptr::null_mut(),
+        note_id: -1,
+        port_index: -1,
+        channel: -1,
+        key: -1,
+        value,
+    }
+}
+#[derive(Debug, Clone, Copy)]
+enum Shape {
+    Valid,
+    ExtraInput,
+    NoOutput,
+    TwoOutputs,
+    NullOutputArray,
+    StereoOutput,
+    NullOutputData,
+    NullOutputChannel,
+    DoubleOutput,
+    ZeroFrames,
+    ExcessFrames,
+}
+fn call_zero(
+    plugin: &LivePlugin<'_>,
+    pointers: &[*const clap_event_header],
+    output: &mut [f32],
+    nonnull_empty_input: bool,
+    shape: Shape,
+) -> (clap_process_status, u64, Vec<NativeOutput>) {
+    let mut input_events = NativeInputs { pointers };
+    let input_events = clap_input_events {
+        ctx: (&mut input_events as *mut NativeInputs<'_>).cast(),
+        size: Some(native_size),
+        get: Some(native_get),
+    };
+    let mut capture = NativeOutputs { records: Vec::with_capacity(16) };
+    let output_events = clap_output_events {
+        ctx: (&mut capture as *mut NativeOutputs).cast(),
+        try_push: Some(capture_native),
+    };
+    let mut channels = [if matches!(shape, Shape::NullOutputChannel) {
+        ptr::null_mut()
+    } else {
+        output.as_mut_ptr()
+    }];
+    let mut buffer = clap_audio_buffer {
+        data32: channels.as_mut_ptr(),
+        data64: ptr::null_mut(),
+        channel_count: 1,
+        latency: 0,
+        constant_mask: 1,
+    };
+    let mut block = clap_process {
+        steady_time: -1,
+        frames_count: output.len() as u32,
+        transport: ptr::null(),
+        // The nonnull pointer is aligned but has no readable element. Count0
+        // makes dereferencing it illegal; a fake hidden input cannot pass.
+        audio_inputs: if nonnull_empty_input {
+            ptr::NonNull::<clap_audio_buffer>::dangling().as_ptr()
+        } else {
+            ptr::null()
+        },
+        audio_outputs: &mut buffer,
+        audio_inputs_count: 0,
+        audio_outputs_count: 1,
+        in_events: &input_events,
+        out_events: &output_events,
+    };
+    match shape {
+        Shape::Valid => {}
+        Shape::ExtraInput => block.audio_inputs_count = 1,
+        Shape::NoOutput => block.audio_outputs_count = 0,
+        Shape::TwoOutputs => block.audio_outputs_count = 2,
+        Shape::NullOutputArray => block.audio_outputs = ptr::null_mut(),
+        Shape::StereoOutput => buffer.channel_count = 2,
+        Shape::NullOutputData => buffer.data32 = ptr::null_mut(),
+        Shape::NullOutputChannel => {}
+        Shape::DoubleOutput => buffer.data64 = ptr::NonNull::<*mut f64>::dangling().as_ptr(),
+        Shape::ZeroFrames => block.frames_count = 0,
+        Shape::ExcessFrames => block.frames_count = 7,
+    }
+    let status = unsafe { (*plugin.plugin).process.unwrap()(plugin.plugin, &block) };
+    (status, buffer.constant_mask, capture.records)
+}
+fn check_zero_ports(plugin: &LivePlugin<'_>) {
+    let audio = unsafe {
+        (*plugin.plugin).get_extension.unwrap()(plugin.plugin, CLAP_EXT_AUDIO_PORTS.as_ptr())
+    }
+    .cast::<clap_plugin_audio_ports>();
+    assert!(!audio.is_null());
+    assert_eq!(unsafe { (*audio).count.unwrap()(plugin.plugin, true) }, 0);
+    assert_eq!(unsafe { (*audio).count.unwrap()(plugin.plugin, false) }, 1);
+    let mut info = clap_audio_port_info {
+        id: CLAP_INVALID_ID,
+        name: [0; 256],
+        flags: 0,
+        channel_count: 0,
+        port_type: ptr::null(),
+        in_place_pair: INPUT_ID,
+    };
+    assert!(!unsafe { (*audio).get.unwrap()(plugin.plugin, 0, true, &mut info) });
+    assert_eq!(
+        info.id, CLAP_INVALID_ID,
+        "nonexistent input is never written"
+    );
+    assert!(unsafe { (*audio).get.unwrap()(plugin.plugin, 0, false, &mut info) });
+    assert_eq!(info.id, OUTPUT_ID);
+    assert_eq!(info.flags, CLAP_AUDIO_PORT_IS_MAIN as u32);
+    assert_eq!(info.channel_count, 1);
+    assert_eq!(unsafe { CStr::from_ptr(info.port_type) }, CLAP_PORT_MONO);
+    assert_eq!(info.in_place_pair, CLAP_INVALID_ID);
+}
+
+#[test]
+fn zero_input_variant_constant_carrier_literal_pcm_and_note_end_across_partitions() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    assert_eq!(unsafe { FACTORY.get_plugin_count.unwrap()(&FACTORY) }, 2);
+    assert_eq!(
+        unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 0) },
+        &DESCRIPTOR as *const clap_plugin_descriptor
+    );
+    assert_eq!(
+        unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 1) },
+        &ZERO_INPUT_DESCRIPTOR as *const clap_plugin_descriptor
+    );
+    assert!(unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 2) }.is_null());
+    // Independent literals: carrier1, port0 zero-velocity Held weight1/32,
+    // gain1/2 and the original Off at2, then four release samples through5.
+    let expected = [
+        1.0_f32 / 32.0,
+        1.0 / 32.0,
+        1.0 / 64.0,
+        3.0 / 256.0,
+        1.0 / 128.0,
+        1.0 / 256.0,
+    ];
+    for nonnull in [false, true] {
+        for partition in [&[6_usize][..], &[2, 4][..], &[1, 2, 3][..]] {
+            let context = native_context();
+            let host = test_host(&context);
+            let plugin = LivePlugin::new(
+                &context,
+                &host,
+                c"org.mondrian.fixture.note-gate.zero-input",
+            );
+            check_zero_ports(&plugin);
+            plugin.start();
+            let mut result = Vec::new();
+            let mut recorded = Vec::new();
+            let mut start = 0;
+            for &frames in partition {
+                let on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+                let gain = parameter(GAIN, 2_u32.saturating_sub(start), 0.5);
+                let off = note(CLAP_EVENT_NOTE_OFF as u16, 2_u32.saturating_sub(start), 0);
+                let mut events = Vec::new();
+                if start == 0 {
+                    events.push(&on.header as *const clap_event_header);
+                }
+                if start <= 2 && start + frames as u32 > 2 {
+                    events.push(&gain.header);
+                    events.push(&off.header);
+                }
+                let mut output = vec![99.0_f32; frames];
+                let (status, mask, records) =
+                    call_zero(&plugin, &events, &mut output, nonnull, Shape::Valid);
+                assert_eq!(status, CLAP_PROCESS_CONTINUE);
+                assert_eq!(mask, 0);
+                for record in records {
+                    recorded.push(match record {
+                        NativeOutput::Gain { time, bits } => {
+                            NativeOutput::Gain { time: time + start, bits }
+                        }
+                        end => end,
+                    });
+                }
+                result.extend(output);
+                start += frames as u32;
+            }
+            assert_eq!(result, expected);
+            assert_eq!(
+                recorded,
+                vec![
+                    NativeOutput::Gain { time: 5, bits: 0.5_f64.to_bits() },
+                    NativeOutput::End {
+                        time: u32::MAX,
+                        address: Address { port: 0, channel: 0, key: 60, id: 10 }
+                    },
+                    NativeOutput::Gain { time: 5, bits: 0.5_f64.to_bits() },
+                ]
+            );
+            plugin.stop();
+            assert_eq!(plugin.exact_offs(), 1.0);
+            plugin.deactivate();
+            check_zero_ports(&plugin);
+        }
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + 6);
+}
+
+#[test]
+fn zero_input_early_end_retains_original_off_pairing_and_rejects_changed_tuple() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    for wrong in [false, true] {
+        let context = native_context();
+        let host = test_host(&context);
+        let plugin = LivePlugin::new(
+            &context,
+            &host,
+            c"org.mondrian.fixture.note-gate.zero-input",
+        );
+        plugin.start();
+        let scenario = parameter(SCENARIO, 0, 1.0);
+        let on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+        let off = note(CLAP_EVENT_NOTE_OFF as u16, 4, if wrong { 1 } else { 0 });
+        let pointers = [
+            &scenario.header as *const clap_event_header,
+            &on.header,
+            &off.header,
+        ];
+        let mut output = [99.0_f32; 6];
+        let (status, _, records) = call_zero(&plugin, &pointers, &mut output, false, Shape::Valid);
+        assert_eq!(
+            records,
+            vec![
+                NativeOutput::Gain { time: 1, bits: 1.0_f64.to_bits() },
+                NativeOutput::End {
+                    time: u32::MAX,
+                    address: Address { port: 0, channel: 0, key: 60, id: 10 }
+                },
+                NativeOutput::Gain { time: 1, bits: 1.0_f64.to_bits() },
+            ]
+        );
+        if wrong {
+            assert_eq!(status, CLAP_PROCESS_ERROR);
+            assert_eq!(output, [1.0 / 32.0, 1.0 / 32.0, 0.0, 0.0, 99.0, 99.0]);
+        } else {
+            assert_eq!(status, CLAP_PROCESS_CONTINUE);
+            assert_eq!(output, [1.0 / 32.0, 1.0 / 32.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        plugin.stop();
+        assert_eq!(plugin.exact_offs(), if wrong { 0.0 } else { 1.0 });
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + 2);
+}
+
+#[test]
+fn zero_input_rejects_wrong_native_shape_extent_and_event_before_pcm_or_off_credit() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    let shapes = [
+        Shape::ExtraInput,
+        Shape::NoOutput,
+        Shape::TwoOutputs,
+        Shape::NullOutputArray,
+        Shape::StereoOutput,
+        Shape::NullOutputData,
+        Shape::NullOutputChannel,
+        Shape::DoubleOutput,
+        Shape::ZeroFrames,
+        Shape::ExcessFrames,
+        Shape::Valid,
+    ];
+    for shape in shapes {
+        let context = native_context();
+        let host = test_host(&context);
+        let plugin = LivePlugin::new(
+            &context,
+            &host,
+            c"org.mondrian.fixture.note-gate.zero-input",
+        );
+        plugin.start();
+        let mut on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+        if matches!(shape, Shape::Valid) {
+            on.header.size = 0;
+        }
+        let off = note(CLAP_EVENT_NOTE_OFF as u16, 2, 0);
+        let pointers = [&on.header as *const clap_event_header, &off.header];
+        let mut output = [99.0_f32; 6];
+        let (status, mask, records) = call_zero(&plugin, &pointers, &mut output, true, shape);
+        assert_eq!(status, CLAP_PROCESS_ERROR, "shape={shape:?}");
+        assert_eq!(output, [99.0; 6], "shape={shape:?}");
+        assert_eq!(mask, 1);
+        assert!(records.is_empty());
+        plugin.stop();
+        assert_eq!(plugin.exact_offs(), 0.0);
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + shapes.len());
+}
