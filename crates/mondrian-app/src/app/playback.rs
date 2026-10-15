@@ -5389,11 +5389,20 @@ mod tests {
                 if output.lock().snapshot.active {
                     break;
                 }
-                assert!(Instant::now() < deadline, "serial PCM did not activate the output");
+                assert!(
+                    Instant::now() < deadline,
+                    "serial PCM did not activate the output"
+                );
                 std::thread::yield_now();
             }
-            assert!(output.lock().queued > 0, "activation uses actually rendered PCM");
-            assert_eq!(state.audio_playback_snapshot().media_anchor, Some(audio_anchor(0)));
+            assert!(
+                output.lock().queued > 0,
+                "activation uses actually rendered PCM"
+            );
+            assert_eq!(
+                state.audio_playback_snapshot().media_anchor,
+                Some(audio_anchor(0))
+            );
             assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
             (state, output, requests)
         }
@@ -5403,7 +5412,10 @@ mod tests {
             output: &parking_lot::Mutex<NativeHoldPlatformState>,
             requests: &Requests,
         ) {
-            assert!(!output.lock().snapshot.active, "the actual App caller must close output");
+            assert!(
+                !output.lock().snapshot.active,
+                "the actual App caller must close output"
+            );
             // Fixed-step advance can leave the test's wall projection in the future.
             // Join the real pump observation to the unchanged Engine high-water mark.
             state.reanchor_playback_observation_projection(Instant::now());
@@ -5414,7 +5426,10 @@ mod tests {
                 if snapshot.in_flight == 0 && output.lock().queued == 0 {
                     break;
                 }
-                assert!(Instant::now() < deadline, "retired PCM did not settle after callback Ack");
+                assert!(
+                    Instant::now() < deadline,
+                    "retired PCM did not settle after callback Ack"
+                );
                 std::thread::yield_now();
             }
             // A later ordinary owner turn must not reactivate or replay origin zero.
@@ -5443,9 +5458,17 @@ mod tests {
         fn pause_at_nonzero_retires_constrained_pcm_without_fresh_entry() {
             let (mut state, output, requests) = active_source(20);
             state.advance_playback_clock(Duration::from_millis(100));
-            assert!(state.current_frame() > 0, "exercise a genuinely nonzero Pause");
-            state.pause().expect("Pause must stop consumption without requiring a fresh Enter");
-            assert_eq!(state.playback_engine.snapshot().state, TransportState::Paused);
+            assert!(
+                state.current_frame() > 0,
+                "exercise a genuinely nonzero Pause"
+            );
+            state
+                .pause()
+                .expect("Pause must stop consumption without requiring a fresh Enter");
+            assert_eq!(
+                state.playback_engine.snapshot().state,
+                TransportState::Paused
+            );
             assert_retired_without_reentry(&mut state, &output, &requests);
         }
 
@@ -5455,7 +5478,10 @@ mod tests {
             let outcome = state.advance_playback_clock(Duration::from_secs(1));
             assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
             assert_eq!(state.current_frame(), 4);
-            assert_eq!(state.playback_engine.snapshot().state, TransportState::Ended);
+            assert_eq!(
+                state.playback_engine.snapshot().state,
+                TransportState::Ended
+            );
             assert_retired_without_reentry(&mut state, &output, &requests);
         }
 

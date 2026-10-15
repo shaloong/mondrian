@@ -240,13 +240,19 @@ impl PreparedAudioPlan {
     ) -> Result<usize, AudioCompileError> {
         compatible_program(self.program.as_ref(), next_program, locator)?;
         let base = Self::requested_base_logical_bytes(next_program)?;
-        let notes = self.schedule.notes.storage_bytes()
+        let notes = self
+            .schedule
+            .notes
+            .storage_bytes()
             .map_err(|_| refused("native author cached Note storage extent overflow"))?;
-        let prepared = base.checked_add(notes)
+        let prepared = base
+            .checked_add(notes)
             .ok_or_else(|| refused("native author prepared logical extent overflow"))?;
-        let compiled_notes = next_program.compiled_note_payload_bytes()
+        let compiled_notes = next_program
+            .compiled_note_payload_bytes()
             .map_err(|_| refused("native author compiled Note storage extent overflow"))?;
-        prepared.checked_add(compiled_notes)
+        prepared
+            .checked_add(compiled_notes)
             .ok_or_else(|| refused("native author prepared logical extent overflow"))
     }
 
@@ -262,15 +268,22 @@ impl PreparedAudioPlan {
         compatible_program(&self.program, &next_program, locator)?;
         let sample_rate = AudioSampleRate::new(self.contract.sample_rate)
             .map_err(|_| refused("native author handoff sample rate is invalid"))?;
-        let note_clone_upper = self.schedule.notes.storage_bytes()
+        let note_clone_upper = self
+            .schedule
+            .notes
+            .storage_bytes()
             .map_err(|_| refused("native author cached Note storage extent overflow"))?;
         let mut schedule = self.schedule.clone();
         // Late logical acceptance of the actual aggregate clone, before any
         // processor/factory interaction; this is not preallocation admission.
-        let cloned_notes = schedule.notes.storage_bytes()
+        let cloned_notes = schedule
+            .notes
+            .storage_bytes()
             .map_err(|_| refused("native author cloned Note storage extent overflow"))?;
         if cloned_notes > note_clone_upper {
-            return Err(refused("native author cloned Note storage exceeds its logical bound"));
+            return Err(refused(
+                "native author cloned Note storage exceeds its logical bound",
+            ));
         }
         for prepared in &mut schedule.processors {
             let old = processor(&self.program, prepared.occurrence)?;

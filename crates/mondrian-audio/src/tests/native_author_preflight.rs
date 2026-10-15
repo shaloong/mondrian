@@ -804,10 +804,10 @@ fn native_author_preflight_selected_equal_scope_still_charges_one_actual_plan() 
 #[path = "native_author_held_handles.rs"]
 mod held_handle_controls;
 
-#[path = "native_author_scope_repeat.rs"]
-mod scope_repeat_controls;
 #[path = "native_author_nested_charge.rs"]
 mod nested_charge_controls;
+#[path = "native_author_scope_repeat.rs"]
+mod scope_repeat_controls;
 
 #[path = "native_author_held_fee_public.rs"]
 mod held_fee_public_controls;

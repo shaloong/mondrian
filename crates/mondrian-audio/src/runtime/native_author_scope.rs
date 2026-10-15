@@ -170,7 +170,10 @@ impl AudioProgramRuntime {
             }
             self.check_resource_ceiling(
                 AudioRuntimeResourceCategory::PreparedLogicalBytes,
-                sum(self.resource_footprint.prepared_logical_bytes, requested_logical)?,
+                sum(
+                    self.resource_footprint.prepared_logical_bytes,
+                    requested_logical,
+                )?,
             )?;
             let mut locals = Vec::new();
             let mut reserved = self.resource_footprint;
