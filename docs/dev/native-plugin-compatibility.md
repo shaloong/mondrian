@@ -185,6 +185,35 @@ exact test-only parent/child bridge. No successful comparison result was written
 PCM, nondefault state, Project reload and processing compatibility are unverified.
 The separately held OpenFX constructor candidate is not accepted by this test.
 
+## Windows Ring Out CLAP Runtime startup gate (2026-10-15)
+
+The real `com.duskaudio.ring-out` module `DF86E10F...` reaches canonical
+Sequence/Output-rack compilation, native owner installation and fresh loading
+of its original 184-byte state. The new ignored gate intends to render 6144
+transition frames and 4096 steady frames, with two partitions and separate
+native-bypass/active controls. Its first run instead **fails before PCM** at
+Runtime Enter: the installed cold object's Source reports `PendingCallbacks`.
+The worker Enter, parameter delivery, PCM comparisons, remaining three runs
+and positive Drop assertions are not reached. This is a diagnostic consumer,
+not verified processing compatibility or an attributed plugin/host defect.
+The test currently polls after Enter; its next slice must first use the existing
+cold installed-owner author poll, canonical transaction, Plan handoff and Ack.
+It must preserve the Source rather than clear flags to admit processing.
+
+`clap-ringout-pcm-actual-r1/gates/receipt.json` retains the exact failed selector
+and 558 ordinary passes (inventory 657/99). The failed owner exits 101, with
+no deadline, outliving descendants or cleanup errors; descendants are reaped.
+Audio and five-crate strict builds have zero diagnostics and share 1955-input
+freeze `6E11ED58...`. Product `F0E19F73...` is bound through the exact two-child
+test-only bridge; its held OpenFX constructor candidate is not accepted here.
+Both preliminary compiler failures remain recorded.
+
+The bound raw PCM `0C54BF84...` contains eight negative zeros. Unity Graph
+accumulation legally changes their signs; the separate reference `9D95B6A2...`
+retains all other bits and still requires every steady sample bit to match.
+No tolerance, skipped zeros, original input change or relaxed old generic gate
+was introduced. No PCM result or successful run receipt was produced.
+
 ## Windows Surge XT Effects default-state observation (2026-10-15)
 
 Surge XT Effects 1.3.4 VST3 (`3B9F6C9B...`, class
