@@ -512,7 +512,8 @@ fn native_startup_metadata_phase_observation() {
         compensation_delay_scratch_budget_bytes: usize::MAX,
     };
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
-        native_lane: native_worker_lane_profile().expect("known native lane layout"),
+        native_lane: native_worker_lane_profile_for_parameters(&parameters)
+            .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {
             class_id,
             vendor,
@@ -583,7 +584,7 @@ fn native_startup_metadata_phase_observation() {
     );
     assert!(trace.phases.iter().all(|p| p.before.object_serial == final_object));
     let worker = prepared.unwrap();
-    assert!(worker.initial_signal_available);
+    assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Unserviced);
     assert_eq!(worker.last_end, None);
     assert!(worker.last_parameter_values.iter().all(Option::is_none));
     assert_eq!(
@@ -611,7 +612,7 @@ fn native_startup_metadata_nonconsuming_sdk_controls() {
         assert_eq!(after.setters, before.setters);
         assert_eq!(after.wrong_thread, 0);
         assert_eq!(worker.last_end, None);
-        assert!(worker.initial_signal_available);
+        assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Unserviced);
         assert!(worker.last_parameter_values.iter().all(Option::is_none));
         assert_eq!(phase.before.object_serial, phase.after.object_serial);
         assert_eq!(phase.after.cohort.as_ref().unwrap().flags, 4);
@@ -828,7 +829,7 @@ fn native_startup_source_pairing_sdk_controls() {
     assert_eq!(after.process, before.process);
     assert_eq!(after.setters, before.setters);
     assert_eq!(after.wrong_thread, 0);
-    assert!(worker.initial_signal_available);
+    assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Unserviced);
     assert_eq!(worker.last_end, None);
     assert!(worker.last_parameter_values.iter().all(Option::is_none));
 }

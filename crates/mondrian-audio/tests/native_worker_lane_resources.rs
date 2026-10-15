@@ -261,3 +261,32 @@ fn native_worker_lane_profile_control_union_keeps_capacity_and_fixed_layout_refu
         })
     ));
 }
+
+#[test]
+fn native_worker_lane_persistent_input_request_is_independent_and_counted_once() {
+    let base = NativeWorkerLaneResourceProfile::scoped_main_dsp(owners(empty()), control(empty()))
+        .unwrap();
+    let request = base.with_processor_input_storage(24, 64).unwrap();
+    assert_eq!(request.processor_input_storage(), (24, 64));
+    assert_eq!(
+        request.known_storage_limit_bytes(),
+        base.known_storage_limit_bytes() + 88
+    );
+    assert_eq!(
+        request.additional_session_reservation_bytes(),
+        base.additional_session_reservation_bytes() + 88
+    );
+    assert_eq!(request.control_overlap(), base.control_overlap());
+    assert_eq!(
+        request
+            .with_processor_input_storage(48, 128)
+            .unwrap()
+            .known_storage_limit_bytes(),
+        base.known_storage_limit_bytes() + 176
+    );
+    assert_eq!(
+        request.with_processor_input_storage(usize::MAX, 1),
+        Err(NativeWorkerLaneResourceError::ExtentOverflow)
+    );
+    assert_eq!(base.processor_input_storage(), (0, 0));
+}

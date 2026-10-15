@@ -166,13 +166,24 @@ mod inline_command_contracts {
         paired_socket(|parent, child| {
             let bytes = [3, 5, 7];
             let seed = ticket(&bytes);
+            for version in [8_u32, 9] {
+                let mut old = Vec::new();
+                header(1).write_to(&mut old).expect("one complete old command");
+                old[4..8].copy_from_slice(&version.to_le_bytes());
+                use std::io::Write;
+                parent.write_all(&old).expect("same authenticated transport");
+                assert!(
+                    decode(child, 2).is_err(),
+                    "old outer schema cannot dispatch"
+                );
+            }
             for tag in 1..=8 {
                 let command = header(tag);
                 let mut wire = Vec::new();
                 command.write_to(&mut wire).expect("existing command codec");
                 assert_eq!(
                     &wire[4..12],
-                    &[9, 0, 0, 0, tag as u8, 0, 0, 0],
+                    &[10, 0, 0, 0, tag as u8, 0, 0, 0],
                     "independent version/tag contract"
                 );
                 use std::io::Write;

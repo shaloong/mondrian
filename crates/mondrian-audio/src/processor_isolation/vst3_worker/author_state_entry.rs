@@ -36,7 +36,13 @@ impl Vst3Worker {
                     "VST3 state-entry source observation failed: {error}"
                 ))
             })?)?;
-        if !source.closed_empty() || self.pending_reprepare().is_some() {
+        if plugin.pending_processor_parameter_input().map_err(|error| {
+            unavailable(format!(
+                "VST3 state-entry input observation failed: {error}"
+            ))
+        })? || !source.closed_empty()
+            || self.pending_reprepare().is_some()
+        {
             return Ok(false);
         }
         Ok(match request.source {

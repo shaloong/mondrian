@@ -3147,6 +3147,30 @@ impl Default for ParameterChanges {
 }
 
 impl ParameterChanges {
+    pub(crate) fn has_active_points(&self) -> crate::Result<bool> {
+        let queues = self.queues.lock().map_err(|_| {
+            crate::Error::HostStorage(crate::host_storage::HostStorageError::PoisonedOwner)
+        })?;
+        let used = self.used.load(Ordering::Relaxed);
+        if used > queues.len() {
+            return Err(crate::Error::HostStorage(
+                crate::host_storage::HostStorageError::PoisonedOwner,
+            ));
+        }
+        for queue in &queues[..used] {
+            if !queue
+                .points
+                .lock()
+                .map_err(|_| {
+                    crate::Error::HostStorage(crate::host_storage::HostStorageError::PoisonedOwner)
+                })?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(crate) fn visit_owned_storage(
         &self,
         visitor: &mut dyn crate::host_storage::HostStorageVisitor,
@@ -3393,11 +3417,17 @@ impl ParameterValueQueue {
     /// COM `addPoint`).
     fn insert_point(&self, sample_offset: i32, value: f64) {
         if let Ok(mut points) = self.points.lock() {
-            let pos = points
-                .iter()
-                .position(|(off, _)| *off > sample_offset)
-                .unwrap_or(points.len());
-            points.insert(pos, (sample_offset, value));
+            // Later host input overrides an earlier initialization baseline.
+            // The separate plugin COM addPoint method is unchanged.
+            if let Some(point) = points.iter_mut().find(|(off, _)| *off == sample_offset) {
+                point.1 = value;
+            } else {
+                let pos = points
+                    .iter()
+                    .position(|(off, _)| *off > sample_offset)
+                    .unwrap_or(points.len());
+                points.insert(pos, (sample_offset, value));
+            }
         }
     }
 }
@@ -5758,3 +5788,6 @@ mod native_author_capture_catchup_contracts {
         }
     }
 }
+
+#[path = "initial_parameter_input.rs"]
+pub(crate) mod initial_parameter_input;

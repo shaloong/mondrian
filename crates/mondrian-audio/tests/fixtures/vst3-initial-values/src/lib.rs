@@ -415,6 +415,47 @@ impl IAudioProcessorTrait for GainProcessor {
             return kInvalidArgument;
         }
         let data = &*data;
+        if data.numSamples == 0 {
+            // A real parameter-only Process may omit audio buses entirely.
+            // Keep the old one-bus form legal too; never dereference PCM here.
+            if data.symbolicSampleSize != SymbolicSampleSizes_::kSample32
+                || !matches!(data.numInputs, 0 | 1)
+                || !matches!(data.numOutputs, 0 | 1)
+            {
+                return kInvalidArgument;
+            }
+            let mut gain = f64::from_bits(self.gain.load(Ordering::Relaxed));
+            if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+                let queues = changes.getParameterCount();
+                if !(0..=1024).contains(&queues) {
+                    return kInvalidArgument;
+                }
+                for index in 0..queues {
+                    let Some(queue) = ComRef::from_raw(changes.getParameterData(index)) else {
+                        return kInvalidArgument;
+                    };
+                    let points = queue.getPointCount();
+                    if queue.getParameterId() != 0 || !(0..=4096).contains(&points) {
+                        return kInvalidArgument;
+                    }
+                    for point in 0..points {
+                        let mut offset = 0;
+                        let mut value = 0.0;
+                        if queue.getPoint(point, &mut offset, &mut value) != kResultOk
+                            || offset != 0
+                            || !value.is_finite()
+                            || !(0.0..=1.0).contains(&value)
+                        {
+                            return kInvalidArgument;
+                        }
+                        gain = value;
+                    }
+                }
+            }
+            self.gain.store(gain.to_bits(), Ordering::Relaxed);
+            self.process_calls.fetch_add(1, Ordering::Relaxed);
+            return kResultOk;
+        }
         if data.numSamples < 0
             || data.numInputs != 1
             || data.numOutputs != 1

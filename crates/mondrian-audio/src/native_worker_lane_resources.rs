@@ -133,6 +133,8 @@ pub enum NativeWorkerLaneResourceError {
 pub struct NativeWorkerLaneResourceProfile {
     owners: NativeWorkerLaneOwnedLayouts,
     control: NativeWorkerControlOverlapLayout,
+    processor_input_vector_bytes: usize,
+    processor_input_com_payload_bytes: usize,
     known_storage_limit_bytes: usize,
     additional_session_reservation_bytes: usize,
 }
@@ -161,9 +163,49 @@ impl NativeWorkerLaneResourceProfile {
         Ok(Self {
             owners,
             control,
+            processor_input_vector_bytes: 0,
+            processor_input_com_payload_bytes: 0,
             known_storage_limit_bytes: bytes,
             additional_session_reservation_bytes,
         })
+    }
+
+    /// Add an independently identified persistent processor-input request.
+    /// Vector element storage and COM payload coverage remain separate; the
+    /// latter does not include the std Arc prefix. This is not control overlap.
+    pub fn with_processor_input_storage(
+        mut self,
+        vector_bytes: usize,
+        com_payload_bytes: usize,
+    ) -> Result<Self, NativeWorkerLaneResourceError> {
+        let old = self
+            .processor_input_vector_bytes
+            .checked_add(self.processor_input_com_payload_bytes)
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        let new = vector_bytes
+            .checked_add(com_payload_bytes)
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        self.known_storage_limit_bytes = self
+            .known_storage_limit_bytes
+            .checked_sub(old)
+            .and_then(|bytes| bytes.checked_add(new))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        self.additional_session_reservation_bytes = self
+            .additional_session_reservation_bytes
+            .checked_sub(old)
+            .and_then(|bytes| bytes.checked_add(new))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        self.processor_input_vector_bytes = vector_bytes;
+        self.processor_input_com_payload_bytes = com_payload_bytes;
+        Ok(self)
+    }
+
+    /// Independent persistent input ceilings, not a complete Arc allocation receipt.
+    pub const fn processor_input_storage(self) -> (usize, usize) {
+        (
+            self.processor_input_vector_bytes,
+            self.processor_input_com_payload_bytes,
+        )
     }
 
     /// Exact layouts used to construct this validated request.

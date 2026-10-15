@@ -31,6 +31,17 @@ ceiling enters `with_additional_session_scratch_bytes`, alongside existing share
 mapping obligations. A profile request itself cannot install a graph, mint an
 editor lease, reset continuity or override the root resource grant.
 
+On Windows, VST3 preparation also requests a baseline input charge for at most
+1024 distinct admitted writable parameters. The parent derives the count from
+the bounded host payload without native queries; the child recomputes it before
+loading. The existing Session/Root grant covers retained Vec capacities and the
+actual COM header/payload layouts. Validation children do not prewarm the pool.
+The first legal same-object Bind or Enter constructs and observes the candidate
+under that grant, after refusing an occupied old input owner. This is not a
+second ledger or a bound on dynamic automation/GUI allocation. Arc allocation
+prefixes, allocator overhead and plugin/OS memory remain outside this charge;
+it does not establish whole-worker realtime safety.
+
 The source packet adds the request/observation API and new-API qualification
 controls. Its concrete native consumer wiring, thread/Ready/refusal behavior and
 full root candidate allocation union require separate actual qualification.

@@ -2233,7 +2233,10 @@ separately from source design and native plugin/editor feature matrices.
 
 ### Native audio control-channel overhead
 
-The worker control protocol uses version-6 framing for typed pending and bounded configuration/seed control. A response writes
+The worker control protocol uses version-10 framing for typed pending and bounded
+configuration/seed control. Prepare carries the mandatory scoped baseline input
+request; the child verifies it before Ready. Old version-9 framing is refused.
+A response writes
 one stack-owned 16-byte header before the existing bounded UTF-8 detail, using
 `write_all` for partial and interrupted writes. Success still carries no detail.
 The reader's allocation and framing rules are unchanged. Instrumented writer
@@ -3038,6 +3041,15 @@ its state, or invent author events. Physical thread and native processing proof
 belong to the matching worker and owned-view qualification, not these SDK
 callback controls.
 
+State capture and destructive configuration changes refuse the union of actual
+input points and pending host values before native side effects or replacement.
+The initial VST3 handoff is narrower: it pairs the exact ordered Source/value
+feedback cohort with an admitted baseline input candidate. All fallible queries,
+locks, capacity and cohort checks precede the Source CAS; its successful tail
+only swaps host ownership and publishes fixed state, with retired owners dropped
+outside guards. A separately authorized zero-sample Process remains fallible and
+cannot manufacture a successful author transaction or Ack after refusal.
+
 One bounded component/controller capture implementation serves stopped native
 configuration capture and exclusive main-thread author state capture. The
 configuration path retains its stopped admission. The author path permits an
@@ -3561,13 +3573,18 @@ Queued renderer entry passes its actual cancellation token. Source validation
 precedes native preflight and follows native Bind. Cancellation or a stale Source
 revokes the entire accepted partial set; standalone DSP has no author permission.
 
-Successful native Prepare establishes a private one-shot first-initialization
-fact after state, mode, metadata and activation were accepted. The first explicit
-signal entry consumes it and records the supplied signed coordinate on the same
-CLAP/VST object and GUI. It performs no reset, reload, synthetic Process or state
-capture. A later seek retains the real reset/reload path and its continuity
-discontinuity. Pending author prefixes still require canonical Session/Plan/Ack
-before entry. Previous view targets can resolve only to cleanup of the exact
+Successful native Prepare establishes the first-initialization phase after
+state, mode, metadata and activation were accepted. On Windows VST3, one state
+authority distinguishes Unserviced, AwaitingFirstSignal and Entered. The first
+valid same-object Bind or first Enter services the admitted initial value cohort;
+even a successful zero-work Bind closes that window. Later GUI callbacks belong
+to runtime author handling. Failed unpublished Bind can retry without consuming
+the phase. Other native adapters retain their existing first-entry semantics.
+The first explicit signal entry records the supplied signed coordinate on the
+same object and GUI, without reset, reload, synthetic Process or state capture.
+A later seek retains the real reset/reload path and its continuity discontinuity.
+Pending author prefixes still require canonical Session/Plan/Ack before entry.
+Previous view targets can resolve only to cleanup of the exact
 same retained object and Sessions under the current Source; stale Open/author
 leases cannot use this receipt.
 
@@ -3594,6 +3611,9 @@ of an execution position. The cold entry pass observes/binds these retained
 objects without Enter, reset, Process or an invented sample anchor. A subsequent
 actual lazy Enter revokes that observation binding and binds its new real local
 epoch before Process. Normal PCM and silent gap windows do not repeat this pass.
+Pure entry refusal preserves the legitimate binding. A destructive VST3 reload
+checks pending input first and revokes the binding before editor/native effects;
+successful initial fast entry revokes it only at its host commit boundary.
 Pending native callbacks and outstanding accepted deliveries still hold entry;
 the observation binding cannot relabel a retained Process callback's position.
 Source/cancellation checks surround the entire cold set; failure revokes all

@@ -1377,6 +1377,21 @@ pub(crate) trait PluginInternal: Send {
             "native editor source status is unsupported by this adapter".to_string(),
         ))
     }
+    /// Real staged input obligations, independent of source-log emptiness.
+    fn pending_processor_parameter_input(&self) -> Result<bool> {
+        Err(Error::Other(
+            "processor input observation is unavailable".to_owned(),
+        ))
+    }
+    fn handoff_initial_parameter_input(
+        &mut self,
+        _cohort: RestartCohort,
+        _source: NativeEditorEventSourceStatus,
+        _values: &[crate::initial_parameter_input::InitialParameterValue],
+        _grant: crate::initial_parameter_input::InitialParameterStorage,
+    ) -> std::result::Result<(), crate::initial_parameter_input::InitialParameterHandoffError> {
+        Err(crate::initial_parameter_input::InitialParameterHandoffError::Unsupported)
+    }
     fn observe_editor_source_bounded(
         &self,
         _maximum: usize,
@@ -2800,6 +2815,38 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .editor_event_source_status()
+    }
+
+    /// Observe existing input COM points and the pending host Vec together.
+    /// This is a control-thread/full-owner read, not proof of native acceptance.
+    pub fn pending_processor_parameter_input(&self) -> Result<bool> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_owned()))?
+            .pending_processor_parameter_input()
+    }
+
+    /// Move a proved initial-only Value prefix into the existing input COM queue.
+    ///
+    /// The caller must hold this incarnation's one-shot initial lifecycle right
+    /// and have completed bounded metadata/current-value validation. This method
+    /// repeats source/cohort/input checks under the actual owner locks. It never
+    /// calls native code, changes controller values or invokes Process. Errors
+    /// preserve Source, feedback, restart cohort and the existing active input.
+    /// Only local backends are supported. A flags-16 consumer is refused while
+    /// MIDI/program interfaces are declared consumed; this operation does not
+    /// implement those interfaces' runtime cache refresh obligations.
+    pub fn handoff_initial_parameter_input(
+        &mut self,
+        cohort: RestartCohort,
+        source: NativeEditorEventSourceStatus,
+        values: &[crate::initial_parameter_input::InitialParameterValue],
+        grant: crate::initial_parameter_input::InitialParameterStorage,
+    ) -> std::result::Result<(), crate::initial_parameter_input::InitialParameterHandoffError> {
+        self.internal
+            .as_mut()
+            .ok_or(crate::initial_parameter_input::InitialParameterHandoffError::Unsupported)?
+            .handoff_initial_parameter_input(cohort, source, values, grant)
     }
 
     /// Copy one complete source and its pending controller-to-DSP feedback on

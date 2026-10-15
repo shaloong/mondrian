@@ -1210,6 +1210,16 @@ pub trait IsolatedAudioProcessorWorkerFactory {
     ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
         Ok(None)
     }
+    /// Derive a same-binary preparation-specific request before foreign load.
+    /// Parsing may allocate on this non-RT path; this must not query or launch
+    /// plugins. Other adapters retain their existing static request by default.
+    fn native_worker_lane_resources_for_preparation(
+        &self,
+        _request: &IsolatedAudioProcessorWorkerPrepareRequest,
+    ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+        self.native_worker_lane_resources()
+    }
+
     /// Load, restore, negotiate, and return one exclusive native instance.
     fn prepare(
         &self,

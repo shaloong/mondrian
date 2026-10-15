@@ -104,6 +104,10 @@ pub enum Error {
     #[error(transparent)]
     HostStorage(#[from] crate::host_storage::HostStorageError),
 
+    /// Existing host input must reach a real DSP call before state mutation/capture.
+    #[error("native processor parameter input is still pending")]
+    PendingParameterDelivery,
+
     /// Other errors
     #[error("{0}")]
     Other(String),

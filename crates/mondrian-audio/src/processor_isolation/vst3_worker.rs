@@ -276,7 +276,9 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             parameter_ids,
             request.render_contract(),
         )?
-        .with_native_worker_lane_resources(native_worker_lane_profile()?)
+        .with_native_worker_lane_resources(native_worker_lane_profile_for_parameters(
+            &plugin.parameters,
+        )?)
         .with_dispatch_argument(Some(OsString::from(VST3_AUDIO_WORKER_ARGUMENT)))
         .with_deadlines(
             std::time::Duration::from_secs(15),
@@ -324,6 +326,41 @@ struct Vst3Payload {
     parameter_ids: Vec<u32>,
 }
 
+// Non-RT decoding/identity validation may allocate Rust owners. No foreign
+// plugin query or worker launch is part of this preparation request.
+fn validated_preparation_payload(
+    request: &IsolatedAudioProcessorWorkerPrepareRequest,
+) -> Result<Vst3Payload, AudioProcessorHostError> {
+    let payload: Vst3Payload = serde_json::from_slice(request.payload())
+        .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
+    let registration = Vst3PluginRegistration {
+        class_id: payload.class_id.clone(),
+        vendor: payload.vendor.clone(),
+        binary_path: payload.binary_path.clone(),
+        binary_sha256: payload.binary_sha256,
+        execution_contract: request.plugin_execution_contract(),
+        auxiliary_inputs: request.auxiliary_inputs().clone(),
+        parameters: payload.parameters.clone(),
+    };
+    validate_registration(&registration)?;
+    if payload.state.as_ref().is_some_and(|state| state.len() > MAX_STATE_BYTES)
+        || payload.parameter_ids.len() != request.parameter_ids().len()
+    {
+        return Err(invalid("VST3 state or parameter-lane capacity is invalid"));
+    }
+    for (id, native_id) in request.parameter_ids().iter().zip(&payload.parameter_ids) {
+        let descriptor = payload
+            .parameters
+            .iter()
+            .find(|descriptor| descriptor.id == *native_id)
+            .ok_or_else(|| invalid("VST3 parameter lane has no descriptor"))?;
+        if descriptor.read_only || descriptor.parameter_id()? != *id {
+            return Err(invalid("VST3 parameter lane identity is invalid"));
+        }
+    }
+    Ok(payload)
+}
+
 /// Child-only VST3 ABI factory. The editor never loads user plugin code.
 pub struct Vst3AudioProcessorWorkerFactory;
 
@@ -332,6 +369,13 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         &self,
     ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
         native_worker_lane_profile()
+    }
+    fn native_worker_lane_resources_for_preparation(
+        &self,
+        request: &IsolatedAudioProcessorWorkerPrepareRequest,
+    ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+        let payload = validated_preparation_payload(request)?;
+        native_worker_lane_profile_for_parameters(&payload.parameters)
     }
     fn prepare(
         &self,
@@ -352,8 +396,14 @@ impl Vst3AudioProcessorWorkerFactory {
                 "VST3 Note input is not supported by this adapter",
             ));
         }
-        let payload: Vst3Payload = serde_json::from_slice(request.payload())
-            .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
+        let payload = validated_preparation_payload(&request)?;
+        if request.native_worker_lane_resources()
+            != native_worker_lane_profile_for_parameters(&payload.parameters)?
+        {
+            return Err(invalid(
+                "VST3 input storage request differs from prepared metadata",
+            ));
+        }
         let registration = Vst3PluginRegistration {
             class_id: payload.class_id.clone(),
             vendor: payload.vendor.clone(),
@@ -363,22 +413,6 @@ impl Vst3AudioProcessorWorkerFactory {
             auxiliary_inputs: request.auxiliary_inputs().clone(),
             parameters: payload.parameters.clone(),
         };
-        validate_registration(&registration)?;
-        if payload.state.as_ref().is_some_and(|state| state.len() > MAX_STATE_BYTES)
-            || payload.parameter_ids.len() != request.parameter_ids().len()
-        {
-            return Err(invalid("VST3 state or parameter-lane capacity is invalid"));
-        }
-        for (id, native_id) in request.parameter_ids().iter().zip(&payload.parameter_ids) {
-            let descriptor = payload
-                .parameters
-                .iter()
-                .find(|descriptor| descriptor.id == *native_id)
-                .ok_or_else(|| invalid("VST3 parameter lane has no descriptor"))?;
-            if descriptor.read_only || descriptor.parameter_id()? != *id {
-                return Err(invalid("VST3 parameter lane identity is invalid"));
-            }
-        }
         if fingerprint(&payload.binary_path)? != payload.binary_sha256 {
             return Err(unavailable("VST3 binary changed since processor admission"));
         }
@@ -470,7 +504,7 @@ impl Vst3AudioProcessorWorkerFactory {
             auxiliary_inputs: registration.auxiliary_inputs,
             input_names,
             last_end: None,
-            initial_signal_available: true,
+            initial_signal_phase: InitialSignalPhase::Unserviced,
             native_binding: None,
             native_author_delivery: None,
             prepared_author_entry: None,
@@ -478,6 +512,13 @@ impl Vst3AudioProcessorWorkerFactory {
             native_main,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitialSignalPhase {
+    Unserviced,
+    AwaitingFirstSignal,
+    Entered,
 }
 
 struct Vst3Worker {
@@ -495,9 +536,8 @@ struct Vst3Worker {
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     input_names: Vec<crate::AudioProcessorInputName>,
     last_end: Option<i64>,
-    // Successful native Prepare accepted state/mode/metadata and activation.
-    // This fact is consumed only once; last_end=None is not initialization proof.
-    initial_signal_available: bool,
+    // One lifecycle authority: Bind may close initialization before first PCM.
+    initial_signal_phase: InitialSignalPhase,
     native_binding: Option<crate::NativeAudioObjectBindReceipt>,
     native_author_delivery: Option<native_author::PendingDelivery>,
     prepared_author_entry: Option<author_state_entry::PreparedAuthorEntry>,
@@ -781,6 +821,12 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         }
         match crate::NativeAudioObjectBindReceipt::acknowledge(request, actual) {
             Ok(receipt) => {
+                // Pure object/receipt validation above precedes any initial allocation.
+                if !self.service_first_parameter_values() {
+                    return Ok(crate::NativeAudioObjectBindOutcome::Refused(
+                        crate::NativeAudioObjectBindRefusal::UnsupportedAdapter,
+                    ));
+                }
                 self.native_binding = Some(receipt);
                 Ok(crate::NativeAudioObjectBindOutcome::Bound(receipt))
             }
@@ -833,6 +879,21 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         });
         if actual != Some(request.expected_cohort) {
             return Ok(Outcome::StillPending(actual));
+        }
+        if self
+            .plugin
+            .as_ref()
+            .ok_or_else(|| unavailable("VST3 retained processor is closed"))?
+            .pending_processor_parameter_input()
+            .map_err(|error| {
+                unavailable(format!(
+                    "VST3 configuration input observation failed: {error}"
+                ))
+            })?
+        {
+            return Ok(Outcome::CapabilityRefused(
+                Refusal::ConfigurationUnavailable,
+            ));
         }
         self.configuration_phase = Phase::Blocked(request.expected_cohort.request);
         if request.expected_cohort.exhausted() {
@@ -1023,21 +1084,31 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
-        self.native_binding = None;
         if self.enter_prepared_author_state(start_sample)? {
+            self.native_binding = None;
             return Ok(());
         }
-        self.service_first_parameter_values();
+        let initial_ready = self.service_first_parameter_values();
         if let Some(request) = self.pending_reprepare() {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
-        if self.initial_signal_available {
+        if !initial_ready && self.initial_signal_phase == InitialSignalPhase::Unserviced {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 initial parameter source was refused".to_owned(),
+            ));
+        }
+        if self.initial_signal_phase == InitialSignalPhase::AwaitingFirstSignal {
             // Anchor the initialized object without Stop, reset, reload, state
             // capture or a synthetic Process. Its source and HWND stay owned.
-            self.initial_signal_available = false;
+            self.native_binding = None;
+            self.initial_signal_phase = InitialSignalPhase::Entered;
             self.last_end = Some(start_sample);
             return Ok(());
         }
+        self.require_delivered_parameter_input()?;
+        // Native close/retirement may partially fail; the old author lease must
+        // already be revoked once this non-preflight work starts.
+        self.native_binding = None;
         self.close_native_editor_owner()?;
         self.prepared_author_entry = None;
         self.rebuild_native_state()?;
@@ -1756,6 +1827,25 @@ fn native_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
     crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
 }
 
+pub(super) fn native_worker_lane_profile_for_parameters(
+    parameters: &[Vst3ParameterDescriptor],
+) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+    if parameters.len() > MAX_PARAMETERS {
+        return Err(invalid("VST3 parameter count exceeds initial bound"));
+    }
+    let count = parameters.iter().filter(|parameter| !parameter.read_only).count();
+    let storage =
+        vst3_host::initial_parameter_input::InitialParameterStorage::for_parameter_count(count)
+            .map_err(|error| invalid(format!("VST3 input storage request is invalid: {error}")))?;
+    native_worker_lane_profile()?
+        .map(|profile| {
+            profile
+                .with_processor_input_storage(storage.vector_bytes, storage.com_payload_bytes)
+                .map_err(AudioProcessorHostError::from)
+        })
+        .transpose()
+}
+
 pub(super) fn native_worker_lane_profile(
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
     #[cfg(target_os = "windows")]
@@ -1777,6 +1867,7 @@ pub(super) fn native_worker_lane_profile(
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
                 vst3_host::controller_parameters::ControllerParameterQueryFrame,
+                initial_parameter_values::InitialParameterFrame,
             )>()),
             runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
             runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
@@ -1807,9 +1898,32 @@ pub(super) fn native_worker_lane_profile(
 }
 
 impl Vst3Worker {
+    fn require_delivered_parameter_input(&self) -> Result<(), AudioProcessorHostError> {
+        if self
+            .plugin
+            .as_ref()
+            .ok_or_else(|| unavailable("VST3 retained processor is closed"))?
+            .pending_processor_parameter_input()
+            .map_err(|error| {
+                unavailable(format!(
+                    "VST3 state-entry input observation failed: {error}"
+                ))
+            })?
+        {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 parameter delivery is still pending".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Sole native reload used by ordinary Enter and explicit author preparation.
     fn rebuild_native_state(&mut self) -> Result<(), AudioProcessorHostError> {
-        self.initial_signal_available = false;
+        self.require_delivered_parameter_input()?;
+        // Pure refusal above preserves the author lease. Native retirement
+        // starts here, so even a subsequent partial failure cannot retain it.
+        self.native_binding = None;
+        self.initial_signal_phase = InitialSignalPhase::Entered;
         self.last_parameter_values.fill(None);
         let mut previous = self.plugin.take().ok_or_else(|| {
             AudioProcessorHostError::StateEntry("VST3 processor is closed".to_owned())
@@ -1873,8 +1987,11 @@ impl Vst3Worker {
         self.plugin = Some(fresh);
         if matches!((previous_owner, fresh_owner), (Some(old), Some(new))
             if new.serial() > old.serial())
+            && !self.service_fresh_parameter_values()
         {
-            self.service_fresh_parameter_values();
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 fresh initial parameter source was refused".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -1884,6 +2001,75 @@ impl Vst3Worker {
 mod bus_contract_tests {
     use super::*;
     use vst3_host::audio::{AudioBusConfig, NativeAudioBusInfo};
+
+    #[test]
+    fn preparation_specific_input_request_is_validated_before_binary_access() {
+        let parameter = Vst3ParameterDescriptor {
+            id: 0,
+            name: "Gain".to_owned(),
+            default_normalized: 0.5,
+            step_count: 0,
+            can_automate: true,
+            read_only: false,
+            flags: 1,
+        };
+        let parameter_id = parameter.parameter_id().unwrap();
+        let payload = Vst3Payload {
+            class_id: "61921CF43A2B4A68AE5AE08241D85E22".to_owned(),
+            vendor: None,
+            binary_path: std::env::temp_dir().join("unopened-vst3-profile-control.dll"),
+            binary_sha256: [1; 32],
+            state: None,
+            parameters: vec![parameter],
+            parameter_ids: vec![0],
+        };
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            native_lane: native_worker_lane_profile().unwrap(),
+            payload: serde_json::to_vec(&payload).unwrap(),
+            plugin_execution_contract: AudioProcessorExecutionContract::new(
+                0,
+                AudioProcessorTail::None,
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
+            parameter_ids: vec![parameter_id],
+            render_contract: crate::AudioRenderContract {
+                sample_rate: 48000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 8,
+                processing_mode: AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: usize::MAX,
+                public_output_lookahead_budget_frames: usize::MAX,
+                compensation_delay_scratch_budget_bytes: usize::MAX,
+            },
+        };
+        let expected = Vst3AudioProcessorWorkerFactory
+            .native_worker_lane_resources_for_preparation(&request)
+            .unwrap();
+        assert_eq!(
+            expected,
+            native_worker_lane_profile_for_parameters(&payload.parameters).unwrap()
+        );
+        #[cfg(target_os = "windows")]
+        {
+            assert_ne!(expected, request.native_lane);
+            assert!(
+                matches!(Vst3AudioProcessorWorkerFactory.prepare_native(request),
+                Err(AudioProcessorHostError::InvalidContract(message))
+                    if message == "VST3 input storage request differs from prepared metadata")
+            );
+        }
+        assert!(native_worker_lane_profile_for_parameters(&vec![
+            payload.parameters[0].clone();
+            MAX_PARAMETERS + 1
+        ])
+        .is_err());
+    }
 
     fn metadata() -> (NativeAudioBusInfoSet, AudioBusLayout, BusArrangements) {
         let main = NativeAudioBusInfo {

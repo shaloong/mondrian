@@ -23,6 +23,9 @@ pub enum ConfigurationLifecyclePhase {
 /// Structured refusal or failure from the dedicated bounded capture operation.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigurationCaptureError {
+    /// Actual input points or pending host parameters have not reached DSP.
+    #[error("native processor parameter input is still pending")]
+    PendingParameterDelivery,
     /// This adapter or native component provides no reusable configuration state.
     #[error("bounded native configuration state is unavailable")]
     Unavailable,

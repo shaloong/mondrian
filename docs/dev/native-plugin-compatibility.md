@@ -36,7 +36,7 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC v9 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, zero-input instruments, other event dialects, third-party processing and physical realtime |
+| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC v10 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, zero-input instruments, other event dialects, third-party processing and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -154,13 +154,51 @@ builds share 1953-input freeze `F4E3FB2A...`; strict checks have zero diagnostic
 and normal Product `F0E19F73...` retains the ten-warning baseline and FFmpeg8 ABI.
 The controls count optional calls after replacing SDK interfaces; initial
 constructor/load query gating is source-reviewed, not instrumented by them.
-This qualifies finite owned Windows cache/consumer behavior. Source/feedback and
-restart flags 16/20 remain unconsumed; Surge PCM, other platforms and realtime
-performance remain open. The test alias build failure and a disqualified stale
+This qualifies finite owned Windows cache/consumer behavior. At that source,
+Source/feedback and restart flags 16/20 remained unconsumed; Surge PCM, other
+platforms and realtime performance were open. The test alias build failure and a disqualified stale
 Cargo Product are retained; the gates bind the rebuilt Product, while these
 SDK controls execute inside the libtests without launching that Product.
 That build also contains the separately held OpenFX constructor candidate;
 this audio receipt does not accept that change.
+
+## Windows VST3 admitted initialization input handoff (2026-10-15)
+
+The first legal same-object Bind or Enter now refreshes the initial parameter
+information/value cohort through the existing Source and input queue. Its bounded
+baseline storage request follows the original Session/Root grant. All fallible
+checks precede the Source CAS; successful Bind closes the initialization window,
+including zero-work Bind. Later callbacks retain runtime author semantics.
+Actual input points and pending values protect destructive native operations.
+The [lane contract](../architecture/audio-native-lanes.md) records memory coverage
+and the remaining dynamic allocation frontier; this is not realtime qualification.
+
+Final freeze `1342129F...` contains 1958 inputs. SDK receipt `C484098E...` under
+`vst3-initial-handoff-sdk-actual-r3/gates/receipt.json` has 560 Audio, seven resource
+and 14 actual SDK control passes, including unchanged refusal assertions and real
+zero-sample processing. Vendor280 is retained from the earlier exact passed set:
+its original producer and fixture are reused only after proving the five changed
+files are Audio-only and outside those packages' dependencies. Strict checks have
+zero diagnostics. Fresh normal Product `B40F3173...` rebuilds all four affected
+production targets, uses FFmpeg8 ABI and retains the ten-warning baseline.
+
+The original Surge test now passes in `vst3-initial-handoff-surge-actual-r2`
+(gate `C04EEB52...`): two fresh restored instances and one native-bypass instance
+each complete 4096 frames, 64 calls and Enter(73) on the same observed object.
+Restored outputs match each other bitwise; bypass matches the input bitwise.
+All three observed children exit zero after Drop. This is direct Factory
+execution with silent auxiliary input, without an independent active-effect DSP
+oracle or a graceful-shutdown Ack claim. Nondefault state, active sidechain,
+App Playback/Export, GUI, performance and other platforms remain unverified.
+The original flags20 failure and the later adapter-only uppercase-case-hash
+failure remain retained. No assertion or native deadline was relaxed.
+
+The unchanged two public CLAP Note controls also pass on this exact Audio/Product
+pair (`public-note-wire10-native-r1`, gate `C100E86D...`), preserving their literal
+PCM, refusal, clock and original-NoteOff checks with fixture `B239C594...`.
+All current accepted groups have clean owned exits and unchanged inputs. This
+freeze includes a separately tested, still-failing Ring Out consumer candidate
+and the held OpenFX constructor candidate; neither is accepted by this slice.
 
 ## Windows Surge XT Effects CLAP metadata comparison (2026-10-15)
 
@@ -233,8 +271,8 @@ platforms remain unverified for this plugin.
 The later PCM/lifecycle gate `2ED65E20...` fails at its first `Enter(73)` with
 `ReprepareRequired(Vst3Restart { flags: 20 })`, before any PCM or explicit Drop
 oracle. Source `83E20443...`/Audio `554A3A5A...` uses retained Product `8E852B04...`
-through an exact test-only source bridge. The initial consumer handles only pure
-value invalidation; parameter-info invalidation remains unsupported. The combined
+through an exact test-only source bridge. At that source, the initial consumer
+handled only pure value invalidation; parameter-info invalidation was unsupported. The combined
 notification is valid and requires parameter-info/value refresh under the
 [VST3 contract](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Parameters%2BAutomation/Index.html).
 Ordinary Audio 558 passes independently; the failed native owner reports exit

@@ -14,6 +14,7 @@ pub(super) enum NativeWorkerLaneWire {
     Scoped {
         owners: [(u64, u64); 7],
         control: [(u64, u64); 3],
+        processor_input_storage: [u64; 2],
     },
 }
 
@@ -52,7 +53,12 @@ impl NativeWorkerLaneWire {
         };
         let owners = profile.owning_layouts();
         let control = profile.control_overlap();
+        let (vectors, com_payloads) = profile.processor_input_storage();
         Ok(Self::Scoped {
+            processor_input_storage: [
+                u64::try_from(vectors).map_err(|_| invalid())?,
+                u64::try_from(com_payloads).map_err(|_| invalid())?,
+            ],
             owners: capture_layouts([
                 owners.reader_slots,
                 owners.processing_slots,
@@ -72,24 +78,30 @@ impl NativeWorkerLaneWire {
     pub(super) fn realize(
         self,
     ) -> Result<Option<NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
-        let Self::Scoped { owners, control } = self else {
+        let Self::Scoped { owners, control, processor_input_storage } = self else {
             return Ok(None);
         };
         let [reader_slots, processing_slots, main_inline, runtime_main_role, runtime_dsp_role, sdk_main_role, sdk_dsp_role] =
             realize_layouts(owners)?;
         let [decoded_input, reply_storage, staged_seed] = realize_layouts(control)?;
-        Ok(Some(NativeWorkerLaneResourceProfile::scoped_main_dsp(
-            NativeWorkerLaneOwnedLayouts {
-                reader_slots,
-                processing_slots,
-                main_inline,
-                runtime_main_role,
-                runtime_dsp_role,
-                sdk_main_role,
-                sdk_dsp_role,
-            },
-            NativeWorkerControlOverlapLayout { decoded_input, reply_storage, staged_seed },
-        )?))
+        Ok(Some(
+            NativeWorkerLaneResourceProfile::scoped_main_dsp(
+                NativeWorkerLaneOwnedLayouts {
+                    reader_slots,
+                    processing_slots,
+                    main_inline,
+                    runtime_main_role,
+                    runtime_dsp_role,
+                    sdk_main_role,
+                    sdk_dsp_role,
+                },
+                NativeWorkerControlOverlapLayout { decoded_input, reply_storage, staged_seed },
+            )?
+            .with_processor_input_storage(
+                usize::try_from(processor_input_storage[0]).map_err(|_| invalid())?,
+                usize::try_from(processor_input_storage[1]).map_err(|_| invalid())?,
+            )?,
+        ))
     }
 }
 
@@ -97,4 +109,33 @@ fn invalid() -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(
         "native lane layout is not wire/address-space representable".to_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_lane_wire_preserves_independent_persistent_input_and_rejects_legacy_shape() {
+        let wire = NativeWorkerLaneWire::Scoped {
+            owners: [(0, 1); 7],
+            control: [(0, 1); 3],
+            processor_input_storage: [24, 64],
+        };
+        let profile = wire.clone().realize().unwrap().unwrap();
+        assert_eq!(profile.processor_input_storage(), (24, 64));
+        assert_eq!(profile.known_storage_limit_bytes(), 88);
+        assert_eq!(NativeWorkerLaneWire::capture(Some(profile)).unwrap(), wire);
+        let mut legacy = serde_json::to_value(&wire).unwrap();
+        legacy.as_object_mut().unwrap().remove("processor_input_storage");
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(legacy).is_err());
+        assert!(NativeWorkerLaneWire::Scoped {
+            owners: [(0, 1); 7],
+            control: [(0, 1); 3],
+            processor_input_storage: [u64::MAX, 1],
+        }
+        .realize()
+        .is_err());
+        assert_eq!(NativeWorkerLaneWire::Inline.realize().unwrap(), None);
+    }
 }

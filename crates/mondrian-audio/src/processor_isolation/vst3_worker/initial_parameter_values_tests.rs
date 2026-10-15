@@ -51,7 +51,8 @@ pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
     };
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
-        native_lane: native_worker_lane_profile().expect("actual known layout"),
+        native_lane: native_worker_lane_profile_for_parameters(&payload.parameters)
+            .expect("actual known layout"),
         payload: serde_json::to_vec(&payload).expect("exact authored fixture payload"),
         plugin_execution_contract: AudioProcessorExecutionContract::new(
             0,
@@ -296,7 +297,7 @@ fn native_initial_values_runtime_reset_cannot_reenter_initial_phase() {
         worker.plugin.as_ref().unwrap().pending_restart_cohort(),
         cohort
     );
-    assert!(!worker.initial_signal_available);
+    assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Entered);
 }
 
 #[test]
@@ -359,4 +360,174 @@ fn native_initial_values_retains_preexisting_author_source_without_querying() {
     assert_eq!(after.process, 0);
     assert_eq!(after.setters, before.setters);
     assert_eq!(after.wrong_thread, 0);
+}
+
+#[test]
+#[ignore = "requires owned SDK fixture DLL under native lab runner"]
+fn native_initial_bind_rejects_wrong_object_before_metadata_or_phase_mutation() {
+    let mut worker = prepare(0.375, 1);
+    let actual = worker.native_audio_object_observation().unwrap().unwrap();
+    let wrong = crate::NativeAudioObjectObservation::new(
+        actual.process_id(),
+        std::num::NonZeroU64::new(actual.object_serial().get().checked_add(1).unwrap()).unwrap(),
+    );
+    let source = worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap();
+    let cohort = worker.plugin.as_ref().unwrap().pending_restart_cohort();
+    let before = audit(&worker);
+    let request = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: wrong,
+    };
+    assert_eq!(
+        worker.bind_native_audio_object(request).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Refused(
+            crate::NativeAudioObjectBindRefusal::ObjectChanged
+        )
+    );
+    let after = audit(&worker);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.values, before.values);
+    assert_eq!(after.setters, before.setters);
+    assert_eq!(after.process, before.process);
+    assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Unserviced);
+    assert!(worker.native_binding.is_none());
+    assert_eq!(worker.last_end, None);
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap(),
+        source
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().pending_restart_cohort(),
+        cohort
+    );
+}
+
+#[test]
+#[ignore = "requires owned SDK fixture DLL under native lab runner"]
+fn native_initial_paused_bind_closes_window_and_first_enter_keeps_same_object() {
+    let mut worker = prepare(0.375, 1);
+    let actual = worker.native_audio_object_observation().unwrap().unwrap();
+    let before = audit(&worker);
+    let request = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: actual,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(request).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    assert_eq!(
+        worker.initial_signal_phase,
+        InitialSignalPhase::AwaitingFirstSignal
+    );
+    assert_eq!(worker.last_end, None);
+    assert_eq!(worker.pending_reprepare(), None);
+    let bound = audit(&worker);
+    assert_eq!(bound.metadata, before.metadata + 1);
+    assert_eq!(bound.values, before.values + 1);
+    assert_eq!(bound.process, before.process);
+    assert_eq!(bound.setters, before.setters);
+    worker.enter_state(73).unwrap();
+    let entered = audit(&worker);
+    assert_eq!(entered.metadata, bound.metadata);
+    assert_eq!(entered.values, bound.values);
+    assert_eq!(entered.process, bound.process);
+    assert_eq!(entered.setters, bound.setters);
+    assert_eq!(worker.initial_signal_phase, InitialSignalPhase::Entered);
+    assert!(worker.native_binding.is_none());
+    assert_eq!(
+        worker.native_audio_object_observation().unwrap(),
+        Some(actual)
+    );
+    assert_eq!(worker.last_end, Some(73));
+    assert_eq!(process(&mut worker, 73)[..4], [0.375; 4]);
+}
+
+#[test]
+#[ignore = "requires owned SDK fixture DLL under native lab runner"]
+fn native_initial_paused_bind_cannot_reclassify_later_native_callbacks_as_startup() {
+    let mut worker = prepare(0.375, 1);
+    let actual = worker.native_audio_object_observation().unwrap().unwrap();
+    let request = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: actual,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(request).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    // Real SDK restore emits a new runtime restart notification. This controlled
+    // callback is not claimed to be physical GUI interaction.
+    worker.plugin.as_mut().unwrap().load_state(&state(0.625, 9)).unwrap();
+    worker.plugin.as_ref().unwrap().get_parameter(0).unwrap();
+    let source = worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap();
+    assert_eq!(source.pending_events(), 3);
+    assert_eq!(source.pending_dsp_feedback_values(), 1);
+    let cohort = worker.plugin.as_ref().unwrap().pending_restart_cohort();
+    let before = audit(&worker);
+    assert!(matches!(
+        worker.enter_state(73),
+        Err(AudioProcessorHostError::ReprepareRequired(
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+        ))
+    ));
+    let after = audit(&worker);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.values, before.values);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.setters, before.setters);
+    assert_eq!(
+        worker.initial_signal_phase,
+        InitialSignalPhase::AwaitingFirstSignal
+    );
+    assert_eq!(
+        worker.native_audio_object_observation().unwrap(),
+        Some(actual)
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().pending_restart_cohort(),
+        cohort
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap(),
+        source
+    );
+    assert_eq!(worker.last_end, None);
+    assert_eq!(
+        worker.native_binding.map(|receipt| receipt.binding()),
+        Some(request.binding)
+    );
+    {
+        let mut roles = worker.split_native_processing().unwrap();
+        // The same check used before the real owner loop submits a DSP flush.
+        assert!(roles.main.native_author_binding_matches(request).unwrap());
+        std::thread::scope(|scope| {
+            let processing = &mut roles.processing;
+            assert_eq!(
+                scope
+                    .spawn(move || processing.flush_native_author_parameters())
+                    .join()
+                    .unwrap()
+                    .unwrap(),
+                crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+            );
+        });
+    }
+    // An authorized paused Process is a later transaction, not initial service.
+    assert_eq!(audit(&worker).process, before.process + 1);
+    assert_eq!(
+        worker
+            .plugin
+            .as_ref()
+            .unwrap()
+            .editor_event_source_status()
+            .unwrap()
+            .pending_events(),
+        3
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().pending_restart_cohort(),
+        cohort
+    );
+    assert_eq!(worker.last_end, None);
 }

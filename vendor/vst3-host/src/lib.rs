@@ -71,6 +71,7 @@ pub mod configuration_capture;
 pub mod controller_parameters;
 pub mod discovery;
 pub mod host_storage;
+pub mod initial_parameter_input;
 
 #[cfg(feature = "egui-widgets")]
 pub mod embed;

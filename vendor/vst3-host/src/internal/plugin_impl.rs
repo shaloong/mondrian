@@ -1897,6 +1897,10 @@ impl PluginImpl {
     /// Set up processing with the current configuration. VST3 requires the component to be
     /// **inactive**; every caller either runs before the first activation or deactivates first.
     fn setup_processing(&mut self) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
+
         unsafe {
             // Set up processing
             let setup = ProcessSetup {
@@ -1927,6 +1931,9 @@ impl PluginImpl {
     // `i32`; on targets where they are already `u32` clippy flags it as redundant.
     #[allow(clippy::unnecessary_cast)]
     fn create_process_data(&mut self) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         unsafe {
             let mut data = Box::new(HostProcessData {
                 process_data: std::mem::zeroed(),
@@ -2177,6 +2184,12 @@ impl PluginImpl {
         };
         if thread::current().id() != self.control_thread {
             return Err(CaptureError::WrongThread);
+        }
+        if self
+            .pending_processor_parameter_input()
+            .map_err(|_| CaptureError::PoisonedBuffer)?
+        {
+            return Err(CaptureError::PendingParameterDelivery);
         }
         let header = crate::plugin::STATE_SNAPSHOT_HEADER_SIZE;
         if !(header..=crate::plugin::MAX_STATE_SNAPSHOT_BYTES).contains(&state_limit) {
@@ -2695,6 +2708,9 @@ impl PluginInternal for PluginImpl {
     }
 
     fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         if self.is_processing {
             return Err(Error::Other(
                 "cannot reconfigure while processing".to_string(),
@@ -2736,6 +2752,10 @@ impl PluginInternal for PluginImpl {
 
     #[allow(clippy::unnecessary_cast)]
     fn set_process_mode(&mut self, mode: crate::plugin::ProcessMode) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
+
         if self.is_processing {
             return Err(Error::Other(
                 "cannot set process mode while processing".to_string(),
@@ -2812,6 +2832,9 @@ impl PluginInternal for PluginImpl {
         inputs: &[crate::audio::SpeakerArrangement],
         outputs: &[crate::audio::SpeakerArrangement],
     ) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         if self.is_processing {
             return Err(Error::Other(
                 "cannot set bus arrangements while processing".to_string(),
@@ -2876,6 +2899,9 @@ impl PluginInternal for PluginImpl {
         active: bool,
     ) -> Result<()> {
         use crate::audio::{BusDirection, MediaType};
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         if self.is_processing {
             return Err(Error::Other(
                 "cannot activate a bus while processing".to_string(),
@@ -3113,6 +3139,9 @@ impl PluginInternal for PluginImpl {
             // setupProcessing on a running component, which VST3 forbids. An unchanged
             // configuration needs no setup at all: the plugin still has it.
             if self.applied_setup != Some(self.current_setup()) {
+                if self.pending_processor_parameter_input()? {
+                    return Err(Error::PendingParameterDelivery);
+                }
                 if self.is_active {
                     self.set_component_active(false);
                     self.is_active = false;
@@ -3220,6 +3249,47 @@ impl PluginInternal for PluginImpl {
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?;
         Ok(handler.editor_event_source_status())
+    }
+
+    fn pending_processor_parameter_input(&self) -> Result<bool> {
+        self.ensure_control_thread("processor input observation")?;
+        if !self.pending_param_changes.is_empty() {
+            return Ok(true);
+        }
+        self.process_data.as_ref().map_or(Ok(false), |data| {
+            data.input_param_changes.has_active_points()
+        })
+    }
+
+    fn handoff_initial_parameter_input(
+        &mut self,
+        cohort: crate::plugin::RestartCohort,
+        source: crate::plugin::NativeEditorEventSourceStatus,
+        values: &[crate::initial_parameter_input::InitialParameterValue],
+        grant: crate::initial_parameter_input::InitialParameterStorage,
+    ) -> std::result::Result<(), crate::initial_parameter_input::InitialParameterHandoffError> {
+        use crate::initial_parameter_input::InitialParameterHandoffError as Failure;
+        if thread::current().id() != self.control_thread {
+            return Err(Failure::WrongThread);
+        }
+        if !self.pending_param_changes.is_empty() {
+            return Err(Failure::InputPending);
+        }
+        if cohort.flags().bits() & 16 != 0
+            && (self
+                ._host_app
+                .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+                || self
+                    ._host_app
+                    .consumes_plugin_interface(crate::PluginInterface::UnitInfo))
+        {
+            return Err(Failure::CohortChanged);
+        }
+        let data = self.process_data.as_ref().ok_or(Failure::Unsupported)?;
+        self.component_handler
+            .as_ref()
+            .ok_or(Failure::Unsupported)?
+            .handoff_initial_parameters(&data.input_param_changes, cohort, source, values, grant)
     }
 
     fn observe_editor_source_bounded(
@@ -3345,6 +3415,11 @@ impl PluginInternal for PluginImpl {
             ));
         }
 
+        // Keep the original request cohort intact if its required queue/native
+        // replacement cannot yet preserve real processor input obligations.
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         let flags = self.take_restart_flags();
         if !flags.latency_changed() && !flags.io_changed() {
             return Ok(flags);
@@ -4152,6 +4227,12 @@ impl PluginInternal for PluginImpl {
         if thread::current().id() != self.control_thread {
             return Err(CaptureError::WrongThread);
         }
+        if self
+            .pending_processor_parameter_input()
+            .map_err(|_| CaptureError::PoisonedBuffer)?
+        {
+            return Err(CaptureError::PendingParameterDelivery);
+        }
         // This slice only admits a latency request at the already applied setup.
         // setupProcessing while active is forbidden, and device/mode changes
         // require a separately admitted complete configuration transaction.
@@ -4223,6 +4304,10 @@ impl PluginInternal for PluginImpl {
     }
 
     fn save_state(&self) -> Result<Vec<u8>> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
+
         self.drain_deferred_controller_sync();
         unsafe {
             let component_stream =
@@ -4272,6 +4357,10 @@ impl PluginInternal for PluginImpl {
     }
 
     fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
+
         let snapshot = decode_state_snapshot(data)?;
         let was_processing = self.is_processing;
         let was_active = self.is_active;
@@ -6936,3 +7025,6 @@ pub(crate) fn native_editor_processing_layouts() -> [std::alloc::Layout; 2] {
 
 #[cfg(test)]
 mod cache_policy_tests;
+
+#[cfg(test)]
+mod initial_parameter_input_tests;

@@ -414,9 +414,8 @@ mod seed_wire_tests {
     }
 
     #[test]
-    fn native_configuration_seed_wire_reply_uses_independent_version_eight_prefix_and_exact_receipt(
-    ) {
-        // Retain this historical CI identity while independently asserting v9.
+    fn native_configuration_seed_wire_reply_uses_exact_outer_prefix_and_receipt() {
+        // Only the outer MASD header carries the current protocol version.
         let request = seed_request(&[7, 1, 2], 19);
         let receipt = NativeConfigurationSeedReceipt {
             ticket: request.ticket,
@@ -430,12 +429,23 @@ mod seed_wire_tests {
         .expect("reply");
         assert_eq!(
             &bytes[..16],
-            &[77, 65, 83, 68, 9, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
+            &[77, 65, 83, 68, 10, 0, 0, 0, 0, 0, 0, 0, 112, 0, 0, 0]
         );
         assert!(
             matches!(read_reply(&mut bytes.as_slice(), request.ticket, 19).expect("same-child receipt"),
             SeedReply::Outcome(NativeConfigurationSeedOutcome::Accepted(observed)) if observed == receipt)
         );
+        for version in [8_u32, 9] {
+            let mut old = bytes.clone();
+            put32(&mut old, 4, version);
+            let mut input = old.as_slice();
+            assert!(read_reply(&mut input, request.ticket, 19).is_err());
+            assert_eq!(
+                input.len(),
+                bytes.len() - 16,
+                "old outer header never consumes seed body"
+            );
+        }
         assert!(read_reply(&mut bytes.as_slice(), request.ticket, 18).is_err());
         let mut stale = request.ticket;
         stale.control_token = NonZeroU64::new(18).expect("another token");

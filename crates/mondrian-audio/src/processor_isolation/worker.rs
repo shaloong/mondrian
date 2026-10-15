@@ -33,13 +33,6 @@ pub(super) fn run_worker(
         ));
     }
     let native_lane = prepare.native_lane.clone().realize()?;
-    if native_lane != factory.native_worker_lane_resources()? {
-        write_ready_rejected(
-            &mut control,
-            "parent and child native lane owner layouts differ".to_owned(),
-        )?;
-        return Ok(());
-    }
     let max_block_frames = usize::try_from(prepare.max_block_frames)
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
@@ -83,6 +76,20 @@ pub(super) fn run_worker(
         parameter_ids: prepare.parameter_ids.clone(),
         render_contract,
     };
+    let requested_lane = match factory.native_worker_lane_resources_for_preparation(&request) {
+        Ok(profile) => profile,
+        Err(error) => {
+            write_ready_rejected(&mut control, error.to_string())?;
+            return Ok(());
+        }
+    };
+    if native_lane != requested_lane {
+        write_ready_rejected(
+            &mut control,
+            "parent and child preparation-specific native storage requests differ".to_owned(),
+        )?;
+        return Ok(());
+    }
     let prepared = catch_unwind(AssertUnwindSafe(|| factory.prepare(request)));
     let mut processor = match prepared {
         Ok(Ok(processor)) => processor,
