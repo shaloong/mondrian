@@ -162,6 +162,29 @@ SDK controls execute inside the libtests without launching that Product.
 That build also contains the separately held OpenFX constructor candidate;
 this audio receipt does not accept that change.
 
+## Windows Surge XT Effects CLAP metadata comparison (2026-10-15)
+
+The real `org.surge-synth-team.surge-xt-fx` module `30845FF7...` completed two
+ProcessOwner-backed Probe calls: default capture, then a fresh process loading
+the original 972 bytes (`9BFB00CB...`). Both calls returned valid typed metadata
+with 13 parameter IDs, zero latency, 96000 tail frames and one stereo auxiliary
+input. Twelve names changed from `FX Parameter n` to `- -`; the strict declaration
+comparison therefore **failed**. Its original assertion and failed receipt
+`22D9A14E...` remain under `clap-surge-probe-actual-r1/gates/receipt.json`.
+CLAP's [parameter rescan contract](../../vendor/clap-sys/official/include/clap/ext/params.h)
+allows name changes. This strong comparison is a diagnostic expectation, not a
+standards-conformance oracle. The production structural matcher already excludes
+display names; this failure does not demonstrate a worker-prepare defect.
+Capture and restored-state metadata come from different lifecycle stages.
+
+The same-source Audio build and strict checks have zero diagnostics; 558 ordinary
+tests pass. The failed native test exits 101 with clean owned reaping and no
+deadline or outliving descendants. Test source `53436F80...` has 1954 inputs;
+Product `F0E19F73...` retains its 1953-input `F4E3FB2A...` provenance through an
+exact test-only parent/child bridge. No successful comparison result was written.
+PCM, nondefault state, Project reload and processing compatibility are unverified.
+The separately held OpenFX constructor candidate is not accepted by this test.
+
 ## Windows Surge XT Effects default-state observation (2026-10-15)
 
 Surge XT Effects 1.3.4 VST3 (`3B9F6C9B...`, class

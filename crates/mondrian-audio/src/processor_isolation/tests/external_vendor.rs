@@ -29,6 +29,9 @@ mod readonly;
 // Finite auxiliary-input PCM observations; no vendor algorithm oracle.
 mod surge_fx;
 
+// Default capture and fresh CLAP metadata restoration; no PCM processing.
+mod surge_fx_clap_probe;
+
 #[test]
 #[ignore = "external hash-bound vendor case, current helper and frozen outer native Job required"]
 fn external_clap_opaque_state_native_bypass_pcm() {
