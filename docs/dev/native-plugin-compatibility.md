@@ -266,6 +266,21 @@ gap; they do not establish the plugin's actual port topology or a plugin defect.
 The next step is to identify the failing native port fact before changing the
 mapping contract or any capacity limit.
 
+The bounded same-call refusal follow-up uses source `320D3DD4...` and a fresh
+normal Product `2725E9B6...`; Audio, strict Clippy and all 572 ordinary tests
+pass (677 total, 105 ignored). The existing error transport retains only fixed
+ASCII facts, without native names, custom type strings or extra port queries.
+Its owned ABI controls verify the four refusal reasons, original short-circuit
+order, query stopping, null/empty normalization and the existing 1024-byte limit.
+
+The real follow-up gate `A766F4B5...` remains failed. Its first input row has
+count 1, index 0, ID 32768, known flag bits zero, main false, two channels and
+type stereo. The host's index-zero-implies-main policy rejects that row;
+this is not evidence of a plugin violation. Output count and the remaining
+topology have not been queried. Supporting a native input without a main role
+requires an explicit main/auxiliary mapping and preserved native order, rather
+than ignoring the flag. State, DSP and instrument compatibility remain open.
+
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 
 The public non-RT owner observation returns the actual PID/load facts from the

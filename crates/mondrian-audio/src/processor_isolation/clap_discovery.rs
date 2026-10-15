@@ -1400,6 +1400,34 @@ pub(super) struct ClapAudioInputMetadata {
     pub(super) names: Vec<crate::AudioProcessorInputName>,
 }
 
+// Only the cold refusal path formats owned facts from this same successful get.
+// Clack has already removed unknown flag bits and normalized NULL/empty types.
+fn audio_port_refusal(
+    reason: &'static str,
+    is_input: bool,
+    index: u32,
+    count: u32,
+    port: &clack_extensions::audio_ports::AudioPortInfo<'_>,
+    expected_channels: usize,
+) -> AudioProcessorHostError {
+    let direction = if is_input { "input" } else { "output" };
+    let port_type = match port.port_type {
+        None => "unspecified",
+        Some(value) if value == AudioPortType::MONO => "mono",
+        Some(value) if value == AudioPortType::STEREO => "stereo",
+        Some(_) => "other",
+    };
+    let expected_type = if expected_channels == 1 {
+        "mono"
+    } else {
+        "stereo"
+    };
+    invalid(format!(
+        "CLAP audio port identity, role, or layout is invalid; reason={reason} direction={direction} index={index} count={count} id={} known_flags_bits={:08X} main={} channels={} type={port_type} expected_channels={expected_channels} expected_type={expected_type}",
+        port.id.get(), port.flags.bits(), port.flags.contains(AudioPortFlags::IS_MAIN), port.channel_count,
+    ))
+}
+
 /// Read native ports in ABI order, using stable IDs for author routes.
 /// The plugin must be deactivated: CLAP forbids audio-port scans while active.
 pub(super) fn inspect_audio_inputs(
@@ -1439,13 +1467,27 @@ pub(super) fn inspect_audio_inputs(
             let port = ports
                 .get(handle, index, is_input, &mut buffer)
                 .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
-            if !ids.insert(port.id.get())
-                || port.flags.contains(AudioPortFlags::IS_MAIN) != (index == 0)
-                || port.port_type != Some(expected_type)
-                || usize::try_from(port.channel_count).ok() != Some(channel_layout.channel_count())
+            let refusal = if !ids.insert(port.id.get()) {
+                Some("duplicate_id")
+            } else if port.flags.contains(AudioPortFlags::IS_MAIN) != (index == 0) {
+                Some("main_role")
+            } else if port.port_type != Some(expected_type) {
+                Some("port_type")
+            } else if usize::try_from(port.channel_count).ok()
+                != Some(channel_layout.channel_count())
             {
-                return Err(invalid(
-                    "CLAP audio port identity, role, or layout is invalid",
+                Some("channel_count")
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                return Err(audio_port_refusal(
+                    reason,
+                    is_input,
+                    index,
+                    count,
+                    &port,
+                    channel_layout.channel_count(),
                 ));
             }
             if is_input && index != 0 {
@@ -3473,6 +3515,18 @@ mod tests {
         const ACTIVATE_FALSE: u8 = 2;
         const RENDER_ERROR: u8 = 3;
         const PARAM_QUERY_OBSERVATION: u8 = 4;
+        const PORT_DUPLICATE_ID: u8 = 5;
+        const PORT_MAIN_ROLE: u8 = 6;
+        const PORT_TYPE_MONO: u8 = 7;
+        const PORT_CHANNEL_COUNT: u8 = 8;
+        const PORT_TYPE_NONE: u8 = 9;
+        const PORT_TYPE_EMPTY: u8 = 10;
+        const PORT_TYPE_OTHER: u8 = 11;
+        static PORT_CUSTOM_TYPE: [u8; 4097] = {
+            let mut bytes = [b'Z'; 4097];
+            bytes[4096] = 0;
+            bytes
+        };
         const PARAM_QUERY_DEFAULT_BITS: u64 = 0x378F_FE40_0000_0000;
         const PARAM_QUERY_VALUE_BITS: u64 = 0x8000_0000_0000_0000;
 
@@ -3500,6 +3554,8 @@ mod tests {
             parameter_info_calls: AtomicU32,
             parameter_value_calls: AtomicU32,
             parameter_query_order: AtomicU32,
+            port_count_calls: [AtomicU32; 2],
+            port_get_calls: [AtomicU32; 2],
         }
 
         // Same test-thread setup convention as the existing CountingFactory fixture.
@@ -3608,21 +3664,63 @@ mod tests {
         }
 
         impl<const CASE: u8> PluginAudioPortsImpl for FixtureMain<'_, CASE> {
-            fn count(&self, _is_input: bool) -> u32 {
-                1
+            fn count(&self, is_input: bool) -> u32 {
+                self.shared.audit.port_count_calls[usize::from(!is_input)]
+                    .fetch_add(1, Ordering::SeqCst);
+                if is_input && matches!(CASE, PORT_DUPLICATE_ID | PORT_MAIN_ROLE) {
+                    3
+                } else {
+                    1
+                }
             }
 
-            fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
-                if index == 0 {
-                    writer.set(&AudioPortInfo {
-                        id: ClapId::new(0),
-                        name: b"main",
-                        channel_count: 2,
-                        flags: AudioPortFlags::IS_MAIN,
-                        port_type: Some(AudioPortType::STEREO),
-                        in_place_pair: None,
-                    });
+            fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+                self.shared.audit.port_get_calls[usize::from(!is_input)]
+                    .fetch_add(1, Ordering::SeqCst);
+                let extra_input = is_input && matches!(CASE, PORT_DUPLICATE_ID | PORT_MAIN_ROLE);
+                if index != 0 && !(extra_input && index < 3) {
+                    return;
                 }
+                let early_conflict = extra_input && index == 1;
+                let output_conflict =
+                    !is_input && matches!(CASE, PORT_TYPE_MONO | PORT_CHANNEL_COUNT);
+                let port_type = if early_conflict || (is_input && CASE == PORT_TYPE_NONE) {
+                    None
+                } else if is_input && CASE == PORT_TYPE_EMPTY {
+                    Some(AudioPortType(c""))
+                } else if is_input && CASE == PORT_TYPE_OTHER {
+                    Some(AudioPortType(
+                        std::ffi::CStr::from_bytes_with_nul(&PORT_CUSTOM_TYPE).unwrap(),
+                    ))
+                } else if output_conflict && CASE == PORT_TYPE_MONO {
+                    Some(AudioPortType::MONO)
+                } else {
+                    Some(AudioPortType::STEREO)
+                };
+                writer.set(&AudioPortInfo {
+                    id: ClapId::new(if CASE == PORT_DUPLICATE_ID { 0 } else { index }),
+                    name: if CASE >= PORT_DUPLICATE_ID {
+                        b"NAME_MUST_NOT_LEAK"
+                    } else {
+                        b"main"
+                    },
+                    channel_count: if early_conflict {
+                        3
+                    } else if output_conflict {
+                        1
+                    } else {
+                        2
+                    },
+                    flags: if CASE == PORT_TYPE_OTHER {
+                        AudioPortFlags::from_bits_retain(0x8000_0001)
+                    } else if index == 0 || early_conflict {
+                        AudioPortFlags::IS_MAIN
+                    } else {
+                        AudioPortFlags::empty()
+                    },
+                    port_type,
+                    in_place_pair: None,
+                });
             }
         }
 
@@ -3825,6 +3923,108 @@ mod tests {
             );
             NEXT_AUDIT.with(|slot| assert!(slot.borrow().is_none(), "fixture setup unused"));
             (result, audit)
+        }
+
+        fn assert_port_refusal<const CASE: u8>(
+            reason: &str,
+            facts: &str,
+            counts: [u32; 2],
+            gets: [u32; 2],
+        ) {
+            let (result, audit) = run::<CASE>();
+            let Err(AudioProcessorHostError::InvalidContract(detail)) = result else {
+                panic!("original port refusal required");
+            };
+            assert_eq!(detail, format!(
+                "CLAP audio port identity, role, or layout is invalid; reason={reason} {facts} expected_channels=2 expected_type=stereo"
+            ));
+            assert!(!detail.contains("NAME_MUST_NOT_LEAK"));
+            assert!(!detail.contains("ZZZ"));
+            for direction in 0..2 {
+                assert_eq!(
+                    audit.port_count_calls[direction].load(Ordering::SeqCst),
+                    counts[direction]
+                );
+                assert_eq!(
+                    audit.port_get_calls[direction].load(Ordering::SeqCst),
+                    gets[direction]
+                );
+            }
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.latency_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_calls.load(Ordering::SeqCst), 1);
+            assert!(!audit.destroy_native_active.load(Ordering::SeqCst));
+            assert!(!audit.destroy_host_active.load(Ordering::SeqCst));
+            assert_eq!(audit.destroy_incomplete.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.destroy_controls.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn probe_audio_port_refusals_preserve_first_reason_direction_and_query_stop() {
+            // The second input has multiple faults: precedence must not change.
+            assert_port_refusal::<PORT_DUPLICATE_ID>("duplicate_id",
+                "direction=input index=1 count=3 id=0 known_flags_bits=00000001 main=true channels=3 type=unspecified", [1, 0], [2, 0]);
+            assert_port_refusal::<PORT_MAIN_ROLE>("main_role",
+                "direction=input index=1 count=3 id=1 known_flags_bits=00000001 main=true channels=3 type=unspecified", [1, 0], [2, 0]);
+            assert_port_refusal::<PORT_TYPE_MONO>("port_type",
+                "direction=output index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=1 type=mono", [1, 1], [1, 1]);
+            assert_port_refusal::<PORT_CHANNEL_COUNT>("channel_count",
+                "direction=output index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=1 type=stereo", [1, 1], [1, 1]);
+            let (result, audit) = run::<AFTER_DEACTIVATE_ALL>();
+            assert_eq!(
+                result.expect("unchanged successful probe").latency_frames,
+                17
+            );
+            for direction in 0..2 {
+                assert_eq!(audit.port_count_calls[direction].load(Ordering::SeqCst), 2);
+                assert_eq!(audit.port_get_calls[direction].load(Ordering::SeqCst), 2);
+            }
+            assert_eq!(audit.activations.load(Ordering::SeqCst), 1);
+            assert_eq!(audit.deactivations.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn probe_audio_port_type_classification_never_copies_custom_bytes() {
+            let unspecified = "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=2 type=unspecified";
+            assert_port_refusal::<PORT_TYPE_NONE>("port_type", unspecified, [1, 0], [1, 0]);
+            assert_port_refusal::<PORT_TYPE_EMPTY>("port_type", unspecified, [1, 0], [1, 0]);
+            // The raw fixture sets an unknown flag: Clack's known-bit projection is all we report.
+            assert_port_refusal::<PORT_TYPE_OTHER>("port_type",
+                "direction=input index=0 count=1 id=0 known_flags_bits=00000001 main=true channels=2 type=other", [1, 0], [1, 0]);
+        }
+
+        #[test]
+        fn probe_audio_port_error_facts_fit_existing_discovery_transport() {
+            let port = AudioPortInfo {
+                id: ClapId::new(u32::MAX - 1),
+                name: b"NAME_MUST_NOT_LEAK",
+                channel_count: u32::MAX,
+                flags: AudioPortFlags::from_bits_truncate(u32::MAX),
+                port_type: Some(AudioPortType(
+                    std::ffi::CStr::from_bytes_with_nul(&PORT_CUSTOM_TYPE).unwrap(),
+                )),
+                in_place_pair: None,
+            };
+            for reason in ["duplicate_id", "main_role", "port_type", "channel_count"] {
+                let error = audio_port_refusal(reason, false, u32::MAX, u32::MAX, &port, 2);
+                let packet = discovery_error_packet(DiscoveryErrorStage::Probe, &error);
+                assert!(!packet.truncated);
+                assert!(packet.error_debug.is_ascii());
+                assert!(packet.error_debug.starts_with("Error: InvalidContract(\"CLAP audio port identity, role, or layout is invalid;"));
+                assert!(packet.error_debug.contains("index=4294967295 count=4294967295 id=4294967294 known_flags_bits=0000000F main=true channels=4294967295 type=other"));
+                assert!(!packet.error_debug.contains("NAME_MUST_NOT_LEAK"));
+                assert!(!packet.error_debug.contains("ZZZ"));
+                let parent_context = format!(
+                    "CLAP discovery worker failed with status exit code: 1; worker stage=Probe: {}",
+                    packet.error_debug
+                );
+                assert!(parent_context.len() < MAX_DISCOVERY_ERROR_TEXT_BYTES);
+                assert!(
+                    serde_json::to_vec(&packet).unwrap().len() as u64
+                        <= MAX_DISCOVERY_ERROR_PACKET_BYTES
+                );
+            }
         }
 
         fn active_rescan_all_bit() -> u16 {
