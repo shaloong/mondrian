@@ -549,7 +549,22 @@ the original owner receipts and raw maps under `ofx-close-observation-actual-r1`
 These successful observations do not reproduce or retrospectively locate the
 original `D30C487F...` deadline failure, identify a particular OS/CRT/DLL cause,
 or qualify third-party compatibility or performance. The readonly-constructor
-integration hold and twelve remaining repeat gates stay open.
+integration hold remains open.
+
+On 2026-10-16, all twelve previously unexecuted functional cases pass once.
+Five integration controls cover current-frame requests, curve lifecycle,
+interpolation, image identity and field admission on fresh `AE956862...` tests
+`C056F0FF...` and retained normal Product `3433BC99...`. Seven direct C ABI
+session modes use retained App `61487952...` from `416EACDE...`: its OFX sources
+and static C++ inputs are unchanged; only three unused CLAP files and the
+separately reviewed equivalent observer-alignment predicate differ. This is a
+selected-path projection, not a new full-source App build. Each case has one
+exact pass, clean owned-process settlement and unchanged inputs. The original
+100ms resident deadline is unchanged where applicable; the seven direct C ABI
+cases do not exercise that resident deadline. Required/temporal/field refusal
+controls do not qualify temporal fetching or interlaced rendering. Evidence:
+`ofx-missing-functional-actual-r1/`, adapter `8274828C...`. The original D30C
+failure and constructor integration hold remain unresolved.
 
 ## Current execution receipts
 
