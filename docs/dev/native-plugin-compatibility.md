@@ -32,11 +32,11 @@ product consumers and pending closure for each feature family.
 | --- | --- | --- |
 | Native discovery and isolation | Selected class/descriptor, fingerprinted native binary, supervised discovery and persistent processing child, bounded control traffic and shared buffers | Standard scan locations/workflow, permitted vendor corpus, platform and native editor lifecycle |
 | VST3 SDK interfaces | One canonical runtime binding package generated from verified SDK 3.8.1 sources; independent layout/signature and actual cross-language calls for all nine methods of the four new interfaces | Optional host-service implementation, MIDI 2 event routing, native MSVC/macOS/Linux qualification; upstream generator excludes SDK testing interfaces |
-| Audio layout | Mono/stereo main in/out, up to 31 auxiliary inputs of the admitted layout; restored-state native port metadata and causal PDC | Mixed layouts, surround/ambisonic, multiple outputs, zero-input generators/instruments |
+| Audio layout | Mono/stereo main in/out, up to 31 auxiliary inputs of the admitted layout; explicit absent CLAP main input with finite owned mono/offline Note execution; restored-state native port metadata and causal PDC | Mixed layouts, surround/ambisonic, multiple outputs, third-party instrument processing and zero-input stereo DSP |
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC v10 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, zero-input instruments, other event dialects, third-party processing and physical realtime |
+| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC v10 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP, zero-input mono/offline and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, other instrument shapes/event dialects, third-party processing and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -245,6 +245,26 @@ Third-party instruments, zero-input stereo DSP, dynamic port rescans, App
 note-only playback/export, GUI, realtime/performance and other platforms remain
 unverified or separately unsupported. The held OpenFX change is outside this
 acceptance.
+
+### Real Surge XT instrument admission, 2026-10-16
+
+The separate instrument test preserves the complete existing FX test and uses
+actual List results before noncapture Probe, default-state capture and fresh
+restore. Source `BA8C43BD...` has 1959 inputs; fresh Audio and strict Clippy pass,
+with 674 tests, 105 ignored and the same 569 ordinary passes. Only a `cfg(test)`
+Windows child was appended; the accepted normal Product `BF219085...` is reused
+through that exact byte bridge, without claiming whole-source equality.
+
+Windows DLL `6FB598B3...` actually lists Surge XT 1.3.4, ID
+`org.surge-synth-team.surge-xt`. The first noncapture Probe fails with the
+original audio-port identity/role/layout refusal. The retained native gate
+`clap-instrument-probe-actual-r1/gates/receipt.json` (`D94AB202...`) stays failed:
+test exit 101, no deadline, owner errors or outliving descendants, and all
+descendants reaped. No state capture, restore, PCM or Note processing occurred.
+The failed gate and bounded failure artifact qualify a reproducible admission
+gap; they do not establish the plugin's actual port topology or a plugin defect.
+The next step is to identify the failing native port fact before changing the
+mapping contract or any capacity limit.
 
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 

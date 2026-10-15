@@ -233,3 +233,186 @@ fn external_clap_default_capture_fresh_restore_metadata() {
     // These read-only leases span both actual ProcessOwner-owned native calls.
     drop((case_lease, helper, plugin));
 }
+
+// Separate instrument observation: keep the original FX comparison and its failure unchanged.
+const INSTRUMENT_PROBE_CASE_ENV: &str = "MONDRIAN_EXTERNAL_CLAP_INSTRUMENT_PROBE_CASE";
+const INSTRUMENT_PROBE_CASE_HASH_ENV: &str = "MONDRIAN_EXTERNAL_CLAP_INSTRUMENT_PROBE_CASE_SHA256";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstrumentProbeCase {
+    schema: u32,
+    helper: Binding,
+    plugin: Binding,
+    evidence_directory: PathBuf,
+}
+
+#[test]
+#[ignore = "hash-bound real CLAP instrument List/Probe case and frozen outer native Job required"]
+fn external_clap_instrument_list_probe_default_capture_fresh_restore() {
+    let path =
+        PathBuf::from(std::env::var_os(INSTRUMENT_PROBE_CASE_ENV).expect("instrument case path"));
+    let mut case_lease = Lease::open(
+        &Binding {
+            bytes: fs::metadata(&path).expect("instrument case metadata").len(),
+            path,
+            sha256: std::env::var(INSTRUMENT_PROBE_CASE_HASH_ENV).expect("instrument case SHA256"),
+        },
+        MAX_JSON,
+    );
+    let bytes = case_lease.read();
+    let case: InstrumentProbeCase =
+        serde_json::from_value(strict_json(&bytes)).expect("strict instrument case");
+    assert_eq!(case.schema, 1);
+    assert_eq!(case.plugin.bytes, 20_966_912);
+    assert_eq!(
+        case.plugin.sha256,
+        "6fb598b3759d359ef670e2632ca0d8ff2c19be5389c0ba4801168643d7c5d219"
+    );
+    no_reparse(&case.evidence_directory);
+    assert!(fs::metadata(&case.evidence_directory)
+        .expect("fresh instrument directory")
+        .is_dir());
+    assert!(fs::read_dir(&case.evidence_directory)
+        .expect("empty instrument directory")
+        .next()
+        .is_none());
+    let helper = Lease::open(&case.helper, 512 * 1024 * 1024);
+    let plugin = Lease::open(&case.plugin, 512 * 1024 * 1024);
+    let dir = &case.evidence_directory;
+    write_new(dir, "case.json", &bytes);
+    let refuse = |stage: &str, reason: &str| -> ! {
+        write_json(
+            dir,
+            "failure.json",
+            json!({"schema":1, "stage":stage,
+            "qualification_refusal":reason, "native_call_returned_error":false, "processed_pcm":false}),
+        );
+        panic!("{stage}: {reason}");
+    };
+    let descriptors =
+        crate::processor_isolation::scan_clap_library_descriptors(&helper.path, &plugin.path)
+            .unwrap_or_else(|error| probe_failed(dir, "list", error));
+    write_json(
+        dir,
+        "list.json",
+        json!({"schema":1, "descriptors":descriptors,
+        "helper_sha256":helper.sha256, "plugin_sha256":plugin.sha256, "processed_pcm":false}),
+    );
+    if descriptors.len() != 1 {
+        refuse("list_selection", "List requires exactly one descriptor");
+    }
+    let id = &descriptors[0].plugin_id;
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 64,
+        processing_mode: AudioProcessingMode::Offline,
+        ..test_render_contract()
+    };
+    let observed = |registration: &ClapPluginRegistration| {
+        json!({
+            "metadata":metadata(registration), "main_audio_input":registration.main_audio_input,
+            "main_audio_input_inferred_from_name":false, "processed_pcm":false,
+        })
+    };
+    // All calls retain the existing ProcessOwner, 5s/512KiB/1024-parameter/64KiB-state limits.
+    let noncapture = probe_clap_plugin_registration(&helper.path, &plugin.path, id, render, None)
+        .unwrap_or_else(|error| probe_failed(dir, "noncapture_probe", error));
+    write_json(dir, "noncapture-metadata.json", observed(&noncapture));
+    let (captured, state) = probe_clap_plugin_registration_with_state(
+        &helper.path,
+        &plugin.path,
+        id,
+        render,
+        None,
+        true,
+    )
+    .unwrap_or_else(|error| probe_failed(dir, "default_capture", error));
+    write_json(
+        dir,
+        "captured-metadata.json",
+        json!({"observation":observed(&captured),
+        "captured_state_present":state.is_some(), "captured_state_bytes":state.as_ref().map(Vec::len),
+        "captured_state_sha256":state.as_ref().map(|bytes| format!("{:x}", Sha256::digest(bytes)))}),
+    );
+    let Some(state) = state else {
+        refuse("default_capture_state", "capture returned no State support");
+    };
+    if state.is_empty() || state.len() > 64 * 1024 {
+        refuse(
+            "default_capture_state",
+            "State must be nonempty and <=64KiB",
+        );
+    }
+    write_new(dir, "original-default-state.bin", &state);
+    let fresh =
+        probe_clap_plugin_registration(&helper.path, &plugin.path, id, render, Some(&state))
+            .unwrap_or_else(|error| probe_failed(dir, "fresh_restore", error));
+    write_json(dir, "fresh-restored-metadata.json", observed(&fresh));
+    for registration in [&noncapture, &captured, &fresh] {
+        if registration.plugin_id != *id
+            || registration.library_path != plugin.path
+            || registration.binary_sha256.as_slice() != decode_hash(&plugin.sha256).as_slice()
+            || !registration.execution_contract.offline_capable()
+            || registration.execution_contract.realtime_capable()
+        {
+            refuse(
+                "identity_and_execution",
+                "leased identity or offline mode changed",
+            );
+        }
+    }
+    // Match native IDs and the existing host's numeric structural semantics.
+    // Name/hidden/current and enumeration order are observations, never this equality oracle.
+    let structure_equal =
+        captured.parameters.len() == fresh.parameters.len()
+            && captured.parameters.iter().all(|expected| {
+                fresh.parameters.iter().find(|actual| actual.id == expected.id).is_some_and(
+                    |actual| {
+                        actual.min_value == expected.min_value
+                            && actual.max_value == expected.max_value
+                            && actual.default_value == expected.default_value
+                            && actual.automatable == expected.automatable
+                            && actual.stepped == expected.stepped
+                            && actual.enumeration == expected.enumeration
+                            && actual.read_only == expected.read_only
+                    },
+                )
+            });
+    let contract_equal = captured.execution_contract == fresh.execution_contract
+        && captured.main_audio_input == fresh.main_audio_input
+        && captured.auxiliary_inputs == fresh.auxiliary_inputs;
+    write_json(
+        dir,
+        "comparison.json",
+        json!({"schema":1, "parameter_structure_equal":structure_equal,
+        "realized_execution_and_input_contract_equal":contract_equal,
+        "display_and_current_values_are_observations_only":true,
+        "current_value_bits_equal_by_id":captured.parameters.iter().all(|first| fresh.parameters.iter()
+            .find(|second| second.id == first.id).is_some_and(|second| second.current_value.to_bits() == first.current_value.to_bits())),
+        "raw_discovery_wire_bytes_qualified":false, "processed_pcm":false}),
+    );
+    if !structure_equal || !contract_equal {
+        refuse(
+            "fresh_restore_comparison",
+            "restored structure or host contract differs",
+        );
+    }
+    write_json(
+        dir,
+        "result.json",
+        json!({"schema":1, "case_sha256":case_lease.sha256,
+        "helper_sha256":helper.sha256, "plugin_sha256":plugin.sha256, "actual_identity":id,
+        "parameter_count":captured.parameters.len(), "main_audio_input":captured.main_audio_input,
+        "captured_state_bytes":state.len(), "captured_state_sha256":format!("{:x}", Sha256::digest(&state)),
+        "actual_list_probe_capture_and_fresh_restore_completed":true,
+        "display_and_current_values_are_observations_only":true,
+        "processed_pcm":false, "notes_qualified":false, "native_bypass_tested":false,
+        "state_recapture_equality_qualified":false, "nondefault_state_discrimination_qualified":false,
+        "gui_qualified":false, "realtime_qualified":false, "performance_qualified":false,
+        "graph_preview_export_qualified":false, "full_compatibility_qualified":false,
+        "outer_job_qualified_by_test":false}),
+    );
+    drop((case_lease, helper, plugin));
+}
