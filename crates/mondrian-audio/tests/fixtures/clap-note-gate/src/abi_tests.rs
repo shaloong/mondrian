@@ -581,7 +581,7 @@ fn check_zero_ports(plugin: &LivePlugin<'_>) {
 fn zero_input_variant_constant_carrier_literal_pcm_and_note_end_across_partitions() {
     let _serial = SERIAL.lock().unwrap();
     let before = DROPPED.load(Ordering::Acquire);
-    assert_eq!(unsafe { FACTORY.get_plugin_count.unwrap()(&FACTORY) }, 2);
+    assert_eq!(unsafe { FACTORY.get_plugin_count.unwrap()(&FACTORY) }, 3);
     assert_eq!(
         unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 0) },
         &DESCRIPTOR as *const clap_plugin_descriptor
@@ -590,7 +590,11 @@ fn zero_input_variant_constant_carrier_literal_pcm_and_note_end_across_partition
         unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 1) },
         &ZERO_INPUT_DESCRIPTOR as *const clap_plugin_descriptor
     );
-    assert!(unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 2) }.is_null());
+    assert_eq!(
+        unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 2) },
+        &THREE_OUTPUTS_DESCRIPTOR as *const clap_plugin_descriptor
+    );
+    assert!(unsafe { FACTORY.get_plugin_descriptor.unwrap()(&FACTORY, 3) }.is_null());
     // Independent literals: carrier1, port0 zero-velocity Held weight1/32,
     // gain1/2 and the original Off at2, then four release samples through5.
     let expected = [
@@ -753,4 +757,460 @@ fn zero_input_rejects_wrong_native_shape_extent_and_event_before_pcm_or_off_cred
         assert_eq!(plugin.exact_offs(), 0.0);
     }
     assert_eq!(DROPPED.load(Ordering::Acquire), before + shapes.len());
+}
+
+// The new ID shares the original Gate and event sink, not a second oracle.
+// Expected PCM below is independently written as literal dyadic sequences.
+#[derive(Debug, Clone, Copy)]
+enum ThreeShape {
+    Valid,
+    ExtraInput,
+    NoOutput,
+    OneOutput,
+    FourOutputs,
+    NullArray,
+    LastStereo,
+    LastNullData,
+    LastNullChannel,
+    LastDoubleData,
+    ExactAlias,
+    PartialAlias,
+    Misaligned,
+    ZeroFrames,
+    ExcessFrames,
+}
+
+unsafe extern "C" fn reject_native_end(
+    list: *const clap_output_events,
+    event: *const clap_event_header,
+) -> bool {
+    if event.is_null() || unsafe { event.read_unaligned() }.type_ == CLAP_EVENT_NOTE_END as u16 {
+        return false;
+    }
+    unsafe { capture_native(list, event) }
+}
+
+fn call_three(
+    plugin: &LivePlugin<'_>,
+    pointers: &[*const clap_event_header],
+    output: &mut [[f32; 7]; 3],
+    frames: u32,
+    nonnull_empty_input: bool,
+    shape: ThreeShape,
+    refuse_end: bool,
+) -> (clap_process_status, [u64; 3], Vec<NativeOutput>) {
+    let mut inputs = NativeInputs { pointers };
+    let inputs = clap_input_events {
+        ctx: (&mut inputs as *mut NativeInputs<'_>).cast(),
+        size: Some(native_size),
+        get: Some(native_get),
+    };
+    let mut capture = NativeOutputs { records: Vec::with_capacity(16) };
+    let callback: unsafe extern "C" fn(
+        *const clap_output_events,
+        *const clap_event_header,
+    ) -> bool = if refuse_end {
+        reject_native_end
+    } else {
+        capture_native
+    };
+    let events = clap_output_events {
+        ctx: (&mut capture as *mut NativeOutputs).cast(),
+        try_push: Some(callback),
+    };
+    let mut channels = output.each_mut().map(|samples| [samples.as_mut_ptr()]);
+    match shape {
+        ThreeShape::ExactAlias => channels[2][0] = channels[0][0],
+        ThreeShape::PartialAlias => channels[2][0] = unsafe { channels[0][0].add(1) },
+        ThreeShape::LastNullChannel => channels[2][0] = ptr::null_mut(),
+        ThreeShape::Misaligned => {
+            channels[2][0] = unsafe { channels[2][0].cast::<u8>().add(1).cast::<f32>() };
+        }
+        _ => {}
+    }
+    let mut buffers = channels.each_mut().map(|channel| clap_audio_buffer {
+        data32: channel.as_mut_ptr(),
+        data64: ptr::null_mut(),
+        channel_count: 1,
+        latency: 0,
+        constant_mask: 1,
+    });
+    match shape {
+        ThreeShape::LastStereo => buffers[2].channel_count = 2,
+        ThreeShape::LastNullData => buffers[2].data32 = ptr::null_mut(),
+        ThreeShape::LastDoubleData => {
+            buffers[2].data64 = ptr::NonNull::<*mut f64>::dangling().as_ptr();
+        }
+        _ => {}
+    }
+    let mut block = clap_process {
+        steady_time: -1,
+        frames_count: frames,
+        transport: ptr::null(),
+        // Both zero-count pointer representations must remain unread.
+        audio_inputs: if nonnull_empty_input {
+            ptr::NonNull::<clap_audio_buffer>::dangling().as_ptr()
+        } else {
+            ptr::null()
+        },
+        audio_outputs: buffers.as_mut_ptr(),
+        audio_inputs_count: 0,
+        audio_outputs_count: 3,
+        in_events: &inputs,
+        out_events: &events,
+    };
+    match shape {
+        ThreeShape::ExtraInput => block.audio_inputs_count = 1,
+        ThreeShape::NoOutput => block.audio_outputs_count = 0,
+        ThreeShape::OneOutput => block.audio_outputs_count = 1,
+        ThreeShape::FourOutputs => block.audio_outputs_count = 4,
+        ThreeShape::NullArray => block.audio_outputs = ptr::null_mut(),
+        ThreeShape::ZeroFrames => block.frames_count = 0,
+        ThreeShape::ExcessFrames => block.frames_count = 7,
+        _ => {}
+    }
+    let status = unsafe { (*plugin.plugin).process.unwrap()(plugin.plugin, &block) };
+    (
+        status,
+        buffers.map(|port| port.constant_mask),
+        capture.records,
+    )
+}
+
+fn process_calls(plugin: &LivePlugin<'_>) -> f64 {
+    let params =
+        unsafe { (*plugin.plugin).get_extension.unwrap()(plugin.plugin, CLAP_EXT_PARAMS.as_ptr()) }
+            .cast::<clap_plugin_params>();
+    assert!(!params.is_null());
+    let mut count = f64::NAN;
+    assert!(unsafe { (*params).get_value.unwrap()(plugin.plugin, PROCESS_CALLS, &mut count) });
+    count
+}
+
+fn check_three_ports(plugin: &LivePlugin<'_>) {
+    let audio = unsafe {
+        (*plugin.plugin).get_extension.unwrap()(plugin.plugin, CLAP_EXT_AUDIO_PORTS.as_ptr())
+    }
+    .cast::<clap_plugin_audio_ports>();
+    assert!(!audio.is_null());
+    assert_eq!(unsafe { (*audio).count.unwrap()(plugin.plugin, true) }, 0);
+    assert_eq!(unsafe { (*audio).count.unwrap()(plugin.plugin, false) }, 3);
+    for index in 0..3 {
+        let mut port: clap_audio_port_info = unsafe { std::mem::zeroed() };
+        assert!(unsafe { (*audio).get.unwrap()(plugin.plugin, index, false, &mut port) });
+        assert_eq!(port.id, index + 1);
+        assert_eq!(
+            port.flags,
+            if index == 0 {
+                CLAP_AUDIO_PORT_IS_MAIN as u32
+            } else {
+                0
+            }
+        );
+        assert_eq!(port.channel_count, 1);
+        assert_eq!(unsafe { CStr::from_ptr(port.port_type) }, CLAP_PORT_MONO);
+        assert_eq!(port.in_place_pair, CLAP_INVALID_ID);
+    }
+    let mut untouched: clap_audio_port_info = unsafe { std::mem::zeroed() };
+    untouched.id = 123;
+    assert!(!unsafe { (*audio).get.unwrap()(plugin.plugin, 0, true, &mut untouched) });
+    assert!(!unsafe { (*audio).get.unwrap()(plugin.plugin, 3, false, &mut untouched) });
+    assert_eq!(untouched.id, 123);
+}
+
+#[test]
+fn three_output_zero_input_literal_pcm_single_gate_and_callback_count_across_partitions() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    // Old IDs still expose exactly their original three parameters. The new
+    // observation is neither a new old-ID parameter nor a hidden setter.
+    for id in [
+        c"org.mondrian.fixture.note-gate",
+        c"org.mondrian.fixture.note-gate.zero-input",
+    ] {
+        let context = native_context();
+        let host = test_host(&context);
+        let plugin = LivePlugin::new(&context, &host, id);
+        assert_eq!(unsafe { parameter_count(plugin.plugin) }, 3);
+        let mut value = 123.0;
+        assert!(!unsafe { parameter_value(plugin.plugin, PROCESS_CALLS, &mut value) });
+        assert_eq!(value, 123.0);
+        let mut info: clap_param_info = unsafe { std::mem::zeroed() };
+        assert!(!unsafe { parameter_info(plugin.plugin, 3, &mut info) });
+    }
+    let expected = [
+        [
+            1.0_f32 / 32.0,
+            1.0 / 32.0,
+            1.0 / 64.0,
+            3.0 / 256.0,
+            1.0 / 128.0,
+            1.0 / 256.0,
+        ],
+        [
+            -1.0_f32 / 64.0,
+            -1.0 / 64.0,
+            -1.0 / 128.0,
+            -3.0 / 512.0,
+            -1.0 / 256.0,
+            -1.0 / 512.0,
+        ],
+        [
+            1.0_f32 / 128.0,
+            1.0 / 128.0,
+            1.0 / 256.0,
+            3.0 / 1024.0,
+            1.0 / 512.0,
+            1.0 / 1024.0,
+        ],
+    ];
+    for nonnull in [false, true] {
+        for partition in [&[6_usize][..], &[2, 4][..], &[1, 2, 3][..]] {
+            let context = native_context();
+            let host = test_host(&context);
+            let plugin = LivePlugin::new(
+                &context,
+                &host,
+                c"org.mondrian.fixture.note-gate.zero-input.three-outputs",
+            );
+            check_three_ports(&plugin);
+            assert_eq!(unsafe { parameter_count(plugin.plugin) }, 4);
+            let mut info: clap_param_info = unsafe { std::mem::zeroed() };
+            assert!(unsafe { parameter_info(plugin.plugin, 3, &mut info) });
+            assert_eq!(info.id, 29);
+            assert_eq!(
+                info.flags,
+                (CLAP_PARAM_IS_READONLY | CLAP_PARAM_IS_STEPPED) as u32
+            );
+            plugin.start();
+            assert_eq!(process_calls(&plugin), 0.0);
+            let mut silent = [[99.0_f32; 7]; 3];
+            let (status, masks, records) = call_three(
+                &plugin,
+                &[],
+                &mut silent,
+                6,
+                nonnull,
+                ThreeShape::Valid,
+                false,
+            );
+            assert_eq!(status, CLAP_PROCESS_CONTINUE);
+            assert_eq!(masks, [0; 3]);
+            assert!(records.is_empty());
+            for (bus, port) in silent.iter().enumerate() {
+                let zero = if bus == 1 { -0.0_f32 } else { 0.0_f32 };
+                assert!(port[..6].iter().all(|value| value.to_bits() == zero.to_bits()));
+                assert_eq!(port[6], 99.0);
+            }
+            assert_eq!(process_calls(&plugin), 1.0);
+            unsafe { (*plugin.plugin).reset.unwrap()(plugin.plugin) };
+            assert_eq!(process_calls(&plugin), 0.0);
+            let mut result: [Vec<f32>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut recorded = Vec::new();
+            let mut start = 0;
+            for &frames in partition {
+                let on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+                let gain = parameter(GAIN, 2_u32.saturating_sub(start), 0.5);
+                let off = note(CLAP_EVENT_NOTE_OFF as u16, 2_u32.saturating_sub(start), 0);
+                let mut events = Vec::new();
+                if start == 0 {
+                    events.push(&on.header as *const clap_event_header);
+                }
+                if start <= 2 && start + frames as u32 > 2 {
+                    events.push(&gain.header);
+                    events.push(&off.header);
+                }
+                let mut output = [[99.0_f32; 7]; 3];
+                let (status, masks, records) = call_three(
+                    &plugin,
+                    &events,
+                    &mut output,
+                    frames as u32,
+                    nonnull,
+                    ThreeShape::Valid,
+                    false,
+                );
+                assert_eq!(status, CLAP_PROCESS_CONTINUE);
+                assert_eq!(masks, [0; 3]);
+                for (bus, samples) in output.iter().enumerate() {
+                    result[bus].extend_from_slice(&samples[..frames]);
+                    assert!(samples[frames..].iter().all(|value| *value == 99.0));
+                }
+                recorded.extend(records.into_iter().map(|record| match record {
+                    NativeOutput::Gain { time, bits } => {
+                        NativeOutput::Gain { time: time + start, bits }
+                    }
+                    end => end,
+                }));
+                start += frames as u32;
+            }
+            for (actual, expected) in result.iter().zip(expected) {
+                assert_eq!(
+                    actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    expected.map(f32::to_bits)
+                );
+            }
+            assert_eq!(
+                recorded,
+                vec![
+                    NativeOutput::Gain { time: 5, bits: 0.5_f64.to_bits() },
+                    NativeOutput::End {
+                        time: u32::MAX,
+                        address: Address { port: 0, channel: 0, key: 60, id: 10 }
+                    },
+                    NativeOutput::Gain { time: 5, bits: 0.5_f64.to_bits() },
+                ]
+            );
+            plugin.stop();
+            assert_eq!(plugin.exact_offs(), 1.0);
+            assert_eq!(process_calls(&plugin), partition.len() as f64);
+            plugin.deactivate();
+            check_three_ports(&plugin);
+        }
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + 8);
+}
+
+#[test]
+fn three_output_zero_input_refuses_all_port_shapes_aliases_and_readonly_writes_before_dsp() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    let shapes = [
+        ThreeShape::ExtraInput,
+        ThreeShape::NoOutput,
+        ThreeShape::OneOutput,
+        ThreeShape::FourOutputs,
+        ThreeShape::NullArray,
+        ThreeShape::LastStereo,
+        ThreeShape::LastNullData,
+        ThreeShape::LastNullChannel,
+        ThreeShape::LastDoubleData,
+        ThreeShape::ExactAlias,
+        ThreeShape::PartialAlias,
+        ThreeShape::Misaligned,
+        ThreeShape::ZeroFrames,
+        ThreeShape::ExcessFrames,
+        ThreeShape::Valid,
+    ];
+    for shape in shapes {
+        let context = native_context();
+        let host = test_host(&context);
+        let plugin = LivePlugin::new(
+            &context,
+            &host,
+            c"org.mondrian.fixture.note-gate.zero-input.three-outputs",
+        );
+        plugin.start();
+        let on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+        let off = note(CLAP_EVENT_NOTE_OFF as u16, 2, 0);
+        let readonly = parameter(PROCESS_CALLS, 0, 9.0);
+        let events = if matches!(shape, ThreeShape::Valid) {
+            vec![
+                &readonly.header as *const clap_event_header,
+                &on.header,
+                &off.header,
+            ]
+        } else {
+            vec![&on.header as *const clap_event_header, &off.header]
+        };
+        let mut output = [[99.0_f32; 7]; 3];
+        let (status, masks, records) =
+            call_three(&plugin, &events, &mut output, 6, true, shape, false);
+        assert_eq!(status, CLAP_PROCESS_ERROR, "shape={shape:?}");
+        assert_eq!(output, [[99.0; 7]; 3], "shape={shape:?}");
+        assert_eq!(masks, [1; 3]);
+        assert!(records.is_empty());
+        plugin.stop();
+        assert_eq!(plugin.exact_offs(), 0.0);
+        // A refused callback is still one real callback; readonly writing9 did
+        // not replace the statistic. No Process invocation is synthesized.
+        assert_eq!(process_calls(&plugin), 1.0);
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + shapes.len());
+}
+
+#[test]
+fn three_output_zero_input_retains_original_off_and_propagates_real_end_sink_refusal() {
+    let _serial = SERIAL.lock().unwrap();
+    let before = DROPPED.load(Ordering::Acquire);
+    for (wrong_off, refuse_end) in [(false, false), (true, false), (false, true)] {
+        let context = native_context();
+        let host = test_host(&context);
+        let plugin = LivePlugin::new(
+            &context,
+            &host,
+            c"org.mondrian.fixture.note-gate.zero-input.three-outputs",
+        );
+        plugin.start();
+        let scenario = parameter(SCENARIO, 0, 1.0);
+        let on = note(CLAP_EVENT_NOTE_ON as u16, 0, 0);
+        let off = note(CLAP_EVENT_NOTE_OFF as u16, 4, if wrong_off { 1 } else { 0 });
+        let events = [
+            &scenario.header as *const clap_event_header,
+            &on.header,
+            &off.header,
+        ];
+        let mut output = [[99.0_f32; 7]; 3];
+        let (status, _, records) = call_three(
+            &plugin,
+            &events,
+            &mut output,
+            6,
+            false,
+            ThreeShape::Valid,
+            refuse_end,
+        );
+        let completed = if refuse_end {
+            2
+        } else if wrong_off {
+            4
+        } else {
+            6
+        };
+        let expected = [
+            [1.0_f32 / 32.0, 1.0 / 32.0, 0.0, 0.0, 0.0, 0.0],
+            [-1.0_f32 / 64.0, -1.0 / 64.0, -0.0, -0.0, -0.0, -0.0],
+            [1.0_f32 / 128.0, 1.0 / 128.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        for (actual, expected) in output.iter().zip(expected) {
+            assert_eq!(
+                actual[..completed].iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                expected[..completed].iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+            );
+            assert!(actual[completed..].iter().all(|value| *value == 99.0));
+        }
+        if refuse_end {
+            assert_eq!(
+                records,
+                vec![NativeOutput::Gain { time: 1, bits: 1.0_f64.to_bits() }]
+            );
+        } else {
+            assert_eq!(
+                records,
+                vec![
+                    NativeOutput::Gain { time: 1, bits: 1.0_f64.to_bits() },
+                    NativeOutput::End {
+                        time: u32::MAX,
+                        address: Address { port: 0, channel: 0, key: 60, id: 10 }
+                    },
+                    NativeOutput::Gain { time: 1, bits: 1.0_f64.to_bits() },
+                ]
+            );
+        }
+        assert_eq!(
+            status,
+            if wrong_off || refuse_end {
+                CLAP_PROCESS_ERROR
+            } else {
+                CLAP_PROCESS_CONTINUE
+            }
+        );
+        plugin.stop();
+        assert_eq!(
+            plugin.exact_offs(),
+            if wrong_off || refuse_end { 0.0 } else { 1.0 }
+        );
+        assert_eq!(process_calls(&plugin), 1.0);
+    }
+    assert_eq!(DROPPED.load(Ordering::Acquire), before + 3);
 }

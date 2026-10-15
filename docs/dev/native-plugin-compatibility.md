@@ -380,6 +380,27 @@ absence under other hosts, the available count/get branch, configuration
 selection, native unload callbacks or instrument processing. The three-output
 admission gap remains open. Evidence: `clap-config-census-actual-r1/`.
 
+### Owned CLAP three-output ABI controls, 2026-10-16
+
+The existing owned NoteGate fixture adds a fixed zero-input class with three
+mono outputs (native IDs 1 Main, 2 and 3 Auxiliary). One Gate produces distinct
+literal Float32 outputs; read-only parameter 29 counts actual Process calls,
+including refusals. The original two classes, Gate oracle and preset state stay
+intact. Source `0F4C4F00...` binds 104 inputs; fresh DLL `B4ABCCE2...` and test
+executable `63546009...` have separate retained producer receipts. Strict Clippy
+passes with zero diagnostics. The first Strict failure, an internal enum naming
+violation, is retained; the fix changes only that identifier and formatting.
+
+The supervised executable inventory is exactly 13 tests, none ignored. All 13
+pass once, including the old ten and three new controls for literal PCM across
+partitions, shape/alias/read-only refusals and original Off/End sink behavior.
+Inventory and batch owners exit 0 with descendants reaped and no deadline or
+cleanup errors; all 164 unique bound inputs retain their bytes. These raw ABI
+calls run inside the test executable. The separately built DLL was not loaded
+by Mondrian, and native multi-output DAG routing, third-party compatibility,
+other platforms and realtime performance remain unqualified. Evidence:
+`clap-multiout-fixture-native-r1/` (adapter `D860E154...`, gate `80E55BCF...`).
+
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 
 The public non-RT owner observation returns the actual PID/load facts from the
