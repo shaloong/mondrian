@@ -281,6 +281,27 @@ topology have not been queried. Supporting a native input without a main role
 requires an explicit main/auxiliary mapping and preserved native order, rather
 than ignoring the flag. State, DSP and instrument compatibility remain open.
 
+The separate default-deactivated census now records the complete bounded
+topology on that same DLL: one non-main stereo input (ID 32768), then three
+stereo outputs in native order, with only output zero (ID 1) marked main;
+outputs one and two have IDs 2 and 3. The input and main output advertise
+reciprocal in-place pairs. This adds a second admission gap: the current host
+also requires exactly one native output. Fixing input-role inference alone
+cannot qualify this instrument.
+
+Source `A005CB9C...` adds only two Windows test-only appendices. Fresh Audio,
+strict Clippy, all 572 ordinary tests and the new census pass; inventory is
+678 total, 106 ignored. Original Job gate `D67C45BD...` and adapter `57CD038B...`
+retain unchanged inputs, exit zero, no deadline/errors/outliving and reaped
+descendants. Normal Product `2725E9B6...` serves only List through the exact
+two-file prefix bridge (1957 other inputs unchanged); it was not rebuilt.
+The fresh census stays deactivated in the Audio test process under the original
+180-second outer Job. Instance and library Rust Drop return before completion;
+this does not independently count native callbacks or observe OS module unload.
+No internal five-second processing deadline, state restore, activation, DSP,
+Note, realtime, performance or cross-platform compatibility is qualified.
+Evidence: `clap-topology-census-actual-r1/` in the existing validation directory.
+
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 
 The public non-RT owner observation returns the actual PID/load facts from the

@@ -4644,3 +4644,93 @@ mod same_call_consumer_contracts {
 #[cfg(all(test, windows))]
 #[path = "clap_deactivated_parameter_diagnostic.rs"]
 mod clap_deactivated_parameter_diagnostic;
+
+// Test-only direct-native observation. This is not processing admission and has
+// no internal native-call deadline: the actual caller's frozen outer Job owns it.
+#[cfg(all(test, windows))]
+pub(super) fn deactivated_audio_port_census_for_test(
+    library: &Path,
+    plugin_id: &str,
+) -> Result<(serde_json::Value, Option<AudioProcessorHostError>), AudioProcessorHostError> {
+    // SAFETY: the caller retains a hash-bound ordinary library-file lease. The
+    // entry owns the loaded module and outlives the one native instance below.
+    let entry = unsafe { PluginEntry::load(library.as_os_str()) }
+        .map_err(|error| unavailable(format!("CLAP census library load failed: {error}")))?;
+    let id = CString::new(plugin_id).map_err(|_| invalid("CLAP census ID contains NUL"))?;
+    let info = HostInfo::new(
+        "Mondrian",
+        "Mondrian",
+        "https://github.com/shaloong/mondrian",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|error| invalid(format!("invalid CLAP census host identity: {error}")))?;
+    let shared = ClapHostShared::new();
+    let native_shared = shared.clone().with_native_logs()?;
+    let mut instance = PluginInstance::<ClapHost>::new(
+        |_| native_shared,
+        |shared| super::clap_main_services::ClapHostMainThread::new(shared),
+        &entry,
+        id.as_c_str(),
+        &info,
+    )
+    .map_err(|error| unavailable(format!("CLAP census instance failed: {error}")))?;
+    let mut input_count = None;
+    let mut output_count = None;
+    let mut rows = Vec::new();
+    let observed = (|| {
+        shared.service_callbacks(&mut instance)?;
+        let handle = instance.plugin_handle();
+        let ports = handle
+            .get_extension::<PluginAudioPorts>()
+            .ok_or_else(|| invalid("CLAP census has no audio-ports extension"))?;
+        let inputs = ports.count(&handle, true);
+        let outputs = ports.count(&handle, false);
+        input_count = Some(inputs);
+        output_count = Some(outputs);
+        if inputs > 32 || outputs > 32 {
+            return Err(invalid("CLAP census exceeds 32 ports per direction"));
+        }
+        for (direction, is_input, count) in [("input", true, inputs), ("output", false, outputs)] {
+            for index in 0..count {
+                let mut buffer = AudioPortInfoBuffer::new();
+                let Some(port) = ports.get(&handle, index, is_input, &mut buffer) else {
+                    rows.push(serde_json::json!({"direction":direction, "index":index,
+                        "count":count, "clack_get_returned_some":false}));
+                    return Err(invalid("CLAP census audio-port metadata is unavailable"));
+                };
+                let port_type = match port.port_type {
+                    None => "unspecified",
+                    Some(value) if value == AudioPortType::MONO => "mono",
+                    Some(value) if value == AudioPortType::STEREO => "stereo",
+                    Some(_) => "other",
+                };
+                rows.push(serde_json::json!({
+                    "direction":direction, "index":index, "count":count,
+                    "clack_get_returned_some":true, "id":port.id.get(),
+                    "known_flags_bits":port.flags.bits(),
+                    "main":port.flags.contains(AudioPortFlags::IS_MAIN),
+                    "channels":port.channel_count, "type_class":port_type,
+                    "in_place_pair":port.in_place_pair.map(|value| value.get()),
+                }));
+            }
+        }
+        Ok(())
+    })();
+    // Neither failure nor success may publish completion before destroy/deinit
+    // have returned on this owner thread. A hang/crash produces no returned carrier.
+    drop(instance);
+    drop(entry);
+    Ok((
+        serde_json::json!({
+            "schema":1, "plugin_id":plugin_id, "process_id":std::process::id(),
+            "phase":"default_deactivated", "reader":"clack_audio_ports",
+            "input_count":input_count, "output_count":output_count, "rows":rows,
+            "complete":observed.is_ok(), "native_instance_drop_returned":true,
+            "native_library_drop_returned":true, "known_flags_only":true,
+            "null_and_empty_types_normalized_together":true,
+            "diagnostic_activation_requested":false, "diagnostic_process_requested":false,
+            "diagnostic_parameter_queries_requested":false, "diagnostic_state_load_requested":false,
+        }),
+        observed.err(),
+    ))
+}

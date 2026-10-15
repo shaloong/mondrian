@@ -416,3 +416,83 @@ fn external_clap_instrument_list_probe_default_capture_fresh_restore() {
     );
     drop((case_lease, helper, plugin));
 }
+
+const AUDIO_PORT_CENSUS_CASE_ENV: &str = "MONDRIAN_CLAP_AUDIO_PORT_CENSUS_CASE";
+const AUDIO_PORT_CENSUS_CASE_HASH_ENV: &str = "MONDRIAN_CLAP_AUDIO_PORT_CENSUS_CASE_SHA256";
+
+#[test]
+#[ignore = "hash-bound direct-native deactivated port census; frozen outer 180s Job required"]
+fn external_clap_instrument_default_deactivated_audio_port_census() {
+    let path =
+        PathBuf::from(std::env::var_os(AUDIO_PORT_CENSUS_CASE_ENV).expect("census case path"));
+    let mut case_lease = Lease::open(
+        &Binding {
+            bytes: fs::metadata(&path).expect("census case metadata").len(),
+            path,
+            sha256: std::env::var(AUDIO_PORT_CENSUS_CASE_HASH_ENV).expect("census case SHA256"),
+        },
+        MAX_JSON,
+    );
+    let bytes = case_lease.read();
+    let case: InstrumentProbeCase =
+        serde_json::from_value(strict_json(&bytes)).expect("strict census case");
+    assert_eq!(case.schema, 1);
+    no_reparse(&case.evidence_directory);
+    assert!(fs::metadata(&case.evidence_directory).expect("census directory").is_dir());
+    assert!(fs::read_dir(&case.evidence_directory)
+        .expect("census directory entries")
+        .next()
+        .is_none());
+    let helper = Lease::open(&case.helper, 512 * 1024 * 1024);
+    let plugin = Lease::open(&case.plugin, 512 * 1024 * 1024);
+    let dir = &case.evidence_directory;
+    write_new(dir, "case.json", &bytes);
+    // Only List uses the normal Product's existing 5s discovery owner. The
+    // fresh census instance lives in this test process under the outer Job.
+    let descriptors =
+        crate::processor_isolation::scan_clap_library_descriptors(&helper.path, &plugin.path)
+            .unwrap_or_else(|error| probe_failed(dir, "list", error));
+    write_json(
+        dir,
+        "list.json",
+        json!({"schema":1, "descriptors":descriptors,
+        "helper_sha256":helper.sha256, "plugin_sha256":plugin.sha256, "processed_pcm":false}),
+    );
+    if descriptors.len() != 1 {
+        probe_failed(
+            dir,
+            "list_selection",
+            AudioProcessorHostError::InvalidContract(
+                "CLAP census requires exactly one actual List descriptor".to_owned(),
+            ),
+        );
+    }
+    let id = &descriptors[0].plugin_id;
+    let (observation, failure) =
+        crate::processor_isolation::clap_discovery::deactivated_audio_port_census_for_test(
+            &plugin.path,
+            id,
+        )
+        .unwrap_or_else(|error| probe_failed(dir, "census_setup", error));
+    // The helper returns only after native instance/module Drop has returned,
+    // including when a bounded count/get refusal retained an incomplete prefix.
+    write_json(dir, "census.json", observation);
+    if let Some(error) = failure {
+        probe_failed(dir, "deactivated_audio_port_census", error);
+    }
+    write_json(
+        dir,
+        "result.json",
+        json!({
+            "schema":1, "case_sha256":case_lease.sha256, "helper_sha256":helper.sha256,
+            "plugin_sha256":plugin.sha256, "actual_identity":id,
+            "topology_observation_complete":true, "native_instance_drop_returned":true,
+            "native_library_drop_returned":true, "direct_native_census_in_test_process":true,
+            "processing_probe_qualified":false, "processed_pcm":false, "notes_qualified":false,
+            "state_qualified":false, "realtime_qualified":false, "full_compatibility_qualified":false,
+            "direct_native_internal_deadline":false, "required_outer_job_deadline_ms":180000,
+            "outer_job_qualified_by_test":false,
+        }),
+    );
+    drop((case_lease, helper, plugin));
+}
