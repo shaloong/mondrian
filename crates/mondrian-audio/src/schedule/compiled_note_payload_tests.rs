@@ -21,6 +21,52 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PORT: &str = " exact.é.port ";
 
+#[test]
+fn runtime_fresh_entry_origin_is_read_from_the_prepared_score_and_grid() {
+    for rate in [48_000, 96_000] {
+        let (mut sequence, locator) = sequence();
+        sequence.settings.audio_sample_rate = rate;
+        let calls = Arc::new(Calls::default());
+        let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            &sequence,
+            &[],
+            &UnusedMedia,
+            &Resolver(Arc::clone(&calls)),
+            AudioRenderContract { sample_rate: rate, ..contract() },
+            None,
+            AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+        )
+        .unwrap();
+        assert_eq!(runtime.state_entry_origin().unwrap(), None);
+        runtime.require_state_entry_recursively_for_test();
+        assert!(runtime.requires_state_entry());
+        assert_eq!(
+            runtime.state_entry_origin().unwrap(),
+            None,
+            "ordinary history has no fixed origin"
+        );
+        add_score(&mut sequence, locator);
+        runtime
+            .prepare_owned_note_model_for_test(Arc::new(compiled(&sequence)))
+            .unwrap();
+        let footprint = runtime.resource_footprint();
+        let queries = calls.note_queries.load(Ordering::Relaxed);
+        let creates = calls.creates.load(Ordering::Relaxed);
+        for _ in 0..3 {
+            assert_eq!(
+                runtime.state_entry_origin().unwrap(),
+                Some(mondrian_core::AudioSamplePosition::new(
+                    0,
+                    mondrian_core::AudioSampleRate::new(rate).unwrap(),
+                ))
+            );
+        }
+        assert_eq!(runtime.resource_footprint(), footprint);
+        assert_eq!(calls.note_queries.load(Ordering::Relaxed), queries);
+        assert_eq!(calls.creates.load(Ordering::Relaxed), creates);
+    }
+}
+
 #[derive(Default)]
 struct Calls {
     resolves: AtomicUsize,

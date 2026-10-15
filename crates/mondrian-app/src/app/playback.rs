@@ -287,6 +287,24 @@ impl AppAudioPlayback {
         }
     }
 
+    fn suspend(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.suspend(anchor),
+            Self::Unavailable { sample_rate, .. } => {
+                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+            }
+        }
+    }
+
+    fn recover_at(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.recover_at(anchor),
+            Self::Unavailable { sample_rate, .. } => {
+                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+            }
+        }
+    }
+
     fn poll(
         &mut self,
         mode: AudioPlaybackMode,
@@ -731,7 +749,7 @@ impl AppState {
             .map_err(|error| transport_action_error("pause", error))?;
         let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, "pause")?;
         self.audio_playback
-            .reprime(audio_anchor)
+            .suspend(audio_anchor)
             .map_err(|error| transport_action_error("pause", error))?;
         self.playback_engine = engine;
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
@@ -754,7 +772,7 @@ impl AppState {
             .map_err(|error| transport_action_error("stop", error))?;
         let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, "stop")?;
         self.audio_playback
-            .reprime(audio_anchor)
+            .suspend(audio_anchor)
             .map_err(|error| transport_action_error("stop", error))?;
         self.playback_engine = engine;
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
@@ -835,7 +853,7 @@ impl AppState {
             self.commit_audio_playback("seek", audio_anchor, renderer)?;
         } else {
             self.audio_playback
-                .reprime(audio_anchor)
+                .suspend(audio_anchor)
                 .map_err(|error| transport_action_error("seek", error))?;
         }
         self.playback_engine = engine;
@@ -1643,7 +1661,7 @@ impl AppState {
                 .validate_anchor(restart_anchor)
                 .map_err(|error| transport_action_error("audio_phase_rejection", error))?;
             self.audio_playback
-                .reprime(restart_anchor)
+                .recover_at(restart_anchor)
                 .map_err(|error| transport_action_error("audio_phase_rejection", error))?;
         }
         self.playback_engine = engine;
@@ -2241,7 +2259,7 @@ impl AppState {
         let target_frame = snapshot.position.frame;
         if snapshot.state == TransportState::Ended {
             self.settle_preview_access_source();
-            // End-of-program reprime is runtime cleanup after the Engine has
+            // End-of-program suspension is runtime cleanup after the Engine has
             // already committed `Ended`; it cannot retroactively reject the
             // clock tick, so record cleanup failure explicitly.
             let cleanup = self
@@ -2252,11 +2270,11 @@ impl AppState {
                 )
                 .and_then(|anchor| {
                     self.audio_playback
-                        .reprime(anchor)
+                        .suspend(anchor)
                         .map_err(|error| transport_action_error("playback_end", error))
                 });
             if let Err(error) = cleanup {
-                tracing::error!(%error, "failed to reprime audio at end of Playback Session");
+                tracing::error!(%error, "failed to suspend audio at end of Playback Session");
             }
             self.refresh_internal_execution_resource_decision();
             return PlaybackAdvance {
@@ -5280,6 +5298,200 @@ mod tests {
         assert_eq!(boundary.status, PlaybackAdvanceStatus::Advanced);
         assert_eq!(state.current_frame(), 1);
     }
+    // These are App/Media host-model controls. They execute the real serial
+    // PCM worker and product transport consumers, not a third-party plugin.
+    mod restricted_origin_product_controls {
+        use super::*;
+
+        type Requests = Arc<parking_lot::Mutex<Vec<mondrian_media::AudioPcmRenderRequest>>>;
+
+        struct RestrictedOriginRenderer {
+            requests: Requests,
+        }
+
+        impl AudioPcmRenderer for RestrictedOriginRenderer {
+            fn render(
+                &self,
+                request: mondrian_media::AudioPcmRenderRequest,
+                _cancellation: &mondrian_core::ExecutionCancellationToken,
+            ) -> mondrian_core::Result<mondrian_media::AudioPcmRenderOutcome> {
+                self.requests.lock().push(request);
+                Ok(mondrian_media::AudioPcmRenderOutcome::Rendered(
+                    mondrian_media::AudioBuffer::silent(
+                        request.sample_rate,
+                        request.channel_layout,
+                        request.frame_count,
+                    ),
+                ))
+            }
+        }
+
+        fn active_source(
+            duration_frames: i64,
+        ) -> (
+            AppState,
+            Arc<parking_lot::Mutex<NativeHoldPlatformState>>,
+            Requests,
+        ) {
+            let mut state = state_with_sequence(duration_frames);
+            play_ready(&mut state);
+            assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+            let mut snapshot = audio_snapshot();
+            snapshot.active = false;
+            snapshot.buffered_frames = 0;
+            snapshot.callback_consumed_frames = 0;
+            snapshot.active_callback_consumed_frames = 0;
+            // Media needs idle callback timing before it can activate real PCM.
+            // Keep consumption at zero and make the activation lead exactly zero.
+            snapshot.callback_count = 1;
+            snapshot.last_callback_playback_delay = Some(Duration::ZERO);
+            snapshot.last_callback_age = Some(Duration::ZERO);
+            snapshot.active_duration = None;
+            let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+                snapshot,
+                revision: 0,
+                acknowledged: 0,
+                auto_acknowledge: true,
+                queued: 0,
+            }));
+            let config = mondrian_media::AudioPlaybackConfig {
+                chunk_frames: 4_096,
+                preroll_frames: 4_096,
+                high_watermark_frames: 8_192,
+                max_in_flight: 1,
+                ..mondrian_media::AudioPlaybackConfig::product_default()
+            };
+            state.audio_playback = AppAudioPlayback::Available(Box::new(
+                AudioPlayback::with_output(
+                    config,
+                    Box::new(NativeHoldPlatformOutput(Arc::clone(&output))),
+                )
+                .expect("owned model output"),
+            ));
+            let requests: Requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            state
+                .audio_playback
+                .prepare(
+                    audio_anchor(0),
+                    Arc::new(RestrictedOriginRenderer { requests: Arc::clone(&requests) }),
+                    AudioPcmContinuityModel::GenerationStateFromOrigin(audio_anchor(0)),
+                )
+                .expect("prepare the constrained source at its declared origin");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let poll = state
+                    .audio_playback
+                    .poll(AudioPlaybackMode::Consume, audio_anchor(0))
+                    .expect("actual serial PCM admission");
+                for event in poll.events {
+                    state.handle_audio_playback_event(event, Instant::now()).unwrap();
+                }
+                if output.lock().snapshot.active {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "serial PCM did not activate the output");
+                std::thread::yield_now();
+            }
+            assert!(output.lock().queued > 0, "activation uses actually rendered PCM");
+            assert_eq!(state.audio_playback_snapshot().media_anchor, Some(audio_anchor(0)));
+            assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
+            (state, output, requests)
+        }
+
+        fn assert_retired_without_reentry(
+            state: &mut AppState,
+            output: &parking_lot::Mutex<NativeHoldPlatformState>,
+            requests: &Requests,
+        ) {
+            assert!(!output.lock().snapshot.active, "the actual App caller must close output");
+            // Fixed-step advance can leave the test's wall projection in the future.
+            // Join the real pump observation to the unchanged Engine high-water mark.
+            state.reanchor_playback_observation_projection(Instant::now());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                state.pump_audio_output().expect("retirement must not retry an illegal Enter");
+                let snapshot = state.audio_playback_snapshot();
+                if snapshot.in_flight == 0 && output.lock().queued == 0 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "retired PCM did not settle after callback Ack");
+                std::thread::yield_now();
+            }
+            // A later ordinary owner turn must not reactivate or replay origin zero.
+            for _ in 0..3 {
+                state.pump_audio_output().expect("settled retirement remains pollable");
+                assert!(!output.lock().snapshot.active);
+                assert_eq!(output.lock().queued, 0);
+            }
+            assert_eq!(
+                requests
+                    .lock()
+                    .iter()
+                    .filter(|request| matches!(
+                        request.continuity,
+                        mondrian_media::AudioPcmContinuity::Enter(_)
+                    ))
+                    .map(|request| request.start_sample)
+                    .collect::<Vec<_>>(),
+                vec![0],
+                "retirement cannot Enter at the nonzero anchor or secretly replay zero"
+            );
+            assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        }
+
+        #[test]
+        fn pause_at_nonzero_retires_constrained_pcm_without_fresh_entry() {
+            let (mut state, output, requests) = active_source(20);
+            state.advance_playback_clock(Duration::from_millis(100));
+            assert!(state.current_frame() > 0, "exercise a genuinely nonzero Pause");
+            state.pause().expect("Pause must stop consumption without requiring a fresh Enter");
+            assert_eq!(state.playback_engine.snapshot().state, TransportState::Paused);
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+
+        #[test]
+        fn reached_end_retires_constrained_pcm_before_later_idle_poll() {
+            let (mut state, output, requests) = active_source(5);
+            let outcome = state.advance_playback_clock(Duration::from_secs(1));
+            assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
+            assert_eq!(state.current_frame(), 4);
+            assert_eq!(state.playback_engine.snapshot().state, TransportState::Ended);
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+
+        #[test]
+        fn rejected_device_phase_retires_constrained_pcm_without_reentry() {
+            let (mut state, output, requests) = active_source(20);
+            state.advance_playback_clock(Duration::from_millis(100));
+            assert!(state.current_frame() > 0);
+            let captured_at = state.playback_observation_instant_anchor;
+            {
+                let mut output = output.lock();
+                output.snapshot.captured_at = captured_at;
+                output.snapshot.callback_consumed_frames = 480;
+                output.snapshot.active_callback_consumed_frames = 480;
+                output.snapshot.callback_count = 1;
+                output.snapshot.last_callback_frames = 480;
+                output.snapshot.active_duration = Some(Duration::from_millis(10));
+                output.snapshot.last_callback_age = Some(Duration::ZERO);
+                output.snapshot.last_callback_playback_delay = Some(Duration::ZERO);
+                output.snapshot.last_callback_playback_delay_uncertainty = Some(Duration::ZERO);
+            }
+            let audio = state.audio_playback_snapshot();
+            assert_eq!(audio.media_anchor, Some(audio_anchor(0)));
+            state
+                .observe_audio_output_clock(audio, captured_at)
+                .expect("a rejected initial device phase must retire inadmissible recovery");
+            assert_eq!(state.playback_clock_master(), Some(ClockMaster::Synthetic));
+            assert_eq!(
+                state.playback_engine.snapshot().audio_handoff.map(|handoff| handoff.status),
+                Some(mondrian_playback::AudioClockHandoffStatus::PhaseRejected),
+                "the real Engine must classify the measured phase as rejected"
+            );
+            assert_retired_without_reentry(&mut state, &output, &requests);
+        }
+    }
+
     // Positive notices below are emitted by the actual serial Media render
     // owner. The controlled platform adapter proves software callback state,
     // not hardware/DAC behavior, and exposes no alternate playback authority.

@@ -17,8 +17,9 @@ use crate::{
     CompiledAudioSource, PreparedAudioPlan,
 };
 use mondrian_core::{
-    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSourceComponentId,
-    ExecutionCancellationToken, ProgramOutputId, SequenceId, TimelineTimeRange,
+    AssetId, AudioChannelLayout, AudioComponentEditId, AudioSamplePosition, AudioSampleRate,
+    AudioSourceComponentId, ExecutionCancellationToken, ProgramOutputId, SequenceId,
+    TimelineTimeRange,
 };
 use mondrian_timeline::{sequence::MAX_NESTED_SEQUENCE_RENDER_DEPTH, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1713,6 +1714,18 @@ impl AudioProgramRuntime {
     /// Whether the selected root/child closure owns mutable continuity state.
     pub fn requires_state_entry(&self) -> bool {
         self.session.requires_state_entry()
+    }
+
+    /// Required fresh-entry origin of this actual prepared root Session.
+    /// This is immutable score metadata, never permission to enter or process.
+    pub fn state_entry_origin(&self) -> Result<Option<AudioSamplePosition>, AudioExecutionError> {
+        if !self.session.has_notes() {
+            return Ok(None);
+        }
+        Ok(Some(AudioSamplePosition::new(
+            0,
+            AudioSampleRate::new(self.session.contract().sample_rate)?,
+        )))
     }
 
     #[cfg(test)]

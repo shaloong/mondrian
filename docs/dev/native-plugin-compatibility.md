@@ -84,6 +84,22 @@ This qualifies the finite offline public Runtime path, not App Playback/Export,
 zero-input instruments, arbitrary third-party plugins, realtime performance or
 other platforms. Gate elapsed times are not DSP performance measurements.
 
+App PCM preparation carries the prepared root score's required origin through
+Media's existing continuity model. Explicit fresh entries are checked before
+output deactivation and Source/PCM retirement. Pause, end-of-program and denied
+recovery suspend PCM without admitting Enter, retaining installed Source/control
+ownership and actual callback retirement obligations. A late Preserved Ack cannot
+resume suspended PCM. Author State Entry intent updates and nonzero Continue
+windows retain their semantics; ordinary stateful plans gain no fixed-origin
+restriction. Notes still require entry at zero. Arbitrary seek replay and complete
+App Note Playback/Export qualification remain outside this evidence.
+
+Windows host-model regression: Audio 558, Media 582 and App 2874 ordinary tests
+pass; focused controls are subsets. Final App/Product share freeze `0B79CDF1...`
+(1949 inputs). Audio/Media and strict results retain their unchanged dependency
+scope across App-only test-fixture corrections. This adds no new third-party or
+realtime qualification.
+
 This table describes source capabilities. Each qualification below remains tied
 to its exact source revision, binary hashes, environment and named tests.
 The complete [audio feature matrix](native-audio-standard-features.md) and

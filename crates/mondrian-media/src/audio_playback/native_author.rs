@@ -310,16 +310,22 @@ impl AudioPlayback {
                     }) = self.native_control_hold
                         && self.in_flight == 0
                     {
-                        if let Some(start) = first_unrendered_sample {
-                            self.next_start_sample = start;
-                        }
                         self.native_control_hold = None;
-                        self.render_blocked = false;
-                        // Actual cumulative underruns remain reported. The resumed
-                        // admission starts a new recovery interval without Enter.
-                        if let Some(output) = self.output.snapshot() {
-                            self.underrun_baseline_frames = output.underrun_frames;
-                            self.last_underrun_frames = output.underrun_frames;
+                        if self.generation_render_anchor.is_some() {
+                            if let Some(start) = first_unrendered_sample {
+                                self.next_start_sample = start;
+                            }
+                            self.render_blocked = false;
+                            // Actual cumulative underruns remain reported. The resumed
+                            // admission starts a new recovery interval without Enter.
+                            if let Some(output) = self.output.snapshot() {
+                                self.underrun_baseline_frames = output.underrun_frames;
+                                self.last_underrun_frames = output.underrun_frames;
+                            }
+                        } else {
+                            // The same-child Ack completes its real control, but a
+                            // suspended PCM generation has no continuation to resume.
+                            self.render_blocked = true;
                         }
                     } else if matches!(
                         self.native_control_hold,

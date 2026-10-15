@@ -143,10 +143,13 @@ impl TimelineAudioPcmRenderer {
                 runtime_grant,
             )
             .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
-        let continuity_model = if runtime.requires_state_entry() {
-            AudioPcmContinuityModel::GenerationState
-        } else {
-            AudioPcmContinuityModel::IndependentWindows
+        let continuity_model = match runtime
+            .state_entry_origin()
+            .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?
+        {
+            Some(origin) => AudioPcmContinuityModel::GenerationStateFromOrigin(origin),
+            None if runtime.requires_state_entry() => AudioPcmContinuityModel::GenerationState,
+            None => AudioPcmContinuityModel::IndependentWindows,
         };
         let delivery = AudioProgramDeliveryRuntime::prepare_standard(runtime, channel_layout)
             .map_err(|error| {
@@ -874,6 +877,147 @@ mod tests {
 
     fn test_runtime_grant() -> AudioRuntimeResourceGrant {
         AudioRuntimeResourceGrant::new(64, 512 * 1024 * 1024, 128 * 1024 * 1024)
+    }
+
+    #[test]
+    fn note_pcm_adapter_publishes_its_actual_prepared_origin() {
+        // Owned factory/score control only: no native plugin or PCM processing.
+        struct Model;
+        impl mondrian_audio::AudioProcessorResolver for Model {
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                assert!(request.note_input_requested());
+                Ok(Arc::new(Model))
+            }
+        }
+        impl mondrian_audio::AudioProcessorFactory for Model {
+            fn execution_contract(&self) -> mondrian_audio::AudioProcessorExecutionContract {
+                mondrian_audio::AudioProcessorExecutionContract::stateless()
+            }
+            fn note_input_contract(&self) -> mondrian_audio::AudioProcessorNoteInputContract {
+                mondrian_audio::AudioProcessorNoteInputContract {
+                    ports: vec![mondrian_audio::AudioProcessorNoteInputPort {
+                        port_key: "clap.note-input.0".to_owned(),
+                        native_id: 0,
+                        native_index: 0,
+                    }],
+                    limits: mondrian_audio::AudioNoteExecutionLimits {
+                        input_events: 4,
+                        output_ends: 4,
+                        retained_records: 4,
+                        live_voices: 4,
+                    },
+                }
+            }
+            fn create(
+                &self,
+            ) -> Result<
+                Box<dyn mondrian_audio::AudioProcessor>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                Ok(Box::new(Model))
+            }
+        }
+        impl mondrian_audio::AudioProcessor for Model {
+            fn enter_state(
+                &mut self,
+                _: i64,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                panic!("the origin metadata query must not enter DSP")
+            }
+
+            fn process(
+                &mut self,
+                _: mondrian_audio::AudioProcessorProcessContext,
+                _: &mut dyn mondrian_audio::AudioProcessorAudioIo,
+                _: mondrian_audio::AudioParameterEventBatch<'_>,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                panic!("the origin metadata query must not process PCM")
+            }
+        }
+        use mondrian_core::{
+            AudioNoteId, AudioNoteLaneId, AudioProcessorInstanceId, AuthoringList,
+        };
+        use mondrian_timeline::audio::{
+            AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef,
+            AudioProcessorInstance,
+        };
+        let mut sequence = Sequence::new("actual prepared origin");
+        let track = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance {
+            id: AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "test.owned.origin".to_owned(),
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        let processor_id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track,
+                processor_id,
+                input_port_key: "clap.note-input.0".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::ZERO,
+                end: TimelineTime::new(1, 48_000).unwrap(),
+                channel: 0,
+                key: 60,
+                on_velocity: 1.0,
+                off_velocity: 0.0,
+            }]),
+        });
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-origin-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let renderer = TimelineAudioPcmRenderer::new_with_processor_resolver(
+            sequence,
+            Vec::new(),
+            AssetLibrary::open(root.clone()).unwrap(),
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+            AudioAuditionOverlay::default(),
+            48_000,
+            AudioChannelLayout::Stereo,
+            7,
+            &Model,
+        )
+        .unwrap();
+        assert_eq!(
+            renderer.continuity_model(),
+            AudioPcmContinuityModel::GenerationStateFromOrigin(AudioSamplePosition::new(
+                0,
+                mondrian_core::AudioSampleRate::new(48_000).unwrap()
+            ))
+        );
+        assert_eq!(
+            renderer.state.lock().delivery.program_render_contract().max_block_frames,
+            7
+        );
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
