@@ -179,6 +179,16 @@ original five initial-value controls pass alongside unchanged ordinary Audio558.
 This is same-object observation, not Product-front-door or DSP qualification;
 the original failed PCM gate remains unresolved.
 
+The follow-up paired-source diagnostic (`4332926C...`, source `7B2F332E...`)
+preserves ten ordered Value callbacks whose admitted IDs and exact value bits
+match both the complete feedback queue and the controller in every phase.
+Unknown IDs and stale values are therefore excluded for this captured default
+state only. Three handler controls and an additional SDK pairing control cover
+capacity, overflow, reentrancy and stale/unknown observations without consuming
+either source. These observations do not authorize initialization retirement:
+the pending controller-to-DSP delivery and first-block author-value priority
+still require an explicit lifecycle contract.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in

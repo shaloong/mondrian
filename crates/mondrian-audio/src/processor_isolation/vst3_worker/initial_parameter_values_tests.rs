@@ -2,7 +2,7 @@
 use super::super::protocol::SharedParameterEvent;
 use super::*;
 
-fn state(gain: f64, mode: u32) -> Vec<u8> {
+pub(super) fn state(gain: f64, mode: u32) -> Vec<u8> {
     let mut native = Vec::from(&b"MIV1"[..]);
     native.extend_from_slice(&1_u32.to_le_bytes());
     native.extend_from_slice(&gain.to_le_bytes());

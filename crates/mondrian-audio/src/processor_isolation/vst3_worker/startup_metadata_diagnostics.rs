@@ -44,6 +44,120 @@ struct Source {
     closed_empty: bool,
 }
 
+impl From<vst3_host::plugin::NativeEditorEventSourceStatus> for Source {
+    fn from(s: vst3_host::plugin::NativeEditorEventSourceStatus) -> Self {
+        Self {
+            revision: s.revision(),
+            pending_events: s.pending_events(),
+            pending_dsp_feedback_values: s.pending_dsp_feedback_values(),
+            open_parameter_edits: s.open_parameter_edits(),
+            group_depth: s.group_depth(),
+            failure: s.failure().map(|error| format!("{error:?}")),
+            closed_empty: s.closed_empty(),
+        }
+    }
+}
+
+#[derive(Serialize, PartialEq, Eq)]
+struct Callback {
+    kind: &'static str,
+    id: Option<u32>,
+    value_bits: Option<u64>,
+    dirty: Option<bool>,
+    parameter_admitted: Option<bool>,
+    value_matches_current_controller: Option<bool>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct Feedback {
+    id: u32,
+    value_bits: u64,
+}
+
+/// A caller-owned report copy, never a native queue or an acknowledgement.
+#[derive(Serialize, PartialEq, Eq)]
+struct SourceObservation {
+    status: Result<Source, String>,
+    events: Vec<Callback>,
+    feedback: Vec<Feedback>,
+    feedback_matches_value_suffix: bool,
+    all_values_have_feedback: bool,
+}
+
+impl SourceObservation {
+    fn read(plugin: &Plugin, admitted: &[Vst3ParameterDescriptor]) -> Self {
+        use vst3_host::plugin::{NativeEditorEvent as Event, ParameterEditKind as Kind};
+        let maximum = crate::NATIVE_AUDIO_AUTHOR_EVENTS;
+        let mut events = Vec::with_capacity(maximum);
+        let mut feedback = Vec::with_capacity(maximum);
+        let status = plugin
+            .observe_editor_source_bounded(maximum, &mut events, &mut feedback)
+            .map(Source::from)
+            .map_err(|error| error.to_string());
+        // The native locks have been released before projection/allocation.
+        let events = events
+            .into_iter()
+            .map(|event| {
+                let (kind, id, value_bits, dirty) = match event {
+                    Event::Parameter(edit) => (
+                        match edit.kind {
+                            Kind::BeginGesture => "begin",
+                            Kind::ValueChange => "value",
+                            Kind::EndGesture => "end",
+                        },
+                        Some(edit.id),
+                        edit.value.map(f64::to_bits),
+                        None,
+                    ),
+                    Event::DirtyChanged(value) => ("dirty", None, None, Some(value)),
+                    Event::GroupEditStarted => ("group_begin", None, None, None),
+                    Event::GroupEditFinished => ("group_end", None, None, None),
+                };
+                Callback {
+                    kind,
+                    id,
+                    value_bits,
+                    dirty,
+                    parameter_admitted: id.map(|id| admitted.iter().any(|p| p.id == id)),
+                    value_matches_current_controller: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let feedback = feedback
+            .into_iter()
+            .map(|(id, value)| Feedback { id, value_bits: value.to_bits() })
+            .collect::<Vec<_>>();
+        let values = events.iter().filter(|event| event.kind == "value");
+        let count = values.clone().count();
+        let paired = status.is_ok()
+            && count >= feedback.len()
+            && values.skip(count.saturating_sub(feedback.len())).zip(&feedback).all(
+                |(event, feedback)| {
+                    event.id == Some(feedback.id) && event.value_bits == Some(feedback.value_bits)
+                },
+            );
+        let all_values_have_feedback = paired && count == feedback.len();
+        Self {
+            status,
+            events,
+            feedback,
+            feedback_matches_value_suffix: paired,
+            all_values_have_feedback,
+        }
+    }
+
+    fn compare_controller(&mut self, parameters: &[Parameter]) {
+        for event in &mut self.events {
+            event.value_matches_current_controller = event.value_bits.and_then(|bits| {
+                parameters
+                    .iter()
+                    .find(|p| Some(p.id) == event.id)
+                    .map(|p| p.normalized_bits == bits)
+            });
+        }
+    }
+}
+
 impl Boundary {
     fn read(plugin: &Plugin) -> Self {
         Self {
@@ -56,15 +170,7 @@ impl Boundary {
             }),
             source: plugin
                 .editor_event_source_status()
-                .map(|s| Source {
-                    revision: s.revision(),
-                    pending_events: s.pending_events(),
-                    pending_dsp_feedback_values: s.pending_dsp_feedback_values(),
-                    open_parameter_edits: s.open_parameter_edits(),
-                    group_depth: s.group_depth(),
-                    failure: s.failure().map(|error| format!("{error:?}")),
-                    closed_empty: s.closed_empty(),
-                })
+                .map(Source::from)
                 .map_err(|error| error.to_string()),
         }
     }
@@ -93,6 +199,8 @@ struct Phase {
     phase: &'static str,
     before: Boundary,
     after: Boundary,
+    source_before: SourceObservation,
+    source_after: SourceObservation,
     admitted_parameter_count: usize,
     observed_parameter_count: Option<usize>,
     parameters: Vec<Parameter>,
@@ -105,6 +213,7 @@ struct Phase {
 impl Phase {
     fn read(phase: &'static str, plugin: &Plugin, admitted: &[Vst3ParameterDescriptor]) -> Self {
         let before = Boundary::read(plugin);
+        let mut source_before = SourceObservation::read(plugin, admitted);
         let mut parameters = Vec::with_capacity(admitted.len().min(MAX_PARAMETERS));
         let query = if admitted.len() > MAX_PARAMETERS {
             Err(vst3_host::Error::InvalidParameter(
@@ -141,7 +250,10 @@ impl Phase {
                 },
             )
         };
+        let mut source_after = SourceObservation::read(plugin, admitted);
         let after = Boundary::read(plugin);
+        source_before.compare_controller(&parameters);
+        source_after.compare_controller(&parameters);
         let complete = matches!(&query, Ok(count) if *count == admitted.len())
             && before.object_serial.is_some()
             && before.object_serial == after.object_serial
@@ -149,6 +261,10 @@ impl Phase {
             && before.cohort == after.cohort
             && before.source.is_ok()
             && before.source == after.source
+            && source_before.status.is_ok()
+            && source_before.status == before.source
+            && source_after.status == after.source
+            && source_before == source_after
             && parameters.iter().all(|p| {
                 p.normalized_in_range && f64::from_bits(p.default_normalized_bits).is_finite()
             });
@@ -156,6 +272,8 @@ impl Phase {
             phase,
             before,
             after,
+            source_before,
+            source_after,
             admitted_parameter_count: admitted.len(),
             observed_parameter_count: query.as_ref().ok().copied(),
             parameters,
@@ -573,4 +691,144 @@ fn native_startup_metadata_nonconsuming_sdk_controls() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+#[ignore = "owned initial-values SDK fixture and native Job required"]
+fn native_startup_source_pairing_sdk_controls() {
+    use super::initial_parameter_values_tests::{audit, prepare, state};
+    use vst3_host::plugin::NativeEditorEvent;
+    let mut worker = prepare(0.375, 9);
+    let before = audit(&worker); // Arms the existing real getParamNormalized callback.
+    let phase = Phase::read(
+        "source_reentrant",
+        worker.plugin.as_ref().unwrap(),
+        &worker.payload.parameters,
+    );
+    assert!(!phase.complete);
+    assert!(phase.source_before.events.is_empty());
+    assert_eq!(
+        phase.source_after.events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        ["begin", "value", "end"]
+    );
+    assert!(phase.source_after.feedback_matches_value_suffix);
+    assert!(phase.source_after.all_values_have_feedback);
+    assert_eq!(phase.source_after.feedback[0].id, 0);
+    assert_eq!(
+        phase.source_after.feedback[0].value_bits,
+        0.875_f64.to_bits()
+    );
+    assert_eq!(
+        phase.source_after.events[1].value_matches_current_controller,
+        Some(false)
+    );
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.setters, before.setters);
+
+    // Setup changes the real controller read mode without draining its existing
+    // callbacks. The observation itself neither restores nor invokes a setter.
+    worker.plugin.as_mut().unwrap().load_state(&state(0.375, 1)).unwrap();
+    let before = audit(&worker);
+    let plugin = worker.plugin.as_ref().unwrap();
+    let cohort = plugin.pending_restart_cohort();
+    let source = plugin.editor_event_source_status().unwrap();
+    let stable = Phase::read("source_stale_value", plugin, &worker.payload.parameters);
+    assert!(
+        stable.complete,
+        "stable complete reading does not authorize stale values"
+    );
+    assert!(stable.source_after.feedback_matches_value_suffix);
+    assert!(stable.source_after.all_values_have_feedback);
+    assert_eq!(stable.source_after.events.len(), 3);
+    assert!(stable
+        .source_after
+        .events
+        .iter()
+        .all(|event| event.parameter_admitted == Some(true)));
+    assert_eq!(
+        stable.source_after.events[1].value_matches_current_controller,
+        Some(false)
+    );
+
+    let mut unknown = worker.payload.parameters.clone();
+    unknown[0].id = 99;
+    let unknown = Phase::read("source_unknown_id", plugin, &unknown);
+    assert!(
+        unknown.complete,
+        "unknown IDs are retained observation facts"
+    );
+    assert!(unknown
+        .source_after
+        .events
+        .iter()
+        .all(|event| event.parameter_admitted == Some(false)));
+    assert_eq!(unknown.source_after.feedback, stable.source_after.feedback);
+
+    // A failed public observation cannot replace even a sentinel output prefix.
+    let mut events = Vec::with_capacity(3);
+    events.push(NativeEditorEvent::DirtyChanged(false));
+    let mut feedback = Vec::with_capacity(1);
+    feedback.push((99, -0.0));
+    assert!(plugin.observe_editor_source_bounded(2, &mut events, &mut feedback).is_err());
+    assert_eq!(events, [NativeEditorEvent::DirtyChanged(false)]);
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].0, 99);
+    assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(plugin.editor_event_source_status().unwrap(), source);
+    assert_eq!(plugin.pending_restart_cohort(), cohort);
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.setters, before.setters);
+    assert_eq!(after.wrong_thread, 0);
+
+    // Same original callback/feedback now matches an actual changed controller;
+    // matching still cannot consume it or grant startup/installed author entry.
+    worker.plugin.as_mut().unwrap().load_state(&state(0.875, 1)).unwrap();
+    let before = audit(&worker);
+    let plugin = worker.plugin.as_ref().unwrap();
+    let source = plugin.editor_event_source_status().unwrap();
+    let cohort = plugin.pending_restart_cohort();
+    let matching = Phase::read("source_matching_value", plugin, &worker.payload.parameters);
+    assert!(matching.complete);
+    assert_eq!(
+        matching.source_after.events[1].value_matches_current_controller,
+        Some(true)
+    );
+    assert_eq!(matching.source_after.feedback, stable.source_after.feedback);
+    assert_eq!(plugin.editor_event_source_status().unwrap(), source);
+    assert_eq!(plugin.pending_restart_cohort(), cohort);
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.setters, before.setters);
+    assert_eq!(after.wrong_thread, 0);
+    // Move ownership, not a shared controller reference. The public observer
+    // must refuse before reaching native code on the other host thread.
+    let plugin = worker.plugin.take().unwrap();
+    let (plugin, refused, events, feedback) = std::thread::spawn(move || {
+        let mut events = Vec::with_capacity(3);
+        events.push(NativeEditorEvent::DirtyChanged(false));
+        let mut feedback = Vec::with_capacity(1);
+        feedback.push((99, -0.0));
+        let refused = plugin.observe_editor_source_bounded(3, &mut events, &mut feedback).is_err();
+        (plugin, refused, events, feedback)
+    })
+    .join()
+    .expect("observation thread returned native ownership");
+    worker.plugin = Some(plugin);
+    assert!(refused);
+    assert_eq!(events, [NativeEditorEvent::DirtyChanged(false)]);
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].0, 99);
+    assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
+    let plugin = worker.plugin.as_ref().unwrap();
+    assert_eq!(plugin.editor_event_source_status().unwrap(), source);
+    assert_eq!(plugin.pending_restart_cohort(), cohort);
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.setters, before.setters);
+    assert_eq!(after.wrong_thread, 0);
+    assert!(worker.initial_signal_available);
+    assert_eq!(worker.last_end, None);
+    assert!(worker.last_parameter_values.iter().all(Option::is_none));
 }

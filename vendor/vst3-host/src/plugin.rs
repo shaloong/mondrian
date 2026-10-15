@@ -1363,6 +1363,16 @@ pub(crate) trait PluginInternal: Send {
             "native editor source status is unsupported by this adapter".to_string(),
         ))
     }
+    fn observe_editor_source_bounded(
+        &self,
+        _maximum: usize,
+        _events: &mut Vec<NativeEditorEvent>,
+        _feedback: &mut Vec<(u32, f64)>,
+    ) -> Result<NativeEditorEventSourceStatus> {
+        Err(Error::Other(
+            "native editor source observation is unsupported by this adapter".to_string(),
+        ))
+    }
     /// Observe exact post-capture source facts. Only newly emitted dirty=false
     /// notices may accompany a coherent getState; values, dirty=true or any
     /// edit/group boundary require a fresh coherent capture.
@@ -2749,6 +2759,26 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .editor_event_source_status()
+    }
+
+    /// Copy one complete source and its pending controller-to-DSP feedback on
+    /// the initializing control thread, under the producer's same two locks.
+    /// Both destinations must already have capacity for the complete result;
+    /// `maximum` cannot exceed the native source's fixed bound. On error both
+    /// destinations remain unchanged. Sticky source failure is an error, never
+    /// a successful truncated prefix; status remains independently observable.
+    /// No controller call, setter, DSP, drain or restart service is performed.
+    /// These copies are observations and confer no author/lifecycle authority.
+    pub fn observe_editor_source_bounded(
+        &self,
+        maximum: usize,
+        events: &mut Vec<NativeEditorEvent>,
+        feedback: &mut Vec<(u32, f64)>,
+    ) -> Result<NativeEditorEventSourceStatus> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .observe_editor_source_bounded(maximum, events, feedback)
     }
 
     /// Non-consuming post-getState coherence from the same ordered source.

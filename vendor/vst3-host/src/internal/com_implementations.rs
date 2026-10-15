@@ -2191,6 +2191,52 @@ impl ComponentHandler {
         status
     }
 
+    pub(crate) fn observe_editor_source_bounded(
+        &self,
+        maximum: usize,
+        output_events: &mut Vec<crate::plugin::NativeEditorEvent>,
+        output_feedback: &mut Vec<(u32, f64)>,
+    ) -> crate::Result<crate::plugin::NativeEditorEventSourceStatus> {
+        if thread::current().id() != self.control_thread || maximum > MAX_EDITOR_FEEDBACK {
+            return Err(crate::Error::InvalidParameter(
+                "native source observation thread or bound is invalid".to_owned(),
+            ));
+        }
+        // Only static errors cross this scope: allocation/formatting and all
+        // native calls stay outside the two producer locks. Existing events
+        // contain only inline scalars; cloning them must remain allocation-free.
+        let observed = (|| -> Result<_, &'static str> {
+            let events = self
+                .editor_events
+                .lock()
+                .map_err(|_| "native source lock poisoned")?;
+            let feedback = self
+                .parameter_changes
+                .lock()
+                .map_err(|_| "native feedback lock poisoned")?;
+            if events.failure.is_some() {
+                return Err("native source is incomplete");
+            }
+            if events.events.len() > maximum || feedback.len() > maximum {
+                return Err("native source exceeds observation bound");
+            }
+            if output_events.capacity() < events.events.len()
+                || output_feedback.capacity() < feedback.len()
+            {
+                return Err("native source observation destinations are too small");
+            }
+            let mut status = events.status();
+            status.pending_dsp_feedback_values = feedback.len();
+            // Every fallible check precedes these complete, preallocated copies.
+            output_events.clear();
+            output_events.extend_from_slice(&events.events);
+            output_feedback.clear();
+            output_feedback.extend_from_slice(&feedback);
+            Ok(status)
+        })();
+        observed.map_err(|reason| crate::Error::Other(reason.to_owned()))
+    }
+
     /// The exact appended source suffix during bounded main getState.
     /// Clearing the native dirty flag may be part of save-state capture;
     /// any value/author boundary/dirty=true mutation remains a typed retry.
@@ -5219,6 +5265,131 @@ mod native_author_boundary_old_api_tests {
                 "an unmatched native group End cannot silently report a complete author source"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod native_source_observation_contracts {
+    use super::*;
+    use crate::plugin::{NativeEditorEvent, ParameterEdit, ParameterEditKind};
+
+    #[test]
+    fn source_observation_copies_complete_order_and_float_bits_without_consumption() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.startGroupEdit(), kResultOk);
+            assert_eq!(handler.beginEdit(3), kResultOk);
+            assert_eq!(handler.performEdit(3, -0.0), kResultOk);
+            assert_eq!(handler.setDirty(1), kResultOk);
+            assert_eq!(handler.performEdit(7, 0.75), kResultOk);
+            assert_eq!(handler.endEdit(3), kResultOk);
+            assert_eq!(handler.finishGroupEdit(), kResultOk);
+            assert_eq!(handler.restartComponent(20), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        let cohort = handler.pending_restart_cohort();
+        let mut events = Vec::with_capacity(MAX_EDITOR_FEEDBACK);
+        let mut feedback = Vec::with_capacity(MAX_EDITOR_FEEDBACK);
+        for _ in 0..2 {
+            assert_eq!(
+                handler
+                    .observe_editor_source_bounded(MAX_EDITOR_FEEDBACK, &mut events, &mut feedback)
+                    .unwrap(),
+                before
+            );
+            assert_eq!(events.len(), 7);
+            assert_eq!(feedback.len(), 2);
+            assert_eq!(feedback[0].0, 3);
+            assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(feedback[1], (7, 0.75));
+            assert!(matches!(&events[0], NativeEditorEvent::GroupEditStarted));
+            assert!(matches!(
+                &events[1],
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 3,
+                    kind: ParameterEditKind::BeginGesture,
+                    value: None
+                })
+            ));
+            assert!(
+                matches!(&events[2], NativeEditorEvent::Parameter(ParameterEdit { id: 3, kind: ParameterEditKind::ValueChange, value: Some(value) }) if value.to_bits() == (-0.0_f64).to_bits())
+            );
+            assert!(matches!(&events[3], NativeEditorEvent::DirtyChanged(true)));
+            assert!(matches!(
+                &events[4],
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 7,
+                    kind: ParameterEditKind::ValueChange,
+                    value: Some(0.75)
+                })
+            ));
+            assert!(matches!(
+                &events[5],
+                NativeEditorEvent::Parameter(ParameterEdit {
+                    id: 3,
+                    kind: ParameterEditKind::EndGesture,
+                    value: None
+                })
+            ));
+            assert!(matches!(&events[6], NativeEditorEvent::GroupEditFinished));
+            assert_eq!(handler.editor_event_source_status(), before);
+            assert_eq!(handler.pending_restart_cohort(), cohort);
+        }
+    }
+
+    #[test]
+    fn source_observation_refuses_small_destinations_and_bounds_without_partial_output() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.performEdit(3, 0.25), kResultOk);
+            assert_eq!(handler.performEdit(7, 0.75), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        for (maximum, event_capacity, feedback_capacity) in [
+            (MAX_EDITOR_FEEDBACK + 1, 2, 2),
+            (1, 2, 2),
+            (2, 1, 2),
+            (2, 2, 1),
+        ] {
+            let mut events = Vec::with_capacity(event_capacity);
+            events.push(NativeEditorEvent::DirtyChanged(false));
+            let mut feedback = Vec::with_capacity(feedback_capacity);
+            feedback.push((99, -0.0));
+            assert!(handler
+                .observe_editor_source_bounded(maximum, &mut events, &mut feedback)
+                .is_err());
+            assert_eq!(events, [NativeEditorEvent::DirtyChanged(false)]);
+            assert_eq!(feedback.len(), 1);
+            assert_eq!(feedback[0].0, 99);
+            assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
+            assert_eq!(handler.editor_event_source_status(), before);
+        }
+    }
+
+    #[test]
+    fn source_observation_refuses_sticky_overflow_without_consuming_retained_prefix() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        for _ in 0..MAX_EDITOR_FEEDBACK {
+            assert_eq!(unsafe { handler.performEdit(3, 0.25) }, kResultOk);
+        }
+        assert_eq!(unsafe { handler.performEdit(3, 0.5) }, kResultFalse);
+        let before = handler.editor_event_source_status();
+        assert_eq!(
+            before.failure(),
+            Some(crate::plugin::NativeEditorEventFailure::Overflow)
+        );
+        let mut events = Vec::with_capacity(MAX_EDITOR_FEEDBACK);
+        events.push(NativeEditorEvent::DirtyChanged(false));
+        let mut feedback = Vec::with_capacity(MAX_EDITOR_FEEDBACK);
+        feedback.push((99, -0.0));
+        assert!(handler
+            .observe_editor_source_bounded(MAX_EDITOR_FEEDBACK, &mut events, &mut feedback)
+            .is_err());
+        assert_eq!(events, [NativeEditorEvent::DirtyChanged(false)]);
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].0, 99);
+        assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(handler.editor_event_source_status(), before);
     }
 }
 

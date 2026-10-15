@@ -3182,6 +3182,19 @@ impl PluginInternal for PluginImpl {
         Ok(handler.editor_event_source_status())
     }
 
+    fn observe_editor_source_bounded(
+        &self,
+        maximum: usize,
+        events: &mut Vec<crate::plugin::NativeEditorEvent>,
+        feedback: &mut Vec<(u32, f64)>,
+    ) -> Result<crate::plugin::NativeEditorEventSourceStatus> {
+        self.ensure_control_thread("bounded native editor source observation")?;
+        self.component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".to_owned()))?
+            .observe_editor_source_bounded(maximum, events, feedback)
+    }
+
     fn take_editor_events(&mut self) -> Result<crate::plugin::NativeEditorEventDrain> {
         self.ensure_control_thread("native editor event drain")?;
         self.service_control_thread_caches();
