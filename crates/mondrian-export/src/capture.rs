@@ -971,6 +971,205 @@ mod tests {
         .expect("test TimelineTime")
     }
 
+    fn sequence_with_note_extent(end: TimelineTime) -> Sequence {
+        use mondrian_timeline::{
+            AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef,
+            AudioProcessorInstance,
+        };
+        let mut sequence = Sequence::new("Note extent, no native execution");
+        let track_id = sequence.audio_tracks[0].id;
+        let processor_id = mondrian_core::AudioProcessorInstanceId::new();
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance {
+                id: processor_id,
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "test.mondrian.unavailable-extent-author".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: true,
+                parameters: Default::default(),
+                opaque_state: None,
+            });
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: mondrian_core::AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "notes.0".to_owned(),
+            },
+            notes: mondrian_core::AuthoringList::from(vec![AudioNote {
+                id: mondrian_core::AudioNoteId::new(),
+                start: TimelineTime::ZERO,
+                end,
+                channel: 0,
+                key: 60,
+                on_velocity: 0.5,
+                off_velocity: 0.0,
+            }]),
+        });
+        sequence
+    }
+
+    #[test]
+    fn note_authored_export_range_preserves_exclusive_end_and_explicit_overrides() {
+        for (rate, end, frames) in [
+            (Rational::FPS_25, TimelineTime::new(1, 100).unwrap(), 1),
+            (Rational::FPS_25, TimelineTime::new(41, 1000).unwrap(), 2),
+            (Rational::FPS_25, TimelineTime::new(2, 25).unwrap(), 2),
+            (
+                Rational::FPS_2997,
+                TimelineTime::new(2003, 30000).unwrap(),
+                3,
+            ),
+        ] {
+            let mut sequence = sequence_with_note_extent(end);
+            sequence.settings.frame_rate = rate;
+            let entire = TimelineExportRange::EntireSequence.resolve(&sequence).unwrap();
+            assert_eq!((entire.start_frame, entire.total_frames), (0, frames));
+            let capture = prepare_timeline_export_dependencies(
+                &sequence,
+                &[],
+                TimelineExportRange::EntireSequence,
+                false,
+            )
+            .expect("capture Note-only author's visual canvas range");
+            assert_eq!(capture.execution_snapshot().visual().range(), entire);
+            assert!(capture.media_components().is_empty());
+            assert_eq!(
+                TimelineExportRange::SequenceInOut.resolve(&sequence).unwrap(),
+                entire
+            );
+            sequence.mark_in(tt(4, sequence.time_base()));
+            sequence.mark_out(tt(8, sequence.time_base()));
+            let marked = TimelineExportRange::SequenceInOut.resolve(&sequence).unwrap();
+            assert_eq!((marked.start_frame, marked.total_frames), (4, 5));
+            let work = TimelineExportRange::WorkArea { start_frame: 20, end_frame_exclusive: 24 }
+                .resolve(&sequence)
+                .unwrap();
+            assert_eq!((work.start_frame, work.total_frames), (20, 4));
+            assert_eq!(
+                TimelineExportRange::EntireSequence.resolve(&sequence).unwrap(),
+                entire
+            );
+        }
+        let empty = Sequence::new("empty");
+        assert_eq!(
+            TimelineExportRange::EntireSequence.resolve(&empty).unwrap().total_frames,
+            1
+        );
+        let huge = sequence_with_note_extent(TimelineTime::new(i64::MAX, 1).unwrap());
+        assert!(matches!(
+            TimelineExportRange::EntireSequence.resolve(&huge),
+            Err(crate::preset::TimelineExportRangeError::Time(
+                mondrian_core::TimelineTimeError::Overflow
+            ))
+        ));
+    }
+
+    #[test]
+    fn nested_note_extent_admits_canvas_handles_without_inventing_picture_content() {
+        for with_short_video in [true, false] {
+            let mut child = sequence_with_note_extent(tt(30, Rational::new(1, 25)));
+            let time_base = child.time_base();
+            let short_asset = AssetId::new();
+            if with_short_video {
+                child.video_tracks[0]
+                    .add_clip(
+                        Clip::new(short_asset, tt(0, time_base), tt(4, time_base))
+                            .expect("short video"),
+                    )
+                    .expect("placement");
+            }
+            let mut root = Sequence::new("Transition over a child canvas tail");
+            let left =
+                Clip::new_nested_sequence(child.id, tt(0, time_base), tt(10, time_base), None)
+                    .unwrap();
+            let mut right =
+                Clip::new_nested_sequence(child.id, tt(10, time_base), tt(10, time_base), None)
+                    .unwrap();
+            right.set_source_origin(tt(10, time_base)).unwrap();
+            root.video_transitions.push(VideoTransition::cross_dissolve(
+                left.id,
+                right.id,
+                TimelineTimeRange::new(tt(8, time_base), tt(4, time_base)).unwrap(),
+            ));
+            root.video_tracks[0].add_clip(left).unwrap();
+            root.video_tracks[0].add_clip(right).unwrap();
+            let range = TimelineExportRange::WorkArea { start_frame: 9, end_frame_exclusive: 10 };
+            let selected = prepare_timeline_export_dependencies(
+                &root,
+                std::slice::from_ref(&child),
+                range,
+                false,
+            )
+            .expect("select child canvas and Transition");
+            assert!(selected.sequence_ids().contains(&child.id));
+            assert!(
+                selected.media_components().is_empty(),
+                "short video is outside the actual selected visual range"
+            );
+            let visual = selected.execution_snapshot().visual();
+            assert!(visual.media_asset_ids().is_empty());
+            let program = visual.closure.program(child.id).expect("selected child program");
+            let (early, _) = program
+                .schedule()
+                .flat_visual_items_at_with_diagnostics(tt(2, time_base))
+                .unwrap();
+            assert_eq!(early.len(), usize::from(with_short_video));
+            let (tail, _) = program
+                .schedule()
+                .flat_visual_items_at_with_diagnostics(tt(9, time_base))
+                .unwrap();
+            assert!(
+                tail.is_empty(),
+                "Note extent extends the canvas; it creates no visual Clip"
+            );
+            validate_timeline_export_execution_snapshot(
+                &root,
+                std::slice::from_ref(&child),
+                &mondrian_core::ProjectColorEnvironment::default(),
+                range,
+                false,
+                selected.execution_snapshot(),
+                &HashMap::new(),
+            )
+            .expect("authored canvas provides finite Transition handles");
+            // A shorter author extent cannot borrow the plugin's tail or the
+            // parent's placement duration as extra child handles.
+            child.audio_program.note_lanes[0].notes[0].end = tt(10, time_base);
+            let short = prepare_timeline_export_dependencies(
+                &root,
+                std::slice::from_ref(&child),
+                range,
+                false,
+            )
+            .expect("prepare shorter child author snapshot");
+            assert!(matches!(
+                validate_timeline_export_execution_snapshot(
+                    &root,
+                    std::slice::from_ref(&child),
+                    &mondrian_core::ProjectColorEnvironment::default(),
+                    range,
+                    false,
+                    short.execution_snapshot(),
+                    &HashMap::new()
+                ),
+                Err(TimelineExportDependencyError::TransitionSourceHandles(
+                    VideoTransitionSourceHandleValidationError::InsufficientSourceHandles { .. }
+                ))
+            ));
+        }
+    }
+
     #[test]
     fn selected_range_excludes_hidden_and_off_range_visual_assets() {
         let mut sequence = Sequence::new("selected visual dependencies");

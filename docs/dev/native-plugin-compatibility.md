@@ -100,6 +100,32 @@ pass; focused controls are subsets. Final App/Product share freeze `0B79CDF1...`
 scope across App-only test-fixture corrections. This adds no new third-party or
 realtime qualification.
 
+### Authored content extent and frame ranges, 2026-10-16
+
+`Sequence::total_duration` now takes the maximum end of every Clip and authored
+Note, including unordered lanes and legal overlapping Clip placements. Mute,
+bypass, plugin availability and tail do not redefine authored duration. App and
+Preview share the checked last-occupied-frame projection, `ceil(end)-1`, clamped
+to zero. Export retains its exclusive-end ceiling and explicit Out/WorkArea
+rules. No project field, cache, playback clock or second duration authority is
+introduced. Nested Export controls qualify selected visual ranges and finite
+Transition handles; they do not claim rendered transparent pixels or audio DSP.
+
+On source `416EACDE...` (1959 inputs), all 4742 ordinary tests across Core,
+Timeline, Audio, Editor State, Project, App and Export pass, including six new
+controls. The fresh normal Product `11D54CCD...` and Audio test executable share
+that full source. Three existing public Note native tests also pass; the
+zero-input case retains six fresh 14-frame Runtime oracles at 44.1/48 kHz across
+three partitions, no media resolution/window, actual Source handoffs and owned
+process exit. These use the original explicit unbounded root grant. They do
+not qualify physical allocation bounds, App terminal Note Off/device consumption,
+third-party instruments, realtime performance or other platforms. Evidence is
+under `note-content-extent-ordinary-r1/` and `note-content-extent-native-r1/` in
+the existing validation directory; this is not a fresh full-workspace result.
+Core Strict passes on that source. App/Export Strict passes on `F1620A35...`,
+whose only additional source change is an equivalent alignment predicate in
+the existing OFX close observer; the executable evidence above remains `416EACDE...`.
+
 This table describes source capabilities. Each qualification below remains tied
 to its exact source revision, binary hashes, environment and named tests.
 The complete [audio feature matrix](native-audio-standard-features.md) and

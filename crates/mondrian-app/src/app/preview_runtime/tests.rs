@@ -68,6 +68,103 @@ fn register_test_window_preview_output(
 }
 
 #[test]
+fn app_and_preview_share_authored_note_last_occupied_frame() {
+    use mondrian_core::{
+        AudioNoteId, AudioNoteLaneId, AudioProcessorInstanceId, AuthoringList, TimelineTime,
+    };
+    use mondrian_timeline::{
+        AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef,
+        AudioProcessorInstance,
+    };
+    ensure_test_ocio_loaded();
+    let mut state = AppState::new();
+    assert_eq!(state.last_content_frame().unwrap(), 0);
+    for (rate, end, expected) in [
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(1, 100).unwrap(),
+            0,
+        ),
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(41, 1000).unwrap(),
+            1,
+        ),
+        (
+            mondrian_core::Rational::FPS_25,
+            TimelineTime::new(2, 25).unwrap(),
+            1,
+        ),
+        (
+            mondrian_core::Rational::FPS_2997,
+            TimelineTime::new(2003, 30000).unwrap(),
+            2,
+        ),
+    ] {
+        let mut sequence = Sequence::new("Note author frame projection");
+        sequence.settings.frame_rate = rate;
+        let track_id = sequence.audio_tracks[0].id;
+        let processor_id = AudioProcessorInstanceId::new();
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .expect("channel")
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance {
+                id: processor_id,
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "test.mondrian.unavailable-extent-author".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                bypassed: true,
+                parameters: Default::default(),
+                opaque_state: None,
+            });
+        sequence.audio_tracks[0].is_muted = true;
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id,
+                input_port_key: "notes.0".to_owned(),
+            },
+            notes: AuthoringList::from(vec![AudioNote {
+                id: AudioNoteId::new(),
+                start: TimelineTime::ZERO,
+                end,
+                channel: 0,
+                key: 60,
+                on_velocity: 0.5,
+                off_velocity: 0.0,
+            }]),
+        });
+        // Explicit export marks do not replace the author's content extent.
+        sequence.mark_out(TimelineTime::new(100, 1).unwrap());
+        state.test_set_sequence(Some(sequence));
+        assert_eq!(state.last_content_frame().unwrap(), expected);
+        let snapshot = state.preview_execution_snapshot(Instant::now());
+        assert_eq!(
+            snapshot.authoring().expect("open author").last_content_frame(),
+            Some(expected)
+        );
+    }
+    // Error projection is still fallible: Preview does not silently saturate.
+    let sequence = state.active_sequence_mut_uncommitted().expect("author");
+    sequence.audio_program.note_lanes[0].notes[0].end = TimelineTime::new(i64::MAX, 1).unwrap();
+    assert!(state.last_content_frame().is_err());
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(
+        snapshot.authoring().expect("open author").last_content_frame(),
+        None
+    );
+}
+
+#[test]
 fn visual_result_drain_limit_requires_follow_up_without_a_new_notification() {
     assert!(!visual_execution_drain_needs_follow_up(
         MEDIA_PREVIEW_MAX_COMPLETED_RESULTS_PER_POLL - 1

@@ -16,13 +16,6 @@ fn sequence_time_from_frame(
     ))?)
 }
 
-fn sequence_frame_from_time(
-    time: TimelineTime,
-    frame_rate: Rational,
-) -> mondrian_core::Result<i64> {
-    Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
-}
-
 /// Estimate the Clip's total source extent on the Sequence evaluation grid
 /// from its Asset probe evidence, when the library can prove one.
 fn estimate_asset_total_source_frames(
@@ -1428,8 +1421,7 @@ impl AppState {
             return Ok(0);
         };
 
-        let end = seq.total_duration()?;
-        Ok((sequence_frame_from_time(end, seq.settings.frame_rate)? - 1).max(0))
+        seq.last_content_frame()
     }
 
     pub fn jump_to_start_frame(&mut self) -> mondrian_core::Result<()> {
