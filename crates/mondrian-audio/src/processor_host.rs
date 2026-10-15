@@ -911,7 +911,7 @@ impl PreparedProcessorHost {
     pub(crate) fn validate_native_owner(
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,
-    ) -> Result<(), crate::AudioNativeOwnerError> {
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
         let instance = self
             .instances
             .iter_mut()
@@ -933,7 +933,7 @@ impl PreparedProcessorHost {
             instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
         }
-        Ok(())
+        Ok(object)
     }
 
     pub(crate) fn retained_native_close_lease(

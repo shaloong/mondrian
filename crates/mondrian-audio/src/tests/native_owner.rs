@@ -20,6 +20,9 @@ struct OwnerProbeState {
     entries: AtomicUsize,
     reject_binding: AtomicBool,
     replace_during_validation: AtomicBool,
+    object_observations: AtomicUsize,
+    observation_revoke_source:
+        std::sync::Mutex<Option<mondrian_core::AudioOwnerInstallationSource>>,
     editor_opens: AtomicUsize,
     editor_closes: AtomicUsize,
     editor_cleanup: AtomicBool,
@@ -212,8 +215,18 @@ impl AudioProcessor for OwnerProbeProcessor {
     fn native_audio_object_observation(
         &mut self,
     ) -> Result<Option<NativeAudioObjectObservation>, AudioProcessorHostError> {
+        self.state.object_observations.fetch_add(1, Ordering::AcqRel);
         if self.state.replace_during_validation.swap(false, Ordering::AcqRel) {
             self.serial = next_probe_load(&self.state);
+        }
+        if let Some(source) = self
+            .state
+            .observation_revoke_source
+            .lock()
+            .expect("actual observation Source revocation")
+            .take()
+        {
+            source.revoke().expect("actual Source revoked during native observation");
         }
         Ok(Some(self.object()))
     }
@@ -421,6 +434,107 @@ fn native_owner_registration_and_prepared_binding_do_not_grant_early_root_permis
 }
 
 #[test]
+fn native_owner_object_observation_returns_only_current_facts_without_author_or_dsp_work() {
+    let state = Arc::new(OwnerProbeState::default());
+    let root = sequence_with_parallel_hosted_delay();
+    let mut runtime = owner_probe_runtime(&root, &[], &state);
+    let source = mondrian_core::AudioOwnerInstallationSource::new();
+    let (verifier, claim) = install_probe_runtime(&mut runtime, &source);
+    let lease = runtime.native_owner_lease(owner_addresses(&runtime)[0]).unwrap();
+    let mut pending = native_author_probe_source();
+    pending.source.revision = 1;
+    pending.source.pending_events = 1;
+    *state.native_author.lock().unwrap() = Some(pending.clone());
+    let before = state.object_observations.load(Ordering::Acquire);
+    let binds = state.binds.load(Ordering::Acquire);
+    let observed = runtime.observe_native_owner_object(lease).expect("actual retained object");
+    assert_eq!(observed.process_id().get(), std::process::id());
+    assert_eq!(observed.object_serial().get(), 1);
+    assert_eq!(
+        state.object_observations.load(Ordering::Acquire),
+        before + 1
+    );
+    assert_eq!(state.binds.load(Ordering::Acquire), binds);
+    assert_eq!(state.created.load(Ordering::Acquire), 1);
+    assert_eq!(state.entries.load(Ordering::Acquire), 0);
+    assert_eq!(state.processes.load(Ordering::Acquire), 0);
+    assert_eq!(state.snapshot_calls.load(Ordering::Acquire), 0);
+    assert_eq!(*state.native_author.lock().unwrap(), Some(pending.clone()));
+    verifier.validate(&claim).expect("observation grants no new installation");
+    assert_eq!(runtime.native_owner_lease(lease.address()).unwrap(), lease);
+
+    let foreign_state = Arc::new(OwnerProbeState::default());
+    let mut foreign = owner_probe_runtime(&root, &[], &foreign_state);
+    let foreign_before = foreign_state.object_observations.load(Ordering::Acquire);
+    assert_eq!(
+        foreign.observe_native_owner_object(lease),
+        Err(AudioNativeOwnerError::UnregisteredRuntime)
+    );
+    assert_eq!(
+        foreign_state.object_observations.load(Ordering::Acquire),
+        foreign_before
+    );
+    let foreign_source = mondrian_core::AudioOwnerInstallationSource::new();
+    install_probe_runtime(&mut foreign, &foreign_source);
+    let foreign_before = foreign_state.object_observations.load(Ordering::Acquire);
+    assert_eq!(
+        foreign.observe_native_owner_object(lease),
+        Err(AudioNativeOwnerError::OwnerUnavailable)
+    );
+    assert_eq!(
+        foreign_state.object_observations.load(Ordering::Acquire),
+        foreign_before
+    );
+
+    state.replace_during_validation.store(true, Ordering::Release);
+    assert_eq!(
+        runtime.observe_native_owner_object(lease),
+        Err(AudioNativeOwnerError::OwnerUnavailable)
+    );
+    assert!(runtime.native_owner_lease(lease.address()).is_err());
+    assert_eq!(*state.native_author.lock().unwrap(), Some(pending));
+}
+
+#[test]
+fn native_owner_observation_rechecks_source_without_a_second_native_query() {
+    for observe_object in [false, true] {
+        for revoke_before_query in [false, true] {
+            let state = Arc::new(OwnerProbeState::default());
+            let root = sequence_with_parallel_hosted_delay();
+            let mut runtime = owner_probe_runtime(&root, &[], &state);
+            let source = mondrian_core::AudioOwnerInstallationSource::new();
+            install_probe_runtime(&mut runtime, &source);
+            let lease = runtime.native_owner_lease(owner_addresses(&runtime)[0]).unwrap();
+            let before = state.object_observations.load(Ordering::Acquire);
+            if revoke_before_query {
+                source.revoke().unwrap();
+            } else {
+                *state.observation_revoke_source.lock().unwrap() = Some(source);
+            }
+            let result = if observe_object {
+                runtime.observe_native_owner_object(lease).map(|_| ())
+            } else {
+                runtime.validate_native_owner(lease)
+            };
+            assert_eq!(
+                result,
+                Err(AudioNativeOwnerError::Installation(
+                    mondrian_core::AudioOwnerInstallationError::NotInstalled
+                ))
+            );
+            assert_eq!(
+                state.object_observations.load(Ordering::Acquire),
+                before + usize::from(!revoke_before_query)
+            );
+            assert!(runtime.native_owner_lease(lease.address()).is_err());
+            assert_eq!(state.entries.load(Ordering::Acquire), 0);
+            assert_eq!(state.processes.load(Ordering::Acquire), 0);
+            assert_eq!(state.snapshot_calls.load(Ordering::Acquire), 0);
+        }
+    }
+}
+
+#[test]
 fn native_owner_wrong_source_root_occurrence_and_epoch_cannot_reuse_current_hosted_record() {
     let state = Arc::new(OwnerProbeState::default());
     let root = sequence_with_parallel_hosted_delay();
@@ -578,6 +692,15 @@ fn native_owner_duplicate_nested_materializations_keep_distinct_local_binding_re
     assert_eq!(state.created.load(Ordering::Acquire), 2);
     runtime.validate_native_owner(a).expect("first actual Hosted record");
     runtime.validate_native_owner(b).expect("second actual Hosted record");
+    let object_a = runtime
+        .observe_native_owner_object(a)
+        .expect("first authenticated nested object");
+    let object_b = runtime
+        .observe_native_owner_object(b)
+        .expect("second authenticated nested object");
+    assert_eq!(object_a.process_id().get(), std::process::id());
+    assert_eq!(object_b.process_id(), object_a.process_id());
+    assert_ne!(object_a.object_serial(), object_b.object_serial());
     runtime
         .enter_state(AudioStateEntry {
             epoch: AudioContinuityEpoch::new(23),

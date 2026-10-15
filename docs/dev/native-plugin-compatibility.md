@@ -200,6 +200,46 @@ All current accepted groups have clean owned exits and unchanged inputs. This
 freeze includes a separately tested, still-failing Ring Out consumer candidate
 and the held OpenFX constructor candidate; neither is accepted by this slice.
 
+## Windows Surge Effects through canonical Runtime (2026-10-16)
+
+The public non-RT owner observation returns the actual PID/load facts from the
+existing authenticated validation query. Current Source and opaque owner lease
+are checked before and after that single native call. Observation neither forces
+parameter presentation nor consumes author work; later operations re-admit the
+lease. The old unit-result validation API retains the same contract.
+
+`surge-runtime-actual-r2/gates/receipt.json` (`F40E91EB...`) records four exact
+native passes on current 1958-input freeze `D48A85B2...`, Audio `61763698...` and
+fresh normal Product `BBFD9405...`. This is full source equality, without a
+test-only Product bridge. The unchanged vendor dependency is separately bound to
+its actual Cargo producer and the exact seven Audio-only source changes.
+
+Surge XT Effects 1.3.4 VST3 follows original 1150-byte state, canonical author
+save/reopen, Sequence/Output-rack compilation, finite resource grant, real Source
+installation/Bind and Enter(0). Three fresh Runtime instances each complete 4096
+frames in 64 render requests at 48kHz/stereo/offline. Two restored outputs match
+bitwise (`BE3C9C7A...`); native bypass matches the unity Graph reference
+(`9D95B6A2...`); the active control differs in 8176 samples. These counts are
+observations, without an independent active-effect or bypass-precision oracle.
+All 66 presentation polls per run legally return no parameter batch. The actual
+authenticated owner remains unchanged through PCM and each observed child exits
+zero after Drop. An unconnected declared auxiliary input uses existing Graph
+zero-fill. Reported resource fees cover the existing host model, not total heaps.
+
+The unchanged Ring Out selector also passes all four cold-handoff/partition
+scenarios; both original public CLAP Note positive/refusal selectors pass with
+owned fixture `B239C594...`. All four gate owners exit zero, reap descendants and
+retain unchanged inputs without deadlines or cleanup errors. Fifty case evidence
+files are retained. Current ordinary regression has 562 exact passes; strict
+checks have zero diagnostics, and Product retains the ten-warning baseline and
+FFmpeg8.1.2 ABI. The first adapter's pre-launch JSON object-key-order refusal is
+retained; its correction compares the same seven tool paths/hashes structurally.
+
+This qualifies these finite Windows offline Runtime and owned Note regressions.
+Nondefault presets, active sidechain, private DSP state, GUI, App Playback/Export,
+realtime, performance and other platforms remain unverified. The held OpenFX
+constructor candidate is outside this acceptance.
+
 ## Windows Surge XT Effects CLAP metadata comparison (2026-10-15)
 
 The real `org.surge-synth-team.surge-xt-fx` module `30845FF7...` completed two

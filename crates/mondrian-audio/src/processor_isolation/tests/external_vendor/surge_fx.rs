@@ -327,3 +327,438 @@ fn observe_pcm(
     assert_eq!(exit_code, 0, "forced/error exit cannot qualify lifecycle");
     output
 }
+
+use crate::{AudioContinuityEpoch, AudioRuntimeResourceGrant, AudioStateEntry};
+use mondrian_core::{
+    AudioOwnerInstallationSource, AutomationSegmentInterpolation, ExactAutomationKeyframe,
+    TimelineTime,
+};
+use mondrian_timeline::{Clip, Sequence};
+
+#[test]
+#[ignore = "pinned external Effects case, current Product and frozen outer native Job required"]
+fn external_vst3_effect_runtime_restore_pcm_observations() {
+    let path = PathBuf::from(std::env::var_os(CASE_ENV).expect("external case path"));
+    let mut case_lease = Lease::open(
+        &Binding {
+            bytes: fs::metadata(&path).expect("case metadata").len(),
+            path,
+            sha256: std::env::var(CASE_HASH_ENV).expect("case SHA256"),
+        },
+        MAX_JSON,
+    );
+    let bytes = case_lease.read();
+    let case: VendorCase =
+        serde_json::from_value(strict_json(&bytes)).expect("strict existing case schema");
+    assert_eq!(case.schema, 1);
+    assert_eq!(case.format, Format::Vst3);
+    assert_eq!(case.expected_identity, "ABCDEF019182FAEB566D624153465854");
+    assert_eq!(case.expected_parameter_count, 14);
+    assert_eq!(case.bypass_native_id, 1_652_125_811);
+    assert_eq!(case.plugin.bytes, 9_753_088);
+    assert_eq!(
+        case.plugin.sha256,
+        "3b9f6c9b3363491a37721ed2cb9f080eb0d4abe1ce545a942e4fbb30b3e93050"
+    );
+    assert_eq!(case.opaque_state.bytes, 1_150);
+    assert_eq!(
+        case.opaque_state.sha256,
+        "e24081fd2018d5a85f6de16ac65ea8f865cafa7bf32fde35b6c7eb0f78977f02"
+    );
+    // Bind the exact accepted capture bytes, not a generated/default blob.
+    assert_eq!(
+        case.captured_probe_response.sha256,
+        "d9dfe2708eb0a659f2a27898341ec849aaa6e9519c07ea04ff459708ae3d3926"
+    );
+    assert_eq!(
+        case.captured_list_response.sha256,
+        "6f899880fded2bdefdef2a4f511015d9a38b34de03cdfd12b6fdc37d3445db08"
+    );
+    no_reparse(&case.evidence_directory);
+    assert_eq!(
+        fs::read_dir(&case.evidence_directory)
+            .expect("fresh evidence directory")
+            .count(),
+        0
+    );
+    let helper = Lease::open(&case.helper, 512 * 1024 * 1024);
+    let plugin = Lease::open(&case.plugin, 512 * 1024 * 1024);
+    let mut state_lease = Lease::open(&case.opaque_state, 128 * 1024);
+    let mut list_lease = Lease::open(&case.captured_list_response, MAX_JSON);
+    let mut probe_lease = Lease::open(&case.captured_probe_response, MAX_JSON);
+    let mut input_lease = Lease::open(&case.pcm, (FRAMES * 2 * 4) as u64);
+    let state = state_lease.read();
+    let list = strict_json(&list_lease.read());
+    let captured = strict_json(&probe_lease.read());
+    let input = deterministic_pcm();
+    assert_eq!(
+        input_lease.read(),
+        pcm_bytes(&input),
+        "existing asymmetric stereo input"
+    );
+    write_new(&case.evidence_directory, "case.json", &bytes);
+    write_new(
+        &case.evidence_directory,
+        "original-opaque-state.bin",
+        &state,
+    );
+    assert_eq!(captured["kind"], "probe");
+    assert_eq!(captured["class_id"], case.expected_identity);
+    assert_eq!(captured["captured_state"], json!(state));
+    assert_eq!(captured["latency_frames"], 0);
+    assert_eq!(captured["tail_frames"], 96_000);
+    assert_eq!(
+        captured["auxiliary_buses"],
+        json!([{"bus_key":"vst3.audio-input.1", "channel_layout":AudioChannelLayout::Stereo}])
+    );
+    let parameters: Vec<Vst3ParameterDescriptor> =
+        serde_json::from_value(captured["parameters"].clone()).expect("captured VST3 schemas");
+    let values = serde_json::from_value(captured["current_values"].clone())
+        .expect("captured normalized VST3 values");
+    assert_eq!(parameters.len(), 14);
+    let bypass = parameters.iter().find(|p| p.id == case.bypass_native_id).unwrap();
+    assert_eq!(bypass.flags & 65_536, 65_536);
+    assert_eq!(bypass.step_count, 1);
+    let facts = Facts::Vst3(parameters, values);
+    let catalog = Arc::new(
+        DiscoveredVst3AudioProcessorSpecResolver::discover(
+            helper.path.clone(),
+            [plugin.path.clone()],
+        )
+        .expect("actual production VST3 discovery"),
+    );
+    assert_eq!(catalog.descriptors().len(), 1);
+    assert_eq!(json!(catalog.descriptors()), list["descriptors"]);
+    let reference: Vec<f32> = input.iter().map(|&raw| 0.0_f32 + raw).collect();
+    assert_eq!(
+        input
+            .iter()
+            .zip(&reference)
+            .filter(|(raw, normalized)| raw.to_bits() != normalized.to_bits())
+            .count(),
+        8,
+        "the public unity Graph normalizes the bound eight negative zeros"
+    );
+    assert!(input.iter().zip(&reference).all(|(raw, normalized)| {
+        normalized.to_bits()
+            == if raw.to_bits() == 0x8000_0000 {
+                0
+            } else {
+                raw.to_bits()
+            }
+    }));
+    write_new(
+        &case.evidence_directory,
+        "unity-graph-reference.f32le",
+        &pcm_bytes(&reference),
+    );
+    let period: Arc<[f32]> = input.clone().into();
+    let first = observe_runtime_pcm(
+        catalog.clone(),
+        &state,
+        period.clone(),
+        &facts,
+        false,
+        "restore-a",
+        &case.evidence_directory,
+    );
+    let second = observe_runtime_pcm(
+        catalog.clone(),
+        &state,
+        period.clone(),
+        &facts,
+        false,
+        "restore-b",
+        &case.evidence_directory,
+    );
+    let bypass = observe_runtime_pcm(
+        catalog,
+        &state,
+        period,
+        &facts,
+        true,
+        "native-bypass",
+        &case.evidence_directory,
+    );
+    let differences =
+        |a: &[f32], b: &[f32]| a.iter().zip(b).filter(|(x, y)| x.to_bits() != y.to_bits()).count();
+    write_json(
+        &case.evidence_directory,
+        "observations.json",
+        json!({
+            "schema":1, "canonical_runtime_and_output_rack":true, "runs":3,
+            "case_sha256":case_lease.sha256, "helper_sha256":helper.sha256,
+            "plugin_sha256":plugin.sha256, "original_state_sha256":state_lease.sha256,
+            "original_state_bytes":state.len(), "source_period_sha256":input_lease.sha256,
+            "frames_per_run":FRAMES, "fresh_restores_differing_samples":differences(&first,&second),
+            "native_bypass_vs_unity_graph_differing_samples":differences(&bypass,&reference),
+            "restore_a_vs_unity_graph_differing_samples":differences(&first,&reference),
+            "unity_graph_reference_sha256":format!("{:x}",Sha256::digest(pcm_bytes(&reference))),
+            "difference_counts_are_observations_only":true, "independent_dsp_oracle_available":false,
+            "bypass_precision_or_algorithm_qualified":false, "nondefault_state_discrimination":false,
+            "live_state_capture_or_author_ack_performed":false, "private_dsp_state_qualified":false,
+            "app_playback_export_qualified":false, "realtime_or_performance_qualified":false,
+            "outer_ownership_qualified_by_test":false
+        }),
+    );
+    drop((
+        case_lease,
+        helper,
+        plugin,
+        state_lease,
+        list_lease,
+        probe_lease,
+        input_lease,
+    ));
+}
+
+fn observe_runtime_pcm(
+    catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
+    state: &[u8],
+    period: Arc<[f32]>,
+    facts: &Facts,
+    native_bypass: bool,
+    label: &str,
+    directory: &Path,
+) -> Vec<f32> {
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: 64,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 16 * 1024 * 1024,
+        ..test_render_contract()
+    };
+    let mut author = catalog
+        .create_instance(
+            "ABCDEF019182FAEB566D624153465854",
+            render,
+            Some(state.to_vec()),
+        )
+        .expect("fresh canonical author from the original VST3 state");
+    facts.check_author(&author);
+    assert_eq!(author.parameters.len(), 14);
+    assert!(
+        !author.bypassed,
+        "host bypass must not replace native processing"
+    );
+    assert_eq!(
+        author.opaque_state.as_deref().map(Vec::as_slice),
+        Some(state)
+    );
+    if native_bypass {
+        let id = ParameterId::new("vst3.param.1652125811").unwrap();
+        let mut curve = ExactAutomationCurve::new(id, 1.0).unwrap();
+        let mut key = ExactAutomationKeyframe::linear(TimelineTime::ZERO, 1.0);
+        key.interpolation_to_next = AutomationSegmentInterpolation::Hold;
+        curve.set_keyframe(key).unwrap();
+        author
+            .set_parameter_automation(curve)
+            .expect("actual canonical native bypass intent");
+    }
+    // This serializes canonical bytes; it never captures the live native object.
+    let serialized = serde_json::to_vec(&author).expect("canonical author save");
+    assert!(serialized.len() as u64 <= MAX_JSON);
+    write_new(directory, &format!("{label}-author.json"), &serialized);
+    let restored: AudioProcessorInstance =
+        serde_json::from_slice(&serialized).expect("canonical author reopen");
+    assert_eq!(restored, author);
+    let instance_id = restored.id;
+    let mut sequence = Sequence::new("Surge original-state PCM through canonical Runtime");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence
+        .add_media_audio_clip(
+            sequence.audio_tracks[0].id,
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            AudioSourceComponentId::primary(),
+        )
+        .expect("public source clip");
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(restored);
+    let resolver = IsolatedAudioProcessorResolver::new(catalog);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let source = PcmMedia { period, reads: reads.clone() };
+    // A finite test admission limit, not a reservation/allocation or new policy.
+    let grant = AudioRuntimeResourceGrant::new(1, 32 * 1024 * 1024, 16 * 1024 * 1024);
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &source,
+        &resolver,
+        render,
+        None,
+        grant,
+    )
+    .expect("canonical compiler/Output rack/native Session obey the real root resource grant");
+    let footprint = runtime.resource_footprint();
+    assert_eq!(footprint.runtime_occurrences, 1);
+    assert!(footprint.fixed_resident_bytes <= grant.max_fixed_resident_bytes);
+    assert!(footprint.prepared_logical_bytes <= grant.max_prepared_logical_bytes);
+    assert!(footprint.processor_session_bytes > 0);
+    assert!(runtime.native_observations_supported());
+    let installation = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = installation.register().unwrap();
+    runtime
+        .bind_native_owner_installation(verifier)
+        .expect("actual Runtime registration");
+    let claim = installation
+        .reserve_install(&registration, None)
+        .and_then(|reservation| installation.begin_commit(reservation))
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime
+        .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+        .expect("real same-object installed Output-rack Bind");
+    let cold = owner(&runtime);
+    assert_eq!(cold.editor_target().instance, instance_id);
+    assert!(cold.editor_target().continuity_epoch.is_none());
+    let cold_object = runtime
+        .observe_native_owner_object(cold)
+        .expect("authenticated actual cold object from the existing owner query");
+    let mut observations = Observations::default();
+    observe(&mut runtime, cold, &mut observations);
+    runtime
+        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+        .expect("cold author Source closed; initial input delivery is not claimed");
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: 0,
+        })
+        .expect("actual public Runtime first signal entry");
+    let lease = owner(&runtime);
+    assert_eq!(lease.editor_target().instance, instance_id);
+    assert_eq!(lease.editor_target().continuity_epoch, Some(1));
+    let entered_object = runtime
+        .observe_native_owner_object(lease)
+        .expect("authenticated actual entered object from the existing owner query");
+    assert_eq!(
+        entered_object, cold_object,
+        "first Enter must anchor the same initialized object"
+    );
+    let pid = entered_object.process_id().get();
+    let serial = entered_object.object_serial().get();
+    assert_ne!(pid, std::process::id());
+    // SAFETY: this is the current installed Runtime's authenticated observation,
+    // not a PID inferred from parameter presentation, logs or process discovery.
+    // The retained HANDLE grants query/synchronize rights only.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+    assert!(
+        !raw.is_null(),
+        "authenticated actual child observation HANDLE"
+    );
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+        258
+    );
+    observe(&mut runtime, lease, &mut observations);
+    let mut output = Vec::with_capacity(FRAMES * 2);
+    let mut calls = 0;
+    for start in (0..FRAMES).step_by(64) {
+        let frames = 64.min(FRAMES - start);
+        let mut pcm = vec![f32::NAN; frames * 2];
+        runtime
+            .render_into(
+                AudioRenderRequest { start_sample: start as i64, frames },
+                &mut pcm,
+            )
+            .expect("actual contiguous Runtime PCM; native typed failures remain failures");
+        assert_eq!(pcm.len(), frames * 2);
+        assert!(pcm.iter().all(|value| value.is_finite()));
+        output.extend(pcm);
+        calls += 1;
+        observe(&mut runtime, lease, &mut observations);
+    }
+    assert_eq!(output.len(), FRAMES * 2);
+    assert_eq!(calls, FRAMES / 64);
+    assert!(
+        reads.load(Ordering::Relaxed) > 0,
+        "actual bound media source read"
+    );
+    assert_eq!(
+        owner(&runtime),
+        lease,
+        "one real owner/epoch across all PCM"
+    );
+    assert_eq!(
+        runtime
+            .observe_native_owner_object(lease)
+            .expect("current same-object native owner after PCM"),
+        entered_object
+    );
+    runtime
+        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+        .expect("actual author Source closed after the real PCM calls");
+    write_new(
+        directory,
+        &format!("{label}-output.f32le"),
+        &pcm_bytes(&output),
+    );
+    let mut receipt = json!({
+        "schema":1, "canonical_runtime_and_output_rack":true, "host_bypassed":false,
+        "native_bypass":native_bypass, "bypass_key_is_sequence_zero_hold":native_bypass,
+        "original_state_bytes":state.len(), "original_state_sha256":format!("{:x}",Sha256::digest(state)),
+        "sample_rate":48000, "channels":2, "mode":"Offline", "max_block_frames":64,
+        "requested_frames":FRAMES, "completed_frames":output.len()/2, "runtime_render_calls":calls,
+        "source_reads":reads.load(Ordering::Relaxed), "finite":true,
+        "same_installed_owner_across_pcm":true, "continuity_epoch":1,
+        "auxiliary_key":"vst3.audio-input.1", "auxiliary_layout":"Stereo",
+        "auxiliary_has_no_authored_route":sequence.audio_program.sidechain_routes.is_empty(),
+        "auxiliary_silence_basis":"existing Graph zero-fill for an unconnected declared input",
+        "parameter_polls":observations.polls, "parameter_batches":observations.parameter_batches,
+        "native_diagnostic_records":observations.diagnostic_records,
+        "output_sha256":format!("{:x}",Sha256::digest(pcm_bytes(&output))),
+        "root_resource_grant":{
+            "runtime_occurrences":grant.max_runtime_occurrences,
+            "fixed_resident_bytes":grant.max_fixed_resident_bytes,
+            "prepared_logical_bytes":grant.max_prepared_logical_bytes
+        },
+        "root_resource_footprint":{
+            "runtime_occurrences":footprint.runtime_occurrences,
+            "fixed_resident_bytes":footprint.fixed_resident_bytes,
+            "prepared_logical_bytes":footprint.prepared_logical_bytes,
+            "render_scratch_bytes":footprint.render_scratch_bytes,
+            "processor_session_bytes":footprint.processor_session_bytes,
+            "parameter_event_bytes":footprint.parameter_event_bytes,
+            "compensation_delay_bytes":footprint.compensation_delay_bytes,
+            "media_window_bytes":footprint.media_window_bytes,
+            "nested_window_bytes":footprint.nested_window_bytes
+        }
+    });
+    receipt.as_object_mut().unwrap().extend(
+        json!({
+            "cold_source_closed_is_input_delivery_receipt":false,
+            "live_state_capture_or_author_ack_performed":false,
+            "native_plugin_callback_counter_instrumented":false,
+            "dsp_algorithm_or_bypass_precision_qualified":false,
+            "private_dsp_state_qualified":false, "nondefault_state_discrimination":false,
+            "app_playback_export_qualified":false, "realtime_or_performance_qualified":false,
+            "complete_physical_heap_qualified":false, "outer_job_qualified_by_test":false
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+    drop(runtime);
+    let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+    let mut exit_code = 0;
+    let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
+    receipt.as_object_mut().unwrap().extend(json!({
+        "native_pid":pid, "native_object_serial":serial,
+        "same_authenticated_object_across_pcm":true, "native_identity_observation_origin":"authenticated_owner_object_query",
+        "parameter_facts_are_identity_requirement":false, "alive_before_drop_wait_status":alive,
+        "post_drop_wait_status":settled, "exit_query_succeeded":queried != 0, "exit_code":exit_code,
+        "graceful_ack_qualified":false, "exact_child_handle_exit_qualified":alive == 258 && settled == 0 && queried != 0 && exit_code == 0
+    }).as_object().unwrap().clone());
+    write_json(directory, &format!("{label}-receipt.json"), receipt);
+    assert_eq!(alive, 258);
+    assert_eq!(
+        settled, 0,
+        "existing Runtime Drop settles the exact actual child"
+    );
+    assert_ne!(queried, 0);
+    assert_eq!(exit_code, 0, "forced/error child exit cannot qualify");
+    output
+}

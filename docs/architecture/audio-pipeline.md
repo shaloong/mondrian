@@ -3573,6 +3573,13 @@ Queued renderer entry passes its actual cancellation token. Source validation
 precedes native preflight and follows native Bind. Cancellation or a stale Source
 revokes the entire accepted partial set; standalone DSP has no author permission.
 
+Non-RT `observe_native_owner_object` returns the already authenticated PID/load
+facts from the existing exact-owner validation query. It checks the installed
+Source and lease before and after that one native call, without forcing parameter
+presentation or consuming author work. These snapshot facts grant no permission;
+later operations still admit the opaque current lease. `validate_native_owner`
+keeps its existing unit-result API through the same path.
+
 Successful native Prepare establishes the first-initialization phase after
 state, mode, metadata and activation were accepted. On Windows VST3, one state
 authority distinguishes Unserviced, AwaitingFirstSignal and Entered. The first

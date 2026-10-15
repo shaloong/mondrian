@@ -844,7 +844,7 @@ impl AudioRenderSession {
     pub(crate) fn validate_native_owner(
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,
-    ) -> Result<(), crate::AudioNativeOwnerError> {
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
         self.processor_host.validate_native_owner(lease)
     }
 

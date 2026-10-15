@@ -823,16 +823,35 @@ impl AudioProgramRuntime {
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,
     ) -> Result<(), crate::AudioNativeOwnerError> {
+        self.observe_native_owner_object(lease).map(|_| ())
+    }
+
+    /// Observe the actual object after current installed-owner validation.
+    ///
+    /// This non-RT control uses the same authenticated observation as owner
+    /// validation, without querying parameter metadata or draining author work.
+    /// Returned PID/load facts grant no execution, editor or author authority;
+    /// every later operation must still admit the current opaque owner lease.
+    pub fn observe_native_owner_object(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
         if self.native_owner_lease(lease.address())? != lease {
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
         }
-        self.validate_local_native_owner(lease)
+        let object = self.validate_local_native_owner(lease)?;
+        // A Source claim can be superseded while the non-RT native control
+        // call is in flight. Do not publish facts under its obsolete authority.
+        if self.native_owner_lease(lease.address())? != lease {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
+        Ok(object)
     }
 
     fn validate_local_native_owner(
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,
-    ) -> Result<(), crate::AudioNativeOwnerError> {
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
         if lease.address().local == self.session.native_owner_identity() {
             return self.session.validate_native_owner(lease);
         }
