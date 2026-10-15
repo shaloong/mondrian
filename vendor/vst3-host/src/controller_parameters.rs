@@ -34,7 +34,7 @@ pub struct ControllerParameterRef<'a> {
     frame: &'a ControllerParameterQueryFrame,
 }
 
-impl ControllerParameterRef<'_> {
+impl<'a> ControllerParameterRef<'a> {
     /// Native definition-local ID.
     pub fn id(self) -> u32 {
         self.frame.info.id
@@ -54,6 +54,22 @@ impl ControllerParameterRef<'_> {
     /// Current controller value; the consumer must validate finiteness and range.
     pub fn normalized(self) -> f64 {
         self.frame.value
+    }
+    /// Exact fixed SDK title, including trailing UTF-16 code units.
+    pub fn title_utf16(self) -> &'a [u16; 128] {
+        &self.frame.info.title
+    }
+    /// Exact fixed SDK short title, without lossy text conversion.
+    pub fn short_title_utf16(self) -> &'a [u16; 128] {
+        &self.frame.info.shortTitle
+    }
+    /// Exact fixed SDK units, without scanning beyond the query frame.
+    pub fn units_utf16(self) -> &'a [u16; 128] {
+        &self.frame.info.units
+    }
+    /// Native unit identity belonging to this parameter information query.
+    pub fn unit_id(self) -> i32 {
+        self.frame.info.unitId
     }
     /// Compare the fixed native title with the existing lossy UTF-16 discovery name.
     /// Never allocates or scans beyond the SDK's fixed title extent.

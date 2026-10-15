@@ -16,7 +16,7 @@ fn state(gain: f64, mode: u32) -> Vec<u8> {
     bytes
 }
 
-fn prepare(gain: f64, mode: u32) -> Vst3Worker {
+pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
     let binary_path = std::env::var_os("MONDRIAN_VST3_INITIAL_VALUES_TEST_PLUGIN")
         .map(PathBuf::from)
         .expect("set exact newly built initial-values DLL path");
@@ -72,15 +72,15 @@ fn prepare(gain: f64, mode: u32) -> Vst3Worker {
 }
 
 #[derive(Debug)]
-struct Audit {
-    process: u32,
-    metadata: u32,
-    values: u32,
-    setters: u32,
-    observed: f64,
-    wrong_thread: u32,
+pub(super) struct Audit {
+    pub(super) process: u32,
+    pub(super) metadata: u32,
+    pub(super) values: u32,
+    pub(super) setters: u32,
+    pub(super) observed: f64,
+    pub(super) wrong_thread: u32,
 }
-fn audit(worker: &Vst3Worker) -> Audit {
+pub(super) fn audit(worker: &Vst3Worker) -> Audit {
     let bytes = worker
         .plugin
         .as_ref()

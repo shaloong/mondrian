@@ -5,6 +5,8 @@ mod initial_parameter_values;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
+#[cfg(all(test, target_os = "windows"))]
+mod startup_metadata_diagnostics;
 
 use super::{
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
@@ -409,6 +411,8 @@ impl Vst3AudioProcessorWorkerFactory {
         let mut plugin = host
             .load_plugin_class(&payload.binary_path, &payload.class_id)
             .map_err(|error| unavailable(format!("VST3 class load failed: {error}")))?;
+        #[cfg(all(test, target_os = "windows"))]
+        startup_metadata_diagnostics::observe("after_load", &plugin, &payload.parameters);
         if fingerprint(&payload.binary_path)? != payload.binary_sha256 {
             return Err(unavailable("VST3 binary changed while loading the class"));
         }
@@ -424,16 +428,32 @@ impl Vst3AudioProcessorWorkerFactory {
                 .load_state(state)
                 .map_err(|error| unavailable(format!("VST3 state restore failed: {error}")))?;
         }
+        #[cfg(all(test, target_os = "windows"))]
+        startup_metadata_diagnostics::observe("after_restore", &plugin, &payload.parameters);
         plugin
             .set_process_mode(mode)
             .map_err(|error| invalid(format!("VST3 processing mode is unsupported: {error}")))?;
+        #[cfg(all(test, target_os = "windows"))]
+        startup_metadata_diagnostics::observe(
+            "after_set_process_mode",
+            &plugin,
+            &payload.parameters,
+        );
         let input_names = validate_loaded(&mut plugin, &registration, render.channel_layout)?;
+        #[cfg(all(test, target_os = "windows"))]
+        startup_metadata_diagnostics::observe("after_validate", &plugin, &payload.parameters);
         let buffers = plugin
             .create_bus_audio_buffers(render.max_block_frames)
             .map_err(|error| invalid(format!("VST3 bus buffer preparation failed: {error}")))?;
         plugin
             .start_processing()
             .map_err(|error| unavailable(format!("VST3 processing start failed: {error}")))?;
+        #[cfg(all(test, target_os = "windows"))]
+        startup_metadata_diagnostics::observe(
+            "after_start_processing",
+            &plugin,
+            &payload.parameters,
+        );
         Ok(Vst3Worker {
             native_lane: request.native_worker_lane_resources(),
             last_parameter_values: vec![None; payload.parameter_ids.len()],

@@ -165,6 +165,20 @@ Ordinary Audio 558 passes independently; the failed native owner reports exit
 101, complete reaping and no timeout or surviving descendants. This is retained
 failure evidence, not DSP or Drop qualification.
 
+A subsequent direct-worker startup diagnostic (`02F9128E...`, source
+`C60220FC...`) observes the same native object across load, state restore, mode
+selection, validation and processing startup. All 14 complete `ParameterInfo`
+records and current values remain identical. Flags20 is already pending after
+load at serial2; restore advances it to serial3. Every phase retains source
+revision10, ten pending events and ten controller-to-DSP feedback values, with
+no open edits. Thus metadata equality alone cannot authorize entry: initialization
+callbacks and derived-cache obligations also need explicit lifecycle handling.
+The diagnostic does not invoke Enter, Process, restart service or a controller
+setter; the existing factory retains its own behavior. Its SDK controls and the
+original five initial-value controls pass alongside unchanged ordinary Audio558.
+This is same-object observation, not Product-front-door or DSP qualification;
+the original failed PCM gate remains unresolved.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in
