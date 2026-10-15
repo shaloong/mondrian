@@ -23,3 +23,5 @@ The product filter host is maintained separately in `../host`.
 - Numeric interpolation metadata is read-only on parameter instances.
   `host/src/ofxhPropertySuite.cpp` enforces existing read-only flags for scalar,
   array and reset operations at the plugin suite boundary.
+  Its typed property constructor also forwards the declared `pluginReadOnly`
+  flag to the base property; host-internal property writes remain available.

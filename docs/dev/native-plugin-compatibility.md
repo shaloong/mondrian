@@ -593,6 +593,37 @@ controls do not qualify temporal fetching or interlaced rendering. Evidence:
 `ofx-missing-functional-actual-r1/`, adapter `8274828C...`. The original D30C
 failure and constructor integration hold remain unresolved.
 
+### SDK readonly property construction, 2026-10-16
+
+The typed property constructor discarded its `pluginReadOnly` argument, so
+declared readonly properties reached the base property as writable. Forwarding
+that existing argument restores the existing Suite scalar/N/reset checks;
+host-internal setters and writable image pixels retain their separate contract.
+No layout, ownership, destructor or shutdown mechanism changes.
+
+The same owned PropertySuite V1 control previously completed 456 checks with
+121 failures before the fix and zero after it. The standalone repository
+CMake/CTest entry now also passes on Windows x64/MSVC 14.44.35207: one CTest
+executes the full 456-check success summary. Fresh executable `E39F2871...`
+compiles exactly the control and candidate property source `3FE9513B...`.
+All three configure/build/CTest Job owners settle cleanly; 69 input bindings
+remain unchanged. Receipt: `ofx-ctor-cmake-entry-actual-r2/receipt.json`
+(`A46BD52E...`). The initial caller's path-array preflight failure is retained;
+it executed no CMake command and is not qualified by this later result.
+
+Root accepts this limited readonly-construction correction independently,
+revising the earlier all-native integration hold on the evidence above and the
+recorded scoped runtime regressions. The original general lifecycle gate is
+not reclassified as passed: D30C remains a reported retirement failure of
+unknown cause, with the original 100ms budget and owned fallback unchanged.
+Neither a causal exclusion nor normal-shutdown, temporal, third-party,
+performance or cross-platform qualification follows from this correction.
+
+The standalone test requires explicit `MONDRIAN_WORKSPACE` and
+`OFX_CTOR_PROPERTY_SOURCE` CMake cache paths; the latter selects the exact
+property implementation being tested. Build target `readonly_suite_controls`,
+then run `ctest --test-dir <build> -C Release -V --no-tests=error`.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in

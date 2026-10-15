@@ -199,9 +199,9 @@ namespace OFX {
 
       template<class T> PropertyTemplate<T>::PropertyTemplate(const std::string &name,
         int dimension,
-        bool /*pluginReadOnly*/,
+        bool pluginReadOnly,
         APIType defaultValue)
-        : Property(name, T::typeCode, dimension)
+        : Property(name, T::typeCode, dimension, pluginReadOnly)
       {
 
         if (dimension) {
