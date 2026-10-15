@@ -261,7 +261,7 @@ mod windows {
                 unsafe { MmapOptions::new().len(BYTES).map_mut(&file) }.map_err(setup_error)?;
             let layout = NonNull::new(mapping.as_mut_ptr().cast::<Layout>())
                 .ok_or_else(|| unavailable("OpenFX close observation mapping is null"))?;
-            if (layout.as_ptr() as usize) % std::mem::align_of::<Layout>() != 0 {
+            if !(layout.as_ptr() as usize).is_multiple_of(std::mem::align_of::<Layout>()) {
                 return Err(invalid(
                     "OpenFX close observation mapping alignment mismatch",
                 ));
