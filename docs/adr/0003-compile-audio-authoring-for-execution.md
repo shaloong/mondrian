@@ -383,3 +383,46 @@ reservation, Hosted/factory peaks, coherent offers/IPC/lifetime and complete
 physical/native/RT qualification remain separate prerequisites. Public unsupported
 and endpoint errors keep their established order. No live Plan migration or
 grandfathered fee policy is introduced.
+
+## Processor output routing contract (2026-10-16)
+
+Approved for implementation; this section does not claim completed native
+multi-output support. The current single mutable Main bus and strip taps cannot
+represent independent plugin outputs. Relaxing a format's output-count check
+would give it incorrect buffers and erase signal identity. Extend the existing
+Main/auxiliary model and sole Route/DAG instead of replacing either executor.
+
+Factories declare ordered, stable-keyed auxiliary output contracts, validated
+against the Render Contract and revalidated for seeds and instance creation.
+An empty auxiliary contract preserves the existing single-Main behavior.
+Callbacks borrow Session-owned mutable auxiliary PCM beside the existing Main.
+Every admitted native output receives real storage, connected or otherwise;
+unconnected outputs never implicitly sum into Main.
+
+An authored Processor-output Route names the unique Sequence-local processor
+ID and either Main or an auxiliary bus key. Preparation derives its existing
+occurrence; it does not persist another owner/instance registry. The first
+slice admits Track/Bus racks only. Scope-generated and Output-rack sources are
+rejected explicitly. Bypassed routed producers retain author intent but fail
+execution preparation; they cannot fabricate auxiliary output. A raw tap is
+captured immediately after that processor returns, before subsequent Rack
+processing, and follows existing pre-mute send semantics. It does not acquire
+an extra owner mute/solo gate.
+
+Reuse the existing pre/post stage DAG, including its conservative rejection of
+same-stage feedback. Routes and sidechains resolve to dense prepared source
+slots. A processor tap's arrival is its aligned input delay plus its own
+algorithmic latency, not the remaining Rack latency. Fanout executes the
+producer once per window. All auxiliary buffers and referenced Main snapshots
+survive until their final consumers and are preallocated/charged through the
+existing storage visitors, FixedResident and Root grant; no second budget is
+introduced. Failed processing must not publish partially updated or stale PCM.
+
+The additive author endpoint requires document schema33 and a value-preserving
+32-to-33 migration that rejects new endpoints mislabeled as legacy. Archive and
+library formats remain unchanged. Clone/remap, strong references, node removal,
+cycle checks and authoring footprint migrate with the endpoint. Shared-DAG
+literal PCM, intermediate taps, PDC, fanout, partitioning, budget boundaries and
+project roundtrips qualify the first slice; independent native fixtures and
+real plugins qualify subsequent format adapters. Existing VST3/CLAP guards
+remain until their complete native buffers, IPC and contracts are implemented.
