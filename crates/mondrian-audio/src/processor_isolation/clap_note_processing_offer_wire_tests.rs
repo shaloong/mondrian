@@ -123,7 +123,7 @@ fn v2_wire_refuses_schema_identity_state_render_and_finite_policy_mismatch() {
 }
 
 #[test]
-fn v3_processing_shape_is_mandatory_and_absent_never_authorizes_auxiliary_ports() {
+fn v3_processing_shape_is_mandatory_and_optional_main_retains_auxiliary_bound() {
     let mut absent = offer();
     absent.processing.main_audio_input = ClapMainAudioInput::Absent;
     let decoded = decode(&encode_processing_offer_v3(&absent).unwrap()).unwrap();
@@ -139,5 +139,19 @@ fn v3_processing_shape_is_mandatory_and_absent_never_authorizes_auxiliary_ports(
     assert!(decode(&serde_json::to_vec(&extra).unwrap()).is_err());
     value["processing"]["auxiliary_buses"] =
         serde_json::json!([{"bus_key":"clap.audio-input.33","channel_layout":"Mono"}]);
-    assert!(decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    let decoded = decode(&serde_json::to_vec(&value).unwrap()).unwrap();
+    assert_eq!(decoded.main_audio_input(), ClapMainAudioInput::Absent);
+    assert_eq!(
+        decoded.auxiliary_inputs().collect::<Vec<_>>(),
+        vec![("clap.audio-input.33", AudioChannelLayout::Mono)]
+    );
+    value["processing"]["auxiliary_buses"] = serde_json::Value::Array((0..32).map(|id| {
+        serde_json::json!({"bus_key":format!("clap.audio-input.{id}"),"channel_layout":"Mono"})
+    }).collect());
+    let refused = decode(&serde_json::to_vec(&value).unwrap());
+    assert!(refused.is_err());
+    assert!(
+        matches!(refused, Err(AudioProcessorHostError::InvalidContract(detail))
+        if detail == "CLAP Note processing response changed its contract identity")
+    );
 }

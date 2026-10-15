@@ -32,7 +32,7 @@ product consumers and pending closure for each feature family.
 | --- | --- | --- |
 | Native discovery and isolation | Selected class/descriptor, fingerprinted native binary, supervised discovery and persistent processing child, bounded control traffic and shared buffers | Standard scan locations/workflow, permitted vendor corpus, platform and native editor lifecycle |
 | VST3 SDK interfaces | One canonical runtime binding package generated from verified SDK 3.8.1 sources; independent layout/signature and actual cross-language calls for all nine methods of the four new interfaces | Optional host-service implementation, MIDI 2 event routing, native MSVC/macOS/Linux qualification; upstream generator excludes SDK testing interfaces |
-| Audio layout | Mono/stereo main in/out, up to 31 auxiliary inputs of the admitted layout; explicit absent CLAP main input with finite owned mono/offline Note execution; restored-state native port metadata and causal PDC | Mixed layouts, surround/ambisonic, multiple outputs, third-party instrument processing and zero-input stereo DSP |
+| Audio layout | Mono/stereo main in/out, up to 31 auxiliary inputs of the admitted layout; explicit absent CLAP main input, including ordered auxiliary-only inputs; finite owned mono/offline Note execution; restored-state native port metadata and causal PDC | Mixed layouts, surround/ambisonic, multiple outputs, third-party instrument processing and zero-input stereo DSP |
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
@@ -327,6 +327,31 @@ this does not independently count native callbacks or observe OS module unload.
 No internal five-second processing deadline, state restore, activation, DSP,
 Note, realtime, performance or cross-platform compatibility is qualified.
 Evidence: `clap-topology-census-actual-r1/` in the existing validation directory.
+
+### CLAP optional Main input, 2026-10-16
+
+Main input presence now follows `IS_MAIN` at native index zero. Non-main inputs,
+including index zero, retain native order and stable ID-based auxiliary keys.
+The existing offset and buffer mapping serve both shapes; graph working PCM
+does not become an undeclared native input. Admission still requires at most
+31 auxiliary inputs and exactly one main output. Inactive restored-state,
+render-mode and configuration metadata checks retain their existing contract.
+
+On source `AE956862...` (1959 inputs), all 575 ordinary Audio tests pass,
+including three new owned Clack ABI controls for mono/stereo PCM mapping,
+disconnected silence, missing PCM and changed/oversized/multi-output refusals.
+The same-source five-core Strict check passes with zero diagnostics. The frozen
+old-validator control is source evidence, not a run of an old Product binary.
+Fresh normal Product `3433BC99...` and Audio `7B1E22D6...` share that source.
+Three existing public Note native regressions pass, including six fresh
+zero-input Runtime cases at 44.1/48 kHz with literal PCM, Source handoffs and
+owned process exit. They retain the original explicit unbounded root grant;
+physical allocation bounds and App terminal Note Off remain unqualified.
+These regress the existing Note families; auxiliary-only processing has the
+inline ABI evidence above. Native evidence: `clap-optional-main-native-r1/`.
+Surge XT's observed default three-output topology remains refused; optional
+port configuration, third-party processing and realtime performance are not
+qualified by these controls. Evidence: `clap-optional-main-ordinary-r1/`.
 
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 

@@ -47,7 +47,7 @@ const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
 pub(super) const MAX_DESCRIPTORS: usize = 4096;
 pub(super) const MAX_PARAMETERS: u32 = 1024;
-const MAX_INPUT_PORTS: u32 = 32;
+pub(super) const MAX_INPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 // Private optional discovery-error transport; never parameter or playback authority.
@@ -1445,11 +1445,7 @@ pub(super) fn inspect_audio_inputs(
     let mut auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
     let mut names = Vec::new();
     let input_count = ports.count(handle, true);
-    let main_audio_input = if input_count == 0 {
-        ClapMainAudioInput::Absent
-    } else {
-        ClapMainAudioInput::Present
-    };
+    let mut main_audio_input = ClapMainAudioInput::Absent;
     for is_input in [true, false] {
         let count = if is_input {
             input_count
@@ -1469,7 +1465,9 @@ pub(super) fn inspect_audio_inputs(
                 .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
             let refusal = if !ids.insert(port.id.get()) {
                 Some("duplicate_id")
-            } else if port.flags.contains(AudioPortFlags::IS_MAIN) != (index == 0) {
+            } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
+                || (!is_input && !port.flags.contains(AudioPortFlags::IS_MAIN))
+            {
                 Some("main_role")
             } else if port.port_type != Some(expected_type) {
                 Some("port_type")
@@ -1490,7 +1488,9 @@ pub(super) fn inspect_audio_inputs(
                     channel_layout.channel_count(),
                 ));
             }
-            if is_input && index != 0 {
+            if is_input && port.flags.contains(AudioPortFlags::IS_MAIN) {
+                main_audio_input = ClapMainAudioInput::Present;
+            } else if is_input {
                 if let Ok(name) = std::str::from_utf8(port.name)
                     && let Some(name) = crate::AudioProcessorInputName::capture(
                         format!("clap.audio-input.{}", port.id.get()),
@@ -1503,6 +1503,8 @@ pub(super) fn inspect_audio_inputs(
                     bus_key: format!("clap.audio-input.{}", port.id.get()),
                     channel_layout,
                 });
+                // Keep the existing 31-auxiliary limit even without a Main.
+                main_audio_input.validate(&auxiliary_inputs)?;
             }
         }
     }

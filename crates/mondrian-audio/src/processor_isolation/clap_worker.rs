@@ -271,7 +271,7 @@ impl HostLogImpl for ClapNativeHostShared {
 pub struct ClapAudioProcessorWorkerFactory;
 
 /// Native CLAP main-input shape, independent of the graph's output/working PCM.
-/// An absent main input never authorizes auxiliary native inputs.
+/// An absent main input may still have ordered auxiliary native inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClapMainAudioInput {
@@ -291,9 +291,9 @@ impl ClapMainAudioInput {
         self,
         auxiliary: &AudioProcessorAuxiliaryInputContract,
     ) -> Result<(), AudioProcessorHostError> {
-        if self == Self::Absent && !auxiliary.buses.is_empty() {
+        if auxiliary.buses.len() >= super::clap_discovery::MAX_INPUT_PORTS as usize {
             return Err(invalid(
-                "CLAP absent main input cannot have auxiliary inputs",
+                "CLAP auxiliary inputs exceed the existing 31-port bound",
             ));
         }
         Ok(())
@@ -2305,7 +2305,7 @@ mod tests {
     }
 
     struct SidechainPlugin<const CASE: u8>;
-    struct SidechainShared(AtomicBool, bool);
+    struct SidechainShared(AtomicBool, bool, usize);
     struct SidechainMain<'a, const CASE: u8>(&'a SidechainShared);
     struct SidechainProcessor<'a>(&'a SidechainShared);
     static LATENCY_DEACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -2337,6 +2337,13 @@ mod tests {
             Ok(SidechainShared(
                 AtomicBool::new(false),
                 matches!(CASE, 7 | 8),
+                if matches!(CASE, 7 | 8) {
+                    0
+                } else if matches!(CASE, 9 | 11 | 12) {
+                    2
+                } else {
+                    3
+                },
             ))
         }
 
@@ -2367,9 +2374,15 @@ mod tests {
                     0
                 } else if CASE == 4 {
                     33
+                } else if matches!(CASE, 9 | 11 | 12) {
+                    2
+                } else if CASE == 10 {
+                    32
                 } else {
                     3
                 }
+            } else if CASE == 11 {
+                3
             } else {
                 1
             }
@@ -2379,26 +2392,38 @@ mod tests {
             if index >= self.count(is_input) || (CASE == 5 && index == 2) {
                 return;
             }
-            let id = match index {
-                0 => 0,
-                1 => 11,
-                _ if CASE == 1 => 11,
-                _ => 7,
+            let id = if is_input && CASE == 10 {
+                100 + index
+            } else if is_input && matches!(CASE, 9 | 11 | 12) {
+                if index == 0 {
+                    11
+                } else {
+                    7
+                }
+            } else {
+                match index {
+                    0 => 0,
+                    1 => 11,
+                    _ if CASE == 1 => 11,
+                    _ => 7,
+                }
             };
             writer.set(&AudioPortInfo {
                 id: ClapId::new(id),
                 name: b"same display name",
-                channel_count: if (CASE == 3 && index != 0) || CASE == 8 {
+                channel_count: if (CASE == 3 && index != 0) || matches!(CASE, 8 | 12) {
                     1
                 } else {
                     2
                 },
-                flags: if index == 0 || (CASE == 2 && index == 1) {
+                flags: if is_input && matches!(CASE, 9..=12) {
+                    AudioPortFlags::empty()
+                } else if index == 0 || (CASE == 2 && index == 1) {
                     AudioPortFlags::IS_MAIN
                 } else {
                     AudioPortFlags::empty()
                 },
-                port_type: Some(if (CASE == 3 && index != 0) || CASE == 8 {
+                port_type: Some(if (CASE == 3 && index != 0) || matches!(CASE, 8 | 12) {
                     AudioPortType::MONO
                 } else {
                     AudioPortType::STEREO
@@ -2431,9 +2456,9 @@ mod tests {
             mut audio: Audio,
             _events: Events,
         ) -> Result<ProcessStatus, PluginError> {
-            if self.0 .1 && (audio.input_port_count() != 0 || audio.output_port_count() != 1) {
+            if audio.input_port_count() != self.0 .2 || audio.output_port_count() != 1 {
                 return Err(PluginError::Message(
-                    "zero-input fixture received native audio input",
+                    "fixture received the wrong native port counts",
                 ));
             }
             let mut expected = if self.0 .1 {
@@ -2615,12 +2640,257 @@ mod tests {
             assert!(serde_json::from_value::<ClapPayload>(unknown).is_err());
             assert!(shape.validate(&AudioProcessorAuxiliaryInputContract::default()).is_ok());
         }
-        assert!(ClapMainAudioInput::Absent
-            .validate(&sidechain_request().auxiliary_inputs)
-            .is_err());
+        assert!(frozen_legacy_main_input_validation(
+            ClapMainAudioInput::Absent,
+            &sidechain_request().auxiliary_inputs,
+        )
+        .is_err());
         assert!(ClapMainAudioInput::Present
             .validate(&sidechain_request().auxiliary_inputs)
             .is_ok());
+    }
+
+    // Source-only mixed-version control: this is the former validator, not an
+    // assertion that an old Product binary has executed during this unit test.
+    fn frozen_legacy_main_input_validation(
+        shape: ClapMainAudioInput,
+        auxiliary: &AudioProcessorAuxiliaryInputContract,
+    ) -> Result<(), AudioProcessorHostError> {
+        if shape == ClapMainAudioInput::Absent && !auxiliary.buses.is_empty() {
+            return Err(invalid(
+                "CLAP absent main input cannot have auxiliary inputs",
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn clap_auxiliary_only_abi_preserves_native_zero_index_order_and_ignores_graph_main() {
+        for layout in [AudioChannelLayout::Mono, AudioChannelLayout::Stereo] {
+            let entry = if layout == AudioChannelLayout::Mono {
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<12>>>(
+                    c"/test/aux-only-mono",
+                )
+            } else {
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<9>>>(
+                    c"/test/aux-only-stereo",
+                )
+            }
+            .expect("auxiliary-only entry");
+            let mut request = sidechain_request();
+            request.render_contract.channel_layout = layout;
+            for bus in &mut request.auxiliary_inputs.buses {
+                bus.channel_layout = layout;
+            }
+            let render = request.render_contract();
+            let auxiliary = request.auxiliary_inputs.clone();
+            let probe = super::super::clap_discovery::probe_loaded(
+                &entry,
+                "org.mondrian.test.sidechain",
+                render,
+                None,
+                false,
+            )
+            .expect("optional Main is discovered from actual flags");
+            assert_eq!(probe.main_audio_input, ClapMainAudioInput::Absent);
+            assert_eq!(
+                super::super::protocol::auxiliary_from_wire(probe.auxiliary_buses),
+                auxiliary
+            );
+            assert!(
+                frozen_legacy_main_input_validation(ClapMainAudioInput::Absent, &auxiliary)
+                    .is_err()
+            );
+            let mut worker = prepare_loaded_with_audio_input(
+                request,
+                entry,
+                c"org.mondrian.test.sidechain",
+                None,
+                ClapMainAudioInput::Absent,
+                &[],
+                &[],
+            )
+            .expect("prepare the same ordered auxiliary-only contract");
+            assert_eq!(worker.auxiliary_input_contract(), auxiliary);
+            assert_eq!(
+                worker
+                    .auxiliary_input_names()
+                    .iter()
+                    .map(|name| name.bus_key.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["clap.audio-input.11", "clap.audio-input.7"]
+            );
+            worker.enter_state(12).expect("actual Enter");
+            let (mut main, aux, expected) = if layout == AudioChannelLayout::Mono {
+                (
+                    vec![99.0, -101.0],
+                    vec![1.0, 2.0, -1.0, -2.0],
+                    vec![-1.0, -2.0],
+                )
+            } else {
+                (
+                    vec![99.0, -101.0, 103.0, -107.0],
+                    vec![1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0],
+                    vec![-1.0, -2.0, -3.0, -4.0],
+                )
+            };
+            worker
+                .process(IsolatedAudioProcessorWorkerBlock::new(
+                    12,
+                    2,
+                    render,
+                    &mut main,
+                    &auxiliary,
+                    &aux,
+                    &[],
+                    &[],
+                ))
+                .expect("actual native input0 and input1 are the two auxiliary buses");
+            assert_eq!(
+                main, expected,
+                "the independent native port gains are 2 and 3, not a graph-Main mix"
+            );
+            let channels = layout.channel_count();
+            let mut main = vec![113.0; channels];
+            worker
+                .process(IsolatedAudioProcessorWorkerBlock::new(
+                    14,
+                    1,
+                    render,
+                    &mut main,
+                    &auxiliary,
+                    &vec![0.0; channels * 2],
+                    &[],
+                    &[],
+                ))
+                .expect("disconnected auxiliary silence overwrites the preceding signal");
+            assert_eq!(main, vec![0.0; channels]);
+            let mut main = vec![127.0; channels];
+            assert!(worker
+                .process(IsolatedAudioProcessorWorkerBlock::new(
+                    15,
+                    1,
+                    render,
+                    &mut main,
+                    &auxiliary,
+                    &[],
+                    &[],
+                    &[],
+                ))
+                .is_err());
+            assert_eq!(
+                main,
+                vec![127.0; channels],
+                "missing auxiliary PCM is never substituted with graph Main"
+            );
+        }
+    }
+
+    #[test]
+    fn clap_auxiliary_only_admission_refuses_changed_contract_capacity_and_multiple_outputs() {
+        for changed in [false, true] {
+            let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<9>>>(
+                c"/test/aux-only-changed",
+            )
+            .unwrap();
+            let mut request = sidechain_request();
+            if changed {
+                request.auxiliary_inputs.buses.reverse();
+            } else {
+                request.auxiliary_inputs.buses.clear();
+            }
+            assert!(matches!(prepare_loaded_with_audio_input(
+                request, entry, c"org.mondrian.test.sidechain", None, ClapMainAudioInput::Absent, &[], &[],
+            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP auxiliary ports changed since contract probe"));
+        }
+        for (entry, expected) in [
+            (
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<10>>>(
+                    c"/test/aux-only-32",
+                )
+                .unwrap(),
+                "CLAP auxiliary inputs exceed the existing 31-port bound",
+            ),
+            (
+                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<11>>>(
+                    c"/test/aux-only-three-outputs",
+                )
+                .unwrap(),
+                "CLAP requires bounded input ports and one main output",
+            ),
+        ] {
+            let request = sidechain_request();
+            assert!(matches!(super::super::clap_discovery::probe_loaded(
+                &entry, "org.mondrian.test.sidechain", request.render_contract(), None, false,
+            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == expected));
+            assert!(matches!(prepare_loaded_with_audio_input(
+                request, entry, c"org.mondrian.test.sidechain", None, ClapMainAudioInput::Absent, &[], &[],
+            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == expected));
+        }
+    }
+
+    #[test]
+    fn clap_optional_main_shape_keeps_legacy_rejection_and_factory_preload_capacity_guard() {
+        let auxiliary = AudioProcessorAuxiliaryInputContract {
+            buses: (0..32)
+                .map(|id| crate::AudioProcessorAuxiliaryInputBusContract {
+                    bus_key: format!("clap.audio-input.{id}"),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .collect(),
+        };
+        let admitted =
+            AudioProcessorAuxiliaryInputContract { buses: auxiliary.buses[..31].to_vec() };
+        assert!(ClapMainAudioInput::Absent.validate(&admitted).is_ok());
+        assert!(ClapMainAudioInput::Present.validate(&admitted).is_ok());
+        assert!(
+            frozen_legacy_main_input_validation(ClapMainAudioInput::Absent, &admitted).is_err()
+        );
+        assert!(frozen_legacy_main_input_validation(
+            ClapMainAudioInput::Absent,
+            &Default::default()
+        )
+        .is_ok());
+        assert!(
+            frozen_legacy_main_input_validation(ClapMainAudioInput::Present, &admitted).is_ok()
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let nonexistent_library = directory.path().join("must-not-load.clap");
+        assert!(!nonexistent_library.exists());
+        for shape in [ClapMainAudioInput::Absent, ClapMainAudioInput::Present] {
+            assert!(shape.validate(&auxiliary).is_err());
+            let mut request = sidechain_request();
+            request.native_lane = clap_native_worker_lane_profile().unwrap();
+            request.auxiliary_inputs = auxiliary.clone();
+            request.payload = serde_json::to_vec(&ClapPayload {
+                main_audio_input: shape,
+                library_path: nonexistent_library.clone(),
+                plugin_id: "org.mondrian.test.sidechain".to_owned(),
+                binary_sha256: [7; 32],
+                state: None,
+                parameters: Vec::new(),
+                parameter_ids: Vec::new(),
+            })
+            .unwrap();
+            assert!(
+                matches!(ClapAudioProcessorWorkerFactory.prepare(request),
+                Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP auxiliary inputs exceed the existing 31-port bound"),
+                "capacity rejection precedes fingerprinting/loading the nonexistent library"
+            );
+            assert!(ClapAudioProcessorSpecResolver::new(
+                std::env::current_exe().unwrap(),
+                [ClapPluginRegistration {
+                    plugin_id: "org.mondrian.test.sidechain".to_owned(),
+                    library_path: nonexistent_library.clone(),
+                    binary_sha256: [7; 32],
+                    execution_contract: contract(),
+                    parameters: Vec::new(),
+                    main_audio_input: shape,
+                    auxiliary_inputs: auxiliary.clone(),
+                }]
+            )
+            .is_err());
+        }
     }
 
     #[test]
