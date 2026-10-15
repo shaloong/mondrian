@@ -353,6 +353,33 @@ Surge XT's observed default three-output topology remains refused; optional
 port configuration, third-party processing and realtime performance are not
 qualified by these controls. Evidence: `clap-optional-main-ordinary-r1/`.
 
+### CLAP inactive configuration census, 2026-10-16
+
+The existing test-only census now queries `clap.audio-ports-config` on the same
+initialized, never-activated instance. Available configurations have a bounded
+count/get summary (at most 32 rows); missing extensions retain null count and
+completion facts, rather than implying zero configurations. No configuration
+selection, ConfigInfo, state load, activation or processing is requested, and
+the host does not advertise configuration/rescan support.
+
+On source `75419BA5...` (1959 inputs), fresh Audio `3CE63176...` includes the
+existing Clack configuration binding feature. All 575 ordinary tests and the
+single real census pass (681 total, 106 ignored); same-source five-core strict
+Clippy has zero diagnostics. Original Job gates and adapter `8523D252...` retain
+unchanged inputs, clean ownership and the original 180-second outer deadline.
+Retained normal Product `3433BC99...` serves descriptor List only through the
+reviewed three-file source projection; it was not rebuilt or asserted to have
+whole-source equality.
+
+Surge XT 1.3.4 DLL `6FB598B3...` returns no configuration extension under this
+host's negotiation. Its count, callback availability and enumeration completion
+remain null; the default one auxiliary stereo input and three stereo outputs
+are unchanged. Instance and library Rust Drop return before completion. This
+verifies the unavailable-extension observation for this host and binary, not
+absence under other hosts, the available count/get branch, configuration
+selection, native unload callbacks or instrument processing. The three-output
+admission gap remains open. Evidence: `clap-config-census-actual-r1/`.
+
 ## Windows Surge Effects through canonical Runtime (2026-10-16)
 
 The public non-RT owner observation returns the actual PID/load facts from the

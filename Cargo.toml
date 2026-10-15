@@ -176,7 +176,7 @@ memmap2          = "0.9.11"
 clap-sys = { path = "vendor/clap-sys" }
 clack-host       = { path = "vendor/clack/host" }
 clack-plugin     = { path = "vendor/clack/plugin" }
-clack-extensions = { path = "vendor/clack/extensions", features = ["clack-host", "audio-ports", "note-ports", "latency", "tail", "state", "params", "render", "thread-check", "log", "gui", "timer"] }
+clack-extensions = { path = "vendor/clack/extensions", features = ["clack-host", "audio-ports", "audio-ports-config", "note-ports", "latency", "tail", "state", "params", "render", "thread-check", "log", "gui", "timer"] }
 # Canonical ABI package; the root patch pins its immutable source.
 vst3 = { path = "vendor/vst3-sdk" }
 vst3-host = { path = "vendor/vst3-host", default-features = false }

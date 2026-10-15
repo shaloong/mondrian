@@ -476,9 +476,42 @@ fn external_clap_instrument_default_deactivated_audio_port_census() {
         .unwrap_or_else(|error| probe_failed(dir, "census_setup", error));
     // The helper returns only after native instance/module Drop has returned,
     // including when a bounded count/get refusal retained an incomplete prefix.
+    let configurations = observation["audio_ports_config"].clone();
     write_json(dir, "census.json", observation);
     if let Some(error) = failure {
         probe_failed(dir, "deactivated_audio_port_census", error);
+    }
+    // An absent extension is a complete availability observation for this Host,
+    // not an invented zero-config list or a claim about other hosts/builds.
+    let available = configurations["available_under_current_host"]
+        .as_bool()
+        .expect("configuration extension availability was actually queried");
+    let rows = configurations["rows"].as_array().expect("bounded configuration summaries");
+    if available {
+        let count = configurations["count"].as_u64().expect("actual configuration count");
+        assert!(count <= 32, "configuration query bound");
+        assert_eq!(configurations["count_callback_available"], true);
+        assert_eq!(configurations["get_callback_available"], true);
+        assert_eq!(configurations["complete"], true);
+        assert_eq!(
+            rows.len() as u64,
+            count,
+            "all advertised configuration summaries"
+        );
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row["index"].as_u64(), Some(index as u64));
+            assert_eq!(row["count"].as_u64(), Some(count));
+            assert_eq!(row["clack_get_returned_some"], true);
+        }
+    } else {
+        assert!(configurations["count"].is_null());
+        assert!(configurations["complete"].is_null());
+        assert!(configurations["count_callback_available"].is_null());
+        assert!(configurations["get_callback_available"].is_null());
+        assert!(
+            rows.is_empty(),
+            "unavailable is not a fabricated configuration"
+        );
     }
     write_json(
         dir,
@@ -487,6 +520,10 @@ fn external_clap_instrument_default_deactivated_audio_port_census() {
             "schema":1, "case_sha256":case_lease.sha256, "helper_sha256":helper.sha256,
             "plugin_sha256":plugin.sha256, "actual_identity":id,
             "topology_observation_complete":true, "native_instance_drop_returned":true,
+            "configuration_extension_available_under_current_host":available,
+            "configuration_summary_count":configurations["count"],
+            "configuration_enumeration_complete":configurations["complete"],
+            "configuration_selection_qualified":false, "config_info_queried":false,
             "native_library_drop_returned":true, "direct_native_census_in_test_process":true,
             "processing_probe_qualified":false, "processed_pcm":false, "notes_qualified":false,
             "state_qualified":false, "realtime_qualified":false, "full_compatibility_qualified":false,

@@ -4654,6 +4654,14 @@ pub(super) fn deactivated_audio_port_census_for_test(
     library: &Path,
     plugin_id: &str,
 ) -> Result<(serde_json::Value, Option<AudioProcessorHostError>), AudioProcessorHostError> {
+    use clack_extensions::audio_ports_config::{
+        AudioPortsConfigBuffer, MainPortInfo, PluginAudioPortsConfig,
+    };
+    use clack_host::extensions::prelude::{Extension, RawExtension};
+    use clap_sys::ext::audio_ports_config::{
+        clap_plugin_audio_ports_config, CLAP_EXT_AUDIO_PORTS_CONFIG,
+    };
+
     // SAFETY: the caller retains a hash-bound ordinary library-file lease. The
     // entry owns the loaded module and outlives the one native instance below.
     let entry = unsafe { PluginEntry::load(library.as_os_str()) }
@@ -4679,6 +4687,14 @@ pub(super) fn deactivated_audio_port_census_for_test(
     let mut input_count = None;
     let mut output_count = None;
     let mut rows = Vec::new();
+    let mut default_topology_complete = false;
+    let mut config_query_callback = None;
+    let mut config_available = None;
+    let mut config_count_callback = None;
+    let mut config_get_callback = None;
+    let mut config_count = None;
+    let mut configs_complete = None;
+    let mut config_rows = Vec::new();
     let observed = (|| {
         shared.service_callbacks(&mut instance)?;
         let handle = instance.plugin_handle();
@@ -4716,6 +4732,88 @@ pub(super) fn deactivated_audio_port_census_for_test(
                 }));
             }
         }
+        default_topology_complete = true;
+        // Query the same initialized, never-activated instance only after the
+        // original default topology scan. No config selection or Host rescan
+        // capability is declared, and no config is assumed to match default.
+        let Some(query) = handle.as_raw().get_extension else {
+            config_query_callback = Some(false);
+            return Err(invalid("CLAP census plugin extension query is unavailable"));
+        };
+        config_query_callback = Some(true);
+        // SAFETY: main-thread handle is the live instance above. The pinned
+        // official ID requests exactly the audio-ports-config ABI table.
+        let raw = unsafe { query(handle.as_raw_ptr(), CLAP_EXT_AUDIO_PORTS_CONFIG.as_ptr()) };
+        let Some(pointer) = std::ptr::NonNull::new(raw.cast_mut()) else {
+            config_available = Some(false);
+            return Ok(());
+        };
+        config_available = Some(true);
+        configs_complete = Some(false);
+        // SAFETY: this table came from the official ID on this same instance;
+        // CLAP keeps it alive until instance destruction. RawExtension retains
+        // that identity, and use_extension checks it before inspecting callbacks.
+        // The typed wrapper is used only while this main-thread handle is live.
+        let (configs, count_callback, get_callback) = unsafe {
+            let raw = RawExtension::from_raw_plugin_extension(
+                pointer.cast::<()>(),
+                std::ptr::NonNull::from(handle.as_raw()),
+            );
+            let table = handle.use_extension(&raw.cast::<clap_plugin_audio_ports_config>());
+            (
+                PluginAudioPortsConfig::from_raw(raw),
+                table.count.is_some(),
+                table.get.is_some(),
+            )
+        };
+        config_count_callback = Some(count_callback);
+        config_get_callback = Some(get_callback);
+        if !count_callback {
+            return Err(invalid(
+                "CLAP census configuration count callback is unavailable",
+            ));
+        }
+        let count = configs.count(&handle);
+        config_count = Some(count);
+        if count > 32 {
+            return Err(invalid("CLAP census exceeds 32 configurations"));
+        }
+        if !get_callback {
+            return Err(invalid(
+                "CLAP census configuration get callback is unavailable",
+            ));
+        }
+        let main_port = |port: Option<MainPortInfo<'_>>| {
+            port.map(|port| {
+                let type_class = match port.port_type {
+                    None => "unspecified",
+                    Some(value) if value == AudioPortType::MONO => "mono",
+                    Some(value) if value == AudioPortType::STEREO => "stereo",
+                    Some(_) => "other",
+                };
+                serde_json::json!({"channels":port.channel_count, "type_class":type_class})
+            })
+        };
+        for index in 0..count {
+            let mut buffer = AudioPortsConfigBuffer::new();
+            let Some(config) = configs.get(&handle, index, &mut buffer) else {
+                config_rows.push(serde_json::json!({"index":index, "count":count,
+                    "clack_get_returned_some":false}));
+                return Err(invalid(
+                    "CLAP census configuration metadata is invalid or unavailable",
+                ));
+            };
+            config_rows.push(serde_json::json!({
+                "index":index, "count":count, "clack_get_returned_some":true,
+                "id":config.id.get(), "input_port_count":config.input_port_count,
+                "output_port_count":config.output_port_count,
+                "has_main_input":config.main_input.is_some(),
+                "has_main_output":config.main_output.is_some(),
+                "main_input":main_port(config.main_input),
+                "main_output":main_port(config.main_output),
+            }));
+        }
+        configs_complete = Some(true);
         Ok(())
     })();
     // Neither failure nor success may publish completion before destroy/deinit
@@ -4727,7 +4825,18 @@ pub(super) fn deactivated_audio_port_census_for_test(
             "schema":1, "plugin_id":plugin_id, "process_id":std::process::id(),
             "phase":"default_deactivated", "reader":"clack_audio_ports",
             "input_count":input_count, "output_count":output_count, "rows":rows,
-            "complete":observed.is_ok(), "native_instance_drop_returned":true,
+            "audio_ports_config":{
+                "extension_query_callback_available":config_query_callback,
+                "available_under_current_host":config_available,
+                "count_callback_available":config_count_callback,
+                "get_callback_available":config_get_callback,
+                "count":config_count, "complete":configs_complete, "rows":config_rows,
+                "availability_is_not_all_hosts_or_dll_builds":true,
+                "config_info_queried":false, "selection_requested":false,
+                "default_layout_comparison_performed":false,
+            },
+            "complete":default_topology_complete, "census_observation_complete":observed.is_ok(),
+            "native_instance_drop_returned":true,
             "native_library_drop_returned":true, "known_flags_only":true,
             "null_and_empty_types_normalized_together":true,
             "diagnostic_activation_requested":false, "diagnostic_process_requested":false,
