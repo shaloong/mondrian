@@ -4,13 +4,19 @@
 use super::*;
 use crate::{
     AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProgramRuntime,
-    AudioStateEntry, ResolvedAudioSource,
+    AudioStateEntry, NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity,
+    ResolvedAudioSource,
 };
 use mondrian_core::{
-    AssetId, AudioOwnerInstallationSource, AudioSourceComponentId, ExecutionCancellationToken,
-    TimelineTime,
+    AssetId, AudioOwnerInstallationSource, AudioSourceComponentId, AutomationSegmentInterpolation,
+    ExactAutomationKeyframe, ExecutionCancellationToken, NativeAudioAuthorCallback, TimelineTime,
 };
-use mondrian_timeline::{Clip, Sequence};
+use mondrian_timeline::audio::AudioChannelStripOwner;
+use mondrian_timeline::{
+    apply_audio_processor_rack_edit, AudioChannelStripRack, AudioProcessorRackAddress,
+    AudioProcessorRackEdit, AudioProcessorRackEditRequest, Clip, NativeAudioAuthorUpdate,
+    NativeAudioParameterWrite, NativeAudioParameterWriteMode, Sequence,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const RUNTIME_CASE_ENV: &str = "MONDRIAN_RING_OUT_RUNTIME_PCM_CASE";
@@ -100,15 +106,17 @@ fn owner(runtime: &AudioProgramRuntime) -> crate::AudioNativeProcessorOwnerLease
     runtime.visit_continuity_evidence(&mut cursors).expect("actual Runtime cursors");
     assert_eq!((cursors.sessions.len(), cursors.processors.len()), (1, 1));
     let processor = cursors.processors[0];
-    let crate::AudioProcessorCursorState::Active { epoch, .. } = processor.state else {
-        panic!("actual native occurrence must have entered its epoch");
+    let epoch = match processor.state {
+        crate::AudioProcessorCursorState::Unentered => None,
+        crate::AudioProcessorCursorState::Active { epoch, .. } => Some(epoch),
+        _ => panic!("actual native occurrence has no usable cold/active owner"),
     };
     runtime
         .native_owner_lease(crate::AudioNativeProcessorAddress {
             root: cursors.sessions[0].identity,
             local: processor.identity,
             occurrence: processor.occurrence,
-            epoch: Some(epoch),
+            epoch,
         })
         .expect("actual installed Runtime-issued native lease")
 }
@@ -165,6 +173,187 @@ fn observe(
     }
 }
 
+// Consume the real cold installed source before public Enter can erase or
+// overwrite it. This is the same canonical transaction/plan/Source/Ack path as
+// the App, bounded to four actual prefixes for this finite startup scenario.
+fn accept_cold_startup(
+    runtime: &mut AudioProgramRuntime,
+    sequence: &mut Sequence,
+    installation: &AudioOwnerInstallationSource,
+    directory: &Path,
+    label: &str,
+) -> (usize, Option<(u32, u64)>) {
+    let cancel = ExecutionCancellationToken::new();
+    let mut handoffs = 0;
+    let mut native_object = None;
+    for round in 0..4 {
+        let lease = owner(runtime);
+        assert!(lease.editor_target().continuity_epoch.is_none());
+        let batch = runtime
+            .poll_native_observations(&cancel)
+            .expect("cold installed native poll retains typed source failures");
+        write_json(
+            directory,
+            &format!("{label}-cold-{round}-poll.json"),
+            json!({
+                "schema": 1, "target_debug": format!("{:?}", lease.editor_target()),
+                "raw_public_batch_debug": format!("{batch:?}"),
+                "continuity_epoch_is_none": true, "author_handoffs_completed": handoffs,
+                "flags_and_values_are_actual_observations": true,
+            }),
+        );
+        if let Some(batch) = &batch {
+            if let Some(logs) = &batch.diagnostics {
+                assert!(
+                    !logs.loss().incomplete(),
+                    "cold native diagnostics incomplete"
+                );
+            }
+            if let Some(parameters) = &batch.parameters {
+                assert_eq!(parameters.target(), lease.editor_target());
+                let actual = (
+                    parameters.process_id().get(),
+                    parameters.object_serial().get(),
+                );
+                if let Some(prior) = native_object {
+                    assert_eq!(actual, prior);
+                }
+                native_object = Some(actual);
+            }
+        }
+        let Some(proposal) = batch.and_then(|batch| batch.author) else {
+            runtime
+                .validate_native_author_source_closed(&cancel)
+                .expect("cold source must actually close, not merely lack a public proposal");
+            runtime.validate_native_owner(owner(runtime)).expect("closed exact cold owner");
+            return (handoffs, native_object);
+        };
+        assert_eq!(proposal.target(), lease.editor_target());
+        assert_eq!(proposal.sequence(), sequence.id);
+        assert!(proposal.callbacks().len() <= mondrian_core::NATIVE_AUDIO_AUTHOR_CALLBACKS);
+        if let Some(state) = proposal.state() {
+            let bytes: Vec<u8> = state.iter().copied().collect();
+            assert!(bytes.len() <= 64 * 1024, "bounded actual cold state");
+            write_new(
+                directory,
+                &format!("{label}-cold-{round}-state.bin"),
+                &bytes,
+            );
+        }
+        let current = &sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
+        assert_eq!(current.id, proposal.target().instance);
+        let definition = current.definition.clone();
+        let mut writes = Vec::new();
+        for callback in proposal.callbacks() {
+            match callback {
+                NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } => {
+                    assert_eq!(flags & !15, 0, "unknown actual rescan flags");
+                    // App native_audio_editor.rs: rescan VALUES refreshes only
+                    // existing unkeyed references, never records automation.
+                    if flags & 9 != 0 {
+                        for (id, bits) in values {
+                            let parameter =
+                                current.parameters.get(id).expect("actual rescan schema");
+                            if parameter
+                                .automation
+                                .as_ref()
+                                .is_none_or(|curve| !curve.keyframes.is_empty())
+                            {
+                                continue;
+                            }
+                            writes.push(
+                                NativeAudioParameterWrite {
+                                    schema: Box::new(parameter.schema.clone()),
+                                    value: f64::from_bits(*bits),
+                                    mode: NativeAudioParameterWriteMode::Unkeyed,
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                }
+                NativeAudioAuthorCallback::DirtyChanged(_) => {}
+                other => panic!("cold startup callback needs a chosen canonical policy: {other:?}"),
+            }
+        }
+        let request = AudioProcessorRackEditRequest {
+            address: AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            edit: AudioProcessorRackEdit::SetNativeAuthorState {
+                processor_id: current.id,
+                expected_definition: definition,
+                update: NativeAudioAuthorUpdate {
+                    parameters: writes,
+                    opaque_state: proposal.state().cloned(),
+                },
+            },
+        };
+        let transaction = apply_audio_processor_rack_edit(sequence, &request)
+            .expect("real atomic SetNativeAuthorState accepts the actual cold proposal");
+        let canonical = serde_json::to_vec(sequence).expect("accepted canonical cold author");
+        assert!(canonical.len() as u64 <= MAX_JSON);
+        write_new(
+            directory,
+            &format!("{label}-cold-{round}-canonical-sequence.json"),
+            &canonical,
+        );
+        let programs = [NativeAudioAuthorProgram {
+            sequence: sequence.id,
+            program: Arc::new(
+                crate::compile_audio_program(
+                    sequence,
+                    crate::AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+                )
+                .expect("compile only the accepted canonical cold transaction"),
+            ),
+        }];
+        let (registration, destination) =
+            installation.register().expect("same private Source registration");
+        let current = installation.current_claim().unwrap().expect("actual cold installed claim");
+        let reservation = installation.reserve_install(&registration, Some(&current)).unwrap();
+        let mut authorization = installation.authorize_runtime_installation(reservation).unwrap();
+        let mut prepared = runtime
+            .prepare_native_author_parameter_handoff(&programs, &proposal, destination, &cancel)
+            .expect("cold same-object handoff obeys original resource grant");
+        let installed = runtime
+            .install_native_author_parameter_handoff(&mut prepared, &mut authorization, &cancel)
+            .expect("actual cold plan/Source CAS installation");
+        assert_eq!(
+            installed.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert!(installed.target.continuity_epoch.is_none());
+        drop(prepared);
+        let acknowledged = runtime
+            .acknowledge_native_author_parameter_handoff(&proposal, &cancel)
+            .expect("exact actual Ack only after canonical transaction and Source install");
+        assert_eq!(
+            acknowledged.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_eq!(owner(runtime).editor_target(), acknowledged.target);
+        assert!(acknowledged.target.continuity_epoch.is_none());
+        write_json(
+            directory,
+            &format!("{label}-cold-{round}-handoff.json"),
+            json!({
+                "schema": 1, "proposal_revision": proposal.revision(),
+                "original_callbacks_debug": format!("{:?}", proposal.callbacks()),
+                "canonical_transaction_changed": transaction.changed,
+                "installed_target_debug": format!("{:?}", installed.target),
+                "acknowledged_target_debug": format!("{:?}", acknowledged.target),
+                "continuity_preserved": true, "continuity_epoch_is_none": true,
+                "current_object_observed": native_object,
+            }),
+        );
+        handoffs += 1;
+    }
+    panic!("cold startup did not close within four original proposal polls; source remains unqualified");
+}
 fn run_runtime(
     catalog: Arc<DiscoveredClapAudioProcessorSpecResolver>,
     state: &[u8],
@@ -195,16 +384,17 @@ fn run_runtime(
     );
     assert_eq!(author.parameters.len(), 9, "RO meters are not author lanes");
     for (id, value) in [(7, -6.0), (8, if native_bypass { 1.0 } else { 0.0 })] {
+        let mut curve = ExactAutomationCurve::new(
+            ParameterId::new(format!("clap.param.{id}")).expect("actual native parameter ID"),
+            value,
+        )
+        .expect("finite canonical curve");
+        let mut key = ExactAutomationKeyframe::linear(TimelineTime::ZERO, value);
+        key.interpolation_to_next = AutomationSegmentInterpolation::Hold;
+        curve.set_keyframe(key).expect("public exact Sequence-time zero key");
         author
-            .set_parameter_automation(
-                ExactAutomationCurve::new(
-                    ParameterId::new(format!("clap.param.{id}"))
-                        .expect("actual native parameter ID"),
-                    value,
-                )
-                .expect("finite canonical constant"),
-            )
-            .expect("schema-validated native parameter authoring");
+            .set_parameter_automation(curve)
+            .expect("schema-validated keyed native intent");
     }
     let author_bytes = serde_json::to_vec(&author).expect("canonical author save");
     assert!(author_bytes.len() as u64 <= MAX_JSON);
@@ -251,6 +441,20 @@ fn run_runtime(
     runtime
         .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
         .expect("real child acknowledges exact installed Output occurrence");
+    let (cold_handoffs, cold_object) =
+        accept_cold_startup(&mut runtime, &mut sequence, &installation, directory, label);
+    for id in [7, 8] {
+        let id = ParameterId::new(format!("clap.param.{id}")).unwrap();
+        let actual =
+            &sequence.audio_program.outputs[0].strip.pre_fader.processors[0].parameters[&id];
+        assert_eq!(
+            actual.automation, author.parameters[&id].automation,
+            "startup rescan may not replace exact keyed user intent"
+        );
+        let curve = actual.automation.as_ref().unwrap();
+        assert_eq!(curve.keyframes.len(), 1);
+        assert_eq!(curve.keyframes[0].time, TimelineTime::ZERO);
+    }
     runtime
         .enter_state(AudioStateEntry {
             epoch: AudioContinuityEpoch::new(1),
@@ -262,11 +466,19 @@ fn run_runtime(
     runtime
         .validate_native_owner(lease)
         .expect("real same-object control admission");
-    let mut observations = Observations::default();
+    // Presentation polls are incremental. The real cold batch already supplied
+    // an authenticated object; an unchanged revision need not publish it again.
+    let mut observations = Observations {
+        native_object: cold_object,
+        ..Observations::default()
+    };
     observe(&mut runtime, lease, &mut observations);
     let (pid, serial) = observations
         .native_object
-        .expect("authenticated actual child parameter snapshot");
+        .expect("authenticated actual cold or post-Enter child parameter observation");
+    if let Some(cold_object) = cold_object {
+        assert_eq!((pid, serial), cold_object);
+    }
     // SAFETY: PID is authenticated by the installed Runtime's retained native
     // child. This extra observation HANDLE has only query/synchronize rights.
     let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
@@ -362,12 +574,22 @@ fn run_runtime(
             "first_parameter_facts_observation": observations.first_parameters,
             "last_parameter_facts_observation": observations.last_parameters,
             "native_diagnostic_records": observations.diagnostic_records,
+            "cold_real_proposal_handoffs": cold_handoffs,
+            "keyed_automation_intent_preserved": true,
             "source_reads": reads.load(Ordering::Relaxed), "finite": true,
     });
     // Keep this bounded test receipt below serde_json's macro recursion limit.
     // The two pieces still form the same flat evidence object.
     receipt.as_object_mut().unwrap().extend(
         json!({
+            "native_identity_observation_origin": if cold_object.is_some() {
+                "cold_authenticated_parameter_observation"
+            } else {
+                "post_enter_authenticated_parameter_observation"
+            },
+            "cold_native_object_observation": cold_object,
+            "post_enter_parameter_batches": observations.parameter_batches,
+            "cold_parameter_values_are_native_target_delivery_receipts": false,
             "raw_source_period_sha256": format!("{:x}", Sha256::digest(pcm_bytes(&period))),
             "unity_graph_reference_period_sha256": format!("{:x}", Sha256::digest(pcm_bytes(&reference))),
             "negative_zero_normalizations_per_period": zero_normalizations,

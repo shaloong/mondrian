@@ -234,7 +234,7 @@ Runtime Enter: the installed cold object's Source reports `PendingCallbacks`.
 The worker Enter, parameter delivery, PCM comparisons, remaining three runs
 and positive Drop assertions are not reached. This is a diagnostic consumer,
 not verified processing compatibility or an attributed plugin/host defect.
-The test currently polls after Enter; its next slice must first use the existing
+That version polls after Enter; its next slice must first use the existing
 cold installed-owner author poll, canonical transaction, Plan handoff and Ack.
 It must preserve the Source rather than clear flags to admit processing.
 
@@ -251,6 +251,38 @@ accumulation legally changes their signs; the separate reference `9D95B6A2...`
 retains all other bits and still requires every steady sample bit to match.
 No tolerance, skipped zeros, original input change or relaxed old generic gate
 was introduced. No PCM result or successful run receipt was produced.
+
+The subsequent cold consumer now follows the existing public poll, canonical
+author transaction/compile, original resource grant and Source install, prepared
+handoff Drop and actual Ack before Enter. One t=0 Hold key preserves the user's
+GainOut/Bypass intent across the startup rescan. The first cold attempt completed
+that handoff but failed before PCM by requiring another complete parameter
+snapshot. Presentation polls are incremental: unchanged revision after Ack may
+return `None`. The test now retains the actual cold authenticated PID/serial;
+later present batches must still match it. Cold values are explicitly not DSP
+target-delivery evidence. Both earlier failed cases remain retained.
+
+`clap-ringout-cold-handoff-actual-r2/gates/receipt.json` (`7686ED5C...`) records
+560 exact ordinary passes followed by the unchanged native selector passing.
+All four fresh Runtime/Output-rack runs complete 10240 frames: 6144 transition
+frames are actually processed, then all 8192 steady sample bit patterns are
+compared against the independent unity Graph reference. Native bypass has zero
+differing samples for Runtime request partitions 64 and 31/33; active controls
+distinguish passthrough. Native callback block sizes are not instrumented.
+Every run completes one actual cold proposal handoff, preserves keyed intent
+and the installed owner, and observes exit0 after Drop. Its PID originates in
+the cold authenticated batch; all four post-Enter parameter-batch counts are
+zero. This does not fabricate a missing full snapshot or delivered-value receipt.
+
+New Audio `CE2A6034...` and strict checks bind 1958-input freeze `A5DD12C3...`.
+Product `B40F3173...` retains its original `1342129F...` producer through the
+exact single-test-child bridge; the other 1957 inputs and actual cfg(test) parent
+chain are unchanged. Both gate owners exit0 without deadline, outliving
+descendants or cleanup errors; 37 evidence files are retained. This qualifies
+this finite Windows offline Runtime bypass/partition/state-handoff scenario.
+Transition and active-effect algorithms, private DSP state, nondefault presets,
+GUI, App Playback/Export, realtime, performance and other platforms remain
+unverified. The separately held OpenFX candidate remains outside this acceptance.
 
 ## Windows Surge XT Effects default-state observation (2026-10-15)
 
