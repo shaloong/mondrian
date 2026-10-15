@@ -5,6 +5,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::Child;
 use std::thread;
 pub(super) mod child_diagnostic;
+mod close_observation;
 mod diagnostic;
 use child_diagnostic::ChildProbe;
 pub use child_diagnostic::{
@@ -289,6 +290,7 @@ pub struct OpenFxFilterSession {
     feedback: Option<mondrian_effects::EffectProcessorFeedback>,
     response_reader: pump::PacketReader,
     request_writer: pump::PacketWriter,
+    close_trace: close_observation::Trace,
 }
 
 /// Owner-thread observations from the sole native request transport.
@@ -510,10 +512,12 @@ impl OpenFxFilterSession {
         // creation and every DSP request. Partial cursors survive live controls.
         let response_reader = pump::PacketReader::acquire()?;
         let request_writer = pump::PacketWriter::acquire()?;
+        let close_trace = close_observation::Trace::parent(&mut command, owner, &nonce)?;
         let mut process = ProcessOwner {
             child: command.spawn().map_err(control_error)?,
             state: ProcessState::Running,
         };
+        close_trace.set_child(&process.child);
         let deadline = Instant::now() + DEADLINE;
         let mut control = loop {
             process.check(owner_checkpoint, deadline)?;
@@ -575,6 +579,7 @@ impl OpenFxFilterSession {
             feedback: None,
             response_reader,
             request_writer,
+            close_trace,
         })
     }
 
@@ -1275,6 +1280,7 @@ impl OpenFxFilterSession {
             ProcessState::Running => {}
         }
         let deadline = Instant::now() + RETIRE;
+        self.close_trace.record(close_observation::Stage::ParentBegin, 0);
         let graceful = (|| {
             let mut checkpoint = || {
                 if Instant::now() >= deadline {
@@ -1282,13 +1288,22 @@ impl OpenFxFilterSession {
                 }
                 Ok(())
             };
-            self.request_writer.write(
+            self.close_trace.record(close_observation::Stage::ParentSendBegin, 0);
+            let mut committed = false;
+            let send = self.request_writer.write(
                 &mut self.control,
                 &Request::Shutdown {},
                 deadline,
                 &mut checkpoint,
-                &mut false,
-            )?;
+                &mut committed,
+            );
+            // The existing writer sets this before its final deadline check.
+            // Preserve actual complete-send evidence even if that check fails.
+            if committed {
+                self.close_trace
+                    .record(close_observation::Stage::ParentSendCommittedObserved, 0);
+            }
+            send?;
             let response = loop {
                 checkpoint()?;
                 if let Some(response) = self.response_reader.step::<Response>(&mut self.control)? {
@@ -1305,8 +1320,13 @@ impl OpenFxFilterSession {
             if !matches!(response, Response::Closed {}) {
                 return Err(unavailable("native session did not close"));
             }
+            self.close_trace.record(close_observation::Stage::ParentClosedObserved, 0);
             loop {
                 if let Some(status) = self.process.child.try_wait().map_err(control_error)? {
+                    self.close_trace.record(
+                        close_observation::Stage::ParentOsExitObserved,
+                        status.code().unwrap_or(-1) as u32,
+                    );
                     self.process.state = ProcessState::Settled;
                     return if status.success() {
                         Ok(())
@@ -1320,7 +1340,17 @@ impl OpenFxFilterSession {
                 thread::sleep(Duration::from_millis(1));
             }
         })();
-        self.process.terminate()?;
+        self.close_trace.record(
+            close_observation::Stage::ParentGracefulEnd,
+            close_observation::result_code(&graceful),
+        );
+        self.close_trace.record(close_observation::Stage::ParentSettlementBegin, 0);
+        let settlement = self.process.terminate();
+        self.close_trace.record(
+            close_observation::Stage::ParentSettlementEnd,
+            close_observation::result_code(&settlement),
+        );
+        settlement?;
         graceful
     }
 }
@@ -1656,6 +1686,20 @@ fn validate_prepare_envelope(prepare: &Prepare, nonce: &str) -> Result<(), OpenF
 
 /// Run a resident native session before media, graphics or application startup.
 pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
+    let mut close_trace = close_observation::Trace::default();
+    let result = run_openfx_resident_worker_inner(&mut close_trace);
+    // All inner locals, including its pump/curves/native/session frame mappings,
+    // have dropped. This is not main, TLS/CRT, module or OS-process exit.
+    close_trace.record(
+        close_observation::Stage::ResidentInnerReturned,
+        close_observation::result_code(&result),
+    );
+    result
+}
+
+fn run_openfx_resident_worker_inner(
+    close_trace: &mut close_observation::Trace,
+) -> Result<(), OpenFxHostError> {
     let endpoint: SocketAddr = std::env::var(ENDPOINT_ENV)
         .map_err(|_| invalid("native session endpoint is missing"))?
         .parse()
@@ -1689,6 +1733,7 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
         }
     })?;
     validate_prepare_envelope(&prepare, &nonce)?;
+    *close_trace = close_observation::Trace::child(prepare.owner, &nonce)?;
     let (_file, input, mut output) = map_frames(&prepare)?;
     verify_worker_binary(
         &prepare.binary_path,
@@ -1699,10 +1744,11 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
     let bundle = native_string(&prepare.bundle_path)?;
     let identifier = CString::new(prepare.plugin_identifier.as_str())
         .map_err(|_| invalid("plugin identifier contains a null byte"))?;
-    let mut pump = pump::WorkerPump::start(
+    let mut pump = pump::WorkerPump::start_observed(
         control,
         prepare.owner,
         Response::Ready { version: VERSION, nonce },
+        close_trace.clone(),
     )?;
     // Declared before the session: native destruction may query its last snapshot.
     let mut curves: BTreeMap<String, std::sync::Arc<curves::CurveContext>> = BTreeMap::new();
@@ -1714,10 +1760,16 @@ pub fn run_openfx_resident_worker() -> Result<(), OpenFxHostError> {
         let request = pump.shared.take_request()?;
         match request {
             Request::Shutdown {} => {
+                let native_present = u32::from(session.is_some());
+                close_trace.record(close_observation::Stage::NativeDropBegin, native_present);
                 drop(session.take());
+                close_trace.record(close_observation::Stage::NativeDropEnd, native_present);
                 let completion = pump.shared.complete(Response::Closed {})?;
                 pump.shared.wait_acknowledged(completion)?;
+                close_trace.record(close_observation::Stage::AckReturned, 0);
+                close_trace.record(close_observation::Stage::PumpStopJoinBegin, 0);
                 pump.stop_and_join();
+                close_trace.record(close_observation::Stage::PumpStopJoinEnd, 0);
                 return Ok(());
             }
             Request::Cancel { .. } | Request::QuestionReply { .. } => {

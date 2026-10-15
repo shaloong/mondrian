@@ -189,6 +189,29 @@ either source. These observations do not authorize initialization retirement:
 the pending controller-to-DSP delivery and first-block author-value priority
 still require an explicit lifecycle contract.
 
+### Windows OpenFX close observations, 2026-10-15
+
+An opt-in fixed QPC mapping now distinguishes native destruction, complete
+Closed packet writes, pump join, resident-inner return and parent OS-exit
+observation. It retains the original single 100ms retirement deadline and
+owner/cleanup contracts; normal execution leaves observation disabled.
+
+Source `0FC44D25...` (1,952 inputs) produced fresh App tests, integration tests
+and normal Product `D74F73FC...`. Four new controls, 46 existing resident tests
+with observation disabled, and one original canonical-curves SDK-fixture case
+pass. All three observed sessions commit all 16 markers and settle cleanly.
+This working baseline still includes the unintegrated readonly-constructor
+candidate (`3FE9513B...`); it is not a runtime comparison against the pre-fix SDK.
+Native destruction takes 0.7507–0.9742ms, pump join 1.5855–1.6340ms, and the
+resident-inner-return to parent OS-exit observation interval is 59.519–69.2271ms;
+total observed close duration is 63.6449–73.3416ms. Decode `9E6EBDE0...` retains
+the original owner receipts and raw maps under `ofx-close-observation-actual-r1`.
+
+These successful observations do not reproduce or retrospectively locate the
+original `D30C487F...` deadline failure, identify a particular OS/CRT/DLL cause,
+or qualify third-party compatibility or performance. The readonly-constructor
+integration hold and twelve remaining repeat gates stay open.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in

@@ -638,10 +638,19 @@ pub(super) struct WorkerPump {
     worker: Option<JoinHandle<()>>,
 }
 impl WorkerPump {
+    #[cfg(test)]
     pub(super) fn start(
+        stream: TcpStream,
+        owner: mondrian_core::EffectProcessorOwnerId,
+        ready: Response,
+    ) -> Result<Self, OpenFxHostError> {
+        Self::start_observed(stream, owner, ready, close_observation::Trace::default())
+    }
+    pub(super) fn start_observed(
         mut stream: TcpStream,
         owner: mondrian_core::EffectProcessorOwnerId,
         ready: Response,
+        close_trace: close_observation::Trace,
     ) -> Result<Self, OpenFxHostError> {
         stream.set_nonblocking(true).map_err(control_error)?;
         // This clone is ONLY a shutdown capability, never another reader/writer.
@@ -664,7 +673,7 @@ impl WorkerPump {
             .name("mondrian-ofx-control".to_owned())
             .stack_size(PUMP_STACK_BYTES)
             .spawn(move || {
-                if let Err(error) = pump_loop(&mut stream, &state, reader, writer) {
+                if let Err(error) = pump_loop(&mut stream, &state, reader, writer, &close_trace) {
                     state.fail(&error);
                 }
             })
@@ -696,9 +705,11 @@ fn pump_loop(
     shared: &Shared,
     mut reader: PacketReader,
     writer: Vec<u8>,
+    close_trace: &close_observation::Trace,
 ) -> Result<(), OpenFxHostError> {
     let mut available_writer = Some(writer);
     let mut pending: Option<PendingWrite> = None;
+    let mut pending_is_closed = false;
     while !shared.stopping.load(Ordering::Acquire) {
         // Reading is always attempted before any blocked progress write. Each
         // direction has a bounded quantum; a full socket never masks Cancel.
@@ -756,6 +767,7 @@ fn pump_loop(
                 }
             };
             if let Some(response) = response {
+                pending_is_closed = matches!(response, Response::Closed {});
                 pending = Some(PendingWrite::new(
                     &response,
                     completion,
@@ -793,6 +805,12 @@ fn pump_loop(
                     shared.ready.notify_all();
                 }
                 available_writer = Some(packet.bytes);
+                if pending_is_closed {
+                    // Actual full packet bytes committed; the original local
+                    // acknowledgement flag is still unpublished at this point.
+                    close_trace.record(close_observation::Stage::ClosedCommitted, 0);
+                }
+                pending_is_closed = false;
                 if completion {
                     shared.acknowledged()?;
                 }
