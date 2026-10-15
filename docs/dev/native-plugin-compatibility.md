@@ -154,6 +154,17 @@ inputs remained unchanged. This qualifies the bounded capture/load observation.
 DSP output, nondefault presets, Project reload, GUI, performance and other
 platforms remain unverified for this plugin.
 
+The later PCM/lifecycle gate `2ED65E20...` fails at its first `Enter(73)` with
+`ReprepareRequired(Vst3Restart { flags: 20 })`, before any PCM or explicit Drop
+oracle. Source `83E20443...`/Audio `554A3A5A...` uses retained Product `8E852B04...`
+through an exact test-only source bridge. The initial consumer handles only pure
+value invalidation; parameter-info invalidation remains unsupported. The combined
+notification is valid and requires parameter-info/value refresh under the
+[VST3 contract](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Parameters%2BAutomation/Index.html).
+Ordinary Audio 558 passes independently; the failed native owner reports exit
+101, complete reaping and no timeout or surviving descendants. This is retained
+failure evidence, not DSP or Drop qualification.
+
 ## Current execution receipts
 
 The full pre-change workspace baseline is documented in
