@@ -1,6 +1,6 @@
-//! Strict v4 query-wire controls; owned DTOs are not native/DSP evidence.
+//! Strict v5 query-wire controls; owned DTOs are not native/DSP evidence.
 use super::super::clap_note_input_contract::{
-    offered_limits, ClapNoteInputContractProbe, ClapNoteProcessingOfferV4,
+    offered_limits, ClapNoteInputContractProbe, ClapNoteProcessingOfferV5,
 };
 use super::*;
 use crate::{AudioProcessorNoteInputContract, AudioProcessorNoteInputPort};
@@ -15,11 +15,11 @@ fn render() -> AudioRenderContract {
         compensation_delay_scratch_budget_bytes: usize::MAX,
     }
 }
-fn offer() -> ClapNoteProcessingOfferV4 {
-    ClapNoteProcessingOfferV4 {
-        schema_version: 4,
+fn offer() -> ClapNoteProcessingOfferV5 {
+    ClapNoteProcessingOfferV5 {
+        schema_version: 5,
         notes: ClapNoteInputContractProbe {
-            schema_version: 1,
+            schema_version: 2,
             plugin_id: "fixture".to_owned(),
             binary_sha256: [7; 32],
             state_sha256: super::super::clap_note_input_metadata::state_digest(Some(&[1])),
@@ -28,14 +28,17 @@ fn offer() -> ClapNoteProcessingOfferV4 {
             max_block_frames: 64,
             offline: true,
             contract: AudioProcessorNoteInputContract {
+                completion: crate::AudioNoteCompletionPolicy::NativeEnd,
                 limits: offered_limits(),
                 ports: vec![
                     AudioProcessorNoteInputPort {
+                        channel_count: 16,
                         native_id: 0x8000_0017,
                         native_index: 0,
                         port_key: "clap.note-input.2147483671".to_owned(),
                     },
                     AudioProcessorNoteInputPort {
+                        channel_count: 16,
                         native_id: 0,
                         native_index: 1,
                         port_key: "clap.note-input.0".to_owned(),
@@ -60,28 +63,31 @@ fn offer() -> ClapNoteProcessingOfferV4 {
         .unwrap(),
     }
 }
-fn decode(bytes: &[u8]) -> Result<ClapNoteProcessingOfferV4, AudioProcessorHostError> {
-    decode_processing_offer_v4(bytes, "fixture", [7; 32], Some(&[1]), render())
+fn decode(bytes: &[u8]) -> Result<ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+    decode_processing_offer_v5(bytes, "fixture", [7; 32], Some(&[1]), render())
 }
 #[test]
-fn v2_wire_has_complete_identity_and_legacy_request_omission_remains_byte_exact() {
+fn note_wire_has_complete_identity_and_refuses_legacy_request_omission() {
     let legacy = br#"{"kind":"probe_notes","plugin_id":"fixture","sample_rate":48000,"channel_layout":"Mono","max_block_frames":64,"offline":true,"state":null}"#;
-    let operation: DiscoveryOperation = serde_json::from_slice(legacy).unwrap();
+    assert!(serde_json::from_slice::<DiscoveryOperation>(legacy).is_err());
+    let mut current = serde_json::from_slice::<serde_json::Value>(legacy).unwrap();
+    current["schema_version"] = serde_json::json!(2);
+    let operation: DiscoveryOperation = serde_json::from_value(current).unwrap();
     assert!(matches!(
         &operation,
-        DiscoveryOperation::ProbeNotes { schema_version: 1, .. }
+        DiscoveryOperation::ProbeNotes { schema_version: 2, .. }
     ));
-    assert_eq!(serde_json::to_vec(&operation).unwrap(), legacy);
-    let bytes = encode_processing_offer_v4(&offer()).unwrap();
+    validate_discovery_schema(&operation).unwrap();
+    let bytes = encode_processing_offer_v5(&offer()).unwrap();
     assert!(bytes.len() as u64 <= MAX_RESPONSE_BYTES);
     let decoded = decode(&bytes).unwrap();
-    assert_eq!(decoded.schema_version, 4);
+    assert_eq!(decoded.schema_version, 5);
     assert_eq!(decoded.notes.contract.ports[0].native_id, 0x8000_0017);
     let mut value = serde_json::to_value(operation).unwrap();
-    value["schema_version"] = serde_json::json!(4);
+    value["schema_version"] = serde_json::json!(5);
     assert!(matches!(
         serde_json::from_value::<DiscoveryOperation>(value).unwrap(),
-        DiscoveryOperation::ProbeNotes { schema_version: 4, .. }
+        DiscoveryOperation::ProbeNotes { schema_version: 5, .. }
     ));
 }
 #[test]
@@ -90,9 +96,19 @@ fn v2_wire_refuses_schema_identity_state_render_and_finite_policy_mismatch() {
         ("/schema_version", serde_json::json!(1)),
         ("/schema_version", serde_json::json!(2)),
         ("/schema_version", serde_json::json!(3)),
+        ("/schema_version", serde_json::json!(4)),
         ("/processing/schema_version", serde_json::json!(2)),
         ("/processing/schema_version", serde_json::json!(1)),
-        ("/notes/schema_version", serde_json::json!(2)),
+        ("/notes/schema_version", serde_json::json!(1)),
+        ("/notes/schema_version", serde_json::json!(3)),
+        (
+            "/notes/contract/completion",
+            serde_json::json!("successful_off_block"),
+        ),
+        (
+            "/notes/contract/ports/0/channel_count",
+            serde_json::json!(1),
+        ),
         ("/notes/plugin_id", serde_json::json!("other")),
         ("/notes/binary_sha256/0", serde_json::json!(8)),
         ("/notes/state_sha256", serde_json::Value::Null),
@@ -127,13 +143,31 @@ fn v2_wire_refuses_schema_identity_state_render_and_finite_policy_mismatch() {
     let mut value = serde_json::to_value(offer()).unwrap();
     value["extra"] = serde_json::json!(true);
     assert!(decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    for field in ["completion", "channel_count"] {
+        let mut value = serde_json::to_value(offer()).unwrap();
+        let object = if field == "completion" {
+            &mut value["notes"]["contract"]
+        } else {
+            &mut value["notes"]["contract"]["ports"][0]
+        };
+        object.as_object_mut().unwrap().remove(field);
+        assert!(decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    let mut request = serde_json::json!({"kind":"probe_notes", "schema_version":2,
+        "plugin_id":"fixture", "sample_rate":48000, "channel_layout":"Mono",
+        "max_block_frames":64, "offline":true, "state":null});
+    for version in [1, 3, 4, 6] {
+        request["schema_version"] = serde_json::json!(version);
+        let operation = serde_json::from_value::<DiscoveryOperation>(request.clone()).unwrap();
+        assert!(validate_discovery_schema(&operation).is_err());
+    }
 }
 
 #[test]
 fn v3_processing_shape_is_mandatory_and_optional_main_retains_auxiliary_bound() {
     let mut absent = offer();
     absent.processing.main_audio_input = ClapMainAudioInput::Absent;
-    let decoded = decode(&encode_processing_offer_v4(&absent).unwrap()).unwrap();
+    let decoded = decode(&encode_processing_offer_v5(&absent).unwrap()).unwrap();
     assert_eq!(decoded.main_audio_input(), ClapMainAudioInput::Absent);
     let mut value = serde_json::to_value(absent).unwrap();
     for key in [

@@ -901,7 +901,9 @@ mod tests {
             }
             fn note_input_contract(&self) -> mondrian_audio::AudioProcessorNoteInputContract {
                 mondrian_audio::AudioProcessorNoteInputContract {
+                    completion: mondrian_audio::AudioNoteCompletionPolicy::NativeEnd,
                     ports: vec![mondrian_audio::AudioProcessorNoteInputPort {
+                        channel_count: 16,
                         port_key: "clap.note-input.0".to_owned(),
                         native_id: 0,
                         native_index: 0,

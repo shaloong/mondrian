@@ -1171,6 +1171,9 @@ impl PreparedProcessorHost {
         schedule: &PreparedAudioSchedule,
         render_contract: AudioRenderContract,
     ) -> Result<Self, AudioExecutionError> {
+        if !schedule.notes.matches_factory_contracts(&schedule.processors) {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
         let maximum_parameter_lanes = schedule
             .processors
             .iter()

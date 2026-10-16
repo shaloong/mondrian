@@ -16,7 +16,7 @@ mod clap_note_input_metadata;
 pub use clap_discovery::probe_clap_note_input_contract;
 pub use clap_discovery::probe_clap_note_processing_offer;
 pub use clap_note_input_contract::ClapNoteInputContractProbe;
-pub use clap_note_input_contract::ClapNoteProcessingOfferV4;
+pub use clap_note_input_contract::ClapNoteProcessingOfferV5;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
 pub mod clap_output_events;
@@ -1038,6 +1038,11 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 }
                 let mut previous_note = None;
                 for event in notes {
+                    if !self.note_input_contract.accepts_event(*event, request.frames) {
+                        return Err(invalid_contract(
+                            "isolated Note channel exceeds admitted input channels",
+                        ));
+                    }
                     let packed = SharedNoteEvent::capture(
                         *event,
                         request.frames,
@@ -1632,6 +1637,7 @@ impl Iterator for IsolatedAudioNoteEvents<'_> {
 
 static EMPTY_NOTE_INPUT_CONTRACT: crate::AudioProcessorNoteInputContract =
     crate::AudioProcessorNoteInputContract {
+        completion: crate::AudioNoteCompletionPolicy::NativeEnd,
         ports: Vec::new(),
         limits: crate::AudioNoteExecutionLimits {
             input_events: 0,
@@ -1891,7 +1897,9 @@ mod note_spec_contracts {
 
     fn contract() -> crate::AudioProcessorNoteInputContract {
         crate::AudioProcessorNoteInputContract {
+            completion: crate::AudioNoteCompletionPolicy::NativeEnd,
             ports: vec![crate::AudioProcessorNoteInputPort {
+                channel_count: 16,
                 port_key: "main-notes".to_owned(),
                 native_id: 27,
                 native_index: 0,

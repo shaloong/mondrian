@@ -97,7 +97,9 @@ impl AudioProcessorFactory for Factory {
     fn note_input_contract(&self) -> AudioProcessorNoteInputContract {
         self.0.note_queries.fetch_add(1, Ordering::Relaxed);
         AudioProcessorNoteInputContract {
+            completion: crate::AudioNoteCompletionPolicy::NativeEnd,
             ports: vec![AudioProcessorNoteInputPort {
+                channel_count: 16,
                 port_key: PORT.to_owned(),
                 native_id: 17,
                 native_index: 0,
@@ -248,6 +250,38 @@ fn fixture() -> (PreparedAudioPlan, NativeAudioEditorLocator, Arc<Calls>) {
     assert_eq!(calls.resolves.load(Ordering::Relaxed), 1);
     assert_eq!(calls.creates.load(Ordering::Relaxed), 0);
     (score, locator, calls)
+}
+
+#[test]
+fn cached_note_width_and_completion_drift_refuse_before_session_or_factory_create() {
+    let (plan, _, calls) = fixture();
+    let queries = calls.note_queries.load(Ordering::Relaxed);
+    assert!(
+        crate::processor_host::PreparedProcessorHost::allocate_storage(&plan.schedule, contract())
+            .is_ok()
+    );
+    for change_policy in [false, true] {
+        let mut invalid = plan.clone();
+        let mut targets = invalid.schedule.notes.targets().to_vec();
+        if change_policy {
+            targets[0].completion = crate::AudioNoteCompletionPolicy::SuccessfulOffBlock;
+        } else {
+            targets[0].channel_count = 4;
+        }
+        invalid.schedule.notes = super::prepared_notes::PreparedNoteScore::from_test_parts(
+            targets,
+            invalid.schedule.notes.events().to_vec(),
+        );
+        assert!(matches!(
+            crate::processor_host::PreparedProcessorHost::allocate_storage(
+                &invalid.schedule,
+                contract()
+            ),
+            Err(crate::AudioExecutionError::InvalidPreparedSchedule)
+        ));
+        assert_eq!(calls.creates.load(Ordering::Relaxed), 0);
+        assert_eq!(calls.note_queries.load(Ordering::Relaxed), queries);
+    }
 }
 
 // Independent existing owner receipts, not a second policy evaluator.

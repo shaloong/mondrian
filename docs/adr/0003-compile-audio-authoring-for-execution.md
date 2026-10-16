@@ -109,6 +109,17 @@ allowing a retry. Continuing parameter handoff prevalidates the unchanged score
 and every bound peer, then publishes the new existing lease origin under the
 Source guard while retaining record phases, tuples, counters and native IDs.
 
+The shared Note contract now requires an admitted channel width and immutable
+completion policy. `NativeEnd` retains its original voice/End rules;
+`SuccessfulOffBlock` retires only original Off pairing records after that actual
+call and all returned facts succeed, with no claim about DSP release voices.
+Whole-root admission uses real priming/public call boundaries and grants no
+same-call Off credit. Cached-IR identity checks still scan prior window events
+and can take quadratic work; this foundation grants no RT/performance scope.
+IPC 14, full CLAP offer 5 and independent Note probe 2 reject older shapes;
+CLAP remains explicitly NativeEnd/16 channels. VST3/canonical Note admission
+is unchanged.
+
 Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
 table and validate the restored, render-bound port cohort. Raw rescan flags and
 wrong-thread/unsupported observations stay bounded and sticky. Metadata-only

@@ -312,7 +312,12 @@ impl WorkerProcessContext<'_> {
         .map_err(|_| invalid_contract("Worker Note input storage is not aligned"))?;
         let mut previous_note = None;
         for note in notes {
-            note.realize(frames, self.note_input_contract.ports.len())?;
+            let event = note.realize(frames, self.note_input_contract.ports.len())?;
+            if !self.note_input_contract.accepts_event(event, frames) {
+                return Err(invalid_contract(
+                    "Worker Note channel exceeds admitted input channels",
+                ));
+            }
             let order = (note.sample_offset, note.kind);
             if previous_note.is_some_and(|previous| previous > order) {
                 return Err(invalid_contract("Worker observed unordered input Notes"));
@@ -1372,7 +1377,9 @@ mod note_process_contracts {
 
     fn notes(input: usize, output: usize) -> AudioProcessorNoteInputContract {
         let contract = AudioProcessorNoteInputContract {
+            completion: crate::AudioNoteCompletionPolicy::NativeEnd,
             ports: vec![AudioProcessorNoteInputPort {
+                channel_count: 16,
                 port_key: "main-notes".to_owned(),
                 native_id: 27,
                 native_index: 0,
@@ -1488,6 +1495,82 @@ mod note_process_contracts {
         assert_eq!(copied[0].realize(1).unwrap(), ended);
         let main: &[f32] = bytemuck::cast_slice(&shared[..8]);
         assert_eq!(main, &[0.75, 0.75]);
+    }
+
+    #[test]
+    fn admitted_channel_width_and_zero_end_contract_guard_the_actual_process_context() {
+        let mut contract = notes(2, 1);
+        contract.completion = crate::AudioNoteCompletionPolicy::SuccessfulOffBlock;
+        contract.ports[0].channel_count = 4;
+        contract.limits.output_ends = 0;
+        contract.limits.live_voices = 0;
+        contract.validate().unwrap();
+        let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+        let outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 0).unwrap();
+        let context = WorkerProcessContext {
+            auxiliary_outputs: &outputs,
+            layout,
+            auxiliary_inputs: &auxiliary,
+            note_input_contract: &contract,
+            parameter_ids: &[],
+            render_contract: render(),
+        };
+        let mut storage = vec![0_u64; layout.total_bytes / 8];
+        let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut storage);
+        bytemuck::cast_slice_mut::<u8, f32>(&mut shared[..8]).copy_from_slice(&[5.0, 6.0]);
+        put_notes(shared, layout, &[packed()]); // channel 4 is scalar-valid but not admitted.
+        let mut calls = 0;
+        assert!(context
+            .process(
+                |_| {
+                    calls += 1;
+                    Ok(())
+                },
+                shared,
+                command(1)
+            )
+            .is_err());
+        assert_eq!(calls, 0);
+        assert_eq!(bytemuck::cast_slice::<u8, f32>(&shared[..8]), &[5.0, 6.0]);
+        put_notes(
+            shared,
+            layout,
+            &[SharedNoteEvent { channel: 3, ..packed() }],
+        );
+        assert_eq!(
+            context
+                .process(
+                    |block| {
+                        calls += 1;
+                        assert_eq!(block.note_events().next().unwrap().channel, 3);
+                        Ok(())
+                    },
+                    shared,
+                    command(1)
+                )
+                .unwrap(),
+            WorkerProcessCompletion { note_end_count: Some(0) }
+        );
+        assert_eq!(calls, 1);
+        assert!(context
+            .process(
+                |mut block| {
+                    calls += 1;
+                    assert!(!block.try_push_note_end(AudioNoteEndEvent {
+                        native_note_id: 7,
+                        port_index: 0,
+                        channel: 3,
+                        key: 60,
+                        flags: 0,
+                    }));
+                    Ok(()) // Ignoring the false callback cannot produce success/Off credit.
+                },
+                shared,
+                command(1)
+            )
+            .is_err());
+        assert_eq!(calls, 2);
     }
 
     #[test]

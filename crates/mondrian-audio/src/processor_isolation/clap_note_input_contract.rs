@@ -114,6 +114,21 @@ pub(super) const fn offered_limits() -> AudioNoteExecutionLimits {
     }
 }
 
+pub(super) fn validate_clap_contract(
+    contract: &AudioProcessorNoteInputContract,
+) -> Result<(), AudioProcessorHostError> {
+    contract.validate()?;
+    if !contract.ports.is_empty()
+        && (contract.completion != crate::AudioNoteCompletionPolicy::NativeEnd
+            || contract.ports.iter().any(|port| port.channel_count != 16))
+    {
+        return Err(unavailable(
+            "CLAP Note execution requires native End completion and sixteen admitted channels",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct PortFingerprint {
     id: u32,
@@ -244,13 +259,18 @@ fn scan_inner(
         write!(&mut key, "clap.note-input.{}", port.id)
             .map_err(|_| invalid("CLAP Note stable key formatting failed"))?;
         ports.push(AudioProcessorNoteInputPort {
+            channel_count: 16,
             port_key: key,
             native_id: port.id,
             native_index: index as u16,
         });
     }
     let binding = RestoredNoteInputs {
-        contract: AudioProcessorNoteInputContract { ports, limits },
+        contract: AudioProcessorNoteInputContract {
+            completion: crate::AudioNoteCompletionPolicy::NativeEnd,
+            ports,
+            limits,
+        },
         fingerprints,
     };
     binding.contract.validate()?;
@@ -292,7 +312,7 @@ pub(super) fn negotiate_restored(
     instance: &mut PluginInstance<ClapHost>,
     expected: &AudioProcessorNoteInputContract,
 ) -> Result<RestoredNoteInputs, AudioProcessorHostError> {
-    expected.validate()?;
+    validate_clap_contract(expected)?;
     let captured = instance.access_shared_handler(|shared| shared.services.note_ports.snapshot());
     // Do not retire before comparing the exact requested native indices/keys.
     let binding = scan_unretired(instance, expected.limits)?;
@@ -403,7 +423,7 @@ pub(super) fn probe_loaded(
     shared.service_callbacks(&mut instance)?;
     let binding = scan(&mut instance, offered_limits(), None, false)?;
     let result = ClapNoteInputContractProbe {
-        schema_version: 1,
+        schema_version: 2,
         plugin_id: plugin_id.to_owned(),
         binary_sha256,
         state_sha256: super::clap_note_input_metadata::state_digest(state),
@@ -420,15 +440,15 @@ pub(super) fn probe_loaded(
 /// Full same-instance metadata response; it does not grant Note execution.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClapNoteProcessingOfferV4 {
-    /// Exact full-processing response version; currently four.
+pub struct ClapNoteProcessingOfferV5 {
+    /// Exact full-processing response version; currently five.
     pub schema_version: u32,
     /// Same-instance identity/render/Note facts, with no execution authority.
     pub notes: ClapNoteInputContractProbe,
     pub(super) processing: super::clap_discovery::ProbeResult,
 }
 
-impl ClapNoteProcessingOfferV4 {
+impl ClapNoteProcessingOfferV5 {
     /// Native main-input shape from the same Notes-enabled instance.
     pub fn main_audio_input(&self) -> super::ClapMainAudioInput {
         self.processing.main_audio_input
@@ -523,13 +543,13 @@ fn check_destroyed_processing_services(
     Ok(())
 }
 
-pub(super) fn probe_loaded_processing_v4(
+pub(super) fn probe_loaded_processing_v5(
     entry: &PluginEntry,
     plugin_id: &str,
     binary_sha256: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<ClapNoteProcessingOfferV4, AudioProcessorHostError> {
+) -> Result<ClapNoteProcessingOfferV5, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     let max_frames = u32::try_from(render.max_block_frames)
         .ok()
@@ -691,7 +711,7 @@ pub(super) fn probe_loaded_processing_v4(
         }
     };
     let notes = ClapNoteInputContractProbe {
-        schema_version: 1,
+        schema_version: 2,
         plugin_id: plugin_id.to_owned(),
         binary_sha256,
         state_sha256: super::clap_note_input_metadata::state_digest(state),
@@ -706,7 +726,7 @@ pub(super) fn probe_loaded_processing_v4(
     drop(instance);
     check_destroyed_processing_services(&services)?;
     check_processing_control(&shared)?;
-    Ok(ClapNoteProcessingOfferV4 { schema_version: 4, notes, processing })
+    Ok(ClapNoteProcessingOfferV5 { schema_version: 5, notes, processing })
 }
 
 #[cfg(test)]

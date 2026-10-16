@@ -15,14 +15,27 @@ struct NoteCalls {
 struct NoteModelResolver {
     probe: Arc<Mutex<HandoffProbe>>,
     calls: Arc<Mutex<NoteCalls>>,
+    completion: AudioNoteCompletionPolicy,
+    off_result: NoteModelReturn,
 }
 struct NoteModelFactory {
     inner: HandoffFactory,
     calls: Arc<Mutex<NoteCalls>>,
+    completion: AudioNoteCompletionPolicy,
+    off_result: NoteModelReturn,
 }
 struct NoteModelProcessor {
     inner: HandoffProcessor,
     calls: Arc<Mutex<NoteCalls>>,
+    completion: AudioNoteCompletionPolicy,
+    off_result: NoteModelReturn,
+}
+
+#[derive(Clone, Copy)]
+enum NoteModelReturn {
+    Success,
+    Failed,
+    Deferred,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -57,7 +70,9 @@ fn cursors(runtime: &AudioProgramRuntime) -> CursorObservation {
 
 fn offered_model_notes() -> AudioProcessorNoteInputContract {
     AudioProcessorNoteInputContract {
+        completion: crate::AudioNoteCompletionPolicy::NativeEnd,
         ports: vec![AudioProcessorNoteInputPort {
+            channel_count: 16,
             port_key: "clap.note-input.0".to_owned(),
             native_id: 0,
             native_index: 0,
@@ -81,6 +96,8 @@ impl AudioProcessorResolver for NoteModelResolver {
             Ok(Arc::new(NoteModelFactory {
                 inner: HandoffFactory { probe: Arc::clone(&self.probe), seed: None },
                 calls: Arc::clone(&self.calls),
+                completion: self.completion,
+                off_result: self.off_result,
             }))
         } else {
             BuiltInAudioProcessorResolver.prepare(request)
@@ -92,7 +109,14 @@ impl AudioProcessorFactory for NoteModelFactory {
         self.inner.execution_contract()
     }
     fn note_input_contract(&self) -> AudioProcessorNoteInputContract {
-        offered_model_notes()
+        let mut contract = offered_model_notes();
+        contract.completion = self.completion;
+        if self.completion == AudioNoteCompletionPolicy::SuccessfulOffBlock {
+            contract.limits.output_ends = 0;
+            contract.limits.live_voices = 0;
+            contract.limits.retained_records = 1;
+        }
+        contract
     }
     fn visit_host_owned_storage<'a>(
         &'a self,
@@ -110,6 +134,8 @@ impl AudioProcessorFactory for NoteModelFactory {
                 object_serial: NonZeroU64::new(1).unwrap(),
             },
             calls: Arc::clone(&self.calls),
+            completion: self.completion,
+            off_result: self.off_result,
         }))
     }
 }
@@ -164,8 +190,27 @@ impl AudioProcessor for NoteModelProcessor {
                 }
             }
         }
+        if off_count != 0 {
+            match self.off_result {
+                NoteModelReturn::Success => {}
+                NoteModelReturn::Failed => {
+                    return Err(AudioProcessorHostError::Process(
+                        "owned Off refusal".to_owned(),
+                    ))
+                }
+                NoteModelReturn::Deferred => {
+                    return Err(AudioProcessorHostError::ReprepareRequired(
+                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                    ))
+                }
+            }
+        }
         self.inner.process(context, audio, parameters)?;
-        for event in off[..off_count].iter().flatten() {
+        for event in off[..off_count]
+            .iter()
+            .flatten()
+            .filter(|_| self.completion == AudioNoteCompletionPolicy::NativeEnd)
+        {
             assert!(
                 audio.try_push_note_end(AudioNoteEndEvent {
                     native_note_id: event.native_note_id,
@@ -239,6 +284,8 @@ fn owned_installed_note_nonzero_entry_keeps_old_owner_and_original_off() {
         &NoteModelResolver {
             probe: Arc::clone(&probe),
             calls: Arc::clone(&calls),
+            completion: AudioNoteCompletionPolicy::NativeEnd,
+            off_result: NoteModelReturn::Success,
         },
         contract,
         None,
@@ -379,4 +426,203 @@ fn owned_installed_note_nonzero_entry_keeps_old_owner_and_original_off() {
     assert_eq!(c.binds, before_calls.0);
     assert_eq!(probe.lock().unwrap().entries, 1);
     assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
+}
+
+fn installed_off_model(
+    result: NoteModelReturn,
+) -> (
+    AudioProgramRuntime,
+    mondrian_core::AudioOwnerInstallationSource,
+    AudioNativeProcessorAddress,
+    Arc<Mutex<NoteCalls>>,
+) {
+    use mondrian_core::automation::{ParameterSchema, PropertyValue};
+    let calls = Arc::new(Mutex::new(NoteCalls::default()));
+    let mut sequence = sequence_with_audio_clip();
+    let track = sequence.audio_tracks[0].id;
+    let parameter = ParameterId::new_static("native.gain");
+    let mut processor = AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.handoff".to_owned(),
+            schema_version: 1,
+            binary_sha256: None,
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    };
+    processor.parameters.insert(
+        parameter.clone(),
+        mondrian_timeline::audio::AudioProcessorParameter::from_schema(ParameterSchema::v1(
+            parameter,
+            PropertyValue::Double(0.5),
+        ))
+        .unwrap(),
+    );
+    let processor_id = processor.id;
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&track)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(processor);
+    let contract = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 1,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &RampResolver,
+        &NoteModelResolver {
+            probe: Arc::new(Mutex::new(HandoffProbe::default())),
+            calls: Arc::clone(&calls),
+            completion: AudioNoteCompletionPolicy::SuccessfulOffBlock,
+            off_result: result,
+        },
+        contract,
+        None,
+        AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+    )
+    .unwrap();
+    sequence.audio_program.note_lanes.push(AudioNoteLane {
+        schema_version: 1,
+        id: AudioNoteLaneId::new(),
+        target: AudioNoteTarget {
+            track_id: track,
+            processor_id,
+            input_port_key: "clap.note-input.0".to_owned(),
+        },
+        notes: AuthoringList::from(
+            (0..3)
+                .map(|n| AudioNote {
+                    id: AudioNoteId::new(),
+                    start: tt(n * 2, 48_000),
+                    end: tt(n * 2 + 1, 48_000),
+                    channel: 4,
+                    key: 60,
+                    on_velocity: -0.0,
+                    off_velocity: 0.5,
+                })
+                .collect::<Vec<_>>(),
+        ),
+    });
+    let program = compile_audio_program(
+        &sequence,
+        AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+    )
+    .unwrap();
+    runtime.prepare_owned_note_model_for_test(Arc::new(program)).unwrap();
+    let source = mondrian_core::AudioOwnerInstallationSource::new();
+    let (registration, verifier) = source.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let claim = source
+        .begin_commit(source.reserve_install(&registration, None).unwrap())
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime
+        .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+        .unwrap();
+    let epoch = AudioContinuityEpoch::new(51);
+    runtime.enter_state(AudioStateEntry { epoch, start_sample: 0 }).unwrap();
+    let identity = runtime.resource_root_identity();
+    let address = AudioNativeProcessorAddress {
+        root: identity,
+        local: identity,
+        epoch: Some(epoch),
+        occurrence: AudioProcessorOccurrence {
+            instance_id: processor_id,
+            owner: AudioProcessorOccurrenceOwner::Track(track),
+            insertion: AudioProcessorInsertionPoint::PreFader,
+        },
+    };
+    (runtime, source, address, calls)
+}
+
+#[test]
+fn owned_installed_successful_off_retires_only_after_success_and_never_replays_failure() {
+    for result in [
+        NoteModelReturn::Success,
+        NoteModelReturn::Failed,
+        NoteModelReturn::Deferred,
+    ] {
+        let (mut runtime, source, address, calls) = installed_off_model(result);
+        let lease = runtime.native_owner_lease(address).unwrap();
+        let claim = source.current_claim().unwrap().unwrap();
+        let mut pcm = [91.0];
+        runtime
+            .render_into(AudioRenderRequest { start_sample: 0, frames: 1 }, &mut pcm)
+            .unwrap();
+        assert_eq!(pcm, [0.5]);
+        let off = runtime.render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm);
+        match result {
+            NoteModelReturn::Success => {
+                off.unwrap();
+                assert_eq!(pcm, [1.0]);
+                for start in 2..6 {
+                    runtime
+                        .render_into(
+                            AudioRenderRequest { start_sample: start, frames: 1 },
+                            &mut pcm,
+                        )
+                        .unwrap();
+                    assert_eq!(pcm, [(start + 1) as f32 * 0.5]);
+                }
+                let c = calls.lock().unwrap();
+                assert_eq!((c.processes, c.note_count, c.ends), (6, 6, 0));
+                for pair in 0..3 {
+                    let on = c.notes[pair * 2].unwrap();
+                    let off = c.notes[pair * 2 + 1].unwrap();
+                    assert_eq!(on.kind, AudioNoteEventKind::On);
+                    assert_eq!(off.kind, AudioNoteEventKind::Off);
+                    assert_eq!(on.native_note_id, pair as i32);
+                    assert_eq!(
+                        (off.native_note_id, off.port_index, off.channel, off.key),
+                        (on.native_note_id, on.port_index, on.channel, on.key)
+                    );
+                }
+                assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
+            }
+            NoteModelReturn::Failed | NoteModelReturn::Deferred => {
+                let expected = match result {
+                    NoteModelReturn::Failed => {
+                        AudioProcessorHostError::Process("owned Off refusal".to_owned())
+                    }
+                    NoteModelReturn::Deferred => AudioProcessorHostError::ReprepareRequired(
+                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                    ),
+                    NoteModelReturn::Success => unreachable!(),
+                };
+                assert!(
+                    matches!(off, Err(AudioExecutionError::ProcessorHost(ref error)) if error == &expected)
+                );
+                assert!(runtime
+                    .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm)
+                    .is_err());
+                assert!(runtime
+                    .render_into(AudioRenderRequest { start_sample: 2, frames: 1 }, &mut pcm)
+                    .is_err());
+                let c = calls.lock().unwrap();
+                assert_eq!((c.processes, c.note_count, c.ends), (2, 2, 0));
+                assert_eq!(
+                    c.notes[0].unwrap().native_note_id,
+                    c.notes[1].unwrap().native_note_id
+                );
+            }
+        }
+        runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
+    }
 }

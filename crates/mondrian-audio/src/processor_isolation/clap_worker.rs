@@ -731,7 +731,7 @@ fn resolve_clap_registration(
     if *schema_version != 1 {
         return Err(unavailable("CLAP definition schema version is unsupported"));
     }
-    notes.validate()?;
+    super::clap_note_input_contract::validate_clap_contract(&notes)?;
     plugin.main_audio_input.validate(&plugin.auxiliary_inputs)?;
     super::clap_discovery::validate_audio_outputs(
         plugin.main_audio_output_id,
@@ -889,6 +889,7 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+        super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
         if request.native_worker_lane_resources() != clap_native_worker_lane_profile()? {
             return Err(invalid(
                 "CLAP prepared native lane profile differs from the actual adapter",
@@ -1177,7 +1178,7 @@ fn prepare_loaded_on_main(
     parameter_ids: &[u32],
 ) -> Result<Box<ClapWorker>, AudioProcessorHostError> {
     let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
-    request.note_input_contract().validate()?;
+    super::clap_note_input_contract::validate_clap_contract(request.note_input_contract())?;
     let notes_enabled = !request.note_input_contract().ports.is_empty();
     let note_limits = request.note_input_contract().limits;
     let input_events =

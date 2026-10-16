@@ -324,10 +324,6 @@ enum DiscoveryOperation {
     List,
     NoteInputMetadata(super::clap_note_input_metadata::NoteInputMetadataRequest),
     ProbeNotes {
-        #[serde(
-            default = "default_note_probe_schema",
-            skip_serializing_if = "legacy_note_probe_schema"
-        )]
         schema_version: u32,
         plugin_id: String,
         sample_rate: u32,
@@ -596,7 +592,7 @@ pub fn probe_clap_note_input_contract(
         helper_executable,
         &canonical,
         DiscoveryOperation::ProbeNotes {
-            schema_version: 1,
+            schema_version: 2,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render.sample_rate,
             channel_layout: render.channel_layout,
@@ -613,7 +609,7 @@ pub fn probe_clap_note_input_contract(
     let result: super::clap_note_input_contract::ClapNoteInputContractProbe =
         serde_json::from_slice(&bytes)
             .map_err(|error| invalid(format!("CLAP Note contract response is invalid: {error}")))?;
-    if result.schema_version != 1
+    if result.schema_version != 2
         || result.plugin_id != plugin_id
         || result.binary_sha256 != fingerprint
         || result.state_sha256 != super::clap_note_input_metadata::state_digest(state)
@@ -628,7 +624,7 @@ pub fn probe_clap_note_input_contract(
             "CLAP Note contract response changed identity/render/finite offer",
         ));
     }
-    result.contract.validate()?;
+    super::clap_note_input_contract::validate_clap_contract(&result.contract)?;
     for port in &result.contract.ports {
         if port.port_key != format!("clap.note-input.{}", port.native_id) {
             return Err(invalid(
@@ -637,13 +633,6 @@ pub fn probe_clap_note_input_contract(
         }
     }
     Ok(result)
-}
-
-fn default_note_probe_schema() -> u32 {
-    1
-}
-fn legacy_note_probe_schema(version: &u32) -> bool {
-    *version == 1
 }
 
 pub(super) fn processing_result_for_notes(
@@ -768,10 +757,10 @@ pub(super) fn revalidate_processing_metadata_for_notes(
     Ok(())
 }
 
-// Only the v4 full-processing branch uses this bounded pure serializer.
+// Only the v5 full-processing branch uses this bounded pure serializer.
 // Legacy read-only Note metadata keeps its original wire/paths. Both passes serialize owned DTOs after native destruction.
-fn encode_processing_offer_v4(
-    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV4,
+fn encode_processing_offer_v5(
+    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV5,
 ) -> Result<Vec<u8>, AudioProcessorHostError> {
     struct Count(usize);
     impl Write for Count {
@@ -835,7 +824,7 @@ pub fn probe_clap_note_processing_offer(
     plugin_id: &str,
     render: AudioRenderContract,
     state: Option<&[u8]>,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV4, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     if !helper_executable.is_absolute()
         || !library_path.is_absolute()
@@ -853,7 +842,7 @@ pub fn probe_clap_note_processing_offer(
         helper_executable,
         &canonical,
         DiscoveryOperation::ProbeNotes {
-            schema_version: 4,
+            schema_version: 5,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render.sample_rate,
             channel_layout: render.channel_layout,
@@ -867,28 +856,28 @@ pub fn probe_clap_note_processing_offer(
             "CLAP binary changed during Note processing negotiation",
         ));
     }
-    decode_processing_offer_v4(&bytes, plugin_id, fingerprint, state, render)
+    decode_processing_offer_v5(&bytes, plugin_id, fingerprint, state, render)
 }
 
-fn decode_processing_offer_v4(
+fn decode_processing_offer_v5(
     bytes: &[u8],
     plugin_id: &str,
     fingerprint: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV4, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP Note processing response exceeds metadata limit",
         ));
     }
-    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV4 =
+    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV5 =
         serde_json::from_slice(bytes).map_err(|error| {
             invalid(format!("CLAP Note processing response is invalid: {error}"))
         })?;
     let notes = &result.notes;
-    if result.schema_version != 4
-        || notes.schema_version != 1
+    if result.schema_version != 5
+        || notes.schema_version != 2
         || notes.plugin_id != plugin_id
         || notes.binary_sha256 != fingerprint
         || notes.state_sha256 != super::clap_note_input_metadata::state_digest(state)
@@ -903,7 +892,7 @@ fn decode_processing_offer_v4(
             "CLAP Note processing response changed requested identity/state/render/offer",
         ));
     }
-    notes.contract.validate()?;
+    super::clap_note_input_contract::validate_clap_contract(&notes.contract)?;
     for port in &notes.contract.ports {
         if port.port_key != format!("clap.note-input.{}", port.native_id) {
             return Err(invalid("CLAP Note processing response changed native key"));
@@ -1028,7 +1017,7 @@ fn validate_discovery_schema(
             Err(invalid("unsupported CLAP processing probe schema version"))
         }
         DiscoveryOperation::ProbeNotes { schema_version, .. }
-            if !matches!(*schema_version, 1 | 4) =>
+            if !matches!(*schema_version, 2 | 5) =>
         {
             Err(invalid("unsupported CLAP Note probe schema version"))
         }
@@ -1185,8 +1174,8 @@ fn run_clap_discovery_worker_inner(
                 public_output_lookahead_budget_frames: usize::MAX,
                 compensation_delay_scratch_budget_bytes: usize::MAX,
             };
-            if schema_version == 1 {
-                // Legacy request omission and response bytes keep their original path.
+            if schema_version == 2 {
+                // Standalone explicit Note contract, separate from full processing.
                 let result = super::clap_note_input_contract::probe_loaded(
                     &entry,
                     &plugin_id,
@@ -1205,7 +1194,7 @@ fn run_clap_discovery_worker_inner(
             } else {
                 // The complete offer is captured from one actual Notes-enabled
                 // restored/render-configured/activated instance, then destroyed.
-                let result = super::clap_note_input_contract::probe_loaded_processing_v4(
+                let result = super::clap_note_input_contract::probe_loaded_processing_v5(
                     &entry,
                     &plugin_id,
                     fingerprint,
@@ -1219,7 +1208,7 @@ fn run_clap_discovery_worker_inner(
                     ));
                 }
                 *stage = DiscoveryErrorStage::ResponseEncoding;
-                Ok(encode_processing_offer_v4(&result)?)
+                Ok(encode_processing_offer_v5(&result)?)
             }
         }
     }
@@ -2638,7 +2627,7 @@ mod tests {
         wrong["schema_version"] = serde_json::json!(1);
         let operation: DiscoveryOperation = serde_json::from_value(wrong).unwrap();
         assert!(validate_discovery_schema(&operation).is_err());
-        let legacy_notes = serde_json::json!({"kind":"probe_notes","schema_version":2,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null});
+        let legacy_notes = serde_json::json!({"kind":"probe_notes","schema_version":1,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null});
         assert!(validate_discovery_schema(&serde_json::from_value(legacy_notes).unwrap()).is_err());
         for shape in [ClapMainAudioInput::Absent, ClapMainAudioInput::Present] {
             let value = processing_result_for_notes(

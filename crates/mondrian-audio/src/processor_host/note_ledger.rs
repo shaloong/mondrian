@@ -8,7 +8,10 @@
 //! only after that actual native call returns. Initial use is cold score-origin
 //! entry followed by sequential blocks; Holding calls none of these methods.
 
-use crate::{AudioNativeProcessorAddress, NativeAudioObjectObservation};
+use crate::{
+    AudioNativeProcessorAddress, AudioNoteCompletionPolicy, AudioNoteEvent, AudioNoteEventKind,
+    NativeAudioObjectObservation,
+};
 use mondrian_core::{AudioNoteId, AudioProcessorBindingId};
 
 const NATIVE_ID_LIMIT: u64 = i32::MAX as u64 + 1;
@@ -79,6 +82,8 @@ pub(crate) enum LedgerError {
     DifferentProducer,
     DifferentCursorOrOccurrence,
     UnchangedEpoch,
+    WrongCompletionPolicy,
+    OffTupleMismatch,
 }
 
 /// Facts only; capacity credit has already been applied in this sole ledger.
@@ -113,6 +118,7 @@ struct Record {
 
 /// Fixed storage and both capacity counters in one non-Clone owner.
 pub(crate) struct NoteLedger {
+    completion: AudioNoteCompletionPolicy,
     origin: Option<LedgerOrigin>,
     records: Box<[Option<Record>]>,
     voice_capacity: usize,
@@ -180,6 +186,7 @@ impl NoteLedger {
     pub(crate) fn prepare(
         record_capacity: usize,
         voice_capacity: usize,
+        completion: AudioNoteCompletionPolicy,
     ) -> Result<Self, LedgerError> {
         Self::layout_bytes(record_capacity)?;
         let mut records = Vec::new();
@@ -188,6 +195,7 @@ impl NoteLedger {
             .map_err(|_| LedgerError::StorageAllocation)?;
         records.resize(record_capacity, None);
         Ok(Self {
+            completion,
             origin: None,
             records: records.into_boxed_slice(),
             voice_capacity,
@@ -219,7 +227,9 @@ impl NoteLedger {
         if ons.len() > self.records.len() - self.retained_records {
             return Err(LedgerError::RecordCapacity);
         }
-        if ons.len() > self.voice_capacity - self.active_voices {
+        if self.completion == AudioNoteCompletionPolicy::NativeEnd
+            && ons.len() > self.voice_capacity - self.active_voices
+        {
             return Err(LedgerError::VoiceCapacity);
         }
         let count = u64::try_from(ons.len()).map_err(|_| LedgerError::NativeIdExhausted)?;
@@ -270,7 +280,9 @@ impl NoteLedger {
             phase: NotePhase::Pressed,
         });
         self.retained_records += 1;
-        self.active_voices += 1;
+        if self.completion == AudioNoteCompletionPolicy::NativeEnd {
+            self.active_voices += 1;
+        }
         self.next_native_id += 1;
         Ok(tuple)
     }
@@ -316,6 +328,9 @@ impl NoteLedger {
         origin: LedgerOrigin,
         end: NoteEnd,
     ) -> Result<EndObservation, LedgerError> {
+        if self.completion != AudioNoteCompletionPolicy::NativeEnd {
+            return Err(LedgerError::WrongCompletionPolicy);
+        }
         if origin != self.bound_origin()? {
             return Ok(EndObservation::StaleOrigin);
         }
@@ -365,6 +380,106 @@ impl NoteLedger {
             }
             NotePhase::EndedUntilOff => Ok(EndObservation::Duplicate),
         }
+    }
+
+    pub(crate) const fn completion_policy(&self) -> AudioNoteCompletionPolicy {
+        self.completion
+    }
+
+    pub(crate) const fn retained_record_count(&self) -> usize {
+        self.retained_records
+    }
+
+    /// Pure whole-window proof for SuccessfulOffBlock. Peak includes every On
+    /// before granting any Off credit from that same native call.
+    pub(crate) fn preflight_off_block_peak(
+        &self,
+        origin: LedgerOrigin,
+        peak_records: usize,
+        total_ons: usize,
+    ) -> Result<(), LedgerError> {
+        self.require_origin(origin)?;
+        if self.completion != AudioNoteCompletionPolicy::SuccessfulOffBlock {
+            return Err(LedgerError::WrongCompletionPolicy);
+        }
+        if peak_records > self.records.len() {
+            return Err(LedgerError::RecordCapacity);
+        }
+        let count = u64::try_from(total_ons).map_err(|_| LedgerError::NativeIdExhausted)?;
+        if count > NATIVE_ID_LIMIT - self.next_native_id {
+            return Err(LedgerError::NativeIdExhausted);
+        }
+        Ok(())
+    }
+
+    /// Address/identity proof without applying the current capacity to a later
+    /// simulated block. The sole ledger remains unchanged.
+    pub(crate) fn preflight_on_identity(
+        &self,
+        origin: LedgerOrigin,
+        on: NoteOn,
+    ) -> Result<(), LedgerError> {
+        self.require_origin(origin)?;
+        if on.port.index < 0 || !(0..=15).contains(&on.channel) || !(0..=127).contains(&on.key) {
+            return Err(LedgerError::InvalidOnAddress);
+        }
+        if self.find_author(on.author_id).is_some() {
+            return Err(LedgerError::DuplicateAuthorNote);
+        }
+        Ok(())
+    }
+
+    /// Retire only Offs in this actual successful operation. Validate the whole
+    /// batch before changing a slot; failed/Deferred operations never call this.
+    /// This grants pairing storage, not evidence that a native voice has ended.
+    pub(crate) fn complete_successful_off_block(
+        &mut self,
+        origin: LedgerOrigin,
+        inputs: &[AudioNoteEvent],
+    ) -> Result<(), LedgerError> {
+        self.require_origin(origin)?;
+        if self.completion != AudioNoteCompletionPolicy::SuccessfulOffBlock {
+            return Err(LedgerError::WrongCompletionPolicy);
+        }
+        for (index, event) in inputs.iter().enumerate() {
+            if event.kind != AudioNoteEventKind::Off {
+                continue;
+            }
+            if inputs[..index].iter().any(|prior| {
+                prior.kind == AudioNoteEventKind::Off
+                    && prior.native_note_id == event.native_note_id
+            }) {
+                return Err(LedgerError::OffAlreadyDelivered);
+            }
+            let record = self
+                .records
+                .iter()
+                .flatten()
+                .find(|record| record.tuple.native_id == event.native_note_id)
+                .ok_or(LedgerError::UnknownAuthorNote)?;
+            if record.origin != origin {
+                return Err(LedgerError::StaleOrigin);
+            }
+            if record.phase != NotePhase::ReleasePending
+                || record.tuple.port_index != event.port_index as i16
+                || record.tuple.channel != i16::from(event.channel)
+                || record.tuple.key != i16::from(event.key)
+            {
+                return Err(LedgerError::OffTupleMismatch);
+            }
+        }
+        for event in inputs.iter().filter(|event| event.kind == AudioNoteEventKind::Off) {
+            let index = self
+                .records
+                .iter()
+                .position(|slot| {
+                    slot.is_some_and(|record| record.tuple.native_id == event.native_note_id)
+                })
+                .expect("all actual Off tuples were validated before retirement");
+            self.records[index] = None;
+            self.retained_records -= 1;
+        }
+        Ok(())
     }
 
     /// Bind the already prepared storage after the existing successful actual
@@ -491,7 +606,8 @@ mod tests {
     }
 
     fn bound_ledger(origin: LedgerOrigin, records: usize, voices: usize) -> NoteLedger {
-        let mut ledger = NoteLedger::prepare(records, voices).unwrap();
+        let mut ledger =
+            NoteLedger::prepare(records, voices, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         // Pure fixture simulates the parent's already confirmed native entry;
         // it neither performs nor proves that operation.
         ledger.commit_confirmed_cold_entry(origin).unwrap();
@@ -1090,7 +1206,7 @@ mod tests {
         let origin = origin();
         let mut missing = origin;
         missing.address.epoch = None;
-        let mut unbound = NoteLedger::prepare(1, 1).unwrap();
+        let mut unbound = NoteLedger::prepare(1, 1, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         assert!(matches!(
             unbound.commit_confirmed_cold_entry(missing),
             Err(LedgerError::UnenteredOrigin)
@@ -1112,10 +1228,122 @@ mod tests {
     }
 
     #[test]
+    fn successful_off_block_is_atomic_and_never_counts_native_voices() {
+        let origin = origin();
+        let mut ledger =
+            NoteLedger::prepare(2, 0, AudioNoteCompletionPolicy::SuccessfulOffBlock).unwrap();
+        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        let first = on();
+        let second = on();
+        let a = ledger.commit_on(origin, first).unwrap();
+        let b = ledger.commit_on(origin, second).unwrap();
+        assert_eq!(ledger.usage().unwrap().active_voices, 0);
+        ledger.commit_off(origin, first.author_id, first.port).unwrap();
+        ledger.commit_off(origin, second.author_id, second.port).unwrap();
+        let off = |tuple: NativeNoteTuple| AudioNoteEvent {
+            sample_offset: 0,
+            kind: AudioNoteEventKind::Off,
+            port_index: tuple.port_index as u16,
+            channel: tuple.channel as u8,
+            key: tuple.key as u8,
+            native_note_id: tuple.native_id,
+            velocity: 0.5,
+        };
+        let before = ledger.usage().unwrap();
+        let invalid = AudioNoteEvent { key: 61, ..off(b) };
+        assert_eq!(
+            ledger.complete_successful_off_block(origin, &[off(a), invalid]),
+            Err(LedgerError::OffTupleMismatch)
+        );
+        assert_eq!(ledger.usage().unwrap(), before);
+        assert_eq!(
+            phase(&ledger, first.author_id),
+            Some(NotePhase::ReleasePending)
+        );
+        assert_eq!(
+            phase(&ledger, second.author_id),
+            Some(NotePhase::ReleasePending)
+        );
+        assert_eq!(
+            ledger.complete_successful_off_block(origin, &[off(a), off(a)]),
+            Err(LedgerError::OffAlreadyDelivered)
+        );
+        assert_eq!(ledger.usage().unwrap(), before);
+        let mut stale = origin;
+        stale.binding = AudioProcessorBindingId::new();
+        assert_eq!(
+            ledger.complete_successful_off_block(stale, &[off(a), off(b)]),
+            Err(LedgerError::StaleOrigin)
+        );
+        assert_eq!(
+            ledger.observe_end_after_native_return(origin, end(a)),
+            Err(LedgerError::WrongCompletionPolicy)
+        );
+        assert_eq!(ledger.usage().unwrap(), before);
+        ledger.complete_successful_off_block(origin, &[off(a), off(b)]).unwrap();
+        assert_eq!(
+            ledger.usage().unwrap(),
+            LedgerUsage {
+                retained_records: 0,
+                active_voices: 0,
+                next_native_id: 2
+            }
+        );
+        assert_eq!(ledger.commit_on(origin, on()).unwrap().native_id, 2);
+    }
+
+    #[test]
+    fn successful_off_block_reuses_records_without_reusing_ids_or_same_block_credit() {
+        let origin = origin();
+        let mut ledger =
+            NoteLedger::prepare(1, 0, AudioNoteCompletionPolicy::SuccessfulOffBlock).unwrap();
+        ledger.commit_confirmed_cold_entry(origin).unwrap();
+        let storage = ledger.records.as_ptr();
+        for id in 0..1100 {
+            let note = on();
+            let tuple = ledger.commit_on(origin, note).unwrap();
+            assert_eq!(tuple.native_id, id);
+            ledger.commit_off(origin, note.author_id, note.port).unwrap();
+            assert_eq!(
+                ledger.commit_on(origin, on()),
+                Err(LedgerError::RecordCapacity)
+            );
+            ledger
+                .complete_successful_off_block(
+                    origin,
+                    &[AudioNoteEvent {
+                        sample_offset: 0,
+                        kind: AudioNoteEventKind::Off,
+                        port_index: tuple.port_index as u16,
+                        channel: tuple.channel as u8,
+                        key: tuple.key as u8,
+                        native_note_id: tuple.native_id,
+                        velocity: 0.5,
+                    }],
+                )
+                .unwrap();
+            assert_eq!(ledger.usage().unwrap().active_voices, 0);
+            assert_eq!(ledger.records.as_ptr(), storage);
+        }
+        ledger.next_native_id = NATIVE_ID_LIMIT - 1;
+        assert_eq!(ledger.preflight_off_block_peak(origin, 1, 1), Ok(()));
+        assert_eq!(
+            ledger.preflight_off_block_peak(origin, 1, 2),
+            Err(LedgerError::NativeIdExhausted)
+        );
+        let note = on();
+        assert_eq!(ledger.commit_on(origin, note).unwrap().native_id, i32::MAX);
+        assert_eq!(
+            ledger.preflight_off_block_peak(origin, 1, 1),
+            Err(LedgerError::NativeIdExhausted)
+        );
+    }
+
+    #[test]
     fn unbound_storage_refuses_reads_and_dispatch_then_binds_and_reenters_in_place() {
         let origin = origin();
         let note = on();
-        let mut ledger = NoteLedger::prepare(2, 2).unwrap();
+        let mut ledger = NoteLedger::prepare(2, 2, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         let storage = ledger.records.as_ptr();
         assert_eq!(ledger.records.len(), 2);
         assert_eq!(ledger.origin, None);
@@ -1280,7 +1508,7 @@ mod continuing_rebind_contracts {
     fn continuing_rebind_preserves_three_live_phases_original_tuples_and_storage() {
         let prior = origin();
         let next = next(prior);
-        let mut ledger = NoteLedger::prepare(4, 3).unwrap();
+        let mut ledger = NoteLedger::prepare(4, 3, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         // Fixture assumption only: the parent completed its genuine cold entry.
         ledger.commit_confirmed_cold_entry(prior).unwrap();
         let pressed = on();
@@ -1373,7 +1601,7 @@ mod continuing_rebind_contracts {
     fn continuing_rebind_refusals_and_id_exhaustion_do_not_reset_namespace() {
         let prior = origin();
         let next = next(prior);
-        let mut ledger = NoteLedger::prepare(1, 1).unwrap();
+        let mut ledger = NoteLedger::prepare(1, 1, AudioNoteCompletionPolicy::NativeEnd).unwrap();
         ledger.commit_confirmed_cold_entry(prior).unwrap();
         // Arithmetic boundary fixture; not a claim that all preceding IDs were executed.
         ledger.next_native_id = i32::MAX as u64;

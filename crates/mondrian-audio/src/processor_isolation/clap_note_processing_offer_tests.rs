@@ -592,12 +592,12 @@ fn configure(mode: Mode) -> (PluginEntry, Rc<Audit>) {
 fn captured(
     mode: Mode,
 ) -> (
-    Result<ClapNoteProcessingOfferV4, AudioProcessorHostError>,
+    Result<ClapNoteProcessingOfferV5, AudioProcessorHostError>,
     Rc<Audit>,
 ) {
     let (entry, audit) = configure(mode);
     (
-        probe_loaded_processing_v4(
+        probe_loaded_processing_v5(
             &entry,
             ID.to_str().unwrap(),
             [23; 32],
@@ -622,7 +622,7 @@ fn actual_abi_v2_captures_one_restored_rendered_notes_environment_and_inactive_r
     let mut offer = result.unwrap();
     cleanup(&audit, 1, 1);
     assert_eq!(audit.mask.get(), 1);
-    assert_eq!(offer.schema_version, 4);
+    assert_eq!(offer.schema_version, 5);
     // Public consumers access existing domain facts without private wire access.
     assert_eq!(offer.parameters()[0].current_value, 1.5);
     assert_eq!(offer.parameters()[0].max_value, 2.0);
@@ -720,7 +720,7 @@ fn actual_abi_ordinary_probe_and_v1_remain_distinct_without_borrowing_an_ordinar
     .unwrap();
     cleanup(&audit, 0, 0);
     assert_eq!(audit.mask.get(), 1);
-    assert_eq!(notes.schema_version, 1);
+    assert_eq!(notes.schema_version, 2);
     assert_eq!(notes.contract.ports[0].native_id, 0x8000_0017);
 }
 #[test]
@@ -830,7 +830,7 @@ fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_r
     let (result, audit) = captured(Mode::ZeroAudioInput);
     let offer = result.unwrap();
     cleanup(&audit, 1, 1);
-    assert_eq!(offer.schema_version, 4);
+    assert_eq!(offer.schema_version, 5);
     assert_eq!(
         offer.main_audio_input(),
         super::super::ClapMainAudioInput::Absent

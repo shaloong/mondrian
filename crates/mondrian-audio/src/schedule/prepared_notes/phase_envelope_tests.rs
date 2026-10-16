@@ -329,7 +329,9 @@ fn owned_processors(
         .enumerate()
         .map(|(index, target)| {
             let notes = crate::AudioProcessorNoteInputContract {
+                completion: crate::AudioNoteCompletionPolicy::NativeEnd,
                 ports: vec![crate::AudioProcessorNoteInputPort {
+                    channel_count: 16,
                     port_key: target.input_port_key.clone(),
                     native_id: 120 + index as u32,
                     native_index: 0,

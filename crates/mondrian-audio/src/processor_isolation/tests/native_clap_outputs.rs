@@ -489,7 +489,7 @@ mod installed {
         // SAFETY: the external gate pins this explicitly selected owned DLL.
         let entry = unsafe { PluginEntry::load(&path) }.unwrap();
         let state = state();
-        let offer = super::super::super::clap_note_input_contract::probe_loaded_processing_v4(
+        let offer = super::super::super::clap_note_input_contract::probe_loaded_processing_v5(
             &entry,
             ID,
             fingerprint_clap_binary(&path).unwrap(),

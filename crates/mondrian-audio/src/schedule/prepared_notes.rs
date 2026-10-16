@@ -76,6 +76,8 @@ pub(crate) struct PreparedNoteTarget {
     pub(crate) native_port_id: u32,
     /// Current restored input ABI index, not a UUID hash or author list position.
     pub(crate) native_port_index: u16,
+    pub(crate) channel_count: u8,
+    pub(crate) completion: crate::AudioNoteCompletionPolicy,
     pub(crate) limits: AudioNoteExecutionLimits,
 }
 
@@ -519,6 +521,8 @@ impl RequestedNoteScore {
                 input_port_key: request.input_port_key,
                 native_port_id: port.native_id,
                 native_port_index: port.native_index,
+                channel_count: port.channel_count,
+                completion: contract.completion,
                 limits: contract.limits,
             });
             #[cfg(test)]
@@ -535,6 +539,11 @@ impl RequestedNoteScore {
                 .ok_or_else(|| invalid("prepared Note event target rank is absent"))?;
             if target.lane_id != event.lane_id {
                 return Err(invalid("prepared Note event target identity differs"));
+            }
+            if event.channel >= target.channel_count {
+                return Err(invalid(
+                    "prepared Note channel exceeds admitted input channels",
+                ));
             }
         }
         // Existing grid/occurrence/port/rank errors win over a new phase refusal.
@@ -569,6 +578,30 @@ impl RequestedNoteScore {
 }
 
 impl PreparedNoteScore {
+    /// Compare the cached immutable binding, without resolver/native queries or
+    /// allocating another contract. Called before Session storage and dispatch.
+    pub(crate) fn matches_factory_contracts(
+        &self,
+        processors: &[super::PreparedProcessor],
+    ) -> bool {
+        self.targets.iter().all(|target| {
+            let Some(processor) = processors.get(target.processor_slot) else {
+                return false;
+            };
+            let contract = processor.factory.note_inputs();
+            let Some(port) = contract.ports.get(usize::from(target.native_port_index)) else {
+                return false;
+            };
+            processor.occurrence == target.occurrence
+                && port.native_index == target.native_port_index
+                && port.native_id == target.native_port_id
+                && port.port_key == target.input_port_key
+                && port.channel_count == target.channel_count
+                && contract.completion == target.completion
+                && contract.limits == target.limits
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn from_test_parts(
         targets: Vec<PreparedNoteTarget>,
@@ -758,13 +791,16 @@ mod tests {
     }
     fn port_contract() -> crate::AudioProcessorNoteInputContract {
         crate::AudioProcessorNoteInputContract {
+            completion: crate::AudioNoteCompletionPolicy::NativeEnd,
             ports: vec![
                 crate::AudioProcessorNoteInputPort {
+                    channel_count: 16,
                     port_key: "other".to_owned(),
                     native_id: 7,
                     native_index: 0,
                 },
                 crate::AudioProcessorNoteInputPort {
+                    channel_count: 16,
                     port_key: " notes.é ".to_owned(),
                     native_id: 123,
                     native_index: 1,

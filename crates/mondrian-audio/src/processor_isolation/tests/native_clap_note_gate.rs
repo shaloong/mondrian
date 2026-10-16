@@ -58,10 +58,12 @@ fn render() -> AudioRenderContract {
 
 fn requested_notes() -> AudioProcessorNoteInputContract {
     AudioProcessorNoteInputContract {
+        completion: crate::AudioNoteCompletionPolicy::NativeEnd,
         ports: NOTE_IDS
             .into_iter()
             .enumerate()
             .map(|(index, id)| AudioProcessorNoteInputPort {
+                channel_count: 16,
                 port_key: format!("clap.note-input.{id}"),
                 native_id: id,
                 native_index: index as u16,
@@ -603,14 +605,19 @@ fn native_owned_note_gate_v2_parent_query_binds_complete_same_instance_facts() {
             render(),
             opaque,
         )
-        .expect("actual schema2 normal helper, full capture and parent decoder");
+        .expect("actual schema5 normal helper, full capture and parent decoder");
         assert_eq!(
             pinned_dll(),
             path,
             "producer bytes remain accepted after query"
         );
-        assert_eq!(offer.schema_version, 3);
-        assert_eq!(offer.notes.schema_version, 1);
+        assert_eq!(offer.schema_version, 5);
+        assert_eq!(offer.notes.schema_version, 2);
+        assert_eq!(
+            offer.notes.contract.completion,
+            crate::AudioNoteCompletionPolicy::NativeEnd
+        );
+        assert!(offer.notes.contract.ports.iter().all(|port| port.channel_count == 16));
         assert_eq!(offer.notes.plugin_id, "org.mondrian.fixture.note-gate");
         assert_eq!(
             offer.notes.binary_sha256,
@@ -624,6 +631,28 @@ fn native_owned_note_gate_v2_parent_query_binds_complete_same_instance_facts() {
         assert_eq!(offer.notes.channel_layout, AudioChannelLayout::Mono);
         assert_eq!(offer.notes.max_block_frames, 14);
         assert!(offer.notes.offline);
+        let standalone = super::super::clap_discovery::probe_clap_note_input_contract(
+            &helper,
+            &path,
+            "org.mondrian.fixture.note-gate",
+            render(),
+            opaque,
+        )
+        .expect("actual independent NoteProbe2 request and response");
+        assert_eq!(standalone.schema_version, 2);
+        assert_eq!(standalone.plugin_id, offer.notes.plugin_id);
+        assert_eq!(standalone.binary_sha256, offer.notes.binary_sha256);
+        assert_eq!(standalone.state_sha256, offer.notes.state_sha256);
+        assert_eq!(standalone.sample_rate, offer.notes.sample_rate);
+        assert_eq!(standalone.channel_layout, offer.notes.channel_layout);
+        assert_eq!(standalone.max_block_frames, offer.notes.max_block_frames);
+        assert_eq!(standalone.offline, offer.notes.offline);
+        assert_eq!(standalone.contract, offer.notes.contract);
+        assert_eq!(
+            pinned_dll(),
+            path,
+            "standalone query preserves accepted producer bytes"
+        );
         assert_eq!(
             offer.notes.contract.limits,
             AudioNoteExecutionLimits {

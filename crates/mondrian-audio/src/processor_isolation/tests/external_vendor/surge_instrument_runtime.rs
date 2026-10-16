@@ -350,8 +350,14 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     let state = state.expect("Surge must expose actual state capture");
     assert!(!state.is_empty() && state.len() <= 64 * 1024);
     let offer = probe_clap_note_processing_offer(&helper, &library, ID, render, Some(&state))
-        .expect("same restored-instance NoteOffer4, no inferred Note dialect or port");
-    assert_eq!(offer.schema_version, 4);
+        .expect("same restored-instance NoteOffer5, no inferred Note dialect or port");
+    assert_eq!(offer.schema_version, 5);
+    assert_eq!(offer.notes.schema_version, 2);
+    assert_eq!(
+        offer.notes.contract.completion,
+        crate::AudioNoteCompletionPolicy::NativeEnd
+    );
+    assert!(offer.notes.contract.ports.iter().all(|port| port.channel_count == 16));
     assert_eq!(offer.notes.plugin_id, ID);
     assert_eq!(offer.main_audio_input(), ClapMainAudioInput::Absent);
     assert_eq!(captured.main_audio_input, ClapMainAudioInput::Absent);
