@@ -921,10 +921,7 @@ impl<'a> PluginEditorProcessingSplit<'a> {
         processor: Box<dyn PluginProcessingRole + Send + 'a>,
     ) -> Self {
         Self {
-            editor: PluginEditorControl {
-                internal: editor,
-                _main_thread: std::marker::PhantomData,
-            },
+            editor: PluginEditorControl::from_role(editor),
             processor: PluginAudioProcessing {
                 internal: processor,
             },
@@ -969,7 +966,14 @@ pub struct PluginEditorControl<'a> {
     _main_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-impl PluginEditorControl<'_> {
+impl<'a> PluginEditorControl<'a> {
+    pub(crate) fn from_role(internal: Box<dyn PluginEditorRole + 'a>) -> Self {
+        Self {
+            internal,
+            _main_thread: std::marker::PhantomData,
+        }
+    }
+
     /// Actual loaded native object's lifetime identity, read without state callbacks.
     /// This observation cannot issue an installed Runtime or authoring lease.
     pub fn attachment_owner(&self) -> Result<NativeEditorAttachmentOwner> {
@@ -1154,6 +1158,14 @@ pub(crate) trait PluginInternal: Send {
     }
     fn native_editor_attachment_owner(&self) -> Option<NativeEditorAttachmentOwner> {
         None
+    }
+    fn borrow_editor_control(&mut self) -> Result<PluginEditorControl<'_>> {
+        Err(Error::Other(
+            "this backend cannot borrow native editor/controller control".to_string(),
+        ))
+    }
+    fn can_split_editor_processing(&self) -> bool {
+        false
     }
     fn split_editor_processing(&mut self) -> Result<PluginEditorProcessingSplit<'_>> {
         Err(Error::Other(
@@ -2694,7 +2706,11 @@ impl Plugin {
             .clone()
     }
 
-    /// Check if the plugin is currently processing
+    /// Read the historical wrapper's cached processing status.
+    ///
+    /// Internal retained configuration operations can stop the native processor
+    /// without updating this cache. Use [`Self::can_split_editor_processing`] for
+    /// the actual native state required to borrow a DSP role.
     pub fn is_processing(&self) -> bool {
         self.is_processing
     }
@@ -2728,6 +2744,31 @@ impl Plugin {
         F: Fn(&AudioLevels) + Send + 'static,
     {
         self.audio_callback = Some(Box::new(callback));
+    }
+
+    /// Borrow this same loaded instance's main-thread controller/view fields.
+    ///
+    /// This is also available while native processing is stopped. It creates no
+    /// DSP role and does not activate, start, reset or service a pending request.
+    /// The borrow prevents replacement of the native owner until control ends;
+    /// dropping this temporary role does not close the owner's view.
+    pub fn borrow_editor_control(&mut self) -> Result<PluginEditorControl<'_>> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .borrow_editor_control()
+    }
+
+    /// Whether the actual native instance is active, processing and has its
+    /// prepared process storage. Unsupported backends return false.
+    ///
+    /// This observes native-owner fields, not [`Self::is_processing`]'s wrapper
+    /// cache. It performs no SDK call or state transition and grants no borrow;
+    /// [`Self::split_editor_processing`] still checks the control thread.
+    pub fn can_split_editor_processing(&self) -> bool {
+        self.internal
+            .as_ref()
+            .is_some_and(|internal| internal.can_split_editor_processing())
     }
 
     /// Borrow disjoint native editor/control and DSP roles of this same loaded instance.
@@ -3961,6 +4002,16 @@ mod public_surface_tests {
             audio_callback: None,
             internal: None,
         }
+    }
+
+    #[test]
+    fn unloaded_editor_capabilities_do_not_trust_the_wrapper_processing_cache() {
+        let mut plugin = unloaded_plugin();
+        plugin.is_processing = true;
+        assert!(plugin.is_processing());
+        assert!(!plugin.can_split_editor_processing());
+        assert!(plugin.borrow_editor_control().is_err());
+        assert!(plugin.split_editor_processing().is_err());
     }
 
     /// The "not processing" rejection happens once per block on the audio thread, so it must

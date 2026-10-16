@@ -2422,11 +2422,22 @@ impl PluginInternal for PluginImpl {
         Some(self.native_editor_owner)
     }
 
+    fn borrow_editor_control(&mut self) -> Result<crate::plugin::PluginEditorControl<'_>> {
+        self.ensure_control_thread("borrow native editor control")?;
+        Ok(crate::plugin::PluginEditorControl::from_role(Box::new(
+            self.editor_fields(),
+        )))
+    }
+
+    fn can_split_editor_processing(&self) -> bool {
+        self.is_active && self.is_processing && self.process_data.is_some()
+    }
+
     fn split_editor_processing(
         &mut self,
     ) -> Result<crate::plugin::PluginEditorProcessingSplit<'_>> {
         self.ensure_control_thread("split editor and processing roles")?;
-        if !self.is_active || !self.is_processing || self.process_data.is_none() {
+        if !self.can_split_editor_processing() {
             return Err(Error::NotProcessing);
         }
         let editor = PluginEditorFields {
@@ -7428,6 +7439,24 @@ mod editor_detach_failure_tests {
         fixture
             .close()
             .expect("full native owner explicitly removes its view");
+        assert_eq!(fixture.removals.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn temporary_control_only_role_preserves_owner_view_until_explicit_close() {
+        let mut fixture = Fixture::new(kResultOk, kResultOk);
+        let owner = fixture.native_editor_owner;
+        {
+            let control = crate::plugin::PluginEditorControl::from_role(Box::new(fixture.fields()));
+            assert_eq!(control.attachment_owner().unwrap(), owner);
+            drop(control);
+        }
+        assert_eq!(fixture.removals.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 0);
+        fixture
+            .close()
+            .expect("the original owner explicitly closes the view");
         assert_eq!(fixture.removals.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.frame_clears.load(Ordering::SeqCst), 1);
     }
