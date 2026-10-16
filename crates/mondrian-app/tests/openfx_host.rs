@@ -2510,6 +2510,42 @@ fn product_worker_accepts_4096_parameters_including_group_and_page_descriptors()
 }
 
 #[test]
+#[ignore = "requires current product and SessionProbe mode host_parameters_4096"]
+fn product_worker_describes_4096_total_parameters_including_group_and_page() {
+    let inspection = cpu_contract_probe("host_parameters_4096");
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let description = describe_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("4096 total descriptors admit complete metadata before resident processing");
+    assert_eq!(description.identifier, identifier);
+    // The pinned Basic's Group/Page and the extra Groups count toward admission,
+    // while only its six value parameters enter the authored description.
+    let expected = [
+        ("scale", OpenFxParameterValue::Double(1.0)),
+        ("scaleComponents", OpenFxParameterValue::Boolean(false)),
+        ("scaleR", OpenFxParameterValue::Double(1.0)),
+        ("scaleG", OpenFxParameterValue::Double(1.0)),
+        ("scaleB", OpenFxParameterValue::Double(1.0)),
+        ("scaleA", OpenFxParameterValue::Double(1.0)),
+    ];
+    assert_eq!(description.parameters.len(), expected.len());
+    for (parameter, (name, default)) in description.parameters.iter().zip(expected) {
+        assert_eq!(parameter.name, name);
+        assert_eq!(parameter.default_value, default);
+        match default {
+            OpenFxParameterValue::Double(_) => {
+                assert_eq!(parameter.double_type, Some(OpenFxDoubleType::Scale));
+                assert_eq!(parameter.numeric_channels.len(), 1);
+            }
+            OpenFxParameterValue::Boolean(_) => {
+                assert_eq!(parameter.double_type, None);
+                assert!(parameter.numeric_channels.is_empty());
+            }
+            _ => unreachable!("the pinned Basic has only Double and Boolean values"),
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires current product and SessionProbe mode host_parameters_4097"]
 fn product_worker_refuses_4097_descriptor_parameters_before_instance_creation() {
     let inspection = cpu_contract_probe("host_parameters_4097");
