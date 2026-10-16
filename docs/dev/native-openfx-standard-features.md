@@ -1,7 +1,7 @@
 # OpenFX 标准能力与实际支持矩阵
 
-规范版本审计日期：2026-10-08；2026-10-16 增量复核 Message/Progress/Timeline
-及通知调用链，其他行保留原资格边界。范围：本仓库实际 native OpenFX host、Rust
+规范版本审计日期：2026-10-08；2026-10-17 增量验证 Host 属性和参数准入，
+2026-10-16 复核 Message/Progress/Timeline 及通知调用链。范围：实际 native host、Rust
 adapter、Effects 图与产品接入。此文记录可定位的源码能力及限制，**不是编译、
 真实插件执行、跨平台或性能合格的替代证据**。运行验收保留当前提交、环境、
 输入条件、命令与通过或失败结论。执行门禁所需的临时绑定在复核后清理；
@@ -21,6 +21,17 @@ pre-DSP output-owner capacity admission、parent-issued instance namespace 已�
 及 Describe 失败缺 Unload；现由原 ImageEffectPlugin 单一状态及持久句柄负责，
 成功只加载/描述一次，Load 失败不卸载，Describe 失败配对一次卸载；回调结束后才释放描述符。
 此结果限上述 owned/官方样例，不是第三方、GUI、其它平台、GPU 或性能资格。
+
+2026-10-17 Windows x64：正常 Product/runner 的六个 Host 属性/Describe 原生门
+全部 exact1、stderr0，原180秒/2秒 Job 回收通过。覆盖七项 Host 身份/私有指针
+属性拒写、插件 label 可写、上限4096声明，以及含 Group/Page 和纯数值参数的
+4096接受/4097拒绝；两个属性门还执行现有 resident/共享 Graph 闭环。
+这只验证上述 owned probe 子集，未新增性能、第三方或其它平台资格。
+
+2026-10-17 修复前 Product 的新增压力门仍有缺口：4096 总参数用例在
+resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner 已于约53.77ms
+返回，父侧约101.07ms仍无 OS 退出观察。4097 拒绝用例另有 libtest 通过但
+Job 首次计数非零的失败，未记录关联进程身份。两项根因仍开放，原预算与断言保留。
 
 Describe 请求/响应必须 schema2；保留原隐藏入口以使旧 worker 明确拒绝新请求。
 通知属于已核验 binary/请求 class 的整次元数据请求，不冒充发出通知的 class 或 Render invocation。
@@ -86,7 +97,7 @@ NEXT；页脚显示 1.5.1 并不证明所有后续符号已发布。
 | B03 | mixed API / unknown version binary，必需 | 实现：先 exact ImageEffect literal+NUL/version，未知 API/version 跳过，不解析无关 ID/body；原 export index 保留 | `is_image_effect_api`; `SelectedPluginBinary::initialize` | [Plugin struct](https://openfx.readthedocs.io/en/main/Reference/ofxPluginStruct.html) |
 | B04 | 每个 accepted plugin setHost / host 生命周期，必需 | 实现：native selection SDK 调用 per-plugin setHost；owner 保证 cache/module/unload 在 Host lease 内；一个 native worker 一个 Host，第二 owner 即时 Busy，无每帧锁 | `OwnedImageEffectCache`; `ImageEffectHostLease`; `NativeSession` 非 Send/Sync | [Host](https://openfx.readthedocs.io/en/main/Reference/ofxHostStruct.html) |
 | B05 | suites name/version/null，必需 | 部分：unknown suite=null；MultiThread 与 Message/Progress/Timeline 接产品实现。各自边界见下；Interact 尚未接入，不因 non-null 计支持 | `host_descriptor.cpp::Host::fetchSuite`; `thread_suite.*`; `aux_suite.*` | [Suite inventory](https://openfx.readthedocs.io/en/main/Reference/suites/ofxSuiteReference.html) |
-| B06 | Property V1 全部 typed scalar/N set/get、reset/dimension，必需 | 实现并有 read-only enforcement；host identity 的 upstream spec 将若干只读字段标成 writable，host schema 仍部分不真实；MaxParameters=-1 与 4096 cap 不符 | `vendor/host/src/ofxhPropertySuite.cpp`; `ofxhHost.cpp::hostStuffs`; `host_descriptor.cpp` | [Property](https://openfx.readthedocs.io/en/main/Reference/suites/ofxPropertySuiteReference.html) |
+| B06 | Property V1 全部 typed scalar/N set/get、reset/dimension，必需 | 已实现，部分验证：七项 Host 身份/私有指针属性仅对插件只读，内部构造仍可赋值；MaxParameters=4096 与完整 descriptor 准入共用常量。上述六门验证拒写、合法 label 更新、Group/Page 计数及完整数值元数据；完整 Property V1 与4096实例退休资格仍待 | `vendor/host/src/ofxhPropertySuite.cpp`; `ofxhHost.cpp::hostStuffs`; `Host::kMaxParameters`; `tests/openfx_host.rs` | [Property](https://openfx.readthedocs.io/en/main/Reference/suites/ofxPropertySuiteReference.html) |
 | B07 | Memory V1 alloc/free，必需 | 实现 malloc/free；null/adversarial ABI与内存不足行为全面资格未完成；不纳入父图预算 | `vendor/host/src/ofxhHost.cpp::Memory` | [Memory](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMemory_8h.html) |
 | B08 | imageMemory alloc/free/lock/unlock，必需 | 实现，bootstrap memory 独立 fixture 已验证 Host 所有权；nested lock/生命周期/RSS ceiling 尚待完整性能验收 | `vendor/host/src/ofxhMemory.cpp`; `ofxhImageEffect.cpp`; `OwnedImageEffectCache` | [Image suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxImageEffectSuiteReference.html) |
 | B09 | Message V1 log/info/warning/error/fatal，必需 | 实现：AuxSuite 区分 NULL/descriptor/instance；Render notice 经 owner/invocation 校验，Describe-only 经独立 schema2 整请求结果交给当前 Catalog。Log 入 tracing，拒绝不完整/Fatal 定义。Windows 有上述有限原生资格，非全场景 Message 资格 | `aux_suite.cpp::message`; `openfx_host/description.rs`; `app/openfx_catalog`; `app/preview_processor_feedback` | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
