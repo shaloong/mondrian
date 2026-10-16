@@ -1,9 +1,11 @@
 # OpenFX 标准能力与实际支持矩阵
 
-规范版本审计日期：2026-10-08；tracked 源码复核：2026-10-09（root r102；实际原生资格 r103）。范围：本仓库实际 native OpenFX host、Rust
+规范版本审计日期：2026-10-08；2026-10-16 增量复核 Message/Progress/Timeline
+及通知调用链，其他行保留原资格边界。范围：本仓库实际 native OpenFX host、Rust
 adapter、Effects 图与产品接入。此文记录可定位的源码能力及限制，**不是编译、
-真实插件执行、跨平台或性能合格的替代证据**。运行验收必须另外记录实际源码、
-构建与插件产物哈希、测试命令和结果。
+真实插件执行、跨平台或性能合格的替代证据**。运行验收保留当前提交、环境、
+输入条件、命令与通过或失败结论。执行门禁所需的临时绑定在复核后清理；
+不积累历史构建产物、整源哈希清单或重复收据。
 
 有限 Float association 的 typed graph、缓存与 Normal Over、实际 image
 UniqueIdentifier/FieldNone、CPU callback 线程和真实 mutex、bulk POD transport、
@@ -14,7 +16,8 @@ root r102 全 workspace 严格 Clippy/fmt gate 已通过。r90 保留为历史�
 替换产物导致 artifact lease 失败。r101 修复 actual-alpha borrowed admission 后，
 r103 统一 test-profile 的 20 项 exact gates 全部通过，source/artifact lease 均稳定；
 包含 raw disk-cache → nested → opaque output、公开线程/互斥与取消回收。
-这不是 fresh release 性能或全面标准资格。未应用的 S02 消息/反馈、Log delivery 草稿不计支持。
+这不是 fresh release 性能或全面标准资格。S02 消息/反馈与 Log delivery 已有实现和
+测试；本次源码复核不重授这些场景的原生运行资格。
 每行只覆盖声明的上下文、格式、时间与消费者；头文件、enum、upstream wrapper
 和测试名字都不能单独证明运行支持。
 
@@ -73,17 +76,17 @@ NEXT；页脚显示 1.5.1 并不证明所有后续符号已发布。
 | B02 | 可选 `OfxSetHost(const OfxHost*)`，存在时先于 count/get | 实现：真实 Host + 已构造 ImageEffect cache；Failed silent empty，其他 non-success 明确错误，缺 export 合法 | `NativeDiscoveryHost`; `SelectedBinaryBootstrap`; `MondrianOpenFxDiscoveryOwner` | [Core](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxCore.h) |
 | B03 | mixed API / unknown version binary，必需 | 实现：先 exact ImageEffect literal+NUL/version，未知 API/version 跳过，不解析无关 ID/body；原 export index 保留 | `is_image_effect_api`; `SelectedPluginBinary::initialize` | [Plugin struct](https://openfx.readthedocs.io/en/main/Reference/ofxPluginStruct.html) |
 | B04 | 每个 accepted plugin setHost / host 生命周期，必需 | 实现：native selection SDK 调用 per-plugin setHost；owner 保证 cache/module/unload 在 Host lease 内；一个 native worker 一个 Host，第二 owner 即时 Busy，无每帧锁 | `OwnedImageEffectCache`; `ImageEffectHostLease`; `NativeSession` 非 Send/Sync | [Host](https://openfx.readthedocs.io/en/main/Reference/ofxHostStruct.html) |
-| B05 | suites name/version/null，必需 | 部分：名称/版本 dispatch 已存在，unknown suite=null。MultiThread 已接 product-owned 实现；Message/Progress/Timeline/Interact 仍有下列未闭合语义，不因 non-null 计支持 | `host_descriptor.cpp::Host::fetchSuite`; `thread_suite.*`; vendor fallback suites | [Suite inventory](https://openfx.readthedocs.io/en/main/Reference/suites/ofxSuiteReference.html) |
+| B05 | suites name/version/null，必需 | 部分：unknown suite=null；MultiThread 与 Message/Progress/Timeline 接产品实现。各自边界见下；Interact 尚未接入，不因 non-null 计支持 | `host_descriptor.cpp::Host::fetchSuite`; `thread_suite.*`; `aux_suite.*` | [Suite inventory](https://openfx.readthedocs.io/en/main/Reference/suites/ofxSuiteReference.html) |
 | B06 | Property V1 全部 typed scalar/N set/get、reset/dimension，必需 | 实现并有 read-only enforcement；host identity 的 upstream spec 将若干只读字段标成 writable，host schema 仍部分不真实；MaxParameters=-1 与 4096 cap 不符 | `vendor/host/src/ofxhPropertySuite.cpp`; `ofxhHost.cpp::hostStuffs`; `host_descriptor.cpp` | [Property](https://openfx.readthedocs.io/en/main/Reference/suites/ofxPropertySuiteReference.html) |
 | B07 | Memory V1 alloc/free，必需 | 实现 malloc/free；null/adversarial ABI与内存不足行为全面资格未完成；不纳入父图预算 | `vendor/host/src/ofxhHost.cpp::Memory` | [Memory](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMemory_8h.html) |
 | B08 | imageMemory alloc/free/lock/unlock，必需 | 实现，bootstrap memory 独立 fixture 已验证 Host 所有权；nested lock/生命周期/RSS ceiling 尚待完整性能验收 | `vendor/host/src/ofxhMemory.cpp`; `ofxhImageEffect.cpp`; `OwnedImageEffectCache` | [Image suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxImageEffectSuiteReference.html) |
-| B09 | Message V1 log/info/warning/error/fatal，必需 | 部分：stdout 日志存在，未接到产品通知；合法 NULL/descriptor transient handle 在 vendor 实现中不能正确 dispatch，descriptor 被当 Instance，NULL 回 BadHandle | `vendor/ofxhImageEffect.cpp::message`; `host_descriptor.cpp::vmessage`; `effect_instance.cpp::vmessage` | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
-| B10 | Message V1 question reply，interactive 条件必需 | 未实现交互 question；render worker instance `vmessage` 总回 OK，Host 自身 question 回 No，不能算合法交互问答。非交互 question 本来就是插件调用错误 | 同 B09；Instance interactive=false | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
-| B11 | Message V2 persistent set/clear，optional exposed | 部分：套件 non-null，但只是即时日志/no-op clear，无持续 error/warning 状态、关联实例或可见清除 | `effect_instance.cpp::setPersistentMessage/clearPersistentMessage` | [Message V2](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
+| B09 | Message V1 log/info/warning/error/fatal，必需 | 实现：AuxSuite 注册身份区分 NULL/descriptor/instance，bounded UTF-8 notice 经 owner/invocation 校验交付，Log 入 tracing；独立 Describe-only 的通知尚未交给 Catalog。当前源码复核，非本轮全场景原生验收 | `host_descriptor.cpp::Host::fetchSuite`; `aux_suite.cpp::message`; `resident.rs`; `app/preview_processor_feedback.rs` | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
+| B10 | Message V1 question reply，interactive 条件必需 | 实现受控 question：实际 GUI/control 授权与当前 invocation 才可请求 Yes/No，非交互明确 Failed；完整 GUI 生命周期与平台资格另行验收 | `aux_suite.cpp::message/bindControl`; live question transport | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
+| B11 | Message V2 persistent set/clear，optional exposed | 实现实例级 persistent revision、set/clear 与当前 scope 通知；Error 阻断，author change 后可同 owner 恢复，拒绝 stale feedback；本轮未重跑对应原生控制 | `aux_suite.cpp::persistent/clear`; `resident.rs`; `app/preview_processor_feedback.rs` | [Message V2](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
 | B12 | MultiThread V1 multiThread/CPU/index/spawned，必需套件 | 实现限定的 1-CPU grant：独立 lazy callback thread，callback(0,1)，真实 spawned/index，阻塞至自身 accepted job 完成；nested ErrExists，其他同时调用 Failed。8 MiB stack+guard 预准入，非全核 SMP；r103 对应真实原生与公开产品控制通过，整批 source/artifact lease 稳定 | `thread_suite.cpp::ThreadSuite::{run,numCPUs,index,isSpawned}`; `State::{work,jobCompleted,jobBusy}` | [MultiThread](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMultiThread_8h.html) |
 | B13 | MultiThread V1 mutexCreate/Destroy/Lock/UnLock/TryLock，必需套件 | 实现：最多 1024 个 owner/generation checked mutex，真实跨线程 mutual exclusion、递归 depth、TryLock 不改失败锁计数；initial count<=0 合法初始解锁，positive 由创建线程持有；destroy/stale/reused handle 有边界；r103 对应真实原生与公开产品控制通过，整批 source/artifact lease 稳定 | `thread_suite.cpp::MutexState`; `ThreadSuite::{createMutex,destroyMutex,lockMutex,unlockMutex,tryMutex}` | [Mutex](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMultiThread_8h.html) |
-| B14 | Progress V1/V2 start/update/end，optional exposed | 部分：start/end no-op、update 恒继续；owner kill/reap 可取消工作，但 plugin progress/abort polling 没有共享 cancellation 状态 | `effect_instance.cpp::progress*`; `vendor Instance::abort`; `resident.rs` | [Progress](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxProgress_8h.html) |
-| B15 | Timeline V1 getTime/getBounds/gotoTime，optional exposed | 部分：读当前 SDK time/range；gotoTime no-op 却 suite 回 OK。产品导航请求没有入 author/navigation owner | `effect_instance.cpp::timeLine*`; `vendor gTimelineSuite` | [Timeline](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxTimeLine_8h.html) |
+| B14 | Progress V1/V2 start/update/end，optional exposed | 实现 begin/update/end 生命周期、实时反馈与 invocation cancellation 查询；完整产品取消时延与并发资格仍须分场景验证 | `aux_suite.cpp`; invocation control; `resident.rs` | [Progress](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxProgress_8h.html) |
+| B15 | Timeline V1 getTime/getBounds/gotoTime，optional exposed | 部分：getTime/getBounds 读实际快照；无法满足的有限 gotoTime 明确 Failed。产品导航尚未接入 | `aux_suite.cpp`; invocation timeline snapshot | [Timeline](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxTimeLine_8h.html) |
 | B16 | Interact V1 swapBuffers/redraw/getPropertySet，optional | 未接入：wrapper/suite存在；host overlays/customInteract=false，未创建 interact，不能执行真实 draw/input | `Host::fetchSuite`; `Host` descriptor；产品无 interact owner | [Interacts](https://openfx.readthedocs.io/en/main/Reference/ofxInteracts.html) |
 | B17 | ParametricParameter V1 全部 curve/control-point API，optional | 拒绝/未实现：宏未启用、suite=null，无 canonical parametric function author schema | `app/build.rs`; `Host::fetchSuite`; `newParam` | [Parametric](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxParametricParam_8h.html) |
 | B18 | Dialog V1 requestDialog/notifyRedrawPending，optional | 拒绝/未实现：suite=null、无 UI-thread dialog action dispatcher | `Host::fetchSuite`; product request enums | [Dialog](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxDialog_8h.html) |
@@ -209,20 +212,21 @@ authoring transaction/Undo/save；worker中局部赋值不能替代这个闭环�
 | W06 | Resident steady-frame latency | 实际 r30 原 Float 前 public production Basic gate 四组均 FAIL：1080p/UHD×30/60，32 warmup排除、600 samples/组，像素 oracle无错误。当前 Float/bulk/new resource source须 fresh release 重测同一预算；不得把源码优化或 strict GREEN 计为性能 PASS | `official_basic_production_resident_steady_frame_performance_gate`; collector；`.scratch/plugin-standard-audit/audio-release-baseline-r30/{1080p30,uhd30,1080p60,uhd60}.json` |
 | W07 | native完整性能预算/RSS/插件SMP/4K重型效果/multipleinstances | 部分 known-host ledger：2 shared rasters+pre-DSP one returned Vec+8 MiB reserved callback stack/guard/fixed mutex state+48-byte namespace POD；actual Vec capacity admission已入源码。当前 factory仍把 active3-raster峰值用于 retained费用，UHD384 MiB可每帧evict。UID std::string/SDK property copies、其他 SDK/OS/CRT/plugin heap未完整计量，不能称 whole RSS cap | `required_resident_storage`; `NativeOutputAllocation::acquire`; `FloatProcessorResidency`; `ThreadSuite::residentBytes`; `FrameState` |
 | W08 | 每帧binaryidentityverification开销 | 保留 parent before/after wholebinary SHA 与 child verified binding/CABI identity；bulk优先降低 O(n) byte/alpha运输成本，未削弱 hash。r30旧版本已测慢；immutable module/resources snapshot优化仍未实现，不允许 stat 代 hash 或永久无校验 cache | `resident.rs` SHA calls；`openfx_host.rs::verify_binary`; bulk POD copy/typed admission |
-| W09 | 用户通知/故障解释 | catalogstatus已有i18n UI；native Message/Progress/Timeline 与 actual current-work 通知/blocked/recovery 尚未接通。S02 与 Log delivery 完整源码包仍未应用，question/livecancel/dialog/Interact 仍待闭环 | `app/openfx_catalog`; `effect_instance.cpp::vmessage`; B09–B15 |
+| W09 | 用户通知/故障解释 | 已接当前 Preview scope 的 notice/persistent/clear 与 Log tracing，拒绝 stale scope；独立 Describe-only/Catalog 通知交付、导航、Dialog/Interact 仍有缺口。不能据源码推定所有交互场景通过 | `app/preview_processor_feedback`; `app/openfx_catalog`; B09–B15 |
 | W10 | hostSDK版权/第三方effectdistribution | vendor BSD-3-Clause源码与license已随产品，未分发第三方effectbinary。接入标准SDK不代表取得vendor插件或其assets/license授权；常规loader不bypasslicensing | `native/vendor/LICENSE.md`, `README.md`; [官方license](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/LICENSE.md) |
 
 ## 8. 剩余的最小闭环切片与验收
 
 S01/S03/S04 已应用源码，但其新产物与全产品资格必须继续完成，不能仍当未应用草稿。
-后续先闭合 S02 已开放辅助 suite，再扩大 context/布局/UI/原生 GPU。每个新切片都要
+S02 已有生产实现及针对性测试，后续复核实际资格并补齐 Describe-only 通知等具体
+缺口；不要重复实现已修的 suite dispatch。扩大 context/布局/UI/原生 GPU 前，每个新切片都要
 测试当前实现真实 RED、应用修复后真实 GREEN，再跑 product worker 与共享图；
 明示hostcapability仅在闭环通过后开放。扩大能力前应先完成独立闭环，再更新 capability 声明。
 
 | Slice | 闭环目标 | 必需代码authority | 独立验收（不能mirror实现） | 性能约束 |
 | --- | --- | --- | --- | --- |
 | S01 | 已入源码：actual image FieldNone 与 parent-owned namespace/generation；r103 cross-worker private analysis 与 public namespace-cache 断言通过，整批 source/artifact lease 稳定 | `FrameState`+typed parent owner+`FrameImage`；Source/Output separate，action-scope handles | 插件按SourceID缓存独立analysis，改变raster/seek/newsession不错误复用；sameimage repeatedfetch合法稳定；真实imageField必须None，不能只查render/clipprop | 无额外rasterhash/clone；generation allocation次数明确 |
-| S02 | Message handle correctness + persistent typed responses、Progress/Timeline真实行为 | product suite dispatch真实Host/Descriptor/Instance，workerresponse与apppostcommit通知/navowner | NULL/descriptor/instance消息不crash；warning/errorset/clear可见；noninteractivequestion拒绝；交互questionreply和timelinecallback可取消；scopedprogress取消及时 | boundedutf8/responsequeue；noUIblockedrealtime；日志不塞满workerpipe |
+| S02 | 已实现 dispatch/persistent/Progress/Log；补 Describe-only 通知与产品导航等具体缺口 | 复用现有 AuxSuite、typed feedback/current-scope owner；Describe 结果不能伪造 Render invocation | 现有 NULL/descriptor/instance、persistent 恢复、UTF-8、Progress/Timeline 控制按场景验收；新增 Describe-only 应不 Render 即交付一次，stale/cancelled Catalog 不发布 | bounded UTF-8/response；无 UI 阻塞 realtime；日志不塞满 worker pipe |
 | S03 | 已入源码：真实 spawned 1-CPU callback/mutex 生命周期；r103 原生 thread/mutex/completion/capacity 与公开产品 thread/mutex/completion/cancel 控制通过，整批 source/artifact lease 稳定。若扩大 SMP，须新的 domain grant/scheduling/resource policy | `ThreadSuite` sole owner；递归/并发拒绝，accepted job own completion | recursionErrExists；每callbackindex覆盖一次+join；initiallockcount/trylock/otherthreadblocking/unlock；callbackspawnstatus真；shutdown无悬空handle | boundedthreads、nestedbudget；同机器1CPU vsavailableCPU p99；不与NLEworkers过度订阅 |
 | S04 | 已入源码：finite typed association / exact dyadic Normal Over / cached/nested/opaque route；r103 raw/cache/nested/opaque native/output 断言通过；全图与 release 性能仍需分别验收，coverage consumer仍有明确限制 | Core/Effects sole typed frame 与 exact arithmetic；actual Source/output association；compiled binding/admission/cache header | currentAPIraw RED；zeroαemission/negativeRGB/signed/>1/subnormal/MAX；samevalidworker不退役；rawcachebits、nestedf64oracle、OCIOopaqueRGBA8；GPUcoverageconsumer typedrefusal无DSP重放 | existingstaging/outputclone预算；FiniteStraightCoverage=可表示Float32转换，不承诺bitlossless；无epsilon/clamp |
 | S05 | 参数unit/spatialdefault/group/page/button/label、dynamicmetadata | Coreauthor parametercontracts、OFXmetadataresponse、appinspectorcontrols | PAR/projectoffset非零/canonicalvsnormalizeddefault正确；dynamicsecret/enabled/options不丢authorvalue；Button一次gesture/Undo/save；RTL/keyboardtab可用 | coldmetadata更新；不每帧重注册definition或构建整UI |
