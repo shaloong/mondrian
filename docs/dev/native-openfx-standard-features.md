@@ -288,6 +288,7 @@ S02 已补齐 Describe-only/Catalog 有界通知；后续推进产品导航和�
 | r90 native 11 项与 public 3 项控制通过，nested/output test 失败 | 原生 image/namespace/thread/mutex/resource 控制与 raw/cache 前置断言到达真实执行；嵌套入口错误期待 StraightCoverage | 整批 source 稳定，但 dev/test 产物替换导致 artifact lease 失败；不能计为整批资格通过 |
 | r102 全 workspace all-target/all-feature strict gate GREEN | actual-alpha admission 与所有当前 test targets 可编译，fmt/lint无warning | 不替代运行、原生 GUI、release 性能或跨平台资格 |
 | r103 修复后的统一 test-profile 资格 GREEN：20 exact gates，0 failure，0 ignored | 一次匹配构建，product/lib/integration/两种插件产物 read-sharing 锁定；source/artifact SHA 全程稳定；nested/opaque 实际旧失败已修正 | 仅命名工作流；fresh release deadline、冷启动、完整 NLE、厂商/平台矩阵仍待验收 |
+| 2026-10-17，`2eb160ca` 固定 canvas 输出控制，部分验证 | Windows 当前 test-profile Product/owned SessionProbe，StraightFloat 3×5/PAR2：原门三帧 direct 像素通过后关闭超时；单次既有 close 观测下 direct 与 retained Graph 全门通过。原 unfetched 拒绝门另行通过，均保留原100ms及180s/2s回收规则 | 正常关闭 RED 未解决，完整切片暂缓验收；不是退出修复、可变 RoD、tiles/multires、第三方、GPU、跨平台或性能资格 |
 
 以上序号指 root 本轮实际资格收据。r103 已完成；后续仍应按真实产物和运行结果更新本节，
 失败要记录 oracle/错误来源；不能把构建、runner参数或0test失败误记行为 RED。
