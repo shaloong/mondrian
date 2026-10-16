@@ -59,7 +59,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use mondrian_timeline::audio::AudioProcessorDefinitionRef;
 use protocol::{
     CommandKind, SharedBlockLayout, SharedNoteEnd, SharedNoteEvent, SharedParameterEvent,
-    WorkerCommand, MAX_CONTROL_FRAME_BYTES,
+    WorkerCommand, MAX_CONTROL_FRAME_BYTES, MAX_PREPARATION_PAYLOAD_BYTES,
 };
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -254,7 +254,7 @@ impl IsolatedAudioProcessorWorkerSpec {
 
     fn validate(&self) -> Result<(), AudioProcessorHostError> {
         if self.helper_executable.as_os_str().is_empty()
-            || self.preparation_payload.len() > MAX_CONTROL_FRAME_BYTES / 2
+            || self.preparation_payload.len() > MAX_PREPARATION_PAYLOAD_BYTES
             || self.render_contract.sample_rate == 0
             || self.render_contract.max_block_frames == 0
             || self.startup_timeout.is_zero()
@@ -399,7 +399,7 @@ impl IsolatedAudioProcessorFactory {
                 configuration,
             )?,
         };
-        if preparation_payload.len() > MAX_CONTROL_FRAME_BYTES / 2 {
+        if preparation_payload.len() > MAX_PREPARATION_PAYLOAD_BYTES {
             return Err(invalid_contract(
                 "native seed payload exceeds the existing preparation limit",
             ));
@@ -578,7 +578,7 @@ fn encode_native_configuration_payload<T: serde::Serialize>(
             let next = self
                 .0
                 .checked_add(input.len())
-                .filter(|bytes| *bytes <= MAX_CONTROL_FRAME_BYTES / 2)
+                .filter(|bytes| *bytes <= MAX_PREPARATION_PAYLOAD_BYTES)
                 .ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -600,7 +600,7 @@ fn encode_native_configuration_payload<T: serde::Serialize>(
     bytes.try_reserve_exact(count.0).map_err(|error| {
         invalid_contract(&format!("native seed payload allocation refused: {error}"))
     })?;
-    if bytes.capacity() > MAX_CONTROL_FRAME_BYTES / 2 {
+    if bytes.capacity() > MAX_PREPARATION_PAYLOAD_BYTES {
         return Err(invalid_contract(
             "native seed actual output capacity exceeds the preparation bound",
         ));

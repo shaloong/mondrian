@@ -99,12 +99,12 @@ The table describes implementation boundaries. Qualification below states the te
 | --- | --- | --- |
 | Shared processor outputs | Shared-slice baseline: 5,343 ordinary tests across eight libraries passed, including 16 new controls; 269 ignored tests excluded. Three strict groups and the normal Product build passed. | Track/Bus shared DAG qualification; native adapters have their separate conditions below. Product output selection, realtime/performance and other platforms remain open. |
 | Owned zero-input CLAP | Six fresh mono/offline Runtime cases at 44.1/48 kHz passed literal 14-frame PCM, NoMedia, Source/author/install/Ack and same-object/Drop-exit checks. | Owned fixture, not general third-party instrument support. |
-| Current Audio and shutdown report | 604 ordinary Audio tests passed; 109 ignored tests excluded after adding the real-instrument consumer. All-target/all-feature Audio Clippy with `-D warnings` passed. The unchanged production code retains its passing pure-library and normal Product build; temporary teardown markers are absent and the normal Product retains ten existing warnings. | Affected Audio scope, not a new whole-workspace or full native qualification. Shutdown control, ACK, exit observation and cleanup remain distinct; the original budgets are unchanged. |
-| Owned three-output CLAP | Direct scoped DSP observed 38 same-object SDK Process calls across three partitions and two entries. The fresh normal IPC11 Product passed 16 canonical Runtime combinations: 44.1/48 kHz, four Main/Aux/fanout routes, two partitions and two entries each; literal PCM, author-state serialization/restore, NoMedia, Source installation and same-object Drop exit0 passed. | Windows mono/offline owned fixture. Aggregate grant is explicitly unbounded; canonical child Process count is unobserved. Live private-DSP state capture, finite aggregate-grant acceptance, third-party multi-output, stereo native workflow, GUI, realtime/performance and other platforms remain unqualified. |
+| Current Audio and shutdown report | 612 ordinary Audio tests passed; 109 ignored tests excluded. All-target/all-feature Audio Clippy with `-D warnings` and the fresh normal IPC12 Product build passed; the Product retains ten existing warnings. Temporary teardown markers are absent. | Affected Audio scope, not a new whole-workspace or full native qualification. Shutdown control, ACK, exit observation and cleanup remain distinct; the original budgets are unchanged. |
+| Owned three-output CLAP | Direct scoped DSP observed 38 same-object SDK Process calls across three partitions and two entries. The fresh normal IPC12 Product passed 16 canonical Runtime combinations: 44.1/48 kHz, four Main/Aux/fanout routes, two partitions and two entries each; literal PCM, author-state serialization/restore, NoMedia, Source installation and same-object Drop exit0 passed. | Windows mono/offline owned fixture. Aggregate grant is explicitly unbounded; canonical child Process count is unobserved. Live private-DSP state capture, finite aggregate-grant acceptance, third-party multi-output, stereo native workflow, GUI, realtime/performance and other platforms remain unqualified. |
 | Surge XT Effects VST3 | The current normal Product passed the original exact Runtime state/restore, PCM and owner gate. The earlier stress failure received ACK in about 20ms, remained running beyond the 100ms exit budget, then was killed/reaped. | The old post-ACK exit failure remains unresolved. A successful regression does not prove a fix or identify the faulty phase. Windows/offline/48k/stereo/max64 only; no realtime, GUI, algorithm or other-platform qualification. |
 | Ring Out CLAP | The current normal Product passed four cold Runtime cases covering native bypass and active control, block64 and 31/33 partitions, 10,240 frames including the actual startup transition and steady range. | Windows/offline and the stated state/parameters; not independent algorithm, GUI, realtime or other-platform qualification. |
-| CLAP port/config metadata | Optional main input and ordered auxiliary inputs/outputs have owned controls. Actual Surge census reports the default auxiliary input and three outputs; the current host does not expose the configuration extension. IPC11 and probe3/processing-offer4 carry exact output identity and order, refusing older incompatible workers/offers. | Configuration selection and real Surge instrument/multi-output processing remain unqualified. No active rescan or new host configuration service is implied. |
-| Surge XT 1.3.4 CLAP instrument | The actual Windows module passed descriptor discovery, 50,208-byte default-state capture and restored NoteOffer4: Note port 32/index 0, no main audio input, stereo auxiliary input 32768, main output 1 and auxiliary outputs 2/3, latency 0 and a finite 96,000-frame tail. | Runtime preparation fails at the generic startup control-frame bound before PCM processing. The ignored real-instrument consumer remains a failing regression; Note DSP, Main PCM and lifecycle success are not qualified. The failed invocation's child tree was reaped cleanly. |
+| CLAP port/config metadata | Optional main input and ordered auxiliary inputs/outputs have owned controls. Actual Surge census reports the default auxiliary input and three outputs; the current host does not expose the configuration extension. IPC12 and probe3/processing-offer4 carry exact output identity and order, refusing older incompatible workers/offers. | Configuration selection and real Surge instrument/multi-output processing remain unqualified. No active rescan or new host configuration service is implied. |
+| Surge XT 1.3.4 CLAP instrument | The actual Windows module passed descriptor discovery, 50,208-byte default-state capture and restored NoteOffer4: Note port 32/index 0, no main audio input, stereo auxiliary input 32768, main output 1 and auxiliary outputs 2/3, latency 0 and a finite 96,000-frame tail. IPC12 passed Runtime preparation, Source installation, cold-source closure and state entry. | A rendering request refuses with `NativeAuthorPending(PendingCallbacks)`. The thin consumer does not yet consume the actual proposal through canonical author transactions. Its failing block index and callback contents are not yet observed. Full Main PCM, Note DSP and successful lifecycle remain unqualified; the failed invocation's child tree was reaped cleanly. |
 | OpenFX CPU Filter | The independent BitCrush gate and finite native controls cover the stated current-frame, full-frame RGBA Float32/progressive CPU boundary. The readonly-constructor correction passed 456 checks. | Other contexts, temporal/tiles/scale/fields, native GPU interop and other platforms remain outside this qualification. |
 | Airwindows metadata | Actual inactive parameter index 6 has current zero and a negative default despite an advertised 0..1 range. It occurs before state restore; the host correctly rejects it. | No clamp or plugin-name exception. Upstream inactive-default initialization is supporting evidence; the actual native writer/source-build binding remains unproven. |
 
@@ -113,15 +113,29 @@ The current local environment uses Windows x64, FFmpeg 8.1.2 and static OCIO
 Normal Product and App libtest retain their existing warning baselines; zero
 strict diagnostics is a separate result.
 
+IPC12 startup carries bounded JSON metadata followed by the exact opaque adapter
+bytes on the existing connection. It removes a second JSON byte-array encoding
+that could inflate an admitted 512 KiB payload beyond the 1 MiB control limit.
+Complete metadata is preflighted before spawn; the child validates version,
+nonce and combined extent before reserving raw storage. Raw remains at most
+512 KiB, metadata plus raw at most 1 MiB, excluding only the four-byte prefix.
+Eight ordinary controls cover exact limits, arbitrary/empty bytes, truncation,
+stream alignment, old-version refusal and preflight before spawn. Original
+adapter/Seed formats, decoded-byte accounting, owners and timeouts remain.
+These are wire and individual-allocation ceilings, not a complete finite
+startup-peak grant: metadata encoding/parsing and adapter decoding have temporary
+overlapping owners. The actual Surge run confirms startup now completes; it
+does not qualify that instrument's later author/PCM workflow.
+
 ## Open issues and integration constraints
 
-- Generic startup serializes an adapter's opaque JSON payload again as a JSON
-  byte array. Its admitted 512 KiB inner bound does not guarantee the 1 MiB outer
-  frame bound; a permitted all-255 payload alone encodes to 2,097,165 bytes.
-  Surge's captured state and metadata expose this mismatch after child launch.
-  Fix the format-independent carrier and preflight the complete bounded envelope
-  before launch; retain existing state/Seed limits and decoded-byte accounting.
-  This is not a reason for a plugin-specific exception or larger frame budget.
+- The actual Surge instrument now reaches rendering but exposes pending native
+  author callbacks. Capture their contents and the failing block, then extend
+  the thin consumer through the existing canonical transaction, Plan/Source
+  install and exact Ack. A pre-Enter closed-source check is only a current
+  observation; it cannot authorize ignoring callbacks after foreign work.
+  Do not infer callback kinds from `PendingCallbacks`, discard a proposal or
+  acknowledge it without the corresponding author transaction.
 - The intermittent Surge failure was reproduced after a valid shutdown ACK,
   with the child still running beyond the existing 100ms exit budget. Host
   termination and reaping succeeded; the resulting exit1 is not a spontaneous

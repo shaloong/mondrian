@@ -1,5 +1,5 @@
 use super::protocol::{
-    auxiliary_from_wire, auxiliary_to_wire, mode_is_realtime, read_json_frame, write_json_frame,
+    auxiliary_from_wire, auxiliary_to_wire, mode_is_realtime, read_json_frame, EncodedPrepare,
     ExecutionContractWire, PrepareWire, ReadyResultWire, ReadyWire, SharedBlockLayout,
     WorkerCommand, WorkerResponse, PROTOCOL_VERSION,
 };
@@ -308,6 +308,37 @@ impl SupervisedAudioWorker {
             .stderr(Stdio::null());
         #[cfg(windows)]
         configure_background_worker_start(&mut command);
+        // Preflight the actual nonce, path and complete metadata before any
+        // child exists. Only encoded metadata and a borrow of the retained
+        // opaque payload survive this block; no payload clone is made.
+        let encoded_prepare = {
+            let prepare = PrepareWire {
+                schema_version: PROTOCOL_VERSION,
+                native_lane: super::native_worker_lane_wire::NativeWorkerLaneWire::capture(
+                    spec.native_lane,
+                )?,
+                nonce,
+                payload_bytes: u64::try_from(spec.preparation_payload.len()).map_err(|_| {
+                    invalid_contract("preparation payload extent is not protocol-representable")
+                })?,
+                execution_contract: ExecutionContractWire::capture(spec.plugin_execution_contract)?,
+                auxiliary_buses: auxiliary_to_wire(&spec.auxiliary_inputs),
+                auxiliary_outputs: super::protocol::outputs_to_wire(&spec.auxiliary_outputs),
+                note_input_contract: spec.note_input_contract.clone(),
+                parameter_ids: spec.parameter_ids.clone(),
+                sample_rate: contract.sample_rate,
+                channel_layout: contract.channel_layout,
+                max_block_frames: u64::try_from(contract.max_block_frames).map_err(|_| {
+                    invalid_contract("maximum block extent is not protocol-representable")
+                })?,
+                realtime: mode_is_realtime(contract.processing_mode),
+                shared_path: shared_file.path().to_string_lossy().into_owned(),
+                shared_bytes: u64::try_from(layout.total_bytes)
+                    .map_err(|_| invalid_contract("shared extent is not protocol-representable"))?,
+            };
+            EncodedPrepare::new(&prepare, &spec.preparation_payload)
+                .map_err(|error| classify_io("startup handshake", error))?
+        };
         let mut process =
             ProcessOwner::new(command.spawn().map_err(|error| worker_failed("startup", error))?);
         let startup_deadline = Instant::now()
@@ -325,30 +356,8 @@ impl SupervisedAudioWorker {
             process.terminate_reported("audio startup failure");
             return Err(worker_failed("startup", error));
         }
-        let prepare = PrepareWire {
-            schema_version: PROTOCOL_VERSION,
-            native_lane: super::native_worker_lane_wire::NativeWorkerLaneWire::capture(
-                spec.native_lane,
-            )?,
-            nonce,
-            payload: spec.preparation_payload.clone(),
-            execution_contract: ExecutionContractWire::capture(spec.plugin_execution_contract)?,
-            auxiliary_buses: auxiliary_to_wire(&spec.auxiliary_inputs),
-            auxiliary_outputs: super::protocol::outputs_to_wire(&spec.auxiliary_outputs),
-            note_input_contract: spec.note_input_contract.clone(),
-            parameter_ids: spec.parameter_ids.clone(),
-            sample_rate: contract.sample_rate,
-            channel_layout: contract.channel_layout,
-            max_block_frames: u64::try_from(contract.max_block_frames).map_err(|_| {
-                invalid_contract("maximum block extent is not protocol-representable")
-            })?,
-            realtime: mode_is_realtime(contract.processing_mode),
-            shared_path: shared_file.path().to_string_lossy().into_owned(),
-            shared_bytes: u64::try_from(layout.total_bytes)
-                .map_err(|_| invalid_contract("shared extent is not protocol-representable"))?,
-        };
         let ready = (|| -> io::Result<ReadyWire> {
-            write_json_frame(&mut control, &prepare)?;
+            encoded_prepare.write_to(&mut control)?;
             read_json_frame(&mut control)
         })();
         let ready = match ready {
@@ -1379,6 +1388,63 @@ mod control_timeout_qualification {
         }
         drop(server);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod startup_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn startup_raw_metadata_overflow_is_refused_before_nonexistent_helper_spawn() {
+        let helper =
+            std::env::temp_dir().join(format!("mondrian-no-startup-child-{}", Uuid::new_v4()));
+        assert!(!helper.exists());
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: crate::AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: usize::MAX,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024,
+        };
+        let execution = crate::AudioProcessorExecutionContract::new(
+            0,
+            crate::AudioProcessorTail::None,
+            false,
+            false,
+            true,
+            0,
+        )
+        .unwrap();
+        let mut spec = IsolatedAudioProcessorWorkerSpec::new(
+            helper,
+            Vec::new(),
+            execution,
+            crate::AudioProcessorAuxiliaryInputContract::default(),
+            Vec::new(),
+            render,
+        )
+        .unwrap();
+        // A real metadata field, not an oversized opaque payload. Calling the
+        // actual launch seam distinguishes preflight refusal from spawn/NotFound.
+        spec.auxiliary_inputs
+            .buses
+            .push(crate::AudioProcessorAuxiliaryInputBusContract {
+                bus_key: "x".repeat(super::super::protocol::MAX_CONTROL_FRAME_BYTES),
+                channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+            });
+        let error = SupervisedAudioWorker::launch(
+            &spec,
+            render,
+            SharedBlockLayout::new(4, 2, 1, 0).unwrap(),
+        )
+        .err()
+        .expect("preflight must refuse without starting an executable");
+        assert!(matches!(error, AudioProcessorHostError::WorkerFailed {
+            operation: "startup handshake", detail,
+        } if detail.contains("preparation metadata") && detail.contains("protocol bound")));
     }
 }
 

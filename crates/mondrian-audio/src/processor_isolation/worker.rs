@@ -1,6 +1,6 @@
 use super::protocol::{
-    auxiliary_from_wire, auxiliary_to_wire, read_json_frame, write_json_frame, CommandKind,
-    PrepareWire, ReadyResultWire, ReadyWire, SharedBlockLayout, SharedNoteEnd, SharedNoteEvent,
+    auxiliary_from_wire, auxiliary_to_wire, read_prepare_frame, write_json_frame, CommandKind,
+    ReadyResultWire, ReadyWire, SharedBlockLayout, SharedNoteEnd, SharedNoteEvent,
     SharedParameterEvent, WorkerCommand, WorkerResponse, PROTOCOL_VERSION,
 };
 use super::{
@@ -24,14 +24,8 @@ pub(super) fn run_worker(
     let mut control =
         TcpStream::connect(&endpoint).map_err(|error| worker_failed("startup", error))?;
     control.set_nodelay(true).map_err(|error| worker_failed("startup", error))?;
-    let prepare: PrepareWire =
-        read_json_frame(&mut control).map_err(|error| worker_failed("startup", error))?;
-    if prepare.schema_version != PROTOCOL_VERSION || prepare.nonce != nonce {
-        return Err(worker_failed_detail(
-            "startup",
-            "parent preparation envelope failed version or nonce validation",
-        ));
-    }
+    let (prepare, payload) = read_prepare_frame(&mut control, &nonce)
+        .map_err(|error| worker_failed("startup", error))?;
     let native_lane = prepare.native_lane.clone().realize()?;
     let max_block_frames = usize::try_from(prepare.max_block_frames)
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
@@ -72,7 +66,7 @@ pub(super) fn run_worker(
     }
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
         native_lane,
-        payload: prepare.payload,
+        payload,
         plugin_execution_contract,
         auxiliary_inputs: auxiliary_inputs.clone(),
         auxiliary_outputs: auxiliary_outputs.clone(),
