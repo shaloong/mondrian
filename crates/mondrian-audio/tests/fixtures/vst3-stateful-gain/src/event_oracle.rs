@@ -14,6 +14,11 @@ const CONTROLLER_CID: TUID = uid(0x84D037BE, 0x29F84A11, 0xBD625C30, 0x7A15E902)
 const NAME: &str = "Mondrian VST3 Note Event Oracle";
 const MAX_CALLS: usize = 64;
 const MAX_EVENTS: usize = 4096;
+const MAIN_MAX_CALLS: usize = 1024;
+const MAIN_MAX_EVENTS: usize = 8192;
+const MAIN_AUDIT_HEADER_BYTES: usize = 80;
+const MAIN_AUDIT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAIN_AUDIT_ENV: &str = "MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR";
 const CONFIG_BYTES: usize = 12;
 const ADMISSION_CONFIG_BYTES: usize = 16;
 const SERVICE_CONFIG_BYTES: usize = 20;
@@ -63,6 +68,7 @@ pub(super) fn create_instance(cid: TUID) -> Option<vst3::ComPtr<FUnknown>> {
 #[derive(Clone, Copy)]
 struct Config {
     fail_call: u32,
+    main_only: bool,
     // None retains the original MNE1 configuration, audit and Note DSP.
     auxiliary_default: Option<bool>,
     // MNE3 input-only first-stop command: 0 stable, 1 retain, 2 flip default.
@@ -73,13 +79,16 @@ impl Config {
     const fn legacy(fail_call: u32) -> Self {
         Self {
             fail_call,
+            main_only: false,
             auxiliary_default: None,
             service_action: None,
         }
     }
     fn encode(self) -> ([u8; SERVICE_CONFIG_BYTES], usize) {
         let mut bytes = [0; SERVICE_CONFIG_BYTES];
-        let (magic, version, len) = if self.service_action.is_some() {
+        let (magic, version, len) = if self.main_only {
+            (b"MNE4", 4_u32, CONFIG_BYTES)
+        } else if self.service_action.is_some() {
             (b"MNE3", 3_u32, SERVICE_CONFIG_BYTES)
         } else if self.auxiliary_default.is_some() {
             (b"MNE2", 2_u32, ADMISSION_CONFIG_BYTES)
@@ -109,11 +118,12 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let fail_call = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    if fail_call > MAX_CALLS as u32 {
+    let main_only = &bytes[..4] == b"MNE4" && version == 4;
+    if fail_call > if main_only { MAIN_MAX_CALLS } else { MAX_CALLS } as u32 {
         return None;
     }
     let (auxiliary_default, service_action) = match (&bytes[..4], version) {
-        (b"MNE1", 1) => (None, None),
+        (b"MNE1", 1) | (b"MNE4", 4) => (None, None),
         (b"MNE2", 2) => {
             if stream.read(bytes[12..].as_mut_ptr().cast(), 4, &mut read) != kResultOk || read != 4
             {
@@ -143,7 +153,12 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
         }
         _ => return None,
     };
-    Some(Config { fail_call, auxiliary_default, service_action })
+    Some(Config {
+        fail_call,
+        main_only,
+        auxiliary_default,
+        service_action,
+    })
 }
 unsafe fn write_bytes(stream: *mut IBStream, bytes: &[u8]) -> tresult {
     let Some(stream) = ComRef::from_raw(stream) else {
@@ -200,6 +215,99 @@ impl AdmissionTrace {
             return Err(std::io::Error::from(std::io::ErrorKind::FileTooLarge));
         }
         self.0.write_all(line.as_bytes())
+    }
+}
+
+// MNE4 alone can publish complete post-join evidence. File offsets, not the
+// DLL-local serial alone, separate lifetimes after module unload/reload.
+struct MainAuditOutput {
+    directory: PathBuf,
+    control_thread: ThreadId,
+}
+impl MainAuditOutput {
+    fn from_env() -> std::io::Result<Option<Self>> {
+        let Some(path) = std::env::var_os(MAIN_AUDIT_ENV) else {
+            return Ok(None);
+        };
+        let directory = PathBuf::from(path);
+        if !directory.is_absolute() || !directory.is_dir() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        Ok(Some(Self {
+            directory,
+            control_thread: thread::current().id(),
+        }))
+    }
+    fn record(
+        &self,
+        instance: u64,
+        active_buses: u32,
+        sample_rate: u64,
+        max_frames: u32,
+        audit: &Audit,
+    ) -> std::io::Result<()> {
+        if thread::current().id() != self.control_thread {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let length = MAIN_AUDIT_HEADER_BYTES
+            .checked_add(
+                audit
+                    .call_count
+                    .checked_mul(CALL_BYTES)
+                    .ok_or(std::io::ErrorKind::InvalidData)?,
+            )
+            .and_then(|n| n.checked_add(audit.event_count.checked_mul(EVENT_BYTES)?))
+            .filter(|n| *n as u64 <= MAIN_AUDIT_FILE_BYTES)
+            .ok_or(std::io::ErrorKind::InvalidData)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(length).map_err(std::io::Error::other)?;
+        bytes.extend_from_slice(b"MNA4");
+        for value in [4_u32, length as u32, 4, std::process::id(), 1] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&instance.to_le_bytes());
+        for value in [u32::from(!audit.incomplete), active_buses] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        for value in [
+            max_frames,
+            audit.call_count as u32,
+            audit.event_count as u32,
+            MAIN_MAX_CALLS as u32,
+            MAIN_MAX_EVENTS as u32,
+            std::mem::size_of::<Call>() as u32,
+            std::mem::size_of::<Note>() as u32,
+            0,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for call in &audit.calls[..audit.call_count] {
+            bytes.extend_from_slice(&call.frames.to_le_bytes());
+            bytes.extend_from_slice(&call.result.to_le_bytes());
+            bytes.extend_from_slice(&call.first.to_le_bytes());
+            bytes.extend_from_slice(&call.count.to_le_bytes());
+        }
+        for note in &audit.events[..audit.event_count] {
+            let mut row = [0_u8; EVENT_BYTES];
+            note.encode(&mut row);
+            bytes.extend_from_slice(&row);
+        }
+        if bytes.len() != length {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        let path = self.directory.join(format!("mne4-{}.audit", std::process::id()));
+        let mut file = File::options().create(true).append(true).open(path)?;
+        if file
+            .metadata()?
+            .len()
+            .checked_add(length as u64)
+            .is_none_or(|n| n > MAIN_AUDIT_FILE_BYTES)
+        {
+            return Err(std::io::ErrorKind::FileTooLarge.into());
+        }
+        // Never truncate/overwrite. A failed/partial write is not complete evidence.
+        file.write_all(&bytes)
     }
 }
 
@@ -307,7 +415,7 @@ struct Voice {
 }
 const EMPTY_VOICE: Voice = Voice { bus: 0, channel: 0, pitch: 0, id: -1, value: 0.0 };
 struct Audit {
-    calls: [Call; MAX_CALLS],
+    calls: Vec<Call>,
     call_count: usize,
     // Allocated on the component construction/control thread, never grown by process.
     events: Vec<Note>,
@@ -318,13 +426,36 @@ struct Audit {
 impl Audit {
     fn new() -> Self {
         Self {
-            calls: [Call::default(); MAX_CALLS],
+            calls: vec![Call::default(); MAX_CALLS],
             call_count: 0,
             events: vec![Note::default(); MAX_EVENTS],
             event_count: 0,
             incomplete: false,
             voices: [EMPTY_VOICE; 16],
         }
+    }
+    // Only an explicit MNE4 restore grows these same owners, on control. Build
+    // both replacements before publishing either; never allocate from process.
+    fn prepare_main(&mut self) -> bool {
+        if self.calls.len() == MAIN_MAX_CALLS && self.events.len() == MAIN_MAX_EVENTS {
+            return true;
+        }
+        let mut calls = Vec::new();
+        let mut events = Vec::new();
+        if calls.try_reserve_exact(MAIN_MAX_CALLS).is_err()
+            || events.try_reserve_exact(MAIN_MAX_EVENTS).is_err()
+            || calls.capacity() != MAIN_MAX_CALLS
+            || events.capacity() != MAIN_MAX_EVENTS
+        {
+            return false;
+        }
+        calls.extend_from_slice(&self.calls[..self.call_count]);
+        calls.resize(MAIN_MAX_CALLS, Call::default());
+        events.extend_from_slice(&self.events[..self.event_count]);
+        events.resize(MAIN_MAX_EVENTS, Note::default());
+        self.calls = calls;
+        self.events = events;
+        true
     }
     fn apply(&mut self, note: Note) -> bool {
         let found = self
@@ -363,6 +494,8 @@ struct NoteProcessor {
     instance: u64,
     fail_call: AtomicU32,
     admission_mode: AtomicBool,
+    main_only: AtomicBool,
+    main_audit: Mutex<Option<MainAuditOutput>>,
     auxiliary_default: AtomicBool,
     service_mode: AtomicBool,
     stop_action: AtomicU32,
@@ -378,6 +511,7 @@ impl NoteProcessor {
     fn config(&self) -> Config {
         Config {
             fail_call: self.fail_call.load(Ordering::Relaxed),
+            main_only: self.main_only.load(Ordering::Relaxed),
             auxiliary_default: self
                 .admission_mode
                 .load(Ordering::Relaxed)
@@ -413,6 +547,8 @@ impl NoteProcessor {
             instance,
             fail_call: AtomicU32::new(0),
             admission_mode: AtomicBool::new(false),
+            main_only: AtomicBool::new(false),
+            main_audit: Mutex::new(None),
             auxiliary_default: AtomicBool::new(false),
             service_mode: AtomicBool::new(false),
             stop_action: AtomicU32::new(0),
@@ -438,6 +574,28 @@ impl IPluginBaseTrait for NoteProcessor {
         let Ok(audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
+        if self.main_only.load(Ordering::Relaxed) {
+            if self.processing.load(Ordering::Acquire) {
+                return kResultFalse;
+            }
+            let Ok(output) = self.main_audit.try_lock() else {
+                return kResultFalse;
+            };
+            if let Some(output) = output.as_ref() {
+                if output
+                    .record(
+                        self.instance,
+                        self.active_buses.load(Ordering::Relaxed),
+                        self.sample_rate.load(Ordering::Relaxed),
+                        self.max_frames.load(Ordering::Relaxed),
+                        &audit,
+                    )
+                    .is_err()
+                {
+                    return kResultFalse;
+                }
+            }
+        }
         if self.trace("terminate", -1, audit.call_count) {
             kResultOk
         } else {
@@ -561,6 +719,14 @@ impl IComponentTrait for NoteProcessor {
         let Some(config) = read_config(stream) else {
             return kInvalidArgument;
         };
+        let main_audit = if config.main_only {
+            match MainAuditOutput::from_env() {
+                Ok(output) => output,
+                Err(_) => return kResultFalse,
+            }
+        } else {
+            None
+        };
         let trace = if config.auxiliary_default.is_some() {
             match AdmissionTrace::open() {
                 Ok(trace) => trace,
@@ -575,8 +741,20 @@ impl IComponentTrait for NoteProcessor {
         let Ok(mut current_trace) = self.trace.try_lock() else {
             return kResultFalse;
         };
+        let Ok(mut output) = self.main_audit.try_lock() else {
+            return kResultFalse;
+        };
+        if config.main_only {
+            if !audit.prepare_main() {
+                return kResultFalse;
+            }
+        } else if audit.call_count > MAX_CALLS || audit.event_count > MAX_EVENTS {
+            return kInvalidArgument;
+        }
+        *output = main_audit;
         *current_trace = trace;
         audit.voices = [EMPTY_VOICE; 16];
+        self.main_only.store(config.main_only, Ordering::Relaxed);
         self.fail_call.store(config.fail_call, Ordering::Relaxed);
         self.admission_mode.store(config.auxiliary_default.is_some(), Ordering::Relaxed);
         self.service_mode.store(config.service_action.is_some(), Ordering::Relaxed);
@@ -592,6 +770,11 @@ impl IComponentTrait for NoteProcessor {
         }
     }
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
+        if self.main_only.load(Ordering::Relaxed) {
+            // MNE4 state is configuration only. Audit is not a DSP checkpoint.
+            let (bytes, len) = self.config().encode();
+            return write_bytes(stream, &bytes[..len]);
+        }
         let Ok(audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
@@ -731,7 +914,14 @@ impl IAudioProcessorTrait for NoteProcessor {
         let Ok(mut audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
-        if audit.call_count == MAX_CALLS {
+        let main_only = self.main_only.load(Ordering::Relaxed);
+        let call_limit = if main_only { MAIN_MAX_CALLS } else { MAX_CALLS };
+        let event_limit = if main_only {
+            MAIN_MAX_EVENTS
+        } else {
+            MAX_EVENTS
+        };
+        if audit.call_count == call_limit {
             audit.incomplete = true;
             return kResultFalse;
         }
@@ -757,6 +947,8 @@ impl IAudioProcessorTrait for NoteProcessor {
         if !self.processing.load(Ordering::Acquire)
             || if admission {
                 active & 3 != 3
+            } else if main_only {
+                active != 7
             } else {
                 active != 15
             }
@@ -786,7 +978,7 @@ impl IAudioProcessorTrait for NoteProcessor {
         }
         let count = if let Some(events) = ComRef::from_raw(data.inputEvents) {
             let count = events.getEventCount();
-            if count < 0 || count as usize > MAX_EVENTS - first {
+            if count < 0 || count as usize > event_limit - first {
                 audit.incomplete = true;
                 return kInvalidArgument;
             }

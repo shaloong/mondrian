@@ -542,3 +542,219 @@ fn installed_vst3_note_oracle_rejects_invalid_batches_before_native_and_accepts_
         plugin.stop_processing().unwrap();
     }
 }
+
+fn main_configuration(fail: u32) -> Vec<u8> {
+    let mut component = b"MNE4".to_vec();
+    component.extend_from_slice(&4_u32.to_le_bytes());
+    component.extend_from_slice(&fail.to_le_bytes());
+    let mut envelope = b"VST3HOST_STATE\0\0".to_vec();
+    for value in [1_u32, 12, 12] {
+        envelope.extend_from_slice(&value.to_le_bytes());
+    }
+    envelope.extend_from_slice(&component);
+    envelope.extend_from_slice(&component);
+    envelope
+}
+
+// This is a complete physical record, not a globally unique DLL-static serial.
+// A truncated/overwritten/missing record never counts as successful evidence.
+fn main_file_audits(bytes: &[u8]) -> Vec<Audit> {
+    let mut records = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let body = &bytes[offset..];
+        assert!(body.len() >= 80, "truncated MNA4 header");
+        assert_eq!(&body[..4], b"MNA4");
+        assert_eq!(u32_at(body, 4), 4);
+        let length = u32_at(body, 8) as usize;
+        assert_eq!(u32_at(body, 12), 4);
+        assert_eq!(u32_at(body, 16), std::process::id());
+        assert_eq!(
+            u32_at(body, 20),
+            1,
+            "actual control-thread terminate record"
+        );
+        assert_eq!(u32_at(body, 32), 1, "audit must be complete");
+        assert_eq!(
+            u32_at(body, 36),
+            7,
+            "Audio in/out + Main Event; Aux stayed inactive"
+        );
+        let instance = u64::from_le_bytes(body[24..32].try_into().unwrap());
+        assert_ne!(instance, 0);
+        let calls = u32_at(body, 52) as usize;
+        let events = u32_at(body, 56) as usize;
+        assert_eq!(u32_at(body, 60), 1024);
+        assert_eq!(u32_at(body, 64), 8192);
+        // Rust backing sizes are reported separately from the 16/48-byte wire rows.
+        assert!(u32_at(body, 68) >= 16);
+        assert!(u32_at(body, 72) >= 48);
+        assert_eq!(u32_at(body, 76), 0);
+        assert!(calls <= 1024 && events <= 8192);
+        assert_eq!(length, 80 + calls * 16 + events * 48);
+        assert!(length <= body.len(), "truncated MNA4 rows");
+        let body = &body[..length];
+        records.push(Audit {
+            instance,
+            sample_rate_bits: u64::from_le_bytes(body[40..48].try_into().unwrap()),
+            max_frames: u32_at(body, 48),
+            calls: body[80..80 + calls * 16]
+                .chunks_exact(16)
+                .map(|row| {
+                    (
+                        i32::from_le_bytes(row[..4].try_into().unwrap()),
+                        i32::from_le_bytes(row[4..8].try_into().unwrap()),
+                        u32_at(row, 8),
+                        u32_at(row, 12),
+                    )
+                })
+                .collect(),
+            events: body[80 + calls * 16..].chunks_exact(48).map(<[u8]>::to_vec).collect(),
+        });
+        offset += length;
+    }
+    assert!(!records.is_empty(), "missing complete MNA4 lifecycle");
+    records
+}
+
+#[test]
+#[ignore = "requires rebuilt owned MONDRIAN_VST3_NOTE_ORACLE_PLUGIN and existing absolute MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR; direct SDK Main-only oracle, not canonical Runtime qualification"]
+fn installed_vst3_main_note_oracle_preserves_main_only_pcm_tuples_and_bounded_audit() {
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR")
+            .expect("external caller must explicitly provide the audit directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    let path = directory.join(format!("mne4-{}.audit", std::process::id()));
+    let prefix = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata.len() as usize,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("audit metadata failed: {error}"),
+    };
+    let mut expected_records = Vec::new();
+    let mut host = host();
+    for scoped in [false, true] {
+        let mut plugin = host.load_plugin_class(fixture(), CLASS).unwrap();
+        let configuration = main_configuration(0);
+        plugin.load_state(&configuration).expect("MNE4 component/controller restore");
+        assert_eq!(plugin.save_state().unwrap(), configuration);
+        let info = plugin.native_event_bus_info().unwrap();
+        assert_eq!(info.inputs.len(), 2);
+        assert!(info.outputs.is_empty());
+        assert_eq!(info.inputs[0].role, NativeEventBusRole::Main);
+        assert_eq!(info.inputs[1].role, NativeEventBusRole::Auxiliary);
+        assert_eq!(
+            info.inputs.iter().map(|bus| bus.channel_count).collect::<Vec<_>>(),
+            [16, 16]
+        );
+        assert_eq!(
+            info.inputs.iter().map(|bus| bus.default_active).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(
+            info.inputs.iter().map(|bus| bus.host_active).collect::<Vec<_>>(),
+            [true, false]
+        );
+        plugin.set_process_mode(ProcessMode::Offline).unwrap();
+        plugin.start_processing().unwrap();
+        let mut bad_buffers = plugin.create_bus_audio_buffers(BLOCK).unwrap();
+        for channel in &mut bad_buffers.outputs[0].channels {
+            channel.fill(123.0);
+        }
+        let bad = [note(true, 0, 0, 1, 0.5), note(true, 1, 1, 2, 0.5)];
+        assert!(matches!(
+            invoke(&mut plugin, &mut bad_buffers, &bad, scoped),
+            Err(vst3_host::Error::NativeEvent(
+                vst3_host::error::NativeEventError::InvalidEvent { index: 1 }
+            ))
+        ));
+        assert!(bad_buffers.outputs[0].channels.iter().flatten().all(|sample| *sample == 123.0));
+        let equal = [
+            note(true, 0, 0, 1, 0.5),
+            note(false, 0, 4, 1, 0.125),
+            note(true, 0, 4, 2, 0.25),
+            note(false, 0, 7, 2, 0.625),
+        ];
+        let (buffers, result) = process(&mut plugin, BLOCK, &equal, scoped);
+        result.unwrap();
+        assert_pcm(
+            &buffers,
+            &[0.25, 0.25, 0.25, 0.25, 0.125, 0.125, 0.125, 0.0],
+        );
+        let mut calls = vec![(8, 0, 0, 4)];
+        let mut events: Vec<_> = equal
+            .iter()
+            .map(|event| expected_tuple(1, event, event.sample_offset))
+            .collect();
+        let mut next_id = 3;
+        for epoch in 0..2 {
+            if epoch != 0 {
+                plugin.stop_processing().unwrap();
+                plugin.load_state(&configuration).unwrap();
+                assert_eq!(plugin.save_state().unwrap(), configuration);
+                plugin.start_processing().unwrap();
+            }
+            // Each epoch has >1024 sequential pairs; existing mode1's 64 calls
+            // cannot hold this evidence. Offs and later IDs are all retained.
+            let mut remaining = 1025;
+            while remaining != 0 {
+                let pairs = remaining.min(BLOCK / 2);
+                let frames = pairs * 2;
+                let mut notes = Vec::new();
+                for index in 0..pairs {
+                    notes.push(note(true, 0, (index * 2) as i32, next_id, 0.5));
+                    notes.push(note(false, 0, (index * 2 + 1) as i32, next_id, 0.125));
+                    next_id += 1;
+                }
+                let (buffers, result) = process(&mut plugin, frames, &notes, scoped);
+                result.unwrap();
+                let literal: Vec<_> =
+                    (0..frames).map(|sample| if sample % 2 == 0 { 0.25 } else { 0.0 }).collect();
+                assert_pcm(&buffers, &literal);
+                let call = calls.len() as u32 + 1;
+                calls.push((frames as i32, 0, events.len() as u32, notes.len() as u32));
+                events.extend(
+                    notes.iter().map(|event| expected_tuple(call, event, event.sample_offset)),
+                );
+                remaining -= pairs;
+            }
+            assert_eq!(
+                plugin.save_state().unwrap(),
+                configuration,
+                "audit is not restored DSP state"
+            );
+        }
+        assert_eq!(calls.len(), 515);
+        assert_eq!(events.len(), 4104);
+        plugin.stop_processing().unwrap();
+        let info = plugin.native_event_bus_info().unwrap();
+        assert_eq!(
+            info.inputs.iter().map(|bus| bus.host_active).collect::<Vec<_>>(),
+            [true, false]
+        );
+        drop(plugin); // Actual same component termination publishes the complete record.
+        expected_records.push((calls, events));
+    }
+    let bytes = std::fs::read(&path).expect("same-PID audit must exist after actual terminate");
+    assert!(bytes.len() <= 2 * 1024 * 1024 && bytes.len() >= prefix);
+    let records = main_file_audits(&bytes[prefix..]);
+    assert_eq!(records.len(), expected_records.len());
+    for (actual, (calls, events)) in records.iter().zip(expected_records) {
+        assert_eq!(actual.sample_rate_bits, RATE.to_bits());
+        assert_eq!(actual.max_frames, BLOCK as u32);
+        assert_eq!(
+            actual.calls, calls,
+            "rejected Aux suffix made no native call"
+        );
+        assert_eq!(
+            actual.events, events,
+            "every native tuple retained in physical lifecycle order"
+        );
+    }
+    println!(
+        "MNE4 pid={} records={} calls_per_record=515 events_per_record=4104 audit_bytes={}",
+        std::process::id(),
+        records.len(),
+        bytes.len() - prefix
+    );
+}
