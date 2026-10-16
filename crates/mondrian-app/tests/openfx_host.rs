@@ -2492,6 +2492,80 @@ fn product_worker_advertises_actual_float_cpu_capabilities() {
 }
 
 #[test]
+#[ignore = "requires current product and SessionProbe mode host_properties_readonly"]
+fn product_worker_preserves_readonly_host_properties_and_writable_plugin_labels() {
+    qualify_cpu_contract_resident_and_graph("host_properties_readonly", false);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_parameter_limit"]
+fn product_worker_advertises_the_actual_per_descriptor_parameter_limit() {
+    qualify_cpu_contract_resident_and_graph("host_parameter_limit", false);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_parameters_4096"]
+fn product_worker_accepts_4096_parameters_including_group_and_page_descriptors() {
+    qualify_cpu_contract_resident_and_graph("host_parameters_4096", false);
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_parameters_4097"]
+fn product_worker_refuses_4097_descriptor_parameters_before_instance_creation() {
+    let inspection = cpu_contract_probe("host_parameters_4097");
+    let error = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect_err("all descriptor parameters count toward the admission limit");
+    assert!(
+        matches!(error, OpenFxHostError::WorkerFailed(ref reason) if reason == "native status 7: "),
+        "expected the exact descriptor refusal, not a native abort or transport failure: {error}"
+    );
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_numeric_parameters_4096"]
+fn product_worker_describes_all_4096_unique_numeric_parameters() {
+    let inspection = cpu_contract_probe("host_numeric_parameters_4096");
+    let description = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect("the entire advertised number of numeric parameters must be describable");
+    assert_eq!(description.parameters.len(), 4096);
+    for (index, parameter) in description.parameters.iter().enumerate() {
+        assert_eq!(parameter.name, format!("host_value_{index}"));
+        assert_eq!(parameter.label, parameter.name);
+        assert_eq!(parameter.default_value, OpenFxParameterValue::Double(0.5));
+        assert_eq!(parameter.double_type, Some(OpenFxDoubleType::Plain));
+        assert_eq!(parameter.numeric_channels.len(), 1);
+        assert_eq!(parameter.numeric_channels[0].minimum, 0.0);
+        assert_eq!(parameter.numeric_channels[0].maximum, 1.0);
+        assert_eq!(parameter.numeric_channels[0].display_minimum, 0.0);
+        assert_eq!(parameter.numeric_channels[0].display_maximum, 1.0);
+    }
+}
+
+#[test]
+#[ignore = "requires current product and SessionProbe mode host_numeric_parameters_4096_plus_group"]
+fn product_worker_refuses_4096_numeric_parameters_plus_one_group() {
+    let inspection = cpu_contract_probe("host_numeric_parameters_4096_plus_group");
+    let error = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    )
+    .expect_err("an unexported Group still counts toward the descriptor limit");
+    assert!(
+        matches!(error, OpenFxHostError::WorkerFailed(ref reason) if reason == "native status 7: "),
+        "expected the exact descriptor refusal without partial metadata: {error}"
+    );
+}
+
+#[test]
 #[ignore = "requires current product and SessionProbe mode canonical_progressive"]
 fn product_worker_preserves_par_canonical_coordinates_and_progressive_fields() {
     qualify_cpu_contract_resident_and_graph("canonical_progressive", true);

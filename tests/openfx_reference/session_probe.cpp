@@ -71,6 +71,162 @@ bool honestHostCapabilities(const OfxHost* host) {
   return true;
 }
 
+// Host-only property contracts. Always use the cached suite while probing the
+// private Host pointer: a legacy reset clears it, so restore before any fetchSuite.
+bool readonlyHostIntegers(const OfxPropertySuiteV1* properties, OfxPropertySetHandle host,
+                          const char* name, const std::array<int, 2>& expected) {
+  int dimension = 0;
+  std::array<int, 2> before{};
+  if (properties->propGetDimension(host, name, &dimension) != kOfxStatOK || dimension != 2 ||
+      properties->propGetIntN(host, name, 2, before.data()) != kOfxStatOK || before != expected) { return false; }
+  const auto check = [&](OfxStatus status) {
+    std::array<int, 2> after{};
+    int size = 0;
+    const bool unchanged = properties->propGetDimension(host, name, &size) == kOfxStatOK && size == 2 &&
+        properties->propGetIntN(host, name, 2, after.data()) == kOfxStatOK && after == before;
+    if (!unchanged && properties->propSetIntN(host, name, 2, before.data()) != kOfxStatOK) { return false; }
+    return status == kOfxStatErrValue && unchanged;
+  };
+  const int replacement[2] = {91, 92};
+  bool valid = check(properties->propSetInt(host, name, 0, replacement[0]));
+  valid = check(properties->propSetIntN(host, name, 2, replacement)) && valid;
+  valid = check(properties->propReset(host, name)) && valid;
+  return valid;
+}
+
+bool readonlyHostString(const OfxPropertySuiteV1* properties, OfxPropertySetHandle host,
+                        const char* name, const char* expected) {
+  char* value = nullptr;
+  int dimension = 0;
+  if (properties->propGetDimension(host, name, &dimension) != kOfxStatOK || dimension != 1 ||
+      properties->propGetString(host, name, 0, &value) != kOfxStatOK || !value || std::string(value) != expected) { return false; }
+  const std::string before(value);
+  const auto check = [&](OfxStatus status) {
+    char* after = nullptr;
+    int size = 0;
+    const bool unchanged = properties->propGetDimension(host, name, &size) == kOfxStatOK && size == 1 &&
+        properties->propGetString(host, name, 0, &after) == kOfxStatOK && after && before == after;
+    const char* original[] = {before.c_str()};
+    if (!unchanged && properties->propSetStringN(host, name, 1, original) != kOfxStatOK) { return false; }
+    return status == kOfxStatErrValue && unchanged;
+  };
+  const char* replacement[] = {"B06 must not replace a Host property"};
+  bool valid = check(properties->propSetString(host, name, 0, replacement[0]));
+  valid = check(properties->propSetStringN(host, name, 1, replacement)) && valid;
+  valid = check(properties->propReset(host, name)) && valid;
+  return valid;
+}
+
+bool readonlyHostPointer(const OfxPropertySuiteV1* properties, OfxPropertySetHandle host) {
+  constexpr const char* name = "sf.openfx.net.OfxHostSupportHostPointer";
+  void* before = nullptr;
+  int dimension = 0;
+  if (properties->propGetDimension(host, name, &dimension) != kOfxStatOK || dimension != 1 ||
+      properties->propGetPointer(host, name, 0, &before) != kOfxStatOK || !before) { return false; }
+  const auto check = [&](OfxStatus status) {
+    void* after = nullptr;
+    int size = 0;
+    const bool unchanged = properties->propGetDimension(host, name, &size) == kOfxStatOK && size == 1 &&
+        properties->propGetPointer(host, name, 0, &after) == kOfxStatOK && after == before;
+    if (!unchanged) {
+      // Never call host->fetchSuite between reset and this same-suite restore.
+      if (properties->propSetPointer(host, name, 0, before) != kOfxStatOK ||
+          properties->propGetPointer(host, name, 0, &after) != kOfxStatOK || after != before) { std::abort(); }
+    }
+    return status == kOfxStatErrValue && unchanged;
+  };
+  void* original[] = {before};
+  bool valid = check(properties->propSetPointer(host, name, 0, before));
+  valid = check(properties->propSetPointerN(host, name, 1, original)) && valid;
+  valid = check(properties->propReset(host, name)) && valid;
+  return valid;
+}
+
+bool readonlyHostProperties(const OfxHost* host) {
+  const auto* properties = host ? static_cast<const OfxPropertySuiteV1*>(
+      host->fetchSuite(host->host, kOfxPropertySuite, 1)) : nullptr;
+  if (!properties) { return false; }
+  bool valid = readonlyHostPointer(properties, host->host);
+  valid = (host->fetchSuite(host->host, kOfxPropertySuite, 1) == properties) && valid;
+  valid = readonlyHostIntegers(properties, host->host, kOfxPropAPIVersion, {1, 4}) && valid;
+  valid = readonlyHostIntegers(properties, host->host, kOfxPropVersion, {1, 0}) && valid;
+  valid = readonlyHostString(properties, host->host, kOfxPropType, kOfxTypeImageEffectHost) && valid;
+  valid = readonlyHostString(properties, host->host, kOfxPropName, "Mondrian") && valid;
+  valid = readonlyHostString(properties, host->host, kOfxPropLabel, "Mondrian") && valid;
+  valid = readonlyHostString(properties, host->host, kOfxPropVersionLabel, "1.0") && valid;
+  return valid;
+}
+
+bool hostParameterLimit(const OfxHost* host) {
+  const auto* properties = host ? static_cast<const OfxPropertySuiteV1*>(
+      host->fetchSuite(host->host, kOfxPropertySuite, 1)) : nullptr;
+  int limit = -2;
+  return properties && properties->propGetInt(host->host, kOfxParamHostPropMaxParameters, 0, &limit) == kOfxStatOK && limit == 4096;
+}
+
+bool addHostParameterCountProbe(const void* handle, bool overflow) {
+  OfxParamSetHandle parameters = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK) { return false; }
+  // The untouched pinned Basic defines six value parameters, one Group, one Page.
+  // All eight are descriptor parameters, even though only six enter author values.
+  for (const char* name : {"scale", "scaleComponents", "componentScales", "scaleR", "scaleG", "scaleB", "scaleA", "Main"}) {
+    OfxParamHandle parameter = nullptr;
+    if (gParamHost->paramGetHandle(parameters, name, &parameter, nullptr) != kOfxStatOK || !parameter) { return false; }
+  }
+  const int total = overflow ? 4097 : 4096;
+  for (int index = 8; index < total; ++index) {
+    const std::string name = "host_limit_group_" + std::to_string(index);
+    OfxPropertySetHandle properties = nullptr;
+    if (gParamHost->paramDefine(parameters, kOfxParamTypeGroup, name.c_str(), &properties) != kOfxStatOK || !properties) { return false; }
+  }
+  return true;
+}
+
+// Describe-only boundary: the untouched Basic context also contains Group/Page,
+// so define this context independently to exercise all 4096 exported values.
+bool defineHostNumericParameterCountProbe(const void* handle, bool overflow) {
+  const auto effect = (OfxImageEffectHandle)handle;
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+    OfxPropertySetHandle properties = nullptr;
+    if (gEffectHost->clipDefine(effect, name, &properties) != kOfxStatOK || !properties ||
+        gPropHost->propSetString(properties, kOfxImageEffectPropSupportedComponents, 0,
+                                kOfxImageComponentRGBA) != kOfxStatOK) { return false; }
+  }
+  OfxParamSetHandle parameters = nullptr;
+  if (gEffectHost->getParamSet(effect, &parameters) != kOfxStatOK) { return false; }
+  for (int index = 0; index < 4096; ++index) {
+    const std::string name = "host_value_" + std::to_string(index);
+    OfxPropertySetHandle properties = nullptr;
+    if (gParamHost->paramDefine(parameters, kOfxParamTypeDouble, name.c_str(), &properties) != kOfxStatOK || !properties ||
+        gPropHost->propSetString(properties, kOfxPropLabel, 0, name.c_str()) != kOfxStatOK ||
+        gPropHost->propSetString(properties, kOfxParamPropDoubleType, 0, kOfxParamDoubleTypePlain) != kOfxStatOK ||
+        gPropHost->propSetDouble(properties, kOfxParamPropDefault, 0, 0.5) != kOfxStatOK ||
+        gPropHost->propSetDouble(properties, kOfxParamPropMin, 0, 0.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(properties, kOfxParamPropMax, 0, 1.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(properties, kOfxParamPropDisplayMin, 0, 0.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(properties, kOfxParamPropDisplayMax, 0, 1.0) != kOfxStatOK) { return false; }
+  }
+  if (overflow) {
+    OfxPropertySetHandle properties = nullptr;
+    if (gParamHost->paramDefine(parameters, kOfxParamTypeGroup, "host_extra_group", &properties) != kOfxStatOK || !properties) { return false; }
+  }
+  return true;
+}
+
+bool writablePluginLabels(const void* handle, bool parameter) {
+  OfxPropertySetHandle properties = nullptr;
+  if (parameter) {
+    OfxParamSetHandle parameters = nullptr;
+    OfxParamHandle scale = nullptr;
+    if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+        gParamHost->paramGetHandle(parameters, "scale", &scale, &properties) != kOfxStatOK) { return false; }
+  } else if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK) { return false; }
+  const char* label = parameter ? "Writable parameter label" : "Writable plugin descriptor label";
+  char* observed = nullptr;
+  return gPropHost->propSetString(properties, kOfxPropLabel, 0, label) == kOfxStatOK &&
+      gPropHost->propGetString(properties, kOfxPropLabel, 0, &observed) == kOfxStatOK && observed && std::string(observed) == label;
+}
+
 bool canonicalProgressiveContract(const void* handle, OfxPropertySetHandle in) {
   OfxPropertySetHandle properties = nullptr;
   OfxImageClipHandle source = nullptr;
@@ -1695,6 +1851,19 @@ OfxStatus probeAction(const char* action, const void* handle,
   const std::string operation(action);
   const std::string selected = mode();
   if (selected == "aux_describe_load_failure" && operation == kOfxActionLoad) { return kOfxStatFailed; }
+  if (selected == "host_properties_readonly" && operation == kOfxActionDescribe &&
+      !readonlyHostProperties(gHost)) { return kOfxStatFailed; }
+  if (selected == "host_parameter_limit" && operation == kOfxActionDescribe &&
+      !hostParameterLimit(gHost)) { return kOfxStatFailed; }
+  // A count refusal must happen before constructing or processing an instance.
+  if ((selected == "host_parameters_4097" || selected == "host_numeric_parameters_4096" ||
+       selected == "host_numeric_parameters_4096_plus_group") &&
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender)) { std::abort(); }
+  if ((selected == "host_numeric_parameters_4096" || selected == "host_numeric_parameters_4096_plus_group") &&
+      operation == kOfxImageEffectActionDescribeInContext) {
+    return defineHostNumericParameterCountProbe(handle, selected == "host_numeric_parameters_4096_plus_group")
+        ? kOfxStatOK : kOfxStatFailed;
+  }
   if (legacyPriorityMode(selected) &&
       (operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionGetRegionsOfInterest ||
        operation == kOfxImageEffectActionRender)) {
@@ -1938,7 +2107,16 @@ OfxStatus probeAction(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
-  const OfxStatus result = pluginMain(action, handle, in, out);  if ((result == kOfxStatOK || result == kOfxStatReplyDefault) &&
+  const OfxStatus result = pluginMain(action, handle, in, out);
+  if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
+    if (selected == "host_properties_readonly" &&
+        ((operation == kOfxActionDescribe && !writablePluginLabels(handle, false)) ||
+         (operation == kOfxImageEffectActionDescribeInContext && !writablePluginLabels(handle, true)))) { return kOfxStatFailed; }
+    if ((selected == "host_parameters_4096" || selected == "host_parameters_4097") &&
+        operation == kOfxImageEffectActionDescribeInContext &&
+        !addHostParameterCountProbe(handle, selected == "host_parameters_4097")) { return kOfxStatFailed; }
+  }
+  if ((result == kOfxStatOK || result == kOfxStatReplyDefault) &&
       ((selected == "aux_transient_null" && operation == kOfxActionLoad && !auxTransientMessages(nullptr)) ||
        (selected == "aux_transient_descriptor" && operation == kOfxActionDescribe && !auxTransientMessages(const_cast<void*>(handle))) ||
        (selected == "aux_invalid_handles" && operation == kOfxActionDescribe && !auxInvalidHandles(const_cast<void*>(handle))) ||
