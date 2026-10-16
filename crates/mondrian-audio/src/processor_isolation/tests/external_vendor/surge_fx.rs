@@ -759,6 +759,9 @@ fn observe_runtime_pcm(
         "existing Runtime Drop settles the exact actual child"
     );
     assert_ne!(queried, 0);
-    assert_eq!(exit_code, 0, "forced/error child exit cannot qualify");
+    assert_eq!(
+        exit_code, 0,
+        "same child exits with status 0; graceful ACK and exit budget remain unqualified"
+    );
     output
 }
