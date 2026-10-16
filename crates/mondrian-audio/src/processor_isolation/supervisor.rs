@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
+mod shutdown_observation;
+use shutdown_observation::{
+    response_tag, ChildObservation, CleanupObservation, ShutdownFailure, ShutdownReport, Timed,
+};
+
 // Background audio and discovery workers run independently of a caller console.
 // Their private launch sites use NUL stdio and IPC, with no competing explicit flags.
 #[cfg(windows)]
@@ -92,24 +97,47 @@ impl ProcessOwner {
     }
 
     fn terminate(&mut self) -> Result<(), AudioProcessorHostError> {
-        #[cfg(test)]
-        if let Some((observe, kill, wait)) = self.cleanup_hooks {
-            return self.terminate_with(observe, kill, wait);
-        }
-        self.terminate_with(Child::try_wait, Child::kill, Child::wait)
+        self.terminate_observed(None)
     }
 
+    fn terminate_observed(
+        &mut self,
+        observation: Option<&mut CleanupObservation>,
+    ) -> Result<(), AudioProcessorHostError> {
+        #[cfg(test)]
+        if let Some((observe, kill, wait)) = self.cleanup_hooks {
+            return self.terminate_with_observation(observe, kill, wait, observation);
+        }
+        self.terminate_with_observation(Child::try_wait, Child::kill, Child::wait, observation)
+    }
+
+    #[cfg(test)]
     fn terminate_with(
+        &mut self,
+        observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+        kill: impl FnMut(&mut Child) -> io::Result<()>,
+        wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+    ) -> Result<(), AudioProcessorHostError> {
+        self.terminate_with_observation(observe, kill, wait, None)
+    }
+
+    fn terminate_with_observation(
         &mut self,
         mut observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
         mut kill: impl FnMut(&mut Child) -> io::Result<()>,
         mut wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+        mut observation: Option<&mut CleanupObservation>,
     ) -> Result<(), AudioProcessorHostError> {
         if self.state == ProcessState::Settled {
             return Ok(());
         }
         self.state = ProcessState::Retiring;
-        let observation_error = match observe(&mut self.child) {
+        let started = observation.as_ref().map(|_| Instant::now());
+        let observed = observe(&mut self.child);
+        if let (Some(report), Some(started)) = (&mut observation, started) {
+            report.initial_observe = Some(Timed::new(report.origin, started, (&observed).into()));
+        }
+        let observation_error = match observed {
             Ok(Some(_)) => {
                 self.state = ProcessState::Settled;
                 return Ok(());
@@ -121,8 +149,22 @@ impl ProcessOwner {
                 error.raw_os_error()
             )),
         };
-        if let Err(error) = kill(&mut self.child) {
-            let final_observation = match observe(&mut self.child) {
+        let started = observation.as_ref().map(|_| Instant::now());
+        let killed = kill(&mut self.child);
+        if let (Some(report), Some(started)) = (&mut observation, started) {
+            report.kill = Some(Timed::new(
+                report.origin,
+                started,
+                killed.as_ref().map(|_| ()).map_err(Into::into),
+            ));
+        }
+        if let Err(error) = killed {
+            let started = observation.as_ref().map(|_| Instant::now());
+            let observed = observe(&mut self.child);
+            if let (Some(report), Some(started)) = (&mut observation, started) {
+                report.final_observe = Some(Timed::new(report.origin, started, (&observed).into()));
+            }
+            let final_observation = match observed {
                 Ok(Some(_)) => {
                     self.state = ProcessState::Settled;
                     if let Some(error) = observation_error.as_deref() {
@@ -147,7 +189,16 @@ impl ProcessOwner {
                 observation_error.as_deref().unwrap_or("child still running")
             )));
         }
-        match wait(&mut self.child) {
+        let started = observation.as_ref().map(|_| Instant::now());
+        let waited = wait(&mut self.child);
+        if let (Some(report), Some(started)) = (&mut observation, started) {
+            report.wait = Some(Timed::new(
+                report.origin,
+                started,
+                waited.as_ref().copied().map_err(Into::into),
+            ));
+        }
+        match waited {
             Ok(_) => {
                 self.state = ProcessState::Settled;
                 if let Some(error) = observation_error.as_deref() {
@@ -176,7 +227,15 @@ impl ProcessOwner {
     // may allocate/block; this is not a realtime-safe failure-path guarantee.
     // Preserve the caller's original typed error rather than replacing it.
     pub(super) fn terminate_reported(&mut self, context: &'static str) {
-        if let Err(error) = self.terminate() {
+        self.terminate_reported_observed(context, None);
+    }
+
+    fn terminate_reported_observed(
+        &mut self,
+        context: &'static str,
+        observation: Option<&mut CleanupObservation>,
+    ) {
+        if let Err(error) = self.terminate_observed(observation) {
             tracing::warn!(process_id = self.child.id(), state = ?self.state, context, error = %error,
                 "Audio native child cleanup failed");
         }
@@ -903,46 +962,117 @@ impl SupervisedAudioWorker {
     }
 
     pub(super) fn shutdown(&mut self) -> bool {
+        self.shutdown_observed().successful()
+    }
+
+    pub(super) fn shutdown_observed(&mut self) -> ShutdownReport {
+        let mut report = ShutdownReport::new(
+            self.process.child.id(),
+            self.process.state,
+            self.operation_timeout,
+        );
         match self.process.state {
-            ProcessState::Settled => return true,
+            ProcessState::Settled => return report.finish(true, self.process.state),
             ProcessState::Retiring => {
-                self.process.terminate_reported("audio shutdown retry");
+                report.primary_failure = Some(ShutdownFailure::AlreadyRetiring);
+                self.process
+                    .terminate_reported_observed("audio shutdown retry", Some(&mut report.cleanup));
                 // Cleanup without a fresh ACK is not graceful validation.
-                return false;
+                return report.finish(false, self.process.state);
             }
             ProcessState::Running => {}
         }
         self.process.state = ProcessState::Retiring;
         let timeout = self.operation_timeout.min(Duration::from_millis(100));
-        if self.configure_control_timeout(timeout.max(Duration::from_millis(1))).is_err() {
-            self.terminate();
-            return false;
+        let started = Instant::now();
+        let configured = self.configure_control_timeout(timeout.max(Duration::from_millis(1)));
+        report.configure = Some(Timed::new(
+            report.started,
+            started,
+            configured.as_ref().map(|_| ()).map_err(Into::into),
+        ));
+        if configured.is_err() {
+            report.primary_failure = Some(ShutdownFailure::ConfigureControlTimeout);
+            self.process
+                .terminate_reported_observed("audio worker failure", Some(&mut report.cleanup));
+            return report.finish(false, self.process.state);
         }
-        let completed = WorkerCommand {
+        let started = Instant::now();
+        let written = WorkerCommand {
             kind: super::protocol::CommandKind::Shutdown,
             start_sample: 0,
             frames: 0,
             event_count: 0,
             note_count: 0,
         }
-        .write_to(&mut self.control)
-        .and_then(|_| WorkerResponse::read_from(&mut self.control))
-        .is_ok_and(|response| response == WorkerResponse::Completed);
-        if completed {
-            let deadline = Instant::now() + timeout;
-            while Instant::now() < deadline {
-                match self.process.child.try_wait() {
-                    Ok(Some(status)) => {
-                        self.process.state = ProcessState::Settled;
-                        return status.success();
+        .write_to(&mut self.control);
+        report.command_write = Some(Timed::new(
+            report.started,
+            started,
+            written.as_ref().map(|_| ()).map_err(Into::into),
+        ));
+        let completed = match written {
+            Err(_) => {
+                report.primary_failure = Some(ShutdownFailure::CommandWrite);
+                false
+            }
+            Ok(()) => {
+                let started = Instant::now();
+                let response = WorkerResponse::read_from(&mut self.control);
+                report.response_read = Some(Timed::new(
+                    report.started,
+                    started,
+                    response.as_ref().map(response_tag).map_err(Into::into),
+                ));
+                match response {
+                    Ok(WorkerResponse::Completed) => true,
+                    Ok(_) => {
+                        report.primary_failure = Some(ShutdownFailure::NonCompletedResponse);
+                        false
                     }
-                    Ok(None) => thread::yield_now(),
-                    Err(_) => break,
+                    Err(_) => {
+                        report.primary_failure = Some(ShutdownFailure::ResponseRead);
+                        false
+                    }
                 }
             }
+        };
+        if completed {
+            let deadline = Instant::now() + timeout;
+            let started = Instant::now();
+            let mut last_observation = None;
+            while Instant::now() < deadline {
+                let observed = self.process.child.try_wait();
+                last_observation = Some(ChildObservation::from(&observed));
+                match observed {
+                    Ok(Some(status)) => {
+                        report.exit_loop = Some(Timed::new(
+                            report.started,
+                            started,
+                            ChildObservation::Exited(status),
+                        ));
+                        self.process.state = ProcessState::Settled;
+                        if !status.success() {
+                            report.primary_failure = Some(ShutdownFailure::NonzeroExit);
+                        }
+                        return report.finish(status.success(), self.process.state);
+                    }
+                    Ok(None) => thread::yield_now(),
+                    Err(_) => {
+                        report.primary_failure = Some(ShutdownFailure::ExitObservationIo);
+                        break;
+                    }
+                }
+            }
+            report.exit_loop =
+                last_observation.map(|observed| Timed::new(report.started, started, observed));
+            if report.primary_failure.is_none() {
+                report.primary_failure = Some(ShutdownFailure::ExitObservationDeadline);
+            }
         }
-        self.process.terminate_reported("audio shutdown failure");
-        false
+        self.process
+            .terminate_reported_observed("audio shutdown failure", Some(&mut report.cleanup));
+        report.finish(false, self.process.state)
     }
 
     fn configure_control_timeout(&mut self, timeout: Duration) -> io::Result<()> {
@@ -1427,6 +1557,369 @@ mod control_timeout_worker_lifecycle {
             Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
             other => panic!("retired worker connection returned {other:?}"),
         }
+        Ok(())
+    }
+
+    const SHUTDOWN_OBSERVATION_MODE: &str = "MONDRIAN_AUDIO_SHUTDOWN_OBSERVATION_MODE";
+    const SHUTDOWN_OBSERVATION_ENDPOINT: &str = "MONDRIAN_AUDIO_SHUTDOWN_OBSERVATION_ENDPOINT";
+
+    // A real Child and TCP endpoint exercise the original codecs and cleanup.
+    // Without the private parent-provided endpoint this libtest entry is inert.
+    #[test]
+    fn native_shutdown_observation_child_fixture() {
+        let Some(endpoint) = std::env::var_os(SHUTDOWN_OBSERVATION_ENDPOINT) else {
+            return;
+        };
+        let mode = std::env::var(SHUTDOWN_OBSERVATION_MODE).expect("owned fixture mode");
+        let mut control = TcpStream::connect(endpoint.to_str().expect("local endpoint"))
+            .expect("connect actual parent");
+        control.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        control.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let command = WorkerCommand::read_from(&mut control).expect("original shutdown command");
+        assert_eq!(command.kind, super::super::protocol::CommandKind::Shutdown);
+        assert_eq!(
+            (
+                command.start_sample,
+                command.frames,
+                command.event_count,
+                command.note_count
+            ),
+            (0, 0, 0, 0)
+        );
+        match mode.as_str() {
+            "ack_exit0" | "ack_exit7" | "ack_hold" => {
+                WorkerResponse::Completed.write_to(&mut control).unwrap();
+                if mode == "ack_exit0" {
+                    std::process::exit(0);
+                }
+                if mode == "ack_exit7" {
+                    std::process::exit(7);
+                }
+            }
+            "failed_hold" => {
+                WorkerResponse::Failed("private payload must not enter the report".repeat(128))
+                    .write_to(&mut control)
+                    .unwrap()
+            }
+            "eof_hold" => control.shutdown(std::net::Shutdown::Write).unwrap(),
+            "no_response" => {}
+            _ => panic!("unknown owned fixture mode"),
+        }
+        thread::sleep(Duration::from_secs(5));
+        panic!("parent failed to retire its bounded test Child");
+    }
+
+    fn launch_shutdown_observation_child(
+        mode: &str,
+        operation: Duration,
+    ) -> Result<SupervisedAudioWorker, Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+        listener.set_nonblocking(true)?;
+        let mut command = Command::new(std::env::current_exe()?);
+        command.args([
+            "--exact",
+            "processor_isolation::supervisor::control_timeout_worker_lifecycle::native_shutdown_observation_child_fixture",
+            "--nocapture", "--test-threads=1",
+        ]).env(SHUTDOWN_OBSERVATION_ENDPOINT, listener.local_addr()?.to_string())
+            .env(SHUTDOWN_OBSERVATION_MODE, mode)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)]
+        configure_background_worker_start(&mut command);
+        let mut process = ProcessOwner::new(command.spawn()?);
+        let control = accept_worker(
+            &listener,
+            &mut process.child,
+            Instant::now() + Duration::from_secs(5),
+        )?;
+        let layout = SharedBlockLayout::new(4, 2, 0, 0)?;
+        let shared_file = NamedTempFile::new()?;
+        shared_file.as_file().set_len(layout.total_bytes as u64)?;
+        // SAFETY: the exclusively owned file is sized to the exact layout and
+        // retained with this map; the fixture never receives or truncates it.
+        let shared = unsafe { MmapOptions::new().map_mut(shared_file.as_file())? };
+        Ok(SupervisedAudioWorker {
+            process,
+            control,
+            shared,
+            _shared_file: shared_file,
+            layout,
+            operation_timeout: operation,
+            state_entry_timeout: Duration::from_secs(30),
+            configured_control_timeout: None,
+        })
+    }
+
+    #[test]
+    fn native_shutdown_observation_actual_child_ack_keeps_exit_status_and_bool_semantics(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (mode, code) in [("ack_exit0", 0), ("ack_exit7", 7)] {
+            let mut worker = launch_shutdown_observation_child(mode, Duration::from_secs(1))?;
+            let report = worker.shutdown_observed();
+            assert_eq!(report.successful(), code == 0);
+            assert_eq!(
+                report.primary_failure,
+                if code == 0 {
+                    None
+                } else {
+                    Some(ShutdownFailure::NonzeroExit)
+                }
+            );
+            assert_eq!(report.response_read.as_ref().unwrap().outcome, Ok(0));
+            assert!(matches!(report.exit_loop.as_ref().unwrap().outcome,
+                ChildObservation::Exited(status) if status.code() == Some(code)));
+            assert!(report.cleanup.initial_observe.is_none());
+            assert!(report.cleanup.kill.is_none());
+            assert!(report.cleanup.wait.is_none());
+            assert_eq!(worker.process.state, ProcessState::Settled);
+            assert!(
+                worker.shutdown(),
+                "Settled remains idempotently successful, even after nonzero exit"
+            );
+            assert_eq!(report.validation_result().is_ok(), code == 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_shutdown_observation_actual_tcp_distinguishes_response_tag_eof_and_timeout(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for mode in ["failed_hold", "eof_hold", "no_response"] {
+            let mut worker = launch_shutdown_observation_child(mode, Duration::from_millis(100))?;
+            let pid = worker.process.child.id();
+            let report = worker.shutdown_observed();
+            assert!(!report.successful());
+            assert_eq!(report.command_write.as_ref().unwrap().outcome, Ok(()));
+            let response = report.response_read.as_ref().unwrap();
+            if mode == "failed_hold" {
+                assert_eq!(
+                    report.primary_failure,
+                    Some(ShutdownFailure::NonCompletedResponse)
+                );
+                assert_eq!(response.outcome, Ok(1));
+            } else {
+                assert_eq!(report.primary_failure, Some(ShutdownFailure::ResponseRead));
+                assert!(response.outcome.is_err());
+                let actual = response.outcome.unwrap_err();
+                if mode == "eof_hold" {
+                    assert_eq!(actual.kind, io::ErrorKind::UnexpectedEof);
+                } else {
+                    assert!(matches!(
+                        actual.kind,
+                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                    ));
+                }
+            }
+            assert!(
+                report.exit_loop.is_none(),
+                "no exit-loop query before Completed"
+            );
+            assert_eq!(worker.process.state, ProcessState::Settled);
+            assert!(matches!(
+                report.cleanup.initial_observe.as_ref().unwrap().outcome,
+                ChildObservation::Running
+            ));
+            assert_eq!(report.cleanup.kill.as_ref().unwrap().outcome, Ok(()));
+            assert!(
+                report.cleanup.final_observe.is_none(),
+                "post-observe only follows refused kill"
+            );
+            assert!(report.cleanup.wait.as_ref().unwrap().outcome.is_ok());
+            let Err(AudioProcessorHostError::WorkerFailed { operation, detail }) =
+                report.validation_result()
+            else {
+                panic!("original typed validation error");
+            };
+            assert_eq!(operation, "validation shutdown");
+            assert!(detail
+                .starts_with("Worker did not acknowledge and exit within the bounded shutdown; "));
+            assert!(detail.contains(&format!("pid={pid};")));
+            assert!(!detail.contains("private payload"));
+            assert!(detail.len() <= super::super::protocol::MAX_WORKER_DETAIL_BYTES);
+            let configure = report.configure.as_ref().unwrap();
+            let command = report.command_write.as_ref().unwrap();
+            let observe = report.cleanup.initial_observe.as_ref().unwrap();
+            let kill = report.cleanup.kill.as_ref().unwrap();
+            let wait = report.cleanup.wait.as_ref().unwrap();
+            assert!(configure.after <= command.after && command.after <= response.after);
+            assert!(
+                response.after <= observe.after
+                    && observe.after <= kill.after
+                    && kill.after <= wait.after
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_shutdown_observation_closed_writer_does_not_attempt_response_read(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("no_response", Duration::from_secs(1))?;
+        worker.control.shutdown(std::net::Shutdown::Write)?;
+        let report = worker.shutdown_observed();
+        assert!(!report.successful());
+        assert_eq!(report.primary_failure, Some(ShutdownFailure::CommandWrite));
+        assert!(report.command_write.as_ref().unwrap().outcome.is_err());
+        assert!(report.response_read.is_none());
+        assert!(report.exit_loop.is_none());
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        Ok(())
+    }
+
+    fn shutdown_refuse_observation(_: &mut Child) -> io::Result<Option<std::process::ExitStatus>> {
+        Err(io::Error::from_raw_os_error(6))
+    }
+
+    fn shutdown_refuse_kill(_: &mut Child) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(5))
+    }
+
+    fn shutdown_forbidden_wait(_: &mut Child) -> io::Result<std::process::ExitStatus> {
+        panic!("refused kill must not wait")
+    }
+
+    #[test]
+    fn native_shutdown_observation_deadline_preserves_primary_and_records_original_fallback(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("ack_hold", Duration::from_millis(100))?;
+        worker.process.cleanup_hooks =
+            Some((shutdown_refuse_observation, Child::kill, Child::wait));
+        let report = worker.shutdown_observed();
+        assert!(!report.successful());
+        assert_eq!(
+            report.primary_failure,
+            Some(ShutdownFailure::ExitObservationDeadline)
+        );
+        assert_eq!(report.response_read.as_ref().unwrap().outcome, Ok(0));
+        assert_eq!(
+            report.exit_loop.as_ref().unwrap().outcome,
+            ChildObservation::Running,
+            "the original exit loop uses real Child.try_wait, never fallback hooks"
+        );
+        assert_eq!(
+            report.cleanup.initial_observe.as_ref().unwrap().outcome,
+            ChildObservation::Io((&io::Error::from_raw_os_error(6)).into())
+        );
+        assert_eq!(report.cleanup.kill.as_ref().unwrap().outcome, Ok(()));
+        assert!(report.cleanup.final_observe.is_none());
+        assert!(report.cleanup.wait.as_ref().unwrap().outcome.is_ok());
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        worker.process.cleanup_hooks = None;
+        Ok(())
+    }
+
+    #[test]
+    fn native_shutdown_observation_refused_kill_records_post_observe_and_never_waits(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for fail_observe in [false, true] {
+            let mut worker =
+                launch_shutdown_observation_child("ack_hold", Duration::from_millis(100))?;
+            let observe = if fail_observe {
+                shutdown_refuse_observation
+            } else {
+                Child::try_wait
+            };
+            worker.process.cleanup_hooks =
+                Some((observe, shutdown_refuse_kill, shutdown_forbidden_wait));
+            let installed = worker.configured_control_timeout;
+            let report = worker.shutdown_observed();
+            assert!(!report.successful());
+            assert_eq!(
+                report.primary_failure,
+                Some(ShutdownFailure::ExitObservationDeadline)
+            );
+            let expected = if fail_observe {
+                ChildObservation::Io((&io::Error::from_raw_os_error(6)).into())
+            } else {
+                ChildObservation::Running
+            };
+            assert_eq!(
+                report.cleanup.initial_observe.as_ref().unwrap().outcome,
+                expected
+            );
+            assert_eq!(
+                report.cleanup.kill.as_ref().unwrap().outcome,
+                Err((&io::Error::from_raw_os_error(5)).into())
+            );
+            assert_eq!(
+                report.cleanup.final_observe.as_ref().unwrap().outcome,
+                expected
+            );
+            assert!(report.cleanup.wait.is_none());
+            assert_eq!(worker.process.state, ProcessState::Retiring);
+            assert_eq!(installed, None);
+            let before_retry = worker.configured_control_timeout;
+            let read_budget = worker.control.read_timeout()?;
+            let write_budget = worker.control.write_timeout()?;
+            worker.process.cleanup_hooks = None;
+            let retry = worker.shutdown_observed();
+            assert!(
+                !retry.successful(),
+                "cleanup retry alone never supplies graceful ACK"
+            );
+            assert_eq!(
+                retry.primary_failure,
+                Some(ShutdownFailure::AlreadyRetiring)
+            );
+            assert!(
+                retry.configure.is_none()
+                    && retry.command_write.is_none()
+                    && retry.response_read.is_none()
+            );
+            assert_eq!(worker.configured_control_timeout, before_retry);
+            assert_eq!(worker.control.read_timeout()?, read_budget);
+            assert_eq!(worker.control.write_timeout()?, write_budget);
+            assert_eq!(worker.process.state, ProcessState::Settled);
+            assert!(worker.shutdown());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_shutdown_observation_cleanup_exit_race_keeps_real_status_and_zero_wait(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("no_response", Duration::from_secs(1))?;
+        let mut report = ShutdownReport::new(
+            worker.process.child.id(),
+            worker.process.state,
+            worker.operation_timeout,
+        );
+        let trace = std::cell::RefCell::new(Vec::new());
+        worker.process.terminate_with_observation(
+            |child| {
+                trace.borrow_mut().push("observe");
+                child.try_wait()
+            },
+            |child| {
+                trace.borrow_mut().push("kill");
+                // The control deliberately establishes a real exit before
+                // reporting a refused kill, reproducing the existing race.
+                // These bounded test-only observations are not production calls.
+                child.kill()?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while child.try_wait()?.is_none() {
+                    assert!(Instant::now() < deadline, "actual test child exit");
+                    thread::yield_now();
+                }
+                Err(io::Error::from_raw_os_error(5))
+            },
+            |_| panic!("confirmed post-kill exit must not call wait"),
+            Some(&mut report.cleanup),
+        )?;
+        assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+        assert_eq!(
+            report.cleanup.initial_observe.as_ref().unwrap().outcome,
+            ChildObservation::Running
+        );
+        assert_eq!(
+            report.cleanup.kill.as_ref().unwrap().outcome,
+            Err((&io::Error::from_raw_os_error(5)).into())
+        );
+        assert!(matches!(
+            report.cleanup.final_observe.as_ref().unwrap().outcome,
+            ChildObservation::Exited(_)
+        ));
+        assert!(report.cleanup.wait.is_none());
+        assert_eq!(worker.process.state, ProcessState::Settled);
         Ok(())
     }
 

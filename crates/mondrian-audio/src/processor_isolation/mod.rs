@@ -426,13 +426,7 @@ impl IsolatedAudioProcessorFactory {
             ))?;
         let (mut validation, input_names) =
             SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
-        if !validation.shutdown() {
-            return Err(AudioProcessorHostError::WorkerFailed {
-                operation: "validation shutdown",
-                detail: "Worker did not acknowledge and exit within the bounded shutdown"
-                    .to_owned(),
-            });
-        }
+        validation.shutdown_observed().validation_result()?;
         Ok(Arc::new(Self {
             spec,
             execution_contract,
