@@ -5335,15 +5335,41 @@ fn current_system_time_nanos() -> i64 {
         .unwrap_or_default()
 }
 
+/// Prove the complete half-open sample window before consuming any process input.
+/// Continuous time is meaningful only when its optional validity bit is present.
+fn checked_process_sample_end(ctx: &ProcessContext, frames: usize) -> Result<(i64, Option<i64>)> {
+    let invalid = NativeEventError::InvalidFrames;
+    let frames = i64::try_from(frames).map_err(|_| Error::NativeEvent(invalid))?;
+    let project = ctx
+        .projectTimeSamples
+        .checked_add(frames)
+        .ok_or(Error::NativeEvent(invalid))?;
+    let continuous = if ctx.state & ProcessContext_::StatesAndFlags_::kContTimeValid as u32 != 0 {
+        Some(
+            ctx.continousTimeSamples
+                .checked_add(frames)
+                .ok_or(Error::NativeEvent(invalid))?,
+        )
+    } else {
+        None
+    };
+    Ok((project, continuous))
+}
+
 /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
 /// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
 /// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
 #[allow(clippy::unnecessary_cast)]
-fn advance_process_context(ctx: &mut ProcessContext, transport_tempo: f64, frames: i64) {
+fn advance_process_context(
+    ctx: &mut ProcessContext,
+    transport_tempo: f64,
+    frames: usize,
+) -> Result<()> {
     use ProcessContext_::StatesAndFlags_ as S;
-    ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
-    if ctx.state & S::kContTimeValid as u32 != 0 {
-        ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
+    let (project, continuous) = checked_process_sample_end(ctx, frames)?;
+    ctx.projectTimeSamples = project;
+    if let Some(continuous) = continuous {
+        ctx.continousTimeSamples = continuous;
     }
     if ctx.state & S::kSystemTimeValid as u32 != 0 && ctx.sampleRate > 0.0 {
         let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
@@ -5354,6 +5380,7 @@ fn advance_process_context(ctx: &mut ProcessContext, transport_tempo: f64, frame
         let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
         ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -5704,7 +5731,7 @@ mod transport_tests {
         // One second of audio at 48 kHz in 512-sample blocks.
         let blocks = 48_000 / 512;
         for _ in 0..blocks {
-            advance_process_context(&mut ctx, 120.0, 512);
+            advance_process_context(&mut ctx, 120.0, 512).unwrap();
         }
         let advanced = (blocks * 512) as i64;
         assert_eq!(ctx.projectTimeSamples, advanced);
@@ -5722,7 +5749,7 @@ mod transport_tests {
         let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
         ctx.sampleRate = 48_000.0;
         ctx.projectTimeSamples = -17;
-        advance_process_context(&mut ctx, 120.0, 4);
+        advance_process_context(&mut ctx, 120.0, 4).unwrap();
         assert_eq!(ctx.projectTimeSamples, -13);
         assert_eq!(ctx.state, 0);
         assert_eq!(ctx.continousTimeSamples, 0);
@@ -6536,10 +6563,10 @@ impl PluginProcessFields<'_> {
                 // a moving playhead instead of a frozen time-0. The context describes the
                 // block that was just processed; advancing here means the next block starts
                 // at the new sample position.
-                advance_process_context(
+                let advance_result = advance_process_context(
                     &mut data.process_context,
                     data.transport_tempo,
-                    frames as i64,
+                    frames,
                 );
 
                 // Clear the staged input events AFTER processing, so the plugin got to see them
@@ -6575,6 +6602,11 @@ impl PluginProcessFields<'_> {
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
                 } else {
+                    // The entire window was checked before consumption. Still
+                    // fail cleanly if native code changed a context counter;
+                    // all input/feedback cleanup above must run first, and the
+                    // original native failure retains priority when both fail.
+                    advance_result?;
                     data.sample_buffers.update_output_silence_flags(
                         &mut data.output_bus_buffers,
                         &self.bus_activation.audio_outputs,
@@ -6687,8 +6719,13 @@ impl PluginProcessFields<'_> {
             return Err(Error::NotProcessing);
         }
 
-        let _denormal = crate::internal::denormal::DenormalGuard::new();
         let total = buffers.frame_count(self.block_size);
+        let data = self
+            .process_data
+            .as_ref()
+            .ok_or_else(|| Error::Other("Process data not initialized".to_owned()))?;
+        checked_process_sample_end(&data.process_context, total)?;
+        let _denormal = crate::internal::denormal::DenormalGuard::new();
         if let Some(notes) = notes {
             // All fallible scalar/layout checks finished. This admission checks
             // both original capacities and absence of legacy input before mutation.
@@ -7675,10 +7712,12 @@ mod checked_native_note_tests {
         calls: usize,
         received: Vec<Vec<Received>>,
         frames: Vec<i32>,
+        positions: Vec<(i64, i64, u32)>,
     }
     struct Processor {
         observed: Arc<Mutex<Observations>>,
         fail_call: Arc<AtomicUsize>,
+        context_fault: Arc<AtomicUsize>,
     }
     impl Class for Processor {
         type Interfaces = (IAudioProcessor,);
@@ -7742,17 +7781,32 @@ mod checked_native_note_tests {
             let call = observed.calls;
             observed.received.push(received);
             observed.frames.push(data.numSamples);
+            let context = unsafe { &*data.processContext };
+            observed.positions.push((
+                context.projectTimeSamples,
+                context.continousTimeSamples,
+                context.state,
+            ));
+            // Adversarial native mutation: the host must reject an unrepresentable
+            // next sample position without skipping per-call cleanup.
+            match self.context_fault.load(Ordering::Relaxed) {
+                1 => unsafe { (*data.processContext).projectTimeSamples = i64::MAX },
+                2 => unsafe { (*data.processContext).continousTimeSamples = i64::MAX },
+                _ => {}
+            }
             // A failed native block deliberately writes native output too. It
             // must not become caller PCM, unlike the preceding successful chunk.
-            let output = unsafe { &mut *data.outputs };
-            output.silenceFlags = 0;
-            let samples = unsafe {
-                std::slice::from_raw_parts_mut(
-                    *output.__field0.channelBuffers32,
-                    data.numSamples as usize,
-                )
-            };
-            samples.fill(call as f32 * 0.25);
+            if data.numSamples != 0 {
+                let output = unsafe { &mut *data.outputs };
+                output.silenceFlags = 0;
+                let samples = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        *output.__field0.channelBuffers32,
+                        data.numSamples as usize,
+                    )
+                };
+                samples.fill(call as f32 * 0.25);
+            }
             if self.fail_call.load(Ordering::Relaxed) == call {
                 kResultFalse
             } else {
@@ -7765,6 +7819,7 @@ mod checked_native_note_tests {
         processor: ComPtr<IAudioProcessor>,
         observed: Arc<Mutex<Observations>>,
         fail_call: Arc<AtomicUsize>,
+        context_fault: Arc<AtomicUsize>,
         data: Option<Box<HostProcessData>>,
         activation: BusActivationState,
         handler: Option<ComWrapper<ComponentHandler>>,
@@ -7782,9 +7837,11 @@ mod checked_native_note_tests {
         fn new() -> Self {
             let observed = Arc::new(Mutex::new(Observations::default()));
             let fail_call = Arc::new(AtomicUsize::new(0));
+            let context_fault = Arc::new(AtomicUsize::new(0));
             let processor = ComWrapper::new(Processor {
                 observed: Arc::clone(&observed),
                 fail_call: Arc::clone(&fail_call),
+                context_fault: Arc::clone(&context_fault),
             })
             .to_com_ptr::<IAudioProcessor>()
             .unwrap();
@@ -7829,6 +7886,7 @@ mod checked_native_note_tests {
                 processor,
                 observed,
                 fail_call,
+                context_fault,
                 data: Some(data),
                 activation: BusActivationState {
                     audio_outputs: vec![true],
@@ -7932,6 +7990,283 @@ mod checked_native_note_tests {
                 velocity: 0.5,
                 note_id: id,
             },
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum WindowPath {
+        Flat,
+        Buses,
+        ScopedNotes,
+    }
+
+    fn run_sample_window(
+        fixture: &mut Fixture,
+        path: WindowPath,
+        frames: usize,
+    ) -> (Result<()>, Vec<f32>) {
+        match path {
+            WindowPath::Flat => {
+                let mut pcm = AudioBuffers::new(0, 1, frames, 48_000.0);
+                pcm.outputs[0].fill(93.0);
+                let result = fixture
+                    .fields()
+                    .process_buffer_view(&mut CallerAudioBuffers::Flat(&mut pcm));
+                (result, pcm.outputs.remove(0))
+            }
+            WindowPath::Buses | WindowPath::ScopedNotes => {
+                let mut pcm = buffers(frames);
+                pcm.outputs[0].channels[0].fill(93.0);
+                let result = match path {
+                    WindowPath::Buses => fixture.fields().process_bus_audio(&mut pcm),
+                    WindowPath::ScopedNotes => {
+                        fixture.run(&mut pcm, &[on(0, 71), off((frames - 1) as i32, 71)])
+                    }
+                    WindowPath::Flat => unreachable!(),
+                };
+                (result, pcm.outputs.remove(0).channels.remove(0))
+            }
+        }
+    }
+
+    // All fields of the pinned SDK POD, without reading uninitialized padding.
+    fn context_facts(ctx: &ProcessContext) -> [u64; 19] {
+        [
+            ctx.state as u64,
+            ctx.sampleRate.to_bits(),
+            ctx.projectTimeSamples as u64,
+            ctx.systemTime as u64,
+            ctx.continousTimeSamples as u64,
+            ctx.projectTimeMusic.to_bits(),
+            ctx.barPositionMusic.to_bits(),
+            ctx.cycleStartMusic.to_bits(),
+            ctx.cycleEndMusic.to_bits(),
+            ctx.tempo.to_bits(),
+            ctx.timeSigNumerator as u64,
+            ctx.timeSigDenominator as u64,
+            ctx.chord.keyNote as u64,
+            ctx.chord.rootNote as u64,
+            ctx.chord.chordMask as u64,
+            ctx.smpteOffsetSubframes as u64,
+            ctx.frameRate.framesPerSecond as u64,
+            ctx.frameRate.flags as u64,
+            ctx.samplesToNextClock as u64,
+        ]
+    }
+
+    #[test]
+    fn sample_window_overflow_preserves_context_queues_pcm_and_calls_no_processor() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        for path in [WindowPath::Flat, WindowPath::Buses, WindowPath::ScopedNotes] {
+            for continuous in [false, true] {
+                let mut fixture = Fixture::new();
+                let data = fixture.data.as_mut().unwrap();
+                // First native chunk (4) would fit exactly; the complete 9-frame
+                // window would overflow only in a later chunk. No prefix may run.
+                data.process_context.projectTimeSamples =
+                    if continuous { -17 } else { i64::MAX - 4 };
+                data.process_context.continousTimeSamples = i64::MAX - 4;
+                data.process_context.state = if continuous {
+                    S::kContTimeValid as u32
+                } else {
+                    0
+                };
+                let context = context_facts(&data.process_context);
+                fixture.parameters.push(ParameterChange {
+                    id: 7,
+                    value: 0.5,
+                    sample_offset: 8,
+                });
+                fixture.gui.lock().unwrap().push((17, 0.25));
+                fixture.output.events.lock().unwrap().push(off(0, 81));
+                if !matches!(path, WindowPath::ScopedNotes) {
+                    fixture.input.events.lock().unwrap().push(on(0, 91));
+                    fixture.chunks.push(Some(off(0, 92)));
+                }
+                let input = fixture.input.events.lock().unwrap().clone();
+                let output = fixture.output.events.lock().unwrap().clone();
+                let chunks = fixture.chunks.clone();
+                let input_owner = {
+                    let owner = fixture.input.events.lock().unwrap();
+                    (owner.as_ptr(), owner.capacity())
+                };
+                let chunk_owner = (fixture.chunks.as_ptr(), fixture.chunks.capacity());
+                let parameter_owner = (fixture.parameters.as_ptr(), fixture.parameters.capacity());
+                let (result, pcm) = run_sample_window(&mut fixture, path, 9);
+                assert!(
+                    matches!(
+                        result,
+                        Err(Error::NativeEvent(NativeEventError::InvalidFrames))
+                    ),
+                    "{path:?} continuous={continuous}: {result:?}"
+                );
+                assert_eq!(pcm, vec![93.0; 9]);
+                assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+                assert_eq!(
+                    context_facts(&fixture.data.as_ref().unwrap().process_context),
+                    context
+                );
+                assert_eq!(*fixture.input.events.lock().unwrap(), input);
+                assert_eq!(*fixture.output.events.lock().unwrap(), output);
+                assert_eq!(fixture.chunks, chunks);
+                assert_eq!(
+                    (fixture.chunks.as_ptr(), fixture.chunks.capacity()),
+                    chunk_owner
+                );
+                let owner = fixture.input.events.lock().unwrap();
+                assert_eq!((owner.as_ptr(), owner.capacity()), input_owner);
+                assert_eq!(
+                    (fixture.parameters.as_ptr(), fixture.parameters.capacity()),
+                    parameter_owner
+                );
+                assert_eq!(fixture.parameters.len(), 1);
+                let parameter = &fixture.parameters[0];
+                assert_eq!(
+                    (
+                        parameter.id,
+                        parameter.value.to_bits(),
+                        parameter.sample_offset
+                    ),
+                    (7, 0.5f64.to_bits(), 8)
+                );
+                assert_eq!(*fixture.gui.lock().unwrap(), [(17, 0.25)]);
+            }
+        }
+    }
+
+    #[test]
+    fn changed_native_sample_context_fails_cleanly_without_replay_and_preserves_primary_error() {
+        for fault in [1, 2] {
+            for native_failure in [false, true] {
+                let mut fixture = Fixture::new();
+                fixture.context_fault.store(fault, Ordering::Relaxed);
+                if native_failure {
+                    fixture.fail_call.store(1, Ordering::Relaxed);
+                }
+                let context = &mut fixture.data.as_mut().unwrap().process_context;
+                context.projectTimeSamples = -17;
+                context.continousTimeSamples = -41;
+                context.state = ProcessContext_::StatesAndFlags_::kContTimeValid as u32;
+                fixture.parameters.push(ParameterChange {
+                    id: 7,
+                    value: 0.5,
+                    sample_offset: 8,
+                });
+                let mut pcm = buffers(9);
+                pcm.outputs[0].channels[0].fill(93.0);
+                let result = fixture.run(&mut pcm, &[on(0, 71), off(8, 71)]);
+                if native_failure {
+                    assert!(
+                        matches!(result, Err(Error::ProcessFailed(value)) if value == kResultFalse)
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::NativeEvent(NativeEventError::InvalidFrames))
+                    ));
+                }
+                assert_eq!(fixture.observed.lock().unwrap().frames, [4]);
+                assert_eq!(pcm.outputs[0].channels[0], [93.0; 9]);
+                let context = &fixture.data.as_ref().unwrap().process_context;
+                assert_eq!(
+                    context.projectTimeSamples,
+                    if fault == 1 { i64::MAX } else { -17 }
+                );
+                assert_eq!(
+                    context.continousTimeSamples,
+                    if fault == 2 { i64::MAX } else { -41 }
+                );
+                assert!(fixture.input.events.lock().unwrap().is_empty());
+                assert!(fixture.chunks.is_empty());
+                assert!(fixture.parameters.is_empty());
+                fixture.context_fault.store(0, Ordering::Relaxed);
+                fixture.fail_call.store(0, Ordering::Relaxed);
+                fixture
+                    .fields()
+                    .set_process_timeline_context(crate::audio::ProcessTimelineContext {
+                        sample_position: 100,
+                        sample_rate: 48_000,
+                    })
+                    .unwrap();
+                fixture.run(&mut buffers(4), &[]).unwrap();
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(observed.frames, [4, 4]);
+                assert!(
+                    observed.received[1].is_empty(),
+                    "failed window's later Note must not replay"
+                );
+                assert_eq!(observed.positions[1], (100, 0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn signed_sample_windows_keep_negative_partial_chunks_and_maximum_exclusive_end() {
+        use ProcessContext_::StatesAndFlags_ as S;
+        for path in [WindowPath::Flat, WindowPath::Buses, WindowPath::ScopedNotes] {
+            for start in [-17, i64::MAX - 9] {
+                let mut fixture = Fixture::new();
+                let context = &mut fixture.data.as_mut().unwrap().process_context;
+                context.projectTimeSamples = start;
+                context.continousTimeSamples = -41;
+                context.state = S::kContTimeValid as u32;
+                let (result, pcm) = run_sample_window(&mut fixture, path, 9);
+                result.unwrap();
+                assert_eq!(pcm, [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5, 0.75]);
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(observed.frames, [4, 4, 1]);
+                assert_eq!(
+                    observed.positions,
+                    [
+                        (start, -41, S::kContTimeValid as u32),
+                        (start + 4, -37, S::kContTimeValid as u32),
+                        (start + 8, -33, S::kContTimeValid as u32),
+                    ]
+                );
+                let context = &fixture.data.as_ref().unwrap().process_context;
+                assert_eq!(context.projectTimeSamples, start + 9);
+                assert_eq!(context.continousTimeSamples, -32);
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_continuous_time_is_ignored_and_legacy_zero_flush_keeps_maximum_position() {
+        for path in [WindowPath::Flat, WindowPath::Buses, WindowPath::ScopedNotes] {
+            let mut fixture = Fixture::new();
+            let context = &mut fixture.data.as_mut().unwrap().process_context;
+            context.projectTimeSamples = -17;
+            context.continousTimeSamples = i64::MAX;
+            let (result, _) = run_sample_window(&mut fixture, path, 9);
+            result.unwrap();
+            let context = &fixture.data.as_ref().unwrap().process_context;
+            assert_eq!(context.projectTimeSamples, -8);
+            assert_eq!(context.continousTimeSamples, i64::MAX);
+            assert_eq!(context.state, 0);
+        }
+        for path in [WindowPath::Flat, WindowPath::Buses] {
+            let mut fixture = Fixture::new();
+            fixture
+                .data
+                .as_mut()
+                .unwrap()
+                .process_context
+                .projectTimeSamples = i64::MAX;
+            let (result, pcm) = run_sample_window(&mut fixture, path, 0);
+            result.unwrap();
+            assert!(pcm.is_empty());
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.frames, [0]);
+            assert_eq!(observed.positions, [(i64::MAX, 0, 0)]);
+            assert_eq!(
+                fixture
+                    .data
+                    .as_ref()
+                    .unwrap()
+                    .process_context
+                    .projectTimeSamples,
+                i64::MAX
+            );
         }
     }
 

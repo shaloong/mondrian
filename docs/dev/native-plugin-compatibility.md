@@ -176,7 +176,13 @@ The stopped-owner control and backend lifecycle-record fixes use the same
 retained owner. The primitive census writes directly to bounded metadata without
 collecting names; its successful-call probe observed zero same-thread Rust host
 allocator operations. This does not cover plugin heaps or prove realtime safety.
-Current 648 ordinary Audio, eight resource, strict Clippy and SDK Note4 gates pass.
+The shared foundation passed 648 ordinary Audio, eight resource and strict Audio
+Clippy gates. The SDK now checks the complete signed sample window before input
+consumption or DSP, including continuous time only when valid. Current SDK 318
+ordinary and five owned DLL gates pass: public/scoped near-limit refusal preserves
+PCM and same-instance audit; negative, partial and exact-limit windows remain
+valid. Post-native counter failure keeps cleanup and the original plugin error.
+System/musical clocks are unchanged; this SDK slice did not relink the Product.
 Older Gain/Surge and OFX exit failures remain open; a late reaped Exit0 never
 converts a deadline failure into a pass. No third-party instrument or other-platform
 qualification is implied.
@@ -196,7 +202,8 @@ zero-channel declarations remain visible. The checked subset requires nonnegativ
 note IDs, MIDI channels 0..15 within an active declared bus, valid ordered offsets
 and an empty legacy input, preserves original
 scalar values, and retires remaining input after a started processing failure.
-It does not roll back an executed prefix. Canonical VST3 Note, third-party
+It does not roll back an executed prefix. Canonical VST3 Note still needs an
+explicit Sequence musical-time mapping for event PPQ. Third-party
 instruments, other platforms, realtime and performance remain unqualified.
 
 ## Open issues and integration constraints

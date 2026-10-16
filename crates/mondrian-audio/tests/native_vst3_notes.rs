@@ -758,3 +758,151 @@ fn installed_vst3_main_note_oracle_preserves_main_only_pcm_tuples_and_bounded_au
         bytes.len() - prefix
     );
 }
+
+#[test]
+#[ignore = "requires rebuilt owned MONDRIAN_VST3_NOTE_ORACLE_PLUGIN; same-object SDK signed sample-window boundary, not canonical transport qualification"]
+fn installed_vst3_note_oracle_rejects_overflowing_signal_windows_before_native() {
+    use vst3_host::audio::ProcessTimelineContext;
+    use vst3_host::error::NativeEventError;
+
+    let mut host = host();
+    for scoped in [false, true] {
+        let mut plugin = open(&mut host, 0);
+        let initial = audit(&plugin);
+        assert!(initial.calls.is_empty() && initial.events.is_empty());
+        for (start, frames) in [(i64::MAX - 16, 24), (i64::MAX - 8, 9)] {
+            plugin
+                .set_process_timeline_context(ProcessTimelineContext {
+                    sample_position: start,
+                    sample_rate: RATE as u32,
+                })
+                .unwrap();
+            let mut buffers = plugin.create_bus_audio_buffers(frames).unwrap();
+            for bus in buffers.inputs.iter_mut().chain(&mut buffers.outputs) {
+                for channel in &mut bus.channels {
+                    channel.fill(123.0);
+                }
+            }
+            let before = buffers.clone();
+            let events = [
+                note(true, 0, 0, 901, 0.5),
+                note(false, 0, frames as i32 - 1, 901, 0.125),
+            ];
+            let result = invoke(&mut plugin, &mut buffers, &events, scoped);
+            let after = audit(&plugin); // The same Plugin, after its DSP borrow joined.
+            assert!(
+                matches!(&result, Err(vst3_host::Error::NativeEvent(NativeEventError::InvalidFrames))),
+                "scoped={scoped}, start={start}, frames={frames}, result={result:?}, actual_calls={:?}",
+                after.calls
+            );
+            assert_eq!(
+                buffers, before,
+                "whole-window refusal must preserve every caller sample"
+            );
+            assert_eq!(
+                after, initial,
+                "no successful native prefix or Note publication"
+            );
+        }
+
+        let mut expected_calls = Vec::new();
+        let mut expected_events = Vec::new();
+        for (index, (start, frames)) in
+            [(i64::MIN, 17), (-17, 19), (i64::MAX - 19, 19)].into_iter().enumerate()
+        {
+            plugin
+                .set_process_timeline_context(ProcessTimelineContext {
+                    sample_position: start,
+                    sample_rate: RATE as u32,
+                })
+                .unwrap();
+            let id = 1001 + index as i32;
+            let events = [
+                note(true, 0, 0, id, 0.5),
+                note(false, 0, frames as i32 - 1, id, 0.125),
+            ];
+            let (buffers, result) = process(&mut plugin, frames, &events, scoped);
+            result.expect("negative origin, partial chunk and exact exclusive end MAX are valid");
+            let mut literal = vec![0.25; frames];
+            literal[frames - 1] = 0.0;
+            assert_pcm(&buffers, &literal);
+            for chunk in (0..frames).step_by(BLOCK) {
+                let chunk_frames = (frames - chunk).min(BLOCK);
+                let first = expected_events.len();
+                let call = expected_calls.len() as u32 + 1;
+                for event in &events {
+                    if (chunk..chunk + chunk_frames).contains(&(event.sample_offset as usize)) {
+                        expected_events.push(expected_tuple(
+                            call,
+                            event,
+                            event.sample_offset - chunk as i32,
+                        ));
+                    }
+                }
+                expected_calls.push((
+                    chunk_frames as i32,
+                    0,
+                    first as u32,
+                    (expected_events.len() - first) as u32,
+                ));
+            }
+            let actual = audit(&plugin);
+            assert_eq!(actual.instance, initial.instance);
+            assert_eq!(actual.calls, expected_calls);
+            assert_eq!(actual.events, expected_events);
+        }
+
+        // The last accepted exclusive end is MAX. Without relocating that same
+        // context, one more sample must refuse; no saturated/wrapped continuation.
+        let before = audit(&plugin);
+        let mut buffers = plugin.create_bus_audio_buffers(1).unwrap();
+        for channel in &mut buffers.outputs[0].channels {
+            channel.fill(123.0);
+        }
+        let pcm_before = buffers.clone();
+        let result = invoke(
+            &mut plugin,
+            &mut buffers,
+            &[note(true, 0, 0, 902, 0.5)],
+            scoped,
+        );
+        assert!(matches!(
+            result,
+            Err(vst3_host::Error::NativeEvent(
+                NativeEventError::InvalidFrames
+            ))
+        ));
+        assert_eq!(buffers, pcm_before);
+        assert_eq!(audit(&plugin), before);
+
+        // A distinct, representable window remains usable after the pure refusal.
+        plugin
+            .set_process_timeline_context(ProcessTimelineContext {
+                sample_position: -9,
+                sample_rate: RATE as u32,
+            })
+            .unwrap();
+        let events = [note(true, 0, 0, 1004, 0.5), note(false, 0, 8, 1004, 0.125)];
+        let (buffers, result) = process(&mut plugin, 9, &events, scoped);
+        result.unwrap();
+        assert_pcm(
+            &buffers,
+            &[0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.0],
+        );
+        let first = expected_events.len() as u32;
+        let call = expected_calls.len() as u32 + 1;
+        expected_calls.extend([(8, 0, first, 1), (1, 0, first + 1, 1)]);
+        expected_events.extend([
+            expected_tuple(call, &events[0], 0),
+            expected_tuple(call + 1, &events[1], 0),
+        ]);
+        let final_audit = audit(&plugin);
+        assert_eq!(final_audit.instance, initial.instance);
+        assert_eq!(final_audit.calls, expected_calls);
+        assert_eq!(
+            final_audit.events, expected_events,
+            "refused Notes cannot replay"
+        );
+        plugin.stop_processing().unwrap();
+    }
+}
