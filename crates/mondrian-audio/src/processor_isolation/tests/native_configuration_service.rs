@@ -26,33 +26,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
             .expect("profile factory")
             .create()
             .expect("retained profile child");
-        processor.enter_state(0).expect("old epoch");
-        for start in [0, 4] {
-            let mut audio = configuration_audio(&keys);
-            processor
-                .process(
-                    configuration_context(start, mode),
-                    &mut audio,
-                    AudioParameterEventBatch::new(
-                        start,
-                        4,
-                        &ids,
-                        std::slice::from_ref(&(0..1)),
-                        &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
-                    ),
-                )
-                .expect("actual old component DSP completes");
-            assert_constant_delay(&audio.main, start as usize, 3);
-        }
-        let cohort = processor
-            .native_configuration_cohort()
-            .expect("live control query")
-            .expect("actual component-requested cohort");
-        assert!(cohort.serial > 0);
-        assert_eq!(
-            cohort.request,
-            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }
-        );
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
         let token = NonZeroU64::new(17).expect("service token");
         // A controller mirror value cannot substitute for the actual successful
         // component DSP configuration. Wrong scalar profile leaves requests live.
@@ -359,6 +333,95 @@ fn assert_constant_delay(pcm: &[f32], processed: usize, delay: usize) {
         );
     }
 }
+
+fn assert_configuration_audio_unchanged(
+    audio: &NativeSidechainAudioIo,
+    main: &[f32],
+    inputs: &[(String, Vec<f32>)],
+) {
+    let bits = |samples: &[f32]| samples.iter().map(|sample| sample.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&audio.main), bits(main));
+    assert_eq!(audio.inputs.len(), inputs.len());
+    for ((key, actual), (expected_key, expected)) in audio.inputs.iter().zip(inputs) {
+        assert_eq!(key, expected_key);
+        assert_eq!(bits(actual), bits(expected));
+    }
+}
+
+fn trigger_vst3_configuration(
+    processor: &mut dyn AudioProcessor,
+    keys: &[String],
+    ids: &[ParameterId],
+    mode: AudioProcessingMode,
+) -> NativeRequestCohort {
+    let restart = mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 };
+    processor.enter_state(0).expect("old epoch");
+    for start in [0, 4] {
+        let mut audio = configuration_audio(keys);
+        let original_main = audio.main.clone();
+        let original_inputs = audio.inputs.clone();
+        let result = processor.process(
+            configuration_context(start, mode),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                start,
+                4,
+                ids,
+                std::slice::from_ref(&(0..1)),
+                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+            ),
+        );
+        if start == 0 {
+            result.expect("first admitted component DSP must complete");
+            assert_constant_delay(&audio.main, 0, 3);
+        } else {
+            match result {
+                Ok(()) => assert_constant_delay(&audio.main, start as usize, 3),
+                Err(error) => {
+                    assert_eq!(error, AudioProcessorHostError::ReprepareRequired(restart));
+                    assert_configuration_audio_unchanged(&audio, &original_main, &original_inputs);
+                }
+            }
+        }
+    }
+    // Main may consume the first scalar sync before or after the first DSP
+    // changes profile 5 to 6. If the second block is admitted, its sync follows
+    // that DSP; otherwise the restart is already observed. This control query
+    // services the sync without submitting another block.
+    let cohort = processor
+        .native_configuration_cohort()
+        .expect("live control query")
+        .expect("actual component-requested cohort within the two-block bound");
+    assert!(cohort.serial > 0);
+    assert_eq!(cohort.request, restart);
+    assert_eq!(
+        processor.preflight_reprepare().expect("pending preflight"),
+        Some(restart)
+    );
+    let mut audio = configuration_audio(keys);
+    let original_main = audio.main.clone();
+    let original_inputs = audio.inputs.clone();
+    assert_eq!(
+        processor.process(
+            configuration_context(8, mode),
+            &mut audio,
+            AudioParameterEventBatch::new(
+                8,
+                4,
+                ids,
+                std::slice::from_ref(&(0..1)),
+                &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
+            ),
+        ),
+        Err(AudioProcessorHostError::ReprepareRequired(restart))
+    );
+    assert_configuration_audio_unchanged(&audio, &original_main, &original_inputs);
+    assert_eq!(
+        processor.native_configuration_cohort().expect("same pending cohort"),
+        Some(cohort)
+    );
+    cohort
+}
 fn assert_candidate(
     candidate: &NativeConfigurationCandidate,
     cohort: NativeRequestCohort,
@@ -505,28 +568,7 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
             .expect("factory")
             .create()
             .expect("same persistent child");
-        processor.enter_state(0).expect("old epoch");
-        for start in [0, 4] {
-            let mut audio = configuration_audio(&keys);
-            processor
-                .process(
-                    configuration_context(start, mode),
-                    &mut audio,
-                    AudioParameterEventBatch::new(
-                        start,
-                        4,
-                        &ids,
-                        std::slice::from_ref(&(0..1)),
-                        &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
-                    ),
-                )
-                .expect("actual desired component DSP trigger");
-            assert_constant_delay(&audio.main, start as usize, 3);
-        }
-        let cohort = processor
-            .native_configuration_cohort()
-            .expect("query")
-            .expect("legal actual cohort");
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
         let result = processor
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
