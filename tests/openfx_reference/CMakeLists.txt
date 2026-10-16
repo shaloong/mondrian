@@ -70,3 +70,30 @@ configure_file("${OPENFX_SOURCE_DIR}/Examples/Basic/Info.plist"
 
 find_package(Threads REQUIRED)
 target_link_libraries(SessionProbe PRIVATE Threads::Threads)
+
+# Small native ownership control: actual tracked HostSupport and product Host,
+# with test-only global allocator failure injection in the executable.
+set(MONDRIAN_OPENFX_HOST "${CMAKE_CURRENT_LIST_DIR}/../../crates/mondrian-app/native/openfx")
+add_executable(ImageMemoryOwnership image_memory_ownership.cpp)
+target_compile_features(ImageMemoryOwnership PRIVATE cxx_std_17)
+target_compile_definitions(ImageMemoryOwnership PRIVATE NOMINMAX OFX_SUPPORTS_MULTITHREAD)
+set_target_properties(ImageMemoryOwnership PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+target_include_directories(ImageMemoryOwnership PRIVATE
+  "${MONDRIAN_OPENFX_HOST}/vendor/include"
+  "${MONDRIAN_OPENFX_HOST}/vendor/host/include"
+  "${MONDRIAN_OPENFX_HOST}/host")
+foreach(source ofxhBinary ofxhClip ofxhHost ofxhImageEffect ofxhImageEffectAPI
+    ofxhInteract ofxhMemory ofxhParam ofxhPluginAPICache ofxhPluginCache
+    ofxhPropertySuite ofxhUtilities)
+  target_sources(ImageMemoryOwnership PRIVATE "${MONDRIAN_OPENFX_HOST}/vendor/host/src/${source}.cpp")
+endforeach()
+foreach(source image_clip effect_instance host_descriptor parameter_instance thread_suite aux_suite)
+  target_sources(ImageMemoryOwnership PRIVATE "${MONDRIAN_OPENFX_HOST}/host/${source}.cpp")
+endforeach()
+if(MSVC)
+  target_compile_options(ImageMemoryOwnership PRIVATE /EHsc /utf-8)
+endif()
+if(WIN32)
+  target_link_libraries(ImageMemoryOwnership PRIVATE shell32)
+endif()
+target_link_libraries(ImageMemoryOwnership PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
