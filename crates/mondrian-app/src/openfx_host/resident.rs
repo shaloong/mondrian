@@ -154,6 +154,7 @@ fn check_owner(
 struct ProcessOwner {
     child: Child,
     state: ProcessState,
+    close_trace: close_observation::Trace,
 }
 
 /// Admission is revoked before cleanup. Only observed exit establishes settlement.
@@ -164,6 +165,13 @@ enum ProcessState {
     Settled,
 }
 impl ProcessOwner {
+    /// The existing sole Child observer has already confirmed native exit.
+    /// Diagnostics borrow its retained handle and cannot change settlement.
+    fn confirmed_exit(&mut self) {
+        self.state = ProcessState::Settled;
+        self.close_trace.record_process_exit(&self.child);
+    }
+
     fn check(
         &mut self,
         owner_checkpoint: &mut dyn FnMut() -> Result<(), OpenFxHostError>,
@@ -180,7 +188,7 @@ impl ProcessOwner {
         match self.child.try_wait() {
             Ok(None) => Ok(()),
             Ok(Some(status)) => {
-                self.state = ProcessState::Settled;
+                self.confirmed_exit();
                 Err(OpenFxHostError::WorkerFailed(format!(
                     "native session exited ({status})"
                 )))
@@ -212,7 +220,7 @@ impl ProcessOwner {
         self.state = ProcessState::Retiring;
         let observation_error = match observe(&mut self.child) {
             Ok(Some(_)) => {
-                self.state = ProcessState::Settled;
+                self.confirmed_exit();
                 return Ok(());
             }
             Ok(None) => None,
@@ -225,7 +233,7 @@ impl ProcessOwner {
         if let Err(error) = kill(&mut self.child) {
             let final_observation = match observe(&mut self.child) {
                 Ok(Some(_)) => {
-                    self.state = ProcessState::Settled;
+                    self.confirmed_exit();
                     return Ok(());
                 }
                 Ok(None) => "post-kill try_wait: child still running".to_owned(),
@@ -243,7 +251,7 @@ impl ProcessOwner {
         }
         match wait(&mut self.child) {
             Ok(_) => {
-                self.state = ProcessState::Settled;
+                self.confirmed_exit();
                 Ok(())
             }
             Err(error) => Err(unavailable(format!(
@@ -290,7 +298,6 @@ pub struct OpenFxFilterSession {
     feedback: Option<mondrian_effects::EffectProcessorFeedback>,
     response_reader: pump::PacketReader,
     request_writer: pump::PacketWriter,
-    close_trace: close_observation::Trace,
 }
 
 /// Owner-thread observations from the sole native request transport.
@@ -516,8 +523,9 @@ impl OpenFxFilterSession {
         let mut process = ProcessOwner {
             child: command.spawn().map_err(control_error)?,
             state: ProcessState::Running,
+            close_trace,
         };
-        close_trace.set_child(&process.child);
+        process.close_trace.set_child(&process.child);
         let deadline = Instant::now() + DEADLINE;
         let mut control = loop {
             process.check(owner_checkpoint, deadline)?;
@@ -579,7 +587,6 @@ impl OpenFxFilterSession {
             feedback: None,
             response_reader,
             request_writer,
-            close_trace,
         })
     }
 
@@ -1280,7 +1287,7 @@ impl OpenFxFilterSession {
             ProcessState::Running => {}
         }
         let deadline = Instant::now() + RETIRE;
-        self.close_trace.record(close_observation::Stage::ParentBegin, 0);
+        self.process.close_trace.record(close_observation::Stage::ParentBegin, 0);
         let graceful = (|| {
             let mut checkpoint = || {
                 if Instant::now() >= deadline {
@@ -1288,7 +1295,7 @@ impl OpenFxFilterSession {
                 }
                 Ok(())
             };
-            self.close_trace.record(close_observation::Stage::ParentSendBegin, 0);
+            self.process.close_trace.record(close_observation::Stage::ParentSendBegin, 0);
             let mut committed = false;
             let send = self.request_writer.write(
                 &mut self.control,
@@ -1300,7 +1307,8 @@ impl OpenFxFilterSession {
             // The existing writer sets this before its final deadline check.
             // Preserve actual complete-send evidence even if that check fails.
             if committed {
-                self.close_trace
+                self.process
+                    .close_trace
                     .record(close_observation::Stage::ParentSendCommittedObserved, 0);
             }
             send?;
@@ -1320,14 +1328,16 @@ impl OpenFxFilterSession {
             if !matches!(response, Response::Closed {}) {
                 return Err(unavailable("native session did not close"));
             }
-            self.close_trace.record(close_observation::Stage::ParentClosedObserved, 0);
+            self.process
+                .close_trace
+                .record(close_observation::Stage::ParentClosedObserved, 0);
             loop {
                 if let Some(status) = self.process.child.try_wait().map_err(control_error)? {
-                    self.close_trace.record(
+                    self.process.close_trace.record(
                         close_observation::Stage::ParentOsExitObserved,
                         status.code().unwrap_or(-1) as u32,
                     );
-                    self.process.state = ProcessState::Settled;
+                    self.process.confirmed_exit();
                     return if status.success() {
                         Ok(())
                     } else {
@@ -1340,13 +1350,15 @@ impl OpenFxFilterSession {
                 thread::sleep(Duration::from_millis(1));
             }
         })();
-        self.close_trace.record(
+        self.process.close_trace.record(
             close_observation::Stage::ParentGracefulEnd,
             close_observation::result_code(&graceful),
         );
-        self.close_trace.record(close_observation::Stage::ParentSettlementBegin, 0);
+        self.process
+            .close_trace
+            .record(close_observation::Stage::ParentSettlementBegin, 0);
         let settlement = self.process.terminate();
-        self.close_trace.record(
+        self.process.close_trace.record(
             close_observation::Stage::ParentSettlementEnd,
             close_observation::result_code(&settlement),
         );
@@ -2995,7 +3007,7 @@ mod process_retirement_tests {
         panic!("outer owner failed to settle its sleeping child");
     }
 
-    fn sleeping_owner() -> (ProcessOwner, tempfile::TempDir) {
+    pub(super) fn sleeping_owner() -> (ProcessOwner, tempfile::TempDir) {
         require_actual_job();
         let directory = tempfile::tempdir().expect("exclusive child markers");
         let ready = directory.path().join("ready");
@@ -3016,7 +3028,11 @@ mod process_retirement_tests {
             .expect("spawn actual inherited-Job child");
         // Wrap immediately: all later assertion/unwind paths use the same
         // production cleanup, never ignored kill followed by unconditional wait.
-        let mut owner = ProcessOwner { child, state: ProcessState::Running };
+        let mut owner = ProcessOwner {
+            child,
+            state: ProcessState::Running,
+            close_trace: close_observation::Trace::default(),
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             assert!(Instant::now() < deadline, "child readiness deadline");
@@ -3050,7 +3066,7 @@ mod process_retirement_tests {
         }
     }
 
-    fn request_natural_exit(directory: &tempfile::TempDir) {
+    pub(super) fn request_natural_exit(directory: &tempfile::TempDir) {
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -3066,7 +3082,7 @@ mod process_retirement_tests {
         text
     }
 
-    fn assert_settled_idempotent(owner: &mut ProcessOwner) {
+    pub(super) fn assert_settled_idempotent(owner: &mut ProcessOwner) {
         assert_eq!(owner.state, ProcessState::Settled);
         owner
             .terminate_with(

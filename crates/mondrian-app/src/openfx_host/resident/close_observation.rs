@@ -5,6 +5,8 @@
 //! waiter occurs in a close record. Read/decode only after the original owner
 //! has settled. Zero slots are missing; status 2 is a failed clock observation.
 //! QPC ticks use one Windows system clock/frequency, never process-local Instant.
+//! Version 2 adds a parent-only exit observation in the reserved tail. UTC
+//! FILETIMEs are diagnostic raw facts, never deadlines or interval authority.
 use super::*;
 
 const DIRECTORY_ENV: &str = "MONDRIAN_OPENFX_CLOSE_OBSERVATION_DIRECTORY";
@@ -95,6 +97,15 @@ impl Trace {
         let _ = child;
     }
 
+    /// Called only after the sole ProcessOwner has confirmed this Child exited.
+    pub(super) fn record_process_exit(&self, child: &Child) {
+        #[cfg(windows)]
+        if let Some(mapping) = &self.mapping {
+            mapping.record_process_exit(child);
+        }
+        let _ = child;
+    }
+
     pub(super) fn record(&self, stage: Stage, value: u32) {
         #[cfg(windows)]
         if let Some(mapping) = &self.mapping {
@@ -119,13 +130,17 @@ mod windows {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::ptr::NonNull;
     use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
+    use windows_sys::Win32::Foundation::{GetLastError, FILETIME};
     use windows_sys::Win32::System::Performance::{
         QueryPerformanceCounter, QueryPerformanceFrequency,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes,
+    };
 
     const BYTES: usize = 4096;
-    const MAGIC: [u8; 8] = *b"OFXCLQ01";
+    const MAGIC: [u8; 8] = *b"OFXCLQ02";
     const SLOTS: usize = 16;
 
     // Binary little-endian x64 layout, independently readable after settlement.
@@ -163,6 +178,77 @@ mod windows {
             self.status.store(if qpc.is_some() { 1 } else { 2 }, Ordering::Release);
         }
     }
+    // Parent-only, single-writer publication after authoritative Child exit.
+    // status: 0 missing, 1 usable UTC facts, 2 GetProcessTimes failed,
+    // 3 a zero timestamp, 4 creation/exit/observation UTC ordering invalid.
+    // Non-1 states retain raw diagnostics but never establish a usable gap.
+    #[repr(C, align(64))]
+    struct ExitObservation {
+        status: AtomicU32,
+        pid: AtomicU32,
+        tid: AtomicU32,
+        raw_os_error: AtomicU32,
+        observed_utc_filetime: AtomicU64,
+        creation_utc_filetime: AtomicU64,
+        exit_utc_filetime: AtomicU64,
+        _reserved: [u8; 24],
+    }
+    struct ProcessTimes {
+        creation: u64,
+        exit: u64,
+    }
+    impl ExitObservation {
+        fn new() -> Self {
+            Self {
+                status: AtomicU32::new(0),
+                pid: AtomicU32::new(0),
+                tid: AtomicU32::new(0),
+                raw_os_error: AtomicU32::new(0),
+                observed_utc_filetime: AtomicU64::new(0),
+                creation_utc_filetime: AtomicU64::new(0),
+                exit_utc_filetime: AtomicU64::new(0),
+                _reserved: [0; 24],
+            }
+        }
+        fn commit(&self, pid: u32, tid: u32, observed: u64, times: Result<ProcessTimes, u32>) {
+            if self.status.load(Ordering::Relaxed) != 0 {
+                return;
+            }
+            self.pid.store(pid, Ordering::Relaxed);
+            self.tid.store(tid, Ordering::Relaxed);
+            self.observed_utc_filetime.store(observed, Ordering::Relaxed);
+            let status = match times {
+                Err(error) => {
+                    self.raw_os_error.store(error, Ordering::Relaxed);
+                    2
+                }
+                Ok(times) => {
+                    self.creation_utc_filetime.store(times.creation, Ordering::Relaxed);
+                    self.exit_utc_filetime.store(times.exit, Ordering::Relaxed);
+                    if observed == 0 || times.creation == 0 || times.exit == 0 {
+                        3
+                    } else if times.creation > times.exit || times.exit > observed {
+                        4
+                    } else {
+                        1
+                    }
+                }
+            };
+            self.status.store(status, Ordering::Release);
+        }
+        #[cfg(test)]
+        fn observed_gap_100ns(&self) -> Option<u64> {
+            if self.status.load(Ordering::Acquire) != 1 {
+                return None;
+            }
+            self.observed_utc_filetime
+                .load(Ordering::Relaxed)
+                .checked_sub(self.exit_utc_filetime.load(Ordering::Relaxed))
+        }
+    }
+    fn filetime_ticks(time: FILETIME) -> u64 {
+        (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+    }
     #[repr(C, align(64))]
     struct Header {
         magic: [u8; 8],
@@ -181,15 +267,24 @@ mod windows {
     struct Layout {
         header: Header,
         records: [Record; SLOTS],
-        _reserved: [u8; 2944],
+        exit_observation: ExitObservation,
+        _reserved: [u8; 2880],
     }
-    const _: () = assert!(std::mem::size_of::<Layout>() == BYTES);
+    const _: () = {
+        assert!(std::mem::size_of::<Header>() == 128);
+        assert!(std::mem::size_of::<Record>() == 64);
+        assert!(std::mem::size_of::<ExitObservation>() == 64);
+        assert!(std::mem::offset_of!(Layout, records) == 128);
+        assert!(std::mem::offset_of!(Layout, exit_observation) == 1152);
+        assert!(std::mem::offset_of!(Layout, _reserved) == 1216);
+        assert!(std::mem::size_of::<Layout>() == BYTES);
+    };
     impl Layout {
         fn new(owner: [u8; 16], nonce: [u8; 16], frequency: i64, parent_pid: u32) -> Self {
             Self {
                 header: Header {
                     magic: MAGIC,
-                    version: 1,
+                    version: 2,
                     bytes: BYTES as u32,
                     frequency,
                     owner,
@@ -201,13 +296,14 @@ mod windows {
                     _reserved: [0; 52],
                 },
                 records: std::array::from_fn(|_| Record::new()),
-                _reserved: [0; 2944],
+                exit_observation: ExitObservation::new(),
+                _reserved: [0; 2880],
             }
         }
         fn valid(&self, owner: &[u8; 16], nonce: &[u8; 16], frequency: i64) -> bool {
             self.header.ready.load(Ordering::Acquire) == 1
                 && self.header.magic == MAGIC
-                && self.header.version == 1
+                && self.header.version == 2
                 && self.header.bytes == BYTES as u32
                 && frequency > 0
                 && self.header.frequency == frequency
@@ -337,6 +433,43 @@ mod windows {
             self.layout().header.process_handle.store(handle, Ordering::Relaxed);
             self.layout().header.child_pid.store(pid, Ordering::Release);
         }
+        pub(super) fn record_process_exit(&self, child: &Child) {
+            use std::os::windows::io::AsRawHandle;
+            let record = &self.layout().exit_observation;
+            if record.status.load(Ordering::Relaxed) != 0 {
+                return;
+            }
+            let mut observed: FILETIME = unsafe { std::mem::zeroed() };
+            let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+            let mut exit: FILETIME = unsafe { std::mem::zeroed() };
+            let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+            let mut user: FILETIME = unsafe { std::mem::zeroed() };
+            // SAFETY: the sole owner already confirmed exit and retains this
+            // exact Child handle throughout the calls. Every output points to
+            // one live FILETIME. No handle is opened, duplicated, waited or closed.
+            // UTC is sampled at this observation, never used for a deadline.
+            unsafe { GetSystemTimePreciseAsFileTime(&mut observed) };
+            let ok = unsafe {
+                GetProcessTimes(
+                    child.as_raw_handle(),
+                    &mut creation,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )
+            };
+            // Preserve the failed call's error before any other Windows API.
+            let times = if ok == 0 {
+                Err(unsafe { GetLastError() })
+            } else {
+                Ok(ProcessTimes {
+                    creation: filetime_ticks(creation),
+                    exit: filetime_ticks(exit),
+                })
+            };
+            let tid = unsafe { GetCurrentThreadId() };
+            record.commit(self.pid, tid, filetime_ticks(observed), times);
+        }
         pub(super) fn record(&self, stage: Stage, value: u32) {
             let record = &self.layout().records[stage as usize];
             if record.status.load(Ordering::Relaxed) != 0 {
@@ -359,6 +492,10 @@ mod windows {
             let mut layout = Layout::new([1; 16], [2; 16], 10_000_000, 42);
             assert_eq!(std::mem::size_of::<Header>(), 128);
             assert_eq!(std::mem::size_of::<Record>(), 64);
+            assert_eq!(std::mem::size_of::<ExitObservation>(), 64);
+            assert_eq!(std::mem::offset_of!(Layout, records), 128);
+            assert_eq!(std::mem::offset_of!(Layout, exit_observation), 1152);
+            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1216);
             assert_eq!(std::mem::size_of::<Layout>(), 4096);
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.ready.store(1, Ordering::Release);
@@ -367,6 +504,12 @@ mod windows {
             assert!(!layout.valid(&[1; 16], &[3; 16], 10_000_000));
             assert!(!layout.valid(&[1; 16], &[2; 16], 1));
             assert!(!layout.valid(&[1; 16], &[2; 16], 0));
+            layout.header.version = 1;
+            assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
+            layout.header.version = 2;
+            layout.header.magic = *b"OFXCLQ01";
+            assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
+            layout.header.magic = MAGIC;
             layout.header.bytes = 4095;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
         }
@@ -387,6 +530,128 @@ mod windows {
             assert_eq!(failed.qpc.load(Ordering::Relaxed), 0);
             assert_eq!(failed.value.load(Ordering::Relaxed), 5);
         }
+        #[test]
+        fn exit_observation_keeps_query_failure_zero_and_utc_order_unknown() {
+            let failed = ExitObservation::new();
+            failed.commit(11, 22, 50, Err(5));
+            assert_eq!(failed.status.load(Ordering::Acquire), 2);
+            assert_eq!(failed.raw_os_error.load(Ordering::Relaxed), 5);
+            assert_eq!(failed.observed_gap_100ns(), None);
+            assert_eq!(failed.exit_utc_filetime.load(Ordering::Relaxed), 0);
+            // A later success cannot rewrite the first immutable failure.
+            failed.commit(99, 99, 500, Ok(ProcessTimes { creation: 1, exit: 2 }));
+            assert_eq!(failed.raw_os_error.load(Ordering::Relaxed), 5);
+            assert_eq!(failed.pid.load(Ordering::Relaxed), 11);
+            assert_eq!(failed.observed_gap_100ns(), None);
+            for (observed, creation, exit, status) in [
+                (0, 10, 20, 3),
+                (30, 0, 20, 3),
+                (30, 10, 0, 3),
+                (30, 21, 20, 4),
+                (19, 10, 20, 4),
+            ] {
+                let record = ExitObservation::new();
+                record.commit(11, 22, observed, Ok(ProcessTimes { creation, exit }));
+                assert_eq!(record.status.load(Ordering::Acquire), status);
+                assert_eq!(record.observed_gap_100ns(), None);
+            }
+            let record = ExitObservation::new();
+            assert_eq!(record.observed_gap_100ns(), None);
+            record.commit(11, 22, 50, Ok(ProcessTimes { creation: 10, exit: 20 }));
+            assert_eq!(record.status.load(Ordering::Acquire), 1);
+            assert_eq!(record.observed_gap_100ns(), Some(30));
+            record.commit(99, 99, 500, Err(6));
+            assert_eq!(record.observed_gap_100ns(), Some(30));
+            assert_eq!(record.raw_os_error.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                filetime_ticks(FILETIME {
+                    dwLowDateTime: 0x89ab_cdef,
+                    dwHighDateTime: 0x1234_5678
+                }),
+                0x1234_5678_89ab_cdef,
+            );
+        }
+
+        #[test]
+        #[ignore = "requires actual outer owner Job; naturally exited same-handle child with delayed observation"]
+        fn owned_natural_exit_timestamp_distinguishes_delayed_parent_observation() {
+            use crate::openfx_host::resident::process_retirement_tests::{
+                assert_settled_idempotent, request_natural_exit, sleeping_owner,
+            };
+            use std::os::windows::io::AsRawHandle;
+            let (mut owner, child_directory) = sleeping_owner();
+            let trace_directory = tempfile::tempdir().expect("private exit observation directory");
+            let processor_owner = mondrian_core::EffectProcessorOwnerId::new();
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let (mapping, _path) = Mapping::create(
+                trace_directory.path().to_path_buf(),
+                processor_owner,
+                &nonce,
+            )
+            .expect("actual fixed observation mapping");
+            let mapping = std::sync::Arc::new(mapping);
+            owner.close_trace = Trace { mapping: Some(mapping.clone()) };
+            owner.close_trace.set_child(&owner.child);
+            let pid = owner.child.id();
+            let handle = owner.child.as_raw_handle() as usize as u64;
+            request_natural_exit(&child_directory);
+            // No Child exit query occurs between this request and the delayed
+            // observation below. The OS exit FILETIME, not this sleep, proves
+            // how long the already-exited child preceded parent observation.
+            let delay = Instant::now();
+            thread::sleep(Duration::from_millis(300));
+            let delay_elapsed = delay.elapsed();
+            owner
+                .terminate_with(
+                    |child| {
+                        let status = child.try_wait()?;
+                        assert_eq!(
+                            status.and_then(|status| status.code()),
+                            Some(7),
+                            "must confirm natural fixture exit before recording"
+                        );
+                        Ok(status)
+                    },
+                    |_| panic!("natural-exit control must never kill"),
+                    |_| panic!("natural-exit control must never wait"),
+                )
+                .expect("same owner confirms the naturally exited child");
+            let record = &mapping.layout().exit_observation;
+            assert_eq!(record.status.load(Ordering::Acquire), 1);
+            let gap = record.observed_gap_100ns().expect("usable same-domain raw UTC facts");
+            assert!(
+                gap >= 1_500_000,
+                "actual exit-to-observation gap below 150ms: {gap} ticks"
+            );
+            assert_eq!(
+                mapping.layout().header.child_pid.load(Ordering::Acquire),
+                pid
+            );
+            assert_eq!(
+                mapping.layout().header.process_handle.load(Ordering::Relaxed),
+                handle
+            );
+            assert_settled_idempotent(&mut owner);
+            assert_eq!(record.observed_gap_100ns(), Some(gap));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "control": "owned_natural_exit_timestamp_distinguishes_delayed_parent_observation",
+                    "schema_version": 2,
+                    "child_pid": pid,
+                    "retained_child_handle": handle,
+                    "natural_exit_code": 7,
+                    "observation_status": record.status.load(Ordering::Acquire),
+                    "raw_os_error": record.raw_os_error.load(Ordering::Relaxed),
+                    "creation_utc_filetime": record.creation_utc_filetime.load(Ordering::Relaxed),
+                    "exit_utc_filetime": record.exit_utc_filetime.load(Ordering::Relaxed),
+                    "parent_observed_utc_filetime": record.observed_utc_filetime.load(Ordering::Relaxed),
+                    "exit_to_observation_100ns": gap,
+                    "deliberate_parent_delay_ms": delay_elapsed.as_millis() as u64,
+                })
+            );
+        }
+
         #[test]
         fn separately_mapped_views_keep_identity_one_shot_and_create_new_ownership() {
             let directory = tempfile::tempdir().expect("private trace directory");
