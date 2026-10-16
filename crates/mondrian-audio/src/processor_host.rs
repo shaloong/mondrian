@@ -537,11 +537,36 @@ impl PreparedProcessorHost {
                                                 .map_err(|_| crate::AudioProcessorHostError::NativeParameterSourceUnavailable)?,
                                         ),
                                     },
-                                    crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags, values } => mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned {
-                                        flags, values: values.into_iter().map(|event| {
-                                            let scalar = event.value.ok_or(crate::AudioProcessorHostError::NativeParameterSourceUnavailable)?;
-                                            Ok((event.parameter, scalar.bits()))
-                                        }).collect::<Result<Vec<_>, crate::AudioProcessorHostError>>()?,
+                                    crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags, values } => {
+                                        let limit = mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES;
+                                        if values.len() > limit || values.capacity() > limit {
+                                            return Err(crate::AudioProcessorHostError::InvalidContract(
+                                                mondrian_core::NativeAudioAuthorProjectionError::Extent.to_string(),
+                                            ));
+                                        }
+                                        // A fallible collect can recycle the larger native-event
+                                        // allocation as tuples and inflate its element capacity.
+                                        // Own a bounded tuple allocation instead. It overlaps the
+                                        // source briefly on this non-RT poll; no full startup/RT
+                                        // aggregate resource grant is asserted by this projection.
+                                        let mut projected = Vec::new();
+                                        projected.try_reserve_exact(values.len()).map_err(|_| {
+                                            crate::AudioProcessorHostError::NativeParameterSourceUnavailable
+                                        })?;
+                                        if projected.capacity() > limit {
+                                            return Err(crate::AudioProcessorHostError::InvalidContract(
+                                                mondrian_core::NativeAudioAuthorProjectionError::Extent.to_string(),
+                                            ));
+                                        }
+                                        for event in values {
+                                            let scalar = event.value.ok_or(
+                                                crate::AudioProcessorHostError::NativeParameterSourceUnavailable,
+                                            )?;
+                                            projected.push((event.parameter, scalar.bits()));
+                                        }
+                                        mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned {
+                                            flags, values: projected,
+                                        }
                                     },
                                     crate::NativeAudioAuthorEvent::ParameterReferencesCleared { parameter, flags } => mondrian_core::NativeAudioAuthorCallback::ParameterReferencesCleared { parameter, flags },
                                     crate::NativeAudioAuthorEvent::DirtyChanged(value) => mondrian_core::NativeAudioAuthorCallback::DirtyChanged(value),

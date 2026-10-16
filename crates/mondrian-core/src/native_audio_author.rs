@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 /// Maximum callback records in one product author completion.
 pub const NATIVE_AUDIO_AUTHOR_CALLBACKS: usize = 4096;
+/// Maximum combined retained value capacities across rescan callbacks in one
+/// native author completion. Initialized value counts do not replace capacities.
+pub const NATIVE_AUDIO_AUTHOR_RESCAN_VALUES: usize = 1024;
 /// Maximum coherent component/controller bytes in one product completion.
 pub const NATIVE_AUDIO_AUTHOR_STATE_BYTES: usize = 128 * 1024;
 
@@ -174,11 +177,11 @@ impl NativeAudioAuthorProposal {
                     scanned_values = scanned_values
                         .checked_add(values.capacity())
                         .ok_or(NativeAudioAuthorProjectionError::Extent)?;
-                    if scanned_values > 1024 {
+                    if scanned_values > NATIVE_AUDIO_AUTHOR_RESCAN_VALUES {
                         return Err(NativeAudioAuthorProjectionError::Extent);
                     }
                     if flags & !15 != 0
-                        || values.capacity() > 1024
+                        || values.capacity() > NATIVE_AUDIO_AUTHOR_RESCAN_VALUES
                         || (flags & 9 == 0 && !values.is_empty())
                         || values.iter().any(|(id, bits)| {
                             id.storage_owner().capacity() > 255

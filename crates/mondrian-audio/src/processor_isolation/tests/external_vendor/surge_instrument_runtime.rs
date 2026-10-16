@@ -11,15 +11,20 @@ use crate::processor_isolation::{
 use crate::{
     AudioCompileRequest, AudioContinuityEpoch, AudioMediaResolver, AudioProcessingMode,
     AudioProcessorCursorState, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    AudioRuntimeResourceGrant, AudioStateEntry, ResolvedAudioSource,
+    AudioRuntimeResourceGrant, AudioStateEntry, NativeAudioAuthorProgram,
+    NativeAudioParameterHandoffContinuity, ResolvedAudioSource,
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioNoteId, AudioNoteLaneId, AudioOwnerInstallationSource,
-    AudioSourceComponentId, AuthoringList, ExecutionCancellationToken, TimelineTime,
+    AudioSourceComponentId, AuthoringList, ExecutionCancellationToken, NativeAudioAuthorCallback,
+    NativeAudioAuthorCompletion, TimelineTime,
 };
-use mondrian_timeline::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
+use mondrian_timeline::audio::{AudioChannelStripOwner, AudioNote, AudioNoteLane, AudioNoteTarget};
 use mondrian_timeline::{
-    AudioProcessorOutputPort, AudioRoute, AudioRouteDestination, AudioRouteSource, Sequence,
+    apply_audio_processor_rack_edit, AudioChannelStripRack, AudioProcessorOutputPort,
+    AudioProcessorRackAddress, AudioProcessorRackEdit, AudioProcessorRackEditRequest, AudioRoute,
+    AudioRouteDestination, AudioRouteSource, NativeAudioAuthorUpdate, NativeAudioParameterWrite,
+    NativeAudioParameterWriteMode, Sequence,
 };
 use serde_json::json;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -50,6 +55,249 @@ impl AudioMediaResolver for NoMedia {
         self.0.fetch_add(1, Ordering::SeqCst);
         Err("instrument-only Runtime must not resolve media".into())
     }
+}
+
+// The App's Rescan policy, applied through the original canonical transaction
+// and Source installation. A copied proposal never supplies its own Ack.
+fn accept_actual_rescans(
+    runtime: &mut AudioProgramRuntime,
+    sequence: &mut Sequence,
+    source: &AudioOwnerInstallationSource,
+    expected_object: crate::NativeAudioObjectObservation,
+) -> (usize, usize) {
+    let cancel = ExecutionCancellationToken::new();
+    let track = sequence.audio_tracks[0].id;
+    let output = sequence.audio_program.outputs[0].id;
+    let score = sequence.audio_program.note_lanes.clone();
+    let routes = sequence.audio_program.routes.clone();
+    let mut rescan_handoffs = 0;
+    for handoffs in 0..4 {
+        let lease = owner(runtime);
+        let target = lease.editor_target();
+        assert_eq!(
+            runtime.observe_native_owner_object(lease).unwrap(),
+            expected_object
+        );
+        let batch = runtime.poll_native_observations(&cancel).expect("actual bounded native poll");
+        let current = &sequence.audio_program.track_channels[&track].strip.pre_fader.processors[0];
+        assert_eq!(target.instance, current.id);
+        assert_eq!(
+            target.owner,
+            mondrian_core::NativeAudioEditorOccurrenceOwner::Track(track)
+        );
+        assert_eq!(
+            target.insertion,
+            mondrian_core::NativeAudioEditorInsertion::PreFader
+        );
+        if let Some(batch) = &batch {
+            if let Some(parameters) = &batch.parameters {
+                assert_eq!(parameters.target(), target);
+                assert_eq!(parameters.process_id(), expected_object.process_id());
+                assert_eq!(parameters.object_serial(), expected_object.object_serial());
+                assert!(parameters.facts().len() <= mondrian_core::NATIVE_AUDIO_PARAMETER_FACTS);
+                for fact in parameters.facts() {
+                    fact.validate().expect("bounded actual parameter presentation");
+                    assert!(fact.revision <= parameters.source_revision());
+                    assert!(
+                        current.parameters.contains_key(&fact.parameter),
+                        "unknown parameter fact"
+                    );
+                }
+            }
+            if let Some(logs) = &batch.diagnostics {
+                assert!(
+                    !logs.loss().incomplete(),
+                    "native diagnostic loss cannot be ignored"
+                );
+                let actual = logs.source();
+                assert_eq!(actual.process_id, expected_object.process_id());
+                assert_eq!(
+                    (actual.root_plan, actual.root_session),
+                    (target.root_plan, target.root_session)
+                );
+                assert_eq!(
+                    (actual.local_plan, actual.local_session),
+                    (target.local_plan, target.local_session)
+                );
+                assert_eq!(actual.instance, target.instance);
+                assert_eq!(
+                    actual.location,
+                    mondrian_core::NativeAudioDiagnosticLocation::Track(track)
+                );
+                assert_eq!(
+                    actual.insertion,
+                    mondrian_core::NativeAudioDiagnosticInsertion::PreFader
+                );
+                for record in logs.records() {
+                    assert_eq!(
+                        record.facts(),
+                        mondrian_core::NativeAudioDiagnosticMessageFacts::default(),
+                        "incomplete diagnostic record"
+                    );
+                }
+            }
+        }
+        let Some(proposal) = batch.and_then(|batch| batch.author) else {
+            runtime
+                .validate_native_author_source_closed(&cancel)
+                .expect("no proposal is not proof of a closed Source");
+            assert_eq!(
+                runtime.observe_native_owner_object(owner(runtime)).unwrap(),
+                expected_object
+            );
+            return (handoffs, rescan_handoffs);
+        };
+        assert_eq!(proposal.target(), target);
+        assert_eq!(proposal.sequence(), sequence.id);
+        assert!(proposal.revision() > 0);
+        assert!(!proposal.callbacks().is_empty());
+        assert!(proposal.callbacks().len() <= mondrian_core::NATIVE_AUDIO_AUTHOR_CALLBACKS);
+        assert_eq!(proposal.open_parameter_edits(), 0);
+        assert_eq!(proposal.group_depth(), 0);
+        assert_eq!(
+            proposal.completion(),
+            NativeAudioAuthorCompletion::CoherentConfiguration
+        );
+        let state = proposal.state().expect("closed actual rescan requires coherent state");
+        assert!(
+            !state.is_empty() && state.len() <= 64 * 1024,
+            "actual bounded coherent state"
+        );
+        let mut writes = Vec::new();
+        let mut scanned = 0usize;
+        for callback in proposal.callbacks() {
+            match callback {
+                NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } => {
+                    assert_eq!(flags & !15, 0, "unknown rescan flags");
+                    scanned = scanned.checked_add(values.len()).expect("bounded rescan sum");
+                    assert!(scanned <= 1024, "original actual rescan value bound");
+                    assert!(flags & 9 != 0 || values.is_empty());
+                    for (id, bits) in values {
+                        let parameter = current.parameters.get(id).expect("unknown rescan schema");
+                        let value = f64::from_bits(*bits);
+                        assert!(value.is_finite());
+                        // Match the App: absent references stay absent; keyed
+                        // automation stays sole authority. Unknown IDs refuse.
+                        if flags & 9 != 0
+                            && parameter
+                                .automation
+                                .as_ref()
+                                .is_some_and(|curve| curve.keyframes.is_empty())
+                        {
+                            writes.push(
+                                NativeAudioParameterWrite {
+                                    schema: Box::new(parameter.schema.clone()),
+                                    value,
+                                    mode: NativeAudioParameterWriteMode::Unkeyed,
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                }
+                NativeAudioAuthorCallback::DirtyChanged(_) => {}
+                other => panic!("no canonical policy for actual callback: {other:?}"),
+            }
+        }
+        let request = AudioProcessorRackEditRequest {
+            address: AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: track },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            edit: AudioProcessorRackEdit::SetNativeAuthorState {
+                processor_id: current.id,
+                expected_definition: current.definition.clone(),
+                update: NativeAudioAuthorUpdate {
+                    parameters: writes,
+                    opaque_state: Some(state.clone()),
+                },
+            },
+        };
+        apply_audio_processor_rack_edit(sequence, &request)
+            .expect("atomic actual Track native-author transaction");
+        assert_eq!(sequence.audio_program.note_lanes, score);
+        assert_eq!(sequence.audio_program.routes, routes);
+        assert!(sequence.audio_program.sidechain_routes.is_empty());
+        let programs = [NativeAudioAuthorProgram {
+            sequence: sequence.id,
+            program: Arc::new(
+                crate::compile_audio_program(sequence, AudioCompileRequest::program(output))
+                    .expect("same canonical output and Note score"),
+            ),
+        }];
+        let mut before = Cursors::default();
+        runtime.visit_continuity_evidence(&mut before).unwrap();
+        let (registration, destination) = source.register().expect("same Source registration");
+        let current_claim = source.current_claim().unwrap().expect("actual installed Source claim");
+        let reservation = source.reserve_install(&registration, Some(&current_claim)).unwrap();
+        let mut authorization = source.authorize_runtime_installation(reservation).unwrap();
+        let mut prepared = runtime
+            .prepare_native_author_parameter_handoff(&programs, &proposal, destination, &cancel)
+            .expect("original grant and exact native-author handoff");
+        let installed = runtime
+            .install_native_author_parameter_handoff(&mut prepared, &mut authorization, &cancel)
+            .expect("actual Plan/Source installation");
+        assert_eq!(
+            installed.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_eq!(installed.target.continuity_epoch, target.continuity_epoch);
+        assert!(installed.claim.generation() > current_claim.generation());
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            installed.claim.generation()
+        );
+        drop(prepared);
+        let acknowledged = runtime
+            .acknowledge_native_author_parameter_handoff(&proposal, &cancel)
+            .expect("Ack only after actual canonical installation");
+        assert_eq!(
+            acknowledged.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_eq!(acknowledged.target, installed.target);
+        assert_eq!(
+            acknowledged.claim.generation(),
+            installed.claim.generation()
+        );
+        let fresh = owner(runtime);
+        assert_eq!(fresh.editor_target(), acknowledged.target);
+        assert_eq!(
+            acknowledged.target.continuity_epoch,
+            target.continuity_epoch
+        );
+        assert_eq!(
+            runtime.observe_native_owner_object(fresh).unwrap(),
+            expected_object
+        );
+        let mut after = Cursors::default();
+        runtime.visit_continuity_evidence(&mut after).unwrap();
+        assert_eq!(before.sessions.len(), after.sessions.len());
+        assert_eq!(before.processors.len(), after.processors.len());
+        for (before, after) in before.sessions.iter().zip(&after.sessions) {
+            assert_eq!(
+                before.state, after.state,
+                "handoff must not Enter or advance Session"
+            );
+            assert_eq!(before.sample_rate, after.sample_rate);
+            assert_eq!(
+                before.public_output_lookahead_frames,
+                after.public_output_lookahead_frames
+            );
+        }
+        for (before, after) in before.processors.iter().zip(&after.processors) {
+            assert_eq!(before.occurrence, after.occurrence);
+            assert_eq!(
+                before.state, after.state,
+                "handoff must preserve the actual native input prefix"
+            );
+        }
+        assert_eq!(runtime.resource_footprint().media_window_bytes, 0);
+        if scanned > 0 {
+            rescan_handoffs += 1;
+        }
+    }
+    panic!("native Source did not close within four actual proposal polls");
 }
 
 #[test]
@@ -242,8 +490,8 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     runtime
         .install_native_owner_bindings(&claim, &cancel)
         .expect("original Source installs the actual Runtime owner");
-    // No proposal is drained/discarded and no Ack is fabricated. An unresolved
-    // native author source refuses this slice and remains an explicit failure.
+    // Cold installation must already be closed. Later genuine Rescan prefixes
+    // use the canonical transaction/Source/Ack path; nothing is discarded.
     runtime
         .validate_native_author_source_closed(&cancel)
         .expect("cold native Source must already be serviced before state entry");
@@ -277,20 +525,93 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
             start_sample: 0,
         })
         .expect("actual instrument state entry, no seek/reset substitute");
+    let (mut author_handoffs, mut rescan_handoffs) =
+        accept_actual_rescans(&mut runtime, &mut sequence, &source, cold);
     let mut energy = 0.0_f64;
     let mut peak = 0.0_f32;
-    for start in (0..TOTAL).step_by(BLOCK) {
+    for (completed_blocks, start) in (0..TOTAL).step_by(BLOCK).enumerate() {
         let mut pcm = vec![f32::NAN; BLOCK * render.channel_count()];
-        runtime
-            .render_into(
-                AudioRenderRequest { start_sample: start as i64, frames: BLOCK },
-                &mut pcm,
-            )
-            .expect("native Main block must complete through the canonical graph");
+        if let Err(error) = runtime.render_into(
+            AudioRenderRequest { start_sample: start as i64, frames: BLOCK },
+            &mut pcm,
+        ) {
+            println!(
+                "{}",
+                json!({"case":"surge-xt-clap-main-runtime", "stage":"render_failed", "start_sample":start, "completed_blocks":completed_blocks, "error":format!("{error:?}")})
+            );
+            // A single failure-only observation retains the Runtime's actual
+            // outstanding proposal. No opaque bytes are printed, no Ack is
+            // constructed, and no subsequent render is attempted.
+            match runtime.poll_native_observations(&cancel) {
+                Ok(batch) => {
+                    let proposal = batch.as_ref().and_then(|batch| batch.author.as_ref()).map(
+                        |proposal| {
+                            use mondrian_core::NativeAudioAuthorCallback as Callback;
+                            let callbacks = proposal.callbacks().iter().map(|callback| {
+                                match callback {
+                                    Callback::Parameter { parameter, phase, value_bits } => json!({
+                                        "kind":"Parameter", "parameter":parameter.as_str(),
+                                        "phase":format!("{phase:?}"), "value_bits":value_bits,
+                                    }),
+                                    Callback::ParameterAtExecution { parameter, phase, value_bits, position } => json!({
+                                        "kind":"ParameterAtExecution", "parameter":parameter.as_str(),
+                                        "phase":format!("{phase:?}"), "value_bits":value_bits,
+                                        "position":format!("{position:?}"),
+                                    }),
+                                    Callback::ParameterValuesRescanned { flags, values } => json!({
+                                        "kind":"ParameterValuesRescanned", "flags":flags,
+                                        "value_count":values.len(),
+                                    }),
+                                    Callback::ParameterReferencesCleared { parameter, flags } => json!({
+                                        "kind":"ParameterReferencesCleared", "parameter":parameter.as_str(),
+                                        "flags":flags,
+                                    }),
+                                    Callback::DirtyChanged(dirty) => json!({"kind":"DirtyChanged", "dirty":dirty}),
+                                    Callback::GroupStarted => json!({"kind":"GroupStarted"}),
+                                    Callback::GroupFinished => json!({"kind":"GroupFinished"}),
+                                }
+                            }).collect::<Vec<_>>();
+                            json!({
+                                "revision":proposal.revision(), "target":format!("{:?}",proposal.target()),
+                                "completion":format!("{:?}",proposal.completion()),
+                                "open_parameter_edits":proposal.open_parameter_edits(),
+                                "group_depth":proposal.group_depth(),
+                                "state_bytes":proposal.state().map(|state| state.len()),
+                                "callback_count":proposal.callbacks().len(), "callbacks":callbacks,
+                            })
+                        },
+                    );
+                    let parameters = batch.as_ref().and_then(|batch| batch.parameters.as_ref()).map(|parameters| json!({
+                        "target":format!("{:?}",parameters.target()), "process_id":parameters.process_id().get(),
+                        "object_serial":parameters.object_serial().get(), "source_revision":parameters.source_revision(),
+                        "fact_count":parameters.facts().len(),
+                    }));
+                    let diagnostics = batch.as_ref().and_then(|batch| batch.diagnostics.as_ref()).map(|diagnostics| {
+                        let loss = diagnostics.loss();
+                        json!({"record_count":diagnostics.records().len(), "loss":{
+                            "capacity":loss.capacity, "contention":loss.contention,
+                            "sequence_exhausted":loss.sequence_exhausted, "incomplete":loss.incomplete(),
+                        }})
+                    });
+                    println!(
+                        "{}",
+                        json!({"case":"surge-xt-clap-main-runtime", "stage":"failure_observation", "start_sample":start, "completed_blocks":completed_blocks, "batch_present":batch.is_some(), "proposal":proposal, "parameters":parameters, "diagnostics":diagnostics})
+                    );
+                }
+                Err(poll_error) => println!(
+                    "{}",
+                    json!({"case":"surge-xt-clap-main-runtime", "stage":"failure_observation_failed", "start_sample":start, "completed_blocks":completed_blocks, "error":format!("{poll_error:?}")})
+                ),
+            }
+            panic!("native Main block must complete through the canonical graph: {error:?}");
+        }
         assert!(
             pcm.iter().all(|sample| sample.is_finite()),
             "all requested stereo PCM must be written and finite"
         );
+        let (handoffs, rescans) = accept_actual_rescans(&mut runtime, &mut sequence, &source, cold);
+        author_handoffs += handoffs;
+        rescan_handoffs += rescans;
         for sample in pcm {
             energy += f64::from(sample) * f64::from(sample);
             peak = peak.max(sample.abs());
@@ -299,6 +620,10 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     assert!(
         energy.is_finite() && energy > 0.0 && peak > 0.0,
         "real captured-state instrument Main must produce finite nonzero energy"
+    );
+    assert!(
+        rescan_handoffs > 0,
+        "actual nonempty rescan must traverse canonical Source installation and Ack"
     );
     assert_eq!(media_resolves.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.resource_footprint().media_window_bytes, 0);
@@ -337,7 +662,7 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
     println!(
         "{}",
-        json!({"case":"surge-xt-clap-main-runtime", "stage":"completed", "plugin_id":descriptor.plugin_id, "plugin_name":descriptor.name, "plugin_version":descriptor.version, "state_bytes":state_bytes, "rate":render.sample_rate, "block":BLOCK, "frames":TOTAL, "channels":2, "mode":"Offline", "note_on":ON, "note_off":OFF, "next_input_signal_sample":processed_through, "main_energy":energy, "main_peak":peak, "media_resolves":media_resolves.load(Ordering::SeqCst), "native_pid":pid, "post_drop_wait_status":settled, "exit_query_succeeded":queried!=0, "exit_code":exit_code, "explicit_unbounded_runtime_grant":true, "auxiliary_output_sound_qualified":false, "algorithm_or_note_release_qualified":false, "terminal_off_qualified":false, "graceful_ack_qualified":false, "realtime_qualified":false})
+        json!({"case":"surge-xt-clap-main-runtime", "stage":"completed", "plugin_id":descriptor.plugin_id, "plugin_name":descriptor.name, "plugin_version":descriptor.version, "state_bytes":state_bytes, "rate":render.sample_rate, "block":BLOCK, "frames":TOTAL, "author_handoffs":author_handoffs, "nonempty_rescan_handoffs":rescan_handoffs, "channels":2, "mode":"Offline", "note_on":ON, "note_off":OFF, "next_input_signal_sample":processed_through, "main_energy":energy, "main_peak":peak, "media_resolves":media_resolves.load(Ordering::SeqCst), "native_pid":pid, "post_drop_wait_status":settled, "exit_query_succeeded":queried!=0, "exit_code":exit_code, "explicit_unbounded_runtime_grant":true, "auxiliary_output_sound_qualified":false, "algorithm_or_note_release_qualified":false, "terminal_off_qualified":false, "graceful_ack_qualified":false, "realtime_qualified":false})
     );
     assert_eq!(
         settled, WAIT_OBJECT_0,
