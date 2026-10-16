@@ -32,6 +32,22 @@ between direct host and compiled effect-graph output.
 The result qualifies this example and this host subset only; other vendors,
 contexts, pixel formats, and controls require separate evidence.
 
+Image-memory allocation failure has a separate explicit target. It links the
+tracked HostSupport and product Host, opens the same official Basic, and injects
+one failed byte allocation for each of the null-instance (Host fallback) and
+live-instance paths:
+
+```powershell
+cmake --build /path/to/build --config Release --target ImageMemoryOwnership Basic
+& /path/to/build/Release/ImageMemoryOwnership.exe `
+  /path/to/build/Basic.ofx.bundle/Contents/Win64/Basic.ofx `
+  /path/to/build/Basic.ofx.bundle
+```
+
+This Windows multi-config example must produce two passing JSON rows and exit 0.
+Each row requires ErrMemory/null, one allocated and released owner, and no live
+owner after refusal. The test does not measure whole-host leaks or performance.
+
 Native reuse is qualified separately in a supervised test child:
 
 ```sh
