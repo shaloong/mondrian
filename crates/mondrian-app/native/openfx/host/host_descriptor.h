@@ -21,6 +21,8 @@ namespace MondrianOpenFx {
     AuxSuite _aux;
     ThreadSuite _threads;
   public:
+    // Per descriptor (and its instance), including Group, Page and PushButton.
+    static constexpr int kMaxParameters = 4096;
     Host();
     AuxSuite& auxiliary() noexcept { return _aux; }
     const void* fetchSuite(const char*, int) override;

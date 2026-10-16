@@ -15,6 +15,9 @@ Mondrian changes to upstream source:
   the unused Expat XML cache reader. The selected-binary render path does
   not use the XML plugin cache, and OCIO already bundles Expat.
 
+- `host/src/ofxhHost.cpp` marks Host identity and the private Host pointer
+  read-only to plugins; host-internal construction still assigns their values.
+
 The product filter host is maintained separately in `../host`.
 
 - `host/src/ofxhParam.cpp` registers the OFX scalar Integer/Double default

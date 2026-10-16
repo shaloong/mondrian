@@ -193,7 +193,7 @@ static int stringMode(const OFX::Host::Property::Set& properties) {
 
 static bool admitsParameterDefaults(const OFX::Host::ImageEffect::Descriptor& descriptor) {
   size_t bytes = 0;
-  if (descriptor.getParamList().size() > 4096) { return false; }
+  if (descriptor.getParamList().size() > static_cast<size_t>(MondrianOpenFx::Host::kMaxParameters)) { return false; }
   for (const auto* parameter : descriptor.getParamList()) {
     if (parameter->getType() != kOfxParamTypeString && parameter->getType() != kOfxParamTypeStrChoice) { continue; }
     const auto& props = parameter->getProperties();
@@ -370,7 +370,7 @@ struct MondrianOpenFxSession {
 
   int applyParameters(const MondrianOpenFxParameter* parameters, int count,
                       bool notify, const char* reason, bool clipsChanged) {
-    if (count < 0 || count > 4096 || (count != 0 && !parameters)) { return 2; }
+    if (count < 0 || count > MondrianOpenFx::Host::kMaxParameters || (count != 0 && !parameters)) { return 2; }
     std::map<std::string, const MondrianOpenFxParameter*> authored;
     for (int index = 0; index < count; ++index) {
       const auto& value = parameters[index];
@@ -746,7 +746,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
     const std::string& type = parameter->getType();
     if (type == kOfxParamTypeGroup || type == kOfxParamTypePage ||
         type == kOfxParamTypePushButton) { continue; }
-    if (++count > 4096) { return 7; }
+    if (++count > MondrianOpenFx::Host::kMaxParameters) { return 7; }
     MondrianOpenFxParameterInfo info{};
     info.string_file_path_exists = -1;
     std::vector<MondrianOpenFxChoiceOption> choices;
@@ -908,7 +908,7 @@ extern "C" int mondrian_openfx_session_create(
   std::copy_n(image_namespace, namespaceCopy.size(), namespaceCopy.begin());
   if (std::all_of(namespaceCopy.begin(), namespaceCopy.end(), [](uint8_t byte) { return byte == 0; })) { return 2; }
   try {
-    if (!binary || !bundle || !identifier || !info || count < 0 || count > 4096 ||
+    if (!binary || !bundle || !identifier || !info || count < 0 || count > MondrianOpenFx::Host::kMaxParameters ||
         (count != 0 && !parameters)) { return 2; }
     MondrianOpenFx::FrameState initial;
     initial.imageNamespace = namespaceCopy;
