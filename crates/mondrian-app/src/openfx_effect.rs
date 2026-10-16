@@ -23,9 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    describe_openfx_filter_with_checkpoint, OpenFxFilterDescription, OpenFxFilterSession,
-    OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue, OpenFxRenderTiming,
-    OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices, OpenFxFilterDescription,
+    OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
+    OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -328,10 +328,17 @@ pub fn register_selected_openfx_filter(
         inspection,
         plugin_identifier,
         &mut || Ok(()),
-    )?;
+    )
+    .definition?;
     let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
     register_effect_definition(definition)?;
     Ok(effect_type)
+}
+
+/// Cold preparation facts; notices never enter a definition or its cache.
+pub(crate) struct PreparedOpenFxFilter {
+    pub definition: Result<EffectDefinition, OpenFxEffectRegistrationError>,
+    pub notices: Option<OpenFxDescribeNotices>,
 }
 
 /// Prepare an immutable definition. Only the live catalog owner's poll commits it.
@@ -340,18 +347,25 @@ pub(crate) fn prepare_selected_openfx_filter(
     inspection: &OpenFxBinaryInspection,
     plugin_identifier: &str,
     checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
-) -> Result<EffectDefinition, OpenFxEffectRegistrationError> {
-    checkpoint()?;
-    let description = describe_openfx_filter_with_checkpoint(
+) -> PreparedOpenFxFilter {
+    let observed = match observe_openfx_filter_with_checkpoint(
         helper_executable,
         inspection,
         plugin_identifier,
         checkpoint,
-    )?;
-    let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
-    let definition = build_definition(helper_executable, inspection, description, &effect_type)?;
-    checkpoint()?;
-    Ok(definition)
+    ) {
+        Ok(observed) => observed,
+        Err(error) => return PreparedOpenFxFilter { definition: Err(error.into()), notices: None },
+    };
+    let definition = (|| {
+        let description = observed.outcome?;
+        let effect_type = effect_type_for_filter(inspection, plugin_identifier)?;
+        let definition =
+            build_definition(helper_executable, inspection, description, &effect_type)?;
+        checkpoint()?;
+        Ok(definition)
+    })();
+    PreparedOpenFxFilter { definition, notices: Some(observed.notices) }
 }
 
 fn build_definition(
@@ -821,7 +835,7 @@ mod tests {
             &mut || Err(OpenFxHostError::Canceled),
         );
         assert!(matches!(
-            result,
+            result.definition,
             Err(OpenFxEffectRegistrationError::Host(
                 OpenFxHostError::Canceled
             ))

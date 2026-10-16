@@ -1,6 +1,13 @@
 //! Supervised Float32 OpenFX filter execution for one selected native binary.
 
 mod curves;
+mod description;
+#[cfg(test)]
+use description::{describe_in_worker, DescribeRequest, DescribeResponse};
+pub use description::{
+    describe_openfx_filter, describe_openfx_filter_with_checkpoint, run_openfx_describe_worker,
+};
+pub(crate) use description::{observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices};
 mod resident;
 pub use resident::{
     run_openfx_resident_worker, OpenFxFilterSession, OpenFxRenderObservation,
@@ -351,27 +358,6 @@ fn checked_openfx_integer(value: f64) -> Option<i32> {
     .then_some(value as i32)
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DescribeRequest {
-    binary_path: PathBuf,
-    bundle_path: PathBuf,
-    binary_sha256: String,
-    plugin_identifier: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum DescribeResponse {
-    Success {
-        description: OpenFxFilterDescription,
-    },
-    Rejected {
-        status: i32,
-        reason: Option<String>,
-    },
-}
-
 #[repr(C)]
 struct NativeParameter {
     name: *const c_char,
@@ -638,6 +624,7 @@ unsafe extern "C" {
         label_length: *mut usize,
         callback: unsafe extern "C" fn(*mut c_void, *const NativeParameterInfo) -> c_int,
         context: *mut c_void,
+        notices: *mut description::NativeDescribeNotices,
     ) -> c_int;
     fn mondrian_openfx_session_create(
         binary: *const c_char,
@@ -832,60 +819,6 @@ impl Drop for NativeSession {
     }
 }
 
-/// Describe the admitted Filter parameter schema in a supervised native child.
-pub fn describe_openfx_filter(
-    helper_executable: &Path,
-    inspection: &OpenFxBinaryInspection,
-    plugin_identifier: &str,
-) -> Result<OpenFxFilterDescription, OpenFxHostError> {
-    describe_openfx_filter_with_checkpoint(
-        helper_executable,
-        inspection,
-        plugin_identifier,
-        &mut || Ok(()),
-    )
-}
-
-/// Describe one Filter while observing the catalog owner, without registration.
-pub fn describe_openfx_filter_with_checkpoint(
-    helper_executable: &Path,
-    inspection: &OpenFxBinaryInspection,
-    plugin_identifier: &str,
-    checkpoint: &mut impl FnMut() -> Result<(), OpenFxHostError>,
-) -> Result<OpenFxFilterDescription, OpenFxHostError> {
-    checkpoint()?;
-    let bundle = verified_selection(inspection, plugin_identifier, checkpoint)?;
-    let staging = tempfile::tempdir()
-        .map_err(|error| unavailable(format!("description staging failed: {error}")))?;
-    let request = DescribeRequest {
-        binary_path: inspection.binary_path.clone(),
-        bundle_path: bundle,
-        binary_sha256: inspection.binary_sha256.clone(),
-        plugin_identifier: plugin_identifier.to_owned(),
-    };
-    let response: DescribeResponse = invoke_worker(
-        helper_executable,
-        OPENFX_DESCRIBE_WORKER_ARGUMENT,
-        staging.path(),
-        &request,
-        checkpoint,
-    )?;
-    if sha256_file_with_checkpoint(&inspection.binary_path, checkpoint)? != inspection.binary_sha256
-    {
-        return Err(invalid("OpenFX binary changed during description"));
-    }
-    match response {
-        DescribeResponse::Success { description } => {
-            validate_description(&description, plugin_identifier)?;
-            checkpoint()?;
-            Ok(description)
-        }
-        DescribeResponse::Rejected { status, reason } => Err(OpenFxHostError::WorkerFailed(
-            format!("native status {status}: {}", reason.unwrap_or_default()),
-        )),
-    }
-}
-
 /// Execute one installed OFX filter in a supervised child. The caller must
 /// supply the working color domain and exact alpha interpretation; this
 /// adapter does not perform implicit color or alpha conversion.
@@ -971,62 +904,6 @@ fn invoke_worker<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&response_bytes)
         .map_err(|error| unavailable(format!("OpenFX worker response is malformed: {error}")))
-}
-
-/// Describe one selected native Filter before graphics or media startup.
-pub fn run_openfx_describe_worker() -> Result<(), OpenFxHostError> {
-    let (request, response_path): (DescribeRequest, PathBuf) =
-        read_worker_request(OPENFX_DESCRIBE_WORKER_ARGUMENT)?;
-    let response = describe_in_worker(&request)?;
-    write_worker_response(&response_path, &response)
-}
-
-fn describe_in_worker(request: &DescribeRequest) -> Result<DescribeResponse, OpenFxHostError> {
-    verify_worker_binary(
-        &request.binary_path,
-        &request.bundle_path,
-        &request.binary_sha256,
-    )?;
-    let binary = native_string(&request.binary_path)?;
-    let bundle = native_string(&request.bundle_path)?;
-    let identifier = CString::new(request.plugin_identifier.as_str())
-        .map_err(|_| invalid("plugin identifier contains a null byte"))?;
-    let mut sink = ParameterSink::default();
-    let mut label = [0_u8; 256];
-    let mut label_length = 0_usize;
-    // SAFETY: The C strings, callback, and sink outlive this synchronous call.
-    // Native code runs only in the supervised child.
-    let status = unsafe {
-        mondrian_openfx_describe(
-            binary.as_ptr(),
-            bundle.as_ptr(),
-            identifier.as_ptr(),
-            label.as_mut_ptr().cast(),
-            label.len(),
-            &mut label_length,
-            collect_native_parameter,
-            (&mut sink as *mut ParameterSink).cast(),
-        )
-    };
-    if status != 0 {
-        return Ok(DescribeResponse::Rejected { status, reason: sink.error });
-    }
-    let label = label
-        .get(..label_length)
-        .ok_or_else(|| invalid("OpenFX display name exceeds its bound"))?;
-    let label =
-        std::str::from_utf8(label).map_err(|_| invalid("OpenFX display name is not UTF-8"))?;
-    let description = OpenFxFilterDescription {
-        identifier: request.plugin_identifier.clone(),
-        label: if label.is_empty() {
-            request.plugin_identifier.clone()
-        } else {
-            label.to_owned()
-        },
-        parameters: sink.parameters,
-    };
-    validate_description(&description, &request.plugin_identifier)?;
-    Ok(DescribeResponse::Success { description })
 }
 
 unsafe extern "C" fn collect_native_parameter(
@@ -2079,13 +1956,14 @@ pub(crate) mod shared_frame_tests {
             .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
             .expect("probe bundle");
         let described = describe_in_worker(&DescribeRequest {
+            schema_version: 2,
             binary_path: path.clone(),
             bundle_path: bundle.to_path_buf(),
             binary_sha256: sha256_file(&path).expect("fixture identity"),
             plugin_identifier: "uk.co.thefoundry.BasicGainPlugin".into(),
         })
         .expect("actual SDK compound description");
-        let DescribeResponse::Success { description } = described else {
+        let DescribeResponse::Success { description, .. } = described else {
             panic!("all six SDK compound descriptions must be admitted");
         };
         let scale = description
@@ -2266,6 +2144,7 @@ pub(crate) mod shared_frame_tests {
                 .expect("probe bundle");
             let identifier = "uk.co.thefoundry.BasicGainPlugin";
             let description = describe_in_worker(&DescribeRequest {
+                schema_version: 2,
                 binary_path: path.clone(),
                 bundle_path: bundle_path.to_path_buf(),
                 binary_sha256: sha256_file(&path).expect("probe fingerprint"),

@@ -106,6 +106,14 @@ struct MondrianOpenFxParameterInfo {
 typedef int (*MondrianOpenFxParameterCallback)(
     void* context, const struct MondrianOpenFxParameterInfo* parameter);
 
+// Whole metadata request only: no Render owner/invocation or emitter identity.
+struct MondrianOpenFxDescribeNotices {
+  int complete;
+  int fatal;
+  size_t notice_count;
+  struct MondrianOpenFxNotice notices[MONDRIAN_OPENFX_NOTICE_SLOTS];
+};
+
 int mondrian_openfx_describe(
     const char* binary,
     const char* bundle,
@@ -114,7 +122,8 @@ int mondrian_openfx_describe(
     size_t label_capacity,
     size_t* label_length,
     MondrianOpenFxParameterCallback callback,
-    void* context)
+    void* context,
+    struct MondrianOpenFxDescribeNotices* notices)
 #ifdef __cplusplus
     noexcept
 #endif

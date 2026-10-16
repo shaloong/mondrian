@@ -190,9 +190,17 @@ OfxStatus AuxSuite::message(void* handle, const char* type, const char* id, cons
     finishQuestion();
     return reply == kOfxStatReplyYes || reply == kOfxStatReplyNo ? reply : kOfxStatFailed;
   }
-  if (_feedback.notice_count == MONDRIAN_OPENFX_NOTICE_SLOTS) { return kOfxStatFailed; }
+  const auto severity = kind(type);
+  if (severity == MONDRIAN_OPENFX_NOTICE_NONE) { return kOfxStatFailed; }
+  if (_feedback.notice_count == MONDRIAN_OPENFX_NOTICE_SLOTS) {
+    _noticeIncomplete = true;
+    return kOfxStatFailed;
+  }
   MondrianOpenFxNotice notice{};
-  if (!formatted(notice, kind(type), id, format, args)) { return kOfxStatFailed; }
+  if (!formatted(notice, severity, id, format, args)) {
+    _noticeIncomplete = true;
+    return kOfxStatFailed;
+  }
   _feedback.notices[_feedback.notice_count++] = notice;
   if (notice.kind == MONDRIAN_OPENFX_NOTICE_FATAL) { _fatal = true; }
   return kOfxStatOK;
@@ -355,6 +363,15 @@ bool AuxSuite::blocked(void* handle) {
   return find(handle, true) && _feedback.persistent.kind == MONDRIAN_OPENFX_NOTICE_ERROR;
 }
 bool AuxSuite::fatal() { std::lock_guard<std::mutex> lock(_gate); return _fatal; }
+void AuxSuite::describeNotices(MondrianOpenFxDescribeNotices& output) {
+  std::lock_guard<std::mutex> lock(_gate);
+  output.complete = _noticeIncomplete ? 0 : 1;
+  output.fatal = _fatal ? 1 : 0;
+  output.notice_count = _feedback.notice_count;
+  for (std::size_t index = 0; index < _feedback.notice_count; ++index) {
+    copyNotice(output.notices[index], _feedback.notices[index]);
+  }
+}
 void AuxSuite::report(MondrianOpenFxFeedback& output) {
   std::lock_guard<std::mutex> lock(_gate);
   output.owner = _feedback.owner;

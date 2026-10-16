@@ -8,6 +8,7 @@
 #include "ofxTimeLine.h"
 #include "aux_feedback.h"
 struct MondrianOpenFxInvocationControl;
+struct MondrianOpenFxDescribeNotices;
 #include <cstdarg>
 #include <cstdint>
 #include <mutex>
@@ -27,6 +28,7 @@ class AuxSuite final {
   AuxRegistrationGuard* _instance = nullptr;
   MondrianOpenFxFeedback _feedback{};
   bool _fatal = false;
+  bool _noticeIncomplete = false;
   const MondrianOpenFxInvocationControl* _control = nullptr;
   bool canceledLocked() const noexcept;
   OfxStatus publishProgressLocked();
@@ -64,6 +66,8 @@ public:
   bool fatal();
   // Snapshot and consume transient facts only after an actual matching report.
   void report(MondrianOpenFxFeedback&);
+  // After metadata-owned SDK/module cleanup, before Host destruction.
+  void describeNotices(MondrianOpenFxDescribeNotices&);
 };
 
 // This is the FIRST base; the SDK Descriptor/Instance is the SECOND base.

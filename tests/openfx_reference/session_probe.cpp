@@ -24,6 +24,9 @@
 #include <limits>
 #include <cmath>
 #include <array>
+#include <mutex>
+#include <cstring>
+#include <utility>
 #include <type_traits>
 #include "ofxGPURender.h"
 #include "ofxProgress.h"
@@ -1354,16 +1357,67 @@ const OfxProgressSuiteV2* auxProgressSuite() {
 const OfxTimeLineSuiteV1* auxTimelineSuite() {
   return static_cast<const OfxTimeLineSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxTimeLineSuite, 1));
 }
+// Default-off, fixture-only action receipt. Fixed ASCII rows, <=32 per PID.
+// ENV presence identifies the actual helper role, not an emitter/request ID.
+void describeActionReceipt(const char* action, const char* point,
+                           unsigned attempted = 0, unsigned accepted = 0,
+                           int status = 0) noexcept {
+  const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
+  if (!directory || !*directory) { return; }
+  static std::mutex gate;
+  static std::atomic<bool> incomplete{false};
+  try {
+    std::lock_guard<std::mutex> lock(gate);
+#ifdef _WIN32
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    const auto path = std::filesystem::u8path(directory) / ("actions-" + std::to_string(pid) + ".txt");
+    std::ifstream previous(path, std::ios::binary);
+    if (std::filesystem::exists(path) && !previous.is_open()) { incomplete = true; }
+    unsigned lines = 0, bytes = 0;
+    char byte;
+    while (previous.get(byte)) {
+      if (++bytes > 4096) { incomplete = true; return; }
+      if (byte == '\n') { ++lines; }
+    }
+    if (previous.bad()) { incomplete = true; }
+    previous.close();
+    if (lines >= 32) { return; }
+    if (lines == 31) { incomplete = true; action = "overflow"; point = "incomplete"; }
+    std::ofstream file(path, std::ios::binary | std::ios::app);
+    file << lines + 1 << " D=" << (std::getenv("MONDRIAN_INTERNAL_OPENFX_DESCRIBE_REQUEST") != nullptr)
+         << " I=" << (std::getenv("MONDRIAN_INTERNAL_OPENFX_DISCOVERY_REQUEST") != nullptr)
+         << ' ' << action << ' ' << point << " attempted=" << attempted << " accepted=" << accepted
+         << " status=" << status << " complete=" << !incomplete << '\n';
+    file.flush();
+    if (!file) { incomplete = true; }
+  } catch (...) { incomplete = true; }
+}
+
 bool auxTransientMessages(void* handle) {
   const auto* v1 = static_cast<const OfxMessageSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 1));
   const auto* v2 = auxMessageSuite();
   if (!v1 || !v2) { return false; }
+  unsigned attempted = 0, accepted = 0;
+  const auto finish = [&](bool result) {
+    describeActionReceipt("transient", "batch", attempted, accepted);
+    return result;
+  };
   for (const char* type : {kOfxMessageMessage, kOfxMessageWarning, kOfxMessageLog}) {
-    if (v1->message(handle, type, nullptr, "%s %d %.3f", u8"说明🙂", 7, 1.25) != kOfxStatOK ||
-        v2->message(handle, type, "", "%s", u8"第二条通知✓") != kOfxStatOK) { return false; }
+    const auto first = v1->message(handle, type, nullptr, "%s %d %.3f", u8"说明🙂", 7, 1.25);
+    ++attempted;
+    accepted += first == kOfxStatOK;
+    if (first != kOfxStatOK) { return finish(false); }
+    const auto second = v2->message(handle, type, "", "%s", u8"第二条通知✓");
+    ++attempted;
+    accepted += second == kOfxStatOK;
+    if (second != kOfxStatOK) { return finish(false); }
   }
-  return true;
+  return finish(true);
 }
+
 bool auxQuestionRefusal(void* handle) {
   const auto* messages = auxMessageSuite();
   OfxPropertySetHandle properties = nullptr;
@@ -1636,10 +1690,11 @@ void legacyPriorityError(const void* handle, LegacyPriorityState& state) {
   state.posted = true;
 }
 
-OfxStatus probe(const char* action, const void* handle,
+OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (selected == "aux_describe_load_failure" && operation == kOfxActionLoad) { return kOfxStatFailed; }
   if (legacyPriorityMode(selected) &&
       (operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionGetRegionsOfInterest ||
        operation == kOfxImageEffectActionRender)) {
@@ -1889,6 +1944,36 @@ OfxStatus probe(const char* action, const void* handle,
        (selected == "aux_invalid_handles" && operation == kOfxActionDescribe && !auxInvalidHandles(const_cast<void*>(handle))) ||
        (selected == "aux_error" && !auxPersistentError(const_cast<void*>(handle), operation, in)))) { return kOfxStatFailed; }
 
+  // Describe-only notice controls. Deliberately ignore a recording refusal
+  // after the retained prefix, so the host must enforce its own completeness.
+  if (operation == kOfxActionDescribe &&
+      (result == kOfxStatOK || result == kOfxStatReplyDefault) &&
+      (selected == "aux_describe_32" || selected == "aux_describe_33" ||
+       selected == "aux_describe_fatal" || selected == "aux_describe_invalid_utf8" ||
+       selected == "aux_describe_native_failure")) {
+    const auto* messages = auxMessageSuite();
+    if (!messages) { return kOfxStatFailed; }
+    void* descriptor = const_cast<void*>(handle);
+    if (selected == "aux_describe_32" || selected == "aux_describe_33") {
+      for (int index = 0; index < 32; ++index) {
+        if (messages->message(descriptor, kOfxMessageMessage, "bounded", "notice %d", index) != kOfxStatOK) {
+          return kOfxStatFailed;
+        }
+      }
+      if (selected == "aux_describe_33") {
+        (void)messages->message(descriptor, kOfxMessageMessage, "overflow", "ignored 33rd notice");
+      }
+    } else if (selected == "aux_describe_fatal") {
+      if (messages->message(descriptor, kOfxMessageFatal, "fatal", "metadata fatal") != kOfxStatOK) { return kOfxStatFailed; }
+    } else {
+      if (messages->message(descriptor, kOfxMessageWarning, "before-refusal", "retained prefix") != kOfxStatOK) { return kOfxStatFailed; }
+      if (selected == "aux_describe_invalid_utf8") {
+        const char invalid[] = {static_cast<char>(0xff), '\0'};
+        (void)messages->message(descriptor, kOfxMessageMessage, "invalid", "%s", invalid);
+      } else { return kOfxStatFailed; }
+    }
+  }
+
   if (legacyPriorityMode(selected)) {
     if (operation == kOfxActionCreateInstance) {
       if ((result != kOfxStatOK && result != kOfxStatReplyDefault) ||
@@ -2103,6 +2188,37 @@ OfxStatus probe(const char* action, const void* handle,
   }
   return result;
 }
+OfxStatus probe(const char* action, const void* handle,
+                OfxPropertySetHandle in, OfxPropertySetHandle out) {
+  const char* observed = nullptr;
+  for (const char* known : {kOfxActionLoad, kOfxActionDescribe,
+       kOfxImageEffectActionDescribeInContext, kOfxActionUnload, kOfxImageEffectActionRender}) {
+    if (std::strcmp(action, known) == 0) { observed = known; break; }
+  }
+  const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
+  const bool observing = directory && *directory;
+  static std::atomic<const void*> describedBase{nullptr}, describedContext{nullptr};
+  if (observing && std::strcmp(action, kOfxActionDescribe) == 0) { describedBase = handle; }
+  if (observing && std::strcmp(action, kOfxImageEffectActionDescribeInContext) == 0) { describedContext = handle; }
+  if (observed) { describeActionReceipt(observed, "enter"); }
+  if (observing && std::strcmp(action, kOfxActionUnload) == 0) {
+    const auto* messages = auxMessageSuite();
+    for (const auto& entry : {std::make_pair("descriptor-base", describedBase.load()),
+                             std::make_pair("descriptor-context", describedContext.load())}) {
+      if (!entry.second) { continue; }
+      // Unknown kind is a pure handle check: live -> Failed, dead -> BadHandle.
+      // Neither the fixture nor the host dereferences the borrowed handle here.
+      const auto status = messages ? messages->message(const_cast<void*>(entry.second),
+          "mondrian.fixture.unknown-message-kind", nullptr, "%s", "handle check") : kOfxStatErrMissingHostFeature;
+      describeActionReceipt(entry.first, "check", 0, 0, status);
+    }
+  }
+  const auto result = probeAction(action, handle, in, out);
+  if (observed) { describeActionReceipt(observed, "return", 0, 0, result); }
+  if (observing && std::strcmp(action, kOfxActionUnload) == 0) { describedBase = nullptr; describedContext = nullptr; }
+  return result;
+}
+
 bool bootstrapImageMemory(const OfxHost* host) {
   if (!host || !host->host || !host->fetchSuite) { return false; }
   const auto* images = static_cast<const OfxImageEffectSuiteV1*>(
@@ -2150,6 +2266,7 @@ OfxExport int SessionProbeImageIdentifier(int output, char* buffer, size_t capac
 }
 
 OfxExport OfxStatus OfxSetHost(const OfxHost* host) {
+  describeActionReceipt("OfxSetHost", "enter");
   if (mode() == "catalog_discovery_block") {
     return blockCatalogCallback(host) ? kOfxStatOK : kOfxStatFailed;
   }

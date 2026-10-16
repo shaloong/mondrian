@@ -216,12 +216,15 @@ static bool admitsParameterDefaults(const OFX::Host::ImageEffect::Descriptor& de
 static OFX::Host::ImageEffect::ImageEffectPlugin* selectFilter(
     OFX::Host::ImageEffect::PluginCache& cache,
     OFX::Host::PluginBinary& binary,
-    const char* identifier)
+    const char* identifier, int& selectionStatus)
 {
+  selectionStatus = 3;
   for (int index = 0; index < binary.getNPlugins(); ++index) {
     OFX::Host::Plugin& candidate = binary.getPlugin(index);
     if (candidate.getIdentifier() != identifier) { continue; }
-    cache.loadFromPlugin(&candidate);
+    auto* selected = dynamic_cast<OFX::Host::ImageEffect::ImageEffectPlugin*>(&candidate);
+    if (!selected) { return nullptr; }
+    if (!selected->getPluginHandle()) { selectionStatus = 7; return nullptr; }
     std::string reason;
     if (!cache.pluginSupported(&candidate, reason)) {
       std::cerr << reason << std::endl;
@@ -555,8 +558,9 @@ struct MondrianOpenFxSession {
     binary = std::make_unique<SelectedPluginBinary>(path, bundle);
     const int enumerated = binary->initialize(cache);
     if (enumerated != 0) { return enumerated; }
-    auto* plugin = selectFilter(imageCache.get(), *binary, identifier);
-    if (!plugin) { return 3; }
+    int selectionStatus;
+    auto* plugin = selectFilter(imageCache.get(), *binary, identifier, selectionStatus);
+    if (!plugin) { return selectionStatus; }
     auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
     if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
     instance.reset(plugin->createInstance(kOfxImageEffectContextFilter, &frame));
@@ -705,12 +709,11 @@ struct MondrianOpenFxSession {
   }
 };
 
-static int describe(const char* binary, const char* bundle,
+static int describe(MondrianOpenFx::Host& host, const char* binary, const char* bundle,
                     const char* identifier,
                     char* label, size_t labelCapacity, size_t* labelLength,
                     MondrianOpenFxParameterCallback callback, void* context)
 {
-  MondrianOpenFx::Host host;
   OFX::Host::PluginCache cache;
   cache.setCacheVersion("mondrian-openfx-v1");
   OwnedImageEffectCache imageEffectPluginCache(host);
@@ -721,8 +724,9 @@ static int describe(const char* binary, const char* bundle,
   SelectedPluginBinary selectedBinary(binary, bundle);
   const int enumerated = selectedBinary.initialize(cache);
   if (enumerated != 0) { return enumerated; }
-  auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier);
-  if (!plugin) { return 3; }
+  int selectionStatus;
+  auto* plugin = selectFilter(imageEffectPluginCache.get(), selectedBinary, identifier, selectionStatus);
+  if (!plugin) { return selectionStatus; }
   auto* descriptor = plugin->getContext(kOfxImageEffectContextFilter);
   if (!descriptor || !admitsCpu(*descriptor) || !admitsIndependentFrames(*descriptor) || !admitsParameterDefaults(*descriptor)) { return 7; }
   const std::string& displayName = descriptor->getLabel();
@@ -862,20 +866,32 @@ static int describe(const char* binary, const char* bundle,
 extern "C" int mondrian_openfx_describe(
     const char* binary, const char* bundle, const char* identifier,
     char* label, size_t labelCapacity, size_t* labelLength,
-    MondrianOpenFxParameterCallback callback, void* context) noexcept
+    MondrianOpenFxParameterCallback callback, void* context,
+    MondrianOpenFxDescribeNotices* notices) noexcept
 {
+  if (!notices) { return 2; }
+  *notices = {};
   try {
     if (!binary || !bundle || !identifier || !label || !labelLength ||
         !callback || !context) { return 2; }
-    return describe(binary, bundle, identifier, label, labelCapacity,
-                    labelLength, callback, context);
+    MondrianOpenFx::Host host;
+    int status;
+    try {
+      status = describe(host, binary, bundle, identifier, label, labelCapacity,
+                        labelLength, callback, context);
+    } catch (const ImageEffectHostBusy&) { status = MONDRIAN_OPENFX_HOST_BUSY; }
+    catch (const std::exception& error) {
+      std::cerr << "OpenFX description failed: " << error.what() << std::endl;
+      status = 6;
+    } catch (...) { status = 6; }
+    // describe's cache/bootstrap/module owners have retired, including Unload
+    // callbacks they actually issued. Callbacks after this snapshot (Host's
+    // destruction) are deliberately outside the whole-request observation.
+    try { host.auxiliary().describeNotices(*notices); }
+    catch (...) { *notices = {}; } // Observation failure never replaces native status.
+    return status;
   } catch (const ImageEffectHostBusy&) { return MONDRIAN_OPENFX_HOST_BUSY; }
-  catch (const std::exception& error) {
-    std::cerr << "OpenFX description failed: " << error.what() << std::endl;
-    return 6;
-  } catch (...) {
-    return 6;
-  }
+  catch (...) { return 6; }
 }
 
 extern "C" int mondrian_openfx_session_create(
