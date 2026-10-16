@@ -17,6 +17,20 @@ same three-stage Interface:
 3. `AudioRenderSession` owns exclusive mutable buffers and processor state for
    one run. It renders exact integer-sample windows into caller-owned storage.
 
+A retained native owner can remain valid while its processing capability is
+stopped. Configuration refusals and pending installation must preserve control
+queries, retry, seed, GUI service and Shutdown. The same command dispatcher then
+borrows only that owner's main role; it neither starts a DSP scope nor resumes
+processing to keep the connection alive. The main borrow ends before exclusive
+lifecycle commands execute. Its actual allocations retain the original grant.
+
+VST3 capability comes from the internal lifecycle that guards its real role
+split, rather than a facade's cached processing flag. CLAP initially permits a
+Stopped processing handle for its existing Ready/first-signal contract; a
+committed seed waits for explicit Enter. Adapters derive these distinctions
+from their existing lifecycle and seed owners, with no second state authority,
+dispatcher, routing graph or wire protocol.
+
 The Render Contract carries one canonical `AudioChannelLayout`, never a bare
 channel count. The value is Mono, a validated named-speaker set in canonical
 interleaving order, or a bounded Discrete bus with deliberately absent speaker

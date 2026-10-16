@@ -1404,6 +1404,18 @@ pub trait IsolatedAudioProcessorWorker {
         false
     }
 
+    /// Borrow only the same native main role while processing is not admitted.
+    ///
+    /// Derive this capability from the existing owner lifecycle, never a second
+    /// processing flag. `None` permits the original disjoint processing borrow;
+    /// `Some` must keep controller/GUI service alive without creating a DSP role.
+    /// Replacement/control commands run only after this borrow has ended.
+    fn native_control_only_role(
+        &mut self,
+    ) -> Result<Option<Box<dyn IsolatedAudioProcessorMainRole + '_>>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
     /// Borrow the same native instance into its real main and DSP roles.
     /// No native owner can be replaced until both roles end and DSP joins.
     fn split_native_processing(

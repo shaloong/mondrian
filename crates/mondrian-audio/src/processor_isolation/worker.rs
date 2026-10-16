@@ -812,9 +812,9 @@ enum NativeScopeExit {
     Completed,
 }
 
-fn service_native_processing_scope(
+fn service_native_main_scope(
     main: &mut dyn super::IsolatedAudioProcessorMainRole,
-    dsp: &super::native_worker_processing::NativeDspDispatch<'_>,
+    dsp: Option<&super::native_worker_processing::NativeDspDispatch<'_>>,
     ingress: &super::native_worker_ingress::NativeCommandIngress<'_>,
     control: &mut TcpStream,
 ) -> Result<NativeScopeExit, AudioProcessorHostError> {
@@ -838,8 +838,19 @@ fn service_native_processing_scope(
                 continue;
             }
             if header.kind == CommandKind::Process {
-                dsp.submit(*header)?;
-                let result = dsp.complete(main);
+                let result = if let Some(dsp) = dsp {
+                    dsp.submit(*header)?;
+                    dsp.complete(main)
+                } else {
+                    Err(main.pending_reprepare()?.map_or_else(
+                        || {
+                            AudioProcessorHostError::StateEntry(
+                                "stopped native owner requires explicit state entry".into(),
+                            )
+                        },
+                        AudioProcessorHostError::ReprepareRequired,
+                    ))
+                };
                 if !write_process_operation_result(control, result, main.pending_reprepare()?)? {
                     // No further native mutation or command is admitted after a
                     // failed DSP response. Scope teardown still explicitly joins.
@@ -872,6 +883,7 @@ fn service_native_processing_scope(
             crate::NativeAudioObservationConsumption::DrainAuthor(binding),
         ) = &command
             && main.native_author_binding_matches(*binding)?
+            && let Some(dsp) = dsp
         {
             // The sole slot settles this exact object's control DSP operation
             // before its borrowed processor joins and main captures state.
@@ -882,6 +894,25 @@ fn service_native_processing_scope(
         }
         return Ok(NativeScopeExit::OwnerCommand(command));
     }
+}
+
+fn admit_native_main_role(
+    profile: crate::NativeWorkerLaneResourceProfile,
+    main: &dyn super::IsolatedAudioProcessorMainRole,
+) -> Result<(), AudioProcessorHostError> {
+    let [runtime, sdk] = main.allocation_layouts().ok_or_else(|| {
+        invalid_contract("native control role cannot report its complete Box layouts")
+    })?;
+    let prepared = profile.owning_layouts();
+    if runtime != prepared.runtime_main_role || sdk != prepared.sdk_main_role {
+        return Err(invalid_contract(
+            "native control main-role allocation layout changed",
+        ));
+    }
+    // The original lane grant retains its conservative DSP/slot reservation.
+    // Only these two main allocations exist in this borrow; no DSP/slot owner
+    // or thread is manufactured to satisfy an allocation observation.
+    Ok(())
 }
 
 fn run_native_command_service(
@@ -937,35 +968,59 @@ fn run_native_command_service(
                     }
                     continue;
                 }
-                let split = processor.split_native_processing()?;
-                let outcome = with_processing_scope(
-                    split,
-                    profile,
-                    shared,
-                    context,
-                    |main, dsp| {
-                        match (context.render_contract.processing_mode, dsp.scheduling_entry()) {
+                let control_exit = {
+                    let role = processor.native_control_only_role()?;
+                    if let Some(mut main) = role {
+                        if !ready_sent {
+                            write_ready_rejected(
+                                control,
+                                "native owner is control-only before initial DSP readiness".into(),
+                            )?;
+                            return Ok(());
+                        }
+                        admit_native_main_role(profile, &*main)?;
+                        Some(service_native_main_scope(
+                            &mut *main, None, ingress, control,
+                        )?)
+                    } else {
+                        None
+                    }
+                };
+                let exit = if let Some(exit) = control_exit {
+                    exit
+                } else {
+                    let split = processor.split_native_processing()?;
+                    let outcome = with_processing_scope(
+                        split,
+                        profile,
+                        shared,
+                        context,
+                        |main, dsp| {
+                            match (context.render_contract.processing_mode, dsp.scheduling_entry()) {
                     (AudioProcessingMode::Offline, None) => {}
                     (AudioProcessingMode::Realtime, Some(evidence))
                         if evidence.role() == mondrian_audio_scheduling::RealtimeAudioThreadRole::NativeDsp => {}
                     _ => return Err(invalid_contract("native DSP scope readiness does not match its actual processing role")),
                 }
-                        if !ready_sent {
-                            // The parent may not observe Ready until this actual DSP
-                            // thread acquired its required scheduling role. No caller
-                            // manufactures native entry from the main thread's mode.
-                            write_json_frame(control, ready)
-                                .map_err(|error| worker_failed("native scope startup", error))?;
-                            ready_sent = true;
-                        }
-                        service_native_processing_scope(main, dsp, ingress, control)
-                    },
-                )?;
-                // Actual explicit scheduling restoration is retained in `outcome`.
-                // A later readiness/exit wire contract must carry these facts to
-                // the parent before claiming its native RT qualification.
-                let _scheduling_exit = outcome.scheduling_exit;
-                match outcome.value {
+                            if !ready_sent {
+                                // The parent may not observe Ready until this actual DSP
+                                // thread acquired its required scheduling role. No caller
+                                // manufactures native entry from the main thread's mode.
+                                write_json_frame(control, ready).map_err(|error| {
+                                    worker_failed("native scope startup", error)
+                                })?;
+                                ready_sent = true;
+                            }
+                            service_native_main_scope(main, Some(dsp), ingress, control)
+                        },
+                    )?;
+                    // Actual explicit scheduling restoration is retained in `outcome`.
+                    // A later readiness/exit wire contract must carry these facts to
+                    // the parent before claiming its native RT qualification.
+                    let _scheduling_exit = outcome.scheduling_exit;
+                    outcome.value
+                };
+                match exit {
                     NativeScopeExit::Completed => return Ok(()),
                     NativeScopeExit::UserCloseRequested => {
                         // This is an observed native window event, not a second
@@ -996,6 +1051,9 @@ fn run_native_command_service(
         },
     )
 }
+
+#[cfg(test)]
+mod native_control_scope_tests;
 
 #[cfg(test)]
 mod inline_dispatch_contracts {

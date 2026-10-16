@@ -603,6 +603,34 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
     }
 
     #[cfg(target_os = "windows")]
+    fn native_control_only_role(
+        &mut self,
+    ) -> Result<Option<Box<dyn super::IsolatedAudioProcessorMainRole + '_>>, AudioProcessorHostError>
+    {
+        let plugin = self
+            .plugin
+            .as_mut()
+            .ok_or_else(|| unavailable("VST3 retained native processor is closed"))?;
+        if self.configuration_phase.blocked_request().is_none()
+            && plugin.can_split_editor_processing()
+        {
+            return Ok(None);
+        }
+        let editor = plugin.borrow_editor_control().map_err(|error| {
+            unavailable(format!("VST3 stopped native main borrow failed: {error}"))
+        })?;
+        Ok(Some(Box::new(VstMainRole {
+            editor,
+            native_main: &self.native_main,
+            native_parent: &mut self.native_parent,
+            configuration_phase: &self.configuration_phase,
+            native_binding: &self.native_binding,
+            native_author_delivery: &self.native_author_delivery,
+            prepared_author_entry: &self.prepared_author_entry,
+        })))
+    }
+
+    #[cfg(target_os = "windows")]
     fn split_native_processing(
         &mut self,
     ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
@@ -665,12 +693,10 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             };
         };
         if let Some(parent) = self.native_parent.as_mut() {
-            let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
-                plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
-            // This is after the real DSP scope joined. The temporary unused
-            // processing borrow is dropped, then the same parent checks its
-            // private exact native-object attachment identity before removal.
-            drop(processor);
+            let mut editor =
+                plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
+            // DSP has joined; the same parent checks its private attachment
+            // identity without requiring this owner to resume processing.
             parent.close(&mut editor).map_err(native_editor_removal_failed)?;
             self.native_parent = None;
         } else {
@@ -717,9 +743,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         if !plugin.has_editor() {
             return Ok(Outcome::Refused(Refusal::NoEditor));
         }
-        let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
-            plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
-        drop(processor);
+        let mut editor = plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
         if self.native_parent.is_none() {
             match vst3_host::window::WindowsPluginEditorParent::open(
                 std::rc::Rc::clone(&self.native_main),
@@ -762,9 +786,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             .as_mut()
             .ok_or_else(|| unavailable("native editor processor owner is closed"))?;
         let result = if let Some(parent) = self.native_parent.as_mut() {
-            let vst3_host::plugin::PluginEditorProcessingSplit { mut editor, processor } =
-                plugin.split_editor_processing().map_err(native_editor_removal_failed)?;
-            drop(processor);
+            let mut editor =
+                plugin.borrow_editor_control().map_err(native_editor_removal_failed)?;
             parent.close(&mut editor)
         } else {
             plugin.close_editor()

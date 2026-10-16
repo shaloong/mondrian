@@ -1558,6 +1558,35 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     }
 
     #[cfg(windows)]
+    fn native_control_only_role(
+        &mut self,
+    ) -> Result<Option<Box<dyn super::IsolatedAudioProcessorMainRole + '_>>, AudioProcessorHostError>
+    {
+        // A new CLAP instance is initially Stopped but can acquire its original
+        // DSP scheduling role for Ready. A committed seed instead waits for the
+        // next explicit Enter; these facts already belong to the retained owner.
+        if self.configuration_phase.blocked_request().is_none()
+            && !(self.configuration_seed.is_some() && self.last_end.is_none())
+        {
+            if self.processor.is_none() {
+                return Err(unavailable("CLAP processor is closed"));
+            }
+            return Ok(None);
+        }
+        Ok(Some(Box::new(ClapMainRole {
+            note_inputs: self.note_inputs.as_ref(),
+            instance: &mut self.instance,
+            gui: &mut self.gui,
+            shared: &self.shared,
+            phase: &self.configuration_phase,
+            object: self.native_object,
+            receiver: std::cell::RefCell::new(&mut self.log_receiver),
+            binding: self.native_binding,
+            author_delivery: &self.native_author_delivery,
+        })))
+    }
+
+    #[cfg(windows)]
     fn split_native_processing(
         &mut self,
     ) -> Result<super::IsolatedAudioProcessorWorkerSplit<'_>, AudioProcessorHostError> {
@@ -3210,6 +3239,26 @@ mod tests {
                 Some(cohort),
                 "refusal must not consume the actual request"
             );
+            #[cfg(windows)]
+            {
+                let object = worker.native_audio_object_observation().unwrap();
+                assert!(matches!(worker.split_native_processing(),
+                    Err(AudioProcessorHostError::Unavailable(detail))
+                        if detail == "CLAP processor is closed"));
+                {
+                    let mut main = worker
+                        .native_control_only_role()
+                        .unwrap()
+                        .expect("stopped refused owner retains its real main role");
+                    main.service_native_main_thread().unwrap();
+                    assert_eq!(main.native_configuration_cohort().unwrap(), Some(cohort));
+                    assert_eq!(main.pending_reprepare().unwrap(), Some(cohort.request));
+                    assert_eq!(main.preserve_native_observations().unwrap().object, object);
+                }
+                assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+                assert_eq!(worker.native_configuration_cohort(), Some(cohort));
+                assert_eq!(worker.pending_reprepare(), Some(cohort.request));
+            }
             assert_eq!(
                 LIFECYCLE_AUDITS[case].activations.load(TestOrdering::SeqCst),
                 1,
