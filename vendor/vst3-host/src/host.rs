@@ -324,7 +324,6 @@ impl Vst3Host {
         let plugin = Plugin {
             info: updated_info,
             compatibility,
-            is_processing: false,
             sample_rate: self.config.sample_rate,
             block_size: self.config.block_size,
             audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(output_channels))),
@@ -420,7 +419,6 @@ impl Vst3Host {
         let plugin = Plugin {
             info: loaded_info,
             compatibility,
-            is_processing: false,
             sample_rate: self.config.sample_rate,
             block_size: self.config.block_size,
             audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(output_channels))),

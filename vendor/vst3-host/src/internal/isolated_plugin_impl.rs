@@ -817,6 +817,10 @@ impl PluginInternal for IsolatedPluginImpl {
         .flatten()
     }
 
+    fn processing_state(&self) -> bool {
+        self.is_processing
+    }
+
     fn start_processing(&mut self) -> Result<()> {
         self.expect_success(HostCommand::StartProcessing, "StartProcessing")?;
         self.is_processing = true;
@@ -1211,6 +1215,36 @@ mod tests {
             false,
             0,
         )
+    }
+
+    #[test]
+    fn processing_record_is_local_and_preserved_across_state_command_refusal() {
+        let fake = FakeHelper::new("processing_record");
+        // Extend only this existing fake transport control: an Error response
+        // cannot expose whether the remote child restored its old lifecycle.
+        let script = std::fs::read_to_string(&fake.script).unwrap();
+        std::fs::write(&fake.script, script.replace(
+            "    *) printf", "    *LoadState*) printf '%s\\n' '{\"Error\":{\"message\":\"test state refusal\"}}' ;;\n    *) printf",
+        )).unwrap();
+        let mut plugin = isolated(&fake);
+        assert!(!plugin.processing_state());
+        plugin.start_processing().unwrap();
+        assert!(plugin.processing_state());
+        let before = fake.requests();
+        assert!(plugin.processing_state());
+        assert_eq!(fake.requests(), before, "getter makes no RPC");
+        assert!(plugin
+            .load_state_with_context(&[1, 2, 3], &StateContext::Project)
+            .is_err());
+        assert!(
+            plugin.processing_state(),
+            "last host-acknowledged processing record only"
+        );
+        plugin.stop_processing().unwrap();
+        assert!(!plugin.processing_state());
+        let before = fake.requests();
+        assert!(!plugin.processing_state());
+        assert_eq!(fake.requests(), before, "stopped getter makes no RPC");
     }
 
     #[test]

@@ -877,7 +877,6 @@ pub struct Plugin {
     // Internal state is hidden from public API
     pub(crate) info: PluginInfo,
     pub(crate) compatibility: Vec<crate::discovery::ClassCompatibility>,
-    pub(crate) is_processing: bool,
     /// Configured sample rate (exposed via [`Plugin::sample_rate`]).
     pub(crate) sample_rate: f64,
     /// Configured max block size (exposed via [`Plugin::block_size`]).
@@ -1382,6 +1381,8 @@ pub(crate) trait PluginInternal: Send {
     ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
         Ok(Vec::new())
     }
+    /// Existing backend host lifecycle record; never a plugin/IPC query.
+    fn processing_state(&self) -> bool;
     fn start_processing(&mut self) -> Result<()>;
     fn stop_processing(&mut self) -> Result<()>;
     /// Derive unresolved teardown from the sole actual view attachment.
@@ -1801,7 +1802,7 @@ impl Plugin {
     /// on an invalid sample rate / zero block size. Works both in-process and across process
     /// isolation.
     pub fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
-        if self.is_processing {
+        if self.is_processing() {
             return Err(Error::Other(
                 "cannot reconfigure while processing; call stop_processing() first".to_string(),
             ));
@@ -1836,7 +1837,7 @@ impl Plugin {
     /// [`Self::stop_processing`] first. Returns an error if called while processing. Works both
     /// in-process and across process isolation.
     pub fn set_process_mode(&mut self, mode: ProcessMode) -> Result<()> {
-        if self.is_processing {
+        if self.is_processing() {
             return Err(Error::Other(
                 "cannot set process mode while processing; call stop_processing() first"
                     .to_string(),
@@ -1870,7 +1871,7 @@ impl Plugin {
         inputs: &[crate::audio::SpeakerArrangement],
         outputs: &[crate::audio::SpeakerArrangement],
     ) -> Result<()> {
-        if self.is_processing {
+        if self.is_processing() {
             return Err(Error::Other(
                 "cannot set bus arrangements while processing; call stop_processing() first"
                     .to_string(),
@@ -1906,7 +1907,7 @@ impl Plugin {
         bus_index: i32,
         active: bool,
     ) -> Result<()> {
-        if self.is_processing {
+        if self.is_processing() {
             return Err(Error::Other(
                 "cannot activate a bus while processing; call stop_processing() first".to_string(),
             ));
@@ -2062,7 +2063,7 @@ impl Plugin {
         &mut self,
         context: crate::audio::ProcessTimelineContext,
     ) -> Result<()> {
-        if !self.is_processing {
+        if !self.is_processing() {
             return Err(Error::NotProcessing);
         }
         self.internal
@@ -2539,31 +2540,23 @@ impl Plugin {
 
     /// Start audio processing
     pub fn start_processing(&mut self) -> Result<()> {
-        if self.is_processing {
+        if self.is_processing() {
             return Ok(());
         }
 
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .start_processing()?;
-
-        self.is_processing = true;
-        Ok(())
+            .start_processing()
     }
 
     /// Stop audio processing
     pub fn stop_processing(&mut self) -> Result<()> {
-        if !self.is_processing {
-            return Ok(());
+        // A loaded component can be active without processing (initial load or
+        // retained configuration service). Its backend still owns deactivation.
+        if let Some(internal) = self.internal.as_mut() {
+            internal.stop_processing()?;
         }
-
-        self.internal
-            .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .stop_processing()?;
-
-        self.is_processing = false;
         Ok(())
     }
 
@@ -2574,7 +2567,7 @@ impl Plugin {
     /// Both playback paths call this from the **audio thread**, so any callback registered
     /// with [`Self::on_audio_process`] runs there too — see that method's warning.
     pub fn process_audio(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
-        if !self.is_processing {
+        if !self.is_processing() {
             return Err(Error::NotProcessing);
         }
 
@@ -2651,7 +2644,7 @@ impl Plugin {
     /// Reuse a set created by [`Self::create_bus_audio_buffers`] for allocation-free in-process
     /// steady-state processing.
     pub fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
-        if !self.is_processing {
+        if !self.is_processing() {
             return Err(Error::NotProcessing);
         }
         self.internal
@@ -2706,13 +2699,17 @@ impl Plugin {
             .clone()
     }
 
-    /// Read the historical wrapper's cached processing status.
+    /// Read the existing backend's host processing lifecycle record.
     ///
-    /// Internal retained configuration operations can stop the native processor
-    /// without updating this cache. Use [`Self::can_split_editor_processing`] for
-    /// the actual native state required to borrow a DSP role.
+    /// This performs no SDK call or IPC request. The native record follows its
+    /// existing lifecycle handling, including retained configuration and
+    /// state-restore recovery. The isolated record follows acknowledged host
+    /// commands; a failed protocol does not reveal the child's final state.
+    /// An unloaded Plugin returns false.
     pub fn is_processing(&self) -> bool {
-        self.is_processing
+        self.internal
+            .as_ref()
+            .is_some_and(|internal| internal.processing_state())
     }
 
     /// Set a callback invoked whenever [`Self::set_parameter`] succeeds, with the parameter id
@@ -2762,8 +2759,8 @@ impl Plugin {
     /// Whether the actual native instance is active, processing and has its
     /// prepared process storage. Unsupported backends return false.
     ///
-    /// This observes native-owner fields, not [`Self::is_processing`]'s wrapper
-    /// cache. It performs no SDK call or state transition and grants no borrow;
+    /// This also requires the active native owner and its prepared process
+    /// storage. It performs no SDK call or state transition and grants no borrow;
     /// [`Self::split_editor_processing`] still checks the control thread.
     pub fn can_split_editor_processing(&self) -> bool {
         self.internal
@@ -3994,7 +3991,6 @@ mod public_surface_tests {
                 has_gui: false,
             },
             compatibility: Vec::new(),
-            is_processing: false,
             sample_rate: 44_100.0,
             block_size: 512,
             audio_levels: Arc::new(Mutex::new(AudioLevels::new(2))),
@@ -4005,13 +4001,107 @@ mod public_surface_tests {
     }
 
     #[test]
-    fn unloaded_editor_capabilities_do_not_trust_the_wrapper_processing_cache() {
+    fn unloaded_plugin_has_no_processing_or_editor_capabilities() {
         let mut plugin = unloaded_plugin();
-        plugin.is_processing = true;
-        assert!(plugin.is_processing());
+        assert!(!plugin.is_processing());
         assert!(!plugin.can_split_editor_processing());
         assert!(plugin.borrow_editor_control().is_err());
         assert!(plugin.split_editor_processing().is_err());
+    }
+
+    #[test]
+    fn unloaded_stop_remains_noop_and_processing_guards_keep_their_original_errors() {
+        let mut plugin = unloaded_plugin();
+        plugin.stop_processing().unwrap();
+        assert!(!plugin.is_processing());
+        assert!(plugin.start_processing().is_err());
+        assert!(!plugin.is_processing());
+        assert!(matches!(
+            plugin.set_process_timeline_context(crate::audio::ProcessTimelineContext {
+                sample_position: 0,
+                sample_rate: 44_100,
+            }),
+            Err(Error::NotProcessing)
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires the existing owned Note-oracle SDK DLL; host lifecycle record only"]
+    fn native_facade_processing_record_tracks_retained_service_and_state_restore_outcomes() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_NOTE_ORACLE_PLUGIN").expect("existing owned SDK DLL"),
+        );
+        assert!(path.is_absolute() && path.is_file());
+        let mut host = crate::Vst3Host::builder()
+            .sample_rate(48_000.0)
+            .block_size(4)
+            .input_channels(2)
+            .output_channels(2)
+            .build()
+            .unwrap();
+        let mut plugin = host
+            .load_plugin_class(&path, "6E4F05A12D8B4C639F017B42A4C2E611")
+            .unwrap();
+        assert!(!plugin.is_processing());
+        plugin.stop_processing().unwrap();
+        plugin
+            .set_bus_active(
+                crate::audio::MediaType::Event,
+                crate::audio::BusDirection::Input,
+                1,
+                true,
+            )
+            .unwrap();
+        plugin.start_processing().unwrap();
+        plugin.start_processing().unwrap();
+        assert!(plugin.is_processing() && plugin.can_split_editor_processing());
+        let saved = plugin.save_state().unwrap();
+        plugin.reactivate_configuration_stopped().unwrap();
+        assert!(!plugin.is_processing());
+        assert!(!plugin.can_split_editor_processing());
+        let mut pcm = AudioBuffers::new(2, 2, 4, 48_000.0);
+        for output in &mut pcm.outputs {
+            output.fill(f32::NAN);
+        }
+        assert!(matches!(
+            plugin.process_audio(&mut pcm),
+            Err(Error::NotProcessing)
+        ));
+        assert!(pcm.outputs.iter().flatten().all(|value| value.is_nan()));
+        assert!(matches!(
+            plugin.set_process_timeline_context(crate::audio::ProcessTimelineContext {
+                sample_position: 0,
+                sample_rate: 48_000,
+            }),
+            Err(Error::NotProcessing)
+        ));
+        plugin.start_processing().unwrap();
+        assert!(plugin.is_processing() && plugin.can_split_editor_processing());
+        // The real fixture rejects DSP unless its actual setProcessing(1) ran.
+        plugin.process_audio(&mut pcm).unwrap();
+        plugin.load_state(&saved).unwrap();
+        assert!(plugin.is_processing() && plugin.can_split_editor_processing());
+        let invalid = encode_state_snapshot(&StateSnapshot {
+            // A valid host envelope reaches real component setState and fails
+            // its existing MNE1 bound. The original recovery then resumes DSP.
+            component: b"MNE1\x01\0\0\0\x41\0\0\0".to_vec(),
+            controller: None,
+        })
+        .unwrap();
+        let error = plugin.load_state(&invalid).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Failed to restore component state"));
+        assert!(
+            plugin.is_processing(),
+            "real apply failure with successful lifecycle recovery"
+        );
+        plugin.process_audio(&mut pcm).unwrap();
+        plugin.load_state(&saved).unwrap();
+        assert!(plugin.is_processing());
+        plugin.stop_processing().unwrap();
+        plugin.stop_processing().unwrap();
+        assert!(!plugin.is_processing() && !plugin.can_split_editor_processing());
     }
 
     /// The "not processing" rejection happens once per block on the audio thread, so it must

@@ -3182,6 +3182,10 @@ impl PluginInternal for PluginImpl {
         Ok(())
     }
 
+    fn processing_state(&self) -> bool {
+        self.is_processing
+    }
+
     fn start_processing(&mut self) -> Result<()> {
         self.bus_activation.event_readiness = None;
         unsafe {
@@ -7523,6 +7527,32 @@ pub(crate) fn native_editor_processing_layouts() -> [std::alloc::Layout; 2] {
         std::alloc::Layout::new::<PluginEditorFields<'static>>(),
         std::alloc::Layout::new::<PluginProcessFields<'static>>(),
     ]
+}
+
+#[test]
+#[ignore = "requires the existing owned Note-oracle SDK DLL; no GUI or compatibility claim"]
+fn native_stop_deactivates_loaded_and_retained_active_but_stopped_owners() {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_NOTE_ORACLE_PLUGIN").expect("existing owned SDK DLL"),
+    );
+    assert!(path.is_absolute() && path.is_file());
+    let mut native = PluginImpl::load_class(
+        &path,
+        "6E4F05A12D8B4C639F017B42A4C2E611",
+        crate::PluginInterfaceSupport::default(),
+    )
+    .unwrap();
+    assert!(native.is_active && !native.processing_state());
+    native.stop_processing().unwrap();
+    assert!(!native.is_active && !native.processing_state());
+    native.stop_processing().unwrap();
+    assert!(!native.is_active && !native.processing_state());
+    native.start_processing().unwrap();
+    assert!(native.is_active && native.processing_state());
+    native.reactivate_configuration_stopped().unwrap();
+    assert!(native.is_active && !native.processing_state());
+    native.stop_processing().unwrap();
+    assert!(!native.is_active && !native.processing_state());
 }
 
 #[cfg(test)]
