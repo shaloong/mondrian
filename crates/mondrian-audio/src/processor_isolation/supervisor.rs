@@ -2907,8 +2907,8 @@ mod control_timeout_worker_lifecycle {
                 let path = staging.path().to_owned();
                 let response = path.join("response.json");
                 match case {
-                    0 => std::fs::write(&response, br#"{"kind":"list","descriptors":[]}"#).unwrap(),
-                    1 => std::fs::write(&response, br#"{"kind":"probe","class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
+                    0 => std::fs::write(&response, br#"{"kind":"list_v2","schema_version":2,"descriptors":[]}"#).unwrap(),
+                    1 => std::fs::write(&response, br#"{"kind":"probe_v2","schema_version":2,"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
                     2 => {},
                     3 => std::fs::write(&response, b"not valid JSON").unwrap(),
                     4 => std::fs::write(&response, vec![b' '; 512 * 1024 + 1]).unwrap(),
@@ -2918,7 +2918,7 @@ mod control_timeout_worker_lifecycle {
                 let owner = successful_vst3_owner(staging);
                 let result = finish_discovery_request(owner, &response);
                 match (case, result) {
-                    (0, Ok(DiscoveryResponse::List { descriptors })) => {
+                    (0, Ok(DiscoveryResponse::List { descriptors, .. })) => {
                         assert!(descriptors.is_empty())
                     }
                     (

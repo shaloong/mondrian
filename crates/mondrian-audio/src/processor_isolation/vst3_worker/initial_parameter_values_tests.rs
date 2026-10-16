@@ -41,6 +41,8 @@ pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
         compensation_delay_scratch_budget_bytes: usize::MAX,
     };
     let payload = Vst3Payload {
+        schema_version: PAYLOAD_VERSION,
+        event_bus_contract: Vst3EventBusContractV1::empty(),
         class_id: "61921CF43A2B4A68AE5AE08241D85E22".to_owned(),
         vendor: Some("Vendor".to_owned()),
         binary_sha256: fingerprint(&binary_path).expect("fixture hash"),

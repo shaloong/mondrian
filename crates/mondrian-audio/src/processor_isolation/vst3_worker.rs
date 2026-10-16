@@ -8,6 +8,7 @@ mod native_author;
 #[cfg(all(test, target_os = "windows"))]
 mod startup_metadata_diagnostics;
 
+use super::vst3_processing_metadata::Vst3EventBusContractV1;
 use super::{
     IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
     IsolatedAudioProcessorWorkerBlock, IsolatedAudioProcessorWorkerFactory,
@@ -42,6 +43,7 @@ use vst3_host::Vst3Host;
 pub const VST3_AUDIO_WORKER_ARGUMENT: &str = "--internal-vst3-audio-worker-v1";
 const MAX_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_STATE_BYTES: usize = 128 * 1024;
+const PAYLOAD_VERSION: u32 = 2;
 
 /// Actual product consumers, shared by discovery and every processing reload.
 pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
@@ -183,6 +185,8 @@ pub struct Vst3PluginRegistration {
     pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     /// Complete parameter metadata, including non-editable parameters.
     pub parameters: Vec<Vst3ParameterDescriptor>,
+    /// Expected native event rows; revalidated after each actual restore/configuration.
+    pub event_bus_contract: Vst3EventBusContractV1,
 }
 
 /// Parent-side registry that packages a VST3 definition for supervised execution.
@@ -259,6 +263,8 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             return Err(invalid("VST3 state exceeds the worker payload limit"));
         }
         let payload = serde_json::to_vec(&Vst3Payload {
+            schema_version: PAYLOAD_VERSION,
+            event_bus_contract: plugin.event_bus_contract,
             binary_path: plugin.binary_path.clone(),
             class_id: plugin.class_id.clone(),
             vendor: plugin.vendor.clone(),
@@ -299,8 +305,7 @@ pub(super) fn payload_with_configuration_seed(
             "native configuration seed exceeds the existing state limit",
         ));
     }
-    let mut decoded: Vst3Payload = serde_json::from_slice(payload)
-        .map_err(|error| invalid(format!("invalid concrete payload for native seed: {error}")))?;
+    let mut decoded = decode_payload(payload)?;
     // Retire the decoded old seed outside publication/SDK guards before
     // allocating its replacement; preserve all other concrete metadata.
     decoded.state = None;
@@ -317,6 +322,8 @@ pub(super) fn payload_with_configuration_seed(
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Vst3Payload {
+    schema_version: u32,
+    event_bus_contract: Vst3EventBusContractV1,
     binary_path: PathBuf,
     class_id: String,
     vendor: Option<String>,
@@ -326,13 +333,22 @@ struct Vst3Payload {
     parameter_ids: Vec<u32>,
 }
 
+fn decode_payload(bytes: &[u8]) -> Result<Vst3Payload, AudioProcessorHostError> {
+    let payload: Vst3Payload = serde_json::from_slice(bytes)
+        .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
+    if payload.schema_version != PAYLOAD_VERSION {
+        return Err(invalid("unsupported VST3 worker payload version"));
+    }
+    payload.event_bus_contract.validate()?;
+    Ok(payload)
+}
+
 // Non-RT decoding/identity validation may allocate Rust owners. No foreign
 // plugin query or worker launch is part of this preparation request.
 fn validated_preparation_payload(
     request: &IsolatedAudioProcessorWorkerPrepareRequest,
 ) -> Result<Vst3Payload, AudioProcessorHostError> {
-    let payload: Vst3Payload = serde_json::from_slice(request.payload())
-        .map_err(|error| invalid(format!("invalid VST3 worker payload: {error}")))?;
+    let payload = decode_payload(request.payload())?;
     let registration = Vst3PluginRegistration {
         class_id: payload.class_id.clone(),
         vendor: payload.vendor.clone(),
@@ -341,6 +357,7 @@ fn validated_preparation_payload(
         execution_contract: request.plugin_execution_contract(),
         auxiliary_inputs: request.auxiliary_inputs().clone(),
         parameters: payload.parameters.clone(),
+        event_bus_contract: payload.event_bus_contract,
     };
     validate_registration(&registration)?;
     if payload.state.as_ref().is_some_and(|state| state.len() > MAX_STATE_BYTES)
@@ -417,6 +434,7 @@ impl Vst3AudioProcessorWorkerFactory {
             execution_contract: request.plugin_execution_contract(),
             auxiliary_inputs: request.auxiliary_inputs().clone(),
             parameters: payload.parameters.clone(),
+            event_bus_contract: payload.event_bus_contract,
         };
         if fingerprint(&payload.binary_path)? != payload.binary_sha256 {
             return Err(unavailable("VST3 binary changed since processor admission"));
@@ -973,6 +991,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         let inputs = observe_active_audio_inputs(plugin, self.render.channel_layout)?;
         if inputs != self.auxiliary_inputs
             || parameter_descriptors(plugin)? != self.payload.parameters
+            || Vst3EventBusContractV1::observe(plugin)? != self.payload.event_bus_contract
         {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
@@ -1387,6 +1406,9 @@ fn validate_loaded(
             "VST3 parameter metadata changed since contract probe",
         ));
     }
+    if Vst3EventBusContractV1::observe(plugin)? != registration.event_bus_contract {
+        return Err(invalid("VST3 event-bus contract changed since probe"));
+    }
     Ok(metadata.names)
 }
 
@@ -1576,6 +1598,7 @@ fn validate_registration(
             "VST3 auxiliary bus indices must retain native order",
         ));
     }
+    registration.event_bus_contract.validate()?;
     let mut ids = BTreeSet::new();
     for parameter in &registration.parameters {
         validate_parameter(parameter)?;
@@ -2004,6 +2027,7 @@ impl Vst3Worker {
                 execution_contract: self.contract,
                 auxiliary_inputs: self.auxiliary_inputs.clone(),
                 parameters: self.payload.parameters.clone(),
+                event_bus_contract: self.payload.event_bus_contract,
             },
             self.render.channel_layout,
         )?;
@@ -2044,6 +2068,8 @@ mod bus_contract_tests {
         };
         let parameter_id = parameter.parameter_id().unwrap();
         let payload = Vst3Payload {
+            schema_version: PAYLOAD_VERSION,
+            event_bus_contract: Vst3EventBusContractV1::empty(),
             class_id: "61921CF43A2B4A68AE5AE08241D85E22".to_owned(),
             vendor: None,
             binary_path: std::env::temp_dir().join("unopened-vst3-profile-control.dll"),
@@ -2098,6 +2124,71 @@ mod bus_contract_tests {
             payload.parameters[0].clone();
             MAX_PARAMETERS + 1
         ])
+        .is_err());
+    }
+
+    #[test]
+    fn payload_v2_seed_keeps_expected_event_contract_and_refuses_legacy_or_unknown_metadata() {
+        use super::super::{Vst3EventBusContractRow, Vst3EventBusContractRows, Vst3EventBusRole};
+        let event_bus_contract = Vst3EventBusContractV1 {
+            schema_version: 1,
+            inputs: Vst3EventBusContractRows::try_from_slice(&[Vst3EventBusContractRow {
+                native_index: 0,
+                role: Vst3EventBusRole::Main,
+                channel_count: 16,
+                default_active: true,
+                host_active: false,
+            }])
+            .unwrap(),
+            outputs: Vst3EventBusContractV1::empty().outputs,
+        };
+        let payload = Vst3Payload {
+            schema_version: 2,
+            event_bus_contract,
+            binary_path: std::env::temp_dir().join("never-opened-event-contract.dll"),
+            class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            vendor: None,
+            binary_sha256: [1; 32],
+            state: None,
+            parameters: vec![],
+            parameter_ids: vec![],
+        };
+        let original = serde_json::to_value(&payload).unwrap();
+        for state in [None, Some(vec![]), Some(vec![1, 2])] {
+            let mut before = original.clone();
+            before["state"] = serde_json::json!(state);
+            let updated =
+                payload_with_configuration_seed(&serde_json::to_vec(&before).unwrap(), &[3, 4])
+                    .unwrap();
+            let decoded = decode_payload(&updated).unwrap();
+            assert_eq!(decoded.event_bus_contract, event_bus_contract);
+            assert_eq!(decoded.state, Some(vec![3, 4]));
+            let mut expected = before;
+            expected["state"] = serde_json::json!([3, 4]);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&updated).unwrap(),
+                expected
+            );
+        }
+        for field in ["schema_version", "event_bus_contract"] {
+            let mut missing = original.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(decode_payload(&serde_json::to_vec(&missing).unwrap()).is_err());
+        }
+        for (field, value) in [
+            ("schema_version", serde_json::json!(1)),
+            ("unknown", serde_json::json!(1)),
+        ] {
+            let mut bad = original.clone();
+            bad[field] = value;
+            let bytes = serde_json::to_vec(&bad).unwrap();
+            assert!(decode_payload(&bytes).is_err());
+            assert!(payload_with_configuration_seed(&bytes, &[]).is_err());
+        }
+        assert!(payload_with_configuration_seed(
+            &serde_json::to_vec(&original).unwrap(),
+            &vec![0; MAX_STATE_BYTES + 1]
+        )
         .is_err());
     }
 

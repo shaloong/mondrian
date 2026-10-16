@@ -42,6 +42,7 @@ mod protocol;
 mod supervisor;
 mod vst3_catalog;
 mod vst3_discovery;
+mod vst3_processing_metadata;
 mod vst3_worker;
 mod worker;
 
@@ -100,6 +101,9 @@ pub use vst3_catalog::{
 pub use vst3_discovery::{
     probe_vst3_plugin_registration, run_vst3_discovery_worker, scan_vst3_binary_descriptors,
     Vst3PluginDescriptor, VST3_DISCOVERY_WORKER_ARGUMENT,
+};
+pub use vst3_processing_metadata::{
+    Vst3EventBusContractRow, Vst3EventBusContractRows, Vst3EventBusContractV1, Vst3EventBusRole,
 };
 pub use vst3_worker::{
     Vst3AudioProcessorSpecResolver, Vst3AudioProcessorWorkerFactory, Vst3ParameterDescriptor,

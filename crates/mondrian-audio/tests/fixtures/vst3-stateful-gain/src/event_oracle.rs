@@ -2,8 +2,12 @@
 //! Audit is transient, fixed-capacity evidence; restoring configuration never
 //! replays it. A callback may fail after earlier chunks advanced: no rollback.
 use super::*;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Mutex;
+use std::thread::{self, ThreadId};
+use std::{fs::File, io::Write, path::PathBuf};
+use vst3::ComPtr;
 
 pub(super) const COMPONENT_CID: TUID = uid(0x6E4F05A1, 0x2D8B4C63, 0x9F017B42, 0xA4C2E611);
 const CONTROLLER_CID: TUID = uid(0x84D037BE, 0x29F84A11, 0xBD625C30, 0x7A15E902);
@@ -11,6 +15,10 @@ const NAME: &str = "Mondrian VST3 Note Event Oracle";
 const MAX_CALLS: usize = 64;
 const MAX_EVENTS: usize = 4096;
 const CONFIG_BYTES: usize = 12;
+const ADMISSION_CONFIG_BYTES: usize = 16;
+const SERVICE_CONFIG_BYTES: usize = 20;
+const TRACE_ENV: &str = "MONDRIAN_VST3_EVENT_ADMISSION_TRACE";
+const TRACE_BYTES: u64 = 16 * 1024;
 const CALL_BYTES: usize = 16;
 const EVENT_BYTES: usize = 48;
 const HEADER_BYTES: usize = 56;
@@ -42,26 +50,100 @@ pub(super) unsafe fn class_info(index: i32, info: *mut PClassInfo) -> tresult {
 pub(super) fn create_instance(cid: TUID) -> Option<vst3::ComPtr<FUnknown>> {
     match cid {
         COMPONENT_CID => ComWrapper::new(NoteProcessor::new()?).to_com_ptr::<FUnknown>(),
-        CONTROLLER_CID => {
-            ComWrapper::new(NoteController { fail_call: Cell::new(0) }).to_com_ptr::<FUnknown>()
-        }
+        CONTROLLER_CID => ComWrapper::new(NoteController {
+            config: Cell::new(Config::legacy(0)),
+            handler: RefCell::new(None),
+            main_thread: Cell::new(None),
+        })
+        .to_com_ptr::<FUnknown>(),
         _ => None,
     }
 }
 
-unsafe fn read_config(stream: *mut IBStream) -> Option<u32> {
+#[derive(Clone, Copy)]
+struct Config {
+    fail_call: u32,
+    // None retains the original MNE1 configuration, audit and Note DSP.
+    auxiliary_default: Option<bool>,
+    // MNE3 input-only first-stop command: 0 stable, 1 retain, 2 flip default.
+    // Normal getState preserves current component configuration, not commands.
+    service_action: Option<u32>,
+}
+impl Config {
+    const fn legacy(fail_call: u32) -> Self {
+        Self {
+            fail_call,
+            auxiliary_default: None,
+            service_action: None,
+        }
+    }
+    fn encode(self) -> ([u8; SERVICE_CONFIG_BYTES], usize) {
+        let mut bytes = [0; SERVICE_CONFIG_BYTES];
+        let (magic, version, len) = if self.service_action.is_some() {
+            (b"MNE3", 3_u32, SERVICE_CONFIG_BYTES)
+        } else if self.auxiliary_default.is_some() {
+            (b"MNE2", 2_u32, ADMISSION_CONFIG_BYTES)
+        } else {
+            (b"MNE1", 1_u32, CONFIG_BYTES)
+        };
+        bytes[..4].copy_from_slice(magic);
+        bytes[4..8].copy_from_slice(&version.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.fail_call.to_le_bytes());
+        if let Some(active) = self.auxiliary_default {
+            bytes[12..16].copy_from_slice(&u32::from(active).to_le_bytes());
+        }
+        if let Some(action) = self.service_action {
+            bytes[16..20].copy_from_slice(&action.to_le_bytes());
+        }
+        (bytes, len)
+    }
+}
+unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     let stream = ComRef::from_raw(stream)?;
-    let mut bytes = [0; CONFIG_BYTES];
+    let mut bytes = [0; SERVICE_CONFIG_BYTES];
     let mut read = 0;
     if stream.read(bytes.as_mut_ptr().cast(), CONFIG_BYTES as i32, &mut read) != kResultOk
         || read != CONFIG_BYTES as i32
-        || bytes[..4] != *b"MNE1"
-        || u32::from_le_bytes(bytes[4..8].try_into().ok()?) != 1
     {
         return None;
     }
-    let fail = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    (fail <= MAX_CALLS as u32).then_some(fail)
+    let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let fail_call = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    if fail_call > MAX_CALLS as u32 {
+        return None;
+    }
+    let (auxiliary_default, service_action) = match (&bytes[..4], version) {
+        (b"MNE1", 1) => (None, None),
+        (b"MNE2", 2) => {
+            if stream.read(bytes[12..].as_mut_ptr().cast(), 4, &mut read) != kResultOk || read != 4
+            {
+                return None;
+            }
+            match u32::from_le_bytes(bytes[12..16].try_into().ok()?) {
+                0 => (Some(false), None),
+                1 => (Some(true), None),
+                _ => return None,
+            }
+        }
+        (b"MNE3", 3) => {
+            if stream.read(bytes[12..].as_mut_ptr().cast(), 8, &mut read) != kResultOk || read != 8
+            {
+                return None;
+            }
+            let active = match u32::from_le_bytes(bytes[12..16].try_into().ok()?) {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            let action = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+            if action > 2 {
+                return None;
+            }
+            (Some(active), Some(action))
+        }
+        _ => return None,
+    };
+    Some(Config { fail_call, auxiliary_default, service_action })
 }
 unsafe fn write_bytes(stream: *mut IBStream, bytes: &[u8]) -> tresult {
     let Some(stream) = ComRef::from_raw(stream) else {
@@ -80,12 +162,45 @@ unsafe fn write_bytes(stream: *mut IBStream, bytes: &[u8]) -> tresult {
         kResultFalse
     }
 }
-fn config(fail: u32) -> [u8; CONFIG_BYTES] {
-    let mut bytes = [0; CONFIG_BYTES];
-    bytes[..4].copy_from_slice(b"MNE1");
-    bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
-    bytes[8..12].copy_from_slice(&fail.to_le_bytes());
-    bytes
+// Fixture-only, explicitly enabled by the native consumer with a precreated
+// path. The control thread writes a finite census/termination trace; process()
+// never opens or writes a file.
+struct AdmissionTrace(File);
+impl AdmissionTrace {
+    fn open() -> std::io::Result<Option<Self>> {
+        let Some(path) = std::env::var_os(TRACE_ENV) else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(path);
+        if !path.is_absolute() || !path.is_file() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        File::options().append(true).open(path).map(|file| Some(Self(file)))
+    }
+    fn record(
+        &mut self,
+        instance: u64,
+        stage: &str,
+        index: i32,
+        default: bool,
+        active: bool,
+        calls: usize,
+    ) -> std::io::Result<()> {
+        let line = format!(
+            "MNE2 pid={} instance={instance} stage={stage} index={index} aux_default={} aux_active={} calls={calls}\n",
+            std::process::id(), u8::from(default), u8::from(active)
+        );
+        if self
+            .0
+            .metadata()?
+            .len()
+            .checked_add(line.len() as u64)
+            .is_none_or(|n| n > TRACE_BYTES)
+        {
+            return Err(std::io::Error::from(std::io::ErrorKind::FileTooLarge));
+        }
+        self.0.write_all(line.as_bytes())
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -247,6 +362,11 @@ impl Audit {
 struct NoteProcessor {
     instance: u64,
     fail_call: AtomicU32,
+    admission_mode: AtomicBool,
+    auxiliary_default: AtomicBool,
+    service_mode: AtomicBool,
+    stop_action: AtomicU32,
+    trace: Mutex<Option<AdmissionTrace>>,
     active_buses: AtomicU32,
     active: AtomicBool,
     processing: AtomicBool,
@@ -255,6 +375,34 @@ struct NoteProcessor {
     audit: Mutex<Audit>,
 }
 impl NoteProcessor {
+    fn config(&self) -> Config {
+        Config {
+            fail_call: self.fail_call.load(Ordering::Relaxed),
+            auxiliary_default: self
+                .admission_mode
+                .load(Ordering::Relaxed)
+                .then(|| self.auxiliary_default.load(Ordering::Relaxed)),
+            // A configuration read is not a checkpoint of a queued test command.
+            service_action: self.service_mode.load(Ordering::Relaxed).then_some(0),
+        }
+    }
+    fn trace(&self, stage: &str, index: i32, calls: usize) -> bool {
+        let Ok(mut trace) = self.trace.try_lock() else {
+            return false;
+        };
+        trace.as_mut().is_none_or(|trace| {
+            trace
+                .record(
+                    self.instance,
+                    stage,
+                    index,
+                    self.auxiliary_default.load(Ordering::Relaxed),
+                    self.active_buses.load(Ordering::Relaxed) & 8 != 0,
+                    calls,
+                )
+                .is_ok()
+        })
+    }
     fn new() -> Option<Self> {
         let instance = NEXT_INSTANCE
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -264,6 +412,11 @@ impl NoteProcessor {
         Some(Self {
             instance,
             fail_call: AtomicU32::new(0),
+            admission_mode: AtomicBool::new(false),
+            auxiliary_default: AtomicBool::new(false),
+            service_mode: AtomicBool::new(false),
+            stop_action: AtomicU32::new(0),
+            trace: Mutex::new(None),
             active_buses: AtomicU32::new(0),
             active: AtomicBool::new(false),
             processing: AtomicBool::new(false),
@@ -282,7 +435,14 @@ impl IPluginBaseTrait for NoteProcessor {
         kResultOk
     }
     unsafe fn terminate(&self) -> tresult {
-        kResultOk
+        let Ok(audit) = self.audit.try_lock() else {
+            return kResultFalse;
+        };
+        if self.trace("terminate", -1, audit.call_count) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 }
 impl IComponentTrait for NoteProcessor {
@@ -334,11 +494,32 @@ impl IComponentTrait for NoteProcessor {
         } else {
             BusTypes_::kAux
         }) as BusType;
-        out.flags = if index == 0 {
+        out.flags = if index == 0
+            || (media == MediaTypes_::kEvent as MediaType
+                && index == 1
+                && self.auxiliary_default.load(Ordering::Relaxed))
+        {
             BusInfo_::BusFlags_::kDefaultActive as u32
         } else {
             0
         };
+        if media == MediaTypes_::kEvent as MediaType && self.admission_mode.load(Ordering::Relaxed)
+        {
+            let enabled = {
+                let Ok(trace) = self.trace.try_lock() else {
+                    return kResultFalse;
+                };
+                trace.is_some()
+            };
+            if enabled {
+                let Ok(audit) = self.audit.try_lock() else {
+                    return kResultFalse;
+                };
+                if !self.trace("census", index, audit.call_count) {
+                    return kResultFalse;
+                }
+            }
+        }
         kResultOk
     }
     unsafe fn getRoutingInfo(
@@ -377,33 +558,65 @@ impl IComponentTrait for NoteProcessor {
         kResultOk
     }
     unsafe fn setState(&self, stream: *mut IBStream) -> tresult {
-        let Some(fail) = read_config(stream) else {
+        let Some(config) = read_config(stream) else {
             return kInvalidArgument;
+        };
+        let trace = if config.auxiliary_default.is_some() {
+            match AdmissionTrace::open() {
+                Ok(trace) => trace,
+                Err(_) => return kResultFalse,
+            }
+        } else {
+            None
         };
         let Ok(mut audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
+        let Ok(mut current_trace) = self.trace.try_lock() else {
+            return kResultFalse;
+        };
+        *current_trace = trace;
         audit.voices = [EMPTY_VOICE; 16];
-        self.fail_call.store(fail, Ordering::Relaxed);
+        self.fail_call.store(config.fail_call, Ordering::Relaxed);
+        self.admission_mode.store(config.auxiliary_default.is_some(), Ordering::Relaxed);
+        self.service_mode.store(config.service_action.is_some(), Ordering::Relaxed);
+        self.stop_action.store(config.service_action.unwrap_or(0), Ordering::Relaxed);
+        self.auxiliary_default
+            .store(config.auxiliary_default.unwrap_or(false), Ordering::Relaxed);
+        drop(current_trace);
         // Historical callback/tuple audit is neither restored nor cleared.
-        kResultOk
+        if self.trace("restore", -1, audit.call_count) {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
         let Ok(audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
-        let mut bytes =
-            vec![0_u8; HEADER_BYTES + MAX_CALLS * CALL_BYTES + MAX_EVENTS * EVENT_BYTES];
-        bytes[..CONFIG_BYTES].copy_from_slice(&config(self.fail_call.load(Ordering::Relaxed)));
-        bytes[12..16].copy_from_slice(b"MNA1");
-        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
-        bytes[20..28].copy_from_slice(&self.instance.to_le_bytes());
-        bytes[28..32].copy_from_slice(&(audit.call_count as u32).to_le_bytes());
-        bytes[32..36].copy_from_slice(&(audit.event_count as u32).to_le_bytes());
-        bytes[36..40].copy_from_slice(&u32::from(!audit.incomplete).to_le_bytes());
-        bytes[40..48].copy_from_slice(&self.sample_rate.load(Ordering::Relaxed).to_le_bytes());
-        bytes[48..52].copy_from_slice(&self.max_frames.load(Ordering::Relaxed).to_le_bytes());
-        let mut cursor = HEADER_BYTES;
+        let (configuration, prefix) = self.config().encode();
+        // MNE1 retains its original 12-byte config and fixed MNA1 audit offsets.
+        // MNE2 adds only its explicit four-byte default-active configuration.
+        let mut bytes = vec![
+            0_u8;
+            prefix + HEADER_BYTES - CONFIG_BYTES
+                + MAX_CALLS * CALL_BYTES
+                + MAX_EVENTS * EVENT_BYTES
+        ];
+        bytes[..prefix].copy_from_slice(&configuration[..prefix]);
+        bytes[prefix..prefix + 4].copy_from_slice(b"MNA1");
+        bytes[prefix + 4..prefix + 8].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[prefix + 8..prefix + 16].copy_from_slice(&self.instance.to_le_bytes());
+        bytes[prefix + 16..prefix + 20].copy_from_slice(&(audit.call_count as u32).to_le_bytes());
+        bytes[prefix + 20..prefix + 24].copy_from_slice(&(audit.event_count as u32).to_le_bytes());
+        bytes[prefix + 24..prefix + 28]
+            .copy_from_slice(&u32::from(!audit.incomplete).to_le_bytes());
+        bytes[prefix + 28..prefix + 36]
+            .copy_from_slice(&self.sample_rate.load(Ordering::Relaxed).to_le_bytes());
+        bytes[prefix + 36..prefix + 40]
+            .copy_from_slice(&self.max_frames.load(Ordering::Relaxed).to_le_bytes());
+        let mut cursor = prefix + HEADER_BYTES - CONFIG_BYTES;
         for call in &audit.calls[..audit.call_count] {
             bytes[cursor..cursor + 4].copy_from_slice(&call.frames.to_le_bytes());
             bytes[cursor + 4..cursor + 8].copy_from_slice(&call.result.to_le_bytes());
@@ -486,7 +699,32 @@ impl IAudioProcessorTrait for NoteProcessor {
         if state != 0 && !self.active.load(Ordering::Acquire) {
             return kResultFalse;
         }
-        self.processing.store(state != 0, Ordering::Release);
+        let was_processing = self.processing.swap(state != 0, Ordering::AcqRel);
+        if self.service_mode.load(Ordering::Relaxed) && was_processing != (state != 0) {
+            // Called on the real control thread, never from process(). A joined
+            // scope does not stop processing: retained service owns the first stop.
+            let Ok(audit) = self.audit.try_lock() else {
+                return kResultFalse;
+            };
+            if !self.trace(
+                if state != 0 { "start" } else { "stop" },
+                -1,
+                audit.call_count,
+            ) {
+                return kResultFalse;
+            }
+            if state == 0 {
+                let action = self.stop_action.swap(0, Ordering::AcqRel);
+                if action != 0 {
+                    if action == 2 {
+                        self.auxiliary_default.fetch_xor(true, Ordering::Relaxed);
+                    }
+                    if !self.trace("consume", 1, audit.call_count) {
+                        return kResultFalse;
+                    }
+                }
+            }
+        }
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
@@ -514,8 +752,14 @@ impl IAudioProcessorTrait for NoteProcessor {
             return kInvalidArgument;
         }
         let data = &*data;
+        let admission = self.admission_mode.load(Ordering::Relaxed);
+        let active = self.active_buses.load(Ordering::Relaxed);
         if !self.processing.load(Ordering::Acquire)
-            || self.active_buses.load(Ordering::Relaxed) != 15
+            || if admission {
+                active & 3 != 3
+            } else {
+                active != 15
+            }
             || data.numSamples <= 0
             || data.numSamples as u32 > self.max_frames.load(Ordering::Relaxed)
             || data.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32
@@ -574,6 +818,19 @@ impl IAudioProcessorTrait for NoteProcessor {
             audit.calls[call_index].result = kResultFalse;
             return kResultFalse;
         }
+        if admission {
+            if count != 0 {
+                return kInvalidArgument;
+            }
+            // Separate MNE2 ordinary-effect oracle; legacy MNE1 Note DSP below
+            // is unchanged. This mode never claims canonical Note execution.
+            for frame in 0..data.numSamples as usize {
+                *outputs[0].add(frame) = *inputs[0].add(frame) * 0.5 + 0.125;
+                *outputs[1].add(frame) = *inputs[1].add(frame) * 0.5 - 0.0625;
+            }
+            audit.calls[call_index].result = kResultOk;
+            return kResultOk;
+        }
         let mut next = first;
         for frame in 0..data.numSamples {
             while next < first + count && audit.events[next].offset == frame {
@@ -598,32 +855,77 @@ impl IProcessContextRequirementsTrait for NoteProcessor {
 }
 
 struct NoteController {
-    fail_call: Cell<u32>,
+    config: Cell<Config>,
+    handler: RefCell<Option<ComPtr<IComponentHandler>>>,
+    main_thread: Cell<Option<ThreadId>>,
 }
 impl Class for NoteController {
     type Interfaces = (IEditController,);
 }
 impl IPluginBaseTrait for NoteController {
     unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+        self.main_thread.set(Some(thread::current().id()));
         kResultOk
     }
     unsafe fn terminate(&self) -> tresult {
+        self.handler.borrow_mut().take();
+        self.main_thread.set(None);
         kResultOk
     }
 }
 impl IEditControllerTrait for NoteController {
     unsafe fn setComponentState(&self, stream: *mut IBStream) -> tresult {
-        self.setState(stream)
-    }
-    unsafe fn setState(&self, stream: *mut IBStream) -> tresult {
-        let Some(fail) = read_config(stream) else {
+        let Some(config) = read_config(stream) else {
             return kInvalidArgument;
         };
-        self.fail_call.set(fail);
+        // Component synchronization never issues the controller-private command.
+        self.config.set(config);
+        kResultOk
+    }
+    unsafe fn setState(&self, stream: *mut IBStream) -> tresult {
+        if self.config.get().service_action.is_some() {
+            if self.main_thread.get() != Some(thread::current().id()) {
+                return kInvalidArgument;
+            }
+            let Some(stream) = ComRef::from_raw(stream) else {
+                return kInvalidArgument;
+            };
+            let mut bytes = [0_u8; 12];
+            let mut read = 0;
+            if stream.read(bytes.as_mut_ptr().cast(), 12, &mut read) != kResultOk
+                || read != 12
+                || &bytes[..4] != b"MNC3"
+                || u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != 3
+            {
+                return kInvalidArgument;
+            }
+            match u32::from_le_bytes(bytes[8..12].try_into().unwrap()) {
+                0 => return kResultOk,
+                1 => {
+                    // No RefCell borrow crosses the foreign callback. Its real
+                    // successful ACK consumes this input-only command; getState
+                    // saves controller configuration, never a pending cohort.
+                    let Some(handler) = self.handler.borrow().clone() else {
+                        return kResultFalse;
+                    };
+                    return handler.restartComponent(RestartFlags_::kLatencyChanged);
+                }
+                _ => return kInvalidArgument,
+            }
+        }
+        let Some(config) = read_config(stream) else {
+            return kInvalidArgument;
+        };
+        self.config.set(config);
         kResultOk
     }
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
-        write_bytes(stream, &config(self.fail_call.get()))
+        if self.config.get().service_action.is_some() {
+            // MNC3 has no component Event-default field and no rearming command.
+            return write_bytes(stream, b"MNC3\x03\0\0\0\0\0\0\0");
+        }
+        let (bytes, len) = self.config.get().encode();
+        write_bytes(stream, &bytes[..len])
     }
     unsafe fn getParameterCount(&self) -> i32 {
         0
@@ -659,7 +961,8 @@ impl IEditControllerTrait for NoteController {
     unsafe fn setParamNormalized(&self, _id: ParamID, _value: ParamValue) -> tresult {
         kInvalidArgument
     }
-    unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
+    unsafe fn setComponentHandler(&self, handler: *mut IComponentHandler) -> tresult {
+        *self.handler.borrow_mut() = ComRef::from_raw(handler).map(|handler| handler.to_com_ptr());
         kResultOk
     }
     unsafe fn createView(&self, _name: *const c_char) -> *mut IPlugView {

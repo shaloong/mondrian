@@ -481,6 +481,7 @@ fn native_startup_metadata_phase_observation() {
         parameters,
         captured_state,
         auxiliary_buses,
+        event_bus_contract,
         ..
     } = serde_json::from_slice(&probe.read()).expect("exact captured probe")
     else {
@@ -516,6 +517,8 @@ fn native_startup_metadata_phase_observation() {
         native_lane: native_worker_lane_profile_for_parameters(&parameters)
             .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {
+            schema_version: PAYLOAD_VERSION,
+            event_bus_contract,
             class_id,
             vendor,
             binary_sha256: fingerprint(&plugin.binding.path).unwrap(),

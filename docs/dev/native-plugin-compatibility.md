@@ -36,7 +36,7 @@ product consumers and pending closure for each feature family.
 | Audio parameters | Canonical author curves and sample offsets; CLAP plain values, VST normalized values; insertion/rebinding/history/archive state | Native display conversion, units/programs/presets, output events, plugin-origin gestures, large state/resources |
 | Audio render mode and threads | Explicit VST realtime/offline selection; CLAP requested-mode probe and execution, hard-realtime/declined-mode refusal; instance-local CLAP symbolic thread checks | Dynamic restart/rescan/latency/tail handling, sleep/request-process scheduling and extension event loops |
 | Audio transport and events | Canonical signal sample position reaches VST3 ProcessContext and CLAP seconds transport; unavailable tempo/beat/signature/transport facts are not invented | Tempo-map authoring, MIDI 1/2/SysEx, notes/expression/polyphonic modulation and event routing |
-| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC12 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP, zero-input mono/offline and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, broader instrument shapes/event dialects and third-party processing, and physical realtime |
+| Bounded Note execution | Public direct-root CLAP Track pre/post scores use the original admission receipt, same-restored-instance processing offer, existing DAG/IPC13 and exclusive Hosted ledger; finite owned Windows canonical-score-to-native-DSP, zero-input mono/offline and author-handoff controls pass | App Playback/Export qualification, windowed/precompiled/nested families, nonzero entry/seek/loop/reverse, VST3 notes, broader instrument shapes/event dialects and third-party processing, and physical realtime |
 | Native editors | Product hosting, isolated editor protocol and observation/author handoff exist; first signal and same-view refresh have dedicated qualification gates | Vendor/platform matrix, resize/DPI/focus/keyboard, remaining GUI/timers/FDs and destructive later-entry continuity |
 | OpenFX CPU image execution | Filter Source/Output, current-frame full-frame RGBA Float32, progressive; complete typed Straight/PM Float and Opaque signal, exact Normal Over, representation-aware cache and actual nested/opaque output; resident native instances | Other contexts/required inputs, formats, fields, mixed PAR/depth, tiles/scale/temporal/ordered scheduling; nonlinear/GPU/OCIO consumers retain explicit format admission |
 | OpenFX capabilities and bootstrap | Actual Float32/CPU advertisement; optional early host bootstrap; CPU-disabled admission refusal; canonical PAR dimensions and progressive fields | GPU execution and negotiated colour/lifetime/synchronization contracts |
@@ -99,11 +99,11 @@ The table describes implementation boundaries. Qualification below states the te
 | --- | --- | --- |
 | Shared processor outputs | Shared-slice baseline: 5,343 ordinary tests across eight libraries passed, including 16 new controls; 269 ignored tests excluded. Three strict groups and the normal Product build passed. | Track/Bus shared DAG qualification; native adapters have their separate conditions below. Product output selection, realtime/performance and other platforms remain open. |
 | Owned zero-input CLAP | Six fresh mono/offline Runtime cases at 44.1/48 kHz passed literal 14-frame PCM, NoMedia, Source/author/install/Ack and same-object/Drop-exit checks. | Owned fixture, not general third-party instrument support. |
-| Current Audio and shutdown report | 616 ordinary Audio tests and 501 ordinary Core tests passed; respectively 109 and 1 ignored tests excluded. All-target/all-feature Audio Clippy with `-D warnings` and the fresh normal IPC12 Product build passed; the Product retains ten existing warnings. Temporary teardown and capacity-projection markers are absent. | Affected Audio/Core scope, not a new whole-workspace or full native qualification. Shutdown control, ACK, exit observation and cleanup remain distinct; the original budgets are unchanged. |
-| Owned three-output CLAP | Direct scoped DSP observed 38 same-object SDK Process calls across three partitions and two entries. The fresh normal IPC12 Product passed 16 canonical Runtime combinations: 44.1/48 kHz, four Main/Aux/fanout routes, two partitions and two entries each; literal PCM, author-state serialization/restore, NoMedia, Source installation and same-object Drop exit0 passed. | Windows mono/offline owned fixture. Aggregate grant is explicitly unbounded; canonical child Process count is unobserved. Live private-DSP state capture, finite aggregate-grant acceptance, third-party multi-output, stereo native workflow, GUI, realtime/performance and other platforms remain unqualified. |
+| Current Audio and shutdown report | 640 ordinary Audio and eight resource tests passed; 109 native tests were explicitly excluded from the ordinary suite. Strict all-target/all-feature Audio Clippy passed with zero warnings. The normal IPC13 test-profile Product passed nine owned native gates; its ten existing OpenFX warnings remain. | Windows finite owned controls; Core and the whole workspace were not rerun in this slice. Original shutdown budgets remain; older Gain/Surge and OpenFX failures stay open. |
+| Owned three-output CLAP | Direct scoped DSP observed 38 same-object SDK Process calls across three partitions and two entries. The fresh normal IPC13 Product passed 16 canonical Runtime combinations: 44.1/48 kHz, four Main/Aux/fanout routes, two partitions and two entries each; literal PCM, author-state serialization/restore, NoMedia, Source installation and same-object Drop exit0 passed. | Windows mono/offline owned fixture. Aggregate grant is explicitly unbounded; canonical child Process count is unobserved. Live private-DSP state capture, finite aggregate-grant acceptance, third-party multi-output, stereo native workflow, GUI, realtime/performance and other platforms remain unqualified. |
 | Surge XT Effects VST3 | The Audio slice normal Product passed the original exact Runtime state/restore, PCM and owner gate. The earlier stress failure received ACK in about 20ms, remained running beyond the 100ms exit budget, then was killed/reaped. | The old post-ACK exit failure remains unresolved. A successful regression does not prove a fix or identify the faulty phase. Windows/offline/48k/stereo/max64 only; no realtime, GUI, algorithm or other-platform qualification. |
 | Ring Out CLAP | The Audio slice normal Product passed four cold Runtime cases covering native bypass and active control, block64 and 31/33 partitions, 10,240 frames including the actual startup transition and steady range. | Windows/offline and the stated state/parameters; not independent algorithm, GUI, realtime or other-platform qualification. |
-| CLAP port/config metadata | Optional main input and ordered auxiliary inputs/outputs have owned controls. Actual Surge census reports the default auxiliary input and three outputs; the current host does not expose the configuration extension. IPC12 and probe3/processing-offer4 carry exact output identity and order, refusing older incompatible workers/offers. | Configuration selection and real auxiliary-output sound remain unqualified. The finite Surge Main result below does not imply active port rescan or a new host configuration service. |
+| CLAP port/config metadata | Optional main input and ordered auxiliary inputs/outputs have owned controls. Actual Surge census reports the default auxiliary input and three outputs; the current host does not expose the configuration extension. IPC13 and probe3/processing-offer4 carry exact output identity and order, refusing older incompatible workers/offers. | Configuration selection and real auxiliary-output sound remain unqualified. The finite Surge Main result below does not imply active port rescan or a new host configuration service. |
 | Surge XT 1.3.4 CLAP instrument | One actual Windows/offline Runtime passed captured-state restore (50,208 bytes), restored NoteOffer4, 48 kHz stereo/block256, 16,384 finite Main frames with nonzero energy, On127/Off8193 and native input cursor16384. Its real nonempty rescan completed the Track canonical transaction, Source install and Preserved Ack; object and cursor continuity passed, NoMedia was zero, and the same retained process handle observed Drop exit0. Main1 and auxiliary2/3 were prepared with a zero-filled stereo auxiliary input32768; latency0/tail96000 were observed. | Single finite Runtime, explicit unbounded aggregate grant. No independent algorithm, release envelope, terminal Off, auxiliary sound, GUI, App Playback/Export, project reload, realtime/performance or other-platform qualification. Successful Drop does not resolve the older intermittent shutdown failure or independently prove its ACK. |
 | OpenFX CPU Filter | The independent BitCrush gate and finite native controls cover the stated current-frame, full-frame RGBA Float32/progressive CPU boundary. The readonly-constructor correction passed 456 checks. | Other contexts, temporal/tiles/scale/fields, native GPU interop and other platforms remain outside this qualification. |
 | OpenFX metadata notices and lifecycle | Windows: 76 distinct ordinary controls and 22 actual owned/official Basic cases passed with the fresh normal Product. Describe returns six ordered UTF-8 notices without Render; the live Catalog delivers four feed notices without replay or author mutation. Exact 32/33 limits, Fatal/invalid-UTF-8/native-failure prefixes, cancellation, single Load/Describe, failed-Describe Unload and live descriptors during Unload passed. | Schema2 metadata requests only; whole-request context is not emitter or Render identity. Per-request32 notices, per-bundle256/1 MiB text+id, one result slot. Log uses the existing tracing path; sink output is not separately qualified. No whole-heap, realtime, third-party, GUI, GPU, other-platform or comparative-performance qualification. |
@@ -117,7 +117,7 @@ strict diagnostics is a separate result.
 Audio native results refer to the accepted Audio slice; the later OFX-only
 Product qualification is the separate row above.
 
-IPC12 startup carries bounded JSON metadata followed by the exact opaque adapter
+IPC13 startup carries bounded JSON metadata followed by the exact opaque adapter
 bytes on the existing connection. It removes a second JSON byte-array encoding
 that could inflate an admitted 512 KiB payload beyond the 1 MiB control limit.
 Complete metadata is preflighted before spawn; the child validates version,
@@ -140,24 +140,44 @@ scalars. Input and target capacities are checked. The two Vec owners briefly
 overlap on the non-realtime poll; retained-capacity checks do not establish a
 complete transient-peak grant or whole-plugin heap qualification.
 
-## VST3 checked local Note adapter
+## VST3 event contracts and local Note adapter
 
-Windows owned-SDK controls pass: 307 vendor and 616 Audio ordinary tests, plus
-three actual Note DLL gates, with both public/scoped roles, 48 kHz, native block 8, three partitions of
-a 24-frame signal, exact tuple bits, failed second callback without replay, and
-4096 accepted/4097 refused events. The original supervised Job gates pass with
-empty stderr. Four existing SDK cache/parameter-barrier controls and the original
-Gain queues, state round-trip and sidechain/partition gates also pass. The latter
-use the freshly built normal Product and current two-Audio-class fixture, selecting
-the original Gain CID with all existing signal/state assertions retained.
+Required discovery/payload version 2 carries the expected event-bus contract
+through the existing probe, registration and payload owners. The actual restored,
+configured, stopped instance is rechecked during preparation, cold rebuilding and
+retained configuration. Canonical VST3 Note remains refused; Project state and
+CLAP Note-offer policy are unchanged.
 
-The final loader lint repair only spells out already-inferred symbol types.
-Vendor compilation/ordinary/SDK gates were repeated; the Audio/Product results
-above precede that annotation. Scoped vendor Clippy denies correctness/suspicious
-lints and passes with 81 other warnings; this is not warning-free strict Clippy.
+The Windows owned test-profile Product passed nine original native gates:
+VST3 retained/seed and two event-metadata controls, CLAP retained/seed/overflow,
+editor user-close/frame-clear retry, and CLAP three-output Runtime/DAG. The latter
+covers 16 rate/route/partition combinations and two entries with literal PCM.
+MNE3 stable capture produces fresh ordinary PCM; unannounced default-flag drift
+is refused on the same cohort/object with zero DSP calls. Post-Drop same-handle
+Exit0 is an OS observation, not proof of the original 100 ms graceful budget.
+
+The complete VST3/CLAP Worker Box header, including the fixed 32-by-2 event
+contract, now enters the original lane profile and sole Root FixedResident fee.
+Startup compares the actual dynamic Box layout before Ready; scoped lane checks
+observe their own seven roles separately. IPC13 requires eight fixed owners and
+rejects old or unknown shapes. Resource controls prove exact-header admission
+and a one-byte-short Root refusal before Session factory creation. Validation
+children run before the final Root grant; cold nested/transient allocations,
+plugin-private heap and physical realtime remain unqualified.
+
+The stopped-owner control and backend lifecycle-record fixes use the same
+retained owner. The primitive census writes directly to bounded metadata without
+collecting names; its successful-call probe observed zero same-thread Rust host
+allocator operations. This does not cover plugin heaps or prove realtime safety.
+Current 640 ordinary Audio, eight resource, strict Clippy and SDK Note3 gates pass.
+Older Gain/Surge and OFX exit failures remain open; a late reaped Exit0 never
+converts a deadline failure into a pass. No third-party instrument or other-platform
+qualification is implied.
 
 The same component retains declarations and accepted activation facts; a query
-does not invent a native active-state getter. Preparation rejects topology drift.
+does not invent a native active-state getter: `host_active` records only that
+owner's last successful activation ACK, independently of its restored default flag.
+Preparation rejects topology drift.
 Loading now limits event buses to 32 per direction and rejects invalid metadata;
 zero-channel declarations remain visible. The checked subset requires nonnegative
 note IDs, MIDI channels 0..15 within an active declared bus, valid ordered offsets
@@ -171,10 +191,10 @@ instruments, other platforms, realtime and performance remain unqualified.
 - The intermittent Surge failure was reproduced after a valid shutdown ACK,
   with the child still running beyond the existing 100ms exit budget. Host
   termination and reaping succeeded; the resulting exit1 is not a spontaneous
-  plugin crash. Narrow temporary phase markers will distinguish ingress join,
-  owner destruction and later process exit. Later bounded instrumented and
-  unflagged runs did not reproduce it; temporary markers have been removed.
-  No timeout widening or retry workaround has been applied.
+  plugin crash. Bounded diagnostic runs have not located the failed phase or
+  root cause; neither Gain nor Surge has been attributed to plugin destruction.
+  Later successful runs do not establish a fix. No timeout widening or retry
+  workaround has been applied.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
   final `try_wait`, nor a native Drop duration.

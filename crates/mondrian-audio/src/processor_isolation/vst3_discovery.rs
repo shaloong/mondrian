@@ -4,7 +4,7 @@ use super::protocol::{auxiliary_from_wire, auxiliary_to_wire, AuxiliaryBusWire};
 use super::vst3_worker::{
     fingerprint, parameter_descriptors, prepare_audio_inputs, MAX_STATE_BYTES,
 };
-use super::{Vst3ParameterDescriptor, Vst3PluginRegistration};
+use super::{Vst3EventBusContractV1, Vst3ParameterDescriptor, Vst3PluginRegistration};
 use crate::{
     AudioProcessingMode, AudioProcessorExecutionContract, AudioProcessorHostError,
     AudioProcessorTail, AudioRenderContract,
@@ -29,6 +29,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BYTES: u64 = 512 * 1024;
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024;
 const MAX_DESCRIPTORS: usize = 4096;
+const DISCOVERY_VERSION: u32 = 2;
 
 /// One audio-effect class exported by an installed VST3 library.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,14 +47,15 @@ pub struct Vst3PluginDescriptor {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DiscoveryRequest {
+    schema_version: u32,
     binary_path: PathBuf,
     operation: DiscoveryOperation,
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum DiscoveryOperation {
-    List,
+    List {},
     Probe {
         class_id: String,
         sample_rate: u32,
@@ -66,12 +68,21 @@ enum DiscoveryOperation {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "cold-path bounded metadata stays inline below 1 KiB to avoid another heap owner; this enum never enters DSP"
+)]
 pub(super) enum DiscoveryResponse {
+    #[serde(rename = "list_v2")]
     List {
+        schema_version: u32,
         descriptors: Vec<Vst3PluginDescriptor>,
     },
+    #[serde(rename = "probe_v2")]
     Probe {
+        schema_version: u32,
+        event_bus_contract: Vst3EventBusContractV1,
         class_id: String,
         vendor: Option<String>,
         latency_frames: u32,
@@ -89,13 +100,13 @@ pub fn scan_vst3_binary_descriptors(
     binary_path: &Path,
 ) -> Result<Vec<Vst3PluginDescriptor>, AudioProcessorHostError> {
     let (path, before) = canonical_binary(binary_path)?;
-    let response = request(helper_executable, &path, DiscoveryOperation::List)?;
+    let response = request(helper_executable, &path, DiscoveryOperation::List {})?;
     if fingerprint(&path)? != before {
         return Err(unavailable(
             "VST3 binary changed during descriptor discovery",
         ));
     }
-    let DiscoveryResponse::List { descriptors } = response else {
+    let DiscoveryResponse::List { descriptors, .. } = response else {
         return Err(invalid("VST3 discovery returned the wrong response type"));
     };
     if descriptors.len() > MAX_DESCRIPTORS {
@@ -180,6 +191,8 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         current_values,
         captured_state,
         auxiliary_buses,
+        event_bus_contract,
+        ..
     } = response
     else {
         return Err(invalid("VST3 probe returned the wrong response type"));
@@ -220,6 +233,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
         execution_contract: contract,
         auxiliary_inputs,
         parameters,
+        event_bus_contract,
     };
     Ok(Vst3Probe { registration, current_values, captured_state })
 }
@@ -240,8 +254,7 @@ pub fn run_vst3_discovery_worker() -> Result<(), AudioProcessorHostError> {
         .map(PathBuf::from)
         .ok_or_else(|| invalid("VST3 discovery response path is missing"))?;
     let bytes = read_bounded(&request_path, MAX_REQUEST_BYTES)?;
-    let request: DiscoveryRequest = serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(format!("VST3 discovery request is invalid: {error}")))?;
+    let request = decode_request(&bytes)?;
     let path = fs::canonicalize(&request.binary_path)
         .map_err(|error| unavailable(format!("VST3 binary is unavailable: {error}")))?;
     if !path.is_file() || path != request.binary_path {
@@ -250,7 +263,7 @@ pub fn run_vst3_discovery_worker() -> Result<(), AudioProcessorHostError> {
         ));
     }
     let response = match request.operation {
-        DiscoveryOperation::List => list_loaded(&path)?,
+        DiscoveryOperation::List {} => list_loaded(&path)?,
         DiscoveryOperation::Probe {
             class_id,
             sample_rate,
@@ -296,7 +309,7 @@ fn list_loaded(path: &Path) -> Result<DiscoveryResponse, AudioProcessorHostError
             version: (!class.version.is_empty()).then_some(class.version),
         })
         .collect();
-    Ok(DiscoveryResponse::List { descriptors })
+    Ok(DiscoveryResponse::List { schema_version: DISCOVERY_VERSION, descriptors })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,6 +361,7 @@ fn probe_loaded(
         })
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
     let auxiliary_inputs = prepare_audio_inputs(&mut plugin, layout)?.contract;
+    let event_bus_contract = Vst3EventBusContractV1::observe(&plugin)?;
     let parameters = parameter_descriptors(&plugin)?;
     let current_values = plugin
         .get_parameters()
@@ -367,6 +381,8 @@ fn probe_loaded(
         None
     };
     Ok(DiscoveryResponse::Probe {
+        schema_version: DISCOVERY_VERSION,
+        event_bus_contract,
         class_id: plugin.info().uid.clone(),
         vendor: (!plugin.info().vendor.is_empty()).then(|| plugin.info().vendor.clone()),
         latency_frames: plugin.latency_samples(),
@@ -471,9 +487,12 @@ fn request(
         .map_err(|error| unavailable(format!("VST3 discovery staging failed: {error}")))?;
     let request_path = temp.path().join("request.json");
     let response_path = temp.path().join("response.json");
-    let bytes =
-        serde_json::to_vec(&DiscoveryRequest { binary_path: binary_path.to_path_buf(), operation })
-            .map_err(|error| invalid(format!("VST3 discovery request encoding failed: {error}")))?;
+    let bytes = serde_json::to_vec(&DiscoveryRequest {
+        schema_version: DISCOVERY_VERSION,
+        binary_path: binary_path.to_path_buf(),
+        operation,
+    })
+    .map_err(|error| invalid(format!("VST3 discovery request encoding failed: {error}")))?;
     if bytes.len() as u64 > MAX_REQUEST_BYTES {
         return Err(invalid("VST3 discovery request exceeds the metadata limit"));
     }
@@ -533,8 +552,29 @@ pub(super) fn finish_discovery_request(
         }
     }
     let bytes = read_bounded(response_path, MAX_RESPONSE_BYTES)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| invalid(format!("VST3 discovery response is invalid: {error}")))
+    decode_response(&bytes)
+}
+
+fn decode_request(bytes: &[u8]) -> Result<DiscoveryRequest, AudioProcessorHostError> {
+    let request: DiscoveryRequest = serde_json::from_slice(bytes)
+        .map_err(|error| invalid(format!("VST3 discovery request is invalid: {error}")))?;
+    if request.schema_version != DISCOVERY_VERSION {
+        return Err(invalid("unsupported VST3 discovery request version"));
+    }
+    Ok(request)
+}
+
+fn decode_response(bytes: &[u8]) -> Result<DiscoveryResponse, AudioProcessorHostError> {
+    let response: DiscoveryResponse = serde_json::from_slice(bytes)
+        .map_err(|error| invalid(format!("VST3 discovery response is invalid: {error}")))?;
+    let version = match &response {
+        DiscoveryResponse::List { schema_version, .. }
+        | DiscoveryResponse::Probe { schema_version, .. } => *schema_version,
+    };
+    if version != DISCOVERY_VERSION {
+        return Err(invalid("unsupported VST3 discovery response version"));
+    }
+    Ok(response)
 }
 
 pub(super) fn retire_discovery_failure(
@@ -606,5 +646,76 @@ mod bundle_tests {
         let bundle = temp.path().join("Missing.vst3");
         fs::create_dir_all(&bundle).expect("empty bundle");
         assert!(canonical_binary(&bundle).is_err());
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn discovery_v2_refuses_legacy_missing_unknown_and_wrong_versions_in_both_directions() {
+        // Frozen legacy request/response discriminators: the old request denied
+        // unknown fields and the old response only recognized list/probe.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct LegacyRequest {
+            binary_path: PathBuf,
+            operation: DiscoveryOperation,
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "kind")]
+        enum LegacyResponse {
+            #[serde(rename = "list")]
+            List {},
+            #[serde(rename = "probe")]
+            Probe {},
+        }
+        let legacy_request = json!({"binary_path":"legacy.vst3", "operation":{"kind":"list"}});
+        let old: LegacyRequest = serde_json::from_value(legacy_request.clone()).unwrap();
+        assert_eq!(old.binary_path, PathBuf::from("legacy.vst3"));
+        assert!(matches!(old.operation, DiscoveryOperation::List {}));
+        assert!(decode_request(&serde_json::to_vec(&legacy_request).unwrap()).is_err());
+        let request = serde_json::to_value(DiscoveryRequest {
+            schema_version: 2,
+            binary_path: PathBuf::from("current.vst3"),
+            operation: DiscoveryOperation::List {},
+        })
+        .unwrap();
+        assert!(decode_request(&serde_json::to_vec(&request).unwrap()).is_ok());
+        assert!(serde_json::from_value::<LegacyRequest>(request.clone()).is_err());
+        for (field, value) in [("schema_version", json!(1)), ("unexpected", json!(true))] {
+            let mut bad = request.clone();
+            bad[field] = value;
+            assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        }
+        let mut bad = request.clone();
+        bad["operation"]["unexpected"] = json!(true);
+        assert!(decode_request(&serde_json::to_vec(&bad).unwrap()).is_err());
+        for (old_kind, new_kind) in [("list", "list_v2"), ("probe", "probe_v2")] {
+            let mut current = if old_kind == "list" {
+                json!({"kind":new_kind,"schema_version":2,"descriptors":[]})
+            } else {
+                json!({"kind":new_kind,"schema_version":2,"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[],"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]}})
+            };
+            assert!(decode_response(&serde_json::to_vec(&current).unwrap()).is_ok());
+            assert!(serde_json::from_value::<LegacyResponse>(current.clone()).is_err());
+            let mut legacy = current.clone();
+            legacy["kind"] = json!(old_kind);
+            legacy.as_object_mut().unwrap().remove("schema_version");
+            legacy.as_object_mut().unwrap().remove("event_bus_contract");
+            assert!(serde_json::from_value::<LegacyResponse>(legacy.clone()).is_ok());
+            assert!(decode_response(&serde_json::to_vec(&legacy).unwrap()).is_err());
+            for (field, value) in [("schema_version", json!(1)), ("unexpected", json!(true))] {
+                let mut bad = current.clone();
+                bad[field] = value;
+                assert!(decode_response(&serde_json::to_vec(&bad).unwrap()).is_err());
+            }
+            current.as_object_mut().unwrap().remove("schema_version");
+            assert!(decode_response(&serde_json::to_vec(&current).unwrap()).is_err());
+        }
+        let missing_contract = br#"{"kind":"probe_v2","schema_version":2,"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#;
+        assert!(decode_response(missing_contract).is_err());
     }
 }
