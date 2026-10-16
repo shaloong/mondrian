@@ -140,6 +140,32 @@ scalars. Input and target capacities are checked. The two Vec owners briefly
 overlap on the non-realtime poll; retained-capacity checks do not establish a
 complete transient-peak grant or whole-plugin heap qualification.
 
+## VST3 checked local Note adapter
+
+Windows owned-SDK controls pass: 307 vendor and 616 Audio ordinary tests, plus
+three actual Note DLL gates, with both public/scoped roles, 48 kHz, native block 8, three partitions of
+a 24-frame signal, exact tuple bits, failed second callback without replay, and
+4096 accepted/4097 refused events. The original supervised Job gates pass with
+empty stderr. Four existing SDK cache/parameter-barrier controls and the original
+Gain queues, state round-trip and sidechain/partition gates also pass. The latter
+use the freshly built normal Product and current two-Audio-class fixture, selecting
+the original Gain CID with all existing signal/state assertions retained.
+
+The final loader lint repair only spells out already-inferred symbol types.
+Vendor compilation/ordinary/SDK gates were repeated; the Audio/Product results
+above precede that annotation. Scoped vendor Clippy denies correctness/suspicious
+lints and passes with 81 other warnings; this is not warning-free strict Clippy.
+
+The same component retains declarations and accepted activation facts; a query
+does not invent a native active-state getter. Preparation rejects topology drift.
+Loading now limits event buses to 32 per direction and rejects invalid metadata;
+zero-channel declarations remain visible. The checked subset requires nonnegative
+note IDs, MIDI channels 0..15 within an active declared bus, valid ordered offsets
+and an empty legacy input, preserves original
+scalar values, and retires remaining input after a started processing failure.
+It does not roll back an executed prefix. Canonical VST3 Note, third-party
+instruments, other platforms, realtime and performance remain unqualified.
+
 ## Open issues and integration constraints
 
 - The intermittent Surge failure was reproduced after a valid shutdown ACK,

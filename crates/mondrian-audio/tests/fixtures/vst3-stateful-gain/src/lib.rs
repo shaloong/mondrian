@@ -12,6 +12,8 @@ use std::{ptr, slice};
 
 use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+mod event_oracle;
+
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
     let c_string = CString::new(src).unwrap_or_else(|_| CString::default());
     let bytes = c_string.as_bytes_with_nul();
@@ -554,7 +556,7 @@ impl IPluginFactoryTrait for Factory {
     }
 
     unsafe fn countClasses(&self) -> i32 {
-        2
+        4
     }
 
     unsafe fn getClassInfo(&self, index: i32, info: *mut PClassInfo) -> tresult {
@@ -577,6 +579,7 @@ impl IPluginFactoryTrait for Factory {
 
                 kResultOk
             }
+            2 | 3 => event_oracle::class_info(index - 2, info),
             _ => kInvalidArgument,
         }
     }
@@ -594,7 +597,7 @@ impl IPluginFactoryTrait for Factory {
             GainController::CID => {
                 Some(ComWrapper::new(GainController::new()).to_com_ptr::<FUnknown>().unwrap())
             }
-            _ => None,
+            cid => event_oracle::create_instance(cid),
         };
 
         if let Some(instance) = instance {

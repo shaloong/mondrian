@@ -97,6 +97,42 @@ pub struct NativeAudioBusInfoSet {
     pub outputs: Vec<NativeAudioBusInfo>,
 }
 
+/// Maximum number of event buses in each native direction, checked before allocation.
+pub const MAX_NATIVE_EVENT_BUSES: usize = 32;
+
+/// Native event-bus purpose, independent of its name or channel count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeEventBusRole {
+    /// Primary event stream.
+    Main,
+    /// Additional event stream.
+    Auxiliary,
+}
+
+/// Declaration and retained activation evidence from one loaded component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEventBusInfo {
+    /// Native declared purpose.
+    pub role: NativeEventBusRole,
+    /// Display name, never bus identity.
+    pub name: String,
+    /// Declared event-channel count.
+    pub channel_count: usize,
+    /// Native default-active flag.
+    pub default_active: bool,
+    /// This same host owner's last successful activation, not a plugin GetActive query.
+    pub host_active: bool,
+}
+
+/// Direction-local native index order from the same restored component.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEventBusInfoSet {
+    /// Native input buses; vector position is the input bus index.
+    pub inputs: Vec<NativeEventBusInfo>,
+    /// Native output buses; vector position is the output bus index.
+    pub outputs: Vec<NativeEventBusInfo>,
+}
+
 /// Configuration of one VST3 audio bus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioBusConfig {

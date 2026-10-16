@@ -2,7 +2,7 @@
 
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
-    error::{Error, Result},
+    error::{Error, NativeEventError, Result},
     midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
@@ -128,12 +128,20 @@ impl ProcessingSampleSize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EventBusActivation {
+    role: crate::audio::NativeEventBusRole,
+    channel_count: usize,
+    active: bool,
+}
+
 #[derive(Default)]
 struct BusActivationState {
     audio_inputs: Vec<bool>,
     audio_outputs: Vec<bool>,
-    event_inputs: Vec<bool>,
-    event_outputs: Vec<bool>,
+    event_inputs: Vec<EventBusActivation>,
+    event_outputs: Vec<EventBusActivation>,
+    event_readiness: Option<std::result::Result<(), NativeEventError>>,
 }
 
 /// Internal plugin implementation that handles all VST3 COM interactions
@@ -1062,6 +1070,7 @@ impl PluginImpl {
     /// load so `setupProcessing` (which runs at `start_processing`) uses the builder's settings
     /// rather than the internal defaults.
     pub fn set_audio_config(&mut self, sample_rate: f64, block_size: usize) {
+        self.bus_activation.event_readiness = None;
         self.sample_rate = sample_rate;
         self.block_size = block_size;
     }
@@ -1673,21 +1682,30 @@ impl PluginImpl {
         Ok(())
     }
 
-    fn set_component_active(&self, active: bool) -> tresult {
-        if !active {
-            self._host_app.flush_data_exchange();
-            // The processor closes queues from its setActive(false) callback. Mark the host-side
-            // gate inactive before entering that callback so closeQueue is accepted there.
-            self._host_app.set_data_exchange_active(false);
+    fn checked_event_readiness(&self) -> std::result::Result<(), NativeEventError> {
+        self.native_event_bus_info()
+            .map(|_| ())
+            .map_err(|error| match error {
+                Error::NativeEvent(error) => error,
+                _ => NativeEventError::PreparationRequired,
+            })
+    }
+
+    fn set_component_active(&mut self, active: bool) -> tresult {
+        self.bus_activation.event_readiness = None;
+        set_native_component_active(&self.component, &self._host_app, active)
+    }
+
+    fn deactivate_for_configuration(&mut self) -> Result<()> {
+        let result = self.set_component_active(false);
+        if result != kResultOk {
+            return Err(Error::NativeEvent(NativeEventError::ComponentActivation {
+                active: false,
+                result,
+            }));
         }
-        let result = unsafe { self.component.setActive(u8::from(active)) };
-        if result == kResultOk || result == kResultTrue {
-            self._host_app.set_data_exchange_active(active);
-        } else if !active {
-            // Deactivation was rejected; the processor remains active and its queues stay live.
-            self._host_app.set_data_exchange_active(true);
-        }
-        result
+        self.is_active = false;
+        Ok(())
     }
 
     /// Describe the plugin class at `class_index` — the class [`Self::create_component`]
@@ -1897,6 +1915,7 @@ impl PluginImpl {
     /// Set up processing with the current configuration. VST3 requires the component to be
     /// **inactive**; every caller either runs before the first activation or deactivates first.
     fn setup_processing(&mut self) -> Result<()> {
+        self.bus_activation.event_readiness = None;
         if self.pending_processor_parameter_input()? {
             return Err(Error::PendingParameterDelivery);
         }
@@ -2697,6 +2716,25 @@ impl PluginInternal for PluginImpl {
         })
     }
 
+    fn native_event_bus_info(&self) -> Result<crate::audio::NativeEventBusInfoSet> {
+        if thread::current().id() != self.control_thread {
+            return Err(Error::NativeEvent(NativeEventError::WrongThread));
+        }
+        if self.is_processing {
+            return Err(Error::NativeEvent(NativeEventError::QueryWhileProcessing));
+        }
+        census_native_event_buses(&self.component, &self.bus_activation)
+    }
+
+    fn process_bus_audio_with_note_events(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> Result<()> {
+        self.process_fields()
+            .process_checked_note_buffers(buffers, events)
+    }
+
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         self.current_audio_bus_layout()
     }
@@ -2716,11 +2754,11 @@ impl PluginInternal for PluginImpl {
                 "cannot reconfigure while processing".to_string(),
             ));
         }
+        self.bus_activation.event_readiness = None;
         // VST3 requires the component to be inactive when setupProcessing is called.
         let was_active = self.is_active;
         if was_active {
-            self.set_component_active(false);
-            self.is_active = false;
+            self.deactivate_for_configuration()?;
         }
 
         let (old_sr, old_bs) = (self.sample_rate, self.block_size);
@@ -2780,8 +2818,7 @@ impl PluginInternal for PluginImpl {
         // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
         let was_active = self.is_active;
         if was_active {
-            self.set_component_active(false);
-            self.is_active = false;
+            self.deactivate_for_configuration()?;
         }
 
         // Store the mode first so setup_processing bakes it into BOTH ProcessSetup and
@@ -2842,12 +2879,12 @@ impl PluginInternal for PluginImpl {
         }
         let mut in_raw: Vec<u64> = inputs.iter().map(|a| a.raw()).collect();
         let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
+        self.bus_activation.event_readiness = None;
         unsafe {
             // VST3 requires the component inactive for setBusArrangements + setupProcessing.
             let was_active = self.is_active;
             if was_active {
-                self.set_component_active(false);
-                self.is_active = false;
+                self.deactivate_for_configuration()?;
             }
 
             let arrangement_result = self.processor.setBusArrangements(
@@ -2907,6 +2944,20 @@ impl PluginInternal for PluginImpl {
                 "cannot activate a bus while processing".to_string(),
             ));
         }
+        if media_type == crate::audio::MediaType::Event {
+            if thread::current().id() != self.control_thread {
+                return Err(Error::NativeEvent(NativeEventError::WrongThread));
+            }
+            return activate_checked_event_bus(
+                &self.component,
+                &self._host_app,
+                &mut self.bus_activation,
+                &mut self.is_active,
+                direction,
+                bus_index,
+                active,
+            );
+        }
         // VST3 bus activation requires the component inactive (it's a setup-time operation).
         let media = match media_type {
             MediaType::Audio => kAudio as i32,
@@ -2936,19 +2987,9 @@ impl PluginInternal for PluginImpl {
                 .activateBus(media, dir, bus_index, active as u8);
 
             let update_result = if result == kResultOk {
-                let states = match (media_type, direction) {
-                    (MediaType::Audio, BusDirection::Input) => {
-                        &mut self.bus_activation.audio_inputs
-                    }
-                    (MediaType::Audio, BusDirection::Output) => {
-                        &mut self.bus_activation.audio_outputs
-                    }
-                    (MediaType::Event, BusDirection::Input) => {
-                        &mut self.bus_activation.event_inputs
-                    }
-                    (MediaType::Event, BusDirection::Output) => {
-                        &mut self.bus_activation.event_outputs
-                    }
+                let states = match direction {
+                    BusDirection::Input => &mut self.bus_activation.audio_inputs,
+                    BusDirection::Output => &mut self.bus_activation.audio_outputs,
                 };
                 if let Some(state) = states.get_mut(bus_index as usize) {
                     *state = active;
@@ -3131,6 +3172,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn start_processing(&mut self) -> Result<()> {
+        self.bus_activation.event_readiness = None;
         unsafe {
             // The configuration may have moved since the last setup (`set_audio_config` after
             // load, or a device change), and a plugin sizes its DSP buffers when it goes active,
@@ -3143,8 +3185,7 @@ impl PluginInternal for PluginImpl {
                     return Err(Error::PendingParameterDelivery);
                 }
                 if self.is_active {
-                    self.set_component_active(false);
-                    self.is_active = false;
+                    self.deactivate_for_configuration()?;
                 }
                 self.setup_processing()?;
             }
@@ -3156,6 +3197,9 @@ impl PluginInternal for PluginImpl {
             // Start processing. `setProcessing` is an optional notification — a plugin
             // may return kNotImplemented (e.g. u-he), which is not an error: it simply
             // doesn't need the start/stop signal and still processes audio normally.
+            // Cold owning-thread validation grants only the new checked API.
+            // Legacy start retains its historical return semantics.
+            let event_readiness = self.checked_event_readiness();
             let result = self.processor.setProcessing(1);
             if result != kResultOk && result != kNotImplemented {
                 return Err(Error::Other(format!(
@@ -3165,12 +3209,14 @@ impl PluginInternal for PluginImpl {
             }
 
             self.is_processing = true;
+            self.bus_activation.event_readiness = Some(event_readiness);
             log::debug!("Plugin processing started successfully");
             Ok(())
         }
     }
 
     fn stop_processing(&mut self) -> Result<()> {
+        self.bus_activation.event_readiness = None;
         unsafe {
             if self.is_processing {
                 self.processor.setProcessing(0);
@@ -4362,6 +4408,7 @@ impl PluginInternal for PluginImpl {
         }
 
         let snapshot = decode_state_snapshot(data)?;
+        self.bus_activation.event_readiness = None;
         let was_processing = self.is_processing;
         let was_active = self.is_active;
 
@@ -4456,6 +4503,11 @@ impl PluginInternal for PluginImpl {
                     self.activate()?;
                 }
                 if was_processing {
+                    let event_readiness = if apply_result.is_ok() {
+                        Some(self.checked_event_readiness())
+                    } else {
+                        None
+                    };
                     let result = self.processor.setProcessing(1);
                     if result != kResultOk && result != kNotImplemented {
                         return Err(Error::Other(format!(
@@ -4463,6 +4515,7 @@ impl PluginInternal for PluginImpl {
                         )));
                     }
                     self.is_processing = true;
+                    self.bus_activation.event_readiness = event_readiness;
                 }
                 Ok(())
             })();
@@ -4593,11 +4646,53 @@ impl PluginImpl {
             Ok(states)
         };
 
+        let read_events =
+            |direction: crate::audio::BusDirection| -> Result<Vec<EventBusActivation>> {
+                let native_direction = event_direction(direction);
+                let count = bounded_event_count(
+                    direction,
+                    component.getBusCount(kEvent as i32, native_direction),
+                )?;
+                let mut states = Vec::new();
+                states
+                    .try_reserve_exact(count)
+                    .map_err(|_| Error::NativeEvent(NativeEventError::Allocation))?;
+                for index in 0..count {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    let status = component.getBusInfo(
+                        kEvent as i32,
+                        native_direction,
+                        index as i32,
+                        &mut info,
+                    );
+                    let (role, channel_count) =
+                        checked_event_bus_info(direction, index as i32, status, &info)?;
+                    let active = info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0;
+                    if active {
+                        let status =
+                            component.activateBus(kEvent as i32, native_direction, index as i32, 1);
+                        if status != kResultOk {
+                            return Err(Error::NativeEvent(NativeEventError::BusMetadata {
+                                direction,
+                                index: index as i32,
+                                result: status,
+                            }));
+                        }
+                    }
+                    states.push(EventBusActivation {
+                        role,
+                        channel_count,
+                        active,
+                    });
+                }
+                Ok(states)
+            };
         Ok(BusActivationState {
             audio_inputs: read_and_activate(kAudio as i32, kInput as i32)?,
             audio_outputs: read_and_activate(kAudio as i32, kOutput as i32)?,
-            event_inputs: read_and_activate(kEvent as i32, kInput as i32)?,
-            event_outputs: read_and_activate(kEvent as i32, kOutput as i32)?,
+            event_inputs: read_events(crate::audio::BusDirection::Input)?,
+            event_outputs: read_events(crate::audio::BusDirection::Output)?,
+            event_readiness: None,
         })
     }
 
@@ -4677,6 +4772,196 @@ impl PluginImpl {
             Ok(None) // Not an error - single components don't need connection
         }
     }
+}
+
+fn census_native_event_buses(
+    component: &ComPtr<IComponent>,
+    activation: &BusActivationState,
+) -> Result<crate::audio::NativeEventBusInfoSet> {
+    let side = |direction: crate::audio::BusDirection,
+                retained: &[EventBusActivation]|
+     -> Result<Vec<crate::audio::NativeEventBusInfo>> {
+        let native_direction = event_direction(direction);
+        // SAFETY: same live component, on the initializing thread while stopped.
+        let count = unsafe { component.getBusCount(kEvent as i32, native_direction) };
+        let count = bounded_event_count(direction, count)?;
+        if retained.len() != count {
+            return Err(Error::NativeEvent(NativeEventError::TopologyChanged {
+                direction,
+            }));
+        }
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(count)
+            .map_err(|_| Error::NativeEvent(NativeEventError::Allocation))?;
+        for (index, retained) in retained.iter().enumerate() {
+            let mut info: BusInfo = unsafe { std::mem::zeroed() };
+            // SAFETY: bounded native index and valid SDK output storage.
+            let status = unsafe {
+                component.getBusInfo(kEvent as i32, native_direction, index as i32, &mut info)
+            };
+            let (role, channel_count) =
+                checked_event_bus_info(direction, index as i32, status, &info)?;
+            if role != retained.role || channel_count != retained.channel_count {
+                return Err(Error::NativeEvent(NativeEventError::TopologyChanged {
+                    direction,
+                }));
+            }
+            result.push(crate::audio::NativeEventBusInfo {
+                role,
+                name: crate::internal::utils::vst_string_to_string(&info.name),
+                channel_count,
+                default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                host_active: retained.active,
+            });
+        }
+        Ok(result)
+    };
+    Ok(crate::audio::NativeEventBusInfoSet {
+        inputs: side(crate::audio::BusDirection::Input, &activation.event_inputs)?,
+        outputs: side(
+            crate::audio::BusDirection::Output,
+            &activation.event_outputs,
+        )?,
+    })
+}
+
+fn set_native_component_active(
+    component: &ComPtr<IComponent>,
+    host: &HostApplication,
+    active: bool,
+) -> tresult {
+    if !active {
+        host.flush_data_exchange();
+        host.set_data_exchange_active(false);
+    }
+    // SAFETY: same owner's live component; caller enforces the cold thread/lifecycle boundary.
+    let result = unsafe { component.setActive(u8::from(active)) };
+    if result == kResultOk || result == kResultTrue {
+        host.set_data_exchange_active(active);
+    } else if !active {
+        host.set_data_exchange_active(true);
+    }
+    result
+}
+
+fn activate_checked_event_bus(
+    component: &ComPtr<IComponent>,
+    host: &HostApplication,
+    activation: &mut BusActivationState,
+    is_active: &mut bool,
+    direction: crate::audio::BusDirection,
+    index: i32,
+    active: bool,
+) -> Result<()> {
+    // A setter attempt invalidates this capability; the census API itself is pure.
+    activation.event_readiness = None;
+    census_native_event_buses(component, activation)?;
+    let states = match direction {
+        crate::audio::BusDirection::Input => &mut activation.event_inputs,
+        crate::audio::BusDirection::Output => &mut activation.event_outputs,
+    };
+    // This is the SAME count matched by the complete census, not a second
+    // untrusted getBusCount which could widen the accepted index afterwards.
+    let count = states.len();
+    let state = usize::try_from(index)
+        .ok()
+        .and_then(|index| states.get_mut(index))
+        .ok_or(Error::NativeEvent(NativeEventError::BusIndex {
+            direction,
+            index,
+            count,
+        }))?;
+    let was_active = *is_active;
+    if was_active {
+        let result = set_native_component_active(component, host, false);
+        if result != kResultOk {
+            return Err(Error::NativeEvent(NativeEventError::ComponentActivation {
+                active: false,
+                result,
+            }));
+        }
+        *is_active = false;
+    }
+    // SAFETY: index is bounded by the validated same-owner topology; component is inactive.
+    let result = unsafe {
+        component.activateBus(
+            kEvent as i32,
+            event_direction(direction),
+            index,
+            u8::from(active),
+        )
+    };
+    let operation = if result == kResultOk {
+        state.active = active;
+        Ok(())
+    } else {
+        Err(Error::NativeEvent(NativeEventError::BusActivation {
+            direction,
+            index,
+            result,
+        }))
+    };
+    let resume = if was_active {
+        let result = set_native_component_active(component, host, true);
+        if result == kResultOk {
+            *is_active = true;
+            Ok(())
+        } else {
+            Err(Error::NativeEvent(NativeEventError::ComponentActivation {
+                active: true,
+                result,
+            }))
+        }
+    } else {
+        Ok(())
+    };
+    // Preserve the first operation failure even if lifecycle restoration also failed.
+    operation.and(resume)
+}
+
+fn event_direction(direction: crate::audio::BusDirection) -> i32 {
+    match direction {
+        crate::audio::BusDirection::Input => kInput as i32,
+        crate::audio::BusDirection::Output => kOutput as i32,
+    }
+}
+
+fn bounded_event_count(direction: crate::audio::BusDirection, count: i32) -> Result<usize> {
+    if !(0..=crate::audio::MAX_NATIVE_EVENT_BUSES as i32).contains(&count) {
+        return Err(Error::NativeEvent(NativeEventError::BusCount {
+            direction,
+            count,
+        }));
+    }
+    Ok(count as usize)
+}
+
+fn checked_event_bus_info(
+    direction: crate::audio::BusDirection,
+    index: i32,
+    result: i32,
+    info: &BusInfo,
+) -> Result<(crate::audio::NativeEventBusRole, usize)> {
+    use crate::audio::NativeEventBusRole;
+    let role = match info.busType {
+        value if value == BusTypes_::kMain as i32 => Some(NativeEventBusRole::Main),
+        value if value == BusTypes_::kAux as i32 => Some(NativeEventBusRole::Auxiliary),
+        _ => None,
+    };
+    if result != kResultOk
+        || info.mediaType != kEvent as i32
+        || info.direction != event_direction(direction)
+        || info.channelCount < 0
+        || role.is_none()
+    {
+        return Err(Error::NativeEvent(NativeEventError::BusMetadata {
+            direction,
+            index,
+            result,
+        }));
+    }
+    Ok((role.expect("validated role"), info.channelCount as usize))
 }
 
 /// Map a sample offset within the caller's block onto one chunk of it.
@@ -5822,6 +6107,122 @@ fn validate_process_bus_buffers(
     )
 }
 
+fn validate_checked_note_buffers(
+    data: &Option<Box<HostProcessData>>,
+    activation: &BusActivationState,
+    sample_rate: f64,
+    prepared_block: usize,
+    buffers: &BusAudioBuffers,
+) -> Result<()> {
+    let frames = buffers.block_size;
+    if frames == 0 || frames > i32::MAX as usize || prepared_block == 0 {
+        return Err(Error::NativeEvent(NativeEventError::InvalidFrames));
+    }
+    if !sample_rate.is_finite() || sample_rate <= 0.0 || buffers.sample_rate != sample_rate {
+        return Err(Error::NativeEvent(NativeEventError::SampleRate));
+    }
+    let data = data
+        .as_ref()
+        .ok_or(Error::NativeEvent(NativeEventError::PreparationRequired))?;
+    for (supplied, expected, active) in [
+        (
+            &buffers.inputs,
+            &data.input_bus_buffers,
+            &activation.audio_inputs,
+        ),
+        (
+            &buffers.outputs,
+            &data.output_bus_buffers,
+            &activation.audio_outputs,
+        ),
+    ] {
+        if supplied.len() != expected.len() || active.len() != expected.len() {
+            return Err(Error::NativeEvent(NativeEventError::AudioLayout));
+        }
+        for ((bus, native), active) in supplied.iter().zip(expected).zip(active) {
+            if native.numChannels < 0
+                || bus.active != *active
+                || bus.channels.len() != native.numChannels as usize
+            {
+                return Err(Error::NativeEvent(NativeEventError::AudioLayout));
+            }
+            if bus.channels.iter().any(|channel| channel.len() != frames) {
+                return Err(Error::NativeEvent(NativeEventError::InvalidFrames));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_checked_note_events(
+    events: &[PluginEvent],
+    frames: usize,
+    inputs: &[EventBusActivation],
+) -> Result<()> {
+    use crate::midi::PluginEventData;
+    if events.len() > MAX_QUEUED_EVENTS {
+        return Err(Error::NativeEvent(NativeEventError::Capacity));
+    }
+    let allowed_flags = (Event_::EventFlags_::kIsLive
+        | Event_::EventFlags_::kUserReserved1
+        | Event_::EventFlags_::kUserReserved2) as u16;
+    let mut previous = None;
+    for (index, event) in events.iter().enumerate() {
+        let invalid = || Error::NativeEvent(NativeEventError::InvalidEvent { index });
+        if event.bus_index < 0
+            || event.sample_offset < 0
+            || event.sample_offset as usize >= frames
+            || !event.ppq_position.is_finite()
+            || event.flags & !allowed_flags != 0
+        {
+            return Err(invalid());
+        }
+        let bus = inputs.get(event.bus_index as usize).ok_or_else(invalid)?;
+        if !bus.active {
+            return Err(invalid());
+        }
+        let (channel, pitch, tuning, velocity, id) = match &event.data {
+            PluginEventData::NoteOn {
+                channel,
+                pitch,
+                tuning,
+                velocity,
+                length,
+                note_id,
+            } => {
+                if *length < 0 {
+                    return Err(invalid());
+                }
+                (*channel, *pitch, *tuning, *velocity, *note_id)
+            }
+            PluginEventData::NoteOff {
+                channel,
+                pitch,
+                tuning,
+                velocity,
+                note_id,
+            } => (*channel, *pitch, *tuning, *velocity, *note_id),
+            _ => return Err(invalid()),
+        };
+        // -1 IDs are standard-defined, but intentionally outside this capability.
+        if !(0..=15).contains(&channel)
+            || channel as usize >= bus.channel_count
+            || !(0..=127).contains(&pitch)
+            || id < 0
+            || !velocity.is_finite()
+            || !(0.0..=1.0).contains(&velocity)
+            || !tuning.is_finite()
+        {
+            return Err(invalid());
+        }
+        if previous.is_some_and(|offset| offset > event.sample_offset) {
+            return Err(Error::NativeEvent(NativeEventError::EventOrder { index }));
+        }
+        previous = Some(event.sample_offset);
+    }
+    Ok(())
+}
+
 /// Disjoint mutable DSP fields, borrowed from the sole loaded PluginImpl.
 /// No controller/component lifecycle or IPlugView capability reaches this role.
 struct PluginProcessFields<'a> {
@@ -6094,7 +6495,12 @@ impl PluginProcessFields<'_> {
         result
     }
 
-    fn process_chunks(&mut self, buffers: &mut CallerAudioBuffers<'_>, total: usize) -> Result<()> {
+    fn process_chunks(
+        &mut self,
+        buffers: &mut CallerAudioBuffers<'_>,
+        total: usize,
+        checked_notes: bool,
+    ) -> Result<()> {
         // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
         // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
         // `block_size` is plain state and this loop must terminate regardless.
@@ -6103,35 +6509,95 @@ impl PluginProcessFields<'_> {
         while offset < total {
             let frames = (total - offset).min(step);
             let is_last = offset + frames >= total;
-            stage_chunk_events(
-                self.chunk_events,
-                self.input_events,
-                offset,
-                frames,
-                is_last,
-            );
+            if checked_notes {
+                self.input_events
+                    .stage_checked_note_chunk(self.chunk_events, offset, frames)
+                    .map_err(Error::NativeEvent)?;
+            } else {
+                stage_chunk_events(
+                    self.chunk_events,
+                    self.input_events,
+                    offset,
+                    frames,
+                    is_last,
+                );
+            }
             self.process_chunk(buffers, offset, frames, is_last)?;
             offset += frames;
         }
         Ok(())
     }
 
+    fn process_checked_note_buffers(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> Result<()> {
+        if !self.is_active || !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        self.bus_activation
+            .event_readiness
+            .unwrap_or(Err(NativeEventError::PreparationRequired))
+            .map_err(Error::NativeEvent)?;
+        if self.component_handler.as_ref().is_some_and(|handler| {
+            let flags = handler.pending_restart_flags();
+            flags.io_changed() || flags.reload_component()
+        }) {
+            return Err(Error::NativeEvent(NativeEventError::PreparationRequired));
+        }
+        validate_checked_note_buffers(
+            self.process_data,
+            self.bus_activation,
+            self.sample_rate,
+            self.block_size,
+            buffers,
+        )?;
+        validate_checked_note_events(
+            events,
+            buffers.block_size,
+            &self.bus_activation.event_inputs,
+        )?;
+        self.process_buffer_view_inner(&mut CallerAudioBuffers::Buses(buffers), Some(events))
+    }
+
     fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
+        self.process_buffer_view_inner(buffers, None)
+    }
+
+    fn process_buffer_view_inner(
+        &mut self,
+        buffers: &mut CallerAudioBuffers<'_>,
+        notes: Option<&[PluginEvent]>,
+    ) -> Result<()> {
         if !self.is_active || !self.is_processing {
             return Err(Error::NotProcessing);
         }
 
         let _denormal = crate::internal::denormal::DenormalGuard::new();
         let total = buffers.frame_count(self.block_size);
-        self.input_events.take_into_slots(self.chunk_events);
+        if let Some(notes) = notes {
+            // All fallible scalar/layout checks finished. This admission checks
+            // both original capacities and absence of legacy input before mutation.
+            self.input_events
+                .begin_checked_note_batch(self.chunk_events, notes)
+                .map_err(Error::NativeEvent)?;
+        } else {
+            self.input_events.take_into_slots(self.chunk_events);
+        }
 
         let result = if total == 0 {
             stage_chunk_events(self.chunk_events, self.input_events, 0, 0, true);
             self.process_chunk(buffers, 0, 0, true)
         } else {
-            self.process_chunks(buffers, total)
+            self.process_chunks(buffers, total, notes.is_some())
         };
 
+        if notes.is_some() {
+            // Consumption has begun; no future call may replay remaining chunks,
+            // including when the second native call or input-list staging failed.
+            self.input_events.clear_consumed_note_events();
+        }
         self.chunk_events.clear();
         self.pending_param_changes.clear();
         result
@@ -6690,6 +7156,13 @@ impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
         validate_process_bus_buffers(self.process_data, self.bus_activation, buffers)?;
         self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
     }
+    fn process_bus_audio_with_note_events(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> Result<()> {
+        self.process_checked_note_buffers(buffers, events)
+    }
 }
 
 #[cfg(test)]
@@ -7028,3 +7501,799 @@ mod cache_policy_tests;
 
 #[cfg(test)]
 mod initial_parameter_input_tests;
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_cast)]
+mod checked_native_note_tests {
+    use super::*;
+    use crate::audio::{AudioBusConfig, NativeEventBusRole};
+    use crate::midi::PluginEventData;
+    use crate::plugin::PluginProcessingRole;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use vst3::{Class, ComRef};
+
+    type Received = (i32, i32, i32, i16, i16, u32);
+    #[derive(Default)]
+    struct Observations {
+        calls: usize,
+        received: Vec<Vec<Received>>,
+        frames: Vec<i32>,
+    }
+    struct Processor {
+        observed: Arc<Mutex<Observations>>,
+        fail_call: Arc<AtomicUsize>,
+    }
+    impl Class for Processor {
+        type Interfaces = (IAudioProcessor,);
+    }
+    impl IAudioProcessorTrait for Processor {
+        unsafe fn setBusArrangements(&self, _: *mut u64, _: i32, _: *mut u64, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getBusArrangement(&self, _: i32, _: i32, arr: *mut u64) -> tresult {
+            unsafe {
+                *arr = 1;
+            }
+            kResultOk
+        }
+        unsafe fn canProcessSampleSize(&self, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getLatencySamples(&self) -> u32 {
+            0
+        }
+        unsafe fn setupProcessing(&self, _: *mut ProcessSetup) -> tresult {
+            kResultOk
+        }
+        unsafe fn setProcessing(&self, _: u8) -> tresult {
+            kResultOk
+        }
+        unsafe fn getTailSamples(&self) -> u32 {
+            0
+        }
+        unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+            // SAFETY: the actual SDK entry receives the fixture's wired stable
+            // ProcessData, event COM owner and mono output storage.
+            let data = unsafe { &mut *data };
+            let mut received = Vec::new();
+            let events = unsafe { ComRef::from_raw(data.inputEvents) }.expect("actual input list");
+            for index in 0..unsafe { events.getEventCount() } {
+                let mut event: Event = unsafe { std::mem::zeroed() };
+                assert_eq!(unsafe { events.getEvent(index, &mut event) }, kResultOk);
+                let (id, channel, pitch, velocity) = match event.r#type as u32 {
+                    value if value == kNoteOnEvent as u32 => {
+                        let note = unsafe { event.__field0.noteOn };
+                        (note.noteId, note.channel, note.pitch, note.velocity)
+                    }
+                    value if value == kNoteOffEvent as u32 => {
+                        let note = unsafe { event.__field0.noteOff };
+                        (note.noteId, note.channel, note.pitch, note.velocity)
+                    }
+                    _ => panic!("only the admitted scalar Note subset"),
+                };
+                received.push((
+                    event.sampleOffset,
+                    event.busIndex,
+                    id,
+                    channel,
+                    pitch,
+                    velocity.to_bits(),
+                ));
+            }
+            let mut observed = self.observed.lock().unwrap();
+            observed.calls += 1;
+            let call = observed.calls;
+            observed.received.push(received);
+            observed.frames.push(data.numSamples);
+            // A failed native block deliberately writes native output too. It
+            // must not become caller PCM, unlike the preceding successful chunk.
+            let output = unsafe { &mut *data.outputs };
+            output.silenceFlags = 0;
+            let samples = unsafe {
+                std::slice::from_raw_parts_mut(
+                    *output.__field0.channelBuffers32,
+                    data.numSamples as usize,
+                )
+            };
+            samples.fill(call as f32 * 0.25);
+            if self.fail_call.load(Ordering::Relaxed) == call {
+                kResultFalse
+            } else {
+                kResultOk
+            }
+        }
+    }
+
+    struct Fixture {
+        processor: ComPtr<IAudioProcessor>,
+        observed: Arc<Mutex<Observations>>,
+        fail_call: Arc<AtomicUsize>,
+        data: Option<Box<HostProcessData>>,
+        activation: BusActivationState,
+        handler: Option<ComWrapper<ComponentHandler>>,
+        parameters: Vec<ParameterChange>,
+        input: ComWrapper<HostEventList>,
+        output: ComWrapper<HostEventList>,
+        chunks: Vec<Option<PluginEvent>>,
+        gui: Arc<Mutex<Vec<(u32, f64)>>>,
+        feedback: Arc<ArrayQueue<(u32, f64)>>,
+        emitted: Arc<ArrayQueue<PluginEvent>>,
+        deferred: ArrayQueue<(u32, f64)>,
+        host: ComWrapper<HostApplication>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let observed = Arc::new(Mutex::new(Observations::default()));
+            let fail_call = Arc::new(AtomicUsize::new(0));
+            let processor = ComWrapper::new(Processor {
+                observed: Arc::clone(&observed),
+                fail_call: Arc::clone(&fail_call),
+            })
+            .to_com_ptr::<IAudioProcessor>()
+            .unwrap();
+            let input = create_event_list();
+            let output = create_event_list();
+            let mut native_output: AudioBusBuffers = unsafe { std::mem::zeroed() };
+            native_output.numChannels = 1;
+            let mut native_outputs = vec![native_output];
+            let mut samples =
+                build_typed_sample_buffers::<f32>(4, &[], &[], &native_outputs, &[true]);
+            native_outputs[0].__field0.channelBuffers32 =
+                samples.output_channel_ptrs.0[0].as_mut_ptr();
+            let mut data = Box::new(HostProcessData {
+                process_data: unsafe { std::mem::zeroed() },
+                sample_buffers: HostSampleBuffers::F32(samples),
+                input_bus_buffers: vec![],
+                output_bus_buffers: native_outputs,
+                process_context: unsafe { std::mem::zeroed() },
+                process_context_requirements: None,
+                transport_tempo: 120.0,
+                input_param_changes: ComWrapper::new(ParameterChanges::default()),
+                output_param_changes: ComWrapper::new(ParameterChanges::default()),
+            });
+            data.process_context.sampleRate = 48_000.0;
+            data.process_data.numOutputs = 1;
+            data.process_data.outputs = data.output_bus_buffers.as_mut_ptr();
+            data.process_data.symbolicSampleSize = SymbolicSampleSizes_::kSample32 as i32;
+            data.process_data.inputEvents = input.as_com_ref::<IEventList>().unwrap().as_ptr();
+            data.process_data.outputEvents = output.as_com_ref::<IEventList>().unwrap().as_ptr();
+            data.process_data.inputParameterChanges = data
+                .input_param_changes
+                .as_com_ref::<IParameterChanges>()
+                .unwrap()
+                .as_ptr();
+            data.process_data.outputParameterChanges = data
+                .output_param_changes
+                .as_com_ref::<IParameterChanges>()
+                .unwrap()
+                .as_ptr();
+            data.process_data.processContext = &mut data.process_context;
+            Self {
+                processor,
+                observed,
+                fail_call,
+                data: Some(data),
+                activation: BusActivationState {
+                    audio_outputs: vec![true],
+                    event_inputs: vec![
+                        EventBusActivation {
+                            role: NativeEventBusRole::Main,
+                            channel_count: 16,
+                            active: true,
+                        },
+                        EventBusActivation {
+                            role: NativeEventBusRole::Auxiliary,
+                            channel_count: 1,
+                            active: true,
+                        },
+                    ],
+                    event_readiness: Some(Ok(())),
+                    ..BusActivationState::default()
+                },
+                handler: None,
+                parameters: Vec::with_capacity(4),
+                input,
+                output,
+                chunks: Vec::with_capacity(4096),
+                gui: Arc::new(Mutex::new(Vec::new())),
+                feedback: Arc::new(ArrayQueue::new(16)),
+                emitted: Arc::new(ArrayQueue::new(16)),
+                deferred: ArrayQueue::new(16),
+                host: super::super::com_implementations::create_host_application(),
+            }
+        }
+        fn fields(&mut self) -> PluginProcessFields<'_> {
+            PluginProcessFields {
+                processor: &self.processor,
+                is_active: true,
+                is_processing: true,
+                sample_rate: 48_000.0,
+                block_size: 4,
+                process_data: &mut self.data,
+                bus_activation: &self.activation,
+                component_handler: &self.handler,
+                pending_param_changes: &mut self.parameters,
+                input_events: &self.input,
+                output_events: &self.output,
+                chunk_events: &mut self.chunks,
+                gui_param_changes_for_host: &self.gui,
+                output_param_feedback: &self.feedback,
+                output_events_owned: &self.emitted,
+                deferred_controller_sync: &self.deferred,
+                host_app: &self.host,
+            }
+        }
+        fn run(&mut self, buffers: &mut BusAudioBuffers, notes: &[PluginEvent]) -> Result<()> {
+            std::thread::scope(|scope| {
+                let mut fields = self.fields();
+                scope
+                    .spawn(move || fields.process_bus_audio_with_note_events(buffers, notes))
+                    .join()
+                    .expect("actual scoped processing thread")
+            })
+        }
+    }
+    fn buffers(frames: usize) -> BusAudioBuffers {
+        BusAudioBuffers::new(
+            &AudioBusLayout {
+                inputs: vec![],
+                outputs: vec![AudioBusConfig {
+                    channel_count: 1,
+                    active: true,
+                }],
+            },
+            frames,
+            48_000.0,
+        )
+    }
+    fn on(offset: i32, id: i32) -> PluginEvent {
+        PluginEvent {
+            bus_index: 0,
+            sample_offset: offset,
+            ppq_position: 0.0,
+            flags: 0,
+            data: PluginEventData::NoteOn {
+                channel: 2,
+                pitch: 60,
+                tuning: 0.25,
+                velocity: 0.0,
+                length: 0,
+                note_id: id,
+            },
+        }
+    }
+    fn off(offset: i32, id: i32) -> PluginEvent {
+        PluginEvent {
+            bus_index: 0,
+            sample_offset: offset,
+            ppq_position: 0.0,
+            flags: 0,
+            data: PluginEventData::NoteOff {
+                channel: 2,
+                pitch: 60,
+                tuning: 0.25,
+                velocity: 0.5,
+                note_id: id,
+            },
+        }
+    }
+
+    #[test]
+    fn checked_note_scoped_native_events_span_chunks_keep_original_tuple_and_equal_offsets() {
+        let mut fixture = Fixture::new();
+        let mut output = buffers(9);
+        fixture
+            .run(&mut output, &[on(1, 71), on(1, 72), off(4, 71), off(8, 72)])
+            .unwrap();
+        assert_eq!(fixture.observed.lock().unwrap().frames, [4, 4, 1]);
+        assert_eq!(
+            fixture.observed.lock().unwrap().received,
+            [
+                vec![(1, 0, 71, 2, 60, 0), (1, 0, 72, 2, 60, 0)],
+                vec![(0, 0, 71, 2, 60, 0.5f32.to_bits())],
+                vec![(0, 0, 72, 2, 60, 0.5f32.to_bits())],
+            ]
+        );
+        assert_eq!(
+            output.outputs[0].channels[0],
+            [0.25, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5, 0.5, 0.75]
+        );
+        assert!(fixture.input.events.lock().unwrap().is_empty());
+        assert!(fixture.chunks.is_empty());
+    }
+
+    #[test]
+    fn checked_note_second_chunk_failure_clears_remaining_input_and_does_not_replay() {
+        let mut fixture = Fixture::new();
+        fixture.fail_call.store(2, Ordering::Relaxed);
+        fixture.parameters.push(ParameterChange {
+            id: 7,
+            value: 0.5,
+            sample_offset: 8,
+        });
+        let mut output = buffers(9);
+        output.outputs[0].channels[0].fill(93.0);
+        assert!(
+            matches!(fixture.run(&mut output, &[on(1, 71), off(4, 71), on(8, 72)]),
+            Err(Error::ProcessFailed(result)) if result == kResultFalse)
+        );
+        assert_eq!(fixture.observed.lock().unwrap().frames, [4, 4]);
+        assert_eq!(
+            output.outputs[0].channels[0],
+            [0.25, 0.25, 0.25, 0.25, 93.0, 93.0, 93.0, 93.0, 93.0]
+        );
+        assert!(fixture.input.events.lock().unwrap().is_empty());
+        assert!(fixture.chunks.is_empty());
+        assert!(fixture.parameters.is_empty());
+        fixture.run(&mut buffers(4), &[]).unwrap();
+        assert!(fixture.observed.lock().unwrap().received[2].is_empty());
+    }
+
+    #[test]
+    fn checked_note_late_bad_event_refuses_before_pcm_parameters_or_native_call_change() {
+        let mut fixture = Fixture::new();
+        fixture.parameters.push(ParameterChange {
+            id: 7,
+            value: 0.5,
+            sample_offset: 0,
+        });
+        let mut output = buffers(9);
+        output.outputs[0].channels[0].fill(93.0);
+        assert!(matches!(
+            fixture.run(&mut output, &[on(0, 71), off(9, 71)]),
+            Err(Error::NativeEvent(NativeEventError::InvalidEvent {
+                index: 1
+            }))
+        ));
+        assert_eq!(output.outputs[0].channels[0], vec![93.0; 9]);
+        assert_eq!(fixture.parameters.len(), 1);
+        assert!(fixture.input.events.lock().unwrap().is_empty());
+        assert!(fixture.chunks.is_empty());
+        assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+    }
+
+    #[test]
+    fn checked_note_bad_audio_window_preserves_all_input_and_parameter_owners() {
+        let mut fixture = Fixture::new();
+        fixture.parameters.push(ParameterChange {
+            id: 7,
+            value: 0.5,
+            sample_offset: 0,
+        });
+        for case in 0..4 {
+            let mut output = buffers(9);
+            output.outputs[0].channels[0].fill(93.0);
+            match case {
+                0 => output.block_size = 8,
+                1 => output.sample_rate = 44_100.0,
+                2 => output.block_size = 0,
+                _ => output.outputs[0].active = false,
+            }
+            assert!(matches!(
+                fixture.run(&mut output, &[on(0, 71)]),
+                Err(Error::NativeEvent(_))
+            ));
+            assert_eq!(output.outputs[0].channels[0], vec![93.0; 9]);
+            assert_eq!(fixture.parameters.len(), 1);
+            assert!(fixture.input.events.lock().unwrap().is_empty());
+            assert!(fixture.chunks.is_empty());
+        }
+        assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+    }
+
+    #[test]
+    fn checked_note_capacity_legacy_and_poison_refusals_preserve_pcm_and_parameters() {
+        for case in 0..4 {
+            let mut fixture = Fixture::new();
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.5,
+                sample_offset: 0,
+            });
+            let mut notes = vec![on(0, 1)];
+            match case {
+                0 => notes = vec![on(0, 1); 4097],
+                1 => fixture.chunks = Vec::new(),
+                2 => fixture.input.add_event(on(2, 77)),
+                _ => {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _guard = fixture.input.events.lock().unwrap();
+                        panic!("owned preflight poison");
+                    }));
+                }
+            }
+            let mut output = buffers(9);
+            output.outputs[0].channels[0].fill(93.0);
+            let error = fixture.run(&mut output, &notes).unwrap_err();
+            let expected = match case {
+                0 | 1 => NativeEventError::Capacity,
+                2 => NativeEventError::PendingEvents,
+                _ => NativeEventError::StoragePoisoned,
+            };
+            assert!(matches!(error,Error::NativeEvent(actual) if actual==expected));
+            assert_eq!(output.outputs[0].channels[0], vec![93.0; 9]);
+            assert_eq!(fixture.parameters.len(), 1);
+            assert_eq!(fixture.parameters[0].id, 7);
+            assert_eq!(fixture.parameters[0].value.to_bits(), 0.5f64.to_bits());
+            assert_eq!(fixture.parameters[0].sample_offset, 0);
+            assert!(fixture.chunks.is_empty());
+            let queue = fixture
+                .input
+                .events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if case == 2 {
+                assert_eq!(*queue, [on(2, 77)]);
+            } else {
+                assert!(queue.is_empty());
+            }
+            assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+        }
+    }
+
+    #[test]
+    fn checked_note_requires_same_owner_prepared_readiness_and_does_not_invent_it() {
+        let mut fixture = Fixture::new();
+        for readiness in [
+            None,
+            Some(Err(NativeEventError::TopologyChanged {
+                direction: crate::audio::BusDirection::Input,
+            })),
+        ] {
+            fixture.activation.event_readiness = readiness;
+            assert!(matches!(
+                fixture.run(&mut buffers(4), &[on(0, 1)]),
+                Err(Error::NativeEvent(_))
+            ));
+        }
+        assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+        fixture.activation.event_readiness = Some(Ok(()));
+        fixture.run(&mut buffers(4), &[on(0, 1)]).unwrap();
+        assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+    }
+
+    #[test]
+    fn checked_note_scalar_subset_and_direction_local_channel_bounds_are_explicit() {
+        let fixture = Fixture::new();
+        for case in 0..13 {
+            let mut event = on(0, 71);
+            match case {
+                0 => event.bus_index = -1,
+                1 => event.bus_index = 2,
+                2 => event.sample_offset = -1,
+                3 => event.sample_offset = 9,
+                4 => event.ppq_position = f64::NAN,
+                5 => event.flags = 2,
+                6 => {
+                    if let PluginEventData::NoteOn { note_id, .. } = &mut event.data {
+                        *note_id = -1;
+                    }
+                }
+                7 => {
+                    if let PluginEventData::NoteOn { velocity, .. } = &mut event.data {
+                        *velocity = f32::NAN;
+                    }
+                }
+                8 => {
+                    if let PluginEventData::NoteOn { tuning, .. } = &mut event.data {
+                        *tuning = f32::INFINITY;
+                    }
+                }
+                9 => {
+                    if let PluginEventData::NoteOn { length, .. } = &mut event.data {
+                        *length = -1;
+                    }
+                }
+                10 => {
+                    if let PluginEventData::NoteOn { pitch, .. } = &mut event.data {
+                        *pitch = 128;
+                    }
+                }
+                11 => {
+                    if let PluginEventData::NoteOn { channel, .. } = &mut event.data {
+                        *channel = 16;
+                    }
+                }
+                _ => event.bus_index = 1, // channel2 does not fit this actual one-channel bus.
+            }
+            assert!(
+                matches!(
+                    validate_checked_note_events(&[event], 9, &fixture.activation.event_inputs),
+                    Err(Error::NativeEvent(NativeEventError::InvalidEvent {
+                        index: 0
+                    }))
+                ),
+                "case {case}"
+            );
+        }
+        assert!(matches!(
+            validate_checked_note_events(
+                &[on(3, 1), off(2, 1)],
+                9,
+                &fixture.activation.event_inputs
+            ),
+            Err(Error::NativeEvent(NativeEventError::EventOrder {
+                index: 1
+            }))
+        ));
+        validate_checked_note_events(&[on(0, 1), off(0, 1)], 9, &fixture.activation.event_inputs)
+            .unwrap();
+    }
+
+    #[derive(Default)]
+    struct ComponentObservations {
+        input_counts: usize,
+        bus_activations: Vec<(i32, i32, bool)>,
+        component_activations: Vec<bool>,
+    }
+    struct ComponentProbe {
+        observed: Mutex<ComponentObservations>,
+        deactivate_result: std::sync::atomic::AtomicI32,
+        reactivate_result: std::sync::atomic::AtomicI32,
+        next_input_count: std::sync::atomic::AtomicI32,
+        channels: std::sync::atomic::AtomicI32,
+    }
+    struct Component(Arc<ComponentProbe>);
+    impl Class for Component {
+        type Interfaces = (IComponent,);
+    }
+    impl IPluginBaseTrait for Component {
+        unsafe fn initialize(&self, _: *mut FUnknown) -> tresult {
+            kResultOk
+        }
+        unsafe fn terminate(&self) -> tresult {
+            kResultOk
+        }
+    }
+    impl IComponentTrait for Component {
+        unsafe fn getControllerClassId(&self, _: *mut TUID) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn setIoMode(&self, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getBusCount(&self, media: i32, direction: i32) -> i32 {
+            assert_eq!(media, kEvent as i32);
+            if direction != kInput as i32 {
+                return 0;
+            }
+            let mut observed = self.0.observed.lock().unwrap();
+            observed.input_counts += 1;
+            if observed.input_counts == 1 {
+                2
+            } else {
+                self.0.next_input_count.load(Ordering::Relaxed)
+            }
+        }
+        unsafe fn getBusInfo(
+            &self,
+            media: i32,
+            direction: i32,
+            index: i32,
+            info: *mut BusInfo,
+        ) -> tresult {
+            if media != kEvent as i32 || direction != kInput as i32 || !(0..2).contains(&index) {
+                return kResultFalse;
+            }
+            let info = unsafe { &mut *info };
+            *info = unsafe { std::mem::zeroed() };
+            info.mediaType = media;
+            info.direction = direction;
+            info.channelCount = self.0.channels.load(Ordering::Relaxed);
+            info.busType = if index == 0 {
+                BusTypes_::kMain as i32
+            } else {
+                BusTypes_::kAux as i32
+            };
+            kResultOk
+        }
+        unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn activateBus(&self, media: i32, direction: i32, index: i32, state: u8) -> tresult {
+            assert_eq!(media, kEvent as i32);
+            self.0
+                .observed
+                .lock()
+                .unwrap()
+                .bus_activations
+                .push((direction, index, state != 0));
+            kResultOk
+        }
+        unsafe fn setActive(&self, state: u8) -> tresult {
+            self.0
+                .observed
+                .lock()
+                .unwrap()
+                .component_activations
+                .push(state != 0);
+            if state == 0 {
+                self.0.deactivate_result.load(Ordering::Relaxed)
+            } else {
+                self.0.reactivate_result.load(Ordering::Relaxed)
+            }
+        }
+        unsafe fn setState(&self, _: *mut IBStream) -> tresult {
+            kResultOk
+        }
+        unsafe fn getState(&self, _: *mut IBStream) -> tresult {
+            kResultOk
+        }
+    }
+    struct EventControl {
+        component: ComPtr<IComponent>,
+        probe: Arc<ComponentProbe>,
+        activation: BusActivationState,
+        active: bool,
+        host: ComWrapper<HostApplication>,
+    }
+    impl EventControl {
+        fn new() -> Self {
+            let probe = Arc::new(ComponentProbe {
+                observed: Mutex::new(ComponentObservations::default()),
+                deactivate_result: std::sync::atomic::AtomicI32::new(kResultOk),
+                reactivate_result: std::sync::atomic::AtomicI32::new(kResultOk),
+                next_input_count: std::sync::atomic::AtomicI32::new(2),
+                channels: std::sync::atomic::AtomicI32::new(16),
+            });
+            let component = ComWrapper::new(Component(Arc::clone(&probe)))
+                .to_com_ptr::<IComponent>()
+                .unwrap();
+            Self {
+                component,
+                probe,
+                active: true,
+                activation: BusActivationState {
+                    event_inputs: vec![
+                        EventBusActivation {
+                            role: NativeEventBusRole::Main,
+                            channel_count: 16,
+                            active: true,
+                        },
+                        EventBusActivation {
+                            role: NativeEventBusRole::Auxiliary,
+                            channel_count: 16,
+                            active: false,
+                        },
+                    ],
+                    event_readiness: Some(Ok(())),
+                    ..BusActivationState::default()
+                },
+                host: super::super::com_implementations::create_host_application(),
+            }
+        }
+        fn activate(&mut self, index: i32) -> Result<()> {
+            activate_checked_event_bus(
+                &self.component,
+                &self.host,
+                &mut self.activation,
+                &mut self.active,
+                crate::audio::BusDirection::Input,
+                index,
+                true,
+            )
+        }
+    }
+
+    #[test]
+    fn checked_event_activation_never_widens_a_validated_count_with_a_second_query() {
+        let mut fixture = EventControl::new();
+        fixture.probe.next_input_count.store(3, Ordering::Relaxed);
+        assert!(matches!(
+            fixture.activate(2),
+            Err(Error::NativeEvent(NativeEventError::BusIndex {
+                index: 2,
+                count: 2,
+                ..
+            }))
+        ));
+        let observed = fixture.probe.observed.lock().unwrap();
+        assert_eq!(
+            observed.input_counts, 1,
+            "second count would report3 and admit an unprepared index"
+        );
+        assert!(observed.bus_activations.is_empty());
+        assert!(observed.component_activations.is_empty());
+        assert!(fixture.active);
+        assert!(!fixture.activation.event_inputs[1].active);
+        assert!(fixture.activation.event_readiness.is_none());
+    }
+
+    #[test]
+    fn checked_event_deactivate_refusal_keeps_active_state_and_never_calls_activate_bus() {
+        let mut fixture = EventControl::new();
+        fixture
+            .probe
+            .deactivate_result
+            .store(kResultFalse, Ordering::Relaxed);
+        assert!(matches!(fixture.activate(1),Err(Error::NativeEvent(
+            NativeEventError::ComponentActivation {active:false,result}
+        )) if result==kResultFalse));
+        let observed = fixture.probe.observed.lock().unwrap();
+        assert_eq!(observed.component_activations, [false]);
+        assert!(observed.bus_activations.is_empty());
+        assert!(
+            fixture.active,
+            "failed deactivate is not an inactive component"
+        );
+        assert!(!fixture.activation.event_inputs[1].active);
+        assert!(fixture.activation.event_readiness.is_none());
+    }
+
+    #[test]
+    fn checked_event_reactivate_refusal_retains_only_the_real_bus_ack_and_never_grants_ready() {
+        let mut fixture = EventControl::new();
+        fixture
+            .probe
+            .reactivate_result
+            .store(kResultFalse, Ordering::Relaxed);
+        assert!(matches!(fixture.activate(1),Err(Error::NativeEvent(
+            NativeEventError::ComponentActivation {active:true,result}
+        )) if result==kResultFalse));
+        let observed = fixture.probe.observed.lock().unwrap();
+        assert_eq!(observed.component_activations, [false, true]);
+        assert_eq!(observed.bus_activations, [(kInput as i32, 1, true)]);
+        assert!(!fixture.active);
+        assert!(
+            fixture.activation.event_inputs[1].active,
+            "activateBus actually acknowledged"
+        );
+        assert!(fixture.activation.event_readiness.is_none());
+    }
+
+    #[test]
+    fn checked_event_zero_channels_remain_declared_without_fabricating_a_note_channel() {
+        let mut fixture = EventControl::new();
+        fixture.probe.channels.store(0, Ordering::Relaxed);
+        for bus in &mut fixture.activation.event_inputs {
+            bus.channel_count = 0;
+        }
+        let info = census_native_event_buses(&fixture.component, &fixture.activation).unwrap();
+        assert_eq!(info.inputs.len(), 2);
+        assert_eq!(info.inputs[0].channel_count, 0);
+        assert!(matches!(
+            validate_checked_note_events(&[on(0, 1)], 4, &fixture.activation.event_inputs),
+            Err(Error::NativeEvent(NativeEventError::InvalidEvent {
+                index: 0
+            }))
+        ));
+        validate_checked_note_events(&[], 4, &fixture.activation.event_inputs).unwrap();
+    }
+
+    #[test]
+    fn checked_note_count_refuses_before_even_the_first_invalid_event_is_inspected() {
+        let fixture = Fixture::new();
+        let oversized = vec![on(99, 1); 4097];
+        assert!(matches!(
+            validate_checked_note_events(&oversized, 4, &fixture.activation.event_inputs),
+            Err(Error::NativeEvent(NativeEventError::Capacity))
+        ));
+    }
+
+    #[test]
+    fn checked_event_census_count_and_native_direction_fields_are_bounded() {
+        use crate::audio::BusDirection::{Input, Output};
+        assert_eq!(bounded_event_count(Input, 32).unwrap(), 32);
+        for count in [-1, 33, i32::MAX] {
+            assert!(matches!(
+                bounded_event_count(Input, count),
+                Err(Error::NativeEvent(NativeEventError::BusCount { .. }))
+            ));
+        }
+        let mut info: BusInfo = unsafe { std::mem::zeroed() };
+        info.mediaType = kEvent as i32;
+        info.direction = kInput as i32;
+        info.channelCount = 16;
+        info.busType = BusTypes_::kMain as i32;
+        assert_eq!(
+            checked_event_bus_info(Input, 0, kResultOk, &info).unwrap(),
+            (NativeEventBusRole::Main, 16)
+        );
+        assert!(matches!(
+            checked_event_bus_info(Output, 0, kResultOk, &info),
+            Err(Error::NativeEvent(NativeEventError::BusMetadata { .. }))
+        ));
+        info.mediaType = kAudio as i32;
+        assert!(checked_event_bus_info(Input, 0, kResultOk, &info).is_err());
+    }
+}

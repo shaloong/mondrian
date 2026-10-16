@@ -11,6 +11,89 @@ pub enum EditorDetachStage {
     FrameClear,
 }
 
+/// Fixed, allocation-free refusals for the bounded native event API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeEventError {
+    /// This backend does not implement this capability.
+    UnsupportedBackend,
+    /// A control operation was attempted away from the initializing thread.
+    WrongThread,
+    /// Metadata cannot be queried while processing.
+    QueryWhileProcessing,
+    /// A native direction reported an invalid or excessive count.
+    BusCount {
+        /// Native direction which reported this count.
+        direction: crate::audio::BusDirection,
+        /// Raw SDK count, preserved without a cast.
+        count: i32,
+    },
+    /// The native metadata call or its returned scalar fields are invalid.
+    BusMetadata {
+        /// Direction of the requested native bus.
+        direction: crate::audio::BusDirection,
+        /// Direction-local native index.
+        index: i32,
+        /// Raw getBusInfo/activation result.
+        result: i32,
+    },
+    /// Native topology no longer matches this owner's retained activation evidence.
+    TopologyChanged {
+        /// Direction whose retained declaration no longer matches.
+        direction: crate::audio::BusDirection,
+    },
+    /// The index is outside the same count validated by the complete census.
+    BusIndex {
+        /// Direction-local requested index.
+        direction: crate::audio::BusDirection,
+        /// Original signed requested index.
+        index: i32,
+        /// Count of retained buses matched by that census.
+        count: usize,
+    },
+    /// The component did not acknowledge its cold active-state transition.
+    ComponentActivation {
+        /// Requested component active state.
+        active: bool,
+        /// Raw SDK return code.
+        result: i32,
+    },
+    /// A validated native event bus did not acknowledge activation.
+    BusActivation {
+        /// Native bus direction.
+        direction: crate::audio::BusDirection,
+        /// Validated native index.
+        index: i32,
+        /// Raw SDK return code.
+        result: i32,
+    },
+    /// Bounded preparation storage could not be reserved.
+    Allocation,
+    /// No successful preparation/start has validated the current event topology.
+    PreparationRequired,
+    /// The caller's complete audio window has an invalid extent.
+    InvalidFrames,
+    /// The caller's rate differs from the prepared native rate.
+    SampleRate,
+    /// Audio bus/channel/activation metadata differs from the native buffers.
+    AudioLayout,
+    /// The indexed event is outside this explicitly supported Note subset.
+    InvalidEvent {
+        /// Position in the caller's original batch.
+        index: usize,
+    },
+    /// An indexed event precedes an earlier event in the supplied batch.
+    EventOrder {
+        /// First batch position which precedes its predecessor.
+        index: usize,
+    },
+    /// Existing input/chunk events belong to another pending producer.
+    PendingEvents,
+    /// The original preallocated input/chunk storage cannot hold the batch.
+    Capacity,
+    /// The original event-list mutex is poisoned.
+    StoragePoisoned,
+}
+
 /// Main error type for vst3-host operations.
 ///
 /// Marked `#[non_exhaustive]`: match with a wildcard arm, as new variants may be added in
@@ -107,6 +190,10 @@ pub enum Error {
     /// Existing host input must reach a real DSP call before state mutation/capture.
     #[error("native processor parameter input is still pending")]
     PendingParameterDelivery,
+
+    /// Structured refusal from the bounded same-instance event API.
+    #[error("native event operation failed: {0:?}")]
+    NativeEvent(NativeEventError),
 
     /// Other errors
     #[error("{0}")]

@@ -830,11 +830,31 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
         .expect("set the VST3 test plugin environment variable to its native binary");
     let descriptors =
         scan_vst3_binary_descriptors(&helper, &binary).expect("scan VST3 reference classes");
-    assert_eq!(descriptors.len(), 1);
+    let descriptor = if sample_accurate {
+        let mut classes = descriptors
+            .iter()
+            .map(|descriptor| descriptor.class_id.as_str())
+            .collect::<Vec<_>>();
+        classes.sort_unstable();
+        assert_eq!(
+            classes,
+            [
+                "6E4F05A12D8B4C639F017B42A4C2E611",
+                "AE4C8B1910234F819CA26D315F8702A1",
+            ]
+        );
+        descriptors
+            .iter()
+            .find(|descriptor| descriptor.class_id == "AE4C8B1910234F819CA26D315F8702A1")
+            .expect("select the original Gain class explicitly")
+    } else {
+        assert_eq!(descriptors.len(), 1);
+        &descriptors[0]
+    };
     let registration = probe_vst3_plugin_registration(
         &helper,
         &binary,
-        &descriptors[0].class_id,
+        &descriptor.class_id,
         test_render_contract(),
         None,
     )
@@ -846,7 +866,7 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
     let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [binary])
         .expect("discover VST3 reference catalog");
     let instance = catalog
-        .create_instance(&descriptors[0].class_id, test_render_contract(), None)
+        .create_instance(&descriptor.class_id, test_render_contract(), None)
         .expect("capture VST3 authoring instance");
     assert!(instance.parameters.contains_key(&id));
     let spec = catalog
@@ -926,7 +946,7 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
         ..test_render_contract()
     };
     let offline_instance = catalog
-        .create_instance(&descriptors[0].class_id, offline_render, None)
+        .create_instance(&descriptor.class_id, offline_render, None)
         .expect("capture offline VST3 instance");
     let offline_spec = catalog
         .resolve(AudioProcessorPrepareRequest::new(
@@ -1073,8 +1093,23 @@ fn stateful_vst3_snapshot_round_trips_and_restores_isolated_worker_audio() {
         .expect("built stateful VST3 Gain fixture");
     let descriptors =
         scan_vst3_binary_descriptors(&helper, &plugin).expect("scan stateful Gain class");
-    assert_eq!(descriptors.len(), 1);
-    let class_id = &descriptors[0].class_id;
+    let mut classes = descriptors
+        .iter()
+        .map(|descriptor| descriptor.class_id.as_str())
+        .collect::<Vec<_>>();
+    classes.sort_unstable();
+    assert_eq!(
+        classes,
+        [
+            "6E4F05A12D8B4C639F017B42A4C2E611",
+            "AE4C8B1910234F819CA26D315F8702A1",
+        ]
+    );
+    let class_id = &descriptors
+        .iter()
+        .find(|descriptor| descriptor.class_id == "AE4C8B1910234F819CA26D315F8702A1")
+        .expect("select the original Gain class explicitly")
+        .class_id;
     let authored_state = stateful_gain_snapshot(0.37);
     let probe = probe_vst3_plugin_registration_with_state(
         &helper,

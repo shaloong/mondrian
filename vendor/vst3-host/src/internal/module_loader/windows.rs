@@ -103,7 +103,10 @@ impl WindowsModule {
                     log::debug!("ExitDll function found (will be called on cleanup)");
                     // SAFETY: We extend the lifetime to 'static because we're storing this in the struct
                     // and will ensure it's dropped before the library is unloaded
-                    Some(std::mem::transmute(func))
+                    Some(std::mem::transmute::<
+                        Symbol<'_, ExitDllFunc>,
+                        Symbol<'static, ExitDllFunc>,
+                    >(func))
                 }
                 Err(_) => {
                     log::debug!(

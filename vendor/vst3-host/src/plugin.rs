@@ -1075,6 +1075,18 @@ impl PluginAudioProcessing<'_> {
     pub fn queue_unconsumed_editor_values(&mut self) -> Result<bool> {
         self.internal.queue_unconsumed_editor_values()
     }
+    /// Validate and process one complete window with a bounded ordered Note batch.
+    /// Total frames may span multiple prepared native blocks. No controller is called.
+    /// No pending legacy event may be mixed into this operation.
+    pub fn process_bus_audio_with_note_events(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> Result<()> {
+        self.internal
+            .process_bus_audio_with_note_events(buffers, events)
+    }
+
     /// Process existing per-bus buffers using the same canonical DSP implementation.
     pub fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
         self.internal.process_bus_audio(buffers)
@@ -1107,6 +1119,15 @@ pub(crate) trait PluginProcessingRole: Send {
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
     fn queue_unconsumed_editor_values(&mut self) -> Result<bool>;
     fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()>;
+    fn process_bus_audio_with_note_events(
+        &mut self,
+        _buffers: &mut BusAudioBuffers,
+        _events: &[PluginEvent],
+    ) -> Result<()> {
+        Err(Error::NativeEvent(
+            crate::error::NativeEventError::UnsupportedBackend,
+        ))
+    }
 }
 
 // The legacy remote helper calls the historical public Option API, whose
@@ -1192,6 +1213,22 @@ pub(crate) trait PluginInternal: Send {
     }
     /// Query native roles and names from this loaded component.
     fn native_audio_bus_info(&self) -> Result<crate::audio::NativeAudioBusInfoSet>;
+    /// Same-instance, owning-thread census. Remote backends must not infer this from discovery.
+    fn native_event_bus_info(&self) -> Result<crate::audio::NativeEventBusInfoSet> {
+        Err(Error::NativeEvent(
+            crate::error::NativeEventError::UnsupportedBackend,
+        ))
+    }
+    /// One checked Note batch and its exact audio window, with no separate queue lifetime.
+    fn process_bus_audio_with_note_events(
+        &mut self,
+        _buffers: &mut BusAudioBuffers,
+        _events: &[PluginEvent],
+    ) -> Result<()> {
+        Err(Error::NativeEvent(
+            crate::error::NativeEventError::UnsupportedBackend,
+        ))
+    }
     /// Process buffers while preserving VST3 bus boundaries.
     fn process_buses(&mut self, _buffers: &mut BusAudioBuffers) -> Result<()> {
         Err(Error::Other(
@@ -2558,6 +2595,18 @@ impl Plugin {
             .native_audio_bus_info()
     }
 
+    /// Query event declarations from this same restored component on its owning
+    /// thread while stopped. The retained host activation is not a native GetActive query.
+    /// A changed topology is refused rather than fabricating activation evidence.
+    pub fn native_event_bus_info(&self) -> Result<crate::audio::NativeEventBusInfoSet> {
+        self.internal
+            .as_ref()
+            .ok_or(Error::NativeEvent(
+                crate::error::NativeEventError::UnsupportedBackend,
+            ))?
+            .native_event_bus_info()
+    }
+
     /// Return every audio bus's current channel count and activation state.
     pub fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         self.internal
@@ -2597,6 +2646,33 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .process_buses(buffers)?;
+        if let Ok(mut levels) = self.audio_levels.lock() {
+            levels.update_from_bus_buffers(&buffers.outputs);
+            if let Some(ref callback) = self.audio_callback {
+                callback(&levels);
+            }
+        }
+        Ok(())
+    }
+
+    /// Process an exact complete audio window with an ordered native Note batch.
+    ///
+    /// Events use native bus indices and caller-provided nonnegative note IDs.
+    /// This subset does not admit -1 IDs, expression events or pending legacy
+    /// input. Validation/capacity refusals do not consume input or parameters.
+    /// After consumption starts, failure does not roll back completed chunks;
+    /// all remaining input is retired so a later call cannot replay it.
+    pub fn process_bus_audio_with_note_events(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or(Error::NativeEvent(
+                crate::error::NativeEventError::UnsupportedBackend,
+            ))?
+            .process_bus_audio_with_note_events(buffers, events)?;
         if let Ok(mut levels) = self.audio_levels.lock() {
             levels.update_from_bus_buffers(&buffers.outputs);
             if let Some(ref callback) = self.audio_callback {

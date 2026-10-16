@@ -2636,6 +2636,87 @@ impl HostEventList {
         }
     }
 
+    /// Begin the checked Note operation in the original chunk owner. Rejected
+    /// input leaves both owners unchanged; no separate pending producer is made.
+    pub(super) fn begin_checked_note_batch(
+        &self,
+        out: &mut Vec<Option<PluginEvent>>,
+        batch: &[PluginEvent],
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        let queued = self.events.lock().map_err(|_| Failure::StoragePoisoned)?;
+        if !queued.is_empty() || !out.is_empty() || self.payload_bytes.load(Ordering::Relaxed) != 0
+        {
+            return Err(Failure::PendingEvents);
+        }
+        if batch.len() > MAX_QUEUED_EVENTS
+            || batch.len() > queued.capacity()
+            || batch.len() > out.capacity()
+        {
+            return Err(Failure::Capacity);
+        }
+        for (index, event) in batch.iter().enumerate() {
+            if !matches!(
+                event.data,
+                PluginEventData::NoteOn { .. } | PluginEventData::NoteOff { .. }
+            ) {
+                return Err(Failure::InvalidEvent { index });
+            }
+        }
+        // Only scalar Note variants passed validation. Clone cannot copy a
+        // String/Vec payload, and both original capacities have been admitted.
+        out.extend(batch.iter().cloned().map(Some));
+        Ok(())
+    }
+
+    /// Stage exactly one native chunk, preserving equal-offset batch order.
+    /// No clamp, silent prefix or backing allocation is permitted here.
+    pub(super) fn stage_checked_note_chunk(
+        &self,
+        queued: &mut [Option<PluginEvent>],
+        start: usize,
+        frames: usize,
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        let end = start.checked_add(frames).ok_or(Failure::InvalidFrames)?;
+        let belongs = |event: &PluginEvent| {
+            event.sample_offset >= 0
+                && (event.sample_offset as usize) >= start
+                && (event.sample_offset as usize) < end
+        };
+        let mut native = self.events.lock().map_err(|_| Failure::StoragePoisoned)?;
+        if !native.is_empty() {
+            return Err(Failure::PendingEvents);
+        }
+        let count = queued
+            .iter()
+            .flatten()
+            .filter(|event| belongs(event))
+            .count();
+        if count > MAX_QUEUED_EVENTS || count > native.capacity() {
+            return Err(Failure::Capacity);
+        }
+        for slot in queued {
+            if slot.as_ref().is_some_and(&belongs) {
+                let mut event = slot.take().expect("matched occupied slot");
+                event.sample_offset -= start as i32;
+                native.push(event);
+            }
+        }
+        Ok(())
+    }
+
+    /// Only after this checked operation began consumption. Even a poisoned
+    /// owner must not replay accepted input on a later caller invocation.
+    pub(super) fn clear_consumed_note_events(&self) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        events.clear();
+        self.payload_bytes.store(0, Ordering::Relaxed);
+    }
+
     /// Move queued events into reusable optional slots for allocation-free chunk routing.
     pub fn take_into_slots(&self, out: &mut Vec<Option<PluginEvent>>) {
         out.clear();
@@ -5791,3 +5872,122 @@ mod native_author_capture_catchup_contracts {
 
 #[path = "initial_parameter_input.rs"]
 pub(crate) mod initial_parameter_input;
+
+#[cfg(test)]
+mod checked_note_input_tests {
+    use super::*;
+    use crate::error::NativeEventError as Failure;
+
+    fn on(offset: i32, id: i32) -> PluginEvent {
+        PluginEvent {
+            bus_index: 0,
+            sample_offset: offset,
+            ppq_position: 0.0,
+            flags: 0,
+            data: PluginEventData::NoteOn {
+                channel: 0,
+                pitch: 60,
+                tuning: 0.0,
+                velocity: 0.0,
+                length: 0,
+                note_id: id,
+            },
+        }
+    }
+
+    #[test]
+    fn checked_note_batch_rejects_legacy_input_or_chunks_without_discarding_them() {
+        let list = HostEventList::new();
+        list.add_event(on(0, 77));
+        let mut chunks = Vec::with_capacity(4);
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &[on(1, 1)]),
+            Err(Failure::PendingEvents)
+        );
+        assert!(chunks.is_empty());
+        assert_eq!(list.events.lock().unwrap()[0], on(0, 77));
+        list.clear();
+        chunks.push(Some(on(0, 88)));
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &[on(1, 1)]),
+            Err(Failure::PendingEvents)
+        );
+        assert_eq!(chunks, [Some(on(0, 88))]);
+        assert!(list.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn checked_note_batch_checks_actual_capacities_before_mutation() {
+        let list = HostEventList::new();
+        let mut chunks = Vec::new();
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &[on(0, 1)]),
+            Err(Failure::Capacity)
+        );
+        assert!(chunks.is_empty());
+        let list = HostEventList {
+            events: Mutex::new(Vec::new()),
+            payload_bytes: AtomicUsize::new(0),
+        };
+        let mut chunks = Vec::with_capacity(1);
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &[on(0, 1)]),
+            Err(Failure::Capacity)
+        );
+        assert!(chunks.is_empty());
+        assert!(list.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn checked_note_batch_poison_refuses_before_consumption() {
+        let list = HostEventList::new();
+        let _ = std::panic::catch_unwind(|| {
+            let _locked = list.events.lock().unwrap();
+            panic!("owned poison control");
+        });
+        let mut chunks = Vec::with_capacity(1);
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &[on(0, 1)]),
+            Err(Failure::StoragePoisoned)
+        );
+        assert!(chunks.is_empty());
+        assert!(list.events.lock().unwrap_err().into_inner().is_empty());
+    }
+
+    #[test]
+    fn checked_note_chunks_keep_equal_offsets_and_rebase_without_replaying() {
+        let list = HostEventList::new();
+        let mut chunks = Vec::with_capacity(4);
+        let events = [on(1, 3), on(1, 4), on(4, 5), on(7, 6)];
+        list.begin_checked_note_batch(&mut chunks, &events).unwrap();
+        list.stage_checked_note_chunk(&mut chunks, 0, 4).unwrap();
+        assert_eq!(*list.events.lock().unwrap(), events[..2]);
+        list.clear_consumed_note_events();
+        list.stage_checked_note_chunk(&mut chunks, 4, 4).unwrap();
+        let mut expected = events[2..].to_vec();
+        expected[0].sample_offset = 0;
+        expected[1].sample_offset = 3;
+        assert_eq!(*list.events.lock().unwrap(), expected);
+        assert!(chunks.iter().all(Option::is_none));
+        list.clear_consumed_note_events();
+        list.stage_checked_note_chunk(&mut chunks, 4, 4).unwrap();
+        assert!(list.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn checked_note_batch_exact_capacity_and_one_past_limit_are_distinct() {
+        let list = HostEventList::new();
+        let events = vec![on(0, 1); 4096];
+        let mut chunks = Vec::with_capacity(4096);
+        list.begin_checked_note_batch(&mut chunks, &events).unwrap();
+        assert_eq!(chunks.len(), 4096);
+        chunks.clear();
+        let events = vec![on(0, 1); 4097];
+        assert_eq!(
+            list.begin_checked_note_batch(&mut chunks, &events),
+            Err(Failure::Capacity)
+        );
+        assert!(chunks.is_empty());
+        assert!(list.events.lock().unwrap().is_empty());
+    }
+}
