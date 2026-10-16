@@ -16,7 +16,7 @@ mod clap_note_input_metadata;
 pub use clap_discovery::probe_clap_note_input_contract;
 pub use clap_discovery::probe_clap_note_processing_offer;
 pub use clap_note_input_contract::ClapNoteInputContractProbe;
-pub use clap_note_input_contract::ClapNoteProcessingOfferV3;
+pub use clap_note_input_contract::ClapNoteProcessingOfferV4;
 /// Bounded typed ownership of the actual CLAP output callbacks.
 /// These source facts do not grant an author Session or installed runtime lease.
 pub mod clap_output_events;
@@ -50,9 +50,10 @@ mod tests;
 
 use crate::{
     AudioParameterEventBatch, AudioProcessingMode, AudioProcessor, AudioProcessorAudioIo,
-    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorFactory,
-    AudioProcessorHostError, AudioProcessorPrepareRequest, AudioProcessorProcessContext,
-    AudioProcessorResolver, AudioRenderContract, BuiltInAudioProcessorResolver,
+    AudioProcessorAuxiliaryInputContract, AudioProcessorAuxiliaryOutputContract,
+    AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
+    AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
+    AudioRenderContract, BuiltInAudioProcessorResolver,
 };
 use mondrian_core::{AudioChannelLayout, ParameterId};
 use mondrian_timeline::audio::AudioProcessorDefinitionRef;
@@ -127,6 +128,7 @@ pub struct IsolatedAudioProcessorWorkerSpec {
     preparation_payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
     note_input_contract: crate::AudioProcessorNoteInputContract,
     parameter_ids: Vec<ParameterId>,
     render_contract: AudioRenderContract,
@@ -162,6 +164,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             preparation_payload,
             plugin_execution_contract,
             auxiliary_inputs,
+            auxiliary_outputs: AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             parameter_ids,
             render_contract,
@@ -196,6 +199,22 @@ impl IsolatedAudioProcessorWorkerSpec {
     ) -> Result<Self, AudioProcessorHostError> {
         contract.validate()?;
         self.note_input_contract = contract;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Bind every additional output, including currently unrouted native ports.
+    pub fn with_auxiliary_output_contract(
+        mut self,
+        contract: AudioProcessorAuxiliaryOutputContract,
+    ) -> Result<Self, AudioProcessorHostError> {
+        contract.validate(self.render_contract.channel_layout)?;
+        if contract.buses.len() > 31 {
+            return Err(invalid_contract(
+                "isolated output contract exceeds 31 auxiliary ports",
+            ));
+        }
+        self.auxiliary_outputs = contract;
         self.validate()?;
         Ok(self)
     }
@@ -248,6 +267,12 @@ impl IsolatedAudioProcessorWorkerSpec {
             ));
         }
         self.auxiliary_inputs.validate(self.render_contract.channel_layout)?;
+        self.auxiliary_outputs.validate(self.render_contract.channel_layout)?;
+        if self.auxiliary_outputs.buses.len() > 31 {
+            return Err(invalid_contract(
+                "isolated output contract exceeds 31 auxiliary ports",
+            ));
+        }
         self.note_input_contract.validate()?;
         let mut parameter_ids = BTreeSet::new();
         if self
@@ -275,6 +300,7 @@ impl fmt::Debug for IsolatedAudioProcessorWorkerSpec {
             .field("helper_executable", &self.helper_executable)
             .field("plugin_execution_contract", &self.plugin_execution_contract)
             .field("auxiliary_inputs", &self.auxiliary_inputs)
+            .field("auxiliary_outputs", &self.auxiliary_outputs)
             .field("note_input_contract", &self.note_input_contract)
             .field("parameter_count", &self.parameter_ids.len())
             .field("render_contract", &self.render_contract)
@@ -385,6 +411,7 @@ impl IsolatedAudioProcessorFactory {
             preparation_payload,
             plugin_execution_contract: self.spec.plugin_execution_contract,
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
             note_input_contract: self.spec.note_input_contract.clone(),
             parameter_ids: self.spec.parameter_ids.clone(),
             render_contract: self.spec.render_contract,
@@ -413,6 +440,7 @@ impl IsolatedAudioProcessorFactory {
             spec.auxiliary_inputs.buses.len(),
             spec.parameter_ids.len(),
         )?
+        .with_auxiliary_outputs(spec.auxiliary_outputs.buses.len())?
         .with_notes(
             spec.note_input_contract.limits.input_events,
             spec.note_input_contract.limits.output_ends,
@@ -420,6 +448,9 @@ impl IsolatedAudioProcessorFactory {
         let execution_contract = spec
             .plugin_execution_contract
             .with_additional_session_scratch_bytes(layout.total_bytes)?
+            .with_additional_session_scratch_bytes(
+                isolated_output_contract_clone_reservation_bytes(&spec.auxiliary_outputs)?,
+            )?
             .with_additional_session_scratch_bytes(spec.native_lane.map_or(
                 0,
                 crate::NativeWorkerLaneResourceProfile::additional_session_reservation_bytes,
@@ -462,6 +493,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         for bus in &self.spec.auxiliary_inputs.buses {
             visitor(Storage::complete(&bus.bus_key)?)?;
         }
+        visitor(Storage::complete(&self.spec.auxiliary_outputs.buses)?)?;
+        for bus in &self.spec.auxiliary_outputs.buses {
+            visitor(Storage::complete(&bus.bus_key)?)?;
+        }
         visitor(Storage::complete(&self.spec.note_input_contract.ports)?)?;
         for port in &self.spec.note_input_contract.ports {
             visitor(Storage::complete(&port.port_key)?)?;
@@ -491,6 +526,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         self.spec.auxiliary_inputs.clone()
     }
 
+    fn auxiliary_output_contract(&self) -> AudioProcessorAuxiliaryOutputContract {
+        self.spec.auxiliary_outputs.clone()
+    }
+
     fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
         self.spec.note_input_contract.clone()
     }
@@ -500,12 +539,24 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
     }
 
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        // This is an additional parent instance owner. Charge it through the
+        // original private Session scratch contract and verify the actual clone
+        // before launching foreign code. Move this exact owner into the instance.
+        let auxiliary_outputs = self.spec.auxiliary_outputs.clone();
+        if isolated_output_contract_allocated_bytes(&auxiliary_outputs)?
+            > isolated_output_contract_clone_reservation_bytes(&self.spec.auxiliary_outputs)?
+        {
+            return Err(invalid_contract(
+                "isolated parent output metadata exceeds its admitted clone reservation",
+            ));
+        }
         let (worker, _) =
             SupervisedAudioWorker::launch(&self.spec, self.spec.render_contract, self.layout)?;
         Ok(Box::new(IsolatedAudioProcessor {
             worker,
             parameter_ids: self.spec.parameter_ids.clone(),
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            auxiliary_outputs,
             note_input_contract: self.spec.note_input_contract.clone(),
             render_contract: self.spec.render_contract,
             failed: false,
@@ -598,10 +649,44 @@ impl fmt::Debug for IsolatedAudioProcessorFactory {
     }
 }
 
+// Private parent instance metadata only; the Factory/spec and native child
+// are separate owners charged by their existing visitors/reservations.
+fn isolated_output_contract_clone_reservation_bytes(
+    contract: &AudioProcessorAuxiliaryOutputContract,
+) -> Result<usize, AudioProcessorHostError> {
+    let bytes = contract
+        .buses
+        .len()
+        .checked_mul(size_of::<crate::AudioProcessorAuxiliaryOutputBusContract>())
+        .ok_or_else(|| {
+            invalid_contract("isolated parent output metadata reservation overflowed")
+        })?;
+    contract.buses.iter().try_fold(bytes, |bytes, bus| {
+        bytes
+            .checked_add(bus.bus_key.len())
+            .ok_or_else(|| invalid_contract("isolated parent output key reservation overflowed"))
+    })
+}
+fn isolated_output_contract_allocated_bytes(
+    contract: &AudioProcessorAuxiliaryOutputContract,
+) -> Result<usize, AudioProcessorHostError> {
+    let bytes = contract
+        .buses
+        .capacity()
+        .checked_mul(size_of::<crate::AudioProcessorAuxiliaryOutputBusContract>())
+        .ok_or_else(|| invalid_contract("isolated parent output metadata capacity overflowed"))?;
+    contract.buses.iter().try_fold(bytes, |bytes, bus| {
+        bytes
+            .checked_add(bus.bus_key.capacity())
+            .ok_or_else(|| invalid_contract("isolated parent output key capacity overflowed"))
+    })
+}
+
 struct IsolatedAudioProcessor {
     worker: SupervisedAudioWorker,
     parameter_ids: Vec<ParameterId>,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
     note_input_contract: crate::AudioProcessorNoteInputContract,
     render_contract: AudioRenderContract,
     failed: bool,
@@ -917,6 +1002,20 @@ impl AudioProcessor for IsolatedAudioProcessor {
             .checked_mul(channel_count)
             .ok_or_else(|| invalid_contract("isolated processor block extent overflowed"))?;
         let layout = self.worker.layout();
+        for bus in &self.auxiliary_outputs.buses {
+            let output = audio.auxiliary_output(&bus.bus_key).ok_or_else(|| {
+                invalid_contract("isolated output bus is absent from the prepared callback")
+            })?;
+            if output.channel_layout != bus.channel_layout
+                || output.frames != request.frames
+                || output.interleaved.len() != samples
+            {
+                self.failed = true;
+                return Err(invalid_contract(
+                    "isolated output bus has the wrong layout or extent",
+                ));
+            }
+        }
         let note_count =
             {
                 let notes = audio.note_events();
@@ -974,8 +1073,18 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 .main_offset
                 .checked_add(samples * size_of::<f32>())
                 .ok_or_else(|| invalid_contract("isolated main range overflowed"))?;
+            let (inputs_and_gap, outputs_and_gap) =
+                before_events.split_at_mut(layout.auxiliary_outputs_offset);
+            let output_bytes = samples
+                .checked_mul(self.auxiliary_outputs.buses.len())
+                .and_then(|samples| samples.checked_mul(size_of::<f32>()))
+                .ok_or_else(|| invalid_contract("isolated output extent overflowed"))?;
+            outputs_and_gap
+                .get_mut(..output_bytes)
+                .ok_or_else(|| invalid_contract("isolated output range is unavailable"))?
+                .fill(0);
             let (main_and_gap, auxiliary_and_gap) =
-                before_events.split_at_mut(layout.auxiliary_offset);
+                inputs_and_gap.split_at_mut(layout.auxiliary_offset);
             let main: &mut [f32] = bytemuck::try_cast_slice_mut(
                 main_and_gap
                     .get_mut(layout.main_offset..main_bytes)
@@ -1137,7 +1246,53 @@ impl AudioProcessor for IsolatedAudioProcessor {
                 .ok_or_else(|| invalid_contract("isolated output range is unavailable"))?,
         )
         .map_err(|_| invalid_contract("isolated output storage is not aligned"))?;
+        if output.iter().any(|sample| !sample.is_finite()) {
+            self.failed = true;
+            return Err(invalid_contract(
+                "isolated main output contains nonfinite PCM",
+            ));
+        }
+        let outputs_end = samples
+            .checked_mul(self.auxiliary_outputs.buses.len())
+            .and_then(|samples| samples.checked_mul(size_of::<f32>()))
+            .and_then(|bytes| layout.auxiliary_outputs_offset.checked_add(bytes))
+            .ok_or_else(|| invalid_contract("isolated output range overflowed"))?;
+        let auxiliary: &[f32] = bytemuck::try_cast_slice(
+            shared
+                .get(layout.auxiliary_outputs_offset..outputs_end)
+                .ok_or_else(|| invalid_contract("isolated output range is unavailable"))?,
+        )
+        .map_err(|_| invalid_contract("isolated output storage is not aligned"))?;
+        if auxiliary.iter().any(|sample| !sample.is_finite()) {
+            self.failed = true;
+            return Err(invalid_contract(
+                "isolated auxiliary output contains nonfinite PCM",
+            ));
+        }
+        // The host owns these destinations; validate the entire view set before copying any PCM.
+        for bus in &self.auxiliary_outputs.buses {
+            let destination = audio
+                .auxiliary_output(&bus.bus_key)
+                .ok_or_else(|| invalid_contract("isolated output destination disappeared"))?;
+            if destination.channel_layout != bus.channel_layout
+                || destination.frames != request.frames
+                || destination.interleaved.len() != samples
+            {
+                self.failed = true;
+                return Err(invalid_contract(
+                    "isolated output destination changed extent",
+                ));
+            }
+        }
         audio.main_interleaved().copy_from_slice(output);
+        for (index, bus) in self.auxiliary_outputs.buses.iter().enumerate() {
+            let destination = audio
+                .auxiliary_output(&bus.bus_key)
+                .ok_or_else(|| invalid_contract("isolated output destination disappeared"))?;
+            destination
+                .interleaved
+                .copy_from_slice(&auxiliary[index * samples..(index + 1) * samples]);
+        }
         self.failed = false;
         Ok(())
     }
@@ -1149,6 +1304,7 @@ pub struct IsolatedAudioProcessorWorkerPrepareRequest {
     payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
     note_input_contract: crate::AudioProcessorNoteInputContract,
     parameter_ids: Vec<ParameterId>,
     render_contract: AudioRenderContract,
@@ -1179,6 +1335,11 @@ impl IsolatedAudioProcessorWorkerPrepareRequest {
     /// Exact prepared auxiliary buses.
     pub const fn auxiliary_inputs(&self) -> &AudioProcessorAuxiliaryInputContract {
         &self.auxiliary_inputs
+    }
+
+    /// Exact prepared additional outputs, including unrouted ports.
+    pub const fn auxiliary_outputs(&self) -> &AudioProcessorAuxiliaryOutputContract {
+        &self.auxiliary_outputs
     }
 
     /// Exact admitted input-port and fixed Note capacities, including empty.
@@ -1384,6 +1545,11 @@ pub trait IsolatedAudioProcessorWorker {
     /// Revalidated native auxiliary-bus facts.
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract;
 
+    /// Revalidated additional outputs. Old single-main adapters retain an empty contract.
+    fn auxiliary_output_contract(&self) -> AudioProcessorAuxiliaryOutputContract {
+        AudioProcessorAuxiliaryOutputContract::default()
+    }
+
     /// Optional native display names captured during control-side preparation.
     fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
         Vec::new()
@@ -1483,6 +1649,8 @@ pub struct IsolatedAudioProcessorWorkerBlock<'a> {
     main: &'a mut [f32],
     auxiliary_inputs: &'a AudioProcessorAuxiliaryInputContract,
     auxiliary: &'a [f32],
+    auxiliary_outputs: Option<&'a AudioProcessorAuxiliaryOutputContract>,
+    output: &'a mut [f32],
     parameter_ids: &'a [ParameterId],
     events: &'a [SharedParameterEvent],
     note_input_contract: Option<&'a crate::AudioProcessorNoteInputContract>,
@@ -1509,12 +1677,32 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
             main,
             auxiliary_inputs,
             auxiliary,
+            auxiliary_outputs: None,
+            output: &mut [],
             parameter_ids,
             events,
             note_input_contract: None,
             note_events: &[],
             note_output: None,
         }
+    }
+
+    fn with_auxiliary_outputs(
+        mut self,
+        contract: &'a AudioProcessorAuxiliaryOutputContract,
+        output: &'a mut [f32],
+    ) -> Self {
+        self.auxiliary_outputs = Some(contract);
+        self.output = output;
+        self
+    }
+
+    /// Mutable additional output in the frozen native order, keyed by definition identity.
+    pub fn auxiliary_output(&mut self, bus_key: &str) -> Option<&mut [f32]> {
+        let index = self.auxiliary_outputs?.buses.iter().position(|bus| bus.bus_key == bus_key)?;
+        let samples = self.frames.checked_mul(self.render_contract.channel_count())?;
+        let start = index.checked_mul(samples)?;
+        self.output.get_mut(start..start.checked_add(samples)?)
     }
 
     fn with_note_regions(

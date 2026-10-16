@@ -50,6 +50,7 @@ pub(super) fn prepare(gain: f64, mode: u32) -> Vst3Worker {
         parameter_ids: vec![0],
     };
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: native_worker_lane_profile_for_parameters(&payload.parameters)
             .expect("actual known layout"),

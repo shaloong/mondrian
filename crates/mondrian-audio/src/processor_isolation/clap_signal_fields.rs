@@ -17,7 +17,8 @@ pub(super) struct ClapSignalFields<'a> {
     pub(super) configuration_phase: &'a NativeConfigurationPhase,
     pub(super) main_audio_input: super::ClapMainAudioInput,
     pub(super) input: &'a mut Vec<Vec<Vec<f32>>>,
-    pub(super) output: &'a mut Vec<Vec<f32>>,
+    pub(super) output: &'a mut Vec<Vec<Vec<f32>>>,
+    pub(super) auxiliary_outputs: &'a crate::AudioProcessorAuxiliaryOutputContract,
     pub(super) auxiliary_inputs: &'a AudioProcessorAuxiliaryInputContract,
     pub(super) input_ports: &'a mut AudioPorts,
     pub(super) output_ports: &'a mut AudioPorts,
@@ -87,10 +88,13 @@ impl ClapSignalFields<'_> {
         let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
             AudioProcessorHostError::Process("CLAP sample position overflowed".to_owned())
         })?;
-        let channels = self.output.len();
+        let channels = block.channel_layout().channel_count();
         if *self.last_end != Some(block.start_sample())
             || frames == 0
-            || frames > self.output[0].len()
+            || self.output.len() != 1 + self.auxiliary_outputs.buses.len()
+            || self.output.iter().any(|port| {
+                port.len() != channels || port.iter().any(|channel| frames > channel.len())
+            })
             || block.main_interleaved().len() != frames * channels
         {
             return Err(AudioProcessorHostError::Process(
@@ -163,8 +167,27 @@ impl ClapSignalFields<'_> {
                 }
             }
         }
-        for channel in self.output.iter_mut() {
-            channel[..frames].fill(0.0);
+        for bus in &self.auxiliary_outputs.buses {
+            if block
+                .auxiliary_output(&bus.bus_key)
+                .is_none_or(|output| output.len() != frames * channels)
+            {
+                return Err(invalid(
+                    "CLAP additional output extent differs from its prepared contract",
+                ));
+            }
+        }
+        for port in self.output.iter_mut() {
+            for channel in port {
+                channel[..frames].fill(0.0);
+            }
+        }
+        let mut expected_data = [core::ptr::null_mut(); 32];
+        let mut expected_channels = [[core::ptr::null_mut(); 2]; 32];
+        for (index, port) in self.output.iter_mut().enumerate() {
+            for (channel, pcm) in port.iter_mut().enumerate() {
+                expected_channels[index][channel] = pcm.as_mut_ptr();
+            }
         }
         let transport = clap_transport(block.start_sample(), block.sample_rate())?;
         let output_origin = ClapOutputOrigin::Process {
@@ -181,12 +204,18 @@ impl ClapSignalFields<'_> {
                 ),
             }
         }));
-        let mut output_audio = self.output_ports.with_output_buffers([AudioPortBuffer {
-            latency: 0,
-            channels: AudioPortBufferType::f32_output_only(
-                self.output.iter_mut().map(|channel| &mut channel[..frames]),
-            ),
-        }]);
+        let mut output_audio =
+            self.output_ports.with_output_buffers(self.output.iter_mut().map(|port| {
+                AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(
+                        port.iter_mut().map(|channel| &mut channel[..frames]),
+                    ),
+                }
+            }));
+        for (index, port) in output_audio.as_raw_buffers().iter().enumerate() {
+            expected_data[index] = port.data32;
+        }
         {
             let _audio_role = self.shared.enter_audio_thread();
             let mut output = if note_port_count == 0 {
@@ -228,6 +257,39 @@ impl ClapSignalFields<'_> {
                     AudioProcessorHostError::Process(format!("CLAP process failed: {error}"))
                 })?;
         }
+        // A plugin may return metadata through these descriptors, but it cannot
+        // replace the host-owned f32 storage. Never dereference a foreign replacement.
+        for (index, port) in output_audio.as_raw_buffers().iter().enumerate() {
+            if port.channel_count as usize != channels
+                || port.data32.is_null()
+                || port.data32 != expected_data[index]
+                || !port.data64.is_null()
+            {
+                return Err(invalid(
+                    "CLAP changed a host-owned output buffer descriptor",
+                ));
+            }
+            for (channel, &expected) in expected_channels[index].iter().take(channels).enumerate() {
+                // SAFETY: data32 was compared to the original AudioPorts pointer
+                // array, whose allocation and exclusive borrow remain live. This
+                // reads a pointer value only; an unexpected PCM pointer is not dereferenced.
+                if unsafe { port.data32.add(channel).read() } != expected {
+                    return Err(invalid("CLAP changed a host-owned output channel pointer"));
+                }
+            }
+        }
+        // constant_mask is an optional hint. The official ABI requires every
+        // constant sample to be filled; read all original samples at full precision.
+        if self
+            .output
+            .iter()
+            .flatten()
+            .any(|channel| channel[..frames].iter().any(|sample| !sample.is_finite()))
+        {
+            return Err(AudioProcessorHostError::Process(
+                "CLAP produced nonfinite PCM".to_owned(),
+            ));
+        }
         if note_port_count != 0 {
             if self.output_events.note_failed() {
                 return Err(AudioProcessorHostError::Process(
@@ -244,13 +306,17 @@ impl ClapSignalFields<'_> {
         }
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
             for (channel, sample) in samples.iter_mut().enumerate() {
-                let value = self.output[channel][frame];
-                if !value.is_finite() {
-                    return Err(AudioProcessorHostError::Process(
-                        "CLAP produced nonfinite PCM".to_owned(),
-                    ));
+                *sample = self.output[0][channel][frame];
+            }
+        }
+        for (index, bus) in self.auxiliary_outputs.buses.iter().enumerate() {
+            let output = block
+                .auxiliary_output(&bus.bus_key)
+                .ok_or_else(|| invalid("CLAP prepared output disappeared"))?;
+            for (frame, samples) in output.chunks_exact_mut(channels).enumerate() {
+                for (channel, sample) in samples.iter_mut().enumerate() {
+                    *sample = self.output[index + 1][channel][frame];
                 }
-                *sample = value;
             }
         }
         *self.last_end = Some(end_sample);

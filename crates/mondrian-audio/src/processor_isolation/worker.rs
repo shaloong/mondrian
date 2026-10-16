@@ -37,6 +37,8 @@ pub(super) fn run_worker(
         .map_err(|_| invalid_contract("maximum block extent exceeds Worker address space"))?;
     let auxiliary_inputs = auxiliary_from_wire(prepare.auxiliary_buses.clone());
     auxiliary_inputs.validate(prepare.channel_layout)?;
+    let auxiliary_outputs = super::protocol::outputs_from_wire(prepare.auxiliary_outputs.clone());
+    auxiliary_outputs.validate(prepare.channel_layout)?;
     prepare.note_input_contract.validate()?;
     let plugin_execution_contract = prepare.execution_contract.realize()?;
     let render_contract = AudioRenderContract {
@@ -58,6 +60,7 @@ pub(super) fn run_worker(
         auxiliary_inputs.buses.len(),
         prepare.parameter_ids.len(),
     )?
+    .with_auxiliary_outputs(auxiliary_outputs.buses.len())?
     .with_notes(
         prepare.note_input_contract.limits.input_events,
         prepare.note_input_contract.limits.output_ends,
@@ -72,6 +75,7 @@ pub(super) fn run_worker(
         payload: prepare.payload,
         plugin_execution_contract,
         auxiliary_inputs: auxiliary_inputs.clone(),
+        auxiliary_outputs: auxiliary_outputs.clone(),
         note_input_contract: prepare.note_input_contract.clone(),
         parameter_ids: prepare.parameter_ids.clone(),
         render_contract,
@@ -106,6 +110,7 @@ pub(super) fn run_worker(
         || processor.uses_native_processing_split() != native_lane.is_some()
         || processor.execution_contract() != plugin_execution_contract
         || processor.auxiliary_input_contract() != auxiliary_inputs
+        || processor.auxiliary_output_contract() != auxiliary_outputs
         || processor.note_input_contract() != prepare.note_input_contract
     {
         write_ready_rejected(
@@ -145,6 +150,7 @@ pub(super) fn run_worker(
         result: ReadyResultWire::Ready {
             execution_contract: prepare.execution_contract,
             auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+            auxiliary_outputs: super::protocol::outputs_to_wire(&auxiliary_outputs),
             note_input_contract: prepare.note_input_contract.clone(),
             input_names,
         },
@@ -152,6 +158,7 @@ pub(super) fn run_worker(
     let context = WorkerProcessContext {
         layout,
         auxiliary_inputs: &auxiliary_inputs,
+        auxiliary_outputs: &auxiliary_outputs,
         note_input_contract: &prepare.note_input_contract,
         parameter_ids: &prepare.parameter_ids,
         render_contract,
@@ -204,6 +211,7 @@ pub(super) fn run_worker(
 pub(super) struct WorkerProcessContext<'a> {
     pub(super) layout: SharedBlockLayout,
     pub(super) auxiliary_inputs: &'a crate::AudioProcessorAuxiliaryInputContract,
+    pub(super) auxiliary_outputs: &'a crate::AudioProcessorAuxiliaryOutputContract,
     pub(super) note_input_contract: &'a crate::AudioProcessorNoteInputContract,
     pub(super) parameter_ids: &'a [mondrian_core::ParameterId],
     pub(super) render_contract: AudioRenderContract,
@@ -352,8 +360,20 @@ impl WorkerProcessContext<'_> {
                 "Worker observed an invalid parameter event",
             ));
         }
+        let (inputs_and_gap, outputs_and_gap) =
+            before_events.split_at_mut(self.layout.auxiliary_outputs_offset);
+        let output_bytes = samples
+            .checked_mul(self.auxiliary_outputs.buses.len())
+            .and_then(|samples| samples.checked_mul(size_of::<f32>()))
+            .ok_or_else(|| invalid_contract("Worker output extent overflowed"))?;
+        let output_storage = outputs_and_gap
+            .get_mut(..output_bytes)
+            .ok_or_else(|| invalid_contract("Worker output range is unavailable"))?;
+        let output: &mut [f32] = bytemuck::try_cast_slice_mut(output_storage)
+            .map_err(|_| invalid_contract("Worker output storage is not aligned"))?;
+        output.fill(0.0);
         let (main_and_gap, auxiliary_and_gap) =
-            before_events.split_at_mut(self.layout.auxiliary_offset);
+            inputs_and_gap.split_at_mut(self.layout.auxiliary_offset);
         let main_storage = main_and_gap
             .get_mut(self.layout.main_offset..main_end)
             .ok_or_else(|| invalid_contract("Worker main range is unavailable"))?;
@@ -376,6 +396,7 @@ impl WorkerProcessContext<'_> {
             self.parameter_ids,
             events,
         )
+        .with_auxiliary_outputs(self.auxiliary_outputs, output)
         .with_note_regions(
             self.note_input_contract,
             notes,
@@ -1076,6 +1097,7 @@ mod inline_dispatch_contracts {
         let note_input_contract = crate::AudioProcessorNoteInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).expect("exact shared extent");
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &note_input_contract,
@@ -1342,6 +1364,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &contract,
@@ -1409,6 +1432,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 1).unwrap();
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &contract,
@@ -1480,6 +1504,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &contract,
@@ -1549,6 +1574,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &contract,
@@ -1591,6 +1617,7 @@ mod note_process_contracts {
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(0, 0).unwrap();
         assert_eq!(layout.total_bytes, 8);
         let context = WorkerProcessContext {
+            auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
             note_input_contract: &contract,

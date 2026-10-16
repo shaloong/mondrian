@@ -4,9 +4,13 @@
 #[path = "tests/native_clap_note_gate.rs"]
 mod native_note_gate_controls;
 
+#[cfg(test)]
+#[path = "tests/native_clap_outputs.rs"]
+mod native_outputs_controls;
+
 use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
 use super::clap_discovery::{
-    fingerprint_clap_binary, inspect_audio_inputs, list_parameters, list_parameters_observed,
+    fingerprint_clap_binary, inspect_audio_ports, list_parameters, list_parameters_observed,
     probe_clap_plugin_registration_with_state, validate_parameters, ParameterQueryCapture,
 };
 use super::clap_main_services::{
@@ -23,8 +27,8 @@ use super::{
     IsolatedAudioProcessorWorkerPrepareRequest, IsolatedAudioProcessorWorkerSpec,
 };
 use crate::{
-    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
-    AudioProcessorPrepareRequest,
+    AudioProcessorAuxiliaryInputContract, AudioProcessorAuxiliaryOutputContract,
+    AudioProcessorExecutionContract, AudioProcessorHostError, AudioProcessorPrepareRequest,
 };
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::log::{HostLog, HostLogImpl, HostLogMessage};
@@ -315,6 +319,10 @@ pub struct ClapPluginRegistration {
     pub parameters: Vec<super::ClapParameterDescriptor>,
     /// Actual native main-input presence captured from this restored instance.
     pub main_audio_input: ClapMainAudioInput,
+    /// Stable native identity of output index zero.
+    pub main_audio_output_id: u32,
+    /// Ordered additional native outputs, including currently unrouted ports.
+    pub auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
     /// Ordered auxiliary inputs captured after restoring the occurrence state.
     pub auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
 }
@@ -600,6 +608,8 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
                 execution_contract,
                 parameters: offer.parameters().to_vec(),
                 main_audio_input: offer.main_audio_input(),
+                main_audio_output_id: offer.main_audio_output_id(),
+                auxiliary_outputs: offer.auxiliary_outputs(),
                 auxiliary_inputs: AudioProcessorAuxiliaryInputContract {
                     buses: offer
                         .auxiliary_inputs()
@@ -654,6 +664,18 @@ impl ClapAudioProcessorSpecResolver {
                 || !plugin.execution_contract.requires_state_entry()
                 || validate_parameters(&plugin.parameters).is_err()
                 || plugin.main_audio_input.validate(&plugin.auxiliary_inputs).is_err()
+                || super::clap_discovery::validate_audio_outputs(
+                    plugin.main_audio_output_id,
+                    &plugin.auxiliary_outputs,
+                    plugin
+                        .auxiliary_outputs
+                        .buses
+                        .first()
+                        .map_or(mondrian_core::AudioChannelLayout::Stereo, |bus| {
+                            bus.channel_layout
+                        }),
+                )
+                .is_err()
                 || by_id.insert(plugin.plugin_id.clone(), plugin).is_some()
             {
                 return Err(invalid("CLAP registrations need unique IDs, absolute libraries, and explicit state entry"));
@@ -711,6 +733,11 @@ fn resolve_clap_registration(
     }
     notes.validate()?;
     plugin.main_audio_input.validate(&plugin.auxiliary_inputs)?;
+    super::clap_discovery::validate_audio_outputs(
+        plugin.main_audio_output_id,
+        &plugin.auxiliary_outputs,
+        request.render_contract().channel_layout,
+    )?;
     if request.note_input_requested() && notes.ports.is_empty() {
         return Err(invalid(
             "CLAP registry has no same-instance Note processing offer",
@@ -750,6 +777,8 @@ fn resolve_clap_registration(
         plugin_id: plugin.plugin_id.clone(),
         binary_sha256: plugin.binary_sha256,
         main_audio_input: plugin.main_audio_input,
+        main_audio_output_id: plugin.main_audio_output_id,
+        auxiliary_outputs: super::protocol::outputs_to_wire(&plugin.auxiliary_outputs),
         state: request.opaque_state().map(ToOwned::to_owned),
         parameters: plugin.parameters.clone(),
         parameter_ids: clap_parameter_ids,
@@ -769,12 +798,24 @@ fn resolve_clap_registration(
                     parameter_input_capacity(request.render_contract(), parameter_ids.len())?,
                     notes.limits.input_events,
                 )?)
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        clap_audio_storage_reservation(
+                            request.render_contract(),
+                            plugin.main_audio_input.port_offset()
+                                + plugin.auxiliary_inputs.buses.len(),
+                            &plugin.auxiliary_outputs,
+                        )
+                        .ok()?,
+                    )
+                })
                 .ok_or_else(|| invalid("CLAP input/output owner reservation overflowed"))?,
         )?,
         plugin.auxiliary_inputs.clone(),
         parameter_ids,
         request.render_contract(),
     )?
+    .with_auxiliary_output_contract(plugin.auxiliary_outputs.clone())?
     .with_native_worker_lane_resources(clap_native_worker_lane_profile()?)
     .with_note_input_contract(notes)
 }
@@ -809,6 +850,8 @@ pub(super) fn payload_with_configuration_seed(
 #[serde(deny_unknown_fields)]
 struct ClapPayload {
     main_audio_input: ClapMainAudioInput,
+    main_audio_output_id: u32,
+    auxiliary_outputs: Vec<super::protocol::AuxiliaryBusWire>,
     library_path: PathBuf,
     plugin_id: String,
     binary_sha256: [u8; 32],
@@ -859,6 +902,17 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             ));
         }
         payload.main_audio_input.validate(request.auxiliary_inputs())?;
+        let outputs = super::protocol::outputs_from_wire(payload.auxiliary_outputs.clone());
+        super::clap_discovery::validate_audio_outputs(
+            payload.main_audio_output_id,
+            &outputs,
+            request.render_contract().channel_layout,
+        )?;
+        if &outputs != request.auxiliary_outputs() {
+            return Err(invalid(
+                "CLAP payload outputs differ from the admitted contract",
+            ));
+        }
         validate_parameters(&payload.parameters)
             .map_err(|error| parameter_refusal_at_site(error, "decoded_payload"))?;
         if payload.parameter_ids.len() != request.parameter_ids().len() {
@@ -897,9 +951,11 @@ impl IsolatedAudioProcessorWorkerFactory for ClapAudioProcessorWorkerFactory {
             plugin_id.as_c_str(),
             payload.state.as_deref(),
             payload.main_audio_input,
+            payload.main_audio_output_id,
             &payload.parameters,
             &payload.parameter_ids,
         )
+        .map(|worker| worker as Box<dyn IsolatedAudioProcessorWorker>)
     }
 }
 
@@ -947,6 +1003,102 @@ fn note_source_reservation_bytes(
             )
         })
         .ok_or_else(|| invalid("CLAP Note owner reservation overflowed"))
+}
+
+// Known host-owned audio buffers only. SDK/foreign heaps remain outside this request.
+fn clap_audio_storage_reservation(
+    render: crate::AudioRenderContract,
+    input_ports: usize,
+    outputs: &AudioProcessorAuxiliaryOutputContract,
+) -> Result<usize, AudioProcessorHostError> {
+    let output_ports = 1usize
+        .checked_add(outputs.buses.len())
+        .ok_or_else(|| invalid("CLAP output count overflowed"))?;
+    let ports = input_ports
+        .checked_add(output_ports)
+        .ok_or_else(|| invalid("CLAP port count overflowed"))?;
+    let channels = ports
+        .checked_mul(render.channel_count())
+        .ok_or_else(|| invalid("CLAP channel count overflowed"))?;
+    let pcm = channels
+        .checked_mul(render.max_block_frames)
+        .and_then(|n| n.checked_mul(size_of::<f32>()));
+    let vectors = ports
+        .checked_mul(size_of::<Vec<Vec<f32>>>())
+        .and_then(|n| n.checked_add(channels.checked_mul(size_of::<Vec<f32>>())?));
+    let sdk = channels.checked_mul(size_of::<*mut f32>()).and_then(|n| {
+        n.checked_add(ports.checked_mul(size_of::<clap_sys::audio_buffer::clap_audio_buffer>())?)
+    });
+    let metadata = outputs
+        .buses
+        .len()
+        .checked_mul(size_of::<crate::AudioProcessorAuxiliaryOutputBusContract>())
+        .and_then(|n| outputs.buses.iter().try_fold(n, |n, bus| n.checked_add(bus.bus_key.len())));
+    pcm.and_then(|n| n.checked_add(vectors?))
+        .and_then(|n| n.checked_add(sdk?))
+        .and_then(|n| n.checked_add(metadata?))
+        .ok_or_else(|| invalid("CLAP audio storage reservation overflowed"))
+}
+
+fn clap_actual_audio_storage(
+    input: &[Vec<Vec<f32>>],
+    output: &[Vec<Vec<f32>>],
+    outer_port_capacity: usize,
+    input_ports: &AudioPorts,
+    output_ports: &AudioPorts,
+    outputs: &AudioProcessorAuxiliaryOutputContract,
+) -> Result<usize, AudioProcessorHostError> {
+    // Outer buffers are exact-count Vecs created immediately above; observe their
+    // complete allocations at the caller, not the slice lengths used for DSP.
+    let mut bytes = outer_port_capacity
+        .checked_mul(size_of::<Vec<Vec<f32>>>())
+        .ok_or_else(|| invalid("CLAP audio owner overflowed"))?;
+    for ports in [input, output] {
+        for port in ports {
+            bytes = bytes
+                .checked_add(
+                    port.capacity()
+                        .checked_mul(size_of::<Vec<f32>>())
+                        .ok_or_else(|| invalid("CLAP channel owner overflowed"))?,
+                )
+                .ok_or_else(|| invalid("CLAP channel owner overflowed"))?;
+            for channel in port {
+                bytes = bytes
+                    .checked_add(
+                        channel
+                            .capacity()
+                            .checked_mul(size_of::<f32>())
+                            .ok_or_else(|| invalid("CLAP PCM owner overflowed"))?,
+                    )
+                    .ok_or_else(|| invalid("CLAP PCM owner overflowed"))?;
+            }
+        }
+    }
+    for ports in [input_ports, output_ports] {
+        for allocation in ports
+            .allocated_storage()
+            .map_err(|_| invalid("CLAP SDK audio owner layout overflowed"))?
+        {
+            bytes = bytes
+                .checked_add(allocation.allocation_layout().size())
+                .ok_or_else(|| invalid("CLAP SDK audio owner overflowed"))?;
+        }
+    }
+    bytes = bytes
+        .checked_add(
+            outputs
+                .buses
+                .capacity()
+                .checked_mul(size_of::<crate::AudioProcessorAuxiliaryOutputBusContract>())
+                .ok_or_else(|| invalid("CLAP output metadata overflowed"))?,
+        )
+        .ok_or_else(|| invalid("CLAP output metadata overflowed"))?;
+    for bus in &outputs.buses {
+        bytes = bytes
+            .checked_add(bus.bus_key.capacity())
+            .ok_or_else(|| invalid("CLAP output key owner overflowed"))?;
+    }
+    Ok(bytes)
 }
 
 fn parameter_input_capacity(
@@ -1006,9 +1158,11 @@ fn prepare_loaded_with_audio_input(
         plugin_id,
         state,
         main_audio_input,
+        0,
         expected_parameters,
         parameter_ids,
     )
+    .map(|worker| worker as Box<dyn IsolatedAudioProcessorWorker>)
 }
 
 fn prepare_loaded_on_main(
@@ -1018,9 +1172,10 @@ fn prepare_loaded_on_main(
     plugin_id: &CStr,
     state: Option<&[u8]>,
     main_audio_input: ClapMainAudioInput,
+    main_audio_output_id: u32,
     expected_parameters: &[super::ClapParameterDescriptor],
     parameter_ids: &[u32],
-) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
+) -> Result<Box<ClapWorker>, AudioProcessorHostError> {
     let event_capacity = parameter_input_capacity(request.render_contract(), parameter_ids.len())?;
     request.note_input_contract().validate()?;
     let notes_enabled = !request.note_input_contract().ports.is_empty();
@@ -1138,13 +1293,15 @@ fn prepare_loaded_on_main(
             "CLAP source/signature owners exceed current Session scratch ceiling",
         ));
     }
-    let input_metadata = inspect_audio_inputs(&handle, request.render_contract().channel_layout)?;
-    let auxiliary_inputs = input_metadata.contract;
+    let audio_metadata = inspect_audio_ports(&handle, request.render_contract().channel_layout)?;
+    let auxiliary_inputs = audio_metadata.contract;
     main_audio_input.validate(request.auxiliary_inputs())?;
-    if input_metadata.main_audio_input != main_audio_input
+    if audio_metadata.main_audio_input != main_audio_input
         || &auxiliary_inputs != request.auxiliary_inputs()
+        || audio_metadata.main_audio_output_id != main_audio_output_id
+        || &audio_metadata.outputs != request.auxiliary_outputs()
     {
-        return Err(invalid("CLAP auxiliary ports changed since contract probe"));
+        return Err(invalid("CLAP audio ports changed since contract probe"));
     }
 
     let note_inputs = if notes_enabled {
@@ -1253,7 +1410,29 @@ fn prepare_loaded_on_main(
     } else {
         vec![vec![vec![0.0; frames]; channel_count]; input_port_count]
     };
-    let output = vec![vec![0.0; frames]; channel_count];
+    let output =
+        vec![vec![vec![0.0; frames]; channel_count]; 1 + request.auxiliary_outputs().buses.len()];
+    let input_ports = AudioPorts::with_capacity(channel_count * input_port_count, input_port_count);
+    let output_ports = AudioPorts::with_capacity(channel_count * output.len(), output.len());
+    let auxiliary_outputs = request.auxiliary_outputs().clone();
+    let actual_audio_bytes = clap_actual_audio_storage(
+        &input,
+        &output,
+        input
+            .capacity()
+            .checked_add(output.capacity())
+            .ok_or_else(|| invalid("CLAP outer audio owner overflowed"))?,
+        &input_ports,
+        &output_ports,
+        &auxiliary_outputs,
+    )?;
+    let reserved_audio_bytes =
+        clap_audio_storage_reservation(render, input_port_count, request.auxiliary_outputs())?;
+    if actual_audio_bytes > reserved_audio_bytes {
+        return Err(invalid(
+            "CLAP actual audio owners exceed their admitted capacity",
+        ));
+    }
     let native_object = next_clap_native_object()?;
     Ok(Box::new(ClapWorker {
         native_lane: request.native_worker_lane_resources(),
@@ -1277,11 +1456,13 @@ fn prepare_loaded_on_main(
         input,
         output,
         main_audio_input,
+        main_audio_output_id,
+        auxiliary_outputs,
         auxiliary_inputs,
         note_inputs,
-        input_names: input_metadata.names,
-        input_ports: AudioPorts::with_capacity(channel_count * input_port_count, input_port_count),
-        output_ports: AudioPorts::with_capacity(channel_count, 1),
+        input_names: audio_metadata.names,
+        input_ports,
+        output_ports,
         parameter_lanes,
         input_events,
         output_events,
@@ -1314,7 +1495,9 @@ struct ClapWorker {
     main_audio_input: ClapMainAudioInput,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     input_names: Vec<crate::AudioProcessorInputName>,
-    output: Vec<Vec<f32>>,
+    output: Vec<Vec<Vec<f32>>>,
+    main_audio_output_id: u32,
+    auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
     input_ports: AudioPorts,
     output_ports: AudioPorts,
     parameter_lanes: Vec<(ClapId, f64, f64, bool)>,
@@ -1386,6 +1569,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             input: &mut self.input,
             output: &mut self.output,
             auxiliary_inputs: &self.auxiliary_inputs,
+            auxiliary_outputs: &self.auxiliary_outputs,
             input_ports: &mut self.input_ports,
             output_ports: &mut self.output_ports,
             parameter_lanes: &self.parameter_lanes,
@@ -1635,9 +1819,11 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         if !same_clap_parameter_structure(&parameters, &self.expected_parameters) {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
-        let metadata = inspect_audio_inputs(&handle, self.render.channel_layout)?;
+        let metadata = inspect_audio_ports(&handle, self.render.channel_layout)?;
         if metadata.main_audio_input != self.main_audio_input
             || metadata.contract != self.auxiliary_inputs
+            || metadata.main_audio_output_id != self.main_audio_output_id
+            || metadata.outputs != self.auxiliary_outputs
         {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
@@ -1780,6 +1966,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         self.auxiliary_inputs.clone()
     }
 
+    fn auxiliary_output_contract(&self) -> AudioProcessorAuxiliaryOutputContract {
+        self.auxiliary_outputs.clone()
+    }
+
     fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
         self.input_names.clone()
     }
@@ -1819,6 +2009,7 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
             input: &mut self.input,
             output: &mut self.output,
             auxiliary_inputs: &self.auxiliary_inputs,
+            auxiliary_outputs: &self.auxiliary_outputs,
             input_ports: &mut self.input_ports,
             output_ports: &mut self.output_ports,
             parameter_lanes: &self.parameter_lanes,
@@ -2381,7 +2572,11 @@ mod tests {
                 } else {
                     3
                 }
-            } else if CASE == 11 {
+            } else if CASE == 13 {
+                33
+            } else if CASE == 14 {
+                0
+            } else if matches!(CASE, 11 | 15..=21) {
                 3
             } else {
                 1
@@ -2404,21 +2599,27 @@ mod tests {
                 match index {
                     0 => 0,
                     1 => 11,
-                    _ if CASE == 1 => 11,
+                    _ if CASE == 1 || (!is_input && CASE == 16) => 11,
                     _ => 7,
                 }
             };
             writer.set(&AudioPortInfo {
                 id: ClapId::new(id),
                 name: b"same display name",
-                channel_count: if (CASE == 3 && index != 0) || matches!(CASE, 8 | 12) {
+                channel_count: if (CASE == 3 && index != 0)
+                    || matches!(CASE, 8 | 12)
+                    || (!is_input && CASE == 18 && index == 2)
+                {
                     1
                 } else {
                     2
                 },
-                flags: if is_input && matches!(CASE, 9..=12) {
+                flags: if (is_input && matches!(CASE, 9..=12)) || (!is_input && CASE == 15) {
                     AudioPortFlags::empty()
-                } else if index == 0 || (CASE == 2 && index == 1) {
+                } else if index == 0
+                    || (CASE == 2 && index == 1)
+                    || (!is_input && CASE == 17 && index == 1)
+                {
                     AudioPortFlags::IS_MAIN
                 } else {
                     AudioPortFlags::empty()
@@ -2456,6 +2657,29 @@ mod tests {
             mut audio: Audio,
             _events: Events,
         ) -> Result<ProcessStatus, PluginError> {
+            if matches!(CASE, 19..=21) {
+                if audio.input_port_count() != 3 || audio.output_port_count() != 3 {
+                    return Err(PluginError::Message("wrong multi-output test extent"));
+                }
+                for (index, mut port) in audio.output_ports().enumerate() {
+                    if CASE == 21 {
+                        port.set_constant_mask(clack_plugin::process::ConstantMask::from_bits(3));
+                    }
+                    let mut channels =
+                        port.channels()?.into_f32().ok_or(PluginError::Message("f32 output"))?;
+                    for samples in channels.iter_mut() {
+                        samples.fill(if CASE == 19 && index == 2 {
+                            f32::NAN
+                        } else {
+                            (index + 1) as f32 * 0.25
+                        });
+                    }
+                }
+                if CASE == 20 {
+                    return Err(PluginError::Message("owned post-write process error"));
+                }
+                return Ok(ProcessStatus::Continue);
+            }
             if audio.input_port_count() != self.0 .2 || audio.output_port_count() != 1 {
                 return Err(PluginError::Message(
                     "fixture received the wrong native port counts",
@@ -2496,6 +2720,7 @@ mod tests {
 
     fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
         IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
@@ -2621,6 +2846,8 @@ mod tests {
     fn clap_payload_requires_explicit_shape_and_rejects_legacy_or_unknown_fields() {
         for shape in [ClapMainAudioInput::Absent, ClapMainAudioInput::Present] {
             let payload = ClapPayload {
+                main_audio_output_id: 0,
+                auxiliary_outputs: Vec::new(),
                 main_audio_input: shape,
                 library_path: std::env::current_exe().unwrap(),
                 plugin_id: "fixture".to_owned(),
@@ -2662,6 +2889,13 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn output_metadata_entry<const CASE: u8>() -> PluginEntry {
+        PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<CASE>>>(
+            c"/test/output-shape",
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2801,32 +3035,48 @@ mod tests {
             }
             assert!(matches!(prepare_loaded_with_audio_input(
                 request, entry, c"org.mondrian.test.sidechain", None, ClapMainAudioInput::Absent, &[], &[],
-            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP auxiliary ports changed since contract probe"));
+            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP audio ports changed since contract probe"));
         }
-        for (entry, expected) in [
-            (
-                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<10>>>(
-                    c"/test/aux-only-32",
-                )
-                .unwrap(),
-                "CLAP auxiliary inputs exceed the existing 31-port bound",
-            ),
-            (
-                PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<11>>>(
-                    c"/test/aux-only-three-outputs",
-                )
-                .unwrap(),
-                "CLAP requires bounded input ports and one main output",
-            ),
-        ] {
-            let request = sidechain_request();
-            assert!(matches!(super::super::clap_discovery::probe_loaded(
-                &entry, "org.mondrian.test.sidechain", request.render_contract(), None, false,
-            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == expected));
-            assert!(matches!(prepare_loaded_with_audio_input(
-                request, entry, c"org.mondrian.test.sidechain", None, ClapMainAudioInput::Absent, &[], &[],
-            ), Err(AudioProcessorHostError::InvalidContract(detail)) if detail == expected));
-        }
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<10>>>(
+            c"/test/aux-only-32",
+        )
+        .unwrap();
+        let request = sidechain_request();
+        let error = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            request.render_contract(),
+            None,
+            false,
+        );
+        assert!(
+            matches!(error, Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP auxiliary inputs exceed the existing 31-port bound")
+        );
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<SidechainPlugin<11>>>(
+            c"/test/aux-only-three-outputs",
+        )
+        .unwrap();
+        let probe = super::super::clap_discovery::probe_loaded(
+            &entry,
+            "org.mondrian.test.sidechain",
+            request.render_contract(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(probe.main_audio_output_id, 0);
+        assert_eq!(
+            super::super::protocol::outputs_from_wire(probe.auxiliary_outputs)
+                .buses
+                .iter()
+                .map(|bus| bus.bus_key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clap.audio-output.11", "clap.audio-output.7"]
+        );
+        assert!(
+            matches!(prepare_loaded_with_audio_input(request, entry, c"org.mondrian.test.sidechain", None, ClapMainAudioInput::Absent, &[], &[]),
+            Err(AudioProcessorHostError::InvalidContract(detail)) if detail == "CLAP audio ports changed since contract probe")
+        );
     }
 
     #[test]
@@ -2863,6 +3113,8 @@ mod tests {
             request.native_lane = clap_native_worker_lane_profile().unwrap();
             request.auxiliary_inputs = auxiliary.clone();
             request.payload = serde_json::to_vec(&ClapPayload {
+                main_audio_output_id: 0,
+                auxiliary_outputs: Vec::new(),
                 main_audio_input: shape,
                 library_path: nonexistent_library.clone(),
                 plugin_id: "org.mondrian.test.sidechain".to_owned(),
@@ -2880,6 +3132,8 @@ mod tests {
             assert!(ClapAudioProcessorSpecResolver::new(
                 std::env::current_exe().unwrap(),
                 [ClapPluginRegistration {
+                    auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+                    main_audio_output_id: 0,
                     plugin_id: "org.mondrian.test.sidechain".to_owned(),
                     library_path: nonexistent_library.clone(),
                     binary_sha256: [7; 32],
@@ -3205,6 +3459,8 @@ mod tests {
                 hidden,
             };
         let registration = ClapPluginRegistration {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            main_audio_output_id: 0,
             main_audio_input: ClapMainAudioInput::Present,
             plugin_id: "org.example.gain".to_owned(),
             library_path: std::env::current_exe().expect("test executable path"),
@@ -3242,6 +3498,8 @@ mod tests {
     fn registration_rejects_duplicate_identity_and_relative_paths() {
         let helper = std::env::current_exe().expect("test executable path");
         let registration = ClapPluginRegistration {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            main_audio_output_id: 0,
             main_audio_input: ClapMainAudioInput::Present,
             plugin_id: "org.example.gain".to_owned(),
             library_path: helper.clone(),
@@ -3258,6 +3516,8 @@ mod tests {
         assert!(ClapAudioProcessorSpecResolver::new(
             helper,
             [ClapPluginRegistration {
+                auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+                main_audio_output_id: 0,
                 library_path: PathBuf::from("gain.clap"),
                 ..registration
             }],
@@ -3277,6 +3537,8 @@ mod tests {
         let resolver = ClapAudioProcessorSpecResolver::new(
             helper.clone(),
             [ClapPluginRegistration {
+                auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+                main_audio_output_id: 0,
                 main_audio_input: ClapMainAudioInput::Present,
                 plugin_id: "org.example.gain".to_owned(),
                 library_path: helper,
@@ -3415,6 +3677,8 @@ mod tests {
         request.native_lane =
             clap_native_worker_lane_profile().expect("actual native lane profile");
         request.payload = serde_json::to_vec(&ClapPayload {
+            main_audio_output_id: 0,
+            auxiliary_outputs: Vec::new(),
             main_audio_input: ClapMainAudioInput::Present,
             library_path,
             plugin_id: "org.mondrian.test.automated-gain".to_owned(),
@@ -3701,6 +3965,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: b"not json".to_vec(),
@@ -3721,6 +3986,8 @@ mod tests {
         let library = temp.path().join("gain.clap");
         std::fs::write(&library, b"replacement binary").expect("write fake plugin");
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_output_id: 0,
+            auxiliary_outputs: Vec::new(),
             main_audio_input: ClapMainAudioInput::Present,
             library_path: library,
             plugin_id: "org.example.gain".to_owned(),
@@ -3731,6 +3998,7 @@ mod tests {
         })
         .expect("payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: clap_native_worker_lane_profile().expect("actual native lane profile"),
             payload,
@@ -3815,6 +4083,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
@@ -3988,6 +4257,8 @@ mod tests {
         .expect("probe Clack gain");
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("stable parameter ID")];
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_output_id: 0,
+            auxiliary_outputs: Vec::new(),
             main_audio_input: ClapMainAudioInput::Present,
             library_path: registration.library_path,
             plugin_id: registration.plugin_id,
@@ -3998,6 +4269,7 @@ mod tests {
         })
         .expect("encode worker payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload,
@@ -4050,6 +4322,7 @@ mod tests {
         };
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("parameter identity")];
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
@@ -4522,6 +4795,7 @@ mod tests {
             )
             .expect("mode facts");
             let request = IsolatedAudioProcessorWorkerPrepareRequest {
+                auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
                 note_input_contract: crate::AudioProcessorNoteInputContract::default(),
                 native_lane: None,
                 payload: Vec::new(),
@@ -4692,6 +4966,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),
@@ -4739,6 +5014,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
             payload: Vec::new(),

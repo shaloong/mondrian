@@ -48,6 +48,7 @@ const MAX_CAPTURED_STATE_BYTES: usize = 64 * 1024;
 pub(super) const MAX_DESCRIPTORS: usize = 4096;
 pub(super) const MAX_PARAMETERS: u32 = 1024;
 pub(super) const MAX_INPUT_PORTS: u32 = 32;
+pub(super) const MAX_OUTPUT_PORTS: u32 = 32;
 const MAX_CLAP_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 // Private optional discovery-error transport; never parameter or playback authority.
@@ -359,6 +360,8 @@ struct DiscoveryResponse {
 pub(super) struct ProbeResult {
     schema_version: u32,
     pub(super) main_audio_input: ClapMainAudioInput,
+    pub(super) main_audio_output_id: u32,
+    pub(super) auxiliary_outputs: Vec<AuxiliaryBusWire>,
     plugin_id: String,
     pub(super) latency_frames: u32,
     offline: bool,
@@ -434,7 +437,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         helper_executable,
         library_path,
         DiscoveryOperation::ProbeProcessing {
-            schema_version: 2,
+            schema_version: 3,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render_contract.sample_rate,
             channel_layout: render_contract.channel_layout,
@@ -453,7 +456,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         ));
     }
     let probe = response.probe.ok_or_else(|| invalid("CLAP probe response is missing"))?;
-    if probe.schema_version != 2
+    if probe.schema_version != 3
         || probe.plugin_id != plugin_id
         || probe.offline != (render_contract.processing_mode == AudioProcessingMode::Offline)
     {
@@ -466,6 +469,11 @@ pub(super) fn probe_clap_plugin_registration_with_state(
     let auxiliary_inputs = auxiliary_from_wire(probe.auxiliary_buses);
     auxiliary_inputs.validate(render_contract.channel_layout)?;
     probe.main_audio_input.validate(&auxiliary_inputs)?;
+    validate_audio_outputs(
+        probe.main_audio_output_id,
+        &super::protocol::outputs_from_wire(probe.auxiliary_outputs.clone()),
+        render_contract.channel_layout,
+    )?;
     if probe
         .captured_state
         .as_ref()
@@ -494,6 +502,8 @@ pub(super) fn probe_clap_plugin_registration_with_state(
             execution_contract,
             parameters: probe.parameters,
             main_audio_input: probe.main_audio_input,
+            main_audio_output_id: probe.main_audio_output_id,
+            auxiliary_outputs: super::protocol::outputs_from_wire(probe.auxiliary_outputs),
             auxiliary_inputs,
         },
         probe.captured_state,
@@ -640,17 +650,23 @@ pub(super) fn processing_result_for_notes(
     plugin_id: &str,
     render: AudioRenderContract,
     parameters: Vec<ClapParameterDescriptor>,
-    main_audio_input: ClapMainAudioInput,
-    auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    audio: &ClapAudioPortMetadata,
     latency_frames: u32,
     tail: TailLength,
 ) -> Result<ProbeResult, AudioProcessorHostError> {
     validate_parameters(&parameters)?;
-    auxiliary_inputs.validate(render.channel_layout)?;
-    main_audio_input.validate(&auxiliary_inputs)?;
+    audio.contract.validate(render.channel_layout)?;
+    audio.main_audio_input.validate(&audio.contract)?;
+    validate_audio_outputs(
+        audio.main_audio_output_id,
+        &audio.outputs,
+        render.channel_layout,
+    )?;
     Ok(ProbeResult {
-        schema_version: 2,
-        main_audio_input,
+        schema_version: 3,
+        main_audio_input: audio.main_audio_input,
+        main_audio_output_id: audio.main_audio_output_id,
+        auxiliary_outputs: super::protocol::outputs_to_wire(&audio.outputs),
         plugin_id: plugin_id.to_owned(),
         offline: render.processing_mode == AudioProcessingMode::Offline,
         latency_frames,
@@ -660,7 +676,7 @@ pub(super) fn processing_result_for_notes(
             TailLength::Infinite => ProbeTail::Infinite,
         },
         parameters,
-        auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
+        auxiliary_buses: auxiliary_to_wire(&audio.contract),
         captured_state: None,
     })
 }
@@ -670,7 +686,7 @@ fn validate_processing_result_for_notes(
     plugin_id: &str,
     render: AudioRenderContract,
 ) -> Result<(), AudioProcessorHostError> {
-    if processing.schema_version != 2
+    if processing.schema_version != 3
         || processing.plugin_id != plugin_id
         || processing.offline != (render.processing_mode == AudioProcessingMode::Offline)
         || processing.captured_state.is_some()
@@ -684,6 +700,11 @@ fn validate_processing_result_for_notes(
     let auxiliary_inputs = auxiliary_from_wire(processing.auxiliary_buses.clone());
     auxiliary_inputs.validate(render.channel_layout)?;
     processing.main_audio_input.validate(&auxiliary_inputs)?;
+    validate_audio_outputs(
+        processing.main_audio_output_id,
+        &super::protocol::outputs_from_wire(processing.auxiliary_outputs.clone()),
+        render.channel_layout,
+    )?;
     let tail = match &processing.tail {
         ProbeTail::None => AudioProcessorTail::None,
         ProbeTail::Finite(frames) => AudioProcessorTail::Finite(*frames as usize),
@@ -732,11 +753,13 @@ pub(super) fn note_processing_mode(processing: &ProbeResult) -> AudioProcessingM
 pub(super) fn revalidate_processing_metadata_for_notes(
     processing: &ProbeResult,
     parameters: &[ClapParameterDescriptor],
-    audio: &ClapAudioInputMetadata,
+    audio: &ClapAudioPortMetadata,
 ) -> Result<(), AudioProcessorHostError> {
     if processing.main_audio_input != audio.main_audio_input
         || processing.parameters != parameters
         || auxiliary_from_wire(processing.auxiliary_buses.clone()) != audio.contract
+        || processing.main_audio_output_id != audio.main_audio_output_id
+        || super::protocol::outputs_from_wire(processing.auxiliary_outputs.clone()) != audio.outputs
     {
         return Err(unavailable(
             "CLAP Note processing metadata changed across activation/deactivation",
@@ -745,10 +768,10 @@ pub(super) fn revalidate_processing_metadata_for_notes(
     Ok(())
 }
 
-// Only the v3 full-processing branch uses this bounded pure serializer.
+// Only the v4 full-processing branch uses this bounded pure serializer.
 // Legacy read-only Note metadata keeps its original wire/paths. Both passes serialize owned DTOs after native destruction.
-fn encode_processing_offer_v3(
-    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV3,
+fn encode_processing_offer_v4(
+    value: &super::clap_note_input_contract::ClapNoteProcessingOfferV4,
 ) -> Result<Vec<u8>, AudioProcessorHostError> {
     struct Count(usize);
     impl Write for Count {
@@ -805,14 +828,14 @@ fn encode_processing_offer_v3(
 /// Query one Notes-enabled instance's complete processing facts in the bounded child.
 ///
 /// Activation and metadata collection do not prove DSP, real-time behavior or
-/// installed ownership. Native Score resolvers still refuse Note preparation.
+/// installed ownership. Execution is admitted separately by the native resolver.
 pub fn probe_clap_note_processing_offer(
     helper_executable: &Path,
     library_path: &Path,
     plugin_id: &str,
     render: AudioRenderContract,
     state: Option<&[u8]>,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV3, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV4, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     if !helper_executable.is_absolute()
         || !library_path.is_absolute()
@@ -830,7 +853,7 @@ pub fn probe_clap_note_processing_offer(
         helper_executable,
         &canonical,
         DiscoveryOperation::ProbeNotes {
-            schema_version: 3,
+            schema_version: 4,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render.sample_rate,
             channel_layout: render.channel_layout,
@@ -844,27 +867,27 @@ pub fn probe_clap_note_processing_offer(
             "CLAP binary changed during Note processing negotiation",
         ));
     }
-    decode_processing_offer_v3(&bytes, plugin_id, fingerprint, state, render)
+    decode_processing_offer_v4(&bytes, plugin_id, fingerprint, state, render)
 }
 
-fn decode_processing_offer_v3(
+fn decode_processing_offer_v4(
     bytes: &[u8],
     plugin_id: &str,
     fingerprint: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV3, AudioProcessorHostError> {
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV4, AudioProcessorHostError> {
     if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err(invalid(
             "CLAP Note processing response exceeds metadata limit",
         ));
     }
-    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV3 =
+    let result: super::clap_note_input_contract::ClapNoteProcessingOfferV4 =
         serde_json::from_slice(bytes).map_err(|error| {
             invalid(format!("CLAP Note processing response is invalid: {error}"))
         })?;
     let notes = &result.notes;
-    if result.schema_version != 3
+    if result.schema_version != 4
         || notes.schema_version != 1
         || notes.plugin_id != plugin_id
         || notes.binary_sha256 != fingerprint
@@ -1001,11 +1024,11 @@ fn validate_discovery_schema(
     operation: &DiscoveryOperation,
 ) -> Result<(), AudioProcessorHostError> {
     match operation {
-        DiscoveryOperation::ProbeProcessing { schema_version, .. } if *schema_version != 2 => {
+        DiscoveryOperation::ProbeProcessing { schema_version, .. } if *schema_version != 3 => {
             Err(invalid("unsupported CLAP processing probe schema version"))
         }
         DiscoveryOperation::ProbeNotes { schema_version, .. }
-            if !matches!(*schema_version, 1 | 3) =>
+            if !matches!(*schema_version, 1 | 4) =>
         {
             Err(invalid("unsupported CLAP Note probe schema version"))
         }
@@ -1182,7 +1205,7 @@ fn run_clap_discovery_worker_inner(
             } else {
                 // The complete offer is captured from one actual Notes-enabled
                 // restored/render-configured/activated instance, then destroyed.
-                let result = super::clap_note_input_contract::probe_loaded_processing_v3(
+                let result = super::clap_note_input_contract::probe_loaded_processing_v4(
                     &entry,
                     &plugin_id,
                     fingerprint,
@@ -1196,7 +1219,7 @@ fn run_clap_discovery_worker_inner(
                     ));
                 }
                 *stage = DiscoveryErrorStage::ResponseEncoding;
-                Ok(encode_processing_offer_v3(&result)?)
+                Ok(encode_processing_offer_v4(&result)?)
             }
         }
     }
@@ -1325,7 +1348,7 @@ pub(super) fn probe_loaded(
     } else {
         None
     };
-    let audio = inspect_audio_inputs(&handle, render_contract.channel_layout)?;
+    let audio = inspect_audio_ports(&handle, render_contract.channel_layout)?;
     let configuration = PluginAudioConfiguration {
         sample_rate: f64::from(render_contract.sample_rate),
         min_frames_count: 1,
@@ -1367,17 +1390,21 @@ pub(super) fn probe_loaded(
         TailLength::Infinite => ProbeTail::Infinite,
     };
     let current_audio =
-        inspect_audio_inputs(&instance.plugin_handle(), render_contract.channel_layout)?;
+        inspect_audio_ports(&instance.plugin_handle(), render_contract.channel_layout)?;
     if current_audio.main_audio_input != audio.main_audio_input
         || current_audio.contract != audio.contract
+        || current_audio.main_audio_output_id != audio.main_audio_output_id
+        || current_audio.outputs != audio.outputs
     {
         return Err(unavailable(
             "CLAP audio input shape changed across activation/deactivation",
         ));
     }
     Ok(ProbeResult {
-        schema_version: 2,
+        schema_version: 3,
         main_audio_input: audio.main_audio_input,
+        main_audio_output_id: audio.main_audio_output_id,
+        auxiliary_outputs: super::protocol::outputs_to_wire(&audio.outputs),
         plugin_id: plugin_id.to_owned(),
         offline: render_contract.processing_mode == AudioProcessingMode::Offline,
         latency_frames,
@@ -1394,10 +1421,12 @@ struct BoundedStateWriter {
     exceeded: bool,
 }
 
-pub(super) struct ClapAudioInputMetadata {
+pub(super) struct ClapAudioPortMetadata {
     pub(super) main_audio_input: ClapMainAudioInput,
     pub(super) contract: AudioProcessorAuxiliaryInputContract,
     pub(super) names: Vec<crate::AudioProcessorInputName>,
+    pub(super) main_audio_output_id: u32,
+    pub(super) outputs: crate::AudioProcessorAuxiliaryOutputContract,
 }
 
 // Only the cold refusal path formats owned facts from this same successful get.
@@ -1430,10 +1459,36 @@ fn audio_port_refusal(
 
 /// Read native ports in ABI order, using stable IDs for author routes.
 /// The plugin must be deactivated: CLAP forbids audio-port scans while active.
-pub(super) fn inspect_audio_inputs(
+pub(super) fn validate_audio_outputs(
+    main_id: u32,
+    outputs: &crate::AudioProcessorAuxiliaryOutputContract,
+    layout: AudioChannelLayout,
+) -> Result<(), AudioProcessorHostError> {
+    outputs.validate(layout)?;
+    if main_id == u32::MAX || outputs.buses.len() >= MAX_OUTPUT_PORTS as usize {
+        return Err(invalid("CLAP output identity or port count is invalid"));
+    }
+    let mut ids = std::collections::BTreeSet::from([main_id]);
+    for bus in &outputs.buses {
+        let id = bus
+            .bus_key
+            .strip_prefix("clap.audio-output.")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|id| *id != u32::MAX && bus.bus_key == format!("clap.audio-output.{id}"))
+            .ok_or_else(|| invalid("CLAP output key is not a canonical native port identity"))?;
+        if !ids.insert(id) {
+            return Err(invalid(
+                "CLAP output native IDs must be unique within their direction",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn inspect_audio_ports(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
     channel_layout: AudioChannelLayout,
-) -> Result<ClapAudioInputMetadata, AudioProcessorHostError> {
+) -> Result<ClapAudioPortMetadata, AudioProcessorHostError> {
     let expected_type = match channel_layout {
         AudioChannelLayout::Mono => AudioPortType::MONO,
         AudioChannelLayout::Stereo => AudioPortType::STEREO,
@@ -1444,17 +1499,16 @@ pub(super) fn inspect_audio_inputs(
         .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
     let mut auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
     let mut names = Vec::new();
-    let input_count = ports.count(handle, true);
     let mut main_audio_input = ClapMainAudioInput::Absent;
+    let mut main_audio_output_id = None;
+    let mut outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
     for is_input in [true, false] {
-        let count = if is_input {
-            input_count
-        } else {
-            ports.count(handle, false)
-        };
-        if (is_input && count > MAX_INPUT_PORTS) || (!is_input && count != 1) {
+        let count = ports.count(handle, is_input);
+        if (is_input && count > MAX_INPUT_PORTS)
+            || (!is_input && !(1..=MAX_OUTPUT_PORTS).contains(&count))
+        {
             return Err(invalid(
-                "CLAP requires bounded input ports and one main output",
+                "CLAP requires bounded inputs and one Main with at most 31 auxiliary outputs",
             ));
         }
         let mut ids = std::collections::BTreeSet::new();
@@ -1466,7 +1520,7 @@ pub(super) fn inspect_audio_inputs(
             let refusal = if !ids.insert(port.id.get()) {
                 Some("duplicate_id")
             } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
-                || (!is_input && !port.flags.contains(AudioPortFlags::IS_MAIN))
+                || (!is_input && index == 0 && !port.flags.contains(AudioPortFlags::IS_MAIN))
             {
                 Some("main_role")
             } else if port.port_type != Some(expected_type) {
@@ -1488,7 +1542,16 @@ pub(super) fn inspect_audio_inputs(
                     channel_layout.channel_count(),
                 ));
             }
-            if is_input && port.flags.contains(AudioPortFlags::IS_MAIN) {
+            if !is_input {
+                if index == 0 {
+                    main_audio_output_id = Some(port.id.get());
+                } else {
+                    outputs.buses.push(crate::AudioProcessorAuxiliaryOutputBusContract {
+                        bus_key: format!("clap.audio-output.{}", port.id.get()),
+                        channel_layout,
+                    });
+                }
+            } else if port.flags.contains(AudioPortFlags::IS_MAIN) {
                 main_audio_input = ClapMainAudioInput::Present;
             } else if is_input {
                 if let Ok(name) = std::str::from_utf8(port.name)
@@ -1510,10 +1573,13 @@ pub(super) fn inspect_audio_inputs(
     }
     auxiliary_inputs.validate(channel_layout)?;
     main_audio_input.validate(&auxiliary_inputs)?;
-    Ok(ClapAudioInputMetadata {
+    Ok(ClapAudioPortMetadata {
         main_audio_input,
         contract: auxiliary_inputs,
         names,
+        main_audio_output_id: main_audio_output_id
+            .ok_or_else(|| invalid("CLAP Main output is missing"))?,
+        outputs,
     })
 }
 
@@ -2554,7 +2620,7 @@ mod tests {
 
     #[test]
     fn processing_probe_requires_new_kind_version_and_explicit_main_input_shape() {
-        let request = serde_json::json!({"kind":"probe_processing","schema_version":2,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null,"capture_default_state":false});
+        let request = serde_json::json!({"kind":"probe_processing","schema_version":3,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null,"capture_default_state":false});
         let operation: DiscoveryOperation = serde_json::from_value(request.clone()).unwrap();
         validate_discovery_schema(&operation).unwrap();
         for legacy in ["probe", "future_probe"] {
@@ -2579,8 +2645,13 @@ mod tests {
                 "fixture",
                 test_processing_render(),
                 Vec::new(),
-                shape,
-                AudioProcessorAuxiliaryInputContract::default(),
+                &ClapAudioPortMetadata {
+                    main_audio_input: shape,
+                    contract: AudioProcessorAuxiliaryInputContract::default(),
+                    names: Vec::new(),
+                    main_audio_output_id: 0,
+                    outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+                },
                 0,
                 TailLength::Finite(0),
             )
@@ -2641,7 +2712,9 @@ mod tests {
     #[test]
     fn note_metadata_legacy_probe_seven_fields_and_additive_operation_are_separate() {
         let response = super::ProbeResult {
-            schema_version: 2,
+            auxiliary_outputs: Vec::new(),
+            main_audio_output_id: 0,
+            schema_version: 3,
             main_audio_input: ClapMainAudioInput::Present,
             plugin_id: "fixture".to_owned(),
             latency_frames: 0,
@@ -2654,7 +2727,7 @@ mod tests {
         // Explicit protocol migration: the old seven-field response cannot grant processing.
         let legacy = br#"{"plugin_id":"fixture","latency_frames":0,"offline":false,"tail":"None","parameters":[],"auxiliary_buses":[],"captured_state":null}"#;
         assert!(serde_json::from_slice::<super::ProbeResult>(legacy).is_err());
-        assert_eq!(serde_json::to_vec(&response).unwrap(), br#"{"schema_version":2,"main_audio_input":"present","plugin_id":"fixture","latency_frames":0,"offline":false,"tail":"None","parameters":[],"auxiliary_buses":[],"captured_state":null}"#);
+        assert_eq!(serde_json::to_vec(&response).unwrap(), br#"{"schema_version":3,"main_audio_input":"present","main_audio_output_id":0,"auxiliary_outputs":[],"plugin_id":"fixture","latency_frames":0,"offline":false,"tail":"None","parameters":[],"auxiliary_buses":[],"captured_state":null}"#);
         let query = super::DiscoveryOperation::NoteInputMetadata(
             super::super::clap_note_input_metadata::NoteInputMetadataRequest {
                 schema_version: 1,

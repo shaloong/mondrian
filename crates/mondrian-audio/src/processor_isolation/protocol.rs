@@ -9,7 +9,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 10;
+pub(super) const PROTOCOL_VERSION: u32 = 11;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_WORKER_DETAIL_BYTES: usize = 4096;
 const COMMAND_MAGIC: u32 = u32::from_le_bytes(*b"MAPC");
@@ -94,6 +94,7 @@ pub(super) struct PrepareWire {
     pub payload: Vec<u8>,
     pub execution_contract: ExecutionContractWire,
     pub auxiliary_buses: Vec<AuxiliaryBusWire>,
+    pub auxiliary_outputs: Vec<AuxiliaryBusWire>,
     pub note_input_contract: AudioProcessorNoteInputContract,
     pub parameter_ids: Vec<ParameterId>,
     pub sample_rate: u32,
@@ -116,6 +117,7 @@ pub(super) enum ReadyResultWire {
     Ready {
         execution_contract: ExecutionContractWire,
         auxiliary_buses: Vec<AuxiliaryBusWire>,
+        auxiliary_outputs: Vec<AuxiliaryBusWire>,
         note_input_contract: AudioProcessorNoteInputContract,
         input_names: Vec<crate::AudioProcessorInputName>,
     },
@@ -144,6 +146,33 @@ pub(super) fn auxiliary_from_wire(
         buses: buses
             .into_iter()
             .map(|bus| AudioProcessorAuxiliaryInputBusContract {
+                bus_key: bus.bus_key,
+                channel_layout: bus.channel_layout,
+            })
+            .collect(),
+    }
+}
+
+pub(super) fn outputs_to_wire(
+    contract: &crate::AudioProcessorAuxiliaryOutputContract,
+) -> Vec<AuxiliaryBusWire> {
+    contract
+        .buses
+        .iter()
+        .map(|bus| AuxiliaryBusWire {
+            bus_key: bus.bus_key.clone(),
+            channel_layout: bus.channel_layout,
+        })
+        .collect()
+}
+
+pub(super) fn outputs_from_wire(
+    buses: Vec<AuxiliaryBusWire>,
+) -> crate::AudioProcessorAuxiliaryOutputContract {
+    crate::AudioProcessorAuxiliaryOutputContract {
+        buses: buses
+            .into_iter()
+            .map(|bus| crate::AudioProcessorAuxiliaryOutputBusContract {
                 bus_key: bus.bus_key,
                 channel_layout: bus.channel_layout,
             })
@@ -663,6 +692,8 @@ pub(super) struct SharedBlockLayout {
     pub main_samples: usize,
     pub auxiliary_offset: usize,
     pub auxiliary_samples: usize,
+    pub auxiliary_outputs_offset: usize,
+    pub auxiliary_outputs_samples: usize,
     pub events_offset: usize,
     pub event_capacity: usize,
     pub note_events_offset: usize,
@@ -714,6 +745,8 @@ impl SharedBlockLayout {
             main_samples,
             auxiliary_offset: main_bytes,
             auxiliary_samples,
+            auxiliary_outputs_offset: events_offset,
+            auxiliary_outputs_samples: 0,
             events_offset,
             event_capacity,
             note_events_offset: total_bytes,
@@ -722,6 +755,46 @@ impl SharedBlockLayout {
             note_end_capacity: 0,
             total_bytes,
         })
+    }
+
+    pub(super) fn with_auxiliary_outputs(
+        mut self,
+        bus_count: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        if bus_count > 31
+            || self.auxiliary_outputs_samples != 0
+            || self.note_event_capacity != 0
+            || self.note_end_capacity != 0
+        {
+            return Err(invalid_contract(
+                "invalid or repeated isolated output capacity",
+            ));
+        }
+        let samples = self
+            .main_samples
+            .checked_mul(bus_count)
+            .ok_or_else(|| invalid_contract("isolated output sample extent overflowed"))?;
+        let bytes = samples
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| invalid_contract("isolated output byte extent overflowed"))?;
+        self.auxiliary_outputs_samples = samples;
+        self.events_offset = align_up(
+            self.auxiliary_outputs_offset
+                .checked_add(bytes)
+                .ok_or_else(|| invalid_contract("isolated output range overflowed"))?,
+            align_of::<SharedParameterEvent>(),
+        )?;
+        self.total_bytes = self
+            .events_offset
+            .checked_add(
+                self.event_capacity
+                    .checked_mul(size_of::<SharedParameterEvent>())
+                    .ok_or_else(|| invalid_contract("isolated parameter bytes overflowed"))?,
+            )
+            .ok_or_else(|| invalid_contract("isolated shared output storage overflowed"))?;
+        self.note_events_offset = self.total_bytes;
+        self.note_ends_offset = self.total_bytes;
+        Ok(self)
     }
 
     pub(super) fn with_notes(
@@ -837,15 +910,15 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v10 wire bytes: MAPR, version=10, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v11 wire bytes: MAPR, version=11, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Completed.write_to(&mut writer)?;
         assert_eq!(writer.written(), COMPLETED_WIRE);
-        for version in [8_u32, 9] {
+        for version in [8_u32, 9, 10] {
             let mut old = COMPLETED_WIRE;
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut old.as_slice()).is_err());
@@ -864,7 +937,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 10, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 11, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -881,7 +954,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 10, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 11, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -1113,7 +1186,7 @@ mod note_protocol_tests {
             WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
             command
         );
-        for version in [8_u32, 9] {
+        for version in [8_u32, 9, 10] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
@@ -1150,7 +1223,7 @@ mod note_protocol_tests {
             assert_eq!(bytes.len(), 28);
             assert_eq!(
                 &bytes[..16],
-                &[77, 65, 80, 82, 10, 0, 0, 0, 4, 0, 0, 0, 12, 0, 0, 0]
+                &[77, 65, 80, 82, 11, 0, 0, 0, 4, 0, 0, 0, 12, 0, 0, 0]
             );
             assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
             assert_eq!(&bytes[20..24], &kind.to_le_bytes());
@@ -1175,7 +1248,15 @@ mod note_protocol_tests {
         WorkerResponse::NotesCompleted { note_end_count: 1, pending: None }
             .write_to(&mut bytes)
             .unwrap();
-        for (offset, value) in [(4, 8_u32), (4, 9), (12, 8), (16, 4097), (20, 3), (24, 1)] {
+        for (offset, value) in [
+            (4, 8_u32),
+            (4, 9),
+            (4, 10),
+            (12, 8),
+            (16, 4097),
+            (20, 3),
+            (24, 1),
+        ] {
             let mut invalid = bytes.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
@@ -1230,10 +1311,43 @@ mod note_protocol_tests {
     }
 
     #[test]
+    fn auxiliary_output_regions_are_disjoint_bounded_and_included_before_events_and_notes() {
+        let old = SharedBlockLayout::new(7, 2, 2, 1).unwrap();
+        let layout = old.with_auxiliary_outputs(2).unwrap().with_notes(3, 2).unwrap();
+        assert_eq!(layout.main_offset, 0);
+        assert_eq!(layout.auxiliary_offset, old.auxiliary_offset);
+        assert_eq!(layout.auxiliary_outputs_offset, old.events_offset);
+        assert_eq!(layout.auxiliary_outputs_samples, 28);
+        assert_eq!(
+            layout.events_offset,
+            old.events_offset + 28 * size_of::<f32>()
+        );
+        assert!(
+            layout.note_events_offset
+                >= layout.events_offset + layout.event_capacity * size_of::<SharedParameterEvent>()
+        );
+        assert!(
+            layout.note_ends_offset >= layout.note_events_offset + 3 * size_of::<SharedNoteEvent>()
+        );
+        assert_eq!(
+            layout.total_bytes,
+            layout.note_ends_offset + 2 * size_of::<SharedNoteEnd>()
+        );
+        assert!(old.with_auxiliary_outputs(32).is_err());
+        assert!(old.with_auxiliary_outputs(1).unwrap().with_auxiliary_outputs(1).is_err());
+        assert!(old.with_notes(1, 1).unwrap().with_auxiliary_outputs(1).is_err());
+        assert!(SharedBlockLayout::new(usize::MAX / 16, 2, 0, 0)
+            .unwrap()
+            .with_auxiliary_outputs(31)
+            .is_err());
+    }
+
+    #[test]
     fn current_protocol_note_contract_is_mandatory_in_prepare_and_ready_json() {
         let ready = ReadyWire {
-            schema_version: 10,
+            schema_version: 11,
             result: ReadyResultWire::Ready {
+                auxiliary_outputs: Vec::new(),
                 execution_contract: ExecutionContractWire::capture(
                     AudioProcessorExecutionContract::new(
                         0,
@@ -1251,6 +1365,9 @@ mod note_protocol_tests {
                 note_input_contract: AudioProcessorNoteInputContract::default(),
             },
         };
+        let mut missing_outputs = serde_json::to_value(&ready).unwrap();
+        missing_outputs["result"].as_object_mut().unwrap().remove("auxiliary_outputs");
+        assert!(serde_json::from_value::<ReadyWire>(missing_outputs).is_err());
         let mut json = serde_json::to_value(&ready).unwrap();
         json["result"].as_object_mut().unwrap().remove("note_input_contract");
         assert!(serde_json::from_value::<ReadyWire>(json).is_err());
@@ -1259,7 +1376,8 @@ mod note_protocol_tests {
             ready
         );
         let prepare = PrepareWire {
-            schema_version: 10,
+            auxiliary_outputs: Vec::new(),
+            schema_version: 11,
             native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
                 .unwrap(),
             nonce: "typed-only-test".to_owned(),
@@ -1286,6 +1404,9 @@ mod note_protocol_tests {
             shared_path: "not-opened".to_owned(),
             shared_bytes: 8,
         };
+        let mut missing_outputs = serde_json::to_value(&prepare).unwrap();
+        missing_outputs.as_object_mut().unwrap().remove("auxiliary_outputs");
+        assert!(serde_json::from_value::<PrepareWire>(missing_outputs).is_err());
         let mut json = serde_json::to_value(&prepare).unwrap();
         json.as_object_mut().unwrap().remove("note_input_contract");
         assert!(serde_json::from_value::<PrepareWire>(json).is_err());

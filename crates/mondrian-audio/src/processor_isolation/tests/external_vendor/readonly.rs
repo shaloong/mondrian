@@ -491,6 +491,8 @@ fn owned_resolver(metadata: &CapturedProbe) -> ClapAudioProcessorSpecResolver {
     ClapAudioProcessorSpecResolver::new(
         path.clone(),
         [ClapPluginRegistration {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            main_audio_output_id: 0,
             main_audio_input: super::ClapMainAudioInput::Present,
             plugin_id: metadata.plugin_id.clone(),
             library_path: path,
@@ -653,8 +655,10 @@ fn readonly_worker_lane_refusal_precedes_library_access() {
             "library_path":library,"plugin_id":metadata.plugin_id,"binary_sha256":vec![3_u8;32],
             "state":metadata.captured_state,"parameters":metadata.parameters,"parameter_ids":[descriptor.id],
             "main_audio_input":ClapMainAudioInput::Present,
+            "main_audio_output_id":0,"auxiliary_outputs":[],
         })).expect("forged native lane payload");
         let prepared = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: factory
                 .native_worker_lane_resources()

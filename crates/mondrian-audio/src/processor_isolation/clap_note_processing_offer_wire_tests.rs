@@ -1,6 +1,6 @@
-//! Strict v3 query-wire controls; owned DTOs are not native/DSP evidence.
+//! Strict v4 query-wire controls; owned DTOs are not native/DSP evidence.
 use super::super::clap_note_input_contract::{
-    offered_limits, ClapNoteInputContractProbe, ClapNoteProcessingOfferV3,
+    offered_limits, ClapNoteInputContractProbe, ClapNoteProcessingOfferV4,
 };
 use super::*;
 use crate::{AudioProcessorNoteInputContract, AudioProcessorNoteInputPort};
@@ -15,9 +15,9 @@ fn render() -> AudioRenderContract {
         compensation_delay_scratch_budget_bytes: usize::MAX,
     }
 }
-fn offer() -> ClapNoteProcessingOfferV3 {
-    ClapNoteProcessingOfferV3 {
-        schema_version: 3,
+fn offer() -> ClapNoteProcessingOfferV4 {
+    ClapNoteProcessingOfferV4 {
+        schema_version: 4,
         notes: ClapNoteInputContractProbe {
             schema_version: 1,
             plugin_id: "fixture".to_owned(),
@@ -47,16 +47,21 @@ fn offer() -> ClapNoteProcessingOfferV3 {
             "fixture",
             render(),
             Vec::new(),
-            ClapMainAudioInput::Present,
-            AudioProcessorAuxiliaryInputContract::default(),
+            &ClapAudioPortMetadata {
+                main_audio_input: ClapMainAudioInput::Present,
+                contract: AudioProcessorAuxiliaryInputContract::default(),
+                names: Vec::new(),
+                main_audio_output_id: 0,
+                outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            },
             17,
             TailLength::Finite(5),
         )
         .unwrap(),
     }
 }
-fn decode(bytes: &[u8]) -> Result<ClapNoteProcessingOfferV3, AudioProcessorHostError> {
-    decode_processing_offer_v3(bytes, "fixture", [7; 32], Some(&[1]), render())
+fn decode(bytes: &[u8]) -> Result<ClapNoteProcessingOfferV4, AudioProcessorHostError> {
+    decode_processing_offer_v4(bytes, "fixture", [7; 32], Some(&[1]), render())
 }
 #[test]
 fn v2_wire_has_complete_identity_and_legacy_request_omission_remains_byte_exact() {
@@ -67,16 +72,16 @@ fn v2_wire_has_complete_identity_and_legacy_request_omission_remains_byte_exact(
         DiscoveryOperation::ProbeNotes { schema_version: 1, .. }
     ));
     assert_eq!(serde_json::to_vec(&operation).unwrap(), legacy);
-    let bytes = encode_processing_offer_v3(&offer()).unwrap();
+    let bytes = encode_processing_offer_v4(&offer()).unwrap();
     assert!(bytes.len() as u64 <= MAX_RESPONSE_BYTES);
     let decoded = decode(&bytes).unwrap();
-    assert_eq!(decoded.schema_version, 3);
+    assert_eq!(decoded.schema_version, 4);
     assert_eq!(decoded.notes.contract.ports[0].native_id, 0x8000_0017);
     let mut value = serde_json::to_value(operation).unwrap();
-    value["schema_version"] = serde_json::json!(3);
+    value["schema_version"] = serde_json::json!(4);
     assert!(matches!(
         serde_json::from_value::<DiscoveryOperation>(value).unwrap(),
-        DiscoveryOperation::ProbeNotes { schema_version: 3, .. }
+        DiscoveryOperation::ProbeNotes { schema_version: 4, .. }
     ));
 }
 #[test]
@@ -84,6 +89,8 @@ fn v2_wire_refuses_schema_identity_state_render_and_finite_policy_mismatch() {
     for (path, replacement) in [
         ("/schema_version", serde_json::json!(1)),
         ("/schema_version", serde_json::json!(2)),
+        ("/schema_version", serde_json::json!(3)),
+        ("/processing/schema_version", serde_json::json!(2)),
         ("/processing/schema_version", serde_json::json!(1)),
         ("/notes/schema_version", serde_json::json!(2)),
         ("/notes/plugin_id", serde_json::json!("other")),
@@ -126,10 +133,15 @@ fn v2_wire_refuses_schema_identity_state_render_and_finite_policy_mismatch() {
 fn v3_processing_shape_is_mandatory_and_optional_main_retains_auxiliary_bound() {
     let mut absent = offer();
     absent.processing.main_audio_input = ClapMainAudioInput::Absent;
-    let decoded = decode(&encode_processing_offer_v3(&absent).unwrap()).unwrap();
+    let decoded = decode(&encode_processing_offer_v4(&absent).unwrap()).unwrap();
     assert_eq!(decoded.main_audio_input(), ClapMainAudioInput::Absent);
     let mut value = serde_json::to_value(absent).unwrap();
-    for key in ["main_audio_input", "schema_version"] {
+    for key in [
+        "main_audio_input",
+        "main_audio_output_id",
+        "auxiliary_outputs",
+        "schema_version",
+    ] {
         let mut missing = value.clone();
         missing["processing"].as_object_mut().unwrap().remove(key);
         assert!(decode(&serde_json::to_vec(&missing).unwrap()).is_err());

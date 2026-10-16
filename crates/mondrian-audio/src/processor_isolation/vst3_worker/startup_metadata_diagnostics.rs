@@ -512,6 +512,7 @@ fn native_startup_metadata_phase_observation() {
         compensation_delay_scratch_budget_bytes: usize::MAX,
     };
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         native_lane: native_worker_lane_profile_for_parameters(&parameters)
             .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {

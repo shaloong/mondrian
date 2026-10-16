@@ -420,18 +420,27 @@ pub(super) fn probe_loaded(
 /// Full same-instance metadata response; it does not grant Note execution.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClapNoteProcessingOfferV3 {
-    /// Exact full-processing response version; currently three.
+pub struct ClapNoteProcessingOfferV4 {
+    /// Exact full-processing response version; currently four.
     pub schema_version: u32,
     /// Same-instance identity/render/Note facts, with no execution authority.
     pub notes: ClapNoteInputContractProbe,
     pub(super) processing: super::clap_discovery::ProbeResult,
 }
 
-impl ClapNoteProcessingOfferV3 {
+impl ClapNoteProcessingOfferV4 {
     /// Native main-input shape from the same Notes-enabled instance.
     pub fn main_audio_input(&self) -> super::ClapMainAudioInput {
         self.processing.main_audio_input
+    }
+
+    /// Main native output ID and ordered additional outputs from this same restored instance.
+    pub fn main_audio_output_id(&self) -> u32 {
+        self.processing.main_audio_output_id
+    }
+    /// Clone the same-instance ordered auxiliary output contract for native preparation.
+    pub fn auxiliary_outputs(&self) -> crate::AudioProcessorAuxiliaryOutputContract {
+        super::protocol::outputs_from_wire(self.processing.auxiliary_outputs.clone())
     }
 
     /// Borrow same-instance parameter facts; no copying or execution authority.
@@ -514,13 +523,13 @@ fn check_destroyed_processing_services(
     Ok(())
 }
 
-pub(super) fn probe_loaded_processing_v3(
+pub(super) fn probe_loaded_processing_v4(
     entry: &PluginEntry,
     plugin_id: &str,
     binary_sha256: [u8; 32],
     state: Option<&[u8]>,
     render: AudioRenderContract,
-) -> Result<ClapNoteProcessingOfferV3, AudioProcessorHostError> {
+) -> Result<ClapNoteProcessingOfferV4, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     let max_frames = u32::try_from(render.max_block_frames)
         .ok()
@@ -579,7 +588,7 @@ pub(super) fn probe_loaded_processing_v3(
         let mut capture = super::clap_discovery::ParameterQueryCapture::from_environment();
         let parameters =
             super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
-        let audio = super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?;
+        let audio = super::clap_discovery::inspect_audio_ports(&handle, render.channel_layout)?;
         (parameters, audio)
     };
     instance.access_shared_handler(|host| check_processing_sources(host, true))?;
@@ -624,13 +633,7 @@ pub(super) fn probe_loaded_processing_v3(
         service_names(&mut instance, &binding)?;
         instance.access_shared_handler(|host| check_processing_sources(host, false))?;
         super::clap_discovery::processing_result_for_notes(
-            plugin_id,
-            render,
-            parameters,
-            audio.main_audio_input,
-            audio.contract,
-            latency,
-            tail,
+            plugin_id, render, parameters, &audio, latency, tail,
         )
     })();
     // Cleanup executes for every post-activation success or failure. No start
@@ -658,7 +661,7 @@ pub(super) fn probe_loaded_processing_v3(
                 let parameters =
                     super::clap_discovery::list_parameters_observed(&handle, capture.as_mut())?;
                 let audio =
-                    super::clap_discovery::inspect_audio_inputs(&handle, render.channel_layout)?;
+                    super::clap_discovery::inspect_audio_ports(&handle, render.channel_layout)?;
                 super::clap_discovery::revalidate_processing_metadata_for_notes(
                     processing,
                     &parameters,
@@ -703,7 +706,7 @@ pub(super) fn probe_loaded_processing_v3(
     drop(instance);
     check_destroyed_processing_services(&services)?;
     check_processing_control(&shared)?;
-    Ok(ClapNoteProcessingOfferV3 { schema_version: 3, notes, processing })
+    Ok(ClapNoteProcessingOfferV4 { schema_version: 4, notes, processing })
 }
 
 #[cfg(test)]

@@ -619,14 +619,14 @@ mod native_object_wire_contracts {
         )
         .expect("correlated acknowledgement");
         assert_eq!(bytes.len(), 40);
-        for version in [8_u32, 9] {
+        for version in [8_u32, 9, 10] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(read_bind_reply(&mut Cursor::new(old), request).is_err());
         }
         assert_eq!(
             &bytes[..12],
-            &[77, 65, 79, 66, 10, 0, 0, 0, 3, 0, 0, 0],
+            &[77, 65, 79, 66, 11, 0, 0, 0, 3, 0, 0, 0],
             "single current V10 schema"
         );
         assert_eq!(
@@ -708,8 +708,8 @@ mod native_object_wire_contracts {
         };
         let mut bytes = Vec::new();
         command.write_to(&mut bytes).expect("current header");
-        assert_eq!(&bytes[4..12], &[10, 0, 0, 0, 9, 0, 0, 0]);
-        for version in [5_u32, 8, 9] {
+        assert_eq!(&bytes[4..12], &[11, 0, 0, 0, 9, 0, 0, 0]);
+        for version in [5_u32, 8, 9, 10] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(
@@ -791,7 +791,7 @@ mod native_log_wire_contracts {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&expected))
             .expect("one bounded current response");
-        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 10, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 11, 0, 0, 0, 1, 0, 0, 0]);
         assert_eq!(
             &bytes[17..29],
             &[0; 12],
@@ -895,7 +895,7 @@ mod native_preflight_snapshot_existing_wire_contracts {
         // Independent byte oracle, not the decoder or a mirrored field helper.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MAOB");
-        expected.extend_from_slice(&10_u32.to_le_bytes());
+        expected.extend_from_slice(&11_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&127_u32.to_le_bytes());
         expected.push(0);

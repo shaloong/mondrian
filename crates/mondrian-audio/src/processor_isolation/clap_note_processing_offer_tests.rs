@@ -592,12 +592,12 @@ fn configure(mode: Mode) -> (PluginEntry, Rc<Audit>) {
 fn captured(
     mode: Mode,
 ) -> (
-    Result<ClapNoteProcessingOfferV3, AudioProcessorHostError>,
+    Result<ClapNoteProcessingOfferV4, AudioProcessorHostError>,
     Rc<Audit>,
 ) {
     let (entry, audit) = configure(mode);
     (
-        probe_loaded_processing_v3(
+        probe_loaded_processing_v4(
             &entry,
             ID.to_str().unwrap(),
             [23; 32],
@@ -622,7 +622,7 @@ fn actual_abi_v2_captures_one_restored_rendered_notes_environment_and_inactive_r
     let mut offer = result.unwrap();
     cleanup(&audit, 1, 1);
     assert_eq!(audit.mask.get(), 1);
-    assert_eq!(offer.schema_version, 3);
+    assert_eq!(offer.schema_version, 4);
     // Public consumers access existing domain facts without private wire access.
     assert_eq!(offer.parameters()[0].current_value, 1.5);
     assert_eq!(offer.parameters()[0].max_value, 2.0);
@@ -830,7 +830,7 @@ fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_r
     let (result, audit) = captured(Mode::ZeroAudioInput);
     let offer = result.unwrap();
     cleanup(&audit, 1, 1);
-    assert_eq!(offer.schema_version, 3);
+    assert_eq!(offer.schema_version, 4);
     assert_eq!(
         offer.main_audio_input(),
         super::super::ClapMainAudioInput::Absent
@@ -858,16 +858,23 @@ fn actual_abi_v3_zero_audio_inputs_keep_same_instance_notes_and_inactive_audio_r
             "fixture",
             render_contract(),
             Vec::new(),
-            admitted,
-            empty_aux.clone(),
+            &super::super::clap_discovery::ClapAudioPortMetadata {
+                main_audio_input: admitted,
+                contract: empty_aux.clone(),
+                names: Vec::new(),
+                main_audio_output_id: 0,
+                outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            },
             0,
             clack_extensions::tail::TailLength::Finite(0),
         )
         .unwrap();
-        let audio = super::super::clap_discovery::ClapAudioInputMetadata {
+        let audio = super::super::clap_discovery::ClapAudioPortMetadata {
             main_audio_input: observed,
             contract: empty_aux.clone(),
             names: Vec::new(),
+            main_audio_output_id: 0,
+            outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         };
         assert!(
             super::super::clap_discovery::revalidate_processing_metadata_for_notes(

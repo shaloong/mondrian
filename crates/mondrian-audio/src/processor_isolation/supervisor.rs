@@ -334,6 +334,7 @@ impl SupervisedAudioWorker {
             payload: spec.preparation_payload.clone(),
             execution_contract: ExecutionContractWire::capture(spec.plugin_execution_contract)?,
             auxiliary_buses: auxiliary_to_wire(&spec.auxiliary_inputs),
+            auxiliary_outputs: super::protocol::outputs_to_wire(&spec.auxiliary_outputs),
             note_input_contract: spec.note_input_contract.clone(),
             parameter_ids: spec.parameter_ids.clone(),
             sample_rate: contract.sample_rate,
@@ -368,6 +369,7 @@ impl SupervisedAudioWorker {
             ReadyResultWire::Ready {
                 execution_contract,
                 auxiliary_buses,
+                auxiliary_outputs,
                 note_input_contract,
                 input_names,
             } => {
@@ -381,6 +383,8 @@ impl SupervisedAudioWorker {
                 let worker_auxiliary = auxiliary_from_wire(auxiliary_buses);
                 if worker_contract != spec.plugin_execution_contract
                     || worker_auxiliary != spec.auxiliary_inputs
+                    || super::protocol::outputs_from_wire(auxiliary_outputs)
+                        != spec.auxiliary_outputs
                     || note_input_contract != spec.note_input_contract
                 {
                     process.terminate_reported("audio startup failure");

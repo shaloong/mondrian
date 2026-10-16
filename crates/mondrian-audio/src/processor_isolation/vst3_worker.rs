@@ -391,6 +391,11 @@ impl Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Vst3Worker, AudioProcessorHostError> {
+        if !request.auxiliary_outputs().buses.is_empty() {
+            return Err(unavailable(
+                "VST3 auxiliary outputs are not supported by this adapter",
+            ));
+        }
         if !request.note_input_contract().ports.is_empty() {
             return Err(unavailable(
                 "VST3 Note input is not supported by this adapter",
@@ -2024,6 +2029,7 @@ mod bus_contract_tests {
             parameter_ids: vec![0],
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             native_lane: native_worker_lane_profile().unwrap(),
             payload: serde_json::to_vec(&payload).unwrap(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(

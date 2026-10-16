@@ -28,6 +28,7 @@ fn assert_callback_refusal(mode: AudioProcessingMode) {
         .expect("owned CLAP entry");
     let render = render(mode);
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,
         payload: Vec::new(),
@@ -130,6 +131,10 @@ fn clap_output_owning_actual_isolated_child_does_not_accept_and_discard_unsuppor
         )
         .expect("fresh actual plugin probe");
         let payload = serde_json::to_vec(&ClapPayload {
+            main_audio_output_id: registration.main_audio_output_id,
+            auxiliary_outputs: super::super::protocol::outputs_to_wire(
+                &registration.auxiliary_outputs,
+            ),
             main_audio_input: ClapMainAudioInput::Present,
             library_path: registration.library_path,
             plugin_id: registration.plugin_id,

@@ -117,6 +117,7 @@ fn prepare_gate() -> Box<dyn IsolatedAudioProcessorWorker> {
     let notes = requested_notes();
     notes.validate().expect("valid requested extent, not native capability");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::new(
@@ -139,11 +140,16 @@ fn prepare_gate() -> Box<dyn IsolatedAudioProcessorWorker> {
     // Production preparation restores this actual object, checks native ports
     // and HostNotePorts capability, and reserves the real typed/IPC layouts.
     // Current guard must refuse; do not turn Err into a skip or empty success.
-    let mut worker = prepare_loaded(
+    let native_main =
+        std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+    let mut worker = prepare_loaded_on_main(
+        native_main,
         request,
         entry,
         c"org.mondrian.fixture.note-gate",
         None,
+        ClapMainAudioInput::Present,
+        0x201, // Actual fixed owned ABI output ID, independent of input ID0x101.
         &parameter_definitions(),
         &[17, 19],
     )

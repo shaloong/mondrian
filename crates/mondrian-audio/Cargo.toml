@@ -21,12 +21,12 @@ tempfile.workspace = true
 memmap2.workspace = true
 bytemuck.workspace = true
 uuid.workspace = true
+clap-sys.workspace = true
 clack-host.workspace = true
 clack-extensions.workspace = true
 vst3-host.workspace = true
 
 [dev-dependencies]
-clap-sys.workspace = true
 crossbeam-queue.workspace = true
 libloading.workspace = true
 # Test the same canonical binding selected by the native audio adapter.
