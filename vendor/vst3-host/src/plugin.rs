@@ -1,7 +1,10 @@
 //! VST3 plugin wrapper with safe API
 
 use crate::{
-    audio::{AudioBuffers, AudioBusLayout, AudioLevels, BusAudioBuffers},
+    audio::{
+        AudioBuffers, AudioBusLayout, AudioLevels, BusAudioBuffers, BusDirection,
+        NativeEventBusRole,
+    },
     error::{Error, Result},
     midi::{
         MidiChannel, MidiEvent, PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES,
@@ -1226,6 +1229,22 @@ pub(crate) trait PluginInternal: Send {
     fn native_audio_bus_info(&self) -> Result<crate::audio::NativeAudioBusInfoSet>;
     /// Same-instance, owning-thread census. Remote backends must not infer this from discovery.
     fn native_event_bus_info(&self) -> Result<crate::audio::NativeEventBusInfoSet> {
+        Err(Error::NativeEvent(
+            crate::error::NativeEventError::UnsupportedBackend,
+        ))
+    }
+    /// Primitive declaration constraints without collecting names or owned rows.
+    fn visit_native_event_bus_constraints(
+        &self,
+        _visitor: &mut dyn FnMut(
+            BusDirection,
+            usize,
+            NativeEventBusRole,
+            usize,
+            bool,
+            bool,
+        ) -> Result<()>,
+    ) -> Result<()> {
         Err(Error::NativeEvent(
             crate::error::NativeEventError::UnsupportedBackend,
         ))
@@ -2610,6 +2629,36 @@ impl Plugin {
                 crate::error::NativeEventError::UnsupportedBackend,
             ))?
             .native_event_bus_info()
+    }
+
+    /// Visit primitive Event constraints in direction-local native index order.
+    ///
+    /// Arguments are direction, index, role, channel count, native default-active
+    /// and this owner's retained host activation ACK. The native backend uses the
+    /// same owning-thread/lifecycle and topology checks as [`Self::native_event_bus_info`].
+    /// It allocates no host Vec or String; the caller and SDK may still allocate.
+    /// No names, activation, pending flags or native state are changed. Unsupported
+    /// backends return a typed error without invoking the visitor or making RPCs.
+    ///
+    /// A callback error stops traversal immediately. A later metadata failure may
+    /// follow earlier callbacks, so publish caller-local results only after Ok.
+    pub fn visit_native_event_bus_constraints(
+        &self,
+        visitor: &mut dyn FnMut(
+            BusDirection,
+            usize,
+            NativeEventBusRole,
+            usize,
+            bool,
+            bool,
+        ) -> Result<()>,
+    ) -> Result<()> {
+        self.internal
+            .as_ref()
+            .ok_or(Error::NativeEvent(
+                crate::error::NativeEventError::UnsupportedBackend,
+            ))?
+            .visit_native_event_bus_constraints(visitor)
     }
 
     /// Return every audio bus's current channel count and activation state.
@@ -4010,6 +4059,19 @@ mod public_surface_tests {
     }
 
     #[test]
+    fn unloaded_primitive_event_census_refuses_without_visiting() {
+        let plugin = unloaded_plugin();
+        assert!(matches!(
+            plugin.visit_native_event_bus_constraints(&mut |_, _, _, _, _, _| panic!(
+                "unsupported owner must not fabricate an empty census"
+            ),),
+            Err(Error::NativeEvent(
+                crate::error::NativeEventError::UnsupportedBackend
+            ))
+        ));
+    }
+
+    #[test]
     fn unloaded_stop_remains_noop_and_processing_guards_keep_their_original_errors() {
         let mut plugin = unloaded_plugin();
         plugin.stop_processing().unwrap();
@@ -4043,6 +4105,34 @@ mod public_surface_tests {
             .load_plugin_class(&path, "6E4F05A12D8B4C639F017B42A4C2E611")
             .unwrap();
         assert!(!plugin.is_processing());
+        let named = plugin.native_event_bus_info().unwrap();
+        assert_eq!(named.inputs.len(), 2);
+        assert!(named.outputs.is_empty());
+        assert!(named
+            .inputs
+            .iter()
+            .all(|row| row.name == "Note oracle events"));
+        let mut rows = [None; 2];
+        plugin
+            .visit_native_event_bus_constraints(
+                &mut |direction, index, role, channels, default, active| {
+                    assert_eq!(direction, BusDirection::Input);
+                    rows[index] = Some((role, channels, default, active));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        for (index, row) in named.inputs.iter().enumerate() {
+            assert_eq!(
+                rows[index],
+                Some((
+                    row.role,
+                    row.channel_count,
+                    row.default_active,
+                    row.host_active
+                ))
+            );
+        }
         plugin.stop_processing().unwrap();
         plugin
             .set_bus_active(

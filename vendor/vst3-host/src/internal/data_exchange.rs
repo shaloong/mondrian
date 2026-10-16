@@ -1082,6 +1082,61 @@ mod data_exchange_storage_contracts {
         assert!(!trace.overflow, "actual allocator journal overflowed");
         (result, trace)
     }
+    #[test]
+    #[ignore = "requires existing owned MNE1 SDK DLL; Rust host allocator success-path observation only"]
+    fn native_event_constraint_census_has_no_rust_host_allocator_operations() {
+        let path = std::path::PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_NOTE_ORACLE_PLUGIN").expect("existing owned SDK DLL"),
+        );
+        assert!(path.is_absolute() && path.is_file());
+        let mut host = crate::Vst3Host::builder()
+            .sample_rate(48_000.0)
+            .block_size(16)
+            .input_channels(2)
+            .output_channels(2)
+            .build()
+            .unwrap();
+        let plugin = host
+            .load_plugin_class(&path, "6E4F05A12D8B4C639F017B42A4C2E611")
+            .unwrap();
+        // All owners, name collection and warmed SDK/thread setup remain outside
+        // capture. The DLL's private allocator is not this Rust host journal.
+        let expected = plugin.native_event_bus_info().unwrap();
+        assert_eq!(expected.inputs.len(), 2);
+        assert!(expected.outputs.is_empty());
+        assert!(expected
+            .inputs
+            .iter()
+            .all(|row| row.name == "Note oracle events"));
+        let mut visited = 0;
+        let (result, observed) = capture(|| {
+            plugin.visit_native_event_bus_constraints(
+                &mut |direction, index, role, channels, default, active| {
+                    assert_eq!(direction, crate::audio::BusDirection::Input);
+                    assert_eq!(index, visited);
+                    let row = &expected.inputs[index];
+                    assert_eq!(
+                        (role, channels, default, active),
+                        (
+                            row.role,
+                            row.channel_count,
+                            row.default_active,
+                            row.host_active
+                        )
+                    );
+                    visited += 1;
+                    Ok(())
+                },
+            )
+        });
+        result.expect("same stopped native object primitive traversal");
+        assert_eq!(visited, 2);
+        assert_eq!(
+            observed.len, 0,
+            "current successful Rust host path only; not DLL heap or realtime safety"
+        );
+    }
+
     #[derive(Default)]
     struct Inventory {
         entries: [Allocation; 16],

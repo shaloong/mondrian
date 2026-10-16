@@ -1683,8 +1683,7 @@ impl PluginImpl {
     }
 
     fn checked_event_readiness(&self) -> std::result::Result<(), NativeEventError> {
-        self.native_event_bus_info()
-            .map(|_| ())
+        self.visit_native_event_bus_constraints(&mut |_, _, _, _, _, _| Ok(()))
             .map_err(|error| match error {
                 Error::NativeEvent(error) => error,
                 _ => NativeEventError::PreparationRequired,
@@ -2735,6 +2734,26 @@ impl PluginInternal for PluginImpl {
             return Err(Error::NativeEvent(NativeEventError::QueryWhileProcessing));
         }
         census_native_event_buses(&self.component, &self.bus_activation)
+    }
+
+    fn visit_native_event_bus_constraints(
+        &self,
+        visitor: &mut dyn FnMut(
+            crate::audio::BusDirection,
+            usize,
+            crate::audio::NativeEventBusRole,
+            usize,
+            bool,
+            bool,
+        ) -> Result<()>,
+    ) -> Result<()> {
+        if thread::current().id() != self.control_thread {
+            return Err(Error::NativeEvent(NativeEventError::WrongThread));
+        }
+        if self.is_processing {
+            return Err(Error::NativeEvent(NativeEventError::QueryWhileProcessing));
+        }
+        walk_native_event_bus_constraints(&self.component, &self.bus_activation, visitor)
     }
 
     fn process_bus_audio_with_note_events(
@@ -4789,48 +4808,127 @@ impl PluginImpl {
     }
 }
 
-fn census_native_event_buses(
+// Both consumers traverse the same live component and retained activation rows.
+// `begin` runs only after the native count and retained extent are validated:
+// the allocating collector therefore keeps its original reserve-before-get order.
+fn walk_native_event_bus_direction<T>(
     component: &ComPtr<IComponent>,
-    activation: &BusActivationState,
-) -> Result<crate::audio::NativeEventBusInfoSet> {
-    let side = |direction: crate::audio::BusDirection,
-                retained: &[EventBusActivation]|
-     -> Result<Vec<crate::audio::NativeEventBusInfo>> {
-        let native_direction = event_direction(direction);
-        // SAFETY: same live component, on the initializing thread while stopped.
-        let count = unsafe { component.getBusCount(kEvent as i32, native_direction) };
-        let count = bounded_event_count(direction, count)?;
-        if retained.len() != count {
+    direction: crate::audio::BusDirection,
+    retained: &[EventBusActivation],
+    begin: impl FnOnce(usize) -> Result<T>,
+    mut row: impl FnMut(
+        &mut T,
+        usize,
+        &BusInfo,
+        crate::audio::NativeEventBusRole,
+        usize,
+        bool,
+    ) -> Result<()>,
+) -> Result<T> {
+    let native_direction = event_direction(direction);
+    // SAFETY: same live component; the original caller owns its thread/lifecycle boundary.
+    let count = unsafe { component.getBusCount(kEvent as i32, native_direction) };
+    let count = bounded_event_count(direction, count)?;
+    if retained.len() != count {
+        return Err(Error::NativeEvent(NativeEventError::TopologyChanged {
+            direction,
+        }));
+    }
+    let mut context = begin(count)?;
+    for (index, retained) in retained.iter().enumerate() {
+        let mut info: BusInfo = unsafe { std::mem::zeroed() };
+        // SAFETY: the validated count bounds this direction-local index; BusInfo
+        // is initialized SDK output storage, borrowed only during this callback.
+        let status = unsafe {
+            component.getBusInfo(kEvent as i32, native_direction, index as i32, &mut info)
+        };
+        let (role, channel_count) = checked_event_bus_info(direction, index as i32, status, &info)?;
+        if role != retained.role || channel_count != retained.channel_count {
             return Err(Error::NativeEvent(NativeEventError::TopologyChanged {
                 direction,
             }));
         }
-        let mut result = Vec::new();
-        result
-            .try_reserve_exact(count)
-            .map_err(|_| Error::NativeEvent(NativeEventError::Allocation))?;
-        for (index, retained) in retained.iter().enumerate() {
-            let mut info: BusInfo = unsafe { std::mem::zeroed() };
-            // SAFETY: bounded native index and valid SDK output storage.
-            let status = unsafe {
-                component.getBusInfo(kEvent as i32, native_direction, index as i32, &mut info)
-            };
-            let (role, channel_count) =
-                checked_event_bus_info(direction, index as i32, status, &info)?;
-            if role != retained.role || channel_count != retained.channel_count {
-                return Err(Error::NativeEvent(NativeEventError::TopologyChanged {
+        row(
+            &mut context,
+            index,
+            &info,
+            role,
+            channel_count,
+            retained.active,
+        )?;
+    }
+    Ok(context)
+}
+
+fn walk_native_event_bus_constraints(
+    component: &ComPtr<IComponent>,
+    activation: &BusActivationState,
+    visitor: &mut dyn FnMut(
+        crate::audio::BusDirection,
+        usize,
+        crate::audio::NativeEventBusRole,
+        usize,
+        bool,
+        bool,
+    ) -> Result<()>,
+) -> Result<()> {
+    for (direction, retained) in [
+        (
+            crate::audio::BusDirection::Input,
+            activation.event_inputs.as_slice(),
+        ),
+        (
+            crate::audio::BusDirection::Output,
+            activation.event_outputs.as_slice(),
+        ),
+    ] {
+        walk_native_event_bus_direction(
+            component,
+            direction,
+            retained,
+            |_| Ok(()),
+            |_, index, info, role, channel_count, host_active| {
+                visitor(
                     direction,
-                }));
-            }
-            result.push(crate::audio::NativeEventBusInfo {
-                role,
-                name: crate::internal::utils::vst_string_to_string(&info.name),
-                channel_count,
-                default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
-                host_active: retained.active,
-            });
-        }
-        Ok(result)
+                    index,
+                    role,
+                    channel_count,
+                    info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    host_active,
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn census_native_event_buses(
+    component: &ComPtr<IComponent>,
+    activation: &BusActivationState,
+) -> Result<crate::audio::NativeEventBusInfoSet> {
+    let side = |direction, retained: &[EventBusActivation]| {
+        walk_native_event_bus_direction(
+            component,
+            direction,
+            retained,
+            |count| {
+                let mut result = Vec::<crate::audio::NativeEventBusInfo>::new();
+                result
+                    .try_reserve_exact(count)
+                    .map_err(|_| Error::NativeEvent(NativeEventError::Allocation))?;
+                Ok(result)
+            },
+            |result, _, info, role, channel_count, host_active| {
+                result.push(crate::audio::NativeEventBusInfo {
+                    role,
+                    name: crate::internal::utils::vst_string_to_string(&info.name),
+                    channel_count,
+                    default_active: info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0,
+                    host_active,
+                });
+                Ok(())
+            },
+        )
     };
     Ok(crate::audio::NativeEventBusInfoSet {
         inputs: side(crate::audio::BusDirection::Input, &activation.event_inputs)?,
@@ -4871,7 +4969,7 @@ fn activate_checked_event_bus(
 ) -> Result<()> {
     // A setter attempt invalidates this capability; the census API itself is pure.
     activation.event_readiness = None;
-    census_native_event_buses(component, activation)?;
+    walk_native_event_bus_constraints(component, activation, &mut |_, _, _, _, _, _| Ok(()))?;
     let states = match direction {
         crate::audio::BusDirection::Input => &mut activation.event_inputs,
         crate::audio::BusDirection::Output => &mut activation.event_outputs,
@@ -8082,6 +8180,8 @@ mod checked_native_note_tests {
     #[derive(Default)]
     struct ComponentObservations {
         input_counts: usize,
+        output_counts: usize,
+        metadata_queries: usize,
         bus_activations: Vec<(i32, i32, bool)>,
         component_activations: Vec<bool>,
     }
@@ -8113,10 +8213,11 @@ mod checked_native_note_tests {
         }
         unsafe fn getBusCount(&self, media: i32, direction: i32) -> i32 {
             assert_eq!(media, kEvent as i32);
+            let mut observed = self.0.observed.lock().unwrap();
             if direction != kInput as i32 {
+                observed.output_counts += 1;
                 return 0;
             }
-            let mut observed = self.0.observed.lock().unwrap();
             observed.input_counts += 1;
             if observed.input_counts == 1 {
                 2
@@ -8131,11 +8232,13 @@ mod checked_native_note_tests {
             index: i32,
             info: *mut BusInfo,
         ) -> tresult {
-            if media != kEvent as i32 || direction != kInput as i32 || !(0..2).contains(&index) {
+            self.0.observed.lock().unwrap().metadata_queries += 1;
+            if media != kEvent as i32 || direction != kInput as i32 || !(0..32).contains(&index) {
                 return kResultFalse;
             }
             let info = unsafe { &mut *info };
             *info = unsafe { std::mem::zeroed() };
+            info.name[..3].copy_from_slice(&[u16::from(b'R'), u16::from(b'o'), u16::from(b'w')]);
             info.mediaType = media;
             info.direction = direction;
             info.channelCount = self.0.channels.load(Ordering::Relaxed);
@@ -8232,6 +8335,156 @@ mod checked_native_note_tests {
                 true,
             )
         }
+    }
+
+    #[test]
+    fn primitive_event_census_matches_the_name_collector_and_preserves_zero_channels() {
+        let mut fixture = EventControl::new();
+        fixture.probe.channels.store(0, Ordering::Relaxed);
+        for row in &mut fixture.activation.event_inputs {
+            row.channel_count = 0;
+        }
+        let named = census_native_event_buses(&fixture.component, &fixture.activation).unwrap();
+        assert!(named.outputs.is_empty());
+        assert_eq!(named.inputs.len(), 2);
+        assert!(named.inputs.iter().all(|row| row.name == "Row"));
+        let mut rows = [None; 2];
+        walk_native_event_bus_constraints(
+            &fixture.component,
+            &fixture.activation,
+            &mut |direction, index, role, channels, default, active| {
+                assert_eq!(direction, crate::audio::BusDirection::Input);
+                rows[index] = Some((role, channels, default, active));
+                Ok(())
+            },
+        )
+        .unwrap();
+        for (index, row) in named.inputs.iter().enumerate() {
+            assert_eq!(
+                rows[index],
+                Some((
+                    row.role,
+                    row.channel_count,
+                    row.default_active,
+                    row.host_active
+                ))
+            );
+        }
+        let observed = fixture.probe.observed.lock().unwrap();
+        assert_eq!(
+            (
+                observed.input_counts,
+                observed.output_counts,
+                observed.metadata_queries
+            ),
+            (2, 2, 4)
+        );
+        assert!(observed.bus_activations.is_empty() && observed.component_activations.is_empty());
+    }
+
+    #[test]
+    fn primitive_event_census_callback_failure_stops_before_later_rows_or_directions() {
+        let fixture = EventControl::new();
+        let mut visits = 0;
+        let result = walk_native_event_bus_constraints(
+            &fixture.component,
+            &fixture.activation,
+            &mut |_, index, _, _, _, _| {
+                visits += 1;
+                assert_eq!(index, 0);
+                Err(Error::NotProcessing)
+            },
+        );
+        assert!(matches!(result, Err(Error::NotProcessing)));
+        assert_eq!(visits, 1);
+        let observed = fixture.probe.observed.lock().unwrap();
+        assert_eq!(
+            (
+                observed.input_counts,
+                observed.output_counts,
+                observed.metadata_queries
+            ),
+            (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn primitive_event_census_keeps_count_bounds_before_begin_and_late_topology_refusal() {
+        for count in [-1, 33] {
+            let fixture = EventControl::new();
+            fixture.probe.observed.lock().unwrap().input_counts = 1;
+            fixture
+                .probe
+                .next_input_count
+                .store(count, Ordering::Relaxed);
+            let mut began = false;
+            let result = walk_native_event_bus_direction(
+                &fixture.component,
+                crate::audio::BusDirection::Input,
+                &fixture.activation.event_inputs,
+                |_| {
+                    began = true;
+                    Ok(())
+                },
+                |_, _, _, _, _, _| panic!("invalid count cannot reach a row"),
+            );
+            assert!(
+                matches!(result, Err(Error::NativeEvent(NativeEventError::BusCount { count: actual, .. })) if actual == count)
+            );
+            assert!(!began);
+            assert_eq!(fixture.probe.observed.lock().unwrap().metadata_queries, 0);
+        }
+        for count in [0, 32] {
+            let mut fixture = EventControl::new();
+            fixture.probe.observed.lock().unwrap().input_counts = 1;
+            fixture
+                .probe
+                .next_input_count
+                .store(count, Ordering::Relaxed);
+            fixture
+                .activation
+                .event_inputs
+                .resize_with(count as usize, || EventBusActivation {
+                    role: NativeEventBusRole::Auxiliary,
+                    channel_count: 16,
+                    active: false,
+                });
+            let mut visits = 0;
+            walk_native_event_bus_constraints(
+                &fixture.component,
+                &fixture.activation,
+                &mut |direction, index, _, _, _, _| {
+                    assert_eq!(direction, crate::audio::BusDirection::Input);
+                    assert_eq!(index, visits);
+                    visits += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(visits, count as usize);
+        }
+        let mut fixture = EventControl::new();
+        fixture.activation.event_inputs[1].channel_count = 17;
+        let mut visits = 0;
+        let result = walk_native_event_bus_constraints(
+            &fixture.component,
+            &fixture.activation,
+            &mut |_, _, _, _, _, _| {
+                visits += 1;
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(Error::NativeEvent(NativeEventError::TopologyChanged {
+                direction: crate::audio::BusDirection::Input,
+            }))
+        ));
+        assert_eq!(
+            visits, 1,
+            "late failure leaves only caller-local partial results"
+        );
+        assert_eq!(fixture.probe.observed.lock().unwrap().output_counts, 0);
     }
 
     #[test]
