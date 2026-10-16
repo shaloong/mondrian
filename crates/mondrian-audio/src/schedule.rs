@@ -179,6 +179,8 @@ pub struct PreparedAudioScheduleSummary {
     pub route_count: usize,
     /// Prepared processor auxiliary buses, including unconnected silent buses.
     pub processor_auxiliary_bus_count: usize,
+    /// All additional outputs plus referenced raw Main snapshots.
+    pub processor_output_buffer_count: usize,
     /// Largest auxiliary-bus set exposed by one processor occurrence.
     pub maximum_processor_auxiliary_buses: usize,
     /// Enabled typed sidechain bindings materialized per processor occurrence.
@@ -319,6 +321,26 @@ impl PreparedAudioPlan {
         ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
     ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
         self.visit_factory_host_owned_storage(visitor)?;
+        self.schedule.visit_output_descriptor_storage(visitor)?;
+        // Only the newly introduced authored endpoint payload is inventoried here;
+        // this is not a claim to inventory all existing Program allocations.
+        for source in self
+            .program
+            .routes
+            .iter()
+            .map(|route| &route.source)
+            .chain(self.program.sidechain_routes.iter().map(|route| &route.source))
+        {
+            if let AudioRouteSource::ProcessorOutput {
+                port: mondrian_timeline::AudioProcessorOutputPort::Auxiliary { bus_key },
+                ..
+            } = source
+            {
+                visitor(crate::AudioProcessorFactoryStorageBorrow::complete(
+                    bus_key,
+                )?)?;
+            }
+        }
         self.visit_note_host_owned_storage(visitor)
     }
 
@@ -555,7 +577,15 @@ impl PreparedAudioPlan {
     pub fn session_resource_footprint(
         &self,
     ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
-        let mut footprint = session_resource_footprint(self.contract, self.schedule.summary)?;
+        let mut footprint = session_resource_footprint(
+            self.contract,
+            self.schedule.summary,
+            self.schedule.output_metadata_bytes()?,
+        )?;
+        footprint.prepared_logical_bytes = footprint
+            .prepared_logical_bytes
+            .checked_add(route_output_key_bytes(self.program.graph())?)
+            .ok_or(AudioResourceFootprintError::ExtentOverflow)?;
         footprint.prepared_logical_bytes = footprint
             .prepared_logical_bytes
             .checked_add(self.schedule.notes.storage_bytes()?)
@@ -649,6 +679,7 @@ struct PreparedLogicalShape {
     automation_curves: usize,
     automation_spans: usize,
     transition_bindings: usize,
+    route_output_key_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -672,6 +703,7 @@ impl PreparedLogicalShape {
             automation_curves: summary.automation_curve_count,
             automation_spans: summary.automation_event_span_count,
             transition_bindings: summary.transition_binding_count,
+            route_output_key_bytes: 0,
         }
     }
 
@@ -691,6 +723,8 @@ impl PreparedLogicalShape {
                 .and_then(|count| count.checked_add(1))
                 .ok_or(PreparedLogicalShapeError::ExtentOverflow)?,
             routes: program.routes.len(),
+            route_output_key_bytes: route_output_key_bytes(program)
+                .map_err(|_| PreparedLogicalShapeError::ExtentOverflow)?,
             contributions: program.contributions.len(),
             ..Self::default()
         };
@@ -779,6 +813,26 @@ impl PreparedLogicalShape {
     }
 }
 
+fn route_output_key_bytes(
+    graph: CompiledAudioGraph<'_>,
+) -> Result<usize, AudioResourceFootprintError> {
+    graph
+        .routes
+        .iter()
+        .map(|route| &route.source)
+        .chain(graph.sidechain_routes.iter().map(|route| &route.source))
+        .try_fold(0_usize, |bytes, source| {
+            let additional = match source {
+                AudioRouteSource::ProcessorOutput {
+                    port: mondrian_timeline::AudioProcessorOutputPort::Auxiliary { bus_key },
+                    ..
+                } => bus_key.capacity(),
+                _ => 0,
+            };
+            bytes.checked_add(additional).ok_or(AudioResourceFootprintError::ExtentOverflow)
+        })
+}
+
 fn prepared_logical_bytes_for_shape(
     shape: PreparedLogicalShape,
 ) -> Result<usize, AudioResourceFootprintError> {
@@ -802,12 +856,14 @@ fn prepared_logical_bytes_for_shape(
         checked_product([shape.automation_curves, PREPARED_AUTOMATION_CURVE_BYTES])?,
         checked_product([shape.automation_spans, PREPARED_AUTOMATION_SPAN_BYTES])?,
         checked_product([shape.transition_bindings, PREPARED_TRANSITION_BYTES])?,
+        shape.route_output_key_bytes,
     ])
 }
 
 fn session_resource_footprint(
     contract: AudioRenderContract,
     summary: PreparedAudioScheduleSummary,
+    output_metadata_bytes: usize,
 ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
     const PROCESSOR_INSTANCE_METADATA_BYTES: usize = 256;
     const METER_CHANNEL_STATE_BYTES: usize = 64;
@@ -857,6 +913,16 @@ fn session_resource_footprint(
         source_pcm,
         reusable_pcm,
         processor_auxiliary_pcm,
+        output_metadata_bytes,
+        checked_product([
+            summary.processor_output_buffer_count,
+            std::mem::size_of::<Vec<f32>>(),
+        ])?,
+        checked_product([
+            summary.processor_output_buffer_count,
+            block_samples,
+            std::mem::size_of::<f32>(),
+        ])?,
         processor_sidechain_lanes,
         gain_parameter_lanes,
     ])?;
@@ -919,6 +985,7 @@ pub(crate) struct PreparedAudioSchedule {
     pub(crate) contributions: Vec<PreparedContribution>,
     pub(crate) processors: Vec<PreparedProcessor>,
     pub(crate) processor_auxiliary_buses: Vec<PreparedProcessorAuxiliaryBus>,
+    pub(crate) processor_output_buses: Vec<PreparedProcessorOutputBus>,
     pub(crate) sidechain_bindings: Vec<PreparedSidechainBinding>,
     pub(crate) sidechain_sources: Vec<PreparedSidechainSource>,
     pub(crate) scopes: Vec<CompiledProcessingScope>,
@@ -1024,6 +1091,7 @@ pub(crate) struct PreparedRoute {
     pub(crate) source_slot: usize,
     pub(crate) destination_slot: usize,
     pub(crate) source_port: AudioChannelStripOutputPort,
+    pub(crate) processor_output: Option<PreparedProcessorOutputSource>,
     pub(crate) constant_gain: Option<f32>,
     pub(crate) gain_automation: Option<PreparedAutomationCurve>,
     pub(crate) compensation_delay_frames: usize,
@@ -1068,6 +1136,8 @@ pub(crate) struct PreparedProcessor {
     pub(crate) main_compensation_delay_frames: usize,
     pub(crate) input_signal_delay_frames: usize,
     pub(crate) auxiliary_buses: Range<usize>,
+    pub(crate) output_buses: Range<usize>,
+    pub(crate) main_output_buffer: Option<usize>,
     pub(crate) factory: PreparedProcessorFactoryBinding,
 }
 
@@ -1089,6 +1159,19 @@ pub(crate) struct PreparedSidechainBinding {
 pub(crate) struct PreparedSidechainSource {
     pub(crate) node_slot: usize,
     pub(crate) port: AudioChannelStripOutputPort,
+    pub(crate) processor_output: Option<PreparedProcessorOutputSource>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedProcessorOutputBus {
+    pub(crate) bus_key: String,
+    pub(crate) buffer_slot: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PreparedProcessorOutputSource {
+    pub(crate) processor_slot: usize,
+    pub(crate) buffer_slot: usize,
 }
 
 /// One author curve lowered into exact sample-grid event spans.
@@ -1197,6 +1280,43 @@ pub(crate) enum PreparedTransitionDirection {
 }
 
 impl PreparedAudioSchedule {
+    fn visit_output_descriptor_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        use crate::AudioProcessorFactoryStorageBorrow as Storage;
+        visitor(Storage::complete(&self.processor_output_buses)?)?;
+        for bus in &self.processor_output_buses {
+            visitor(Storage::complete(&bus.bus_key)?)?;
+        }
+        Ok(())
+    }
+
+    // Query current owners, not cached byte counts: Vec/String Clone may shrink
+    // spare capacity and native-author seeds can retain equal values in new storage.
+    pub(crate) fn output_metadata_bytes(&self) -> Result<usize, AudioResourceFootprintError> {
+        let mut bytes = 0_usize;
+        let mut visitor = |owner: crate::AudioProcessorFactoryStorageBorrow<'_>| {
+            bytes = bytes.checked_add(owner.layout().size()).ok_or(
+                crate::AudioProcessorFactoryStorageError::Owner(
+                    crate::NativeHostLedgerError::ExtentOverflow,
+                ),
+            )?;
+            Ok(())
+        };
+        for processor in &self.processors {
+            processor
+                .factory
+                .visit_auxiliary_output_storage(&mut visitor)
+                .map_err(|_| AudioResourceFootprintError::ExtentOverflow)?;
+        }
+        self.visit_output_descriptor_storage(&mut visitor)
+            .map_err(|_| AudioResourceFootprintError::ExtentOverflow)?;
+        Ok(bytes)
+    }
+
     fn build(
         program: &CompiledAudioProgram,
         contract: AudioRenderContract,
@@ -1576,6 +1696,37 @@ impl PreparedAudioSchedule {
             node.contributions = start..contribution_cursor;
         }
 
+        let mut processor_output_buses = Vec::new();
+        let mut processor_output_buffer_count = 0_usize;
+        for processor in &mut processors {
+            let start = processor_output_buses.len();
+            for bus in &processor.factory.auxiliary_outputs().buses {
+                let buffer_slot = processor_output_buffer_count;
+                processor_output_buffer_count =
+                    processor_output_buffer_count.checked_add(1).ok_or_else(|| {
+                        AudioCompileError::InvalidPreparedGraph(
+                            "output buffer extent overflowed".to_owned(),
+                        )
+                    })?;
+                processor_output_buses
+                    .push(PreparedProcessorOutputBus { bus_key: bus.bus_key.clone(), buffer_slot });
+            }
+            processor.output_buses = start..processor_output_buses.len();
+            if program.routes.iter().map(|route| &route.source).chain(program.sidechain_routes.iter().map(|route| &route.source)).any(|source| matches!(source,
+                AudioRouteSource::ProcessorOutput { processor_id, port: mondrian_timeline::audio::AudioProcessorOutputPort::Main } if *processor_id == processor.occurrence.instance_id)) {
+                processor.main_output_buffer = Some(processor_output_buffer_count);
+                processor_output_buffer_count = processor_output_buffer_count.checked_add(1)
+                    .ok_or_else(|| AudioCompileError::InvalidPreparedGraph("output buffer extent overflowed".to_owned()))?;
+            }
+        }
+        // Resolve borrowed descriptors before mutating node incoming ranges.
+        let source_bindings = program
+            .routes
+            .iter()
+            .map(|route| {
+                prepared_source(&route.source, &nodes, &processors, &processor_output_buses)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut routes = Vec::with_capacity(program.routes.len());
         for (destination_slot, node) in nodes.iter_mut().enumerate() {
             let start = routes.len();
@@ -1587,28 +1738,15 @@ impl PreparedAudioSchedule {
                 }
             };
             if let Some(destination) = destination {
-                for route in program.routes.iter().filter(|route| route.destination == destination)
+                for (binding_index, route) in program
+                    .routes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, route)| route.destination == destination)
                 {
-                    let (source_slot, source_port) = match route.source {
-                        AudioRouteSource::Track { track_id, port } => (
-                            track_slots.get(&track_id).copied().ok_or_else(|| {
-                                AudioCompileError::InvalidPreparedGraph(format!(
-                                    "Route {} references missing Track {track_id}",
-                                    route.id
-                                ))
-                            })?,
-                            port,
-                        ),
-                        AudioRouteSource::Bus { bus_id, port } => (
-                            bus_slots.get(&bus_id).copied().ok_or_else(|| {
-                                AudioCompileError::InvalidPreparedGraph(format!(
-                                    "Route {} references missing Bus {bus_id}",
-                                    route.id
-                                ))
-                            })?,
-                            port,
-                        ),
-                    };
+                    let source = source_bindings[binding_index];
+                    let source_slot = source.node_slot;
+                    let source_port = source.port;
                     if source_slot >= destination_slot {
                         return Err(AudioCompileError::InvalidPreparedGraph(format!(
                             "Route {} violates the prepared topological order",
@@ -1624,6 +1762,7 @@ impl PreparedAudioSchedule {
                         source_slot,
                         destination_slot,
                         source_port,
+                        processor_output: source.processor_output,
                         constant_gain: gain_automation
                             .is_none()
                             .then(|| crate::dsp::db_to_linear(route.gain_db)),
@@ -1646,7 +1785,8 @@ impl PreparedAudioSchedule {
         let mut sidechain_sources = Vec::new();
         let mut sidechain_source_slots = BTreeMap::new();
         let mut matched_sidechain_routes = BTreeSet::new();
-        for processor in &mut processors {
+        for processor_index in 0..processors.len() {
+            let processor = &processors[processor_index];
             let auxiliary_contract = processor.factory.auxiliary_inputs().clone();
             let auxiliary_start = processor_auxiliary_buses.len();
             for bus in auxiliary_contract.buses {
@@ -1655,22 +1795,14 @@ impl PreparedAudioSchedule {
                     route.processor_id == processor.occurrence.instance_id
                         && route.bus_key == bus.bus_key
                 }) {
-                    let source_slot = match route.source {
-                        AudioRouteSource::Track { track_id, .. } => {
-                            track_slots.get(&track_id).copied()
-                        }
-                        AudioRouteSource::Bus { bus_id, .. } => bus_slots.get(&bus_id).copied(),
-                    }
-                    .ok_or_else(|| {
-                        AudioCompileError::InvalidPreparedGraph(format!(
-                            "sidechain Route {} source is outside the selected Signal Closure",
-                            route.id
-                        ))
-                    })?;
-                    let source_port = match route.source {
-                        AudioRouteSource::Track { port, .. }
-                        | AudioRouteSource::Bus { port, .. } => port,
-                    };
+                    let source = prepared_source(
+                        &route.source,
+                        &nodes,
+                        &processors,
+                        &processor_output_buses,
+                    )?;
+                    let source_slot = source.node_slot;
+                    let source_port = source.port;
                     let target_slot = processor_target_node_slot(
                         processor,
                         &contributions,
@@ -1697,12 +1829,13 @@ impl PreparedAudioSchedule {
                         )));
                     }
                     let source_buffer_slot = *sidechain_source_slots
-                        .entry((source_slot, source_port))
+                        .entry((source_slot, source_port, source.processor_output))
                         .or_insert_with(|| {
                             let slot = sidechain_sources.len();
                             sidechain_sources.push(PreparedSidechainSource {
                                 node_slot: source_slot,
                                 port: source_port,
+                                processor_output: source.processor_output,
                             });
                             slot
                         });
@@ -1726,7 +1859,8 @@ impl PreparedAudioSchedule {
                     bindings: binding_start..sidechain_bindings.len(),
                 });
             }
-            processor.auxiliary_buses = auxiliary_start..processor_auxiliary_buses.len();
+            processors[processor_index].auxiliary_buses =
+                auxiliary_start..processor_auxiliary_buses.len();
         }
         if matched_sidechain_routes.len() != program.sidechain_routes.len() {
             let missing = program
@@ -1883,6 +2017,7 @@ impl PreparedAudioSchedule {
                 .sum(),
             route_count: routes.len(),
             processor_auxiliary_bus_count: processor_auxiliary_buses.len(),
+            processor_output_buffer_count,
             maximum_processor_auxiliary_buses: processors
                 .iter()
                 .map(|processor| processor.auxiliary_buses.len())
@@ -1924,6 +2059,7 @@ impl PreparedAudioSchedule {
             contributions,
             processors,
             processor_auxiliary_buses,
+            processor_output_buses,
             sidechain_bindings,
             sidechain_sources,
             scopes,
@@ -1932,6 +2068,87 @@ impl PreparedAudioSchedule {
             summary,
         })
     }
+}
+
+fn source_channel(
+    source: &AudioRouteSource,
+    nodes: &[PreparedNode],
+) -> Result<(PreparedNodeOrigin, AudioChannelStripOutputPort), AudioCompileError> {
+    match source {
+        AudioRouteSource::Track { track_id, port } => {
+            Ok((PreparedNodeOrigin::Track(*track_id), *port))
+        }
+        AudioRouteSource::Bus { bus_id, port } => Ok((PreparedNodeOrigin::Bus(*bus_id), *port)),
+        AudioRouteSource::ProcessorOutput { processor_id, .. } => {
+            for node in nodes
+                .iter()
+                .filter(|node| !matches!(node.origin, PreparedNodeOrigin::Output(_)))
+            {
+                for (rack, port) in [
+                    (&node.strip.pre_fader, AudioChannelStripOutputPort::PreFader),
+                    (
+                        &node.strip.post_fader,
+                        AudioChannelStripOutputPort::PostFaderPreMute,
+                    ),
+                ] {
+                    if compiled_rack_contains_processor(rack, *processor_id) {
+                        return Ok((node.origin, port));
+                    }
+                }
+            }
+            Err(AudioCompileError::InvalidPreparedGraph(format!(
+                "processor output source {processor_id} is not an active Track/Bus rack occurrence"
+            )))
+        }
+    }
+}
+
+fn prepared_source(
+    source: &AudioRouteSource,
+    nodes: &[PreparedNode],
+    processors: &[PreparedProcessor],
+    outputs: &[PreparedProcessorOutputBus],
+) -> Result<PreparedSidechainSource, AudioCompileError> {
+    let (origin, port) = source_channel(source, nodes)?;
+    let invalid = || {
+        AudioCompileError::InvalidPreparedGraph(
+            "processor output key or occurrence is absent from the prepared contract".to_owned(),
+        )
+    };
+    let node_slot = nodes.iter().position(|node| node.origin == origin).ok_or_else(invalid)?;
+    let processor_output = if let AudioRouteSource::ProcessorOutput { processor_id, port } = source
+    {
+        let processor_slot = processors
+            .iter()
+            .position(|processor| {
+                processor.occurrence.instance_id == *processor_id
+                    && matches!(
+                        processor.occurrence.owner,
+                        AudioProcessorOccurrenceOwner::Track(_)
+                            | AudioProcessorOccurrenceOwner::Bus(_)
+                    )
+            })
+            .ok_or_else(invalid)?;
+        let processor = &processors[processor_slot];
+        let buffer_slot = match port {
+            mondrian_timeline::audio::AudioProcessorOutputPort::Main => {
+                processor.main_output_buffer.ok_or_else(invalid)?
+            }
+            mondrian_timeline::audio::AudioProcessorOutputPort::Auxiliary { bus_key } => {
+                outputs
+                    .get(processor.output_buses.clone())
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .find(|bus| bus.bus_key == *bus_key)
+                    .ok_or_else(invalid)?
+                    .buffer_slot
+            }
+        };
+        Some(PreparedProcessorOutputSource { processor_slot, buffer_slot })
+    } else {
+        None
+    };
+    Ok(PreparedSidechainSource { node_slot, port, processor_output })
 }
 
 fn prepared_main_path_order(
@@ -1967,10 +2184,7 @@ fn prepared_main_path_order(
         Ok(())
     };
     for route in &program.routes {
-        let source = match route.source {
-            AudioRouteSource::Track { track_id, .. } => PreparedNodeOrigin::Track(track_id),
-            AudioRouteSource::Bus { bus_id, .. } => PreparedNodeOrigin::Bus(bus_id),
-        };
+        let (source, _) = source_channel(&route.source, nodes)?;
         let destination = match route.destination {
             AudioRouteDestination::Bus(bus_id) => PreparedNodeOrigin::Bus(bus_id),
             AudioRouteDestination::Output(output_id) => PreparedNodeOrigin::Output(output_id),
@@ -2021,13 +2235,8 @@ fn prepared_execution_order(
         );
         outgoing.insert((slot, AudioChannelSignalStage::PostFader), BTreeSet::new());
     }
-    let source_stage = |source: AudioRouteSource| {
-        let (origin, port) = match source {
-            AudioRouteSource::Track { track_id, port } => {
-                (PreparedNodeOrigin::Track(track_id), port)
-            }
-            AudioRouteSource::Bus { bus_id, port } => (PreparedNodeOrigin::Bus(bus_id), port),
-        };
+    let source_stage = |source: &AudioRouteSource| {
+        let (origin, port) = source_channel(source, nodes)?;
         slots
             .get(&origin)
             .copied()
@@ -2049,7 +2258,7 @@ fn prepared_execution_order(
             )
         })?;
         outgoing
-            .entry(source_stage(route.source)?)
+            .entry(source_stage(&route.source)?)
             .or_default()
             .insert((slot, AudioChannelSignalStage::PreFader));
     }
@@ -2089,7 +2298,7 @@ fn prepared_execution_order(
                 "sidechain target outside selected closure".to_owned(),
             ));
         }
-        outgoing.entry(source_stage(route.source)?).or_default().extend(targets);
+        outgoing.entry(source_stage(&route.source)?).or_default().extend(targets);
     }
     let mut indegree = outgoing
         .keys()
@@ -2231,6 +2440,8 @@ fn prepare_rack(
             main_compensation_delay_frames: 0,
             input_signal_delay_frames: 0,
             auxiliary_buses: 0..0,
+            output_buses: 0..0,
+            main_output_buffer: None,
             factory,
         });
         algorithmic_latency_frames = algorithmic_latency_frames

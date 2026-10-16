@@ -32,6 +32,7 @@ use std::sync::Arc;
 pub(crate) struct PreparedProcessorFactoryBinding {
     contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
+    auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract,
     note_inputs: crate::AudioProcessorNoteInputContract,
     factory: Arc<dyn AudioProcessorFactory>,
 }
@@ -50,6 +51,10 @@ impl PreparedProcessorFactoryBinding {
             factory.auxiliary_input_contract()
         })?;
         auxiliary_inputs.validate(render_contract.channel_layout)?;
+        let auxiliary_outputs = isolate_adapter_value("auxiliary-output contract query", || {
+            factory.auxiliary_output_contract()
+        })?;
+        auxiliary_outputs.validate(render_contract.channel_layout)?;
         let note_inputs = isolate_adapter_value("Note input contract query", || {
             factory.note_input_contract()
         })?;
@@ -59,7 +64,13 @@ impl PreparedProcessorFactoryBinding {
                 "processor does not admit {mode:?} execution"
             )));
         }
-        Ok(Self { contract, auxiliary_inputs, note_inputs, factory })
+        Ok(Self {
+            contract,
+            auxiliary_inputs,
+            auxiliary_outputs,
+            note_inputs,
+            factory,
+        })
     }
 
     pub(crate) fn visit_host_owned_storage<'a>(
@@ -74,6 +85,7 @@ impl PreparedProcessorFactoryBinding {
         for bus in &self.auxiliary_inputs.buses {
             visitor(Storage::complete(&bus.bus_key)?)?;
         }
+        self.visit_auxiliary_output_storage(visitor)?;
         visitor(Storage::complete(&self.note_inputs.ports)?)?;
         for port in &self.note_inputs.ports {
             visitor(Storage::complete(&port.port_key)?)?;
@@ -83,12 +95,30 @@ impl PreparedProcessorFactoryBinding {
         })?
     }
 
+    pub(crate) fn visit_auxiliary_output_storage<'a>(
+        &'a self,
+        visitor: &mut dyn FnMut(
+            crate::AudioProcessorFactoryStorageBorrow<'a>,
+        ) -> Result<(), crate::AudioProcessorFactoryStorageError>,
+    ) -> Result<(), crate::AudioProcessorFactoryStorageError> {
+        use crate::AudioProcessorFactoryStorageBorrow as Storage;
+        visitor(Storage::complete(&self.auxiliary_outputs.buses)?)?;
+        for bus in &self.auxiliary_outputs.buses {
+            visitor(Storage::complete(&bus.bus_key)?)?;
+        }
+        Ok(())
+    }
+
     pub(crate) const fn contract(&self) -> AudioProcessorExecutionContract {
         self.contract
     }
 
     pub(crate) fn auxiliary_inputs(&self) -> &AudioProcessorAuxiliaryInputContract {
         &self.auxiliary_inputs
+    }
+
+    pub(crate) fn auxiliary_outputs(&self) -> &crate::AudioProcessorAuxiliaryOutputContract {
+        &self.auxiliary_outputs
     }
 
     pub(crate) fn note_inputs(&self) -> &crate::AudioProcessorNoteInputContract {
@@ -124,12 +154,17 @@ impl PreparedProcessorFactoryBinding {
         let auxiliary_inputs = isolate_adapter_value("native seed auxiliary-input query", || {
             factory.auxiliary_input_contract()
         })?;
+        let auxiliary_outputs =
+            isolate_adapter_value("native seed auxiliary-output query", || {
+                factory.auxiliary_output_contract()
+            })?;
         let note_inputs = isolate_adapter_value("native seed Note-input query", || {
             factory.note_input_contract()
         })?;
         note_inputs.validate()?;
         if contract != self.contract
             || auxiliary_inputs != self.auxiliary_inputs
+            || auxiliary_outputs != self.auxiliary_outputs
             || note_inputs != self.note_inputs
         {
             return Err(AudioProcessorHostError::InvalidContract(
@@ -146,7 +181,13 @@ impl PreparedProcessorFactoryBinding {
                 "native state seed changed the prepared auxiliary-input names".to_owned(),
             ));
         }
-        Ok(Self { contract, auxiliary_inputs, note_inputs, factory })
+        Ok(Self {
+            contract,
+            auxiliary_inputs,
+            auxiliary_outputs,
+            note_inputs,
+            factory,
+        })
     }
 
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
@@ -166,6 +207,16 @@ impl PreparedProcessorFactoryBinding {
         if current_auxiliary_inputs != self.auxiliary_inputs {
             return Err(AudioProcessorHostError::InvalidContract(
                 "prepared factory changed its auxiliary-input contract before Session creation"
+                    .to_owned(),
+            ));
+        }
+        let current_auxiliary_outputs =
+            isolate_adapter_value("auxiliary-output contract revalidation", || {
+                self.factory.auxiliary_output_contract()
+            })?;
+        if current_auxiliary_outputs != self.auxiliary_outputs {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "prepared factory changed its auxiliary-output contract before Session creation"
                     .to_owned(),
             ));
         }
@@ -189,6 +240,7 @@ impl fmt::Debug for PreparedProcessorFactoryBinding {
             .debug_struct("PreparedProcessorFactoryBinding")
             .field("contract", &self.contract)
             .field("auxiliary_inputs", &self.auxiliary_inputs)
+            .field("auxiliary_outputs", &self.auxiliary_outputs)
             .field("note_inputs", self.note_inputs())
             .finish_non_exhaustive()
     }
@@ -201,6 +253,8 @@ struct MainBusAudioIo<'a> {
     auxiliary_buses: &'a [PreparedProcessorAuxiliaryBus],
     auxiliary_pcm: &'a [f32],
     notes: Option<NoteBlockIo<'a>>,
+    output_buses: &'a [crate::schedule::PreparedProcessorOutputBus],
+    output_pcm: &'a mut [Vec<f32>],
 }
 
 struct NoteBlockIo<'a> {
@@ -238,6 +292,17 @@ impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
 
     fn main_interleaved(&mut self) -> &mut [f32] {
         self.pcm
+    }
+
+    fn auxiliary_output(&mut self, bus_key: &str) -> Option<crate::AudioProcessorOutputBus<'_>> {
+        let bus = self.output_buses.iter().find(|bus| bus.bus_key == bus_key)?;
+        let samples = self.frames.checked_mul(self.channel_layout.channel_count())?;
+        Some(crate::AudioProcessorOutputBus {
+            bus_key: &bus.bus_key,
+            channel_layout: self.channel_layout,
+            frames: self.frames,
+            interleaved: self.output_pcm.get_mut(bus.buffer_slot)?.get_mut(..samples)?,
+        })
     }
 
     fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>> {
@@ -1209,6 +1274,12 @@ impl PreparedProcessorHost {
         self.session_scratch_bytes
     }
 
+    pub(crate) fn has_failed_instance(&self) -> bool {
+        self.instances
+            .iter()
+            .any(|instance| matches!(instance.continuity, HostedProcessorContinuity::Failed))
+    }
+
     pub(crate) fn preflight_native_control(
         &mut self,
     ) -> Result<
@@ -1344,6 +1415,8 @@ impl PreparedProcessorHost {
         processors: &[PreparedProcessor],
         score: &crate::schedule::PreparedNoteScore,
         processor_auxiliary_buses: &[PreparedProcessorAuxiliaryBus],
+        processor_output_buses: &[crate::schedule::PreparedProcessorOutputBus],
+        output_pcm: &mut [Vec<f32>],
         sidechain_bindings: &[PreparedSidechainBinding],
         request: AudioRenderRequest,
         sample_rate: AudioSampleRate,
@@ -1490,6 +1563,16 @@ impl PreparedProcessorHost {
                 instance.continuity = HostedProcessorContinuity::Failed;
                 return Err(error.into());
             }
+            let output_buses = processor_output_buses
+                .get(processor.output_buses.clone())
+                .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            for bus in output_buses {
+                output_pcm
+                    .get_mut(bus.buffer_slot)
+                    .and_then(|pcm| pcm.get_mut(..expected_samples))
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+                    .fill(0.0);
+            }
             let result = {
                 let note_io = instance.notes.as_mut().map(|state| NoteBlockIo {
                     inputs: &state.inputs,
@@ -1505,6 +1588,8 @@ impl PreparedProcessorHost {
                     auxiliary_buses,
                     auxiliary_pcm: &auxiliary_pcm[..auxiliary_samples],
                     notes: note_io,
+                    output_buses,
+                    output_pcm,
                 };
                 isolate_adapter_call("block processing", || {
                     instance.processor.process(context, &mut audio, batch)
@@ -1520,6 +1605,13 @@ impl PreparedProcessorHost {
             {
                 instance.continuity = HostedProcessorContinuity::Failed;
                 return Err(error.into());
+            }
+            if let Some(slot) = processor.main_output_buffer {
+                output_pcm
+                    .get_mut(slot)
+                    .and_then(|output| output.get_mut(..expected_samples))
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+                    .copy_from_slice(pcm);
             }
             if let HostedProcessorContinuity::Active { epoch, .. } = instance.continuity {
                 let next_sample = signal_request

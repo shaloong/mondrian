@@ -370,6 +370,8 @@ fn owned_processors(
                 main_compensation_delay_frames: 0,
                 input_signal_delay_frames: 0,
                 auxiliary_buses: 0..0,
+                output_buses: 0..0,
+                main_output_buffer: None,
                 factory,
             }
         })

@@ -118,9 +118,11 @@ pub(crate) fn solve_prepared_latency(
                             PreparedSidechainSource {
                                 node_slot: route.source_slot,
                                 port: route.source_port,
+                                processor_output: route.processor_output,
                             },
                             &node_latencies,
                             &published,
+                            graph.processors,
                         )?);
                     }
                     for (index, route) in node.incoming.clone().zip(incoming) {
@@ -129,9 +131,11 @@ pub(crate) fn solve_prepared_latency(
                                 PreparedSidechainSource {
                                     node_slot: route.source_slot,
                                     port: route.source_port,
+                                    processor_output: route.processor_output,
                                 },
                                 &node_latencies,
                                 &published,
+                                graph.processors,
                             )?;
                     }
                     maximum
@@ -195,12 +199,21 @@ fn source_arrival(
     source: PreparedSidechainSource,
     latencies: &[PreparedNodeLatency],
     published: &[[bool; 2]],
+    processors: &[PreparedProcessor],
 ) -> Result<usize, &'static str> {
     let stage = usize::from(
         AudioChannelSignalStage::producing(source.port) == AudioChannelSignalStage::PostFader,
     );
     if !published.get(source.node_slot).ok_or("latency source is unavailable")?[stage] {
         return Err("latency source stage has not been produced");
+    }
+    if let Some(output) = source.processor_output {
+        let processor =
+            processors.get(output.processor_slot).ok_or("output processor is unavailable")?;
+        return processor
+            .input_signal_delay_frames
+            .checked_add(processor.factory.contract().algorithmic_latency_frames())
+            .ok_or("processor output latency overflowed");
     }
     Ok(latencies
         .get(source.node_slot)
@@ -220,10 +233,11 @@ fn solve_rack(
     published: &[[bool; 2]],
 ) -> Result<usize, &'static str> {
     let mut arrival = input;
-    for processor in processors
-        .get_mut(rack.processors.clone())
-        .ok_or("latency processor range is invalid")?
-    {
+    if rack.processors.end > processors.len() {
+        return Err("latency processor range is invalid");
+    }
+    for processor_index in rack.processors.clone() {
+        let processor = &processors[processor_index];
         let buses = auxiliary_buses
             .get(processor.auxiliary_buses.clone())
             .ok_or("latency auxiliary range is invalid")?;
@@ -238,11 +252,11 @@ fn solve_rack(
                         .ok_or("latency source buffer is unavailable")?,
                     latencies,
                     published,
+                    processors,
                 )?);
             }
         }
-        processor.main_compensation_delay_frames = aligned - arrival;
-        processor.input_signal_delay_frames = aligned;
+        let latency = processor.factory.contract().algorithmic_latency_frames();
         for bus in buses {
             for binding in bindings
                 .get_mut(bus.bindings.clone())
@@ -255,12 +269,14 @@ fn solve_rack(
                             .ok_or("latency source buffer is unavailable")?,
                         latencies,
                         published,
+                        processors,
                     )?;
             }
         }
-        arrival = aligned
-            .checked_add(processor.factory.contract().algorithmic_latency_frames())
-            .ok_or("processor signal latency overflowed")?;
+        let processor = &mut processors[processor_index];
+        processor.main_compensation_delay_frames = aligned - arrival;
+        processor.input_signal_delay_frames = aligned;
+        arrival = aligned.checked_add(latency).ok_or("processor signal latency overflowed")?;
     }
     rack.algorithmic_latency_frames = arrival - input;
     Ok(arrival)
@@ -508,6 +524,7 @@ mod tests {
             source_slot: output,
             destination_slot: output,
             source_port: AudioChannelStripOutputPort::PostMute,
+            processor_output: None,
             constant_gain: Some(1.0),
             gain_automation: None,
             compensation_delay_frames: 0,

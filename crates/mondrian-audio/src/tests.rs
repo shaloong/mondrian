@@ -31,6 +31,9 @@ mod note_model_tests;
 #[path = "tests/prepared_admission.rs"]
 mod prepared_admission_tests;
 
+#[path = "tests/processor_outputs.rs"]
+pub(crate) mod processor_output_tests;
+
 #[derive(Default)]
 struct RampSource {
     block_reads: usize,
@@ -1423,6 +1426,7 @@ fn clip_track_bus_output_math_is_unclipped_and_block_invariant() {
             channel_mix_coefficient_count: 1,
             route_count: 2,
             processor_auxiliary_bus_count: 0,
+            processor_output_buffer_count: 0,
             maximum_processor_auxiliary_buses: 0,
             sidechain_binding_count: 0,
             sidechain_source_count: 0,

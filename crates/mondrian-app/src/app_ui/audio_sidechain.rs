@@ -74,13 +74,13 @@ pub(crate) fn retained_routes(
             SidechainRouteModel {
                 scalar_target: None,
                 route_id: route.id,
-                source: route.source,
-                source_label: source_label(sequence, route.source, localizer),
+                source: route.source.clone(),
+                source_label: source_label(sequence, &route.source, localizer),
                 rewire_options: Vec::new(),
                 bus_key: route.bus_key.clone(),
                 label: format!(
                     "{} → {}",
-                    source_label(sequence, route.source, localizer),
+                    source_label(sequence, &route.source, localizer),
                     route.bus_key
                 ),
                 enabled: route.enabled,
@@ -145,7 +145,7 @@ pub(crate) fn input_options(
         }))
         .filter(|source| {
             admission.is_some_and(|admission| {
-                admission.allows_processor_sidechain_addition(*source, binding.processor_id)
+                admission.allows_processor_sidechain_addition(source.clone(), binding.processor_id)
             })
         })
         .collect::<Vec<_>>();
@@ -162,10 +162,10 @@ pub(crate) fn input_options(
             options: sources
                 .iter()
                 .map(|source| SidechainCreateOption {
-                    label: source_label(sequence, *source, localizer),
+                    label: source_label(sequence, source, localizer),
                     payload: crate::app::product_action::AudioProcessorInputConnectionPayload {
                         binding,
-                        source: *source,
+                        source: source.clone(),
                         bus_key: bus.bus_key.clone(),
                     },
                 })
@@ -191,7 +191,7 @@ pub(crate) fn bind_rewire_options(
                     payload: crate::app::product_action::AudioProcessorInputRewirePayload {
                         connection: option.payload.clone(),
                         route_id: route.route_id,
-                        expected_source: route.source,
+                        expected_source: route.source.clone(),
                     },
                 })
                 .collect()
@@ -220,7 +220,7 @@ pub(crate) fn bind_retained_input_names(
     for route in routes {
         route.label = format!(
             "{} → {}",
-            source_label(sequence, route.source, localizer),
+            source_label(sequence, &route.source, localizer),
             input_label(&route.bus_key, inputs, names)
         );
     }
@@ -253,10 +253,18 @@ fn input_label(
     }
 }
 
-fn source_label(sequence: &Sequence, source: AudioRouteSource, localizer: &Localizer) -> String {
+fn source_label(sequence: &Sequence, source: &AudioRouteSource, localizer: &Localizer) -> String {
+    if let AudioRouteSource::ProcessorOutput { processor_id, port } = source {
+        return match port {
+            mondrian_timeline::AudioProcessorOutputPort::Main => format!("{processor_id} · Main"),
+            mondrian_timeline::AudioProcessorOutputPort::Auxiliary { bus_key } => {
+                format!("{processor_id} · {bus_key}")
+            }
+        };
+    }
     let (name, port, is_bus) = match source {
         AudioRouteSource::Track { track_id, port } => (
-            sequence.audio_tracks.iter().find(|track| track.id == track_id).map_or_else(
+            sequence.audio_tracks.iter().find(|track| track.id == *track_id).map_or_else(
                 || {
                     localizer.format_text(
                         "audio-sidechain-missing-track",
@@ -270,7 +278,7 @@ fn source_label(sequence: &Sequence, source: AudioRouteSource, localizer: &Local
             false,
         ),
         AudioRouteSource::Bus { bus_id, port } => (
-            sequence.audio_program.buses.iter().find(|bus| bus.id == bus_id).map_or_else(
+            sequence.audio_program.buses.iter().find(|bus| bus.id == *bus_id).map_or_else(
                 || {
                     localizer.format_text(
                         "audio-mixer-missing-bus",
@@ -283,8 +291,9 @@ fn source_label(sequence: &Sequence, source: AudioRouteSource, localizer: &Local
             port,
             true,
         ),
+        AudioRouteSource::ProcessorOutput { .. } => unreachable!("raw output handled above"),
     };
-    let port = localizer.text(match (port, is_bus) {
+    let port = localizer.text(match (*port, is_bus) {
         (AudioChannelStripOutputPort::PreFader, _) => "audio-mixer-port-prefader",
         (AudioChannelStripOutputPort::PostFaderPreMute, false) => {
             "audio-mixer-port-postfader-premute"
@@ -376,7 +385,7 @@ mod tests {
             TimelineTime,
         };
         let (mut sequence, id, source) = fixture();
-        let mut route = AudioProcessorSidechainRoute::new(source, id, "native.absent");
+        let mut route = AudioProcessorSidechainRoute::new(source.clone(), id, "native.absent");
         let route_id = route.id;
         let mut curve = ExactAutomationCurve::new(
             ParameterId::new_static(mondrian_timeline::audio::ROUTE_GAIN_DB_PARAMETER_ID),
@@ -458,8 +467,8 @@ mod tests {
     #[test]
     fn sidechain_controls_preserve_multiple_disabled_and_unavailable_bus_routes() {
         let (mut sequence, id, source) = fixture();
-        let first = AudioProcessorSidechainRoute::new(source, id, "native.absent");
-        let mut second = AudioProcessorSidechainRoute::new(source, id, "native.absent");
+        let first = AudioProcessorSidechainRoute::new(source.clone(), id, "native.absent");
+        let mut second = AudioProcessorSidechainRoute::new(source.clone(), id, "native.absent");
         second.enabled = false;
         sequence.audio_program.sidechain_routes.extend([first, second]);
         for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {
@@ -522,7 +531,7 @@ mod tests {
         for _ in 0..2 {
             state
                 .dispatch_action(edit_action(AudioRoutingEdit::CreateProcessorSidechain {
-                    source,
+                    source: source.clone(),
                     processor_id: id,
                     bus_key: "native.absent".into(),
                 }))
@@ -621,10 +630,10 @@ mod tests {
         assert_eq!(options.len(), 1);
         assert!(!options[0].options.is_empty());
         for option in &options[0].options {
-            let source = option.payload.source;
+            let source = option.payload.source.clone();
             assert_eq!(option.payload.binding, binding);
             assert_eq!(option.payload.bus_key, "detector.7");
-            assert!(admission.allows_processor_sidechain_addition(source, id));
+            assert!(admission.allows_processor_sidechain_addition(source.clone(), id));
             assert!(
                 !matches!(source, AudioRouteSource::Track { track_id, .. } if track_id == sequence.audio_tracks[0].id)
             );
@@ -643,13 +652,14 @@ mod tests {
     #[test]
     fn retained_source_options_require_editable_current_port_and_preserve_route_identity() {
         let (mut sequence, id, source) = fixture();
-        let route = AudioProcessorSidechainRoute::new(source, id, "detector.7");
+        let route = AudioProcessorSidechainRoute::new(source.clone(), id, "detector.7");
         let route_id = route.id;
         sequence.audio_program.sidechain_routes.push(route);
-        sequence
-            .audio_program
-            .sidechain_routes
-            .push(AudioProcessorSidechainRoute::new(source, id, "missing"));
+        sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            source.clone(),
+            id,
+            "missing",
+        ));
         let mut state = AppState::new();
         state.test_set_sequence(Some(sequence.clone()));
         let binding = crate::app::product_action::AudioProcessorInputBinding {
@@ -741,7 +751,7 @@ mod tests {
         sequence.audio_program.sidechain_routes.extend(
             keys.iter()
                 .chain([&"missing"])
-                .map(|key| AudioProcessorSidechainRoute::new(source, id, *key)),
+                .map(|key| AudioProcessorSidechainRoute::new(source.clone(), id, *key)),
         );
         let before = serde_json::to_value(&sequence).expect("author snapshot");
         for locale in [AppUiLocale::EnUs, AppUiLocale::ZhCn, AppUiLocale::Pseudo] {

@@ -82,6 +82,10 @@ impl AudioRenderSession {
         for buffer in &self.sidechain_source_buffers {
             visitor(Storage::complete(buffer)?)?;
         }
+        visitor(Storage::complete(&self.processor_output_buffers)?)?;
+        for buffer in &self.processor_output_buffers {
+            visitor(Storage::complete(buffer)?)?;
+        }
         self.processor_host.visit_state_entry_storage(visitor)?;
         self.meter_bank.visit_host_storage(visitor)
     }
@@ -130,5 +134,75 @@ impl AudioRenderSession {
         proposal: &mondrian_core::NativeAudioAuthorProposal,
     ) -> bool {
         self.processor_host.retains_parameter_author(proposal)
+    }
+}
+
+#[cfg(test)]
+mod output_storage_tests {
+    use super::*;
+    use crate::tests::processor_output_tests::{fixture, plan, OutputResolver};
+    use crate::NativeHostAllocationOwner;
+
+    #[test]
+    fn processor_output_state_entry_visitor_retains_each_actual_new_and_old_pcm_owner() {
+        let sequence = fixture(AudioChannelLayout::Mono);
+        let plan = Arc::new(plan(&sequence, &OutputResolver::default()).unwrap());
+        let current = AudioRenderSession::new(Arc::clone(&plan)).unwrap();
+        let next = AudioRenderSession::allocate_storage(plan).unwrap();
+        let mut expected = Vec::new();
+        for session in [&current, &next.session] {
+            expected.push(Storage::complete(&session.processor_output_buffers).unwrap());
+            for pcm in &session.processor_output_buffers {
+                expected.push(Storage::complete(pcm).unwrap());
+            }
+        }
+        assert_eq!(
+            expected.len(),
+            8,
+            "two independent outer owners and six actual output PCM owners"
+        );
+        let mut observed = Vec::new();
+        current
+            .visit_state_entry_storage(&mut |owner| {
+                observed.push(owner);
+                Ok(())
+            })
+            .unwrap();
+        next.visit_storage(&mut |owner| {
+            observed.push(owner);
+            Ok(())
+        })
+        .unwrap();
+        for wanted in &expected {
+            assert_eq!(
+                observed
+                    .iter()
+                    .filter(|owner| owner.address() == wanted.address()
+                        && owner.layout() == wanted.layout()
+                        && owner.complete_allocation().is_some())
+                    .count(),
+                1
+            );
+        }
+        let mut ledger =
+            crate::NativeHostAllocationLedger::new(expected.len(), usize::MAX).unwrap();
+        for owner in observed
+            .iter()
+            .filter(|owner| expected.iter().any(|wanted| wanted.address() == owner.address()))
+        {
+            ledger.record(owner.complete_allocation().unwrap()).unwrap();
+            ledger.record(owner.complete_allocation().unwrap()).unwrap();
+        }
+        let expected_bytes = expected.iter().map(|owner| owner.layout().size()).sum::<usize>();
+        assert_eq!(
+            ledger.finish().unwrap().allocation_bytes(),
+            expected_bytes
+                + crate::NativeHostAllocationLedger::storage_layout(expected.len())
+                    .unwrap()
+                    .bytes()
+                    .unwrap()
+        );
+        // The expected owners above are the actual Vecs, not synthesized policy sizes.
+        assert!(current.processor_output_buffers.host_allocation().unwrap().layout().size() > 0);
     }
 }

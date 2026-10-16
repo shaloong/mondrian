@@ -788,8 +788,17 @@ pub enum AudioChannelStripOutputPort {
     PostMute,
 }
 
+/// A raw output immediately after this authored processor has returned.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AudioProcessorOutputPort {
+    /// Snapshot of the in-place Main before any later rack processing.
+    Main,
+    /// One definition-owned additional output.
+    Auxiliary { bus_key: String },
+}
+
 /// Typed Route source; generated operations are never routable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AudioRouteSource {
     /// One explicit output port of a Track Mixer Channel.
     Track {
@@ -801,20 +810,29 @@ pub enum AudioRouteSource {
         bus_id: MixBusId,
         port: AudioChannelStripOutputPort,
     },
+    /// Strong reference to a Track/Bus rack instance and one raw output.
+    ProcessorOutput {
+        processor_id: AudioProcessorInstanceId,
+        port: AudioProcessorOutputPort,
+    },
 }
 
 impl AudioRouteSource {
-    fn track_id(self) -> Option<TrackId> {
+    pub(crate) fn references_processor(&self, ids: &BTreeSet<AudioProcessorInstanceId>) -> bool {
+        matches!(self, Self::ProcessorOutput { processor_id, .. } if ids.contains(processor_id))
+    }
+
+    fn track_id(&self) -> Option<TrackId> {
         match self {
-            Self::Track { track_id, .. } => Some(track_id),
-            Self::Bus { .. } => None,
+            Self::Track { track_id, .. } => Some(*track_id),
+            Self::Bus { .. } | Self::ProcessorOutput { .. } => None,
         }
     }
 
-    fn bus_id(self) -> Option<MixBusId> {
+    fn bus_id(&self) -> Option<MixBusId> {
         match self {
-            Self::Bus { bus_id, .. } => Some(bus_id),
-            Self::Track { .. } => None,
+            Self::Bus { bus_id, .. } => Some(*bus_id),
+            Self::Track { .. } | Self::ProcessorOutput { .. } => None,
         }
     }
 }
@@ -1304,13 +1322,26 @@ impl AuthoringFootprint for AudioChannelStripOutputPort {
     }
 }
 
+impl AuthoringFootprint for AudioProcessorOutputPort {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Main => Ok(()),
+            Self::Auxiliary { bus_key } => bus_key.collect_authoring_footprint(collector),
+        }
+    }
+}
+
 impl AuthoringFootprint for AudioRouteSource {
     fn collect_authoring_footprint(
         &self,
-        _collector: &mut AuthoringFootprintCollector,
+        collector: &mut AuthoringFootprintCollector,
     ) -> Result<(), AuthoringFootprintError> {
         match self {
             Self::Track { track_id: _, port: _ } | Self::Bus { bus_id: _, port: _ } => Ok(()),
+            Self::ProcessorOutput { port, .. } => port.collect_authoring_footprint(collector),
         }
     }
 }
@@ -1470,6 +1501,60 @@ impl AudioProgram {
         }
     }
 
+    /// Resolve a route's producing channel/stage from canonical author identity.
+    /// Raw processor taps bypass the owning channel's final mute gate.
+    /// Scope and Program Output occurrences are deliberately not routable sources.
+    pub fn route_source_channel(
+        &self,
+        source: &AudioRouteSource,
+    ) -> Result<(AudioChannelStripOwner, AudioChannelStripOutputPort), AudioAuthoringError> {
+        match source {
+            AudioRouteSource::Track { track_id, port } => {
+                Ok((AudioChannelStripOwner::Track { track_id: *track_id }, *port))
+            }
+            AudioRouteSource::Bus { bus_id, port } => {
+                Ok((AudioChannelStripOwner::Bus { bus_id: *bus_id }, *port))
+            }
+            AudioRouteSource::ProcessorOutput { processor_id, port } => {
+                if let AudioProcessorOutputPort::Auxiliary { bus_key } = port
+                    && (bus_key.trim().is_empty()
+                        || bus_key.len() > 128
+                        || bus_key.chars().any(char::is_control))
+                {
+                    return Err(AudioAuthoringError::InvalidProcessorOutputKey);
+                }
+                for (owner, strip) in
+                    self.track_channels
+                        .iter()
+                        .map(|(id, channel)| {
+                            (
+                                AudioChannelStripOwner::Track { track_id: *id },
+                                &channel.strip,
+                            )
+                        })
+                        .chain(self.buses.iter().map(|bus| {
+                            (AudioChannelStripOwner::Bus { bus_id: bus.id }, &bus.strip)
+                        }))
+                {
+                    for (rack, tap) in [
+                        (&strip.pre_fader, AudioChannelStripOutputPort::PreFader),
+                        (
+                            &strip.post_fader,
+                            AudioChannelStripOutputPort::PostFaderPreMute,
+                        ),
+                    ] {
+                        if rack.processors.iter().any(|processor| processor.id == *processor_id) {
+                            return Ok((owner, tap));
+                        }
+                    }
+                }
+                Err(AudioAuthoringError::InvalidProcessorOutputSource(
+                    *processor_id,
+                ))
+            }
+        }
+    }
+
     /// Register a processing definition and return its stable identity.
     pub fn add_processing_scope(&mut self, scope: AudioProcessingScope) -> AudioProcessingScopeId {
         let id = scope.id;
@@ -1504,9 +1589,13 @@ impl AudioProgram {
             .collect::<BTreeSet<_>>();
         self.track_channels.remove(&track_id);
         self.note_lanes.retain(|lane| lane.target.track_id != track_id);
-        self.routes.retain(|route| route.source.track_id() != Some(track_id));
+        self.routes.retain(|route| {
+            route.source.track_id() != Some(track_id)
+                && !route.source.references_processor(&removed_processor_ids)
+        });
         self.sidechain_routes.retain(|route| {
             route.source.track_id() != Some(track_id)
+                && !route.source.references_processor(&removed_processor_ids)
                 && !removed_processor_ids.contains(&route.processor_id)
         });
     }
@@ -1740,6 +1829,7 @@ impl AudioProgram {
         let _ = route_ids;
         for route in &self.routes {
             route.validate()?;
+            self.route_source_channel(&route.source)?;
             if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
                 || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
             {
@@ -1763,6 +1853,7 @@ impl AudioProgram {
         }
         for route in &self.sidechain_routes {
             route.validate()?;
+            self.route_source_channel(&route.source)?;
             if route.source.track_id().is_some_and(|id| !expected_tracks.contains(&id))
                 || route.source.bus_id().is_some_and(|id| !bus_ids.contains(&id))
             {
@@ -2075,15 +2166,14 @@ fn validate_routing_cycles(
 }
 
 impl AudioAuthorRoutingNode {
-    pub(crate) fn from_source(source: AudioRouteSource) -> Self {
-        match source {
-            AudioRouteSource::Track { track_id, port } => {
-                Self::Track(track_id, AudioChannelSignalStage::producing(port))
-            }
-            AudioRouteSource::Bus { bus_id, port } => {
-                Self::Bus(bus_id, AudioChannelSignalStage::producing(port))
-            }
-        }
+    pub(crate) fn from_source(program: &AudioProgram, source: &AudioRouteSource) -> Option<Self> {
+        let (owner, port) = program.route_source_channel(source).ok()?;
+        let stage = AudioChannelSignalStage::producing(port);
+        Some(match owner {
+            AudioChannelStripOwner::Track { track_id } => Self::Track(track_id, stage),
+            AudioChannelStripOwner::Bus { bus_id } => Self::Bus(bus_id, stage),
+            AudioChannelStripOwner::ProgramOutput { .. } => return None,
+        })
     }
 }
 
@@ -2154,17 +2244,15 @@ pub(crate) fn author_routing_graph(
                 AudioAuthorRoutingNode::Output(output_id, AudioChannelSignalStage::PreFader)
             }
         };
-        outgoing
-            .entry(AudioAuthorRoutingNode::from_source(route.source))
-            .or_default()
-            .insert(destination);
+        if let Some(source) = AudioAuthorRoutingNode::from_source(program, &route.source) {
+            outgoing.entry(source).or_default().insert(destination);
+        }
     }
     for route in &program.sidechain_routes {
-        if let Some(targets) = processor_targets.get(&route.processor_id) {
-            outgoing
-                .entry(AudioAuthorRoutingNode::from_source(route.source))
-                .or_default()
-                .extend(targets.iter().copied());
+        if let Some(targets) = processor_targets.get(&route.processor_id)
+            && let Some(source) = AudioAuthorRoutingNode::from_source(program, &route.source)
+        {
+            outgoing.entry(source).or_default().extend(targets.iter().copied());
         }
     }
     AudioAuthorRoutingGraph { outgoing, processor_targets }
@@ -2173,6 +2261,12 @@ pub(crate) fn author_routing_graph(
 /// Invalid author state. Such state cannot enter an immutable execution snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AudioAuthoringError {
+    /// Raw output sources must belong to one authored Track/Bus rack.
+    #[error("processor {0} is not a routable Track/Bus rack source")]
+    InvalidProcessorOutputSource(AudioProcessorInstanceId),
+    /// Output identity has the same bounded lexical contract as auxiliary inputs.
+    #[error("invalid processor output key")]
+    InvalidProcessorOutputKey,
     /// Each score lane identity is unique in the Sequence.
     #[error("duplicate audio note lane {0}")]
     DuplicateNoteLane(AudioNoteLaneId),
@@ -2322,6 +2416,7 @@ pub enum AudioAuthoringError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Sequence;
 
     fn note_program_fixture() -> (Track, AudioProgram) {
         let track = Track::new_audio("score");
@@ -3334,5 +3429,176 @@ mod tests {
             program.validate(&[track], &[], AudioChannelLayout::Stereo),
             Err(AudioAuthoringError::RouteCycle)
         );
+    }
+    fn processor_output_author_fixture() -> (Sequence, AudioProcessorInstanceId) {
+        let mut sequence = Sequence::new("raw processor author fixture");
+        let track = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::ProcessorOutput {
+                processor_id: id,
+                port: AudioProcessorOutputPort::Auxiliary { bus_key: "definition.output".into() },
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ));
+        (sequence, id)
+    }
+
+    #[test]
+    fn processor_output_author_sources_resolve_only_track_bus_and_reject_stage_cycles() {
+        let (sequence, id) = processor_output_author_fixture();
+        sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let track = sequence.audio_tracks[0].id;
+        let source = sequence.audio_program.routes.last().unwrap().source.clone();
+        let candidates = crate::inspect_audio_route_candidates(&sequence).unwrap();
+        assert!(candidates.allows_addition(
+            source.clone(),
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id)
+        ));
+        assert!(!candidates.allows_processor_sidechain_addition(source.clone(), id));
+        let mut cycle = sequence.clone();
+        cycle.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
+            source.clone(),
+            id,
+            "detector",
+        ));
+        assert_eq!(
+            cycle.audio_program.validate(
+                &cycle.audio_tracks,
+                &cycle.audio_roles,
+                cycle.settings.audio_channel_layout
+            ),
+            Err(AudioAuthoringError::RouteCycle)
+        );
+        for owner in [0, 1] {
+            let mut invalid = sequence.clone();
+            let processor = invalid
+                .audio_program
+                .track_channels
+                .get_mut(&track)
+                .unwrap()
+                .strip
+                .pre_fader
+                .processors
+                .remove(0);
+            if owner == 0 {
+                let mut scope = AudioProcessingScope::identity();
+                scope.processors.processors.push(processor);
+                invalid.audio_program.processing_scopes.push(scope);
+            } else {
+                invalid.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            }
+            assert_eq!(
+                invalid.audio_program.validate(
+                    &invalid.audio_tracks,
+                    &invalid.audio_roles,
+                    invalid.settings.audio_channel_layout
+                ),
+                Err(AudioAuthoringError::InvalidProcessorOutputSource(id))
+            );
+            assert!(crate::inspect_audio_route_candidates(&invalid).is_err());
+        }
+        let mut locked = sequence;
+        locked.audio_tracks[0].is_locked = true;
+        assert!(
+            !crate::inspect_audio_route_candidates(&locked).unwrap().allows_addition(
+                source,
+                AudioRouteDestination::Output(locked.audio_program.outputs[0].id)
+            )
+        );
+    }
+
+    #[test]
+    fn processor_output_strong_references_reject_single_delete_but_whole_track_prunes_and_duplicate_rekeys(
+    ) {
+        let (mut sequence, id) = processor_output_author_fixture();
+        let track = sequence.audio_tracks[0].id;
+        let before = sequence.clone();
+        let request = crate::AudioProcessorRackEditRequest {
+            address: crate::AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::Track { track_id: track },
+                rack: crate::AudioChannelStripRack::PreFader,
+            },
+            edit: crate::AudioProcessorRackEdit::Remove { processor_id: id },
+        };
+        assert!(crate::apply_audio_processor_rack_edit(&mut sequence, &request).is_err());
+        assert_eq!(sequence, before);
+        let mut duplicate = sequence.clone();
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        duplicate
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let new_id = duplicate
+            .audio_program
+            .track_channels
+            .get(&duplicate.audio_tracks[0].id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors[0]
+            .id;
+        assert_ne!(new_id, id);
+        assert!(
+            matches!(&duplicate.audio_program.routes.last().unwrap().source, AudioRouteSource::ProcessorOutput { processor_id, port: AudioProcessorOutputPort::Auxiliary { bus_key } } if *processor_id == new_id && bus_key == "definition.output")
+        );
+        // A raw producer on a Bus is a strong Bus dependency even without a
+        // legacy Bus source route; both original deletion policies still apply.
+        let mut bus_sequence = before.clone();
+        let producer = bus_sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .remove(0);
+        let bus_id = MixBusId::new();
+        let mut strip = AudioChannelStrip::default();
+        strip.pre_fader.processors.push(producer);
+        bus_sequence.audio_program.buses.push(AudioMixBus {
+            id: bus_id,
+            name: "producer bus".into(),
+            strip,
+        });
+        bus_sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        let saved = bus_sequence.clone();
+        let request = |policy| crate::AudioRoutingEditRequest {
+            edit: crate::AudioRoutingEdit::RemoveBus { bus_id, policy },
+        };
+        assert!(
+            matches!(crate::apply_audio_routing_edit(&mut bus_sequence, &request(crate::AudioBusRemovalPolicy::RejectIfConnected)), Err(crate::AudioRoutingEditError::BusConnected { bus_id: actual, route_count: 1 }) if actual == bus_id)
+        );
+        assert_eq!(bus_sequence, saved);
+        crate::apply_audio_routing_edit(
+            &mut bus_sequence,
+            &request(crate::AudioBusRemovalPolicy::Disconnect),
+        )
+        .unwrap();
+        assert!(bus_sequence.audio_program.buses.is_empty());
+        assert!(!bus_sequence.audio_program.routes.iter().any(|route| matches!(&route.source, AudioRouteSource::ProcessorOutput { processor_id, .. } if *processor_id == id)));
+        bus_sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        sequence.add_audio_track();
+        sequence.remove_audio_track(track).unwrap();
+        sequence
+            .validate_author_contract(&mondrian_core::ProjectColorEnvironment::default())
+            .unwrap();
+        assert!(!sequence.audio_program.routes.iter().any(|route| matches!(&route.source, AudioRouteSource::ProcessorOutput { processor_id, .. } if *processor_id == id)));
     }
 }

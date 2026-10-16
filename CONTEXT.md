@@ -756,11 +756,11 @@ A persistent user-addressable Track Mixer Channel, Mix Bus, or Program Output wi
 _Avoid_: Generic property node, universal untyped ID, generated Clip DSP operator
 
 **Audio Route**:
-A persistent typed connection between stable signal endpoints in one Audio Program.
+A persistent typed connection between stable signal endpoints in one Audio Program. A processor-output source names one exact Track/Bus-rack processor instance and Main or a definition-owned auxiliary output key; it retains the producer's signal identity before later Rack processing and owner Mute, while following the existing owner Solo rules. Fanout shares that producer's execution and never implicitly sums unconnected outputs into Main.
 _Avoid_: Node-name connection, array-index connection, hidden fallback route
 
 **Audio Processor Sidechain Route**:
-A persistent typed auxiliary connection from one exact Track/Bus strip port to one stable Audio Processor Instance and definition-owned bus key. It participates in complete routing reachability and cycle validation but never sums into a Routing Node main input. Preparation must negotiate the key/layout against the realized processor contract and align the detector signal to the processor's main-input signal time.
+A persistent typed auxiliary connection from one exact Track/Bus strip port or processor-output endpoint to one stable Audio Processor Instance and definition-owned bus key. It participates in complete routing reachability and cycle validation but never sums into a Routing Node main input. Preparation must negotiate the key/layout against the realized processor contract and align the detector signal to the processor's main-input signal time.
 _Avoid_: Soloing a Track to manufacture a stem, mixing detector PCM into the main Bus, plugin array-index bus address, unvalidated string lookup, callback allocation
 
 **Audio Processor Instance**:

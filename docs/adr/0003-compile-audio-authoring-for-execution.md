@@ -406,8 +406,10 @@ slice admits Track/Bus racks only. Scope-generated and Output-rack sources are
 rejected explicitly. Bypassed routed producers retain author intent but fail
 execution preparation; they cannot fabricate auxiliary output. A raw tap is
 captured immediately after that processor returns, before subsequent Rack
-processing, and follows existing pre-mute send semantics. It does not acquire
-an extra owner mute/solo gate.
+processing, before the owner mute stage. Audition Solo filtering applies to
+Track-owned processor sources just as for pre-mute Track sends; Bus owners
+follow the existing Bus rules. Processor execution adds no separate mute/Solo
+gate.
 
 Reuse the existing pre/post stage DAG, including its conservative rejection of
 same-stage feedback. Routes and sidechains resolve to dense prepared source
@@ -417,6 +419,9 @@ producer once per window. All auxiliary buffers and referenced Main snapshots
 survive until their final consumers and are preallocated/charged through the
 existing storage visitors, FixedResident and Root grant; no second budget is
 introduced. Failed processing must not publish partially updated or stale PCM.
+Replacement overlap uses a conservative allocation union: metadata already in
+the current fixed footprint can be charged again while its owner is retained.
+This is an upper bound, not qualification of a minimum peak grant or physical heap.
 
 The additive author endpoint requires document schema33 and a value-preserving
 32-to-33 migration that rejects new endpoints mislabeled as legacy. Archive and

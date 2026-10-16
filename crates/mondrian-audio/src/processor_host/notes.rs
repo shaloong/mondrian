@@ -641,6 +641,8 @@ mod tests {
         };
         {
             let mut io = MainBusAudioIo {
+                output_buses: &[],
+                output_pcm: &mut [],
                 channel_layout: AudioChannelLayout::Mono,
                 frames: 1,
                 pcm: &mut pcm,

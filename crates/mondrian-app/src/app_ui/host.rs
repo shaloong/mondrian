@@ -12311,7 +12311,8 @@ mod tests {
             .iter()
             .find(|route| route.id == route_id)
             .expect("route")
-            .source;
+            .source
+            .clone();
         for edit in 0..2 {
             for key in [
                 mondrian_ui_core::KeyCode::Enter,
@@ -12336,7 +12337,7 @@ mod tests {
             );
             assert_eq!(route.gain_db, -29.2);
             assert!(route.enabled);
-            previous = route.source;
+            previous = route.source.clone();
         }
         for _ in 0..2 {
             assert!(host.app_state.borrow_mut().undo_timeline().expect("Undo source"));

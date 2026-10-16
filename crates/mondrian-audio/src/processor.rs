@@ -387,6 +387,12 @@ pub trait AudioProcessorFactory: Send + Sync {
         AudioProcessorAuxiliaryInputContract::default()
     }
 
+    /// Ordered additional output buses for this exact prepared instance.
+    /// Main remains the existing in-place bus. The default exposes no extra outputs.
+    fn auxiliary_output_contract(&self) -> AudioProcessorAuxiliaryOutputContract {
+        AudioProcessorAuxiliaryOutputContract::default()
+    }
+
     /// Concrete Note inputs and fixed limits for this exact restored instance.
     /// The empty default admits no Notes. Native adapters must preserve this
     /// contract through state seeding and validate it on actual creation.
@@ -696,6 +702,57 @@ pub struct AudioProcessorAuxiliaryInputBusContract {
     pub channel_layout: AudioChannelLayout,
 }
 
+/// Borrowed writable output; its memory belongs to this Session, never the adapter.
+pub struct AudioProcessorOutputBus<'a> {
+    /// Stable definition-owned output key.
+    pub bus_key: &'a str,
+    /// Prepared semantic channel layout.
+    pub channel_layout: AudioChannelLayout,
+    /// Exact frame count for this call.
+    pub frames: usize,
+    /// Mutable interleaved PCM, cleared before each processor call.
+    pub interleaved: &'a mut [f32],
+}
+
+/// One stable additional output; its order is the factory's native binding order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryOutputBusContract {
+    /// Definition-owned stable identity, independent of presentation names.
+    pub bus_key: String,
+    /// Exact layout; this host currently admits the render layout only.
+    pub channel_layout: AudioChannelLayout,
+}
+
+/// Complete immutable additional-output contract of one prepared processor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioProcessorAuxiliaryOutputContract {
+    /// All actual additional outputs, including currently unrouted outputs.
+    pub buses: Vec<AudioProcessorAuxiliaryOutputBusContract>,
+}
+
+impl AudioProcessorAuxiliaryOutputContract {
+    pub(crate) fn validate(
+        &self,
+        main_layout: AudioChannelLayout,
+    ) -> Result<(), AudioProcessorHostError> {
+        let mut keys = std::collections::BTreeSet::new();
+        for bus in &self.buses {
+            if bus.bus_key.trim().is_empty()
+                || bus.bus_key.len() > 128
+                || bus.bus_key.chars().any(char::is_control)
+                || !keys.insert(bus.bus_key.as_str())
+                || bus.channel_layout != main_layout
+            {
+                return Err(AudioProcessorHostError::InvalidContract(
+                    "processor outputs require unique bounded keys and the exact render layout"
+                        .to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Control-side native name independent of a bus's routing identity and layout.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -805,6 +862,10 @@ pub trait AudioProcessorAudioIo {
     fn frames(&self) -> usize;
     /// Mutable in-place main-bus PCM.
     fn main_interleaved(&mut self) -> &mut [f32];
+    /// Borrow a negotiated additional output. No lookup allocates or retains PCM.
+    fn auxiliary_output(&mut self, _bus_key: &str) -> Option<AudioProcessorOutputBus<'_>> {
+        None
+    }
     /// Find one negotiated read-only auxiliary input by stable definition key.
     fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>>;
     /// Borrow the mutable main bus and one read-only auxiliary bus together.

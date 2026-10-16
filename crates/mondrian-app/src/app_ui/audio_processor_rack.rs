@@ -174,7 +174,7 @@ pub(crate) fn bind_audio_scalar_author_lease(
                     .zip(rack.input_inspection_target).map(|(lease, owner)| crate::app::parameter_gesture::AudioScalarGestureTarget {
                         lease,
                         owner: crate::app::parameter_gesture::AudioScalarOwner::ProcessorSidechainLevel {
-                            route_id: route.route_id, source: route.source, bus_key: route.bus_key.clone(),
+                            route_id: route.route_id, source: route.source.clone(), bus_key: route.bus_key.clone(),
                             owner, processor_id: processor.processor_id, definition: processor.definition.clone(),
                         },
                     });
@@ -943,7 +943,7 @@ mod tests {
             port: AudioChannelStripOutputPort::PreFader,
         };
         sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
-            source,
+            source.clone(),
             processor_id,
             "offline.detector",
         ));

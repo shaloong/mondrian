@@ -35,7 +35,7 @@ use migration::{JsonMigrationRegistry, JsonMigrationStep};
 /// Current `.mdp` container format version.
 pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
-pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 32;
+pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 33;
 /// Current embedded asset-library SQLite schema version.
 pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
@@ -332,11 +332,18 @@ const DOCUMENT_MIGRATIONS: JsonMigrationRegistry = JsonMigrationRegistry::new(
     "project document",
     "schema_version",
     PROJECT_DOCUMENT_SCHEMA_VERSION,
-    &[JsonMigrationStep {
-        from: 31,
-        to: 32,
-        migrate: migrate_document_v31_to_v32,
-    }],
+    &[
+        JsonMigrationStep {
+            from: 31,
+            to: 32,
+            migrate: migrate_document_v31_to_v32,
+        },
+        JsonMigrationStep {
+            from: 32,
+            to: 33,
+            migrate: migrate_document_v32_to_v33,
+        },
+    ],
 );
 
 // Schema 32 prevents an older archive reader from silently discarding scores.
@@ -363,6 +370,38 @@ fn migrate_document_v31_to_v32(mut value: serde_json::Value) -> anyhow::Result<s
     value["schema_version"] = serde_json::json!(32);
     Ok(value)
 }
+// New endpoints are a closed author-schema extension, not an archive/container change.
+fn migrate_document_v32_to_v33(mut value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let sequences = value
+        .get("sequences")
+        .and_then(|collection| collection.get("sequences"))
+        .and_then(serde_json::Value::as_array)
+        .context("schema-32 document has no Sequence collection")?;
+    for sequence in sequences {
+        let program = sequence
+            .get("audio_program")
+            .and_then(serde_json::Value::as_object)
+            .context("schema-32 Sequence has no AudioProgram")?;
+        for name in ["routes", "sidechain_routes"] {
+            if let Some(routes) = program.get(name) {
+                for route in routes.as_array().context("schema-32 routes must be an array")? {
+                    if route
+                        .get("source")
+                        .and_then(serde_json::Value::as_object)
+                        .is_some_and(|source| source.contains_key("ProcessorOutput"))
+                    {
+                        anyhow::bail!(
+                            "schema-32 document cannot contain processor output endpoints"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    value["schema_version"] = serde_json::json!(33);
+    Ok(value)
+}
+
 const REQUIRED_ARCHIVE_ENTRIES: [&str; 3] = [MANIFEST_ENTRY, PROJECT_ENTRY, LIBRARY_ENTRY];
 
 /// Admission limits for opening one untrusted `.mdp` archive.
@@ -1790,7 +1829,7 @@ mod tests {
         let lane = insert_note_archive_fixture(&mut document);
         save_project_archive(&document, &database, &archive).expect("save authored score");
         let reopened = read_project_document_from_archive(&archive).expect("validated reopen");
-        assert_eq!(reopened.schema_version, 32);
+        assert_eq!(reopened.schema_version, PROJECT_DOCUMENT_SCHEMA_VERSION);
         let actual =
             &reopened.sequences.active().expect("reopened Sequence").audio_program.note_lanes[0];
         assert_eq!(actual, &lane);
@@ -1824,7 +1863,10 @@ mod tests {
         let runtime = root.join("runtime");
         let loaded = load_project_archive(&archive, &runtime).expect("actual registry migration");
         assert_eq!(loaded.source_document_schema_version, 31);
-        assert_eq!(loaded.document.schema_version, 32);
+        assert_eq!(
+            loaded.document.schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
         assert!(loaded
             .document
             .sequences
@@ -1832,7 +1874,7 @@ mod tests {
             .iter()
             .all(|sequence| sequence.audio_program.note_lanes.is_empty()));
         let mut expected: ProjectDocument = serde_json::from_slice(legacy).expect("legacy fixture");
-        expected.schema_version = 32;
+        expected.schema_version = PROJECT_DOCUMENT_SCHEMA_VERSION;
         assert_eq!(
             project_document_fingerprint(loaded.document.clone()).expect("migrated fingerprint"),
             project_document_fingerprint(expected).expect("independent expected empty migration")
@@ -1846,7 +1888,10 @@ mod tests {
             .expect("current resave");
         let reopened =
             load_project_archive(&saved, &root.join("reopened-runtime")).expect("current reopen");
-        assert_eq!(reopened.source_document_schema_version, 32);
+        assert_eq!(
+            reopened.source_document_schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
         assert_eq!(
             project_document_fingerprint(reopened.document).expect("reopened fingerprint"),
             project_document_fingerprint(loaded.document).expect("migrated fingerprint")
@@ -1917,7 +1962,18 @@ mod tests {
         let archive = root.join("score32.mdp");
         let mut document = test_document();
         insert_note_archive_fixture(&mut document);
-        save_project_archive(&document, &database, &archive).expect("new schema score");
+        let mut score32 = serde_json::to_value(&document).expect("exact score");
+        score32["schema_version"] = serde_json::json!(32);
+        let manifest = serde_json::to_vec(&ProjectManifest::default()).expect("manifest");
+        let bytes = serde_json::to_vec(&score32).expect("schema32 score");
+        write_raw_stored_archive(
+            &archive,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &bytes),
+                (LIBRARY_ENTRY, b"sqlite fixture"),
+            ],
+        );
         let file = fs::File::open(&archive).expect("held archive");
         let mut zip = zip::ZipArchive::new(file).expect("archive");
         // Exercise the exact existing version-boundary algorithm with a v31
@@ -3804,6 +3860,97 @@ mod tests {
         assert_eq!(
             fs::read(runtime.join("index.db")).expect("runtime after"),
             b"existing-runtime"
+        );
+    }
+    #[test]
+    fn processor_output_schema33_roundtrip_migration_and_old_reader_boundary() {
+        use mondrian_timeline::audio::{
+            AudioProcessorDefinitionRef, AudioProcessorInstance, AudioProcessorOutputPort,
+            AudioRoute, AudioRouteDestination, AudioRouteSource,
+        };
+        let mut document = test_document();
+        let sequence = document.sequences.active_mut().expect("Sequence");
+        let track = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: AudioProcessorDefinitionRef::Clap {
+                plugin_id: "not.installed.output.fixture".into(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        let id = processor.id;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.routes.push(AudioRoute::new(
+            AudioRouteSource::ProcessorOutput {
+                processor_id: id,
+                port: AudioProcessorOutputPort::Auxiliary { bus_key: "stable.output.2".into() },
+            },
+            AudioRouteDestination::Output(sequence.audio_program.outputs[0].id),
+        ));
+        document.validate().expect("author intent needs no installed plugin");
+        let value = serde_json::to_value(&document).unwrap();
+        let old32 = JsonMigrationRegistry::new("project document", "schema_version", 32, &[]);
+        assert!(old32
+            .migrate(value.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported project document version: 33"));
+        let mut mislabeled = value.clone();
+        mislabeled["schema_version"] = serde_json::json!(32);
+        assert!(
+            DOCUMENT_MIGRATIONS.migrate(mislabeled).is_err(),
+            "legacy32 must not smuggle a new endpoint through version-only migration"
+        );
+        let mut sidechain_mislabeled = value.clone();
+        let program = &mut sidechain_mislabeled["sequences"]["sequences"][0]["audio_program"];
+        let routes = program["routes"].as_array_mut().unwrap();
+        let index = routes
+            .iter()
+            .position(|route| route["source"].get("ProcessorOutput").is_some())
+            .unwrap();
+        let route = routes.remove(index);
+        program["sidechain_routes"] = serde_json::json!([route]);
+        sidechain_mislabeled["schema_version"] = serde_json::json!(32);
+        assert!(
+            DOCUMENT_MIGRATIONS.migrate(sidechain_mislabeled).is_err(),
+            "legacy sidechain cannot smuggle a new source either"
+        );
+        let root = unique_temp_dir("output-schema33");
+        let database = root.join("index.db");
+        fs::write(&database, b"sqlite fixture").unwrap();
+        let archive = root.join("outputs.mdp");
+        save_project_archive(&document, &database, &archive).unwrap();
+        let reopened = read_project_document_from_archive(&archive).unwrap();
+        assert_eq!(serde_json::to_value(reopened).unwrap(), value);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn processor_output_schema32_migration_preserves_every_existing_author_value() {
+        let mut document = test_document();
+        insert_note_archive_fixture(&mut document);
+        let mut legacy = serde_json::to_value(&document).unwrap();
+        legacy["schema_version"] = serde_json::json!(32);
+        let mut expected = legacy.clone();
+        expected["schema_version"] = serde_json::json!(33);
+        let migrated = DOCUMENT_MIGRATIONS.migrate(legacy).unwrap();
+        assert_eq!(migrated, expected);
+        assert_eq!(
+            serde_json::to_vec(&migrated).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "version-only migration preserves exact numeric serialization including signed zero"
         );
     }
 }

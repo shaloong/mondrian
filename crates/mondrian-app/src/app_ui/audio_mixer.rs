@@ -393,11 +393,9 @@ impl AudioMixerRoutingIndex {
         }
         for route in &sequence.audio_program.routes {
             let projected = project_route(sequence, route, localizer, time_context);
-            index
-                .outbound
-                .entry(owner_for_source(route.source))
-                .or_default()
-                .push(projected);
+            if let Some(owner) = owner_for_source(sequence, &route.source) {
+                index.outbound.entry(owner).or_default().push(projected);
+            }
             *index
                 .incoming_counts
                 .entry(owner_for_destination(route.destination))
@@ -440,9 +438,9 @@ fn project_route(
         source_sequence_id: sequence.id,
         scalar_author_lease: None,
         route_id: route.id,
-        source: route.source,
+        source: route.source.clone(),
         destination: route.destination,
-        source_port_label: source_port_label(route.source, localizer),
+        source_port_label: source_port_label(&route.source, localizer),
         destination_label: destination_label(sequence, route.destination, localizer),
         enabled: route.enabled,
         gain: route.gain_automation.as_ref().map_or(
@@ -462,11 +460,11 @@ fn project_route(
     }
 }
 
-fn owner_for_source(source: AudioRouteSource) -> AudioChannelStripOwner {
-    match source {
-        AudioRouteSource::Track { track_id, .. } => AudioChannelStripOwner::Track { track_id },
-        AudioRouteSource::Bus { bus_id, .. } => AudioChannelStripOwner::Bus { bus_id },
-    }
+fn owner_for_source(
+    sequence: &mondrian_timeline::Sequence,
+    source: &AudioRouteSource,
+) -> Option<AudioChannelStripOwner> {
+    sequence.audio_program.route_source_channel(source).ok().map(|(owner, _)| owner)
 }
 
 fn owner_for_destination(destination: AudioRouteDestination) -> AudioChannelStripOwner {
@@ -509,6 +507,7 @@ fn route_create_options(
     let source_identity = match owner_source {
         AudioRouteSource::Track { track_id, .. } => RouteSourceIdentity::Track(track_id),
         AudioRouteSource::Bus { bus_id, .. } => RouteSourceIdentity::Bus(bus_id),
+        AudioRouteSource::ProcessorOutput { .. } => return Vec::new(),
     };
     let ports: &[AudioChannelStripOutputPort] = match source_identity {
         RouteSourceIdentity::Track(_) => &[
@@ -531,7 +530,7 @@ fn route_create_options(
                     AudioMixerRouteCreateOption {
                         label: format!(
                             "{} → {destination_label}",
-                            source_port_label(source, localizer)
+                            source_port_label(&source, localizer)
                         ),
                         source,
                         destination,
@@ -539,7 +538,7 @@ fn route_create_options(
                 }
             })
         })
-        .filter(|option| routing.allows_candidate(option.source, option.destination))
+        .filter(|option| routing.allows_candidate(option.source.clone(), option.destination))
         .collect()
 }
 
@@ -572,7 +571,15 @@ fn route_source_for_owner(owner: AudioChannelStripOwner) -> Option<AudioRouteSou
     }
 }
 
-fn source_port_label(source: AudioRouteSource, localizer: &Localizer) -> String {
+fn source_port_label(source: &AudioRouteSource, localizer: &Localizer) -> String {
+    if let AudioRouteSource::ProcessorOutput { processor_id, port } = source {
+        return match port {
+            mondrian_timeline::AudioProcessorOutputPort::Main => format!("{processor_id} · Main"),
+            mondrian_timeline::AudioProcessorOutputPort::Auxiliary { bus_key } => {
+                format!("{processor_id} · {bus_key}")
+            }
+        };
+    }
     localizer.text(match source {
         AudioRouteSource::Track { port: AudioChannelStripOutputPort::PreFader, .. }
         | AudioRouteSource::Bus { port: AudioChannelStripOutputPort::PreFader, .. } => {
@@ -590,6 +597,7 @@ fn source_port_label(source: AudioRouteSource, localizer: &Localizer) -> String 
                 AudioChannelStripOutputPort::PostFaderPreMute | AudioChannelStripOutputPort::PostMute,
             ..
         } => "audio-mixer-port-postfader",
+        AudioRouteSource::ProcessorOutput { .. } => unreachable!("raw output handled above"),
     })
 }
 
@@ -697,7 +705,7 @@ pub(crate) fn rename_bus_action(channel: &AudioMixerChannelModel, name: &str) ->
 pub(crate) fn create_route_action(option: &AudioMixerRouteCreateOption) -> Action {
     audio_routing_edit_action(AudioRoutingEditRequest {
         edit: AudioRoutingEdit::CreateRoute {
-            source: option.source,
+            source: option.source.clone(),
             destination: option.destination,
         },
     })
@@ -713,7 +721,7 @@ pub(crate) fn rewire_route_action(
             audio_routing_edit_action(AudioRoutingEditRequest {
                 edit: AudioRoutingEdit::SetRouteEndpoints {
                     route_id: route.route_id,
-                    source: option.source,
+                    source: option.source.clone(),
                     destination: option.destination,
                 },
             })
@@ -742,7 +750,7 @@ pub(crate) fn route_gain_target(
                 .filter(|lease| lease.sequence_id == route.source_sequence_id)?,
             owner: crate::app::parameter_gesture::AudioScalarOwner::RouteLevel {
                 route_id: route.route_id,
-                source: route.source,
+                source: route.source.clone(),
                 destination: route.destination,
             },
         },

@@ -960,7 +960,7 @@ pub(crate) mod tests {
                         super::super::product_action::AudioProcessorInputRewirePayload {
                             connection: payload,
                             route_id: route.id,
-                            expected_source: route.source,
+                            expected_source: route.source.clone(),
                         },
                     )
                 } else {
@@ -1102,7 +1102,7 @@ pub(crate) mod tests {
             let mut payload = AudioProcessorInputRewirePayload {
                 connection,
                 route_id: route.id,
-                expected_source: route.source,
+                expected_source: route.source.clone(),
             };
             match scenario {
                 0 => payload.route_id = mondrian_core::AudioRouteId::new(),
@@ -1347,7 +1347,7 @@ pub(crate) mod tests {
                         super::super::product_action::AudioProcessorInputRewirePayload {
                             connection: payload,
                             route_id: route.id,
-                            expected_source: route.source,
+                            expected_source: route.source.clone(),
                         },
                     )
                 } else {

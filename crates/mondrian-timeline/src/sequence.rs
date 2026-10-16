@@ -2177,6 +2177,9 @@ impl Sequence {
             if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
                 *bus_id = bus_ids[bus_id];
             }
+            if let AudioRouteSource::ProcessorOutput { processor_id, .. } = &mut route.source {
+                *processor_id = processor_ids[processor_id];
+            }
             match &mut route.destination {
                 AudioRouteDestination::Bus(bus_id) => *bus_id = bus_ids[bus_id],
                 AudioRouteDestination::Output(output_id) => {
@@ -2190,6 +2193,9 @@ impl Sequence {
             rekey_optional_exact_curve(&mut route.gain_automation);
             if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
                 *bus_id = bus_ids[bus_id];
+            }
+            if let AudioRouteSource::ProcessorOutput { processor_id, .. } = &mut route.source {
+                *processor_id = processor_ids[processor_id];
             }
         }
         for transition in &mut self.audio_program.transitions {

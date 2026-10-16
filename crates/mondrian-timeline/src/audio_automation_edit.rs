@@ -534,25 +534,42 @@ pub fn inspect_audio_automation<'a>(
                 .routes
                 .iter()
                 .find(|route| route.id == *route_id)
-                .map(|route| (route.source, route.gain_db, route.gain_automation.as_ref()))
+                .map(|route| {
+                    (
+                        route.source.clone(),
+                        route.gain_db,
+                        route.gain_automation.as_ref(),
+                    )
+                })
                 .or_else(|| {
                     sequence
                         .audio_program
                         .sidechain_routes
                         .iter()
                         .find(|route| route.id == *route_id)
-                        .map(|route| (route.source, route.gain_db, route.gain_automation.as_ref()))
+                        .map(|route| {
+                            (
+                                route.source.clone(),
+                                route.gain_db,
+                                route.gain_automation.as_ref(),
+                            )
+                        })
                 })
                 .ok_or(AudioAutomationAddressError::UnknownRoute(*route_id))?;
-            let blocker = match route.0 {
-                crate::audio::AudioRouteSource::Track { track_id, .. } => sequence
+            let (source_owner, _) = sequence
+                .audio_program
+                .route_source_channel(&route.0)
+                .map_err(|_| AudioAutomationAddressError::UnknownRoute(*route_id))?;
+            let blocker = match source_owner {
+                crate::AudioChannelStripOwner::Track { track_id } => sequence
                     .audio_tracks
                     .iter()
                     .find(|track| track.id == track_id)
                     .ok_or(AudioAutomationAddressError::UnknownTrack(track_id))?
                     .is_locked
                     .then_some(AudioAutomationEditBlocker::LockedTrack(track_id)),
-                crate::audio::AudioRouteSource::Bus { .. } => None,
+                crate::AudioChannelStripOwner::Bus { .. }
+                | crate::AudioChannelStripOwner::ProgramOutput { .. } => None,
             };
             Ok(inspection(
                 target,

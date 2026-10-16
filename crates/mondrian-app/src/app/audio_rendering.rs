@@ -1760,7 +1760,7 @@ mod tests {
         let action = |processor_id| {
             ProductAction::Audio(AudioProductAction::EditRouting(AudioRoutingEditRequest {
                 edit: AudioRoutingEdit::CreateProcessorSidechain {
-                    source,
+                    source: source.clone(),
                     processor_id,
                     bus_key: bus_key.to_owned(),
                 },
@@ -1929,7 +1929,7 @@ mod tests {
         let rewire = crate::app_ui::test_utils::native_sidechain_source_action(
             &state,
             query,
-            replacement_source,
+            replacement_source.clone(),
             bus_key,
             Some(route_id),
         );

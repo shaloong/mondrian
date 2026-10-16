@@ -10,8 +10,8 @@ use mondrian_core::{
 };
 use mondrian_timeline::audio::{
     AudioChannelStrip, AudioChannelStripOutputPort, AudioComponentSource, AudioProcessorRack,
-    AudioProcessorSidechainRoute, AudioProgramOutput, AudioRoute, AudioRouteDestination,
-    AudioRouteSource, ProgramOutputMainSource,
+    AudioProcessorSidechainRoute, AudioProgramOutput, AudioRouteDestination, AudioRouteSource,
+    ProgramOutputMainSource,
 };
 use mondrian_timeline::{AudioAuthoringError, Sequence};
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,18 +148,20 @@ where
     let mut selected_sidechain_ids = BTreeSet::new();
     let (mut routes, mut required_tracks, required_buses) = loop {
         let (routes, mut required_tracks, required_buses) = resolve_signal_closure(
-            &sequence.audio_program.routes,
+            &sequence.audio_program,
             request.output_id,
             &sidechain_source_buses,
             &muted_tracks,
         );
         required_tracks.extend(sidechain_source_tracks.iter().copied());
         let post_fader_tracks = post_fader_tracks(
+            &sequence.audio_program,
             &routes,
             &sequence.audio_program.sidechain_routes,
             &selected_sidechain_ids,
         );
         let post_fader_buses = post_fader_buses(
+            &sequence.audio_program,
             &routes,
             &sequence.audio_program.sidechain_routes,
             &selected_sidechain_ids,
@@ -194,20 +196,24 @@ where
             .sidechain_routes
             .iter()
             .filter(|route| selected.contains(&route.id))
-            .filter_map(|route| match route.source {
-                AudioRouteSource::Bus { bus_id, .. } => Some(bus_id),
-                AudioRouteSource::Track { .. } => None,
-            })
+            .filter_map(
+                |route| match channel_source(&sequence.audio_program, &route.source) {
+                    AudioRouteSource::Bus { bus_id, .. } => Some(bus_id),
+                    _ => None,
+                },
+            )
             .collect::<BTreeSet<_>>();
         let next_source_tracks = sequence
             .audio_program
             .sidechain_routes
             .iter()
             .filter(|route| selected.contains(&route.id))
-            .filter_map(|route| match route.source {
-                AudioRouteSource::Track { track_id, .. } => Some(track_id),
-                AudioRouteSource::Bus { .. } => None,
-            })
+            .filter_map(
+                |route| match channel_source(&sequence.audio_program, &route.source) {
+                    AudioRouteSource::Track { track_id, .. } => Some(track_id),
+                    _ => None,
+                },
+            )
             .collect::<BTreeSet<_>>();
         if selected == selected_sidechain_ids
             && next_source_buses == sidechain_source_buses
@@ -221,33 +227,64 @@ where
     };
     if !request.audition.soloed_tracks.is_empty() {
         required_tracks.retain(|track| request.audition.soloed_tracks.contains(track));
-        routes.retain(|route| match route.source {
-            AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
-            AudioRouteSource::Bus { .. } => true,
-        });
+        routes.retain(
+            |route| match channel_source(&sequence.audio_program, &route.source) {
+                AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
+                _ => true,
+            },
+        );
         selected_sidechain_ids.retain(|route_id| {
             sequence
                 .audio_program
                 .sidechain_routes
                 .iter()
                 .find(|route| route.id == *route_id)
-                .is_some_and(|route| match route.source {
-                    AudioRouteSource::Track { track_id, .. } => required_tracks.contains(&track_id),
-                    AudioRouteSource::Bus { .. } => true,
-                })
+                .is_some_and(
+                    |route| match channel_source(&sequence.audio_program, &route.source) {
+                        AudioRouteSource::Track { track_id, .. } => {
+                            required_tracks.contains(&track_id)
+                        }
+                        _ => true,
+                    },
+                )
         });
     }
     let post_fader_tracks = post_fader_tracks(
+        &sequence.audio_program,
         &routes,
         &sequence.audio_program.sidechain_routes,
         &selected_sidechain_ids,
     );
     let post_fader_buses = post_fader_buses(
+        &sequence.audio_program,
         &routes,
         &sequence.audio_program.sidechain_routes,
         &selected_sidechain_ids,
     );
 
+    for source in routes.iter().map(|route| &route.source).chain(
+        sequence
+            .audio_program
+            .sidechain_routes
+            .iter()
+            .filter(|route| selected_sidechain_ids.contains(&route.id))
+            .map(|route| &route.source),
+    ) {
+        if let AudioRouteSource::ProcessorOutput { processor_id, .. } = source {
+            let bypassed = sequence
+                .audio_program
+                .track_channels
+                .values()
+                .map(|channel| &channel.strip)
+                .chain(sequence.audio_program.buses.iter().map(|bus| &bus.strip))
+                .flat_map(|strip| [&strip.pre_fader, &strip.post_fader])
+                .flat_map(|rack| &rack.processors)
+                .any(|processor| processor.id == *processor_id && processor.bypassed);
+            if bypassed {
+                return Err(AudioCompileError::BypassedProcessorOutput(*processor_id).into());
+            }
+        }
+    }
     let mut track_channels = BTreeMap::new();
     for track_id in &required_tracks {
         let track = sequence
@@ -278,7 +315,7 @@ where
             );
         }
     }
-    let bus_order = topological_bus_order(&routes, &required_buses)?;
+    let bus_order = topological_bus_order(&sequence.audio_program, &routes, &required_buses)?;
 
     let mut processing_scopes = BTreeMap::<AudioProcessingScopeId, CompiledProcessingScope>::new();
     let mut contributions = Vec::new();
@@ -415,7 +452,7 @@ where
         })
         .map(|route| CompiledProcessorSidechainRoute {
             id: route.id,
-            source: route.source,
+            source: route.source.clone(),
             processor_id: route.processor_id,
             bus_key: route.bus_key.clone(),
             gain_db: route.gain_db,
@@ -619,19 +656,37 @@ fn active_author_processor_ids(
     active
 }
 
+fn channel_source(
+    program: &mondrian_timeline::audio::AudioProgram,
+    source: &AudioRouteSource,
+) -> AudioRouteSource {
+    use mondrian_timeline::audio::AudioChannelStripOwner;
+    let (owner, port) = program
+        .route_source_channel(source)
+        .expect("compiler sources passed complete author validation");
+    match owner {
+        AudioChannelStripOwner::Track { track_id } => AudioRouteSource::Track { track_id, port },
+        AudioChannelStripOwner::Bus { bus_id } => AudioRouteSource::Bus { bus_id, port },
+        AudioChannelStripOwner::ProgramOutput { .. } => {
+            unreachable!("Program Output sources are not admitted")
+        }
+    }
+}
+
 fn post_fader_tracks(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     sidechains: &[AudioProcessorSidechainRoute],
     selected_sidechains: &BTreeSet<mondrian_core::AudioRouteId>,
 ) -> BTreeSet<TrackId> {
     routes
         .iter()
-        .map(|route| route.source)
+        .map(|route| channel_source(program, &route.source))
         .chain(
             sidechains
                 .iter()
                 .filter(|route| selected_sidechains.contains(&route.id))
-                .map(|route| route.source),
+                .map(|route| channel_source(program, &route.source)),
         )
         .filter_map(|source| match source {
             AudioRouteSource::Track { track_id, port }
@@ -645,18 +700,19 @@ fn post_fader_tracks(
 }
 
 fn post_fader_buses(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     sidechains: &[AudioProcessorSidechainRoute],
     selected_sidechains: &BTreeSet<mondrian_core::AudioRouteId>,
 ) -> BTreeSet<MixBusId> {
     routes
         .iter()
-        .map(|route| route.source)
+        .map(|route| channel_source(program, &route.source))
         .chain(
             sidechains
                 .iter()
                 .filter(|route| selected_sidechains.contains(&route.id))
-                .map(|route| route.source),
+                .map(|route| channel_source(program, &route.source)),
         )
         .filter_map(|source| match source {
             AudioRouteSource::Bus { bus_id, port }
@@ -670,7 +726,7 @@ fn post_fader_buses(
 }
 
 fn resolve_signal_closure(
-    routes: &[AudioRoute],
+    program: &mondrian_timeline::audio::AudioProgram,
     output_id: ProgramOutputId,
     additional_bus_destinations: &BTreeSet<MixBusId>,
     muted_tracks: &BTreeSet<TrackId>,
@@ -682,7 +738,7 @@ fn resolve_signal_closure(
         .chain(additional_bus_destinations.iter().copied().map(AudioRouteDestination::Bus))
         .collect::<Vec<_>>();
     while let Some(destination) = pending_destinations.pop() {
-        for route in routes.iter().filter(|route| {
+        for route in program.routes.iter().filter(|route| {
             route.enabled
                 && route.destination == destination
                 && !matches!(
@@ -698,12 +754,12 @@ fn resolve_signal_closure(
             }
             selected.push(CompiledRoute {
                 id: route.id,
-                source: route.source,
+                source: route.source.clone(),
                 destination: route.destination,
                 gain_db: route.gain_db,
                 gain_automation: route.gain_automation.clone(),
             });
-            match route.source {
+            match channel_source(program, &route.source) {
                 AudioRouteSource::Track { track_id, .. } => {
                     required_tracks.insert(track_id);
                 }
@@ -712,6 +768,7 @@ fn resolve_signal_closure(
                         pending_destinations.push(AudioRouteDestination::Bus(bus_id));
                     }
                 }
+                AudioRouteSource::ProcessorOutput { .. } => unreachable!("normalized source"),
             }
         }
     }
@@ -720,6 +777,7 @@ fn resolve_signal_closure(
 }
 
 fn topological_bus_order(
+    program: &mondrian_timeline::audio::AudioProgram,
     routes: &[CompiledRoute],
     buses: &BTreeSet<MixBusId>,
 ) -> Result<Vec<MixBusId>, AudioCompileError> {
@@ -728,7 +786,7 @@ fn topological_bus_order(
         if let (
             AudioRouteSource::Bus { bus_id: source, .. },
             AudioRouteDestination::Bus(destination),
-        ) = (route.source, route.destination)
+        ) = (channel_source(program, &route.source), route.destination)
             && buses.contains(&source)
             && buses.contains(&destination)
         {
@@ -743,7 +801,7 @@ fn topological_bus_order(
     while let Some(id) = ready.pop_first() {
         order.push(id);
         for route in routes {
-            if matches!(route.source, AudioRouteSource::Bus { bus_id, .. } if bus_id == id)
+            if matches!(channel_source(program, &route.source), AudioRouteSource::Bus { bus_id, .. } if bus_id == id)
                 && let AudioRouteDestination::Bus(destination) = route.destination
                 && let Some(value) = indegree.get_mut(&destination)
             {
@@ -763,6 +821,9 @@ fn topological_bus_order(
 /// Author validation, dependency, or lowering failure.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AudioCompileError {
+    /// A raw output cannot be fabricated by host bypass.
+    #[error("routed processor {0} is bypassed")]
+    BypassedProcessorOutput(mondrian_core::AudioProcessorInstanceId),
     /// Invalid persistent author state.
     #[error(transparent)]
     InvalidAuthoring(#[from] AudioAuthoringError),

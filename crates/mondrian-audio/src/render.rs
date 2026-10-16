@@ -98,6 +98,10 @@ pub struct AudioRenderCapacity {
     pub maximum_processor_auxiliary_buses: usize,
     /// Preallocated PCM samples for the largest processor auxiliary-bus set.
     pub processor_auxiliary_scratch_samples: usize,
+    /// Actual output arena capacities, including unrouted additional outputs.
+    pub processor_output_buffers: usize,
+    /// Actual interleaved sample capacity across processor output buffers.
+    pub processor_output_samples: usize,
     /// Enabled per-occurrence sidechain Route bindings.
     pub sidechain_bindings: usize,
     /// Non-zero Contribution and Route compensation lines.
@@ -199,6 +203,7 @@ pub struct AudioRenderSession {
     sidechain_delay_lines: Vec<FixedDelayLine>,
     processor_delay_lines: Vec<FixedDelayLine>,
     sidechain_source_buffers: Vec<Vec<f32>>,
+    processor_output_buffers: Vec<Vec<f32>>,
     processor_host: PreparedProcessorHost,
     meter_bank: AudioMeterBank,
     meter_block_serial: u64,
@@ -371,6 +376,25 @@ impl AudioRenderSession {
         let sidechain_source_buffers = (0..plan.schedule.sidechain_sources.len())
             .map(|_| vec![0.0; samples])
             .collect::<Vec<_>>();
+        let processor_output_buffers = (0..plan.schedule.summary.processor_output_buffer_count)
+            .map(|_| vec![0.0; samples])
+            .collect::<Vec<_>>();
+        let processor_output_samples = processor_output_buffers
+            .iter()
+            .try_fold(0_usize, |sum, pcm| sum.checked_add(pcm.capacity()))
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
+        if processor_output_buffers.capacity()
+            != plan.schedule.summary.processor_output_buffer_count
+            || processor_output_samples
+                != plan
+                    .schedule
+                    .summary
+                    .processor_output_buffer_count
+                    .checked_mul(samples)
+                    .ok_or(AudioExecutionError::BufferTooLarge)?
+        {
+            return Err(AudioExecutionError::InvalidPreparedSchedule);
+        }
         let compensation_delay_line_count = contribution_delay_lines
             .iter()
             .chain(route_delay_lines.iter())
@@ -432,6 +456,8 @@ impl AudioRenderSession {
                 .maximum_processor_auxiliary_buses
                 .checked_mul(samples)
                 .ok_or(AudioExecutionError::BufferTooLarge)?,
+            processor_output_buffers: processor_output_buffers.len(),
+            processor_output_samples,
             sidechain_bindings: plan.schedule.sidechain_bindings.len(),
             compensation_delay_line_count,
             compensation_delay_samples,
@@ -454,6 +480,7 @@ impl AudioRenderSession {
                 sidechain_delay_lines,
                 processor_delay_lines,
                 sidechain_source_buffers,
+                processor_output_buffers,
                 processor_host,
                 meter_bank,
                 meter_block_serial: 0,
@@ -962,6 +989,12 @@ impl AudioRenderSession {
         if let Some(ticket) = self.pending_reprepare_ticket {
             return Err(AudioExecutionError::ReprepareRequired(ticket));
         }
+        // Stateful and mixed Sessions retain their existing epoch recovery and
+        // error ordering. A wholly stateless failed instance can only be rebuilt;
+        // reject before a preceding producer or native query is replayed.
+        if !self.requires_state_entry() && self.processor_host.has_failed_instance() {
+            return Err(crate::AudioProcessorHostError::PoisonedInstance.into());
+        }
         if let Some((occurrence, request)) = self.processor_host.preflight_native_control()? {
             let continuity_epoch = match self.continuity {
                 SessionContinuity::Unentered => None,
@@ -1191,6 +1224,9 @@ impl AudioRenderSession {
         let schedule = &self.plan.schedule;
         let backend = self.plan.kernel_backend();
         let sample_rate = AudioSampleRate::new(contract.sample_rate)?;
+        for output in &mut self.processor_output_buffers {
+            output[..samples].fill(0.0);
+        }
         for &(node_slot, stage) in &schedule.execution_order {
             let node = &schedule.nodes[node_slot];
             let scratch_slot = node.scratch_slot;
@@ -1213,6 +1249,7 @@ impl AudioRenderSession {
                         &self.sidechain_source_buffers,
                         &mut self.sidechain_delay_lines,
                         &mut self.processor_delay_lines,
+                        &mut self.processor_output_buffers,
                         cancellation,
                     )?;
                 } else {
@@ -1229,6 +1266,7 @@ impl AudioRenderSession {
                             contract.channel_count(),
                             backend,
                             &mut self.node_buffers,
+                            &self.processor_output_buffers,
                             delay_line,
                             &mut self.scratch,
                         )?;
@@ -1249,6 +1287,7 @@ impl AudioRenderSession {
                 &self.sidechain_source_buffers,
                 &mut self.sidechain_delay_lines,
                 &mut self.processor_delay_lines,
+                &mut self.processor_output_buffers,
                 cancellation,
             )?;
             for source_slot in &node.sidechain_source_buffers {
@@ -1263,8 +1302,15 @@ impl AudioRenderSession {
                     .sidechain_source_buffers
                     .get_mut(*source_slot)
                     .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
-                destination[..samples]
-                    .copy_from_slice(self.node_buffers[scratch_slot].port(source.port, samples));
+                let pcm = if let Some(output) = source.processor_output {
+                    self.processor_output_buffers
+                        .get(output.buffer_slot)
+                        .and_then(|pcm| pcm.get(..samples))
+                        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?
+                } else {
+                    self.node_buffers[scratch_slot].port(source.port, samples)
+                };
+                destination[..samples].copy_from_slice(pcm);
             }
             if stage == AudioChannelSignalStage::PostFader
                 && meter_start_sample.is_some()
@@ -1328,6 +1374,7 @@ fn render_track_contributions(
     sidechain_source_buffers: &[Vec<f32>],
     sidechain_delay_lines: &mut [FixedDelayLine],
     processor_delay_lines: &mut [FixedDelayLine],
+    processor_output_buffers: &mut [Vec<f32>],
     cancellation: Option<&ExecutionCancellationToken>,
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
@@ -1438,6 +1485,8 @@ fn render_track_contributions(
             &schedule.processors,
             &schedule.notes,
             &schedule.processor_auxiliary_buses,
+            &schedule.processor_output_buses,
+            processor_output_buffers,
             &schedule.sidechain_bindings,
             AudioRenderRequest {
                 start_sample: execution_start_sample,
@@ -1639,6 +1688,7 @@ fn sum_prepared_route(
     channels: usize,
     backend: crate::AudioKernelBackend,
     buffers: &mut [NodeBuffers],
+    processor_output_buffers: &[Vec<f32>],
     delay_line: &mut FixedDelayLine,
     scratch: &mut RenderScratch,
 ) -> Result<(), AudioExecutionError> {
@@ -1667,6 +1717,22 @@ fn sum_prepared_route(
     } else {
         None
     };
+    if let Some(output) = route.processor_output {
+        let source = processor_output_buffers
+            .get(output.buffer_slot)
+            .and_then(|pcm| pcm.get(..samples))
+            .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+        let destination =
+            &mut buffers[schedule.nodes[route.destination_slot].scratch_slot].input[..samples];
+        return sum_route_signal(
+            route,
+            source,
+            destination,
+            automated_gains,
+            backend,
+            delay_line,
+        );
+    }
     let source_scratch = schedule.nodes[route.source_slot].scratch_slot;
     let destination_scratch = schedule.nodes[route.destination_slot].scratch_slot;
     if source_scratch == destination_scratch {
@@ -1745,6 +1811,7 @@ fn process_strip(
     sidechain_source_buffers: &[Vec<f32>],
     sidechain_delay_lines: &mut [FixedDelayLine],
     processor_delay_lines: &mut [FixedDelayLine],
+    processor_output_buffers: &mut [Vec<f32>],
     cancellation: Option<&ExecutionCancellationToken>,
 ) -> Result<(), AudioExecutionError> {
     let channels = channel_layout.channel_count();
@@ -1765,6 +1832,8 @@ fn process_strip(
             &schedule.processors,
             &schedule.notes,
             &schedule.processor_auxiliary_buses,
+            &schedule.processor_output_buses,
+            processor_output_buffers,
             &schedule.sidechain_bindings,
             request,
             sample_rate,
@@ -1810,6 +1879,8 @@ fn process_strip(
         &schedule.processors,
         &schedule.notes,
         &schedule.processor_auxiliary_buses,
+        &schedule.processor_output_buses,
+        processor_output_buffers,
         &schedule.sidechain_bindings,
         request,
         sample_rate,

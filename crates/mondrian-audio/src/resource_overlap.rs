@@ -190,6 +190,8 @@ pub(crate) fn admit(
     let mut removed_logical = 0usize;
     let mut inserted_parameter_bytes = 0usize;
     let mut removed_parameter_bytes = 0usize;
+    let mut inserted_render_bytes = 0usize;
+    let mut removed_render_bytes = 0usize;
     for replacement in replacements {
         let current = runtime
             .find_resource_session(replacement.current)
@@ -229,6 +231,10 @@ pub(crate) fn admit(
         inserted_logical = sum(inserted_logical, next.prepared_logical_bytes)?;
         removed_logical = sum(removed_logical, old.prepared_logical_bytes)?;
         removed_parameter_bytes = sum(removed_parameter_bytes, old.parameter_event_bytes)?;
+        // Output contract/descriptor Vec and String clones can own different
+        // capacities while preserving the exact same validated graph shape.
+        removed_render_bytes = sum(removed_render_bytes, old.render_scratch_bytes)?;
+        inserted_render_bytes = sum(inserted_render_bytes, next.render_scratch_bytes)?;
         let event_layout = replacement.events.host_allocation()?.layout();
         let lane_layout = replacement.lanes.host_allocation()?.layout();
         inserted_parameter_bytes = sum(
@@ -327,10 +333,15 @@ pub(crate) fn admit(
         removed_parameter_bytes,
         inserted_parameter_bytes,
     )?;
+    footprint.render_scratch_bytes = replace(
+        original.render_scratch_bytes,
+        removed_render_bytes,
+        inserted_render_bytes,
+    )?;
     footprint.fixed_resident_bytes = replace(
         original.fixed_resident_bytes,
-        removed_parameter_bytes,
-        inserted_parameter_bytes,
+        sum(removed_parameter_bytes, removed_render_bytes)?,
+        sum(inserted_parameter_bytes, inserted_render_bytes)?,
     )?;
     runtime.check_resource_ceiling(
         AudioRuntimeResourceCategory::FixedResidentBytes,
