@@ -1881,6 +1881,7 @@ pub(super) fn native_worker_lane_profile(
         let [sdk_main, sdk_dsp] =
             vst3_host::plugin::PluginEditorProcessingSplit::allocation_layouts();
         let owners = crate::NativeWorkerLaneOwnedLayouts {
+            adapter_resident: native_layout(std::alloc::Layout::new::<Vst3Worker>()),
             reader_slots: native_layout(std::alloc::Layout::new::<
                 super::native_worker_ingress::NativeReaderSlots,
             >()),

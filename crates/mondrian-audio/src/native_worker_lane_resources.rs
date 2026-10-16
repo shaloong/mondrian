@@ -16,6 +16,8 @@ pub const SCOPED_NATIVE_DSP_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// A fixed known storage owner in one scoped native main/DSP implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeWorkerLaneStorageKind {
+    /// The complete retained concrete Adapter Worker Box allocation.
+    AdapterResident,
     /// Main-owned command and reply acknowledgement slots.
     ReaderSlots,
     /// Main-owned job, completion and readiness slots.
@@ -38,7 +40,7 @@ pub enum NativeWorkerLaneStorageKind {
     StagedSeed,
 }
 
-/// Actual requested layouts of the seven fixed known lane storage owners.
+/// Actual requested layouts of the eight fixed known lane storage owners.
 ///
 /// Construct these from the real owning types' `Layout::new`, or the SDK's
 /// complete Box-owner observer. A trait-object pointer layout is insufficient.
@@ -46,6 +48,9 @@ pub enum NativeWorkerLaneStorageKind {
 /// it is not an additional allocation inside the two requested worker stacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWorkerLaneOwnedLayouts {
+    /// Complete retained Adapter Worker header, including its inline metadata.
+    /// Nested allocations are separate owners and are not covered by this layout.
+    pub adapter_resident: NativeHostBufferLayout,
     /// Combined requested layouts of the actual reader/ack slot values.
     pub reader_slots: NativeHostBufferLayout,
     /// Combined requested layouts of the actual job/completion/ready values.
@@ -68,7 +73,7 @@ pub struct NativeWorkerLaneOwnedLayouts {
 /// charged again under a second identity. These are capacity ceilings, not
 /// payload lengths or a claim that the maximum owners are always all live.
 /// Each alignment is the maximum required alignment of its command union.
-/// Legal observed alignments must divide that ceiling; all seven fixed owners
+/// Legal observed alignments must divide that ceiling; all eight fixed owners
 /// still require exact measured layouts. Actual capacity and alignment remain
 /// the owning type's facts and must not be rewritten to fit the ceiling.
 /// Descriptor strings, nested Vecs and error Strings need separate receipts.
@@ -150,7 +155,13 @@ impl NativeWorkerLaneResourceProfile {
         control: NativeWorkerControlOverlapLayout,
     ) -> Result<Self, NativeWorkerLaneResourceError> {
         let mut bytes = 0usize;
-        for (kind, layout) in fixed_layouts(owners).into_iter().chain(control_layouts(control)) {
+        for (kind, layout) in std::iter::once((
+            NativeWorkerLaneStorageKind::AdapterResident,
+            owners.adapter_resident,
+        ))
+        .chain(lane_layouts(owners))
+        .chain(control_layouts(control))
+        {
             validate_layout(kind, layout)?;
             bytes = bytes
                 .checked_add(layout.bytes)
@@ -242,18 +253,22 @@ impl NativeWorkerLaneResourceProfile {
         self.additional_session_reservation_bytes
     }
 
-    /// Check actual created fixed owners and actual control Vec capacities.
+    /// Check the seven scoped lane owners and actual control Vec capacities.
     ///
     /// Call before scoped thread entry/Ready or publication of a control result.
     /// Failure cannot be hidden by counting lengths or dropping the excess from
     /// a receipt. No allocation or locking occurs in this comparison.
-    pub fn admit_observed_owners(
+    /// The retained Worker header is not borrowed by these scoped roles. Its
+    /// `adapter_resident` field is ignored here, never reported as an actual
+    /// observation; startup separately calls `admit_adapter_resident` on the
+    /// same Box that remains owned throughout all subsequent role borrows.
+    pub fn admit_observed_lane_owners(
         self,
         owners: NativeWorkerLaneOwnedLayouts,
         control: NativeWorkerControlOverlapLayout,
     ) -> Result<(), NativeWorkerLaneResourceError> {
         for ((kind, prepared), (_, observed)) in
-            fixed_layouts(self.owners).into_iter().zip(fixed_layouts(owners))
+            lane_layouts(self.owners).into_iter().zip(lane_layouts(owners))
         {
             validate_layout(kind, observed)?;
             if observed != prepared {
@@ -278,6 +293,28 @@ impl NativeWorkerLaneResourceProfile {
         }
         Ok(())
     }
+
+    /// Verify the complete concrete retained Worker Box before Ready.
+    ///
+    /// Derive this layout from `Layout::for_value` on the actual boxed worker,
+    /// not the trait-object pointer or a scoped role. This does not observe any
+    /// nested heap allocation or any of the separately borrowed lane owners.
+    pub fn admit_adapter_resident(
+        self,
+        observed: NativeHostBufferLayout,
+    ) -> Result<(), NativeWorkerLaneResourceError> {
+        let owner = NativeWorkerLaneStorageKind::AdapterResident;
+        validate_layout(owner, observed)?;
+        let prepared = self.owners.adapter_resident;
+        if observed != prepared {
+            return Err(NativeWorkerLaneResourceError::FixedOwnerChanged {
+                owner,
+                prepared,
+                observed,
+            });
+        }
+        Ok(())
+    }
 }
 
 fn validate_layout(
@@ -293,7 +330,7 @@ fn validate_layout(
         })
 }
 
-fn fixed_layouts(
+fn lane_layouts(
     owners: NativeWorkerLaneOwnedLayouts,
 ) -> [(NativeWorkerLaneStorageKind, NativeHostBufferLayout); 7] {
     use NativeWorkerLaneStorageKind::*;

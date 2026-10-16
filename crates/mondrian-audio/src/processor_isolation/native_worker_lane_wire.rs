@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub(super) enum NativeWorkerLaneWire {
-    Inline,
+    Inline {},
     Scoped {
-        owners: [(u64, u64); 7],
+        owners: [(u64, u64); 8],
         control: [(u64, u64); 3],
         processor_input_storage: [u64; 2],
     },
@@ -49,7 +49,7 @@ impl NativeWorkerLaneWire {
         profile: Option<NativeWorkerLaneResourceProfile>,
     ) -> Result<Self, AudioProcessorHostError> {
         let Some(profile) = profile else {
-            return Ok(Self::Inline);
+            return Ok(Self::Inline {});
         };
         let owners = profile.owning_layouts();
         let control = profile.control_overlap();
@@ -60,6 +60,7 @@ impl NativeWorkerLaneWire {
                 u64::try_from(com_payloads).map_err(|_| invalid())?,
             ],
             owners: capture_layouts([
+                owners.adapter_resident,
                 owners.reader_slots,
                 owners.processing_slots,
                 owners.main_inline,
@@ -81,12 +82,13 @@ impl NativeWorkerLaneWire {
         let Self::Scoped { owners, control, processor_input_storage } = self else {
             return Ok(None);
         };
-        let [reader_slots, processing_slots, main_inline, runtime_main_role, runtime_dsp_role, sdk_main_role, sdk_dsp_role] =
+        let [adapter_resident, reader_slots, processing_slots, main_inline, runtime_main_role, runtime_dsp_role, sdk_main_role, sdk_dsp_role] =
             realize_layouts(owners)?;
         let [decoded_input, reply_storage, staged_seed] = realize_layouts(control)?;
         Ok(Some(
             NativeWorkerLaneResourceProfile::scoped_main_dsp(
                 NativeWorkerLaneOwnedLayouts {
+                    adapter_resident,
                     reader_slots,
                     processing_slots,
                     main_inline,
@@ -118,7 +120,7 @@ mod tests {
     #[test]
     fn native_lane_wire_preserves_independent_persistent_input_and_rejects_legacy_shape() {
         let wire = NativeWorkerLaneWire::Scoped {
-            owners: [(0, 1); 7],
+            owners: [(0, 1); 8],
             control: [(0, 1); 3],
             processor_input_storage: [24, 64],
         };
@@ -130,12 +132,76 @@ mod tests {
         legacy.as_object_mut().unwrap().remove("processor_input_storage");
         assert!(serde_json::from_value::<NativeWorkerLaneWire>(legacy).is_err());
         assert!(NativeWorkerLaneWire::Scoped {
-            owners: [(0, 1); 7],
+            owners: [(0, 1); 8],
             control: [(0, 1); 3],
             processor_input_storage: [u64::MAX, 1],
         }
         .realize()
         .is_err());
-        assert_eq!(NativeWorkerLaneWire::Inline.realize().unwrap(), None);
+        assert_eq!((NativeWorkerLaneWire::Inline {}).realize().unwrap(), None);
+    }
+
+    #[test]
+    fn native_lane_wire_resident_owner_requires_eight_layouts_and_refuses_old_peers() {
+        // Frozen IPC12 profile shape; neither side may silently omit the new owner.
+        #[derive(Serialize, Deserialize)]
+        #[serde(tag = "kind", deny_unknown_fields)]
+        enum LegacyWire {
+            Scoped {
+                owners: [(u64, u64); 7],
+                control: [(u64, u64); 3],
+                processor_input_storage: [u64; 2],
+            },
+        }
+        let old = serde_json::to_value(LegacyWire::Scoped {
+            owners: [(0, 1); 7],
+            control: [(0, 1); 3],
+            processor_input_storage: [0, 0],
+        })
+        .unwrap();
+        assert!(serde_json::from_value::<LegacyWire>(old.clone()).is_ok());
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(old).is_err());
+        let mut owners = [(0, 1); 8];
+        owners[0] = (1032, 8);
+        let wire = NativeWorkerLaneWire::Scoped {
+            owners,
+            control: [(0, 1); 3],
+            processor_input_storage: [0, 0],
+        };
+        let profile = wire.clone().realize().unwrap().unwrap();
+        assert_eq!(
+            profile.owning_layouts().adapter_resident,
+            NativeHostBufferLayout { bytes: 1032, alignment: 8 }
+        );
+        assert_eq!(profile.known_storage_limit_bytes(), 1032);
+        assert_eq!(NativeWorkerLaneWire::capture(Some(profile)).unwrap(), wire);
+        let current = serde_json::to_value(wire).unwrap();
+        assert!(serde_json::from_value::<LegacyWire>(current.clone()).is_err());
+        let mut extra = current.clone();
+        extra["owners"].as_array_mut().unwrap().push(serde_json::json!([0, 1]));
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(extra).is_err());
+        let mut unknown = current;
+        unknown["unaccounted_owner"] = serde_json::json!([1, 1]);
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(unknown).is_err());
+        let inline = serde_json::json!({ "kind": "Inline" });
+        assert_eq!(
+            serde_json::to_value(NativeWorkerLaneWire::capture(None).unwrap()).unwrap(),
+            inline
+        );
+        assert_eq!(
+            serde_json::from_value::<NativeWorkerLaneWire>(inline.clone())
+                .unwrap()
+                .realize()
+                .unwrap(),
+            None
+        );
+        for (name, value) in [
+            ("owners", serde_json::to_value([(0_u64, 1_u64); 8]).unwrap()),
+            ("unaccounted_owner", serde_json::json!([1, 1])),
+        ] {
+            let mut unknown = inline.clone();
+            unknown[name] = value;
+            assert!(serde_json::from_value::<NativeWorkerLaneWire>(unknown).is_err());
+        }
     }
 }

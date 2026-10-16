@@ -221,7 +221,8 @@ impl IsolatedAudioProcessorWorkerSpec {
 
     /// Declare the concrete adapter's measured additional native lane request.
     /// The sole Session grant remains authority; the child must match this exact
-    /// request before native load and compare actual created roles before Ready.
+    /// request before native load and compare the actual retained Worker Box
+    /// header and created roles before Ready. Nested cold allocations are separate.
     pub fn with_native_worker_lane_resources(
         mut self,
         profile: Option<crate::NativeWorkerLaneResourceProfile>,
@@ -445,16 +446,7 @@ impl IsolatedAudioProcessorFactory {
             spec.note_input_contract.limits.input_events,
             spec.note_input_contract.limits.output_ends,
         )?;
-        let execution_contract = spec
-            .plugin_execution_contract
-            .with_additional_session_scratch_bytes(layout.total_bytes)?
-            .with_additional_session_scratch_bytes(
-                isolated_output_contract_clone_reservation_bytes(&spec.auxiliary_outputs)?,
-            )?
-            .with_additional_session_scratch_bytes(spec.native_lane.map_or(
-                0,
-                crate::NativeWorkerLaneResourceProfile::additional_session_reservation_bytes,
-            ))?;
+        let execution_contract = Self::requested_execution_contract(&spec, layout)?;
         let (mut validation, input_names) =
             SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
         validation.shutdown_observed().validation_result()?;
@@ -464,6 +456,21 @@ impl IsolatedAudioProcessorFactory {
             layout,
             input_names,
         }))
+    }
+
+    fn requested_execution_contract(
+        spec: &IsolatedAudioProcessorWorkerSpec,
+        layout: SharedBlockLayout,
+    ) -> Result<AudioProcessorExecutionContract, AudioProcessorHostError> {
+        spec.plugin_execution_contract
+            .with_additional_session_scratch_bytes(layout.total_bytes)?
+            .with_additional_session_scratch_bytes(
+                isolated_output_contract_clone_reservation_bytes(&spec.auxiliary_outputs)?,
+            )?
+            .with_additional_session_scratch_bytes(spec.native_lane.map_or(
+                0,
+                crate::NativeWorkerLaneResourceProfile::additional_session_reservation_bytes,
+            ))
     }
 }
 

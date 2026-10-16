@@ -5386,6 +5386,7 @@ pub(super) fn clap_native_worker_lane_profile(
     #[cfg(windows)]
     {
         let owners = crate::NativeWorkerLaneOwnedLayouts {
+            adapter_resident: clap_native_layout(std::alloc::Layout::new::<ClapWorker>()),
             reader_slots: clap_native_layout(std::alloc::Layout::new::<
                 super::native_worker_ingress::NativeReaderSlots,
             >()),

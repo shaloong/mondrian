@@ -74,29 +74,10 @@ pub(super) fn run_worker(
         parameter_ids: prepare.parameter_ids.clone(),
         render_contract,
     };
-    let requested_lane = match factory.native_worker_lane_resources_for_preparation(&request) {
-        Ok(profile) => profile,
-        Err(error) => {
-            write_ready_rejected(&mut control, error.to_string())?;
-            return Ok(());
-        }
-    };
-    if native_lane != requested_lane {
-        write_ready_rejected(
-            &mut control,
-            "parent and child preparation-specific native storage requests differ".to_owned(),
-        )?;
-        return Ok(());
-    }
-    let prepared = catch_unwind(AssertUnwindSafe(|| factory.prepare(request)));
-    let mut processor = match prepared {
-        Ok(Ok(processor)) => processor,
-        Ok(Err(error)) => {
-            write_ready_rejected(&mut control, error.to_string())?;
-            return Ok(());
-        }
-        Err(_) => {
-            write_ready_rejected(&mut control, "Worker factory panicked".to_owned())?;
+    let mut processor = match prepare_worker(factory, request) {
+        Ok(processor) => processor,
+        Err(detail) => {
+            write_ready_rejected(&mut control, detail)?;
             return Ok(());
         }
     };
@@ -470,6 +451,34 @@ fn write_operation_result(
     Ok(success)
 }
 
+fn prepare_worker(
+    factory: &dyn IsolatedAudioProcessorWorkerFactory,
+    request: IsolatedAudioProcessorWorkerPrepareRequest,
+) -> Result<Box<dyn IsolatedAudioProcessorWorker>, String> {
+    let native_lane = request.native_worker_lane_resources();
+    let requested_lane = factory
+        .native_worker_lane_resources_for_preparation(&request)
+        .map_err(|error| error.to_string())?;
+    if native_lane != requested_lane {
+        return Err(
+            "parent and child preparation-specific native storage requests differ".to_owned(),
+        );
+    }
+    let processor = catch_unwind(AssertUnwindSafe(|| factory.prepare(request)))
+        .map_err(|_| "Worker factory panicked".to_owned())?
+        .map_err(|error| error.to_string())?;
+    if let Some(profile) = native_lane {
+        let layout = std::alloc::Layout::for_value(processor.as_ref());
+        profile
+            .admit_adapter_resident(crate::NativeHostBufferLayout {
+                bytes: layout.size(),
+                alignment: layout.align(),
+            })
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(processor)
+}
+
 fn write_ready_rejected(
     control: &mut TcpStream,
     detail: String,
@@ -722,7 +731,7 @@ fn admit_native_control_storage(
         return Ok(());
     };
     profile
-        .admit_observed_owners(
+        .admit_observed_lane_owners(
             profile.owning_layouts(),
             crate::NativeWorkerControlOverlapLayout {
                 decoded_input,
@@ -1054,6 +1063,9 @@ fn run_native_command_service(
 
 #[cfg(test)]
 mod native_control_scope_tests;
+
+#[cfg(test)]
+mod native_resident_owner_tests;
 
 #[cfg(test)]
 mod inline_dispatch_contracts {

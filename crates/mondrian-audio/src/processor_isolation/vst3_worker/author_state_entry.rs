@@ -123,7 +123,7 @@ impl Vst3Worker {
                 .checked_add(accepted.capacity())
                 .ok_or_else(|| invalid("native staged author-state owner extent overflow"))?;
             profile
-                .admit_observed_owners(
+                .admit_observed_lane_owners(
                     profile.owning_layouts(),
                     crate::NativeWorkerControlOverlapLayout {
                         decoded_input: crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },

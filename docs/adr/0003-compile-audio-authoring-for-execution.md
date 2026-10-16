@@ -400,6 +400,16 @@ grandfathered fee policy is introduced.
 
 ## Processor output routing contract (2026-10-16)
 
+The native lane's fixed owners also include `AdapterResident`: the complete
+concrete retained Worker Box header, including inline adapter metadata. Its real
+type layout enters the existing Factory session reservation and sole Root
+`FixedResident` grant; the child compares its pure type profile before native
+preparation and checks the actual dynamic Box layout before Ready. IPC13 requires
+all eight owner layouts and refuses the old profile. This does not account for
+nested cold heap owners or qualify whole-process residency. Resolver validation
+and discovery cold peaks precede the final Session grant; non-Windows adapters
+without a native lane profile do not acquire this qualification.
+
 Approved for implementation; this section does not claim completed native
 multi-output support. The current single mutable Main bus and strip taps cannot
 represent independent plugin outputs. Relaxing a format's output-count check

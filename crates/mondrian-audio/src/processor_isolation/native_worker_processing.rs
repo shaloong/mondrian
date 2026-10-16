@@ -164,7 +164,7 @@ pub(super) fn with_processing_scope<T>(
     actual.sdk_dsp_role = sdk_dsp;
     let empty = crate::NativeHostBufferLayout { bytes: 0, alignment: 1 };
     profile
-        .admit_observed_owners(
+        .admit_observed_lane_owners(
             actual,
             crate::NativeWorkerControlOverlapLayout {
                 decoded_input: empty,
