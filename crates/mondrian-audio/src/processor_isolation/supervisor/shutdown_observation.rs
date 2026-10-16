@@ -112,9 +112,10 @@ pub(in crate::processor_isolation) struct ShutdownReport {
     pub(super) configure: Option<Timed<Result<(), IoFailure>>>,
     pub(super) command_write: Option<Timed<Result<(), IoFailure>>>,
     pub(super) response_read: Option<Timed<Result<u32, IoFailure>>>,
-    // Timed.after marks when the whole exit-polling span was recorded relative
-    // to shutdown start; elapsed covers that span. The outcome is the last
-    // existing try_wait result, not that query's timestamp or duration.
+    // Timed.after marks when the whole bounded exit-wait span was recorded
+    // relative to shutdown start; elapsed covers that span, not one syscall.
+    // Running may be a wait timeout; Exited always comes from Child.try_wait.
+    // Io may be the platform wait or try_wait error. None means no observation.
     pub(super) exit_loop: Option<Timed<ChildObservation>>,
     pub(super) primary_failure: Option<ShutdownFailure>,
     pub(super) cleanup: CleanupObservation,

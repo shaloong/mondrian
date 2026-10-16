@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use tempfile::{NamedTempFile, TempDir};
 use uuid::Uuid;
 
+mod exit_wait;
 mod shutdown_observation;
 use shutdown_observation::{
     response_tag, ChildObservation, CleanupObservation, ShutdownFailure, ShutdownReport, Timed,
@@ -1053,34 +1054,32 @@ impl SupervisedAudioWorker {
         if completed {
             let deadline = Instant::now() + timeout;
             let started = Instant::now();
-            let mut last_observation = None;
-            while Instant::now() < deadline {
-                let observed = self.process.child.try_wait();
-                last_observation = Some(ChildObservation::from(&observed));
-                match observed {
-                    Ok(Some(status)) => {
-                        report.exit_loop = Some(Timed::new(
-                            report.started,
-                            started,
-                            ChildObservation::Exited(status),
-                        ));
-                        self.process.state = ProcessState::Settled;
-                        if !status.success() {
-                            report.primary_failure = Some(ShutdownFailure::NonzeroExit);
-                        }
-                        return report.finish(status.success(), self.process.state);
+            match exit_wait::wait_for_exit(&mut self.process.child, deadline) {
+                exit_wait::ExitWaitOutcome::Exited(status) => {
+                    report.exit_loop = Some(Timed::new(
+                        report.started,
+                        started,
+                        ChildObservation::Exited(status),
+                    ));
+                    self.process.state = ProcessState::Settled;
+                    if !status.success() {
+                        report.primary_failure = Some(ShutdownFailure::NonzeroExit);
                     }
-                    Ok(None) => thread::yield_now(),
-                    Err(_) => {
-                        report.primary_failure = Some(ShutdownFailure::ExitObservationIo);
-                        break;
-                    }
+                    return report.finish(status.success(), self.process.state);
                 }
-            }
-            report.exit_loop =
-                last_observation.map(|observed| Timed::new(report.started, started, observed));
-            if report.primary_failure.is_none() {
-                report.primary_failure = Some(ShutdownFailure::ExitObservationDeadline);
+                exit_wait::ExitWaitOutcome::Deadline(last_observation) => {
+                    report.exit_loop = last_observation
+                        .map(|observed| Timed::new(report.started, started, observed));
+                    report.primary_failure = Some(ShutdownFailure::ExitObservationDeadline);
+                }
+                exit_wait::ExitWaitOutcome::Io(error) => {
+                    report.exit_loop = Some(Timed::new(
+                        report.started,
+                        started,
+                        ChildObservation::Io(error),
+                    ));
+                    report.primary_failure = Some(ShutdownFailure::ExitObservationIo);
+                }
             }
         }
         self.process
@@ -1657,13 +1656,20 @@ mod control_timeout_worker_lifecycle {
             (0, 0, 0, 0)
         );
         match mode.as_str() {
-            "ack_exit0" | "ack_exit7" | "ack_hold" => {
+            "ack_exit0" | "ack_exit7" | "ack_hold" | "ack_release_exit0" => {
                 WorkerResponse::Completed.write_to(&mut control).unwrap();
                 if mode == "ack_exit0" {
                     std::process::exit(0);
                 }
                 if mode == "ack_exit7" {
                     std::process::exit(7);
+                }
+                if mode == "ack_release_exit0" {
+                    let mut release = [0];
+                    control.read_exact(&mut release).expect("parent releases delayed exit");
+                    assert_eq!(release, [1]);
+                    thread::sleep(Duration::from_millis(10));
+                    std::process::exit(0);
                 }
             }
             "failed_hold" => {
@@ -1717,6 +1723,85 @@ mod control_timeout_worker_lifecycle {
             state_entry_timeout: Duration::from_secs(30),
             configured_control_timeout: None,
         })
+    }
+
+    #[test]
+    fn native_exit_wait_actual_already_exited_child_keeps_original_status(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("ack_exit7", Duration::from_secs(1))?;
+        command(super::super::protocol::CommandKind::Shutdown, 0).write_to(&mut worker.control)?;
+        assert!(matches!(
+            WorkerResponse::read_from(&mut worker.control)?,
+            WorkerResponse::Completed
+        ));
+        let original = worker.process.child.wait()?;
+        assert_eq!(original.code(), Some(7));
+        let observed = exit_wait::wait_for_exit(
+            &mut worker.process.child,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(observed, exit_wait::ExitWaitOutcome::Exited(actual) if actual == original)
+        );
+        assert_eq!(worker.process.try_wait()?, Some(original));
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        Ok(())
+    }
+
+    #[test]
+    fn native_exit_wait_actual_delayed_child_uses_same_owner_and_real_exit_status(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker =
+            launch_shutdown_observation_child("ack_release_exit0", Duration::from_secs(1))?;
+        let original_pid = worker.process.child.id();
+        command(super::super::protocol::CommandKind::Shutdown, 0).write_to(&mut worker.control)?;
+        assert!(matches!(
+            WorkerResponse::read_from(&mut worker.control)?,
+            WorkerResponse::Completed
+        ));
+        assert!(
+            worker.process.child.try_wait()?.is_none(),
+            "child awaits actual parent release"
+        );
+        std::io::Write::write_all(&mut worker.control, &[1])?;
+        let observed = exit_wait::wait_for_exit(
+            &mut worker.process.child,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(observed, exit_wait::ExitWaitOutcome::Exited(actual) if actual.code() == Some(0))
+        );
+        assert_eq!(worker.process.child.id(), original_pid);
+        assert!(worker.process.try_wait()?.is_some_and(|status| status.success()));
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        Ok(())
+    }
+
+    #[test]
+    fn native_exit_wait_actual_live_child_at_deadline_is_not_terminated_by_wait(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut worker = launch_shutdown_observation_child("ack_hold", Duration::from_secs(1))?;
+        command(super::super::protocol::CommandKind::Shutdown, 0).write_to(&mut worker.control)?;
+        assert!(matches!(
+            WorkerResponse::read_from(&mut worker.control)?,
+            WorkerResponse::Completed
+        ));
+        let observed = exit_wait::wait_for_exit(
+            &mut worker.process.child,
+            Instant::now() + Duration::from_millis(10),
+        );
+        assert!(matches!(
+            observed,
+            exit_wait::ExitWaitOutcome::Deadline(Some(ChildObservation::Running))
+        ));
+        assert!(
+            worker.process.child.try_wait()?.is_none(),
+            "waiting does not kill or reap a live Child"
+        );
+        worker.terminate();
+        assert_eq!(worker.process.state, ProcessState::Settled);
+        assert!(worker.process.child.try_wait()?.is_some());
+        Ok(())
     }
 
     #[test]
