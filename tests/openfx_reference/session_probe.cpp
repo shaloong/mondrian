@@ -26,6 +26,7 @@
 #include <array>
 #include <mutex>
 #include <cstring>
+#include <cstdint>
 #include <utility>
 #include <type_traits>
 #include "ofxGPURender.h"
@@ -1552,6 +1553,115 @@ void describeActionReceipt(const char* action, const char* point,
   } catch (...) { incomplete = true; }
 }
 
+// Fixed-canvas oracle only: time selects independent output, never invocation
+// history. Rust checks separate literal tables in top-down storage order.
+OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
+  OfxPropertySetHandle sourceImage = nullptr, outputImage = nullptr, repeatedImage = nullptr;
+  struct View { void* data = nullptr; int rowBytes = 0; } source, output, repeated;
+  unsigned sourceAttempts = 0, sourceAccepted = 0, outputAttempts = 0, outputAccepted = 0;
+  int phase = -1;
+  const bool valid = [&]() {
+    double time = -1.0, renderScale[2]{};
+    if (!honestHostCapabilities(gHost) || !canonicalProgressiveContract(handle, in) ||
+        gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, renderScale) != kOfxStatOK ||
+        renderScale[0] != 1.0 || renderScale[1] != 1.0 ||
+        gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+        (time != 0.0 && time != 1.0 && time != 2.0)) { return false; }
+    phase = static_cast<int>(time);
+    OfxImageClipHandle clips[2]{};
+    for (int index = 0; index < 2; ++index) {
+      OfxPropertySetHandle properties = nullptr;
+      OfxRectD rod{};
+      char* association = nullptr;
+      if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle,
+              index == 0 ? "Source" : "Output", &clips[index], &properties) != kOfxStatOK ||
+          gEffectHost->clipGetRegionOfDefinition(clips[index], time, &rod) != kOfxStatOK ||
+          rod.x1 != 0.0 || rod.y1 != 0.0 || rod.x2 != 6.0 || rod.y2 != 5.0 ||
+          gPropHost->propGetString(properties, kOfxImageEffectPropPreMultiplication,
+              0, &association) != kOfxStatOK || !association ||
+          std::strcmp(association, kOfxImageUnPreMultiplied) != 0) { return false; }
+    }
+    const auto fetch = [&](OfxImageClipHandle clip, OfxPropertySetHandle& image,
+                           View& view, unsigned& attempts, unsigned& accepted) {
+      ++attempts;
+      if (gEffectHost->clipGetImage(clip, time, nullptr, &image) != kOfxStatOK || !image) { return false; }
+      ++accepted;
+      int bounds[4]{}, rod[4]{};
+      double par = 0.0, imageScale[2]{};
+      char *depth = nullptr, *components = nullptr, *association = nullptr, *field = nullptr;
+      if (gPropHost->propGetIntN(image, kOfxImagePropBounds, 4, bounds) != kOfxStatOK ||
+          gPropHost->propGetIntN(image, kOfxImagePropRegionOfDefinition, 4, rod) != kOfxStatOK ||
+          gPropHost->propGetDouble(image, kOfxImagePropPixelAspectRatio, 0, &par) != kOfxStatOK || par != 2.0 ||
+          gPropHost->propGetDoubleN(image, kOfxImageEffectPropRenderScale, 2, imageScale) != kOfxStatOK ||
+          imageScale[0] != 1.0 || imageScale[1] != 1.0 ||
+          gPropHost->propGetPointer(image, kOfxImagePropData, 0, &view.data) != kOfxStatOK || !view.data ||
+          gPropHost->propGetInt(image, kOfxImagePropRowBytes, 0, &view.rowBytes) != kOfxStatOK ||
+          view.rowBytes != -static_cast<int>(3 * sizeof(OfxRGBAColourF)) ||
+          reinterpret_cast<std::uintptr_t>(view.data) % alignof(OfxRGBAColourF) != 0 ||
+          gPropHost->propGetString(image, kOfxImageEffectPropPixelDepth, 0, &depth) != kOfxStatOK ||
+          !depth || std::strcmp(depth, kOfxBitDepthFloat) != 0 ||
+          gPropHost->propGetString(image, kOfxImageEffectPropComponents, 0, &components) != kOfxStatOK ||
+          !components || std::strcmp(components, kOfxImageComponentRGBA) != 0 ||
+          gPropHost->propGetString(image, kOfxImageEffectPropPreMultiplication, 0, &association) != kOfxStatOK ||
+          !association || std::strcmp(association, kOfxImageUnPreMultiplied) != 0 ||
+          gPropHost->propGetString(image, kOfxImagePropField, 0, &field) != kOfxStatOK ||
+          !field || std::strcmp(field, kOfxImageFieldNone) != 0) { return false; }
+      const int expected[4] = {0, 0, 3, 5};
+      for (int index = 0; index < 4; ++index) {
+        if (bounds[index] != expected[index] || rod[index] != expected[index]) { return false; }
+      }
+      return true;
+    };
+    if (!fetch(clips[0], sourceImage, source, sourceAttempts, sourceAccepted) ||
+        !fetch(clips[1], outputImage, output, outputAttempts, outputAccepted)) { return false; }
+    const auto pixel = [](const View& view, int x, int y) -> OfxRGBAColourF& {
+      return reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(view.data) + y * view.rowBytes)[x];
+    };
+    const auto expected = [&](int x, int y) {
+      if (phase == 0) {
+        return OfxRGBAColourF{-0.5f + x / 8.0f + y / 16.0f,
+            2.0f + x / 4.0f + y / 8.0f, 0.25f + x / 16.0f - y / 32.0f, 0.5f};
+      }
+      if (phase == 1 && x >= 1 && y >= 1 && y < 3) {
+        return OfxRGBAColourF{1.5f + x / 8.0f, -0.25f - y / 16.0f,
+            0.5f + x / 32.0f + y / 64.0f, 0.25f};
+      }
+      return OfxRGBAColourF{0, 0, 0, 0};
+    };
+    for (int y = 0; y < 5; ++y) {
+      for (int x = 0; x < 3; ++x) {
+        if (phase == 0 || (phase == 1 && x >= 1 && y >= 1 && y < 3)) {
+          pixel(output, x, y) = expected(x, y);
+        }
+      }
+    }
+    // A second image fetch must not clear pixels already written this action.
+    // Phase two really fetches/releases Output but never writes a pixel.
+    if (phase != 2 &&
+        !fetch(clips[1], repeatedImage, repeated, outputAttempts, outputAccepted)) { return false; }
+    const View& observed = phase == 2 ? output : repeated;
+    for (int y = 0; y < 5; ++y) {
+      for (int x = 0; x < 3; ++x) {
+        const auto actual = pixel(observed, x, y);
+        const auto wanted = expected(x, y);
+        if (actual.r != wanted.r || actual.g != wanted.g ||
+            actual.b != wanted.b || actual.a != wanted.a) { return false; }
+      }
+    }
+    return true;
+  }();
+  bool released = true;
+  for (auto image : {repeatedImage, outputImage, sourceImage}) {
+    if (image && gEffectHost->clipReleaseImage(image) != kOfxStatOK) { released = false; }
+  }
+  const auto status = valid && released ? kOfxStatOK : kOfxStatFailed;
+  const char* names[] = {"fixed-canvas-0", "fixed-canvas-1", "fixed-canvas-2"};
+  const char* name = phase >= 0 ? names[phase] : "fixed-canvas-invalid";
+  describeActionReceipt(name, "source-fetch", sourceAttempts, sourceAccepted, status);
+  describeActionReceipt(name, "output-fetch", outputAttempts, outputAccepted, status);
+  return status;
+}
+
 bool auxTransientMessages(void* handle) {
   const auto* v1 = static_cast<const OfxMessageSuiteV1*>(gHost->fetchSuite(gHost->host, kOfxMessageSuite, 1));
   const auto* v2 = auxMessageSuite();
@@ -2107,7 +2217,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
-  const OfxStatus result = pluginMain(action, handle, in, out);
+  const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
+      ? fixedCanvasPartialOutput(handle, in) : pluginMain(action, handle, in, out);
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
     if (selected == "host_properties_readonly" &&
         ((operation == kOfxActionDescribe && !writablePluginLabels(handle, false)) ||

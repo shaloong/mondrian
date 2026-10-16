@@ -4426,3 +4426,251 @@ fn native_live_progress_flows_through_real_effects_residency_before_frame_comple
     session.retire_processor_resources();
     assert_eq!(session.diagnostics().processor_instances, 0);
 }
+
+fn assert_fixed_canvas_literal(actual: &EffectFloatFrame, phase: usize) {
+    // Independent top-down tables. The fixture writes in OFX pixel coordinates
+    // through the actual negative row stride; no production helper is this oracle.
+    const FULL: [[f32; 4]; 15] = [
+        [-0.25, 2.5, 0.125, 0.5],
+        [-0.125, 2.75, 0.1875, 0.5],
+        [0.0, 3.0, 0.25, 0.5],
+        [-0.3125, 2.375, 0.15625, 0.5],
+        [-0.1875, 2.625, 0.21875, 0.5],
+        [-0.0625, 2.875, 0.28125, 0.5],
+        [-0.375, 2.25, 0.1875, 0.5],
+        [-0.25, 2.5, 0.25, 0.5],
+        [-0.125, 2.75, 0.3125, 0.5],
+        [-0.4375, 2.125, 0.21875, 0.5],
+        [-0.3125, 2.375, 0.28125, 0.5],
+        [-0.1875, 2.625, 0.34375, 0.5],
+        [-0.5, 2.0, 0.25, 0.5],
+        [-0.375, 2.25, 0.3125, 0.5],
+        [-0.25, 2.5, 0.375, 0.5],
+    ];
+    const SUBSET: [[f32; 4]; 15] = [
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+        [1.625, -0.375, 0.5625, 0.25],
+        [1.75, -0.375, 0.59375, 0.25],
+        [0.0; 4],
+        [1.625, -0.3125, 0.546875, 0.25],
+        [1.75, -0.3125, 0.578125, 0.25],
+        [0.0; 4],
+        [0.0; 4],
+        [0.0; 4],
+    ];
+    const EMPTY: [[f32; 4]; 15] = [[0.0; 4]; 15];
+    let expected = match phase {
+        0 => &FULL,
+        1 => &SUBSET,
+        2 => &EMPTY,
+        _ => panic!("only the three actual frame times are admitted"),
+    };
+    assert_eq!((actual.width(), actual.height()), (3, 5));
+    assert_eq!(
+        actual.alpha(),
+        mondrian_core::ColorFrameAlpha::StraightFloat
+    );
+    assert_eq!(actual.pixels().len(), expected.len());
+    for (index, (actual, expected)) in actual.pixels().iter().zip(expected).enumerate() {
+        assert_eq!(
+            actual.map(f32::to_bits),
+            expected.map(f32::to_bits),
+            "phase {phase}, pixel {index}: signed/HDR channels and transparent clear must be exact"
+        );
+    }
+}
+
+fn assert_fixed_canvas_actions(directory: &Path, pid: u32) {
+    use std::io::Read;
+    let path = directory.join(format!("actions-{pid}.txt"));
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .expect("actual native action receipt")
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .expect("bounded native action receipt");
+    assert!(!bytes.is_empty() && bytes.len() <= 4096 && bytes.is_ascii());
+    let text = std::str::from_utf8(&bytes).expect("fixed ASCII action rows");
+    assert!(text.ends_with('\n'), "no incomplete final row");
+    let rows: Vec<_> = text.lines().collect();
+    assert!(rows.len() <= 32);
+    let mut actual = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let fields: Vec<_> = row.split_whitespace().collect();
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0].parse::<usize>().expect("ordinal"), index + 1);
+        assert_eq!(
+            &fields[1..3],
+            ["D=0", "I=0"],
+            "actual resident, not a Describe/discovery child"
+        );
+        assert_eq!(fields[8], "complete=1");
+        if fields[3] == "OfxImageEffectActionRender" || fields[3].starts_with("fixed-canvas-") {
+            actual.push(fields[3..].join(" "));
+        }
+    }
+    assert!(rows
+        .last()
+        .expect("unload row")
+        .ends_with(" OfxActionUnload return attempted=0 accepted=0 status=0 complete=1"));
+    let mut expected = Vec::new();
+    for phase in 0..3 {
+        let fetches = if phase == 2 { 1 } else { 2 };
+        expected.extend([
+            "OfxImageEffectActionRender enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
+            format!("fixed-canvas-{phase} source-fetch attempted=1 accepted=1 status=0 complete=1"),
+            format!("fixed-canvas-{phase} output-fetch attempted={fetches} accepted={fetches} status=0 complete=1"),
+            "OfxImageEffectActionRender return attempted=0 accepted=0 status=0 complete=1".to_owned(),
+        ]);
+    }
+    assert_eq!(
+        actual, expected,
+        "three real ordered Render actions, with genuine fetch/release"
+    );
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe fixed_canvas_partial_output and an empty action-receipt directory"]
+fn product_worker_preserves_fixed_canvas_subset_and_empty_outputs() {
+    use mondrian_effects::{
+        EffectExecutionSession, EffectExecutionSessionConfig, EffectProcessorControl,
+    };
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("root-owned new native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).expect("action directory").next().is_none());
+    let inspection = cpu_contract_probe("fixed_canvas_partial_output");
+    assert_eq!(inspection.plugins.len(), 1);
+    let identifier = "uk.co.thefoundry.BasicGainPlugin";
+    let input = cpu_contract_input();
+    let original_input = input.clone();
+    let mut direct = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        identifier,
+        input.width(),
+        input.height(),
+        input.format(),
+        &mut || Ok(()),
+    )
+    .expect("actual fixed-canvas resident");
+    let direct_pid = direct.worker_process_id();
+    for phase in 0..3 {
+        let timing = OpenFxRenderTiming {
+            frame: f64::from(phase as u32),
+            ..cpu_contract_timing(2.0)
+        };
+        let output = direct
+            .render(&timing, &BTreeMap::new(), &input, &mut || Ok(()))
+            .expect("real full, subset, then Output-fetched no-write frame");
+        assert_eq!(direct.worker_process_id(), direct_pid);
+        assert_fixed_canvas_literal(&output, phase);
+        assert_eq!(input, original_input, "Source remains immutable");
+    }
+    direct.shutdown().expect("same resident gracefully destroys and reaps");
+    assert_fixed_canvas_actions(&directory, direct_pid);
+
+    let kind = register_selected_openfx_filter(product_executable(), &inspection, identifier)
+        .expect("canonical native provider");
+    let effect = instantiate_effect_node(kind).expect("one canonical authored node");
+    let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
+        std::slice::from_ref(&effect),
+        &[],
+        &[],
+        &[],
+        WorkingColorSpace::LinearRec709,
+        EffectFrameContext::new(
+            Rational::FPS_24,
+            SampleAspectRatio::new(2, 1).expect("PAR two"),
+            TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::new(101, 24).expect("end"))
+                .expect("source range"),
+        )
+        .expect("canonical full-canvas context"),
+        &LutPreparationCache::uncached(),
+    )
+    .expect("canonical graph preparation");
+    let mut retained = EffectExecutionSession::new(EffectExecutionSessionConfig {
+        max_processor_instances: 1,
+        max_processor_bytes: 64 * 1024 * 1024,
+        max_working_bytes: 128 * 1024 * 1024,
+        max_cache_entries: 0,
+        max_cache_bytes: 0,
+        max_gpu_plan_entries: 0,
+        max_gpu_plan_bytes: 0,
+    });
+    retained.bind_generation(1);
+    for phase in 0..3 {
+        let graph = program
+            .evaluate(TimelineTime::new(phase as i64, 24).expect("real frame time"))
+            .expect("same authored node evaluated at the next frame");
+        let output = retained
+            .apply_compiled_rgba_f32(
+                input.view(),
+                &graph,
+                phase as i64,
+                &mut EffectProcessorControl::uncancelled(),
+            )
+            .expect("canonical retained native frame");
+        assert_fixed_canvas_literal(&output, phase);
+        assert_eq!(input, original_input);
+        assert_eq!(retained.diagnostics().processor_instances, 1);
+        assert_eq!(
+            retained.diagnostics().cache_entries,
+            0,
+            "no frame/identity cache substitutes Render"
+        );
+    }
+    retained.retire_processor_resources();
+    assert_eq!(retained.diagnostics().processor_instances, 0);
+    drop(retained);
+    // No PID is inferred from cache counts: locate only the actual fixture rows
+    // in this fresh private directory, then check its complete action sequence.
+    let entries: Vec<_> = std::fs::read_dir(&directory)
+        .expect("closed action directory")
+        .take(17)
+        .collect::<Result<_, _>>()
+        .expect("bounded entries");
+    assert!(entries.len() <= 16);
+    let mut actual_pids = Vec::new();
+    for entry in entries {
+        use std::io::Read;
+        assert!(entry.file_type().expect("file type").is_file());
+        let name = entry.file_name().into_string().expect("ASCII action filename");
+        let pid = name
+            .strip_prefix("actions-")
+            .and_then(|name| name.strip_suffix(".txt"))
+            .expect("only native PID action files")
+            .parse::<u32>()
+            .expect("actual PID");
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path())
+            .expect("closed action file")
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .expect("bounded action read");
+        assert!(bytes.len() <= 4096 && bytes.is_ascii());
+        if std::str::from_utf8(&bytes).expect("ASCII rows").contains(" fixed-canvas-") {
+            actual_pids.push(pid);
+        }
+    }
+    assert_eq!(
+        actual_pids.len(),
+        2,
+        "only direct and retained-Graph native owners rendered"
+    );
+    assert!(actual_pids.contains(&direct_pid));
+    let graph_pid = *actual_pids
+        .iter()
+        .find(|pid| **pid != direct_pid)
+        .expect("distinct Graph child");
+    assert_ne!(graph_pid, direct_pid);
+    assert_fixed_canvas_actions(&directory, graph_pid);
+}
