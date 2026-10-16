@@ -18,6 +18,9 @@ Mondrian changes to upstream source:
 - `host/src/ofxhHost.cpp` marks Host identity and the private Host pointer
   read-only to plugins; host-internal construction still assigns their values.
 
+- `host/src/ofxhImageEffect.cpp` retains fallback image-memory owners with
+  RAII until byte allocation succeeds, so allocation failure releases the owner.
+
 The product filter host is maintained separately in `../host`.
 
 - `host/src/ofxhParam.cpp` registers the OFX scalar Integer/Double default

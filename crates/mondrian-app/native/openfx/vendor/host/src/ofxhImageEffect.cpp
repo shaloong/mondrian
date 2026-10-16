@@ -29,6 +29,7 @@
 
 #include <string.h>
 #include <stdarg.h>
+#include <memory>
 
 namespace OFX {
 
@@ -624,9 +625,9 @@ namespace OFX {
         if(instance)
           return instance;
         else{
-          Memory::Instance* instance = new Memory::Instance;
+          auto instance = std::make_unique<Memory::Instance>();
           instance->alloc(nBytes);
-          return instance;
+          return instance.release();
         }
       }
 
@@ -2755,9 +2756,9 @@ namespace OFX {
         if(instance)
           return instance;
         else{
-          Memory::Instance* instance = new Memory::Instance;
+          auto instance = std::make_unique<Memory::Instance>();
           instance->alloc(nBytes);
-          return instance;
+          return instance.release();
         }
       }
 
