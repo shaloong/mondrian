@@ -11,7 +11,8 @@ mod native_outputs_controls;
 use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
 use super::clap_discovery::{
     fingerprint_clap_binary, inspect_audio_ports, list_parameters, list_parameters_observed,
-    probe_clap_plugin_registration_with_state, validate_parameters, ParameterQueryCapture,
+    probe_clap_plugin_registration_with_names, probe_clap_plugin_registration_with_state,
+    validate_parameters, ParameterQueryCapture,
 };
 use super::clap_main_services::{
     ClapHostMainThread, ClapNativeServicesOwner, ClapNativeServicesShared,
@@ -629,20 +630,22 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
                 offer.notes.contract,
             );
         }
-        let registration = probe_clap_plugin_registration(
+        let probe = probe_clap_plugin_registration_with_names(
             &self.helper_executable,
             library_path,
             plugin_id,
             request.render_contract(),
             request.opaque_state(),
+            false,
         )?;
-        if registration.binary_sha256 != *fingerprint {
+        if probe.registration.binary_sha256 != *fingerprint {
             return Err(unavailable(
                 "CLAP binary changed after descriptor discovery",
             ));
         }
-        ClapAudioProcessorSpecResolver::new(self.helper_executable.clone(), [registration])?
-            .resolve(request)
+        ClapAudioProcessorSpecResolver::new(self.helper_executable.clone(), [probe.registration])?
+            .resolve(request)?
+            .with_native_probe_input_names(probe.input_names)
     }
 }
 

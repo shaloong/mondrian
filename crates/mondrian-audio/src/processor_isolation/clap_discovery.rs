@@ -348,7 +348,23 @@ enum DiscoveryOperation {
 #[serde(deny_unknown_fields)]
 struct DiscoveryResponse {
     descriptors: Vec<ClapPluginDescriptor>,
-    probe: Option<ProbeResult>,
+    probe: Option<NormalProbeResultV4>,
+}
+
+// Ordinary processing discovery owns this envelope only. The same-instance
+// Note offer retains its original Processing3 wire and independent lifecycle.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NormalProbeResultV4 {
+    schema_version: u32,
+    processing: ProbeResult,
+    input_names: Vec<crate::AudioProcessorInputName>,
+}
+
+pub(super) struct ClapProbe {
+    pub(super) registration: ClapPluginRegistration,
+    pub(super) captured_state: Option<Vec<u8>>,
+    pub(super) input_names: Vec<crate::AudioProcessorInputName>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -423,6 +439,25 @@ pub(super) fn probe_clap_plugin_registration_with_state(
     state: Option<&[u8]>,
     capture_default_state: bool,
 ) -> Result<(ClapPluginRegistration, Option<Vec<u8>>), AudioProcessorHostError> {
+    probe_clap_plugin_registration_with_names(
+        helper_executable,
+        library_path,
+        plugin_id,
+        render_contract,
+        state,
+        capture_default_state,
+    )
+    .map(|probe| (probe.registration, probe.captured_state))
+}
+
+pub(super) fn probe_clap_plugin_registration_with_names(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render_contract: AudioRenderContract,
+    state: Option<&[u8]>,
+    capture_default_state: bool,
+) -> Result<ClapProbe, AudioProcessorHostError> {
     if plugin_id.is_empty() || plugin_id.len() > 256 || plugin_id.contains('\0') {
         return Err(invalid("CLAP probe plugin ID is invalid"));
     }
@@ -433,7 +468,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         helper_executable,
         library_path,
         DiscoveryOperation::ProbeProcessing {
-            schema_version: 3,
+            schema_version: 4,
             plugin_id: plugin_id.to_owned(),
             sample_rate: render_contract.sample_rate,
             channel_layout: render_contract.channel_layout,
@@ -446,12 +481,36 @@ pub(super) fn probe_clap_plugin_registration_with_state(
     if fingerprint_clap_binary(&library_path)? != fingerprint {
         return Err(unavailable("CLAP binary changed during contract probing"));
     }
+    realize_normal_probe(
+        response,
+        library_path,
+        fingerprint,
+        plugin_id,
+        render_contract,
+        capture_default_state,
+    )
+}
+
+fn realize_normal_probe(
+    response: DiscoveryResponse,
+    library_path: PathBuf,
+    fingerprint: [u8; 32],
+    plugin_id: &str,
+    render_contract: AudioRenderContract,
+    capture_default_state: bool,
+) -> Result<ClapProbe, AudioProcessorHostError> {
     if !response.descriptors.is_empty() {
         return Err(invalid(
             "CLAP probe response unexpectedly contains descriptors",
         ));
     }
-    let probe = response.probe.ok_or_else(|| invalid("CLAP probe response is missing"))?;
+    let normal = response.probe.ok_or_else(|| invalid("CLAP probe response is missing"))?;
+    if normal.schema_version != 4 {
+        return Err(invalid(
+            "unsupported CLAP normal processing probe schema version",
+        ));
+    }
+    let NormalProbeResultV4 { processing: probe, input_names, .. } = normal;
     if probe.schema_version != 3
         || probe.plugin_id != plugin_id
         || probe.offline != (render_contract.processing_mode == AudioProcessingMode::Offline)
@@ -464,6 +523,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
     }
     let auxiliary_inputs = auxiliary_from_wire(probe.auxiliary_buses);
     auxiliary_inputs.validate(render_contract.channel_layout)?;
+    crate::AudioProcessorInputName::validate_all(&input_names, &auxiliary_inputs)?;
     probe.main_audio_input.validate(&auxiliary_inputs)?;
     validate_audio_outputs(
         probe.main_audio_output_id,
@@ -490,8 +550,8 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         render_contract.processing_mode == AudioProcessingMode::Offline,
         0,
     )?;
-    Ok((
-        ClapPluginRegistration {
+    Ok(ClapProbe {
+        registration: ClapPluginRegistration {
             plugin_id: plugin_id.to_owned(),
             library_path,
             binary_sha256: fingerprint,
@@ -502,8 +562,9 @@ pub(super) fn probe_clap_plugin_registration_with_state(
             auxiliary_outputs: super::protocol::outputs_from_wire(probe.auxiliary_outputs),
             auxiliary_inputs,
         },
-        probe.captured_state,
-    ))
+        captured_state: probe.captured_state,
+        input_names,
+    })
 }
 
 fn request_discovery(
@@ -1013,7 +1074,7 @@ fn validate_discovery_schema(
     operation: &DiscoveryOperation,
 ) -> Result<(), AudioProcessorHostError> {
     match operation {
-        DiscoveryOperation::ProbeProcessing { schema_version, .. } if *schema_version != 3 => {
+        DiscoveryOperation::ProbeProcessing { schema_version, .. } if *schema_version != 4 => {
             Err(invalid("unsupported CLAP processing probe schema version"))
         }
         DiscoveryOperation::ProbeNotes { schema_version, .. }
@@ -1127,7 +1188,7 @@ fn run_clap_discovery_worker_inner(
             capture_default_state,
         } => {
             *stage = DiscoveryErrorStage::Probe;
-            let probe = probe_loaded(
+            let probe = probe_loaded_with_names(
                 &entry,
                 &plugin_id,
                 AudioRenderContract {
@@ -1255,6 +1316,9 @@ fn list_loaded(entry: &PluginEntry) -> Result<Vec<ClapPluginDescriptor>, AudioPr
     Ok(descriptors)
 }
 
+// Existing ABI controls observe the unchanged Processing3 projection of the
+// ordinary probe, through the same implementation used by the real child.
+#[cfg(test)]
 pub(super) fn probe_loaded(
     entry: &PluginEntry,
     plugin_id: &str,
@@ -1262,6 +1326,23 @@ pub(super) fn probe_loaded(
     state: Option<&[u8]>,
     capture_default_state: bool,
 ) -> Result<ProbeResult, AudioProcessorHostError> {
+    probe_loaded_with_names(
+        entry,
+        plugin_id,
+        render_contract,
+        state,
+        capture_default_state,
+    )
+    .map(|normal| normal.processing)
+}
+
+fn probe_loaded_with_names(
+    entry: &PluginEntry,
+    plugin_id: &str,
+    render_contract: AudioRenderContract,
+    state: Option<&[u8]>,
+    capture_default_state: bool,
+) -> Result<NormalProbeResultV4, AudioProcessorHostError> {
     let max_frames = u32::try_from(render_contract.max_block_frames)
         .ok()
         .filter(|frames| *frames > 0)
@@ -1389,18 +1470,24 @@ pub(super) fn probe_loaded(
             "CLAP audio input shape changed across activation/deactivation",
         ));
     }
-    Ok(ProbeResult {
-        schema_version: 3,
-        main_audio_input: audio.main_audio_input,
-        main_audio_output_id: audio.main_audio_output_id,
-        auxiliary_outputs: super::protocol::outputs_to_wire(&audio.outputs),
-        plugin_id: plugin_id.to_owned(),
-        offline: render_contract.processing_mode == AudioProcessingMode::Offline,
-        latency_frames,
-        tail,
-        parameters,
-        captured_state,
-        auxiliary_buses: auxiliary_to_wire(&audio.contract),
+    Ok(NormalProbeResultV4 {
+        schema_version: 4,
+        processing: ProbeResult {
+            schema_version: 3,
+            main_audio_input: audio.main_audio_input,
+            main_audio_output_id: audio.main_audio_output_id,
+            auxiliary_outputs: super::protocol::outputs_to_wire(&audio.outputs),
+            plugin_id: plugin_id.to_owned(),
+            offline: render_contract.processing_mode == AudioProcessingMode::Offline,
+            latency_frames,
+            tail,
+            parameters,
+            captured_state,
+            auxiliary_buses: auxiliary_to_wire(&audio.contract),
+        },
+        // This is the restored/render-configured inactive snapshot consumed by
+        // the real Worker before activation, not the later deactivation scan.
+        input_names: audio.names,
     })
 }
 
@@ -2609,7 +2696,7 @@ mod tests {
 
     #[test]
     fn processing_probe_requires_new_kind_version_and_explicit_main_input_shape() {
-        let request = serde_json::json!({"kind":"probe_processing","schema_version":3,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null,"capture_default_state":false});
+        let request = serde_json::json!({"kind":"probe_processing","schema_version":4,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null,"capture_default_state":false});
         let operation: DiscoveryOperation = serde_json::from_value(request.clone()).unwrap();
         validate_discovery_schema(&operation).unwrap();
         for legacy in ["probe", "future_probe"] {
@@ -2623,10 +2710,12 @@ mod tests {
         let mut extra = request.clone();
         extra["extra"] = serde_json::json!(true);
         assert!(serde_json::from_value::<DiscoveryOperation>(extra).is_err());
-        let mut wrong = request;
-        wrong["schema_version"] = serde_json::json!(1);
-        let operation: DiscoveryOperation = serde_json::from_value(wrong).unwrap();
-        assert!(validate_discovery_schema(&operation).is_err());
+        for version in [1, 2, 3, 5] {
+            let mut wrong = request.clone();
+            wrong["schema_version"] = serde_json::json!(version);
+            let operation: DiscoveryOperation = serde_json::from_value(wrong).unwrap();
+            assert!(validate_discovery_schema(&operation).is_err());
+        }
         let legacy_notes = serde_json::json!({"kind":"probe_notes","schema_version":1,"plugin_id":"fixture","sample_rate":48000,"channel_layout":AudioChannelLayout::Stereo,"max_block_frames":64,"offline":true,"state":null});
         assert!(validate_discovery_schema(&serde_json::from_value(legacy_notes).unwrap()).is_err());
         for shape in [ClapMainAudioInput::Absent, ClapMainAudioInput::Present] {
@@ -2670,6 +2759,160 @@ mod tests {
                 test_processing_render()
             )
             .is_err());
+        }
+    }
+
+    fn normal_processing_response(
+        auxiliary_count: u32,
+        input_names: Vec<crate::AudioProcessorInputName>,
+    ) -> DiscoveryResponse {
+        DiscoveryResponse {
+            descriptors: Vec::new(),
+            probe: Some(NormalProbeResultV4 {
+                schema_version: 4,
+                processing: ProbeResult {
+                    schema_version: 3,
+                    main_audio_input: ClapMainAudioInput::Present,
+                    main_audio_output_id: 0,
+                    auxiliary_outputs: Vec::new(),
+                    plugin_id: "fixture".to_owned(),
+                    latency_frames: 0,
+                    offline: true,
+                    tail: ProbeTail::None,
+                    parameters: Vec::new(),
+                    auxiliary_buses: (1..=auxiliary_count)
+                        .map(|id| AuxiliaryBusWire {
+                            bus_key: format!("clap.audio-input.{id}"),
+                            channel_layout: AudioChannelLayout::Stereo,
+                        })
+                        .collect(),
+                    captured_state: None,
+                },
+                input_names,
+            }),
+        }
+    }
+
+    fn realize_normal_processing_fixture(
+        response: DiscoveryResponse,
+    ) -> Result<ClapProbe, AudioProcessorHostError> {
+        realize_normal_probe(
+            response,
+            std::env::temp_dir().join("normal-probe.clap"),
+            [7; 32],
+            "fixture",
+            test_processing_render(),
+            false,
+        )
+    }
+
+    #[test]
+    fn normal_processing_probe_v4_requires_names_and_keeps_processing_v3_strict() {
+        let value = serde_json::to_value(normal_processing_response(0, Vec::new())).unwrap();
+        let decoded = serde_json::from_value::<DiscoveryResponse>(value.clone()).unwrap();
+        let snapshot = realize_normal_processing_fixture(decoded).expect("normal Probe4 snapshot");
+        assert!(snapshot.input_names.is_empty());
+        assert!(snapshot.captured_state.is_none());
+        assert!(snapshot.registration.auxiliary_inputs.buses.is_empty());
+        for field in ["schema_version", "processing", "input_names"] {
+            let mut missing = value.clone();
+            missing["probe"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<DiscoveryResponse>(missing).is_err());
+        }
+        for field in ["schema_version", "main_audio_input", "auxiliary_buses"] {
+            let mut missing = value.clone();
+            missing["probe"]["processing"].as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<DiscoveryResponse>(missing).is_err());
+        }
+        let mut null_names = value.clone();
+        null_names["probe"]["input_names"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<DiscoveryResponse>(null_names).is_err());
+        for depth in 0..3 {
+            let mut unknown = value.clone();
+            match depth {
+                0 => unknown["unexpected"] = true.into(),
+                1 => unknown["probe"]["unexpected"] = true.into(),
+                _ => unknown["probe"]["processing"]["unexpected"] = true.into(),
+            }
+            assert!(serde_json::from_value::<DiscoveryResponse>(unknown).is_err());
+        }
+        let mut unknown_name = value.clone();
+        unknown_name["probe"]["input_names"] = serde_json::json!([{
+            "bus_key":"clap.audio-input.1", "name":"Sidechain", "unexpected":true
+        }]);
+        assert!(serde_json::from_value::<DiscoveryResponse>(unknown_name).is_err());
+        for version in [0, 1, 2, 3, 5] {
+            let mut wrong = value.clone();
+            wrong["probe"]["schema_version"] = version.into();
+            let decoded = serde_json::from_value::<DiscoveryResponse>(wrong).unwrap();
+            assert!(matches!(
+                realize_normal_processing_fixture(decoded),
+                Err(AudioProcessorHostError::InvalidContract(_))
+            ));
+        }
+        for version in [0, 1, 2, 4, 5] {
+            let mut wrong = value.clone();
+            wrong["probe"]["processing"]["schema_version"] = version.into();
+            let decoded = serde_json::from_value::<DiscoveryResponse>(wrong).unwrap();
+            assert!(matches!(
+                realize_normal_processing_fixture(decoded),
+                Err(AudioProcessorHostError::InvalidContract(_))
+            ));
+        }
+        let mut legacy = value.clone();
+        legacy["probe"] = value["probe"]["processing"].clone();
+        assert!(serde_json::from_value::<DiscoveryResponse>(legacy).is_err());
+    }
+
+    #[test]
+    fn normal_processing_probe_names_preserve_reordered_key_sets_and_31_auxiliary_ports() {
+        let names = vec![
+            crate::AudioProcessorInputName {
+                bus_key: "clap.audio-input.31".to_owned(),
+                name: "Last input".to_owned(),
+            },
+            crate::AudioProcessorInputName {
+                bus_key: "clap.audio-input.1".to_owned(),
+                name: "First input".to_owned(),
+            },
+        ];
+        let expected = names.clone();
+        let value = serde_json::to_value(normal_processing_response(31, names)).unwrap();
+        let decoded = serde_json::from_value::<DiscoveryResponse>(value).unwrap();
+        let snapshot = realize_normal_processing_fixture(decoded).expect("31 auxiliary ports");
+        assert_eq!(snapshot.input_names, expected);
+        assert_eq!(snapshot.registration.auxiliary_inputs.buses.len(), 31);
+        assert_eq!(
+            snapshot.registration.auxiliary_inputs.buses[0].bus_key,
+            "clap.audio-input.1"
+        );
+        let error = realize_normal_processing_fixture(normal_processing_response(32, Vec::new()));
+        assert!(
+            matches!(error, Err(AudioProcessorHostError::InvalidContract(detail))
+            if detail == "CLAP probe returned excessive auxiliary ports")
+        );
+    }
+
+    #[test]
+    fn normal_processing_probe_names_refuse_duplicate_unknown_keys_and_invalid_text() {
+        let name = |key: &str, text: &str| crate::AudioProcessorInputName {
+            bus_key: key.to_owned(),
+            name: text.to_owned(),
+        };
+        for names in [
+            vec![
+                name("clap.audio-input.1", "A"),
+                name("clap.audio-input.1", "B"),
+            ],
+            vec![name("clap.audio-input.3", "Unknown")],
+            vec![name("clap.audio-input.1", "")],
+            vec![name("clap.audio-input.1", "line\nbreak")],
+            vec![name("clap.audio-input.1", &"x".repeat(1025))],
+        ] {
+            assert!(matches!(
+                realize_normal_processing_fixture(normal_processing_response(2, names)),
+                Err(AudioProcessorHostError::InvalidContract(_))
+            ));
         }
     }
 
