@@ -251,8 +251,12 @@ instruments, other platforms, realtime and performance remain unqualified.
   output selection and realtime remain open.
 - OFX same-handle exit-time observation passed the finite Windows controls and
   official Basic sessions above. The original 100ms policy and sole Child owner
-  remain unchanged; the intermittent exit issue still requires reproduction
-  and causal diagnosis.
+  remain unchanged. The disconnected-optional-clip gate now passes all six
+  format/image checks, same-resident bit-exact RGBA half gain and unchanged
+  Source, then fails that original shutdown deadline despite native Unload0.
+  Five separate temporal-admission/CPU/PAR resident-and-Graph regressions pass.
+  This is finite correctness evidence, not a passing lifecycle gate or an
+  identified exit root cause; the failed gate has not been retried.
 - Process operation, shutdown control and graceful exit currently share budget
   policy. The final kill/reap wait has no separate timeout, so the existing
   100ms values do not describe a strict total shutdown limit. Budget changes
