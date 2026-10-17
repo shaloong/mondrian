@@ -3,9 +3,8 @@
 use super::vst3_discovery::{canonical_binary, probe_vst3_plugin_registration_with_state};
 use super::vst3_worker::fingerprint;
 use super::{
-    probe_vst3_plugin_registration, scan_vst3_binary_descriptors,
-    IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorkerSpec,
-    Vst3AudioProcessorSpecResolver, Vst3PluginDescriptor,
+    scan_vst3_binary_descriptors, IsolatedAudioProcessorSpecResolver,
+    IsolatedAudioProcessorWorkerSpec, Vst3AudioProcessorSpecResolver, Vst3PluginDescriptor,
 };
 use crate::{AudioProcessorHostError, AudioProcessorPrepareRequest, AudioRenderContract};
 use mondrian_core::{AudioProcessorInstanceId, AuthoringMap, ExactAutomationCurve};
@@ -148,18 +147,20 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredVst3AudioProcessorSpecReso
             .plugins
             .get(class_id)
             .ok_or_else(|| unavailable(format!("VST3 class {class_id} is not installed")))?;
-        let registration = probe_vst3_plugin_registration(
+        let probe = probe_vst3_plugin_registration_with_state(
             &self.helper_executable,
             path,
             class_id,
             request.render_contract(),
             request.opaque_state(),
+            false,
         )?;
-        if registration.binary_sha256 != *expected_hash {
+        if probe.registration.binary_sha256 != *expected_hash {
             return Err(unavailable("VST3 binary changed after discovery"));
         }
-        Vst3AudioProcessorSpecResolver::new(self.helper_executable.clone(), [registration])?
-            .resolve(request)
+        Vst3AudioProcessorSpecResolver::new(self.helper_executable.clone(), [probe.registration])?
+            .resolve(request)?
+            .with_native_probe_input_names(probe.input_names)
     }
 }
 
