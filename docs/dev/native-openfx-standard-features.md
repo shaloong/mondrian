@@ -65,6 +65,19 @@ OS退出观察约66.7–75.8ms（相对 ParentBegin QPC）；未复现或解释�
 四个原有生命周期、稀疏曲线、常量和 CurrentFrame 查询回归均 exact1/stderr0、原180秒/2秒
 Job 回收通过。此结果不关闭既有退出问题，不新增第三方、GPU、性能或其它平台资格。
 
+2026-10-18 Windows x64：`cbc78220` 修复清理失败覆盖原始错误的问题。修复前，
+真实 TCP Shutdown 超时在注入 OS 查询/kill 拒绝后错误返回清理 Unavailable；
+修复后三个 exact 控制分别保留 DeadlineExceeded、原错误响应内容及 render admission
+Canceled。前两项使用真实受 Job 管理的 sleeping Child/TCP，第三项先准备正常 Product
+及官方 Basic；每项均先解除注入、由同一 owner 实际 kill/reap，再检查目标结果。
+两个既有 owner 控制及 `authored_native_factory_reuses_instances_and_rejects_stale_output`
+产品回归也通过；六门均 stderr0、原180秒/2秒 Job 回收通过，并经独立复核。
+原 fatal 例外、Retiring 拒绝复用及 sole Child 所有权不变；output allocation、inner render
+及 GUI 的同策略改动仅有源码审查和相关回归，未增加逐点故障注入资格。
+App 单测和配对 Product/集成程序构建通过；严格 Clippy 仍被既有的1项 unused import
+和9项 dead code 阻断。本片不关闭旧退出失败，不证明 final Drop 有界、冷构造失败
+owner 存续、全 shutdown 100ms、第三方、其它平台或 realtime。
+
 Describe 请求/响应必须 schema2；保留原隐藏入口以使旧 worker 明确拒绝新请求。
 通知属于已核验 binary/请求 class 的整次元数据请求，不冒充发出通知的 class 或 Render invocation。
 单请求最多32条，文本4096/id256 UTF-8字节；丢失、Fatal 均拒定义并保留可信前缀。
