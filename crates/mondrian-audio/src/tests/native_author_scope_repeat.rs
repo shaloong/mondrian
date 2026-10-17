@@ -604,7 +604,13 @@ fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_prepa
         .iter_mut()
         .find(|scope| scope.id == scope_id)
         .unwrap();
-    scope.processors.processors[0].opaque_state = proposal.state().cloned();
+    let captured_seed = proposal.state().expect("coherent Scope prefix must carry its cold seed");
+    assert_eq!(
+        captured_seed.as_slice(),
+        &0.75_f64.to_le_bytes(),
+        "the portable factory supports this exact bounded 8B seed, not arbitrary state"
+    );
+    scope.processors.processors[0].opaque_state = Some(captured_seed.clone());
     let programs = preflight_programs(&mut fixture, 0.75);
     let root = fixture.inner.runtime.resource_root_identity();
     let owners = scope_repeat_poll_probe_snapshots(&fixture);

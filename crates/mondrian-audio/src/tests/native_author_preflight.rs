@@ -27,7 +27,7 @@ struct PreflightRegistry {
     calls: PreflightCalls,
 }
 struct PreflightResolver(Arc<PreflightRegistry>);
-struct PreflightFactory(Arc<PreflightRegistry>);
+struct PreflightFactory(Arc<PreflightRegistry>, Option<Vec<u8>>);
 struct PreflightProcessor {
     inner: HandoffProcessor,
     registry: Arc<PreflightRegistry>,
@@ -40,7 +40,7 @@ impl AudioProcessorResolver for PreflightResolver {
         if matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
             if plugin_id == "test.mondrian.handoff")
         {
-            Ok(Arc::new(PreflightFactory(Arc::clone(&self.0))))
+            Ok(Arc::new(PreflightFactory(Arc::clone(&self.0), None)))
         } else {
             BuiltInAudioProcessorResolver.prepare(request)
         }
@@ -58,7 +58,25 @@ impl AudioProcessorFactory for PreflightFactory {
         ) -> Result<(), AudioProcessorFactoryStorageError>,
     ) -> Result<(), AudioProcessorFactoryStorageError> {
         // The same explicit unresolved Arc payload frontier as the old fixture.
-        visitor(AudioProcessorFactoryStorageBorrow::arc_payload(&self.0))
+        visitor(AudioProcessorFactoryStorageBorrow::arc_payload(&self.0))?;
+        if let Some(seed) = &self.1 {
+            visitor(AudioProcessorFactoryStorageBorrow::complete(seed)?)?;
+        }
+        Ok(())
+    }
+    fn with_native_configuration_seed(
+        &self,
+        format: NativeConfigurationFormat,
+        configuration: &[u8],
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        // Same portable cold-seed contract as HandoffFactory: retain the exact
+        // scalar bytes and report their actual owner, without live state mutation.
+        assert_eq!(format, NativeConfigurationFormat::ClapState);
+        assert_eq!(configuration.len(), 8);
+        Ok(Some(Arc::new(Self(
+            Arc::clone(&self.0),
+            Some(configuration.to_vec()),
+        ))))
     }
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let ordinal = self.0.calls.creates.fetch_add(1, Ordering::Relaxed);

@@ -806,11 +806,24 @@ mod native_log_wire_contracts {
         }
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&good)).expect("baseline");
+        // Current fixed fields: envelope12 + PID4 + object1 + cleanup4 +
+        // observed-request16 + author1 + parameter-revision8 + parameter-count4.
+        const LOG_COUNT_OFFSET: usize = 50;
+        assert_eq!(
+            &bytes[LOG_COUNT_OFFSET..LOG_COUNT_OFFSET + 4],
+            &2_u32.to_le_bytes()
+        );
         let mut oversized = bytes.clone();
-        oversized[42..46].copy_from_slice(&33_u32.to_le_bytes());
+        oversized[LOG_COUNT_OFFSET..LOG_COUNT_OFFSET + 4].copy_from_slice(&33_u32.to_le_bytes());
+        let mut oversized = Cursor::new(oversized);
         assert!(
-            read_observation_reply(&mut Cursor::new(oversized)).is_err(),
+            read_observation_reply(&mut oversized).is_err(),
             "untrusted count cannot grow storage"
+        );
+        assert_eq!(
+            oversized.position(),
+            58,
+            "count and loss header is read, but no untrusted record or storage extent is consumed"
         );
         for cut in 0..bytes.len() {
             assert!(
