@@ -3483,6 +3483,40 @@ impl PluginInternal for PluginImpl {
             .map(|handler| handler.pending_restart_cohort())
     }
 
+    fn capture_restart_source_witness(
+        &self,
+    ) -> std::result::Result<crate::plugin::RestartSourceWitness, crate::plugin::RestartSourceError>
+    {
+        use crate::plugin::RestartSourceError as Failure;
+        if thread::current().id() != self.control_thread {
+            return Err(Failure::WrongThread);
+        }
+        self.component_handler
+            .as_ref()
+            .ok_or(Failure::Unsupported)?
+            .capture_restart_source_witness(self.native_editor_owner)
+    }
+
+    fn settle_restart_source_prefix(
+        &mut self,
+        witness: crate::plugin::RestartSourceWitness,
+    ) -> std::result::Result<
+        crate::plugin::RestartSourceSettlement,
+        crate::plugin::RestartSourceError,
+    > {
+        use crate::plugin::RestartSourceError as Failure;
+        if thread::current().id() != self.control_thread {
+            return Err(Failure::WrongThread);
+        }
+        if witness.owner() != self.native_editor_owner {
+            return Err(Failure::Conflict);
+        }
+        self.component_handler
+            .as_ref()
+            .ok_or(Failure::Unsupported)?
+            .settle_restart_source_prefix(self.native_editor_owner, witness)
+    }
+
     fn retire_restart_cohort(&mut self, expected: crate::plugin::RestartCohort) -> Result<bool> {
         self.ensure_control_thread("native restart cohort retirement")?;
         Ok(self
@@ -11359,5 +11393,60 @@ mod restored_audio_activation_tests {
         assert!(f.plugin.setup_processing().is_err());
         assert!(f.plugin.is_active && f.plugin.is_processing);
         assert!(f.probe.lock().unwrap().bus_calls.is_empty());
+    }
+
+    #[test]
+    fn local_restart_witness_uses_existing_native_object_identity_and_service_lineage() {
+        use crate::plugin::{RestartSourceError as Failure, RestartSourceSettlement as Settlement};
+        let mut a = Fixture::new(vec![true], vec![true]);
+        let mut b = Fixture::new(vec![true], vec![true]);
+        for fixture in [&mut a, &mut b] {
+            fixture.plugin.component_handler = Some(ComWrapper::new(ComponentHandler::new(
+                Arc::new(Mutex::new(Vec::with_capacity(MAX_PENDING_PARAM_CHANGES))),
+            )));
+            unsafe {
+                assert_eq!(
+                    fixture
+                        .plugin
+                        .component_handler
+                        .as_ref()
+                        .unwrap()
+                        .restartComponent(4),
+                    kResultOk
+                );
+            }
+        }
+        let witness = a.plugin.capture_restart_source_witness().unwrap();
+        assert_eq!(witness.owner(), a.plugin.native_editor_owner);
+        let _ = a.plugin.take_editor_events().unwrap();
+        let _ = b.plugin.take_editor_events().unwrap();
+        let other = b.plugin.pending_restart_cohort();
+        assert_eq!(
+            b.plugin.settle_restart_source_prefix(witness),
+            Err(Failure::Conflict)
+        );
+        assert_eq!(b.plugin.pending_restart_cohort(), other);
+        assert_eq!(
+            a.plugin.settle_restart_source_prefix(witness),
+            Ok(Settlement::Retired)
+        );
+        let handler = a.plugin.component_handler.as_ref().unwrap();
+        unsafe {
+            assert_eq!(handler.restartComponent(8), kResultOk);
+        }
+        let before = handler.editor_event_source_status();
+        let lineage = handler.capture_restart_source_witness(a.plugin.native_editor_owner);
+        assert_eq!(lineage, Err(Failure::Conflict));
+        assert_eq!(a.plugin.service_host_requests().unwrap().bits(), 8);
+        let handler = a.plugin.component_handler.as_ref().unwrap();
+        assert_eq!(handler.editor_event_source_status(), before);
+        assert!(!handler.pending_restart_cohort().pending());
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let after = a.plugin.capture_restart_source_witness().unwrap();
+        assert_eq!(after.retirement_lineage(), witness.retirement_lineage() + 2);
+        assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
+        assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
     }
 }

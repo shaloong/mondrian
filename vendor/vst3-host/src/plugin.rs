@@ -732,6 +732,78 @@ impl RestartCohort {
     }
 }
 
+/// Coherent local facts for one complete parameter-rescan source prefix.
+///
+/// Capture this after coherent state capture, so its revision includes every
+/// resulting callback. This is not a one-shot author/install permission; the
+/// caller must retain the real delivered prefix and its own acceptance receipt.
+/// It cannot be serialized or constructed for another loaded native object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartSourceWitness {
+    pub(crate) owner: NativeEditorAttachmentOwner,
+    pub(crate) source: NativeEditorEventSourceStatus,
+    pub(crate) cohort: RestartCohort,
+    pub(crate) retirement_lineage: u64,
+}
+impl RestartSourceWitness {
+    /// Existing identity of the same actually loaded native object.
+    pub const fn owner(self) -> NativeEditorAttachmentOwner {
+        self.owner
+    }
+    /// Complete source facts at the prefix's exact publication revision.
+    pub const fn source(self) -> NativeEditorEventSourceStatus {
+        self.source
+    }
+    /// Full raw callback cohort held by that prefix.
+    pub const fn cohort(self) -> RestartCohort {
+        self.cohort
+    }
+    /// Non-wrapping lineage of successful nonempty raw retirements.
+    pub const fn retirement_lineage(self) -> u64 {
+        self.retirement_lineage
+    }
+}
+
+/// Local settlement of an already delivered and accepted exact-4 prefix.
+/// Neither disposition authorizes an author transaction or another native block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartSourceSettlement {
+    /// The prefix's exact raw cohort was retired; source suffixes remain intact.
+    Retired,
+    /// The old prefix is settled while this newer exact-4 cohort and its entire
+    /// source suffix remain pending. No raw retirement occurs in this branch.
+    NewerParameterSuffixPending {
+        /// Actual still-pending raw callback cohort.
+        cohort: RestartCohort,
+    },
+}
+
+/// No local source/cohort settlement was committed on these errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RestartSourceError {
+    /// This adapter does not expose the local source owner.
+    #[error("local restart source settlement is unavailable")]
+    Unsupported,
+    /// Only the native component's initializing control thread may use a witness.
+    #[error("restart source settlement requires the native control thread")]
+    WrongThread,
+    /// An existing owner is borrowed; no blocking wait or raw mutation occurred.
+    #[error("restart source owner is busy")]
+    Busy,
+    /// An owning lock cannot establish a trustworthy source or lineage.
+    #[error("restart source owner is poisoned")]
+    PoisonedOwner,
+    /// The source is incomplete or cannot supply a closed publication prefix.
+    #[error("restart source is incomplete or invalid")]
+    InvalidSource,
+    /// Owner, prefix, cohort or retirement history differs from the witness.
+    #[error("restart source prefix conflicts with current ownership")]
+    Conflict,
+    /// Callback serial or non-wrapping retirement lineage cannot advance safely.
+    #[error("restart source retirement lineage or callback serial is exhausted")]
+    Exhausted,
+}
+
 /// What a plugin asked the host to re-read, reported through `IComponentHandler::restartComponent`
 /// and drained with [`Plugin::take_restart_flags`].
 ///
@@ -1553,6 +1625,20 @@ pub(crate) trait PluginInternal: Send {
     /// A non-consuming local callback snapshot; remote adapters may be unavailable.
     fn pending_restart_cohort(&self) -> Option<RestartCohort> {
         None
+    }
+
+    /// Coherent local witness; remote/default backends never synthesize one.
+    fn capture_restart_source_witness(
+        &self,
+    ) -> std::result::Result<RestartSourceWitness, RestartSourceError> {
+        Err(RestartSourceError::Unsupported)
+    }
+    /// Settle only a prefix from this same actual local owner.
+    fn settle_restart_source_prefix(
+        &mut self,
+        _witness: RestartSourceWitness,
+    ) -> std::result::Result<RestartSourceSettlement, RestartSourceError> {
+        Err(RestartSourceError::Unsupported)
     }
 
     /// Retire only an exact cohort after the control owner completed native service.
@@ -3188,6 +3274,38 @@ impl Plugin {
             .and_then(|inner| inner.pending_restart_cohort())
     }
 
+    /// Capture coherent local source/cohort/retirement facts for exact flags 4.
+    ///
+    /// Requires the native control thread, a healthy closed source and no DSP
+    /// feedback. Take it after coherent state capture and before moving that
+    /// exact source prefix. No native callback, allocation, drain or retirement
+    /// occurs. Remote/default adapters return `Unsupported`.
+    pub fn capture_restart_source_witness(
+        &self,
+    ) -> std::result::Result<RestartSourceWitness, RestartSourceError> {
+        self.internal
+            .as_ref()
+            .ok_or(RestartSourceError::Unsupported)?
+            .capture_restart_source_witness()
+    }
+
+    /// Settle a delivered prefix only after its caller's actual acceptance.
+    ///
+    /// The exact old prefix must already have been drained. This verifies the
+    /// same loaded owner and uninterrupted raw-retirement lineage. New source
+    /// bounds/feedback are preserved; a newer exact-4 suffix keeps all its raw
+    /// flags. No native callback, allocation or source drain occurs here. A
+    /// witness is immutable evidence, not canonical acceptance or once authority.
+    pub fn settle_restart_source_prefix(
+        &mut self,
+        witness: RestartSourceWitness,
+    ) -> std::result::Result<RestartSourceSettlement, RestartSourceError> {
+        self.internal
+            .as_mut()
+            .ok_or(RestartSourceError::Unsupported)?
+            .settle_restart_source_prefix(witness)
+    }
+
     /// Retire an exact callback cohort after successful native control service.
     ///
     /// Runs only on the component's control thread. A newer callback, including
@@ -3215,6 +3333,9 @@ impl Plugin {
     /// Take the flags the plugin raised via `IComponentHandler::restartComponent` since the
     /// last call — its way of saying "something about me changed, re-read it".
     ///
+    /// Returns observed flags, not proof that their exact retirement succeeded:
+    /// a newer callback, busy/poisoned source or exhausted lineage keeps raw
+    /// flags pending. Use the typed local settlement API for an author receipt.
     /// Poll this next to [`Self::take_editor_events`] (e.g. each UI frame). See
     /// [`RestartFlags`] for what each one asks of the host. Returns an empty set for a plugin
     /// that hasn't raised anything. Works across process isolation.
@@ -4128,6 +4249,10 @@ mod public_surface_tests {
         assert!(!plugin.can_split_editor_processing());
         assert!(plugin.borrow_editor_control().is_err());
         assert!(plugin.split_editor_processing().is_err());
+        assert_eq!(
+            plugin.capture_restart_source_witness(),
+            Err(super::RestartSourceError::Unsupported)
+        );
     }
 
     #[test]

@@ -258,15 +258,9 @@ impl ComponentHandler {
             }
             // Even zero-work closure proves the exact unchanged serial.
             // No allocation, locking, native call or fallible work follows.
-            if self
-                .restart_cohort
-                .compare_exchange(
-                    cohort.word(),
-                    u64::from(cohort.serial()) << 32,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
+            if !self
+                .retire_restart_cohort_locked(&mut events, cohort)
+                .map_err(|_| Failure::CohortChanged)?
             {
                 return Err(Failure::CohortChanged);
             }
@@ -782,5 +776,58 @@ mod tests {
         );
         assert_eq!(source_snapshot(&handler), after);
         assert_eq!(input.used.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn initial_handoff_uses_locked_retirement_lineage_and_keeps_zero_claim_unmodified() {
+        for flags in [0, 4, 20] {
+            let handler = handler();
+            unsafe {
+                assert_eq!(handler.restartComponent(flags), kResultOk);
+            }
+            let input = ParameterChanges::default();
+            handler
+                .handoff_initial_parameters(
+                    &input,
+                    handler.pending_restart_cohort(),
+                    handler.editor_event_source_status(),
+                    &[],
+                    Storage::default(),
+                )
+                .unwrap();
+            assert_eq!(
+                handler.editor_events.lock().unwrap().retirement_lineage,
+                u64::from(flags != 0)
+            );
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+        }
+        for flags in [0, 4, 20] {
+            let handler = handler();
+            unsafe {
+                assert_eq!(handler.restartComponent(flags), kResultOk);
+            }
+            handler.editor_events.lock().unwrap().retirement_lineage = u64::MAX;
+            let before = source_snapshot(&handler);
+            let cohort = handler.pending_restart_cohort();
+            let input = ParameterChanges::default();
+            let result = handler.handoff_initial_parameters(
+                &input,
+                cohort,
+                before.0,
+                &[],
+                Storage::default(),
+            );
+            if flags == 0 {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(result, Err(Failure::CohortChanged));
+                assert_eq!(source_snapshot(&handler), before);
+                assert_eq!(handler.pending_restart_cohort(), cohort);
+            }
+            assert_eq!(
+                handler.editor_events.lock().unwrap().retirement_lineage,
+                u64::MAX
+            );
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+        }
     }
 }

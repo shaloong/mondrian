@@ -1946,6 +1946,9 @@ struct EditorEventBuffer {
     failure: Option<crate::plugin::NativeEditorEventFailure>,
 
     revision: u64,
+    // History evidence only: successful nonempty raw retirement, never source
+    // drain, claim or a second copy of the raw callback state.
+    retirement_lineage: u64,
     open_parameters: [u32; MAX_EDITOR_FEEDBACK],
     open_parameter_count: usize,
     group_depth: u32,
@@ -1957,6 +1960,7 @@ impl EditorEventBuffer {
             events: Vec::with_capacity(MAX_EDITOR_FEEDBACK),
             failure: None,
             revision: 0,
+            retirement_lineage: 0,
             open_parameters: [0; MAX_EDITOR_FEEDBACK],
             open_parameter_count: 0,
             group_depth: 0,
@@ -2129,14 +2133,51 @@ impl ComponentHandler {
         if !expected.pending() || expected.exhausted() {
             return false;
         }
-        self.restart_cohort
+        let Ok(mut source) = self.editor_events.try_lock() else {
+            return false;
+        };
+        self.retire_restart_cohort_locked(&mut source, expected)
+            .unwrap_or(false)
+    }
+
+    // The caller already owns the original source lock (initial handoff also
+    // holds feedback/input). All fallible arithmetic precedes the CAS; after a
+    // successful clear the lineage update cannot fail or call foreign code.
+    fn retire_restart_cohort_locked(
+        &self,
+        source: &mut EditorEventBuffer,
+        expected: crate::plugin::RestartCohort,
+    ) -> Result<bool, crate::plugin::RestartSourceError> {
+        use crate::plugin::RestartSourceError as Failure;
+        if expected.exhausted() {
+            return Err(Failure::Exhausted);
+        }
+        let next = if expected.flags().is_empty() {
+            None
+        } else {
+            Some(
+                source
+                    .retirement_lineage
+                    .checked_add(1)
+                    .ok_or(Failure::Exhausted)?,
+            )
+        };
+        if self
+            .restart_cohort
             .compare_exchange(
                 expected.word(),
                 u64::from(expected.serial()) << 32,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok()
+            .is_err()
+        {
+            return Ok(false);
+        }
+        if let Some(next) = next {
+            source.retirement_lineage = next;
+        }
+        Ok(true)
     }
 
     /// Claim a still-current serviced serial; do not clear any pending callback.
@@ -2176,6 +2217,151 @@ impl ComponentHandler {
                 Err(observed) => previous = observed,
             }
         }
+    }
+
+    pub(crate) fn capture_restart_source_witness(
+        &self,
+        owner: crate::plugin::NativeEditorAttachmentOwner,
+    ) -> Result<crate::plugin::RestartSourceWitness, crate::plugin::RestartSourceError> {
+        use crate::plugin::{NativeEditorEvent as Event, RestartSourceError as Failure};
+        if thread::current().id() != self.control_thread {
+            return Err(Failure::WrongThread);
+        }
+        let source = self.editor_events.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::Busy,
+            std::sync::TryLockError::Poisoned(_) => Failure::PoisonedOwner,
+        })?;
+        let before = self.pending_restart_cohort();
+        let feedback = self
+            .parameter_changes
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => Failure::Busy,
+                std::sync::TryLockError::Poisoned(_) => Failure::PoisonedOwner,
+            })?;
+        let mut status = source.status();
+        status.pending_dsp_feedback_values = feedback.len();
+        let cohort = self.pending_restart_cohort();
+        if before != cohort {
+            return Err(Failure::Conflict);
+        }
+        if cohort.exhausted() || source.retirement_lineage == u64::MAX {
+            return Err(Failure::Exhausted);
+        }
+        if status.failure().is_some()
+            || status.open_parameter_edits() != 0
+            || status.group_depth() != 0
+            || !feedback.is_empty()
+        {
+            return Err(Failure::InvalidSource);
+        }
+        let mut last = None;
+        for event in &source.events {
+            if let Event::ParameterRescanRequested {
+                flags,
+                cohort: marker,
+            } = event
+            {
+                if *flags != 4
+                    || marker.flags().bits() != 4
+                    || marker.serial() == 0
+                    || marker.exhausted()
+                    || last.is_some_and(|prior: crate::plugin::RestartCohort| {
+                        prior.serial() >= marker.serial()
+                    })
+                {
+                    return Err(Failure::Conflict);
+                }
+                last = Some(*marker);
+            }
+        }
+        if cohort.flags().bits() != 4 || cohort.serial() == 0 || last != Some(cohort) {
+            return Err(Failure::Conflict);
+        }
+        Ok(crate::plugin::RestartSourceWitness {
+            owner,
+            source: status,
+            cohort,
+            retirement_lineage: source.retirement_lineage,
+        })
+    }
+
+    pub(crate) fn settle_restart_source_prefix(
+        &self,
+        owner: crate::plugin::NativeEditorAttachmentOwner,
+        witness: crate::plugin::RestartSourceWitness,
+    ) -> Result<crate::plugin::RestartSourceSettlement, crate::plugin::RestartSourceError> {
+        use crate::plugin::{
+            NativeEditorEvent as Event, RestartSourceError as Failure,
+            RestartSourceSettlement as Settlement,
+        };
+        if thread::current().id() != self.control_thread {
+            return Err(Failure::WrongThread);
+        }
+        if owner != witness.owner {
+            return Err(Failure::Conflict);
+        }
+        let mut source = self.editor_events.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::Busy,
+            std::sync::TryLockError::Poisoned(_) => Failure::PoisonedOwner,
+        })?;
+        let before = self.pending_restart_cohort();
+        // Keep the original lock order, but never consume or require an empty,
+        // closed new suffix. Its gestures/feedback are later obligations.
+        let _feedback = self
+            .parameter_changes
+            .try_lock()
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => Failure::Busy,
+                std::sync::TryLockError::Poisoned(_) => Failure::PoisonedOwner,
+            })?;
+        let current = self.pending_restart_cohort();
+        if before != current || source.retirement_lineage != witness.retirement_lineage {
+            return Err(Failure::Conflict);
+        }
+        if source.failure.is_some() {
+            return Err(Failure::InvalidSource);
+        }
+        if current.exhausted() || source.retirement_lineage == u64::MAX {
+            return Err(Failure::Exhausted);
+        }
+        let delta = source
+            .revision
+            .checked_sub(witness.source.revision())
+            .and_then(|value| usize::try_from(value).ok());
+        if delta != Some(source.events.len()) || witness.cohort.flags().bits() != 4 {
+            return Err(Failure::Conflict);
+        }
+        let mut last = witness.cohort;
+        for event in &source.events {
+            if let Event::ParameterRescanRequested { flags, cohort } = event {
+                if *flags != 4
+                    || cohort.flags().bits() != 4
+                    || cohort.exhausted()
+                    || cohort.serial() <= last.serial()
+                {
+                    return Err(Failure::Conflict);
+                }
+                last = *cohort;
+            }
+        }
+        if last != current {
+            return Err(Failure::Conflict);
+        }
+        if current == witness.cohort {
+            return if self.retire_restart_cohort_locked(&mut source, current)? {
+                Ok(Settlement::Retired)
+            } else {
+                Err(Failure::Conflict)
+            };
+        }
+        if current.flags().bits() != 4 || current.serial() <= witness.cohort.serial() {
+            return Err(Failure::Conflict);
+        }
+        // Lineage equality proves no raw clear occurred after publication.
+        // The intact suffix explains the new exact-4 cohort. Settle only the
+        // old caller-held prefix; leave all current raw/source state untouched.
+        Ok(Settlement::NewerParameterSuffixPending { cohort: current })
     }
 
     /// Drain one complete ordered author batch or the sticky source failure.
@@ -6511,5 +6697,286 @@ mod active_note_owner_tests {
         assert!(chunks.is_empty());
         assert_eq!(owner.require_quiescent(), Err(Failure::StoragePoisoned));
         assert_eq!(unsafe { owner.getEventCount() }, 0);
+    }
+}
+
+#[cfg(test)]
+mod restart_retirement_lineage_tests {
+    use super::*;
+    use crate::plugin::{
+        NativeEditorAttachmentOwner as Owner, NativeEditorEvent as Event,
+        RestartSourceError as Failure, RestartSourceSettlement as Settlement,
+    };
+
+    fn handler() -> ComponentHandler {
+        ComponentHandler::new(Arc::new(Mutex::new(Vec::with_capacity(
+            MAX_EDITOR_FEEDBACK,
+        ))))
+    }
+    fn snapshot(
+        handler: &ComponentHandler,
+    ) -> (
+        crate::plugin::NativeEditorEventSourceStatus,
+        Vec<Event>,
+        Vec<(u32, u64)>,
+        crate::plugin::RestartCohort,
+        u64,
+    ) {
+        let events = handler.editor_events.lock().unwrap();
+        let feedback = handler.parameter_changes.lock().unwrap();
+        let mut status = events.status();
+        status.pending_dsp_feedback_values = feedback.len();
+        (
+            status,
+            events.events.clone(),
+            feedback
+                .iter()
+                .map(|&(id, value)| (id, value.to_bits()))
+                .collect(),
+            handler.pending_restart_cohort(),
+            events.retirement_lineage,
+        )
+    }
+    fn capture_and_drain(
+        handler: &ComponentHandler,
+        owner: Owner,
+    ) -> crate::plugin::RestartSourceWitness {
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let witness = handler.capture_restart_source_witness(owner).unwrap();
+        assert!(
+            matches!(handler.take_editor_events(), crate::plugin::NativeEditorEventDrain::Complete { events } if events.len() == 1)
+        );
+        witness
+    }
+
+    #[test]
+    fn raw_retirement_lineage_changes_once_only_for_successful_nonempty_clear() {
+        let handler = handler();
+        unsafe {
+            assert_eq!(handler.restartComponent(8), kResultOk);
+        }
+        let stale = handler.pending_restart_cohort();
+        unsafe {
+            assert_eq!(handler.restartComponent(8), kResultOk);
+        }
+        assert!(!handler.retire_restart_cohort(stale));
+        assert_eq!(snapshot(&handler).4, 0);
+        let current = handler.pending_restart_cohort();
+        assert!(handler.retire_restart_cohort(current));
+        assert_eq!(snapshot(&handler).4, 1);
+        assert!(handler.claim_retired_restart_serial(current.serial()));
+        assert!(!handler.retire_restart_cohort(handler.pending_restart_cohort()));
+        assert!(handler.take_restart_flags().is_empty());
+        assert_eq!(snapshot(&handler).4, 1);
+        let source = handler.editor_event_source_status();
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let published = handler.editor_event_source_status();
+        assert_eq!(handler.take_restart_flags().bits(), 4);
+        assert_eq!(handler.editor_event_source_status(), published);
+        assert_eq!(snapshot(&handler).4, 2);
+        let _ = handler.take_editor_events();
+        assert_eq!(snapshot(&handler).4, 2);
+        assert_eq!(
+            handler.editor_event_source_status().revision(),
+            source.revision() + 1
+        );
+    }
+
+    #[test]
+    fn restart_prefix_exact_settlement_preserves_open_source_and_feedback_suffix() {
+        let handler = handler();
+        let owner = Owner::issue().unwrap();
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+            assert_eq!(handler.setDirty(0), kResultOk);
+        }
+        let witness = handler.capture_restart_source_witness(owner).unwrap();
+        assert_eq!(witness.source().revision(), 2);
+        assert_eq!(witness.source().pending_events(), 2);
+        let _ = handler.take_editor_events();
+        unsafe {
+            assert_eq!(handler.startGroupEdit(), kResultOk);
+            assert_eq!(handler.beginEdit(7), kResultOk);
+            assert_eq!(handler.performEdit(7, 0.375), kResultOk);
+        }
+        let before = snapshot(&handler);
+        assert_eq!(
+            handler.settle_restart_source_prefix(owner, witness),
+            Ok(Settlement::Retired)
+        );
+        let after = snapshot(&handler);
+        assert_eq!(after.0, before.0);
+        assert_eq!(after.1, before.1);
+        assert_eq!(after.2, before.2);
+        assert_eq!(after.3.serial(), before.3.serial());
+        assert!(after.3.flags().is_empty());
+        assert_eq!(after.4, before.4 + 1);
+    }
+
+    #[test]
+    fn restart_prefix_lineage_distinguishes_late_same_bit_from_external_retirement() {
+        for external in [false, true] {
+            let handler = handler();
+            let owner = Owner::issue().unwrap();
+            let witness = capture_and_drain(&handler, owner);
+            if external {
+                assert_eq!(handler.take_restart_flags().bits(), 4);
+            }
+            unsafe {
+                assert_eq!(handler.restartComponent(4), kResultOk);
+                assert_eq!(handler.beginEdit(7), kResultOk);
+                assert_eq!(handler.performEdit(7, 0.625), kResultOk);
+            }
+            let before = snapshot(&handler);
+            assert_eq!(before.3.serial(), witness.cohort().serial() + 1);
+            assert_eq!(before.3.flags().bits(), 4);
+            let expected = if external {
+                Err(Failure::Conflict)
+            } else {
+                Ok(Settlement::NewerParameterSuffixPending { cohort: before.3 })
+            };
+            assert_eq!(
+                handler.settle_restart_source_prefix(owner, witness),
+                expected
+            );
+            assert_eq!(snapshot(&handler), before);
+        }
+    }
+
+    #[test]
+    fn restart_prefix_refuses_missing_drain_missing_suffix_mixed_and_other_owner() {
+        for case in 0..4 {
+            let handler = handler();
+            let owner = Owner::issue().unwrap();
+            unsafe {
+                assert_eq!(handler.restartComponent(4), kResultOk);
+            }
+            let witness = handler.capture_restart_source_witness(owner).unwrap();
+            let target = if case == 3 {
+                Owner::issue().unwrap()
+            } else {
+                owner
+            };
+            if case != 0 {
+                let _ = handler.take_editor_events();
+            }
+            match case {
+                1 => {
+                    unsafe {
+                        assert_eq!(handler.restartComponent(4), kResultOk);
+                    }
+                    let _ = handler.take_editor_events();
+                }
+                2 => unsafe {
+                    assert_eq!(handler.restartComponent(8), kResultOk);
+                },
+                _ => {}
+            }
+            let before = snapshot(&handler);
+            assert_eq!(
+                handler.settle_restart_source_prefix(target, witness),
+                Err(Failure::Conflict)
+            );
+            assert_eq!(snapshot(&handler), before);
+        }
+    }
+
+    #[test]
+    fn raw_retirement_busy_poison_and_exhaustion_keep_flags_and_source() {
+        let handler = handler();
+        let owner = Owner::issue().unwrap();
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let cohort = handler.pending_restart_cohort();
+        {
+            let source = handler.editor_events.lock().unwrap();
+            assert!(!handler.retire_restart_cohort(cohort));
+            assert_eq!(handler.take_restart_flags().bits(), 4);
+            assert_eq!(
+                handler.capture_restart_source_witness(owner),
+                Err(Failure::Busy)
+            );
+            assert_eq!(source.retirement_lineage, 0);
+        }
+        handler.editor_events.lock().unwrap().retirement_lineage = u64::MAX;
+        let before = snapshot(&handler);
+        assert!(!handler.retire_restart_cohort(cohort));
+        assert_eq!(handler.take_restart_flags().bits(), 4);
+        assert_eq!(
+            handler.capture_restart_source_witness(owner),
+            Err(Failure::Exhausted)
+        );
+        assert_eq!(snapshot(&handler), before);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _source = handler.editor_events.lock().unwrap();
+            panic!("source poison control");
+        }));
+        assert!(!handler.retire_restart_cohort(cohort));
+        assert_eq!(handler.take_restart_flags().bits(), 4);
+        assert_eq!(
+            handler.capture_restart_source_witness(owner),
+            Err(Failure::PoisonedOwner)
+        );
+        assert_eq!(handler.pending_restart_cohort(), cohort);
+    }
+
+    #[test]
+    fn nonparameter_restart_remains_atomic_while_source_owned_and_invalidates_old_proof() {
+        let handler = handler();
+        let owner = Owner::issue().unwrap();
+        let witness = capture_and_drain(&handler, owner);
+        {
+            let source = handler.editor_events.lock().unwrap();
+            unsafe {
+                assert_eq!(handler.restartComponent(8), kResultOk);
+            }
+            assert!(source.events.is_empty());
+            assert_eq!(source.retirement_lineage, witness.retirement_lineage());
+        }
+        let before = snapshot(&handler);
+        assert_eq!(
+            handler.settle_restart_source_prefix(owner, witness),
+            Err(Failure::Conflict)
+        );
+        assert_eq!(snapshot(&handler), before);
+    }
+    #[test]
+    fn restart_source_busy_feedback_and_wrong_thread_preserve_every_obligation() {
+        let handler = handler();
+        let owner = Owner::issue().unwrap();
+        let witness = capture_and_drain(&handler, owner);
+        let before = snapshot(&handler);
+        {
+            let _feedback = handler.parameter_changes.lock().unwrap();
+            assert_eq!(
+                handler.capture_restart_source_witness(owner),
+                Err(Failure::Busy)
+            );
+            assert_eq!(
+                handler.settle_restart_source_prefix(owner, witness),
+                Err(Failure::Busy)
+            );
+        }
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    assert_eq!(
+                        handler.capture_restart_source_witness(owner),
+                        Err(Failure::WrongThread)
+                    );
+                    assert_eq!(
+                        handler.settle_restart_source_prefix(owner, witness),
+                        Err(Failure::WrongThread)
+                    );
+                })
+                .join()
+                .unwrap();
+        });
+        assert_eq!(snapshot(&handler), before);
     }
 }
