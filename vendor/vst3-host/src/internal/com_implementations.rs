@@ -2636,6 +2636,25 @@ impl HostEventList {
         }
     }
 
+    /// Prove that the original ingress and retained chunks contain no logical
+    /// event, without consuming either owner or waiting for its mutex. An
+    /// anchored pure-audio call must not access this ingress again afterwards:
+    /// late events belong to the next invocation, never this SDK input window.
+    pub(super) fn require_empty_anchored_ingress(
+        &self,
+        retained: &[Option<PluginEvent>],
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        let queued = self.events.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        if !queued.is_empty() || retained.iter().any(Option::is_some) {
+            return Err(Failure::PendingEvents);
+        }
+        Ok(())
+    }
+
     /// Begin the checked Note operation in the original chunk owner. Rejected
     /// input leaves both owners unchanged; no separate pending producer is made.
     pub(super) fn begin_checked_note_batch(

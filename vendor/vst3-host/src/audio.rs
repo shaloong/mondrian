@@ -1,5 +1,7 @@
 //! Audio types and utilities for VST3 host
 
+mod musical_time;
+
 /// Canonical signal timeline facts for the next native process block.
 ///
 /// Installing this context clears optional fields and validity flags. Tempo,
@@ -11,6 +13,67 @@ pub struct ProcessTimelineContext {
     pub sample_position: i64,
     /// Exact prepared signal rate in samples per second.
     pub sample_rate: u32,
+}
+
+/// Immutable exact seconds reference supplied by the embedding host.
+///
+/// This SDK copy contains no playhead, transport state, tempo curve or time
+/// signature. It projects absolute signal samples to quarter notes with one
+/// correctly rounded binary64 conversion, including signed PDC positions.
+/// Installing it currently admits pure audio only: queued/staged events and
+/// nonempty explicit checked batches are refused before processing. This value
+/// does not assign Event.ppqPosition or enable canonical Note routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessMusicalReference {
+    zero_numerator: i64,
+    zero_denominator: i64,
+    duration_numerator: i64,
+    duration_denominator: i64,
+}
+
+impl ProcessMusicalReference {
+    /// Validate seconds coordinate and strictly positive quarter-note duration.
+    /// Numerators/denominators need not be reduced; denominators must be positive.
+    pub fn new(
+        zero_numerator: i64,
+        zero_denominator: i64,
+        duration_numerator: i64,
+        duration_denominator: i64,
+    ) -> std::result::Result<Self, crate::error::MusicalTimeError> {
+        if zero_denominator <= 0 || duration_numerator <= 0 || duration_denominator <= 0 {
+            return Err(crate::error::MusicalTimeError::InvalidReference);
+        }
+        Ok(Self {
+            zero_numerator,
+            zero_denominator,
+            duration_numerator,
+            duration_denominator,
+        })
+    }
+
+    /// Project one absolute signal sample with round-to-nearest, ties-to-even.
+    /// Every validated reference and nonzero u32 rate is representable as a
+    /// finite normal binary64 value or exact positive zero.
+    pub fn quarter_notes_at(
+        self,
+        sample: i64,
+        rate: u32,
+    ) -> std::result::Result<f64, crate::error::MusicalTimeError> {
+        musical_time::quarter_notes(
+            sample,
+            rate,
+            self.zero_numerator,
+            self.zero_denominator,
+            self.duration_numerator,
+            self.duration_denominator,
+        )
+        .ok_or(crate::error::MusicalTimeError::SampleRate)
+    }
+
+    /// Correctly rounded constant BPM, without deriving a meter or playing state.
+    pub fn tempo_bpm(self) -> f64 {
+        musical_time::tempo(self.duration_numerator, self.duration_denominator)
+    }
 }
 
 /// Audio buffers for plugin processing
@@ -1235,5 +1298,50 @@ mod meter_tests {
                 w.capacity
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod musical_reference_tests {
+    use super::ProcessMusicalReference;
+    use crate::error::MusicalTimeError;
+
+    #[test]
+    fn musical_reference_public_api_validates_exact_scalars_and_projects_without_defaults() {
+        for (b, c, d) in [
+            (0, 1, 1),
+            (-1, 1, 1),
+            (1, 0, 1),
+            (1, -1, 1),
+            (1, 1, 0),
+            (1, 1, -1),
+        ] {
+            assert_eq!(
+                ProcessMusicalReference::new(i64::MIN, b, c, d),
+                Err(MusicalTimeError::InvalidReference)
+            );
+        }
+        let reference = ProcessMusicalReference::new(-19, 7, 3, 4).unwrap();
+        assert_eq!(reference.tempo_bpm().to_bits(), 0x4054_0000_0000_0000);
+        assert_eq!(
+            reference.quarter_notes_at(0, 0),
+            Err(MusicalTimeError::SampleRate)
+        );
+        assert_eq!(
+            ProcessMusicalReference::new(i64::MIN, 1, 1, 1)
+                .unwrap()
+                .quarter_notes_at(i64::MIN, 1)
+                .unwrap()
+                .to_bits(),
+            0
+        );
+        let reference = ProcessMusicalReference::new(i64::MAX - 33, 44_100, 1, 1).unwrap();
+        assert_eq!(
+            reference
+                .quarter_notes_at(i64::MAX - 32, 44_100)
+                .unwrap()
+                .to_bits(),
+            0x3ef7_c6f8_c751_f177
+        );
     }
 }

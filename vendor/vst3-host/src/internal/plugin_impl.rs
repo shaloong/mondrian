@@ -2,7 +2,7 @@
 
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
-    error::{Error, NativeEventError, Result},
+    error::{Error, MusicalTimeError, NativeEventError, Result},
     midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
@@ -284,6 +284,7 @@ struct HostProcessData {
     process_context: ProcessContext,
     process_context_requirements: Option<u32>,
     transport_tempo: f64,
+    musical_reference: Option<crate::audio::ProcessMusicalReference>,
     input_param_changes: ComWrapper<ParameterChanges>,
     output_param_changes: ComWrapper<ParameterChanges>,
     // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
@@ -1974,6 +1975,7 @@ impl PluginImpl {
                 process_context: std::mem::zeroed(),
                 process_context_requirements: self.process_context_requirements,
                 transport_tempo: self.tempo,
+                musical_reference: None,
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
             });
@@ -2485,6 +2487,15 @@ impl PluginInternal for PluginImpl {
         self.process_fields().set_signal_timeline_context(context)
     }
 
+    fn set_process_musical_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+        reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        self.process_fields()
+            .install_musical_timeline_context(context, reference)
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.set_parameter_at(id, value, 0)
     }
@@ -2533,6 +2544,13 @@ impl PluginInternal for PluginImpl {
     }
 
     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+        if self
+            .process_data
+            .as_ref()
+            .is_some_and(|data| data.musical_reference.is_some())
+        {
+            return Err(Error::MusicalTime(MusicalTimeError::AnchoredTempo));
+        }
         self.update_tempo(bpm);
         Ok(())
     }
@@ -5356,6 +5374,54 @@ fn checked_process_sample_end(ctx: &ProcessContext, frames: usize) -> Result<(i6
     Ok((project, continuous))
 }
 
+fn preflight_musical_window(
+    context: &ProcessContext,
+    reference: Option<crate::audio::ProcessMusicalReference>,
+    prepared_rate: f64,
+    frames: usize,
+    prepared_block: usize,
+) -> Result<()> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    if !prepared_rate.is_finite()
+        || !(1.0..=f64::from(u32::MAX)).contains(&prepared_rate)
+        || prepared_rate.fract() != 0.0
+        || context.sampleRate != prepared_rate
+    {
+        return Err(Error::MusicalTime(MusicalTimeError::SampleRate));
+    }
+    let rate = prepared_rate as u32;
+    let step = prepared_block.max(1);
+    let mut offset = 0;
+    loop {
+        let start = context
+            .projectTimeSamples
+            .checked_add(
+                i64::try_from(offset)
+                    .map_err(|_| Error::NativeEvent(NativeEventError::InvalidFrames))?,
+            )
+            .ok_or(Error::NativeEvent(NativeEventError::InvalidFrames))?;
+        reference
+            .quarter_notes_at(start, rate)
+            .map_err(Error::MusicalTime)?;
+        let chunk = (frames - offset).min(step);
+        let end = start
+            .checked_add(
+                i64::try_from(chunk)
+                    .map_err(|_| Error::NativeEvent(NativeEventError::InvalidFrames))?,
+            )
+            .ok_or(Error::NativeEvent(NativeEventError::InvalidFrames))?;
+        reference
+            .quarter_notes_at(end, rate)
+            .map_err(Error::MusicalTime)?;
+        offset += chunk;
+        if offset == frames {
+            return Ok(());
+        }
+    }
+}
+
 /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
 /// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
 /// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
@@ -5363,10 +5429,23 @@ fn checked_process_sample_end(ctx: &ProcessContext, frames: usize) -> Result<(i6
 fn advance_process_context(
     ctx: &mut ProcessContext,
     transport_tempo: f64,
+    anchored: Option<(crate::audio::ProcessMusicalReference, u32)>,
     frames: usize,
 ) -> Result<()> {
     use ProcessContext_::StatesAndFlags_ as S;
     let (project, continuous) = checked_process_sample_end(ctx, frames)?;
+    let musical_position = if let Some((reference, rate)) = anchored {
+        if ctx.sampleRate != f64::from(rate) {
+            return Err(Error::MusicalTime(MusicalTimeError::SampleRate));
+        }
+        Some(
+            reference
+                .quarter_notes_at(project, rate)
+                .map_err(Error::MusicalTime)?,
+        )
+    } else {
+        None
+    };
     ctx.projectTimeSamples = project;
     if let Some(continuous) = continuous {
         ctx.continousTimeSamples = continuous;
@@ -5375,7 +5454,9 @@ fn advance_process_context(
         let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
         ctx.systemTime = ctx.systemTime.saturating_add(nanos);
     }
-    if ctx.state & S::kProjectTimeMusicValid as u32 != 0 && ctx.sampleRate > 0.0 {
+    if let Some(position) = musical_position {
+        ctx.projectTimeMusic = position;
+    } else if ctx.state & S::kProjectTimeMusicValid as u32 != 0 && ctx.sampleRate > 0.0 {
         // Quarter notes elapsed = seconds * (BPM / 60).
         let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
         ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
@@ -5731,7 +5812,7 @@ mod transport_tests {
         // One second of audio at 48 kHz in 512-sample blocks.
         let blocks = 48_000 / 512;
         for _ in 0..blocks {
-            advance_process_context(&mut ctx, 120.0, 512).unwrap();
+            advance_process_context(&mut ctx, 120.0, None, 512).unwrap();
         }
         let advanced = (blocks * 512) as i64;
         assert_eq!(ctx.projectTimeSamples, advanced);
@@ -5749,7 +5830,7 @@ mod transport_tests {
         let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
         ctx.sampleRate = 48_000.0;
         ctx.projectTimeSamples = -17;
-        advance_process_context(&mut ctx, 120.0, 4).unwrap();
+        advance_process_context(&mut ctx, 120.0, None, 4).unwrap();
         assert_eq!(ctx.projectTimeSamples, -13);
         assert_eq!(ctx.state, 0);
         assert_eq!(ctx.continousTimeSamples, 0);
@@ -6449,6 +6530,7 @@ impl PluginProcessFields<'_> {
         frame_offset: usize,
         frames: usize,
         is_last: bool,
+        pure_audio: bool,
     ) -> Result<()> {
         let result = if let Some(data) = self.process_data.as_mut() {
             unsafe {
@@ -6548,8 +6630,18 @@ impl PluginProcessFields<'_> {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
+                // ProcessData.inputEvents is optional. Some admits pure audio
+                // only: do not expose late ingress through the original list.
+                // No Rust owner or queue is replaced; this pointer is restored
+                // immediately after native returns, before any fallible advance.
+                let saved_input_events = pure_audio.then(|| {
+                    std::mem::replace(&mut data.process_data.inputEvents, ptr::null_mut())
+                });
                 self.host_app.enter_data_exchange_process();
                 let process_result = self.processor.process(&mut data.process_data);
+                if let Some(input_events) = saved_input_events {
+                    data.process_data.inputEvents = input_events;
+                }
                 self.host_app.leave_data_exchange_process();
                 restore_process_audio_io(&mut data.process_data, saved_audio_io);
 
@@ -6566,12 +6658,19 @@ impl PluginProcessFields<'_> {
                 let advance_result = advance_process_context(
                     &mut data.process_context,
                     data.transport_tempo,
+                    // Successful anchored installation and the whole-window
+                    // preflight prove this prepared f64 is an exact nonzero
+                    // u32 rate. Never derive the rate from plugin-writable ctx.
+                    data.musical_reference
+                        .map(|reference| (reference, self.sample_rate as u32)),
                     frames,
                 );
 
                 // Clear the staged input events AFTER processing, so the plugin got to see them
                 // and the next chunk starts from an empty list.
-                self.input_events.clear();
+                if !pure_audio {
+                    self.input_events.clear();
+                }
                 // Clear the input parameter queue too, so this block's values don't
                 // re-stick on the next block.
                 data.input_param_changes.clear_all();
@@ -6645,6 +6744,7 @@ impl PluginProcessFields<'_> {
         buffers: &mut CallerAudioBuffers<'_>,
         total: usize,
         checked_notes: bool,
+        pure_audio: bool,
     ) -> Result<()> {
         // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
         // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
@@ -6654,20 +6754,22 @@ impl PluginProcessFields<'_> {
         while offset < total {
             let frames = (total - offset).min(step);
             let is_last = offset + frames >= total;
-            if checked_notes {
-                self.input_events
-                    .stage_checked_note_chunk(self.chunk_events, offset, frames)
-                    .map_err(Error::NativeEvent)?;
-            } else {
-                stage_chunk_events(
-                    self.chunk_events,
-                    self.input_events,
-                    offset,
-                    frames,
-                    is_last,
-                );
+            if !pure_audio {
+                if checked_notes {
+                    self.input_events
+                        .stage_checked_note_chunk(self.chunk_events, offset, frames)
+                        .map_err(Error::NativeEvent)?;
+                } else {
+                    stage_chunk_events(
+                        self.chunk_events,
+                        self.input_events,
+                        offset,
+                        frames,
+                        is_last,
+                    );
+                }
             }
-            self.process_chunk(buffers, offset, frames, is_last)?;
+            self.process_chunk(buffers, offset, frames, is_last, pure_audio)?;
             offset += frames;
         }
         Ok(())
@@ -6725,30 +6827,52 @@ impl PluginProcessFields<'_> {
             .as_ref()
             .ok_or_else(|| Error::Other("Process data not initialized".to_owned()))?;
         checked_process_sample_end(&data.process_context, total)?;
-        let _denormal = crate::internal::denormal::DenormalGuard::new();
-        if let Some(notes) = notes {
-            // All fallible scalar/layout checks finished. This admission checks
-            // both original capacities and absence of legacy input before mutation.
+        preflight_musical_window(
+            &data.process_context,
+            data.musical_reference,
+            self.sample_rate,
+            total,
+            self.block_size,
+        )?;
+        let pure_audio = data.musical_reference.is_some();
+        if pure_audio {
+            if notes.is_some_and(|events| !events.is_empty()) {
+                return Err(Error::MusicalTime(MusicalTimeError::EventInputUnsupported));
+            }
             self.input_events
-                .begin_checked_note_batch(self.chunk_events, notes)
+                .require_empty_anchored_ingress(self.chunk_events)
                 .map_err(Error::NativeEvent)?;
-        } else {
-            self.input_events.take_into_slots(self.chunk_events);
+        }
+        let _denormal = crate::internal::denormal::DenormalGuard::new();
+        if !pure_audio {
+            if let Some(notes) = notes {
+                // All fallible scalar/layout checks finished. This admission checks
+                // both original capacities and absence of legacy input before mutation.
+                self.input_events
+                    .begin_checked_note_batch(self.chunk_events, notes)
+                    .map_err(Error::NativeEvent)?;
+            } else {
+                self.input_events.take_into_slots(self.chunk_events);
+            }
         }
 
         let result = if total == 0 {
-            stage_chunk_events(self.chunk_events, self.input_events, 0, 0, true);
-            self.process_chunk(buffers, 0, 0, true)
+            if !pure_audio {
+                stage_chunk_events(self.chunk_events, self.input_events, 0, 0, true);
+            }
+            self.process_chunk(buffers, 0, 0, true, pure_audio)
         } else {
-            self.process_chunks(buffers, total, notes.is_some())
+            self.process_chunks(buffers, total, notes.is_some(), pure_audio)
         };
 
-        if notes.is_some() {
-            // Consumption has begun; no future call may replay remaining chunks,
-            // including when the second native call or input-list staging failed.
-            self.input_events.clear_consumed_note_events();
+        if !pure_audio {
+            if notes.is_some() {
+                // Consumption has begun; no future call may replay remaining chunks,
+                // including when the second native call or input-list staging failed.
+                self.input_events.clear_consumed_note_events();
+            }
+            self.chunk_events.clear();
         }
-        self.chunk_events.clear();
         self.pending_param_changes.clear();
         result
     }
@@ -6773,6 +6897,42 @@ impl PluginProcessFields<'_> {
         data.process_context.projectTimeSamples = context.sample_position;
         data.process_context.state =
             process_context_state(data.process_context_requirements, false, 0);
+        data.musical_reference = None;
+        Ok(())
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn install_musical_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+        reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        if !self.is_processing {
+            return Err(Error::NotProcessing);
+        }
+        if context.sample_rate == 0 || f64::from(context.sample_rate) != self.sample_rate {
+            return Err(Error::MusicalTime(MusicalTimeError::SampleRate));
+        }
+        let position = reference
+            .quarter_notes_at(context.sample_position, context.sample_rate)
+            .map_err(Error::MusicalTime)?;
+        let tempo = reference.tempo_bpm();
+        let data = self.process_data.as_mut().ok_or(Error::NotProcessing)?;
+        // All validation/projection precedes publication. The assignment keeps
+        // the ProcessData pointer to this same retained field stable.
+        let mut next: ProcessContext = unsafe { std::mem::zeroed() };
+        next.sampleRate = f64::from(context.sample_rate);
+        next.projectTimeSamples = context.sample_position;
+        next.projectTimeMusic = position;
+        next.tempo = tempo;
+        next.state = process_context_state(
+            data.process_context_requirements,
+            false,
+            (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
+                | ProcessContext_::StatesAndFlags_::kTempoValid) as u32,
+        );
+        data.process_context = next;
+        data.musical_reference = Some(reference);
         Ok(())
     }
 }
@@ -7252,6 +7412,13 @@ impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
     ) -> Result<()> {
         self.set_signal_timeline_context(context)
     }
+    fn set_process_musical_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+        reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        self.install_musical_timeline_context(context, reference)
+    }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) || sample_offset < 0 {
             return Err(Error::InvalidParameter(
@@ -7690,6 +7857,474 @@ fn native_stop_deactivates_loaded_and_retained_active_but_stopped_owners() {
     assert!(!native.is_active && !native.processing_state());
 }
 
+#[test]
+#[ignore = "requires the existing owned Note-oracle DLL; SDK anchored/legacy mutator ownership only"]
+fn native_anchored_musical_context_rejects_independent_tempo_and_keeps_explicit_meter_playing() {
+    use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+    use IProcessContextRequirements_::Flags_ as R;
+    use ProcessContext_::StatesAndFlags_ as S;
+    let path = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_NOTE_ORACLE_PLUGIN").expect("existing owned SDK DLL"),
+    );
+    assert!(path.is_absolute() && path.is_file());
+    let mut native = PluginImpl::load_class(
+        &path,
+        "6E4F05A12D8B4C639F017B42A4C2E611",
+        crate::PluginInterfaceSupport::default(),
+    )
+    .unwrap();
+    native.set_audio_config(48_000.0, 4);
+    native.start_processing().unwrap();
+    assert_eq!(
+        native.process_data.as_ref().unwrap().musical_reference,
+        None
+    );
+    let reference = ProcessMusicalReference::new(-1, 7, 3, 4).unwrap();
+    native
+        .set_process_musical_timeline_context(
+            ProcessTimelineContext {
+                sample_position: -17,
+                sample_rate: 48_000,
+            },
+            reference,
+        )
+        .unwrap();
+    let before = {
+        let data = native.process_data.as_ref().unwrap();
+        (
+            native.tempo,
+            data.transport_tempo,
+            data.process_context.tempo,
+            data.process_context.projectTimeMusic,
+            data.process_context.state,
+        )
+    };
+    assert!(matches!(
+        native.set_tempo(140.0),
+        Err(Error::MusicalTime(MusicalTimeError::AnchoredTempo))
+    ));
+    let data = native.process_data.as_ref().unwrap();
+    assert_eq!(
+        (
+            native.tempo,
+            data.transport_tempo,
+            data.process_context.tempo,
+            data.process_context.projectTimeMusic,
+            data.process_context.state
+        ),
+        before
+    );
+    // These independent explicit SDK caller facts remain legal. They are not
+    // inferred from the reference and do not establish product meter/transport.
+    native.set_time_signature(7, 8).unwrap();
+    native.set_playing(true).unwrap();
+    let data = native.process_data.as_ref().unwrap();
+    assert_eq!(data.musical_reference, Some(reference));
+    assert_eq!(data.process_context.tempo, before.2);
+    assert_eq!(data.process_context.projectTimeMusic, before.3);
+    assert_eq!(
+        (
+            native.time_sig_numerator,
+            native.time_sig_denominator,
+            native.playing
+        ),
+        (7, 8, true)
+    );
+    if process_context_needs(
+        data.process_context_requirements,
+        R::kNeedTimeSignature as u32,
+    ) {
+        assert_eq!(
+            (
+                data.process_context.timeSigNumerator,
+                data.process_context.timeSigDenominator
+            ),
+            (7, 8)
+        );
+        assert_ne!(data.process_context.state & S::kTimeSigValid as u32, 0);
+    }
+    assert_eq!(
+        data.process_context.state & S::kPlaying as u32 != 0,
+        process_context_needs(
+            data.process_context_requirements,
+            R::kNeedTransportState as u32
+        )
+    );
+    assert_eq!(data.process_context.barPositionMusic, 0.0);
+    assert_eq!(data.process_context.state & S::kBarPositionValid as u32, 0);
+    native
+        .set_process_timeline_context(ProcessTimelineContext {
+            sample_position: -5,
+            sample_rate: 48_000,
+        })
+        .unwrap();
+    assert_eq!(
+        native.process_data.as_ref().unwrap().musical_reference,
+        None
+    );
+    native.set_tempo(140.0).unwrap();
+    assert_eq!(native.tempo, 140.0);
+    native.stop_processing().unwrap();
+    native.start_processing().unwrap();
+    assert_eq!(
+        native.process_data.as_ref().unwrap().musical_reference,
+        None
+    );
+}
+
+#[test]
+#[ignore = "requires rebuilt MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN mode7; actual DLL DSP literal music/PCM, not Audio VST transport admission"]
+fn native_anchored_musical_context_reaches_sidechain_dsp_with_literal_bits() {
+    use crate::audio::{BusDirection, MediaType, ProcessMusicalReference, ProcessTimelineContext};
+    use crate::{Plugin, Vst3Host};
+
+    // Only the existing state envelope is decoded here. Q/tempo expectations
+    // live as independent literal bits inside the actual DLL's process callback.
+    fn observe(plugin: &Plugin) -> (Vec<u8>, f64, u64) {
+        let bytes = plugin
+            .save_state()
+            .expect("same component after scoped DSP join");
+        let state = decode_state_snapshot(&bytes).unwrap();
+        assert_eq!(state.component.len(), 32);
+        assert_eq!(&state.component[..4], b"MSS1");
+        assert_eq!(&state.component[4..8], &1_u32.to_le_bytes());
+        assert_eq!(&state.component[16..20], &7_u32.to_le_bytes());
+        assert_eq!(&state.component[20..24], b"MSA7");
+        let controller = state.controller.as_ref().expect("separate controller");
+        assert_eq!(controller.len(), 20);
+        assert_eq!(&controller[..8], &state.component[..8]);
+        assert_eq!(&controller[16..20], &state.component[16..20]);
+        let gain = f64::from_le_bytes(state.component[8..16].try_into().unwrap());
+        let attempts = u64::from_le_bytes(state.component[24..32].try_into().unwrap());
+        (bytes, gain, attempts)
+    }
+    fn invalid_rate(result: Result<()>, anchored: bool) {
+        if anchored {
+            assert!(matches!(
+                result,
+                Err(Error::MusicalTime(MusicalTimeError::SampleRate))
+            ));
+        } else {
+            assert!(matches!(result, Err(Error::InvalidParameter(_))));
+        }
+    }
+
+    let path = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN")
+            .expect("rebuilt existing sidechain DLL with independent mode7"),
+    );
+    assert!(path.is_absolute() && path.is_file());
+    for rate in [44_100_u32, 48_000] {
+        let mut host = Vst3Host::builder()
+            .sample_rate(f64::from(rate))
+            .block_size(4)
+            .input_channels(2)
+            .output_channels(2)
+            .build()
+            .unwrap();
+        for scoped in [false, true] {
+            for anchored in [false, true] {
+                for start in [-17, i64::MAX - 32] {
+                    let mut plugin = host
+                        .load_plugin_class(&path, "7486AF22234A480B9DF13173F12EB620")
+                        .expect("actual existing sidechain class");
+                    let mut configuration = b"MSS1".to_vec();
+                    configuration.extend_from_slice(&1_u32.to_le_bytes());
+                    configuration.extend_from_slice(&0.5_f64.to_le_bytes());
+                    configuration.extend_from_slice(&7_u32.to_le_bytes());
+                    let state = encode_state_snapshot(&StateSnapshot {
+                        component: configuration.clone(),
+                        controller: Some(configuration),
+                    })
+                    .unwrap();
+                    plugin.load_state(&state).unwrap();
+                    for index in 0..3 {
+                        plugin
+                            .set_bus_active(MediaType::Audio, BusDirection::Input, index, true)
+                            .unwrap();
+                    }
+                    plugin
+                        .set_bus_active(MediaType::Audio, BusDirection::Output, 0, true)
+                        .unwrap();
+                    assert_eq!(plugin.latency_samples(), 3);
+                    plugin.start_processing().unwrap();
+                    let (initial_state, initial_gain, initial_attempts) = observe(&plugin);
+                    assert_eq!((initial_gain, initial_attempts), (0.5, 0));
+                    let context = ProcessTimelineContext {
+                        sample_position: start,
+                        sample_rate: rate,
+                    };
+                    let reference =
+                        ProcessMusicalReference::new(start - 1, i64::from(rate), 3, 4).unwrap();
+                    let overflow_context = ProcessTimelineContext {
+                        sample_position: i64::MAX - 6,
+                        sample_rate: rate,
+                    };
+                    let overflow_reference =
+                        ProcessMusicalReference::new(i64::MAX - 7, i64::from(rate), 3, 4).unwrap();
+                    let bad_context = ProcessTimelineContext {
+                        sample_position: start,
+                        sample_rate: if rate == 44_100 { 48_000 } else { 44_100 },
+                    };
+                    // Two complete native windows use the same object. Window0
+                    // observes the retained context after a refused setter;
+                    // window1 proves a refused overflow consumed no queued point
+                    // or DSP call. A successful position-only setter then clears
+                    // the same object's prior anchor before actual None DSP.
+                    for pass in 0..2 {
+                        let mut buffers = plugin.create_bus_audio_buffers(9).unwrap();
+                        assert_eq!((buffers.inputs.len(), buffers.outputs.len()), (3, 1));
+                        for (channel, samples) in buffers.inputs[0].channels.iter_mut().enumerate()
+                        {
+                            samples.fill(if channel == 0 { 1.0 } else { -1.0 });
+                        }
+                        for samples in &mut buffers.outputs[0].channels {
+                            samples.fill(-99.0);
+                        }
+                        let unmodified = buffers.clone();
+                        plugin
+                            .set_parameter_at(0, if pass == 0 { 0.75 } else { 0.25 }, 0)
+                            .unwrap();
+                        if scoped {
+                            let split = plugin.split_editor_processing().unwrap();
+                            let mut processor = split.processor;
+                            std::thread::scope(|scope| {
+                                scope
+                                    .spawn(|| {
+                                        if anchored && pass == 0 {
+                                            processor
+                                                .set_process_musical_timeline_context(
+                                                    context, reference,
+                                                )
+                                                .unwrap();
+                                        } else {
+                                            processor
+                                                .set_process_timeline_context(context)
+                                                .unwrap();
+                                        }
+                                        if pass == 0 {
+                                            invalid_rate(
+                                                if anchored {
+                                                    processor.set_process_musical_timeline_context(
+                                                        bad_context,
+                                                        reference,
+                                                    )
+                                                } else {
+                                                    processor
+                                                        .set_process_timeline_context(bad_context)
+                                                },
+                                                anchored,
+                                            );
+                                            assert_eq!(buffers, unmodified);
+                                        } else {
+                                            if anchored {
+                                                processor
+                                                    .set_process_musical_timeline_context(
+                                                        overflow_context,
+                                                        overflow_reference,
+                                                    )
+                                                    .unwrap();
+                                            } else {
+                                                processor
+                                                    .set_process_timeline_context(overflow_context)
+                                                    .unwrap();
+                                            }
+                                            assert!(matches!(
+                                                processor.process_bus_audio(&mut buffers),
+                                                Err(Error::NativeEvent(
+                                                    NativeEventError::InvalidFrames
+                                                ))
+                                            ));
+                                            assert_eq!(buffers, unmodified);
+                                            processor
+                                                .set_process_timeline_context(context)
+                                                .unwrap();
+                                        }
+                                        processor.process_bus_audio(&mut buffers).unwrap();
+                                    })
+                                    .join()
+                                    .expect("joined real scoped DSP thread");
+                            });
+                            drop(processor);
+                            drop(split.editor);
+                        } else {
+                            if anchored && pass == 0 {
+                                plugin
+                                    .set_process_musical_timeline_context(context, reference)
+                                    .unwrap();
+                            } else {
+                                plugin.set_process_timeline_context(context).unwrap();
+                            }
+                            if pass == 0 {
+                                invalid_rate(
+                                    if anchored {
+                                        plugin.set_process_musical_timeline_context(
+                                            bad_context,
+                                            reference,
+                                        )
+                                    } else {
+                                        plugin.set_process_timeline_context(bad_context)
+                                    },
+                                    anchored,
+                                );
+                                assert_eq!(buffers, unmodified);
+                            } else {
+                                if anchored {
+                                    plugin
+                                        .set_process_musical_timeline_context(
+                                            overflow_context,
+                                            overflow_reference,
+                                        )
+                                        .unwrap();
+                                } else {
+                                    plugin
+                                        .set_process_timeline_context(overflow_context)
+                                        .unwrap();
+                                }
+                                assert!(matches!(
+                                    plugin.process_bus_audio(&mut buffers),
+                                    Err(Error::NativeEvent(NativeEventError::InvalidFrames))
+                                ));
+                                assert_eq!(buffers, unmodified);
+                                plugin.set_process_timeline_context(context).unwrap();
+                            }
+                            plugin.process_bus_audio(&mut buffers).unwrap();
+                        }
+                        let (_, gain, attempts) = observe(&plugin);
+                        assert_eq!(
+                            attempts,
+                            if pass == 0 { 3 } else { 6 },
+                            "refused call cannot reach DLL process"
+                        );
+                        assert_eq!(
+                            gain.to_bits(),
+                            if pass == 0 { 0.75_f64 } else { 0.25_f64 }.to_bits()
+                        );
+                        for (channel, samples) in buffers.outputs[0].channels.iter().enumerate() {
+                            for (frame, actual) in samples.iter().enumerate() {
+                                // Independent literal PCM: three-frame delay of
+                                // main-input * 2 * the retained parameter gain,
+                                // plus a per-native-chunk mode/rate tag.
+                                let row = frame / 4;
+                                let tag =
+                                    (1 + row + if rate == 44_100 { 0 } else { 4 }) as f32 / 16.0;
+                                let tag = if anchored && pass == 0 { tag } else { -tag };
+                                let delayed = match (pass, frame < 3) {
+                                    (0, true) => 0.0,
+                                    (0, false) | (1, true) => 1.5,
+                                    (1, false) => 0.5,
+                                    _ => unreachable!(),
+                                };
+                                let expected = delayed + tag;
+                                let expected = if channel == 0 { expected } else { -expected };
+                                assert_eq!(actual.to_bits(), expected.to_bits(), "rate={rate} start={start} scoped={scoped} anchored={anchored} pass={pass} channel={channel} frame={frame}");
+                            }
+                        }
+                    }
+                    if anchored {
+                        let mut guarded = plugin.create_bus_audio_buffers(9).unwrap();
+                        for (channel, samples) in guarded.inputs[0].channels.iter_mut().enumerate()
+                        {
+                            samples.fill(if channel == 0 { 1.0 } else { -1.0 });
+                        }
+                        for samples in &mut guarded.outputs[0].channels {
+                            samples.fill(-99.0);
+                        }
+                        let unmodified = guarded.clone();
+                        plugin
+                            .set_process_musical_timeline_context(context, reference)
+                            .unwrap();
+                        plugin
+                            .send_plugin_event(PluginEvent {
+                                bus_index: 0,
+                                sample_offset: 0,
+                                ppq_position: 0.0,
+                                flags: 0,
+                                data: crate::midi::PluginEventData::NoteOn {
+                                    channel: 0,
+                                    pitch: 60,
+                                    tuning: 0.0,
+                                    velocity: 0.5,
+                                    length: 0,
+                                    note_id: 777,
+                                },
+                            })
+                            .unwrap();
+                        plugin.set_parameter_at(0, 0.75, 0).unwrap();
+                        let result = if scoped {
+                            let split = plugin.split_editor_processing().unwrap();
+                            let mut processor = split.processor;
+                            let result = std::thread::scope(|scope| {
+                                scope
+                                    .spawn(|| processor.process_bus_audio(&mut guarded))
+                                    .join()
+                                    .unwrap()
+                            });
+                            drop(processor);
+                            drop(split.editor);
+                            result
+                        } else {
+                            plugin.process_bus_audio(&mut guarded)
+                        };
+                        assert!(matches!(
+                            result,
+                            Err(Error::NativeEvent(NativeEventError::PendingEvents))
+                        ));
+                        assert_eq!(guarded, unmodified);
+                        assert!(
+                            matches!(plugin.save_state(), Err(Error::PendingParameterDelivery)),
+                            "refusal must retain the original queued parameter"
+                        );
+                        // Explicit SDK caller recovery preserves the original None
+                        // event route. This fixture does not implement Note DSP:
+                        // only the Some rejection, PCM and actual call count qualify.
+                        plugin.set_process_timeline_context(context).unwrap();
+                        if scoped {
+                            let split = plugin.split_editor_processing().unwrap();
+                            let mut processor = split.processor;
+                            std::thread::scope(|scope| {
+                                scope
+                                    .spawn(|| processor.process_bus_audio(&mut guarded))
+                                    .join()
+                                    .unwrap()
+                            })
+                            .unwrap();
+                            drop(processor);
+                            drop(split.editor);
+                        } else {
+                            plugin.process_bus_audio(&mut guarded).unwrap();
+                        }
+                        let (_, gain, attempts) = observe(&plugin);
+                        assert_eq!(
+                            (gain, attempts),
+                            (0.75, 9),
+                            "only the explicit valid recovery's three calls reached the same DLL"
+                        );
+                        for (channel, samples) in guarded.outputs[0].channels.iter().enumerate() {
+                            for (frame, actual) in samples.iter().enumerate() {
+                                let tag = (1 + frame / 4 + if rate == 44_100 { 0 } else { 4 })
+                                    as f32
+                                    / 16.0;
+                                let expected = if frame < 3 { 0.5 } else { 1.5 } - tag;
+                                let expected = if channel == 0 { expected } else { -expected };
+                                assert_eq!(actual.to_bits(), expected.to_bits());
+                            }
+                        }
+                    }
+                    plugin.stop_processing().unwrap();
+                    // Restore the earlier real same-object configuration with a
+                    // recorded count0. Audit is intentionally not DSP state:
+                    // original gain restores; actual attempt history remains.
+                    plugin.load_state(&initial_state).unwrap();
+                    let (_, gain, attempts) = observe(&plugin);
+                    assert_eq!((gain, attempts), (0.5, if anchored { 9 } else { 6 }));
+                    plugin.stop_processing().unwrap();
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod cache_policy_tests;
 
@@ -7703,7 +8338,7 @@ mod checked_native_note_tests {
     use crate::audio::{AudioBusConfig, NativeEventBusRole};
     use crate::midi::PluginEventData;
     use crate::plugin::PluginProcessingRole;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use vst3::{Class, ComRef};
 
     type Received = (i32, i32, i32, i16, i16, u32);
@@ -7713,11 +8348,14 @@ mod checked_native_note_tests {
         received: Vec<Vec<Received>>,
         frames: Vec<i32>,
         positions: Vec<(i64, i64, u32)>,
+        musical: Vec<[u64; 5]>,
     }
     struct Processor {
         observed: Arc<Mutex<Observations>>,
         fail_call: Arc<AtomicUsize>,
         context_fault: Arc<AtomicUsize>,
+        inject_legacy: Arc<AtomicBool>,
+        original_ingress: ComPtr<IEventList>,
     }
     impl Class for Processor {
         type Interfaces = (IAudioProcessor,);
@@ -7751,9 +8389,30 @@ mod checked_native_note_tests {
             // SAFETY: the actual SDK entry receives the fixture's wired stable
             // ProcessData, event COM owner and mono output storage.
             let data = unsafe { &mut *data };
+            if self.inject_legacy.swap(false, Ordering::Relaxed) {
+                let mut late: Event = unsafe { std::mem::zeroed() };
+                late.r#type = kNoteOnEvent as u16;
+                late.ppqPosition = 0.0;
+                late.__field0.noteOn = NoteOnEvent {
+                    channel: 2,
+                    pitch: 60,
+                    tuning: 0.0,
+                    velocity: 0.5,
+                    length: 0,
+                    noteId: 999,
+                };
+                assert_eq!(
+                    unsafe { self.original_ingress.addEvent(&mut late) },
+                    kResultOk
+                );
+            }
             let mut received = Vec::new();
-            let events = unsafe { ComRef::from_raw(data.inputEvents) }.expect("actual input list");
-            for index in 0..unsafe { events.getEventCount() } {
+            let events = unsafe { ComRef::from_raw(data.inputEvents) };
+            for index in 0..events
+                .as_ref()
+                .map_or(0, |events| unsafe { events.getEventCount() })
+            {
+                let events = events.as_ref().unwrap();
                 let mut event: Event = unsafe { std::mem::zeroed() };
                 assert_eq!(unsafe { events.getEvent(index, &mut event) }, kResultOk);
                 let (id, channel, pitch, velocity) = match event.r#type as u32 {
@@ -7787,11 +8446,19 @@ mod checked_native_note_tests {
                 context.continousTimeSamples,
                 context.state,
             ));
+            observed.musical.push([
+                context.projectTimeMusic.to_bits(),
+                context.tempo.to_bits(),
+                context.barPositionMusic.to_bits(),
+                context.timeSigNumerator as u64,
+                context.timeSigDenominator as u64,
+            ]);
             // Adversarial native mutation: the host must reject an unrepresentable
             // next sample position without skipping per-call cleanup.
             match self.context_fault.load(Ordering::Relaxed) {
                 1 => unsafe { (*data.processContext).projectTimeSamples = i64::MAX },
                 2 => unsafe { (*data.processContext).continousTimeSamples = i64::MAX },
+                3 => unsafe { (*data.processContext).sampleRate = 44_100.0 },
                 _ => {}
             }
             // A failed native block deliberately writes native output too. It
@@ -7820,6 +8487,7 @@ mod checked_native_note_tests {
         observed: Arc<Mutex<Observations>>,
         fail_call: Arc<AtomicUsize>,
         context_fault: Arc<AtomicUsize>,
+        inject_legacy: Arc<AtomicBool>,
         data: Option<Box<HostProcessData>>,
         activation: BusActivationState,
         handler: Option<ComWrapper<ComponentHandler>>,
@@ -7838,14 +8506,17 @@ mod checked_native_note_tests {
             let observed = Arc::new(Mutex::new(Observations::default()));
             let fail_call = Arc::new(AtomicUsize::new(0));
             let context_fault = Arc::new(AtomicUsize::new(0));
+            let inject_legacy = Arc::new(AtomicBool::new(false));
+            let input = create_event_list();
             let processor = ComWrapper::new(Processor {
                 observed: Arc::clone(&observed),
                 fail_call: Arc::clone(&fail_call),
                 context_fault: Arc::clone(&context_fault),
+                inject_legacy: Arc::clone(&inject_legacy),
+                original_ingress: input.to_com_ptr::<IEventList>().unwrap(),
             })
             .to_com_ptr::<IAudioProcessor>()
             .unwrap();
-            let input = create_event_list();
             let output = create_event_list();
             let mut native_output: AudioBusBuffers = unsafe { std::mem::zeroed() };
             native_output.numChannels = 1;
@@ -7862,6 +8533,7 @@ mod checked_native_note_tests {
                 process_context: unsafe { std::mem::zeroed() },
                 process_context_requirements: None,
                 transport_tempo: 120.0,
+                musical_reference: None,
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
             });
@@ -7887,6 +8559,7 @@ mod checked_native_note_tests {
                 observed,
                 fail_call,
                 context_fault,
+                inject_legacy,
                 data: Some(data),
                 activation: BusActivationState {
                     audio_outputs: vec![true],
@@ -8942,5 +9615,705 @@ mod checked_native_note_tests {
         ));
         info.mediaType = kAudio as i32;
         assert!(checked_event_bus_info(Input, 0, kResultOk, &info).is_err());
+    }
+
+    #[test]
+    fn anchored_musical_native_chunks_keep_absolute_reference_and_exact_rounding() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        use ProcessContext_::StatesAndFlags_ as S;
+        let valid = (S::kProjectTimeMusicValid | S::kTempoValid) as u32;
+        for path in [WindowPath::Flat, WindowPath::Buses, WindowPath::ScopedNotes] {
+            let mut fixture = Fixture::new();
+            for start in [-17, i64::MAX - 32] {
+                let reference = ProcessMusicalReference::new(start - 1, 48_000, 3, 4).unwrap();
+                fixture
+                    .fields()
+                    .set_process_musical_timeline_context(
+                        ProcessTimelineContext {
+                            sample_position: start,
+                            sample_rate: 48_000,
+                        },
+                        reference,
+                    )
+                    .unwrap();
+                let before = fixture.observed.lock().unwrap().calls;
+                // This slice observes process context only. An empty checked
+                // batch supplies no invented Event.ppqPosition or Note claim.
+                let result = if matches!(path, WindowPath::ScopedNotes) {
+                    fixture.run(&mut buffers(9), &[])
+                } else {
+                    run_sample_window(&mut fixture, path, 9).0
+                };
+                result.unwrap();
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(&observed.frames[before..], [4, 4, 1]);
+                assert_eq!(
+                    &observed.positions[before..],
+                    [
+                        (start, 0, valid),
+                        (start + 4, 0, valid),
+                        (start + 8, 0, valid)
+                    ]
+                );
+                for (row, quarter_bits) in observed.musical[before..].iter().zip([
+                    0x3efd_208a_5a91_2e32, // 1/36000
+                    0x3f22_3456_789a_bcdf, // 5/36000
+                    0x3f30_624d_d2f1_a9fc, // 9/36000
+                ]) {
+                    assert_eq!(*row, [quarter_bits, 0x4054_0000_0000_0000, 0, 0, 0]);
+                }
+                drop(observed);
+                let data = fixture.data.as_ref().unwrap();
+                assert_eq!(data.musical_reference, Some(reference));
+                assert_eq!(data.process_context.projectTimeSamples, start + 9);
+                assert_eq!(
+                    data.process_context.projectTimeMusic.to_bits(),
+                    0x3f32_3456_789a_bcdf
+                ); // 10/36000
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_musical_install_is_atomic_and_successful_position_only_install_clears_it() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        let mut fixture = Fixture::new();
+        let reference = ProcessMusicalReference::new(-1, 7, 3, 4).unwrap();
+        fixture
+            .fields()
+            .set_process_musical_timeline_context(
+                ProcessTimelineContext {
+                    sample_position: -17,
+                    sample_rate: 48_000,
+                },
+                reference,
+            )
+            .unwrap();
+        let snapshot = context_facts(&fixture.data.as_ref().unwrap().process_context);
+        let pointer = fixture.data.as_ref().unwrap().process_data.processContext;
+        for rate in [0, 44_100] {
+            assert!(matches!(
+                fixture.fields().set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: 91,
+                        sample_rate: rate
+                    },
+                    reference
+                ),
+                Err(Error::MusicalTime(MusicalTimeError::SampleRate))
+            ));
+            assert!(matches!(
+                fixture
+                    .fields()
+                    .set_process_timeline_context(ProcessTimelineContext {
+                        sample_position: 91,
+                        sample_rate: rate
+                    }),
+                Err(Error::InvalidParameter(_))
+            ));
+            let data = fixture.data.as_ref().unwrap();
+            assert_eq!(context_facts(&data.process_context), snapshot);
+            assert_eq!(data.musical_reference, Some(reference));
+            assert_eq!(data.process_data.processContext, pointer);
+        }
+        fixture
+            .fields()
+            .set_process_timeline_context(ProcessTimelineContext {
+                sample_position: -5,
+                sample_rate: 48_000,
+            })
+            .unwrap();
+        let data = fixture.data.as_ref().unwrap();
+        assert_eq!(data.musical_reference, None);
+        assert_eq!(data.process_context.projectTimeSamples, -5);
+        assert_eq!(data.process_context.state, 0);
+        assert_eq!(data.process_context.projectTimeMusic, 0.0);
+        assert_eq!(data.process_context.tempo, 0.0);
+        assert_eq!(data.process_data.processContext, pointer);
+        assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+    }
+
+    #[test]
+    fn anchored_musical_window_refusals_preserve_real_com_input_pcm_and_parameter_owners() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for bad_rate in [false, true] {
+            let mut fixture = Fixture::new();
+            let start = if bad_rate { -17 } else { i64::MAX - 4 };
+            let reference = ProcessMusicalReference::new(start, 48_000, 3, 4).unwrap();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: start,
+                        sample_rate: 48_000,
+                    },
+                    reference,
+                )
+                .unwrap();
+            if bad_rate {
+                fixture.data.as_mut().unwrap().process_context.sampleRate = 44_100.0;
+            }
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.5,
+                sample_offset: 8,
+            });
+            fixture.input.events.lock().unwrap().push(on(0, 71));
+            fixture.chunks.push(Some(off(0, 71)));
+            fixture.gui.lock().unwrap().push((17, 0.25));
+            let input = fixture.input.events.lock().unwrap().clone();
+            let chunks = fixture.chunks.clone();
+            let parameter_owner = (fixture.parameters.as_ptr(), fixture.parameters.capacity());
+            let snapshot = context_facts(&fixture.data.as_ref().unwrap().process_context);
+            let (result, pcm) = run_sample_window(&mut fixture, WindowPath::Buses, 9);
+            if bad_rate {
+                assert!(matches!(
+                    result,
+                    Err(Error::MusicalTime(MusicalTimeError::SampleRate))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::NativeEvent(NativeEventError::InvalidFrames))
+                ));
+            }
+            assert_eq!(pcm, [93.0; 9]);
+            assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+            assert_eq!(*fixture.input.events.lock().unwrap(), input);
+            assert_eq!(fixture.chunks, chunks);
+            assert_eq!(
+                (fixture.parameters.as_ptr(), fixture.parameters.capacity()),
+                parameter_owner
+            );
+            assert_eq!(fixture.parameters.len(), 1);
+            assert_eq!(
+                (
+                    fixture.parameters[0].id,
+                    fixture.parameters[0].value,
+                    fixture.parameters[0].sample_offset
+                ),
+                (7, 0.5, 8)
+            );
+            assert_eq!(*fixture.gui.lock().unwrap(), [(17, 0.25)]);
+            let data = fixture.data.as_ref().unwrap();
+            assert_eq!(context_facts(&data.process_context), snapshot);
+            assert_eq!(data.musical_reference, Some(reference));
+        }
+    }
+
+    #[test]
+    fn anchored_musical_post_native_fault_keeps_primary_failure_and_does_not_replay() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for native_failure in [false, true] {
+            let mut fixture = Fixture::new();
+            let reference = ProcessMusicalReference::new(-1, 7, 3, 4).unwrap();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    reference,
+                )
+                .unwrap();
+            fixture.context_fault.store(3, Ordering::Relaxed);
+            if native_failure {
+                fixture.fail_call.store(1, Ordering::Relaxed);
+            }
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.5,
+                sample_offset: 8,
+            });
+            let mut pcm = buffers(9);
+            pcm.outputs[0].channels[0].fill(93.0);
+            let result = fixture.run(&mut pcm, &[]);
+            if native_failure {
+                assert!(matches!(result, Err(Error::ProcessFailed(code)) if code==kResultFalse));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::MusicalTime(MusicalTimeError::SampleRate))
+                ));
+            }
+            assert_eq!(fixture.observed.lock().unwrap().frames, [4]);
+            assert_eq!(pcm.outputs[0].channels[0], [93.0; 9]);
+            assert!(fixture.input.events.lock().unwrap().is_empty());
+            assert!(fixture.chunks.is_empty());
+            assert!(fixture.parameters.is_empty());
+            fixture.context_fault.store(0, Ordering::Relaxed);
+            fixture.fail_call.store(0, Ordering::Relaxed);
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: 100,
+                        sample_rate: 48_000,
+                    },
+                    reference,
+                )
+                .unwrap();
+            fixture.run(&mut buffers(4), &[]).unwrap();
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.frames, [4, 4]);
+            assert!(observed.received[1].is_empty());
+        }
+    }
+    #[test]
+    fn anchored_musical_queued_ingress_refuses_before_native_without_consuming_owners() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for case in 0..4 {
+            for checked in [false, true] {
+                let mut fixture = Fixture::new();
+                if case == 0 {
+                    fixture.input.add_event(on(0, 77));
+                }
+                fixture
+                    .fields()
+                    .set_process_musical_timeline_context(
+                        ProcessTimelineContext {
+                            sample_position: -17,
+                            sample_rate: 48_000,
+                        },
+                        ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+                    )
+                    .unwrap();
+                match case {
+                    1 => fixture.input.add_event(on(0, 88)),
+                    2 => fixture.chunks.push(Some(off(0, 99))),
+                    3 => {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let _guard = fixture.input.events.lock().unwrap();
+                            panic!("owned poisoned ingress control");
+                        }));
+                    }
+                    _ => {}
+                }
+                fixture.parameters.push(ParameterChange {
+                    id: 7,
+                    value: 0.75,
+                    sample_offset: 0,
+                });
+                let original = fixture
+                    .input
+                    .events
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone();
+                let chunks = fixture.chunks.clone();
+                let parameter_owner = (fixture.parameters.as_ptr(), fixture.parameters.capacity());
+                let context = context_facts(&fixture.data.as_ref().unwrap().process_context);
+                let mut pcm = buffers(4);
+                pcm.outputs[0].channels[0].fill(93.0);
+                let result = if checked {
+                    fixture.run(&mut pcm, &[])
+                } else {
+                    fixture.fields().process_bus_audio(&mut pcm)
+                };
+                let expected = if case == 3 {
+                    NativeEventError::StoragePoisoned
+                } else {
+                    NativeEventError::PendingEvents
+                };
+                assert!(
+                    matches!(result, Err(Error::NativeEvent(error)) if error == expected),
+                    "Some must refuse case={case} checked={checked} before native"
+                );
+                assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+                assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
+                assert_eq!(
+                    *fixture
+                        .input
+                        .events
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()),
+                    original
+                );
+                assert_eq!(fixture.chunks, chunks);
+                assert_eq!(
+                    (fixture.parameters.as_ptr(), fixture.parameters.capacity()),
+                    parameter_owner
+                );
+                assert_eq!(fixture.parameters.len(), 1);
+                assert_eq!(
+                    (
+                        fixture.parameters[0].id,
+                        fixture.parameters[0].value,
+                        fixture.parameters[0].sample_offset
+                    ),
+                    (7, 0.75, 0)
+                );
+                assert_eq!(
+                    context_facts(&fixture.data.as_ref().unwrap().process_context),
+                    context
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_musical_late_legacy_ingress_is_not_delivered_or_discarded() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for checked in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+                )
+                .unwrap();
+            fixture.inject_legacy.store(true, Ordering::Relaxed);
+            let mut pcm = buffers(9);
+            if checked {
+                fixture.run(&mut pcm, &[]).unwrap();
+            } else {
+                fixture.fields().process_bus_audio(&mut pcm).unwrap();
+            }
+            {
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(observed.frames, [4, 4, 1]);
+                assert!(observed.received.iter().all(Vec::is_empty));
+            }
+            let pending = fixture.input.events.lock().unwrap().clone();
+            assert_eq!(pending.len(), 1, "late original ingress must remain owned");
+            assert!(matches!(
+                pending[0].data,
+                crate::midi::PluginEventData::NoteOn { note_id: 999, .. }
+            ));
+            assert_eq!(pending[0].ppq_position.to_bits(), 0);
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.75,
+                sample_offset: 0,
+            });
+            let mut next = buffers(4);
+            next.outputs[0].channels[0].fill(93.0);
+            let result = if checked {
+                fixture.run(&mut next, &[])
+            } else {
+                fixture.fields().process_bus_audio(&mut next)
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::NativeEvent(NativeEventError::PendingEvents))
+                ),
+                "late ingress must explicitly block the next Some call"
+            );
+            assert_eq!(fixture.observed.lock().unwrap().calls, 3);
+            assert_eq!(next.outputs[0].channels[0], [93.0; 4]);
+            assert_eq!(*fixture.input.events.lock().unwrap(), pending);
+            assert_eq!(fixture.parameters.len(), 1);
+            fixture
+                .fields()
+                .set_process_timeline_context(ProcessTimelineContext {
+                    sample_position: 100,
+                    sample_rate: 48_000,
+                })
+                .unwrap();
+            fixture.fields().process_bus_audio(&mut next).unwrap();
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.calls, 4);
+            assert_eq!(observed.received[3].len(), 1);
+            assert_eq!(
+                observed.received[3][0].2, 999,
+                "explicit None recovers the original queued event once"
+            );
+            assert!(fixture.input.events.lock().unwrap().is_empty());
+        }
+    }
+    #[test]
+    fn anchored_musical_explicit_checked_events_refuse_before_consumption() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        let mut fixture = Fixture::new();
+        fixture
+            .fields()
+            .set_process_musical_timeline_context(
+                ProcessTimelineContext {
+                    sample_position: -17,
+                    sample_rate: 48_000,
+                },
+                ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+            )
+            .unwrap();
+        fixture.parameters.push(ParameterChange {
+            id: 7,
+            value: 0.75,
+            sample_offset: 0,
+        });
+        let mut caller = on(0, 71);
+        caller.ppq_position = -3.5;
+        let mut pcm = buffers(4);
+        pcm.outputs[0].channels[0].fill(93.0);
+        let context = context_facts(&fixture.data.as_ref().unwrap().process_context);
+        assert!(
+            matches!(
+                fixture.run(&mut pcm, &[caller.clone()]),
+                Err(Error::MusicalTime(MusicalTimeError::EventInputUnsupported))
+            ),
+            "this first anchored capability is pure audio"
+        );
+        assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+        assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
+        assert_eq!(fixture.parameters.len(), 1);
+        assert_eq!(fixture.parameters[0].value, 0.75);
+        assert!(fixture.input.events.lock().unwrap().is_empty());
+        assert!(fixture.chunks.is_empty());
+        assert_eq!(
+            context_facts(&fixture.data.as_ref().unwrap().process_context),
+            context
+        );
+        // Explicit caller-supplied PPQ responsibility under None is unchanged.
+        // Clearing the optional anchor is an explicit SDK caller operation.
+        fixture
+            .fields()
+            .set_process_timeline_context(ProcessTimelineContext {
+                sample_position: 100,
+                sample_rate: 48_000,
+            })
+            .unwrap();
+        fixture.run(&mut pcm, &[caller]).unwrap();
+        let observed = fixture.observed.lock().unwrap();
+        assert_eq!(observed.calls, 1);
+        assert_eq!(observed.received[0].len(), 1);
+        assert_eq!(observed.received[0][0].2, 71);
+        assert!(fixture.parameters.is_empty());
+    }
+    #[test]
+    fn anchored_musical_busy_ingress_refuses_without_waiting_or_consuming() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for checked in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+                )
+                .unwrap();
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.75,
+                sample_offset: 0,
+            });
+            let mut pcm = buffers(4);
+            pcm.outputs[0].channels[0].fill(93.0);
+            let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+            {
+                let mut fields = fixture.fields();
+                let original_ingress = fields.input_events;
+                // The same-thread held owner would deadlock a blocking check.
+                // The admitted guard must return StorageBusy without acquiring it.
+                let _held = original_ingress.events.lock().unwrap();
+                let result = if checked {
+                    fields.process_bus_audio_with_note_events(&mut pcm, &[])
+                } else {
+                    fields.process_bus_audio(&mut pcm)
+                };
+                assert!(matches!(
+                    result,
+                    Err(Error::NativeEvent(NativeEventError::StorageBusy))
+                ));
+            }
+            assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+            assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
+            assert_eq!(fixture.parameters.len(), 1);
+            assert_eq!(fixture.parameters[0].value, 0.75);
+            assert_eq!(
+                fixture.data.as_ref().unwrap().process_data.inputEvents,
+                pointer
+            );
+            assert!(fixture.input.events.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn anchored_musical_empty_retained_slots_and_capacity_are_not_events() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for checked in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+                )
+                .unwrap();
+            fixture.chunks.resize_with(3, || None);
+            let chunks = (fixture.chunks.as_ptr(), fixture.chunks.capacity());
+            let original = {
+                let mut queue = fixture.input.events.lock().unwrap();
+                queue.reserve(8192);
+                (queue.as_ptr(), queue.capacity())
+            };
+            let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+            let mut pcm = buffers(9);
+            if checked {
+                fixture.run(&mut pcm, &[]).unwrap();
+            } else {
+                fixture.fields().process_bus_audio(&mut pcm).unwrap();
+            }
+            assert_eq!(fixture.observed.lock().unwrap().frames, [4, 4, 1]);
+            assert!(fixture
+                .observed
+                .lock()
+                .unwrap()
+                .received
+                .iter()
+                .all(Vec::is_empty));
+            assert_eq!(fixture.chunks.len(), 3);
+            assert!(fixture.chunks.iter().all(Option::is_none));
+            assert_eq!((fixture.chunks.as_ptr(), fixture.chunks.capacity()), chunks);
+            let queue = fixture.input.events.lock().unwrap();
+            assert!(queue.is_empty());
+            assert_eq!((queue.as_ptr(), queue.capacity()), original);
+            assert_eq!(
+                fixture.data.as_ref().unwrap().process_data.inputEvents,
+                pointer
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_musical_late_ingress_and_pointer_survive_native_or_advance_failure() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for checked in [false, true] {
+            for native_failure in [false, true] {
+                let mut fixture = Fixture::new();
+                let context = ProcessTimelineContext {
+                    sample_position: -17,
+                    sample_rate: 48_000,
+                };
+                let reference = ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap();
+                fixture
+                    .fields()
+                    .set_process_musical_timeline_context(context, reference)
+                    .unwrap();
+                fixture.inject_legacy.store(true, Ordering::Relaxed);
+                fixture.context_fault.store(3, Ordering::Relaxed);
+                if native_failure {
+                    fixture.fail_call.store(1, Ordering::Relaxed);
+                }
+                fixture.parameters.push(ParameterChange {
+                    id: 7,
+                    value: 0.75,
+                    sample_offset: 8,
+                });
+                let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+                let mut pcm = buffers(9);
+                pcm.outputs[0].channels[0].fill(93.0);
+                let result = if checked {
+                    fixture.run(&mut pcm, &[])
+                } else {
+                    fixture.fields().process_bus_audio(&mut pcm)
+                };
+                if native_failure {
+                    assert!(
+                        matches!(result, Err(Error::ProcessFailed(value)) if value == kResultFalse)
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::MusicalTime(MusicalTimeError::SampleRate))
+                    ));
+                }
+                assert_eq!(fixture.observed.lock().unwrap().frames, [4]);
+                assert!(fixture.observed.lock().unwrap().received[0].is_empty());
+                assert_eq!(pcm.outputs[0].channels[0], [93.0; 9]);
+                assert_eq!(
+                    fixture.data.as_ref().unwrap().process_data.inputEvents,
+                    pointer
+                );
+                let pending = fixture.input.events.lock().unwrap().clone();
+                assert_eq!(pending.len(), 1);
+                assert!(matches!(
+                    pending[0].data,
+                    crate::midi::PluginEventData::NoteOn { note_id: 999, .. }
+                ));
+                assert!(
+                    fixture.parameters.is_empty(),
+                    "consumed native failure keeps original cleanup"
+                );
+                fixture.context_fault.store(0, Ordering::Relaxed);
+                fixture.fail_call.store(0, Ordering::Relaxed);
+                fixture
+                    .fields()
+                    .set_process_musical_timeline_context(context, reference)
+                    .unwrap();
+                let mut next = buffers(4);
+                next.outputs[0].channels[0].fill(93.0);
+                assert!(matches!(
+                    fixture.fields().process_bus_audio(&mut next),
+                    Err(Error::NativeEvent(NativeEventError::PendingEvents))
+                ));
+                assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+                assert_eq!(next.outputs[0].channels[0], [93.0; 4]);
+                assert_eq!(*fixture.input.events.lock().unwrap(), pending);
+                fixture
+                    .fields()
+                    .set_process_timeline_context(context)
+                    .unwrap();
+                fixture.fields().process_bus_audio(&mut next).unwrap();
+                let observed = fixture.observed.lock().unwrap();
+                assert_eq!(observed.calls, 2);
+                assert_eq!(observed.received[1].len(), 1);
+                assert_eq!(observed.received[1][0].2, 999);
+                assert_eq!(
+                    fixture.data.as_ref().unwrap().process_data.inputEvents,
+                    pointer
+                );
+                assert!(fixture.input.events.lock().unwrap().is_empty());
+            }
+        }
+    }
+    #[test]
+    fn anchored_musical_reference_occupies_the_existing_complete_process_box() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        use crate::host_storage::{HostStorageKind, HostStorageRef};
+        let mut fixture = Fixture::new();
+        let (address, layout) = {
+            let process = fixture.data.as_ref().unwrap();
+            let observed = HostStorageRef::boxed(process);
+            assert_eq!(observed.kind(), HostStorageKind::CompleteAllocation);
+            assert_eq!(
+                observed.layout(),
+                std::alloc::Layout::new::<HostProcessData>()
+            );
+            let field = std::ptr::from_ref(&process.musical_reference) as usize;
+            assert!(field >= observed.address());
+            assert!(
+                field + std::mem::size_of::<Option<crate::audio::ProcessMusicalReference>>()
+                    <= observed.address() + observed.layout().size()
+            );
+            assert_eq!(process.musical_reference, None);
+            (observed.address(), observed.layout())
+        };
+        fixture
+            .fields()
+            .set_process_musical_timeline_context(
+                ProcessTimelineContext {
+                    sample_position: -17,
+                    sample_rate: 48_000,
+                },
+                ProcessMusicalReference::new(-18, 48_000, 3, 4).unwrap(),
+            )
+            .unwrap();
+        let process = fixture.data.as_ref().unwrap();
+        let observed = HostStorageRef::boxed(process);
+        assert_eq!((observed.address(), observed.layout()), (address, layout));
+        assert!(process.musical_reference.is_some());
+        // This is the original visitor primitive's complete Box observation,
+        // not an Audio grant or a complete native/plugin heap qualification.
     }
 }

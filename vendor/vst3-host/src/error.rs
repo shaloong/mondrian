@@ -92,6 +92,23 @@ pub enum NativeEventError {
     Capacity,
     /// The original event-list mutex is poisoned.
     StoragePoisoned,
+    /// The original event-list owner is busy; the operation did not wait for it.
+    StorageBusy,
+}
+
+/// Fixed, allocation-free refusals for an anchored musical timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MusicalTimeError {
+    /// Seconds denominators and quarter-note duration must be strictly positive.
+    InvalidReference,
+    /// The exact nonzero signal rate must match the active processing setup.
+    SampleRate,
+    /// This backend has no anchored timeline capability; no RPC is inferred.
+    UnsupportedBackend,
+    /// An explicit musical reference owns tempo until a position-only install clears it.
+    AnchoredTempo,
+    /// Anchored processing currently admits pure audio only, not an explicit event batch.
+    EventInputUnsupported,
 }
 
 /// Main error type for vst3-host operations.
@@ -190,6 +207,10 @@ pub enum Error {
     /// Existing host input must reach a real DSP call before state mutation/capture.
     #[error("native processor parameter input is still pending")]
     PendingParameterDelivery,
+
+    /// Structured refusal from the anchored musical timeline API.
+    #[error("musical timeline operation failed: {0:?}")]
+    MusicalTime(MusicalTimeError),
 
     /// Structured refusal from the bounded same-instance event API.
     #[error("native event operation failed: {0:?}")]

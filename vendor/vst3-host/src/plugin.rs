@@ -1069,6 +1069,19 @@ impl PluginAudioProcessing<'_> {
     ) -> Result<()> {
         self.internal.set_process_timeline_context(context)
     }
+    /// Atomically install absolute signal time and an exact constant musical reference.
+    /// This supplies quarter notes and tempo only, not meter or playing state.
+    /// Anchored processing currently admits pure audio only. Queued/staged input,
+    /// a busy/poisoned event owner, or a nonempty explicit checked event batch is
+    /// refused before consumption. It does not project Event.ppqPosition.
+    pub fn set_process_musical_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+        reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        self.internal
+            .set_process_musical_timeline_context(context, reference)
+    }
     /// Queue one finite normalized parameter at a valid nonnegative sample offset.
     /// Controller presentation is deferred to the main role; this never calls it.
     pub fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
@@ -1122,6 +1135,15 @@ pub(crate) trait PluginProcessingRole: Send {
         &mut self,
         context: crate::audio::ProcessTimelineContext,
     ) -> Result<()>;
+    fn set_process_musical_timeline_context(
+        &mut self,
+        _context: crate::audio::ProcessTimelineContext,
+        _reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        Err(Error::MusicalTime(
+            crate::error::MusicalTimeError::UnsupportedBackend,
+        ))
+    }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
     fn queue_unconsumed_editor_values(&mut self) -> Result<bool>;
     fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()>;
@@ -1179,6 +1201,15 @@ pub(crate) trait PluginInternal: Send {
         &mut self,
         context: crate::audio::ProcessTimelineContext,
     ) -> Result<()>;
+    fn set_process_musical_timeline_context(
+        &mut self,
+        _context: crate::audio::ProcessTimelineContext,
+        _reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        Err(Error::MusicalTime(
+            crate::error::MusicalTimeError::UnsupportedBackend,
+        ))
+    }
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     /// Schedule a parameter change at a sample offset within the next process block.
     /// Defaults to a block-start change (ignores the offset) for implementations that don't
@@ -2038,6 +2069,9 @@ impl Plugin {
     ///
     /// `bpm` must be finite and greater than `0` (a non-positive tempo would freeze or reverse
     /// the derived musical playhead). Works both in-process and across process isolation.
+    /// An installed anchored reference refuses independent tempo mutation with
+    /// `MusicalTimeError::AnchoredTempo`; replace that reference atomically or
+    /// explicitly clear it through the position-only timeline setter first.
     pub fn set_tempo(&mut self, bpm: f64) -> Result<()> {
         if !(bpm.is_finite() && bpm > 0.0) {
             return Err(Error::InvalidParameter(format!(
@@ -2078,6 +2112,8 @@ impl Plugin {
     /// optional transport values and flags. Call after start_processing and
     /// before process_audio/process_bus_audio for each externally timed block.
     /// The exact rate must match the active native processing configuration.
+    /// A successful call clears any prior anchored musical reference; a refused
+    /// call preserves the complete current context and reference.
     pub fn set_process_timeline_context(
         &mut self,
         context: crate::audio::ProcessTimelineContext,
@@ -2089,6 +2125,29 @@ impl Plugin {
             .as_mut()
             .ok_or(Error::NotProcessing)?
             .set_process_timeline_context(context)
+    }
+
+    /// Atomically install absolute signal time with the embedding host's exact
+    /// constant musical reference. Optional fields are cleared first; only
+    /// supplied quarter-note and tempo facts are advertised through the original
+    /// requirements filter. Explicit meter/playing setters remain independent.
+    /// The legacy position-only setter clears this reference on success.
+    /// While present, this first capability admits pure audio only: queued or
+    /// staged events and nonempty checked batches are refused before processing;
+    /// busy/poisoned event owners are also explicit refusals. Late queued events
+    /// remain for the next call. Event.ppqPosition is not projected here.
+    pub fn set_process_musical_timeline_context(
+        &mut self,
+        context: crate::audio::ProcessTimelineContext,
+        reference: crate::audio::ProcessMusicalReference,
+    ) -> Result<()> {
+        if !self.is_processing() {
+            return Err(Error::NotProcessing);
+        }
+        self.internal
+            .as_mut()
+            .ok_or(Error::NotProcessing)?
+            .set_process_musical_timeline_context(context, reference)
     }
 
     /// Toggle the transport playing state advertised to the plugin in the host
@@ -4083,6 +4142,16 @@ mod public_surface_tests {
                 sample_position: 0,
                 sample_rate: 44_100,
             }),
+            Err(Error::NotProcessing)
+        ));
+        assert!(matches!(
+            plugin.set_process_musical_timeline_context(
+                crate::audio::ProcessTimelineContext {
+                    sample_position: 0,
+                    sample_rate: 44_100
+                },
+                crate::audio::ProcessMusicalReference::new(0, 1, 3, 4).unwrap(),
+            ),
             Err(Error::NotProcessing)
         ));
     }

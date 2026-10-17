@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 6).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 7).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -99,6 +99,83 @@ unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresu
     }
 }
 
+// An independent, deliberately finite DLL DSP oracle. No SDK projection helper
+// or floating-point seconds/tempo calculation is used to construct expectations.
+fn musical_context_tag(data: &ProcessData, prepared_rate: u64) -> Option<f32> {
+    if data.processContext.is_null() {
+        return None;
+    }
+    // SAFETY: process() receives the host's live ProcessData/ProcessContext for
+    // this callback only. The reference is neither retained nor mutated.
+    let context = unsafe { &*data.processContext };
+    let rate = if prepared_rate == 44_100_f64.to_bits() {
+        0
+    } else if prepared_rate == 48_000_f64.to_bits() {
+        1
+    } else {
+        return None;
+    };
+    let row = match context.projectTimeSamples {
+        -17 => 0,
+        -13 => 1,
+        -9 => 2,
+        sample if sample == i64::MAX - 32 => 0,
+        sample if sample == i64::MAX - 28 => 1,
+        sample if sample == i64::MAX - 24 => 2,
+        _ => return None,
+    };
+    // Each complete caller window is split by the host into 4 + 4 + 1 frames.
+    if data.numSamples != if row == 2 { 1 } else { 4 }
+        || context.sampleRate.to_bits() != prepared_rate
+        || context.systemTime != 0
+        || context.continousTimeSamples != 0
+        || context.barPositionMusic.to_bits() != 0
+        || context.cycleStartMusic.to_bits() != 0
+        || context.cycleEndMusic.to_bits() != 0
+        || context.timeSigNumerator != 0
+        || context.timeSigDenominator != 0
+        || context.chord.keyNote != 0
+        || context.chord.rootNote != 0
+        || context.chord.chordMask != 0
+        || context.smpteOffsetSubframes != 0
+        || context.frameRate.framesPerSecond != 0
+        || context.frameRate.flags != 0
+        || context.samplesToNextClock != 0
+        || context.projectTimeSamples.checked_add(i64::from(data.numSamples)).is_none()
+    {
+        return None;
+    }
+    // Correctly rounded independent literal bits for 1, 5, 9 divided by
+    // (3 * rate / 4). Both signed origins use zero=(origin-1)/rate seconds.
+    const QUARTER_NOTES: [[u64; 3]; 2] = [
+        [
+            0x3eff_b3f6_5f17_ec9e,
+            0x3f23_d079_fb6e_f3e3,
+            0x3f31_d53a_957d_7519,
+        ],
+        [
+            0x3efd_208a_5a91_2e32,
+            0x3f22_3456_789a_bcdf,
+            0x3f30_624d_d2f1_a9fc,
+        ],
+    ];
+    let tag = (1 + row + rate * 4) as f32 / 16.0;
+    if context.state == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
+    {
+        Some(-tag)
+    } else if context.state
+        == (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
+            | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
+        && context.projectTimeMusic.to_bits() == QUARTER_NOTES[rate][row]
+        && context.tempo.to_bits() == 0x4054_0000_0000_0000
+    // Exactly 80 BPM.
+    {
+        Some(tag)
+    } else {
+        None
+    }
+}
+
 struct GainProcessor {
     mode: AtomicU32,
     active_buses: AtomicU32,
@@ -109,6 +186,8 @@ struct GainProcessor {
     position: AtomicUsize,
     gain: AtomicU64,
     sample_rate: AtomicU64,
+    // Mode7-only, non-restorable diagnostic count of actual process attempts.
+    musical_attempts: AtomicU64,
 }
 
 impl Class for GainProcessor {
@@ -122,6 +201,7 @@ impl GainProcessor {
         GainProcessor {
             gain: AtomicU64::new(0.5f64.to_bits()),
             sample_rate: AtomicU64::new(0),
+            musical_attempts: AtomicU64::new(0),
             mode: AtomicU32::new(0),
             active_buses: AtomicU32::new(0),
             delay: std::array::from_fn(|_| AtomicU32::new(0)),
@@ -310,11 +390,29 @@ impl IComponentTrait for GainProcessor {
     }
 
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
-        write_gain_state(
+        let mode = self.mode.load(Ordering::Acquire);
+        let result = write_gain_state(
             state,
             f64::from_bits(self.gain.load(Ordering::Acquire)),
-            self.mode.load(Ordering::Acquire),
-        )
+            mode,
+        );
+        if mode != 7 || result != kResultOk {
+            return result;
+        }
+        let Some(stream) = ComRef::from_raw(state) else {
+            return kInvalidArgument;
+        };
+        // Cold observation only. setState reads the original 20B configuration;
+        // it deliberately does not restore this audit suffix or DSP history.
+        let mut audit = [0_u8; 12];
+        audit[..4].copy_from_slice(b"MSA7");
+        audit[4..].copy_from_slice(&self.musical_attempts.load(Ordering::Acquire).to_le_bytes());
+        let mut written = 0;
+        if stream.write(audit.as_mut_ptr().cast(), 12, &mut written) == kResultOk && written == 12 {
+            kResultOk
+        } else {
+            kResultFalse
+        }
     }
 }
 
@@ -398,6 +496,21 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         let data = &*data;
         let mode = self.mode.load(Ordering::Relaxed);
+        let musical_tag = if mode == 7 {
+            // A VST3 processor instance is not processed concurrently with itself.
+            // Count attempts before any context/parameter/PCM validation, without
+            // allocation, a lock, or any main-thread SDK call from DSP.
+            let Some(attempts) = self.musical_attempts.load(Ordering::Relaxed).checked_add(1) else {
+                return kResultFalse;
+            };
+            self.musical_attempts.store(attempts, Ordering::Release);
+            let Some(tag) = musical_context_tag(data, self.sample_rate.load(Ordering::Relaxed)) else {
+                return kInvalidArgument;
+            };
+            Some(tag)
+        } else {
+            None
+        };
         let count = if mode == 2 { 2 } else { 3 };
         let timeline_start = if mode == 3 {
             if data.processContext.is_null() { return kInvalidArgument; }
@@ -463,6 +576,11 @@ impl IAudioProcessorTrait for GainProcessor {
                     (gain * value).to_bits()
                 }, Ordering::Relaxed),
                 );
+                if let Some(tag) = musical_tag {
+                    // Outside the original delay: the final partial native chunk
+                    // must remain observable without an extra flush callback.
+                    *pointer.add(frame) += if channel == 0 { tag } else { -tag };
+                }
             }
             position = (position + 1) % self.configured_latency.load(Ordering::Relaxed);
         };

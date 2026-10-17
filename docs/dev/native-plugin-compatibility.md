@@ -181,12 +181,25 @@ collecting names; its successful-call probe observed zero same-thread Rust host
 allocator operations. This does not cover plugin heaps or prove realtime safety.
 The shared foundation passed 656 ordinary Audio, eight resource and strict Audio
 Clippy gates. The SDK now checks the complete signed sample window before input
-consumption or DSP, including continuous time only when valid. Current SDK 318
-ordinary and five owned DLL gates pass: public/scoped near-limit refusal preserves
+consumption or DSP, including continuous time only when valid. Five newly linked
+Main SDK Note integration gates pass: public/scoped near-limit refusal preserves
 PCM and same-instance audit; negative, partial and exact-limit windows remain
 valid. Post-native counter failure keeps cleanup and the original plugin error.
-VST3 system/musical clocks are unchanged; the fresh IPC15 Product separately
-qualifies the CLAP constant-tempo consumer.
+The anchored musical SDK slice separately passes 335 ordinary controls and nine
+owned DLL gates. Its validated exact reference projects absolute signed samples
+to quarter notes and constant Tempo, with nearest-even binary64 rounding across
+native chunks. Independent mode7 DSP controls cover 44.1/48 kHz, local/scoped
+roles, None/Some and negative/near-limit positions, including same-object
+processing counts and queued-parameter refusal/recovery. The new reference
+currently admits pure audio only: queued/staged events, busy/poisoned ingress
+and nonempty checked batches refuse before consumption. Late ingress survives
+success and error paths; callback inputEvents is temporarily null and restored.
+This does not project Event PPQ. The existing process Box contains the reference
+in place; the SDK complete-Box observer does not charge that nested owner to
+the Audio grant.
+The canonical VST3 musical entry remains refused. The IPC15 Product separately
+qualifies the CLAP constant-tempo consumer; canonical system clocks remain
+unavailable.
 Older Gain/Surge and OFX exit failures remain open; a late reaped Exit0 never
 converts a deadline failure into a pass. No third-party instrument or other-platform
 qualification is implied.
