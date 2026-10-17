@@ -21,11 +21,13 @@ use super::clap_output_events::{ClapOutputEvents, ClapOutputOrigin};
 use super::clap_parameter_events::ClapInputEvents;
 use super::clap_signal_fields::ClapSignalFields;
 use super::native_request_cohort::{NativeRequestMarker, RecordedRequestCohort};
+#[cfg(test)]
+use super::probe_clap_plugin_registration;
 use super::{
-    probe_clap_plugin_registration, scan_clap_library_descriptors, ClapPluginDescriptor,
-    IsolatedAudioProcessorSpecResolver, IsolatedAudioProcessorWorker,
-    IsolatedAudioProcessorWorkerBlock, IsolatedAudioProcessorWorkerFactory,
-    IsolatedAudioProcessorWorkerPrepareRequest, IsolatedAudioProcessorWorkerSpec,
+    scan_clap_library_descriptors, ClapPluginDescriptor, IsolatedAudioProcessorSpecResolver,
+    IsolatedAudioProcessorWorker, IsolatedAudioProcessorWorkerBlock,
+    IsolatedAudioProcessorWorkerFactory, IsolatedAudioProcessorWorkerPrepareRequest,
+    IsolatedAudioProcessorWorkerSpec,
 };
 use crate::{
     AudioProcessorAuxiliaryInputContract, AudioProcessorAuxiliaryOutputContract,

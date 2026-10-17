@@ -688,9 +688,18 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 payload["state"] = serde_json::json!(changed_state);
                 stale.preparation_payload =
                     serde_json::to_vec(&payload).expect("changed-state payload");
-                assert!(
-                    IsolatedAudioProcessorFactory::prepare(stale).is_err(),
-                    "changed native order must refuse stale admission"
+                let stale = IsolatedAudioProcessorFactory::prepare(stale)
+                    .expect("probe evidence permits metadata-only factory preparation");
+                let error = stale
+                    .create()
+                    .err()
+                    .expect("changed native order must refuse actual instance admission");
+                assert_eq!(
+                    error,
+                    AudioProcessorHostError::WorkerFailed {
+                        operation: "startup",
+                        detail: "invalid audio processor execution contract: CLAP audio ports changed since contract probe".to_owned(),
+                    }
                 );
             }
         }
