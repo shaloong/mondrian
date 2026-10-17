@@ -51,15 +51,15 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
     let captured = strict_json(&probe_lease.read());
     exact_keys(&list, &["kind", "schema_version", "descriptors"]);
     let DiscoveryResponse::List { schema_version, descriptors } =
-        serde_json::from_value(list.clone()).expect("strict current List2")
+        serde_json::from_value(list.clone()).expect("strict current List3")
     else {
         panic!("current List response required");
     };
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
     assert_eq!(
         list,
         json!({
-            "kind":"list_v2", "schema_version":2,
+            "kind":"list_v3", "schema_version":3,
             "descriptors":[
                 {"class_id":CLASS_ID,"name":"AGain Sample Accurate","vendor":"Steinberg Media Technologies","version":"3.8.0.0"},
                 {"class_id":"CC48BF25529043DA80223510FFE8BD02","name":"Advanced Tutorial","vendor":"Steinberg Media Technologies","version":"3.8.0.0"}
@@ -84,6 +84,7 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
             "current_values",
             "captured_state",
             "auxiliary_buses",
+            "input_names",
         ],
     );
     let DiscoveryResponse::Probe {
@@ -97,11 +98,12 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         current_values,
         captured_state,
         auxiliary_buses,
-    } = serde_json::from_value(captured.clone()).expect("strict current Probe2")
+        input_names,
+    } = serde_json::from_value(captured.clone()).expect("strict current Probe3")
     else {
         panic!("current Probe response required");
     };
-    assert_eq!(schema_version, 2);
+    assert_eq!(schema_version, 3);
     assert_eq!(class_id, CLASS_ID);
     assert_eq!(vendor.as_deref(), Some("Steinberg Media Technologies"));
     assert_eq!((latency_frames, tail_frames), (0, 0));
@@ -110,6 +112,7 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         json!({"schema_version":1,"inputs":[],"outputs":[]})
     );
     assert!(auxiliary_buses.is_empty());
+    assert!(input_names.is_empty());
     assert_eq!(captured_state.as_deref(), Some(state.as_slice()));
     assert_eq!(
         captured["parameters"],
@@ -157,6 +160,7 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
     assert_eq!(actual.registration.parameters, parameters);
     assert_eq!(actual.current_values, current_values);
     assert_eq!(actual.registration.event_bus_contract, event_bus_contract);
+    assert_eq!(actual.input_names, input_names);
     assert!(actual.registration.auxiliary_inputs.buses.is_empty());
     assert_eq!(
         actual.registration.execution_contract.algorithmic_latency_frames(),
