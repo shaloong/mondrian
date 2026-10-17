@@ -130,7 +130,10 @@ fn external_mda_dx10_vst3_captured_state_notes_without_media() {
 
         for partition in [&[BLOCK][..], &[31_usize, 225, 127, 129]] {
             let instance = catalog.create_instance(CLASS, render, Some(state.clone())).unwrap();
-            assert_eq!(instance.opaque_state.as_deref(), Some(state.as_slice()));
+            assert_eq!(
+                instance.opaque_state.as_deref().map(Vec::as_slice),
+                Some(state.as_slice())
+            );
             let processor_id = instance.id;
             let mut sequence = Sequence::new("official mda DX10 Note-only Runtime");
             sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
@@ -281,7 +284,7 @@ fn external_mda_dx10_vst3_captured_state_notes_without_media() {
                 unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
             assert_eq!(settled, WAIT_OBJECT_0);
             assert_ne!(queried, 0);
-            assert_eq!(exit_code, 0, "forced/error exit cannot pass");
+            assert_eq!(exit_code, 0, "observed child exit code must be zero");
             println!(
                 "{}",
                 json!({"case":"mda-dx10-runtime", "stage":"completed", "version":descriptor.version,
