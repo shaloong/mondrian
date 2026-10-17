@@ -5,17 +5,21 @@
 #include "ofxhImageEffectAPI.h"
 #include "host_descriptor.h"
 #include "frame_state.h"
+#include "effect_instance.h"
+#include "image_clip.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <stdexcept>
 
 namespace {
 struct AllocationProbe {
-  bool armed = false, fail_array = false, unexpected = false;
+  bool armed = false, fail_array = false, unexpected = false, fail_image_owner = false;
   void* owner = nullptr;
   unsigned scalar_allocations = 0, scalar_deletions = 0, array_calls = 0, array_failures = 0;
+  unsigned scalar_failures = 0;
   int live_owners = 0;
 } probe;
 
@@ -35,8 +39,15 @@ void releaseBytes(void* storage) noexcept {
 // Initialization, plugin Load/Describe/Create and all printing occur unarmed.
 // The armed call is synchronous and has no plugin/DSP/thread callback; any
 // allocation other than the one Memory::Instance and its 257-byte array fails
-// the oracle rather than being silently excluded from the count.
+// the original oracle. The separate image-fetch window fails only the first
+// real FrameImage allocation, before a wrapper or property handle exists.
 void* operator new(std::size_t bytes) {
+  if (probe.armed && probe.fail_image_owner) {
+    probe.fail_image_owner = false;
+    ++probe.scalar_failures;
+    if (bytes != sizeof(MondrianOpenFx::FrameImage)) { probe.unexpected = true; }
+    throw std::bad_alloc();
+  }
   void* storage = allocateBytes(bytes);
   if (probe.armed) {
     ++probe.scalar_allocations;
@@ -95,6 +106,59 @@ bool failureCase(const OfxImageEffectSuiteV1& suite, OfxImageEffectHandle instan
   return passed;
 }
 
+bool imageFetchFailureAndRecovery(const OfxImageEffectSuiteV1& suite,
+                                  MondrianOpenFx::FilterClipInstance& clip,
+                                  MondrianOpenFx::FrameState& frame, const char* path) {
+  unsigned char sourceBefore[sizeof(OfxRGBAColourF)], outputBefore[sizeof(OfxRGBAColourF)];
+  std::memcpy(sourceBefore, frame.input, sizeof(sourceBefore));
+  std::memcpy(outputBefore, frame.output, sizeof(outputBefore));
+  // A sentinel is an output value only; it is never submitted as a handle.
+  OfxPropertySetHandle image = reinterpret_cast<OfxPropertySetHandle>(&probe);
+  OfxStatus status;
+  struct FailureWindow {
+    FailureWindow() { probe = {}; probe.armed = probe.fail_image_owner = true; }
+    ~FailureWindow() { probe.armed = false; }
+  };
+  try {
+    const FailureWindow armed;
+    status = suite.clipGetImage(clip.getHandle(), frame.info.frame, nullptr, &image);
+  } catch (...) {
+    std::fprintf(stderr, "clipGetImage exception escaped for %s\n", path);
+    return false;
+  }
+  const bool outNull = image == nullptr;
+  const size_t handlesAfterFailure = frame.imageHandles.load();
+  const bool pixelsUnchanged = std::memcmp(sourceBefore, frame.input, sizeof(sourceBefore)) == 0 &&
+      std::memcmp(outputBefore, frame.output, sizeof(outputBefore)) == 0;
+  const bool refused = status == kOfxStatErrMemory && outNull && !probe.unexpected &&
+      probe.scalar_failures == 1 && probe.scalar_allocations == 0 &&
+      probe.array_calls == 0 && probe.live_owners == 0 && handlesAfterFailure == 0 &&
+      !clip.outputFetched() && pixelsUnchanged;
+
+  // The same actual clip and raster remain usable after the failed allocation.
+  // This succeeds even on the old wrong-status implementation, independently
+  // of the ErrMemory assertion above; no retry of the injected failure occurs.
+  image = nullptr;
+  const OfxStatus fetchStatus = suite.clipGetImage(clip.getHandle(), frame.info.frame, nullptr, &image);
+  const bool fetched = fetchStatus == kOfxStatOK && image && frame.imageHandles.load() == 1;
+  const OfxStatus releaseStatus = image ? suite.clipReleaseImage(image) : kOfxStatFailed;
+  const OfxRGBAColourF transparent{0, 0, 0, 0};
+  const bool sourceUnchanged = std::memcmp(sourceBefore, frame.input, sizeof(sourceBefore)) == 0;
+  const bool outputCorrect = clip.isOutput() ?
+      std::memcmp(&transparent, frame.output, sizeof(transparent)) == 0 :
+      std::memcmp(outputBefore, frame.output, sizeof(outputBefore)) == 0;
+  const bool recovered = fetched && releaseStatus == kOfxStatOK && frame.imageHandles.load() == 0 &&
+      sourceUnchanged && outputCorrect && !frame.invalidImageLifetime;
+  const bool passed = refused && recovered;
+  std::printf("{\"path\":\"%s\",\"status\":%d,\"out_null\":%s,"
+              "\"scalar_failures\":%u,\"scalar_allocations\":%u,\"image_handles_after_failure\":%zu,"
+              "\"pixels_unchanged\":%s,\"recovered\":%s,\"passed\":%s}\n",
+              path, status, outNull ? "true" : "false", probe.scalar_failures,
+              probe.scalar_allocations, handlesAfterFailure, pixelsUnchanged ? "true" : "false",
+              recovered ? "true" : "false", passed ? "true" : "false");
+  return passed;
+}
+
 int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bundlePath) {
   OFX::Host::ImageEffect::PluginCache images(host);
   OFX::Host::PluginCache plugins;
@@ -120,7 +184,20 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   if (!suite) { throw std::runtime_error("image suite unavailable"); }
   const bool hostPassed = failureCase(*suite, nullptr, "host");
   const bool instancePassed = failureCase(*suite, instance->getHandle(), "instance");
-  return hostPassed && instancePassed ? 0 : 1;
+  if (!instance->getClipPreferences()) { throw std::runtime_error("actual Basic clip preferences failed"); }
+  auto* source = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Source"));
+  auto* output = dynamic_cast<MondrianOpenFx::FilterClipInstance*>(instance->getClip("Output"));
+  if (!source || !output) { throw std::runtime_error("actual Basic Source/Output clips missing"); }
+  const OfxRGBAColourF inputPixel{-0.25f, 2.5f, 0.125f, 0.5f};
+  OfxRGBAColourF outputPixel{3.0f, -1.0f, 0.75f, 0.25f};
+  frame.input = &inputPixel;
+  frame.output = &outputPixel;
+  frame.pixelCount = 1;
+  const MondrianOpenFx::FrameBorrow borrowed(frame);
+  const MondrianOpenFx::ImageAccess imagesAvailable(frame, true, true);
+  const bool sourcePassed = imageFetchFailureAndRecovery(*suite, *source, frame, "source-image");
+  const bool outputPassed = imageFetchFailureAndRecovery(*suite, *output, frame, "output-image");
+  return hostPassed && instancePassed && sourcePassed && outputPassed ? 0 : 1;
 }
 }
 
