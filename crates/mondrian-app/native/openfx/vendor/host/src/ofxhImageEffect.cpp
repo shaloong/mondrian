@@ -30,6 +30,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <memory>
+#include <new>
 
 namespace OFX {
 
@@ -2043,6 +2044,9 @@ namespace OFX {
         *h3 = image->getPropHandle();
 
         return kOfxStatOK;
+        } catch (const std::bad_alloc&) {
+          *h3 = NULL;
+          return kOfxStatErrMemory;
         } catch (...) {
           *h3 = NULL;
 
