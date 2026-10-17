@@ -8,7 +8,7 @@ use crate::{
     NativeAudioObjectBindRequest, NativeAudioObservationConsumption, NativeObservedRequest,
 };
 use mondrian_core::{AudioProcessorBindingId, AudioProcessorInstanceId};
-use mondrian_timeline::audio::AudioProcessorDefinitionRef;
+use mondrian_timeline::audio::{AudioProcessorDefinitionRef, AudioProcessorParameter};
 use std::collections::BTreeMap;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, WaitForSingleObject};
@@ -93,6 +93,15 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
     assert!(registration.event_bus_contract.outputs.is_empty());
     assert_eq!(registration.parameters.len(), 1);
     assert_eq!(registration.parameters[0].id, 0);
+    let descriptor = &registration.parameters[0];
+    assert!(!descriptor.read_only);
+    let expected_id = descriptor.parameter_id().expect("actual native parameter identity");
+    let schema = descriptor.authoring_schema().expect("actual probed parameter schema");
+    assert_eq!(schema.parameter_id, expected_id);
+    let parameters = BTreeMap::from([(
+        schema.parameter_id.clone(),
+        AudioProcessorParameter::from_schema(schema).expect("valid author parameter definition"),
+    )]);
     let definition = AudioProcessorDefinitionRef::Vst3 {
         class_id: registration.class_id.clone(),
         vendor: registration.vendor.clone(),
@@ -108,7 +117,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
                 insertion: AudioProcessorInsertionPoint::PreFader,
             },
             &definition,
-            &BTreeMap::new(),
+            &parameters,
             Some(&state),
             render,
         ))
@@ -117,6 +126,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
     assert!(spec.musical_time_reference.is_none());
     let ids = spec.parameter_ids.clone();
     assert_eq!(ids.len(), 1);
+    assert_eq!(ids, [expected_id]);
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("original unprobed validation launch and strict shutdown");
     let mut processor = factory.create().expect("actual Product retained Ready owner");
