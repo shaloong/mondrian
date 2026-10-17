@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 13).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 14).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -531,6 +531,7 @@ impl IProcessContextRequirementsTrait for GainProcessor {
 
 struct GainController {
     armed: Cell<bool>,
+    mode14_edit_result: Cell<Option<tresult>>,
     metadata_reads: Cell<u32>,
     value_reads: Cell<u32>,
     setters: Cell<u32>,
@@ -554,6 +555,7 @@ impl GainController {
     fn new() -> GainController {
         GainController {
             armed: Cell::new(false),
+            mode14_edit_result: Cell::new(None),
             metadata_reads: Cell::new(0),
             value_reads: Cell::new(0),
             setters: Cell::new(0),
@@ -566,6 +568,25 @@ impl GainController {
             connection: RefCell::new(None),
             control_thread: Cell::new(None),
         }
+    }
+
+    unsafe fn restore_mode14_value(&self) -> tresult {
+        // Both controller restore entry points run for one host load. Notify
+        // only once per controller instance, retaining the actual callback
+        // result. This never updates the separate component's DSP gain.
+        self.gain.set(0.75);
+        if let Some(result) = self.mode14_edit_result.get() {
+            return result;
+        }
+        let Some(handler) = self.handler.borrow().clone() else {
+            return kResultFalse;
+        };
+        // Reentrant restore during the callback fails closed without a
+        // second notification; even a failed actual attempt is not replayed.
+        self.mode14_edit_result.set(Some(kResultFalse));
+        let result = handler.performEdit(0, 0.75);
+        self.mode14_edit_result.set(Some(result));
+        result
     }
 }
 
@@ -643,6 +664,10 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
+        if mode == 14 {
+            self.mode.set(mode);
+            return self.restore_mode14_value();
+        }
         self.gain.set(gain);
         self.mode.set(mode);
         if mode != 0 {
@@ -667,6 +692,10 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
+        if mode == 14 {
+            self.mode.set(mode);
+            return self.restore_mode14_value();
+        }
         self.gain.set(gain);
         self.mode.set(mode);
         if mode != 0 {
