@@ -738,8 +738,7 @@ fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
     hold(&mut f);
     let proposal = rescan(&mut f, a);
     let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
-    let claim = f.source.current_claim().unwrap().unwrap();
-    install(&mut f, &proposal, &mut prepared, &mut authorization);
+    let installed_claim = install(&mut f, &proposal, &mut prepared, &mut authorization);
     let next_address = AudioNativeProcessorAddress {
         root: f.runtime.resource_root_identity(),
         local: f.runtime.resource_root_identity(),
@@ -749,9 +748,10 @@ fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
     assert_ne!(next_lease, lease);
     assert_eq!(next_lease.binding(), f.target.binding);
     assert_eq!(
-        f.source.current_claim().unwrap().unwrap().generation().get(),
-        claim.generation().get() + 1
+        f.source.current_claim().unwrap().unwrap().generation(),
+        installed_claim.generation()
     );
+    assert_eq!(f.target.installed_generation, installed_claim.generation());
     let installed = cursors(&f.runtime);
     assert_eq!(
         installed.sessions[0].unwrap().state,
@@ -762,6 +762,16 @@ fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
         before_cursors.processors[0].unwrap().state
     );
     f.ack(&proposal);
+    f.runtime
+        .native_owner_installation_verifier()
+        .unwrap()
+        .validate(&installed_claim)
+        .unwrap();
+    assert_eq!(
+        f.source.current_claim().unwrap().unwrap().generation(),
+        installed_claim.generation(),
+        "Ack retires the prefix without publishing another ledger origin"
+    );
     assert_eq!(cursors(&f.runtime), installed);
     assert!(f
         .runtime

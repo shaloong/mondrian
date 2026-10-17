@@ -891,6 +891,88 @@ fn vst_rescan_selected_singleton_preserves_all_native_peer_admission_guards() {
     .unwrap();
     selected.lock().unwrap().live_request = Some(crate::NativeObservedRequest::Cohort(a));
     hold(&mut f.inner);
+    // This Root polls one actual producer per call. The inserted empty peer is
+    // first; observing it must not drain or alter the selected source.
+    let root = f.inner.runtime.resource_root_identity();
+    assert_eq!(
+        f.inner
+            .runtime
+            .find_resource_session(root)
+            .unwrap()
+            .native_observation_sources(),
+        2
+    );
+    let snapshots = |registry: &PreflightRegistry| {
+        registry
+            .probes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|owned| {
+                let p = owned.lock().unwrap();
+                (
+                    (
+                        p.binding,
+                        p.revision,
+                        p.open,
+                        p.retained,
+                        p.request_cohort,
+                        p.reported_request_cohort,
+                    ),
+                    (
+                        p.pending.clone(),
+                        p.configuration.clone(),
+                        p.retained_configuration.clone(),
+                        p.accepted_seed.clone(),
+                        p.catchup_pending,
+                        p.catchup_polls,
+                        p.source_failure,
+                    ),
+                    (
+                        p.entries,
+                        p.processed.clone(),
+                        p.opens,
+                        p.closes,
+                        p.creates,
+                        p.binds,
+                        p.ack_attempts,
+                        p.accepted_acks,
+                    ),
+                    (
+                        p.vst_rescan_abi,
+                        p.live_request,
+                        p.live_after_ack,
+                        p.parameter_only,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let queued = snapshots(&f.registry);
+    let old_cursors = preflight_cursors(&f.inner.runtime);
+    let old_claim = f.inner.source.current_claim().unwrap().unwrap();
+    let old_verifier = f.inner.runtime.native_owner_installation_verifier().unwrap();
+    let old_footprint = f.inner.runtime.resource_footprint();
+    let old_grant = f.inner.runtime.resource_grant();
+    let calls = f.registry.calls.snapshot();
+    assert!(f
+        .inner
+        .runtime
+        .poll_native_observations(&ExecutionCancellationToken::new())
+        .expect("actual peer errors cannot become an empty completion")
+        .is_none());
+    assert_eq!(
+        f.registry.calls.snapshot(),
+        [calls[0].checked_add(1).unwrap(), calls[1], calls[2]]
+    );
+    assert_eq!(snapshots(&f.registry), queued);
+    assert_eq!(f.inner.runtime.resource_root_identity(), root);
+    assert_eq!(f.inner.runtime.resource_footprint(), old_footprint);
+    assert_eq!(f.inner.runtime.resource_grant(), old_grant);
+    assert_eq!(preflight_cursors(&f.inner.runtime), old_cursors);
+    let unchanged = f.inner.source.current_claim().unwrap().unwrap();
+    old_verifier.validate(&unchanged).unwrap();
+    assert_eq!(unchanged.generation(), old_claim.generation());
     let proposal = rescan(&mut f.inner, a);
     let programs = super::continuing_rescan_controls::programs(&mut f.inner, &proposal);
     let before = preflight_cursors(&f.inner.runtime);

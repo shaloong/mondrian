@@ -2121,9 +2121,11 @@ mod continuing_rescan_controls {
         PreparedNativeAudioParameterHandoff,
         mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
     ) {
+        let claim = fixture.source.current_claim().unwrap().unwrap();
+        let current = fixture.runtime.native_owner_installation_verifier().unwrap();
+        current.validate(&claim).unwrap();
         let programs = programs(fixture, proposal);
         let (registration, destination) = fixture.source.register().unwrap();
-        let claim = fixture.source.current_claim().unwrap().unwrap();
         let reservation = fixture.source.reserve_install(&registration, Some(&claim)).unwrap();
         let authorization = fixture.source.authorize_runtime_installation(reservation).unwrap();
         let prepared = fixture
@@ -2135,6 +2137,14 @@ mod continuing_rescan_controls {
                 &ExecutionCancellationToken::new(),
             )
             .unwrap();
+        let unchanged = fixture.source.current_claim().unwrap().unwrap();
+        current.validate(&unchanged).unwrap();
+        assert_eq!(unchanged.generation(), claim.generation());
+        assert!(fixture
+            .runtime
+            .native_owner_installation_verifier()
+            .unwrap()
+            .same_registration(&current));
         (prepared, authorization)
     }
     pub(super) fn install(
@@ -2142,8 +2152,12 @@ mod continuing_rescan_controls {
         proposal: &mondrian_core::NativeAudioAuthorProposal,
         prepared: &mut PreparedNativeAudioParameterHandoff,
         authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
-    ) {
+    ) -> mondrian_core::AudioOwnerInstallationClaim {
         let old = fixture.target;
+        let old_claim = fixture.source.current_claim().unwrap().unwrap();
+        let old_verifier = fixture.runtime.native_owner_installation_verifier().unwrap();
+        old_verifier.validate(&old_claim).unwrap();
+        assert_eq!(old.installed_generation, old_claim.generation());
         let receipt = fixture
             .runtime
             .install_native_author_parameter_handoff(
@@ -2160,7 +2174,31 @@ mod continuing_rescan_controls {
         assert_eq!(receipt.target.local_session, old.local_session);
         assert_eq!(receipt.target.continuity_epoch, old.continuity_epoch);
         assert_eq!(proposal.target(), old);
+        let current = fixture.source.current_claim().unwrap().unwrap();
+        let destination = fixture.runtime.native_owner_installation_verifier().unwrap();
+        destination.validate(&receipt.claim).unwrap();
+        destination.validate(&current).unwrap();
+        assert_eq!(current.generation(), receipt.claim.generation());
+        assert_eq!(
+            receipt.target.installed_generation,
+            receipt.claim.generation()
+        );
+        assert!(receipt.claim.generation() > old_claim.generation());
+        assert_eq!(
+            old_verifier.validate(&current),
+            Err(mondrian_core::AudioOwnerInstallationError::WrongRegistration)
+        );
+        assert_eq!(
+            old_verifier.validate(&old_claim),
+            Err(mondrian_core::AudioOwnerInstallationError::Superseded)
+        );
+        assert!(matches!(
+            authorization.begin_commit(&destination),
+            Err(mondrian_core::AudioOwnerInstallationError::ConsumedAuthorization)
+        ));
+        destination.validate(&fixture.source.current_claim().unwrap().unwrap()).unwrap();
         fixture.target = receipt.target;
+        receipt.claim
     }
     #[derive(Debug, Default, PartialEq, Eq)]
     struct Cursors {
@@ -2215,12 +2253,9 @@ mod continuing_rescan_controls {
             if arrival == 1 {
                 f.probe.lock().unwrap().live_request = Some(observed(b));
             }
-            let before_claim = f.source.current_claim().unwrap().unwrap();
-            install(&mut f, &proposal, &mut prepared, &mut authorization);
-            assert_eq!(
-                f.source.current_claim().unwrap().unwrap().generation().get(),
-                before_claim.generation().get() + 1
-            );
+            // Registration and reserve_install share the Source serial issuer;
+            // the installed identity is the actual one-shot receipt, not old + 1.
+            let installed_claim = install(&mut f, &proposal, &mut prepared, &mut authorization);
             let moved = ticket(&f).unwrap();
             assert_eq!(
                 moved,
@@ -2243,6 +2278,16 @@ mod continuing_rescan_controls {
             }
             let before = counts(&f);
             f.ack(&proposal);
+            f.runtime
+                .native_owner_installation_verifier()
+                .unwrap()
+                .validate(&installed_claim)
+                .unwrap();
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation(),
+                installed_claim.generation(),
+                "Ack cannot publish a second Source generation"
+            );
             assert_eq!(
                 ticket(&f).unwrap(),
                 AudioProcessorReprepareTicket { request: observed(b), ..moved }
