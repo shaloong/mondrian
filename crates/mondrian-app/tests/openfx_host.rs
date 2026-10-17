@@ -2650,6 +2650,135 @@ fn product_discovery_rejects_non_successful_host_bootstrap() {
     );
 }
 
+// Observe only the existing supervised discovery/Describe children. A complete
+// native action chain is required before interpreting the metadata outcome.
+fn temporal_clip_description(
+    mode: &str,
+) -> Result<mondrian_app::openfx_host::OpenFxFilterDescription, OpenFxHostError> {
+    use std::io::Read;
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("new empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let inspection = cpu_contract_probe(mode);
+    let result = describe_openfx_filter(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+    );
+    let entries = std::fs::read_dir(&directory)
+        .unwrap()
+        .take(3)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!((1..=2).contains(&entries.len()));
+    let mut discovery = Vec::new();
+    let mut describe = Vec::new();
+    for entry in entries {
+        let kind = entry.file_type().unwrap();
+        assert!(kind.is_file() && !kind.is_symlink());
+        let name = entry.file_name().into_string().unwrap();
+        let pid = name
+            .strip_prefix("actions-")
+            .and_then(|name| name.strip_suffix(".txt"))
+            .expect("fixed action filename");
+        assert!(pid.bytes().all(|byte| byte.is_ascii_digit()) && pid.parse::<u32>().unwrap() > 0);
+        let mut bytes = Vec::new();
+        std::fs::File::open(entry.path())
+            .unwrap()
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        assert!(
+            !bytes.is_empty()
+                && bytes.len() <= 4096
+                && bytes.is_ascii()
+                && bytes.last() == Some(&b'\n')
+        );
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.lines().count() < 32, "overflow/prefix is not proof");
+        for (index, row) in text.lines().enumerate() {
+            let fields: Vec<_> = row.split_whitespace().collect();
+            assert_eq!(fields.len(), 9);
+            assert_eq!(fields[0].parse::<usize>().unwrap(), index + 1);
+            assert_eq!(fields[8], "complete=1");
+            match &fields[1..3] {
+                ["D=0", "I=1"] => discovery.push(fields[3..].join(" ")),
+                ["D=1", "I=0"] => describe.push(fields[3..].join(" ")),
+                _ => panic!("unexpected native request role"),
+            }
+        }
+    }
+    assert_eq!(
+        discovery,
+        vec!["OfxSetHost enter attempted=0 accepted=0 status=0 complete=1".to_owned()]
+    );
+    let creates = describe
+        .iter()
+        .filter(|row| row.starts_with("OfxActionCreateInstance "))
+        .count();
+    let renders = describe
+        .iter()
+        .filter(|row| row.starts_with("OfxImageEffectActionRender "))
+        .count();
+    assert_eq!((creates, renders), (0, 0));
+    let expected = [
+        ("OfxSetHost", "enter", 0),
+        ("OfxActionLoad", "enter", 0),
+        ("OfxActionLoad", "return", 0),
+        ("OfxActionDescribe", "enter", 0),
+        ("OfxActionDescribe", "return", 0),
+        ("OfxImageEffectActionDescribeInContext", "enter", 0),
+        ("OfxImageEffectActionDescribeInContext", "return", 0),
+        ("OfxActionUnload", "enter", 0),
+        ("descriptor-base", "check", 1),
+        ("descriptor-context", "check", 1),
+        ("OfxActionUnload", "return", 0),
+    ]
+    .into_iter()
+    .map(|(action, point, status)| {
+        format!("{action} {point} attempted=0 accepted=0 status={status} complete=1")
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        describe, expected,
+        "successful descriptor actions and exact retirement, with no Create/Render"
+    );
+    println!("temporal-clip mode={mode} complete_descriptor=1 create={creates} render={renders}");
+    result
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_temporal_source, and an empty action directory"]
+fn product_worker_refuses_source_clip_temporal_access_before_instance_creation() {
+    let result = temporal_clip_description("clip_temporal_source");
+    assert!(matches!(&result, Err(OpenFxHostError::WorkerFailed(reason)) if reason == "native status 7: "),
+        "expected exact temporal descriptor refusal after successful Describe, not abort/transport failure: {result:?}");
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_temporal_output, and an empty action directory"]
+fn product_worker_refuses_output_clip_temporal_access_before_instance_creation() {
+    let result = temporal_clip_description("clip_temporal_output");
+    assert!(matches!(&result, Err(OpenFxHostError::WorkerFailed(reason)) if reason == "native status 7: "),
+        "expected exact temporal descriptor refusal after successful Describe, not abort/transport failure: {result:?}");
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_temporal_optional, and an empty action directory"]
+fn product_worker_admits_disconnected_optional_temporal_clip() {
+    let description = temporal_clip_description("clip_temporal_optional")
+        .expect("unused optional clip must not impose a connected temporal dependency");
+    assert_eq!(description.identifier, "uk.co.thefoundry.BasicGainPlugin");
+    assert!(!description.label.is_empty());
+    assert!(
+        description.parameters.is_empty(),
+        "independently defined descriptor-only fixture"
+    );
+}
+
 #[test]
 #[ignore = "requires current product and SessionProbe mode cpu_unsupported_descriptor"]
 fn product_worker_refuses_gpu_only_descriptor_before_registration() {

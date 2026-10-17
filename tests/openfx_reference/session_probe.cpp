@@ -214,6 +214,41 @@ bool defineHostNumericParameterCountProbe(const void* handle, bool overflow) {
   return true;
 }
 
+// Describe-only temporal admission controls. Define an independent zero-parameter
+// context through legal descriptor APIs; never fetch an instance Clip handle here.
+bool temporalClipAdmissionMode(const std::string& selected) {
+  return selected == "clip_temporal_source" || selected == "clip_temporal_output" ||
+      selected == "clip_temporal_optional";
+}
+bool defineTemporalClipAdmissionProbe(const void* handle, const std::string& selected) {
+  const auto effect = (OfxImageEffectHandle)handle;
+  OfxPropertySetHandle properties = nullptr;
+  int temporal = -1;
+  if (gEffectHost->getPropertySet(effect, &properties) != kOfxStatOK || !properties ||
+      gPropHost->propGetInt(properties, kOfxImageEffectPropTemporalClipAccess, 0, &temporal) != kOfxStatOK ||
+      temporal != 0 ||
+      gPropHost->propGetInt(gHost->host, kOfxImageEffectPropTemporalClipAccess, 0, &temporal) != kOfxStatOK ||
+      temporal != 0) { return false; }
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName,
+                           "TemporalOptional"}) {
+    const bool optional = std::strcmp(name, "TemporalOptional") == 0;
+    if (optional && selected != "clip_temporal_optional") { continue; }
+    const int expected = optional ||
+        (selected == "clip_temporal_source" && std::strcmp(name, kOfxImageEffectSimpleSourceClipName) == 0) ||
+        (selected == "clip_temporal_output" && std::strcmp(name, kOfxImageEffectOutputClipName) == 0);
+    properties = nullptr;
+    int observed = -1, dimension = 0;
+    if (gEffectHost->clipDefine(effect, name, &properties) != kOfxStatOK || !properties ||
+        gPropHost->propSetString(properties, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA) != kOfxStatOK ||
+        gPropHost->propSetInt(properties, kOfxImageClipPropOptional, 0, optional ? 1 : 0) != kOfxStatOK ||
+        gPropHost->propSetInt(properties, kOfxImageEffectPropTemporalClipAccess, 0, expected) != kOfxStatOK ||
+        gPropHost->propGetDimension(properties, kOfxImageEffectPropTemporalClipAccess, &dimension) != kOfxStatOK || dimension != 1 ||
+        gPropHost->propGetInt(properties, kOfxImageEffectPropTemporalClipAccess, 0, &observed) != kOfxStatOK || observed != expected ||
+        gPropHost->propGetInt(properties, kOfxImageClipPropOptional, 0, &observed) != kOfxStatOK || observed != (optional ? 1 : 0)) { return false; }
+  }
+  return true;
+}
+
 bool writablePluginLabels(const void* handle, bool parameter) {
   OfxPropertySetHandle properties = nullptr;
   if (parameter) {
@@ -1960,6 +1995,12 @@ OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (temporalClipAdmissionMode(selected)) {
+    if (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) { std::abort(); }
+    if (operation == kOfxImageEffectActionDescribeInContext) {
+      return defineTemporalClipAdmissionProbe(handle, selected) ? kOfxStatOK : kOfxStatFailed;
+    }
+  }
   if (selected == "aux_describe_load_failure" && operation == kOfxActionLoad) { return kOfxStatFailed; }
   if (selected == "host_properties_readonly" && operation == kOfxActionDescribe &&
       !readonlyHostProperties(gHost)) { return kOfxStatFailed; }
@@ -2483,6 +2524,11 @@ OfxStatus probe(const char* action, const void* handle,
   for (const char* known : {kOfxActionLoad, kOfxActionDescribe,
        kOfxImageEffectActionDescribeInContext, kOfxActionUnload, kOfxImageEffectActionRender}) {
     if (std::strcmp(action, known) == 0) { observed = known; break; }
+  }
+  // These Describe-only modes must prove that Create was never entered. Keep
+  // existing modes' receipt sequences unchanged.
+  if (temporalClipAdmissionMode(mode()) && std::strcmp(action, kOfxActionCreateInstance) == 0) {
+    observed = kOfxActionCreateInstance;
   }
   const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
   const bool observing = directory && *directory;
