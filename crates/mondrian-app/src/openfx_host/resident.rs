@@ -269,6 +269,15 @@ impl ProcessOwner {
         self.terminate_with(Child::try_wait, Child::kill, Child::wait)
     }
 
+    // The original operation already failed. Cleanup remains mandatory, but
+    // an OS refusal is secondary evidence, never a replacement primary error.
+    fn terminate_reported(&mut self, operation: &'static str) {
+        if let Err(error) = self.terminate() {
+            tracing::warn!(process_id = self.child.id(), state = ?self.state, operation,
+                error = %error, "OpenFX secondary cleanup failed");
+        }
+    }
+
     fn terminate_with(
         &mut self,
         mut observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
@@ -402,11 +411,8 @@ impl OpenFxFilterSession {
             .checked_add(DEADLINE)
             .ok_or_else(|| unavailable("native GUI action deadline overflow"))?;
         let result = self.close_gui_inner(deadline);
-        if result.is_err()
-            && let Err(error) = self.process.terminate()
-        {
-            tracing::warn!(process_id = self.process.child.id(), state = ?self.process.state,
-                error = %error, "OpenFX GUI failure cleanup failed");
+        if result.is_err() {
+            self.process.terminate_reported("close GUI");
         }
         result
     }
@@ -822,7 +828,7 @@ impl OpenFxFilterSession {
                 error,
                 OpenFxHostError::Canceled | OpenFxHostError::DeadlineExceeded
             ) {
-                self.process.terminate()?;
+                self.process.terminate_reported("render admission");
             }
             return Err(error);
         }
@@ -836,7 +842,7 @@ impl OpenFxFilterSession {
             Ok(owner) => owner,
             Err(error @ OpenFxHostError::HostResourceRefused(_)) => return Err(error),
             Err(error) => {
-                self.process.terminate()?;
+                self.process.terminate_reported("render output allocation");
                 return Err(error);
             }
         };
@@ -852,7 +858,7 @@ impl OpenFxFilterSession {
             .as_ref()
             .is_err_and(|error| !matches!(error, OpenFxHostError::UserBlocked(_)))
         {
-            self.process.terminate()?;
+            self.process.terminate_reported("render");
         }
         result
     }
@@ -1420,8 +1426,16 @@ impl OpenFxFilterSession {
             close_observation::Stage::ParentSettlementEnd,
             close_observation::result_code(&settlement),
         );
-        settlement?;
-        graceful
+        match graceful {
+            Err(primary) => {
+                if let Err(error) = settlement {
+                    tracing::warn!(process_id = self.process.child.id(), state = ?self.process.state,
+                        error = %error, "OpenFX shutdown secondary cleanup failed");
+                }
+                Err(primary)
+            }
+            Ok(()) => settlement,
+        }
     }
 }
 impl Drop for OpenFxFilterSession {
