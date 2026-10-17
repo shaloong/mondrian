@@ -180,6 +180,9 @@ fn observe(
 // Metadata-only qualification has its own case contract and no PCM oracle.
 mod readonly;
 
+mod again_runtime_pcm;
+mod vst3_runtime_pcm;
+
 // Finite auxiliary-input PCM observations; no vendor algorithm oracle.
 mod surge_fx;
 
