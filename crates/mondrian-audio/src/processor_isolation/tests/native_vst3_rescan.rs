@@ -181,7 +181,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
             live.pending_reprepare
         );
     };
-    assert!(prefix.serial != 0 && prefix.serial != u64::MAX);
+    assert!(prefix.serial != 0 && prefix.serial != u32::MAX);
     assert_eq!(
         prefix.request,
         mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
