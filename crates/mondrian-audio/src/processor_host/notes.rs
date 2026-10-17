@@ -520,6 +520,55 @@ impl PreparedProcessorHost {
             })
     }
 
+    /// Read only the actual selected occurrence and existing Hosted/ledger
+    /// state. Completion policy and raw event-bus presence grant no entry.
+    pub(crate) fn validate_vst3_note_initial_entry(
+        &self,
+        program: &crate::CompiledAudioProgram,
+        entry: AudioStateEntry,
+    ) -> Result<(), AudioExecutionError> {
+        let mut deferred_refusal = None;
+        for instance in &self.instances {
+            let Some(notes) = &instance.notes else {
+                continue;
+            };
+            let processor = crate::schedule::processor(program, instance.occurrence)
+                .map_err(|_| AudioExecutionError::InvalidPreparedSchedule)?;
+            if !matches!(
+                &processor.definition,
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+            ) {
+                continue;
+            }
+            // A failed first entry can still have no origin; it is poisoned,
+            // never mistaken for a fresh producer or recoverable repeat.
+            if matches!(instance.continuity, HostedProcessorContinuity::Failed) {
+                return Err(AudioProcessorHostError::PoisonedInstance.into());
+            }
+            if notes.ledger.origin().is_some() {
+                if !matches!(
+                    instance.continuity,
+                    HostedProcessorContinuity::Active { .. }
+                ) {
+                    return Err(AudioProcessorHostError::PoisonedInstance.into());
+                }
+                deferred_refusal.get_or_insert("VST3 Note score supports only initial entry");
+            } else if !matches!(instance.continuity, HostedProcessorContinuity::Unentered) {
+                return Err(AudioProcessorHostError::PoisonedInstance.into());
+            } else if entry.start_sample != 0 {
+                deferred_refusal.get_or_insert(
+                    "Note score cold entry requires public origin zero; seek replay is unsupported",
+                );
+            }
+        }
+        // Any failed target dominates a repeat/seek refusal, even when a
+        // preceding target already entered before a later target failed.
+        match deferred_refusal {
+            Some(reason) => Err(refusal(reason).into()),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn validate_note_entry(
         &self,
         entry: AudioStateEntry,

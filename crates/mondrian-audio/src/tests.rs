@@ -4706,3 +4706,684 @@ fn selected_vst3_music_reaches_sole_prepare_with_exact_reference_and_no_note() {
         assert_eq!(media.resolved_assets.lock().unwrap().len(), 1);
     }
 }
+
+// Owned shared-host controls. These exercise the canonical Runtime and Source;
+// their native-object observation is a test model, not an SDK/IPC qualification.
+mod vst3_note_entry_controls {
+    use super::*;
+    use mondrian_core::{
+        AudioNoteId, AudioNoteLaneId, AudioProcessorInstanceId, AuthoringList, MusicalTimeReference,
+    };
+    use mondrian_timeline::audio::{
+        AudioNote, AudioNoteLane, AudioNoteTarget, AudioProcessorDefinitionRef,
+    };
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    const KEY: &str = "vst3.note-input.0";
+    const REPEAT: &str = "VST3 Note score supports only initial entry";
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        Enter(i64),
+        Bind,
+        Poll,
+        Process(i64),
+    }
+    #[derive(Debug, Clone, Default, PartialEq)]
+    struct Probe {
+        prepares: usize,
+        creates: usize,
+        requests: Vec<bool>,
+        calls: Vec<Call>,
+        events: Vec<AudioNoteEvent>,
+    }
+    struct Resolver {
+        probe: Arc<Mutex<Probe>>,
+        fail_entry: bool,
+        fail_entry_at: Option<AudioProcessorInstanceId>,
+    }
+    struct Factory {
+        probe: Arc<Mutex<Probe>>,
+        serial: u64,
+        notes: bool,
+        parameters: usize,
+        fail_entry: bool,
+    }
+    struct Processor {
+        probe: Arc<Mutex<Probe>>,
+        serial: u64,
+        parameters: usize,
+        fail_entry: bool,
+    }
+    fn object(serial: u64) -> NativeAudioObjectObservation {
+        NativeAudioObjectObservation::new(
+            NonZeroU32::new(std::process::id()).unwrap(),
+            NonZeroU64::new(serial).unwrap(),
+        )
+    }
+    fn note_contract() -> AudioProcessorNoteInputContract {
+        AudioProcessorNoteInputContract {
+            completion: AudioNoteCompletionPolicy::SuccessfulOffBlock,
+            ports: vec![AudioProcessorNoteInputPort {
+                channel_count: 16,
+                port_key: KEY.to_owned(),
+                native_id: 0,
+                native_index: 0,
+            }],
+            limits: AudioNoteExecutionLimits {
+                input_events: 2,
+                output_ends: 0,
+                retained_records: 1,
+                live_voices: 0,
+            },
+        }
+    }
+    impl AudioProcessorResolver for Resolver {
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            let serial = {
+                let mut probe = self.probe.lock().unwrap();
+                probe.prepares += 1;
+                probe.requests.push(request.note_input_requested());
+                probe.prepares as u64
+            };
+            Ok(Arc::new(Factory {
+                probe: Arc::clone(&self.probe),
+                serial,
+                notes: request.note_input_requested(),
+                parameters: request.parameters().len(),
+                fail_entry: self.fail_entry
+                    || self.fail_entry_at == Some(request.occurrence().instance_id),
+            }))
+        }
+    }
+    impl AudioProcessorFactory for Factory {
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, false, true, 0)
+                .unwrap()
+        }
+        fn note_input_contract(&self) -> AudioProcessorNoteInputContract {
+            if self.notes {
+                note_contract()
+            } else {
+                Default::default()
+            }
+        }
+        fn visit_host_owned_storage<'a>(
+            &'a self,
+            visitor: &mut dyn FnMut(
+                AudioProcessorFactoryStorageBorrow<'a>,
+            ) -> Result<(), AudioProcessorFactoryStorageError>,
+        ) -> Result<(), AudioProcessorFactoryStorageError> {
+            visitor(AudioProcessorFactoryStorageBorrow::arc_payload(&self.probe))
+        }
+        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            self.probe.lock().unwrap().creates += 1;
+            Ok(Box::new(Processor {
+                probe: Arc::clone(&self.probe),
+                serial: self.serial,
+                parameters: self.parameters,
+                fail_entry: self.fail_entry,
+            }))
+        }
+    }
+    impl AudioProcessor for Processor {
+        fn native_observations_supported(&self) -> bool {
+            true
+        }
+        fn native_audio_object_observation(
+            &mut self,
+        ) -> Result<Option<NativeAudioObjectObservation>, AudioProcessorHostError> {
+            Ok(Some(object(self.serial)))
+        }
+        fn poll_native_observations(
+            &mut self,
+            _: NativeAudioObservationConsumption,
+        ) -> Result<NativeAudioObservations, AudioProcessorHostError> {
+            self.probe.lock().unwrap().calls.push(Call::Poll);
+            Ok(NativeAudioObservations {
+                object: Some(object(self.serial)),
+                ..Default::default()
+            })
+        }
+        fn bind_native_audio_object(
+            &mut self,
+            request: NativeAudioObjectBindRequest,
+        ) -> Result<NativeAudioObjectBindOutcome, AudioProcessorHostError> {
+            self.probe.lock().unwrap().calls.push(Call::Bind);
+            Ok(NativeAudioObjectBindOutcome::Bound(
+                NativeAudioObjectBindReceipt::acknowledge(request, object(self.serial)).unwrap(),
+            ))
+        }
+        fn prepare_native_author_state_entry(
+            &mut self,
+            _: NativeAudioAuthorStateEntryRequest<'_>,
+        ) -> Result<NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+            panic!("initial canonical entry must not request native state replacement")
+        }
+        fn enter_state(&mut self, sample: i64) -> Result<(), AudioProcessorHostError> {
+            self.probe.lock().unwrap().calls.push(Call::Enter(sample));
+            if self.fail_entry {
+                return Err(AudioProcessorHostError::StateEntry(
+                    "owned initial entry failure".into(),
+                ));
+            }
+            Ok(())
+        }
+        fn process(
+            &mut self,
+            context: AudioProcessorProcessContext,
+            audio: &mut dyn AudioProcessorAudioIo,
+            parameters: AudioParameterEventBatch<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            assert_eq!(parameters.lane_count(), self.parameters);
+            let mut probe = self.probe.lock().unwrap();
+            probe.calls.push(Call::Process(context.request().start_sample));
+            probe.events.extend_from_slice(audio.note_events());
+            for (frame, sample) in audio.main_interleaved().iter_mut().enumerate() {
+                *sample = (context.request().start_sample + frame as i64 + 1) as f32;
+            }
+            Ok(())
+        }
+    }
+    fn contract() -> AudioRenderContract {
+        AudioRenderContract {
+            sample_rate: 8,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 1,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        }
+    }
+    fn append_target(sequence: &mut Sequence, vst: bool) -> AudioProcessorInstanceId {
+        let track = sequence.audio_tracks[0].id;
+        let id = AudioProcessorInstanceId::new();
+        let definition = if vst {
+            AudioProcessorDefinitionRef::Vst3 {
+                class_id: "owned.vst3.note-entry".into(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            }
+        } else {
+            AudioProcessorDefinitionRef::Clap {
+                plugin_id: "owned.clap.note-entry".into(),
+                schema_version: 1,
+                binary_sha256: Some([8; 32]),
+            }
+        };
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance {
+                id,
+                definition,
+                bypassed: false,
+                parameters: Default::default(),
+                opaque_state: None,
+            });
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id: track,
+                processor_id: id,
+                input_port_key: KEY.into(),
+            },
+            notes: AuthoringList::from(
+                vec![(0, 2), (3, 4)]
+                    .into_iter()
+                    .map(|(start, end)| AudioNote {
+                        id: AudioNoteId::new(),
+                        start: tt(start, 8),
+                        end: tt(end, 8),
+                        channel: 15,
+                        key: 60,
+                        on_velocity: 0.5,
+                        off_velocity: 0.25,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        });
+        id
+    }
+    fn sequence() -> Sequence {
+        let mut sequence = Sequence::new("owned VST3 canonical entry");
+        sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+        sequence.audio_program.musical_time_reference =
+            Some(MusicalTimeReference::new(tt(-3, 8), tt(1, 2)).unwrap());
+        append_target(&mut sequence, true);
+        sequence
+    }
+    fn build(
+        sequence: &Sequence,
+        probe: &Arc<Mutex<Probe>>,
+        fail_entry: bool,
+    ) -> Result<AudioProgramRuntime, AudioRuntimeBuildError> {
+        AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            sequence,
+            &[],
+            &RecordingResolver::default(),
+            &Resolver {
+                probe: Arc::clone(probe),
+                fail_entry,
+                fail_entry_at: None,
+            },
+            contract(),
+            None,
+            AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+        )
+    }
+    fn entry(epoch: u64, start_sample: i64) -> AudioStateEntry {
+        AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(epoch),
+            start_sample,
+        }
+    }
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Cursors {
+        sessions: Vec<AudioSessionCursorEvidence>,
+        processors: Vec<AudioProcessorCursorEvidence>,
+    }
+    impl AudioContinuityEvidenceVisitor for Cursors {
+        fn session(
+            &mut self,
+            evidence: AudioSessionCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.sessions.push(evidence);
+            Ok(())
+        }
+        fn processor(
+            &mut self,
+            evidence: AudioProcessorCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.processors.push(evidence);
+            Ok(())
+        }
+    }
+    fn cursors(runtime: &AudioProgramRuntime) -> Cursors {
+        let mut result = Cursors::default();
+        runtime.visit_continuity_evidence(&mut result).unwrap();
+        result
+    }
+    fn install(
+        runtime: &mut AudioProgramRuntime,
+    ) -> (
+        mondrian_core::AudioOwnerInstallationSource,
+        mondrian_core::AudioOwnerInstallationClaim,
+    ) {
+        let source = mondrian_core::AudioOwnerInstallationSource::new();
+        let (registration, verifier) = source.register().unwrap();
+        runtime.bind_native_owner_installation(verifier).unwrap();
+        let claim = source
+            .begin_commit(source.reserve_install(&registration, None).unwrap())
+            .unwrap()
+            .commit()
+            .unwrap();
+        runtime
+            .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+            .unwrap();
+        (source, claim)
+    }
+
+    #[test]
+    fn vst3_note_none_and_mixed_targets_refuse_before_media_or_factory() {
+        for mixed in [false, true] {
+            let mut sequence = sequence_with_audio_clip();
+            let id = append_target(&mut sequence, true);
+            let lane = sequence.audio_program.note_lanes[0].id;
+            if mixed {
+                append_target(&mut sequence, false);
+            }
+            let probe = Arc::new(Mutex::new(Probe::default()));
+            let resolver = Resolver {
+                probe: Arc::clone(&probe),
+                fail_entry: false,
+                fail_entry_at: None,
+            };
+            let media = RecordingResolver::default();
+            let result = AudioProgramRuntime::build_with_processor_resolver(
+                &sequence,
+                &[],
+                &media,
+                &resolver,
+                contract(),
+                None,
+            );
+            assert!(matches!(result,
+                Err(AudioRuntimeBuildError::Compile(AudioCompileError::NoteExecutionNotSupported {
+                    lane_id, processor_id,
+                })) if lane_id == lane && processor_id == id));
+            assert!(media.resolved_assets.lock().unwrap().is_empty());
+            assert_eq!(*probe.lock().unwrap(), Probe::default());
+        }
+    }
+
+    #[test]
+    fn vst3_note_scope_keeps_empty_untargeted_clap_none_and_direct_plan_boundaries() {
+        // Some enables Runtime preparation only; direct plans still reject all
+        // selected nonempty Notes before resolving any factory.
+        let sequence = sequence();
+        let compiled = Arc::new(
+            compile_audio_program(
+                &sequence,
+                AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+            )
+            .unwrap(),
+        );
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        let error = PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            contract(),
+            AudioKernelBackend::ScalarReference,
+            &Resolver {
+                probe: Arc::clone(&probe),
+                fail_entry: false,
+                fail_entry_at: None,
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(
+            error,
+            AudioCompileError::NoteExecutionNotSupported {
+                lane_id: sequence.audio_program.note_lanes[0].id,
+                processor_id: sequence.audio_program.note_lanes[0].target.processor_id,
+            }
+        );
+        assert_eq!(*probe.lock().unwrap(), Probe::default());
+
+        for control in 0..4 {
+            let mut sequence = sequence_with_audio_clip();
+            append_target(&mut sequence, control < 2);
+            if control == 0 {
+                sequence.audio_program.note_lanes[0].notes.clear();
+            } else if control == 1 {
+                sequence
+                    .audio_program
+                    .track_channels
+                    .get_mut(&sequence.audio_tracks[0].id)
+                    .unwrap()
+                    .strip
+                    .pre_fader
+                    .processors[0]
+                    .bypassed = true;
+            }
+            if control == 3 {
+                // A VST in the same selected rack is not a Note owner merely
+                // because another processor is targeted by a nonempty lane.
+                append_target(&mut sequence, true);
+                sequence.audio_program.note_lanes.pop().unwrap();
+            }
+            let probe = Arc::new(Mutex::new(Probe::default()));
+            let runtime = build(&sequence, &probe, false).unwrap();
+            {
+                let calls = probe.lock().unwrap();
+                let expected = if control == 3 {
+                    2
+                } else {
+                    usize::from(control != 1)
+                };
+                assert_eq!((calls.prepares, calls.creates), (expected, expected));
+                assert_eq!(
+                    calls.requests.iter().filter(|&&requested| requested).count(),
+                    usize::from(control >= 2)
+                );
+                if control == 3 {
+                    assert_eq!(
+                        calls.requests.iter().filter(|&&requested| !requested).count(),
+                        1
+                    );
+                }
+            }
+            drop(runtime);
+        }
+    }
+
+    #[test]
+    fn vst3_note_first_entry_binds_without_replacement_and_repeat_keeps_owner_and_ids() {
+        for with_parameter in [false, true] {
+            let mut sequence = sequence();
+            if with_parameter {
+                use mondrian_core::automation::{ParameterSchema, PropertyValue};
+                let parameter = ParameterId::new_static("owned.value");
+                sequence
+                    .audio_program
+                    .track_channels
+                    .get_mut(&sequence.audio_tracks[0].id)
+                    .unwrap()
+                    .strip
+                    .pre_fader
+                    .processors[0]
+                    .parameters
+                    .insert(
+                        parameter.clone(),
+                        mondrian_timeline::audio::AudioProcessorParameter::from_schema(
+                            ParameterSchema::v1(parameter, PropertyValue::Double(0.5)),
+                        )
+                        .unwrap(),
+                    );
+            }
+            let probe = Arc::new(Mutex::new(Probe::default()));
+            let mut runtime = build(&sequence, &probe, false).unwrap();
+            let (source, claim) = install(&mut runtime);
+            let before = probe.lock().unwrap().clone();
+            let before_cursors = cursors(&runtime);
+            assert!(matches!(runtime.enter_state(entry(6, 3)),
+                Err(AudioExecutionError::ProcessorHost(
+                    AudioProcessorHostError::NoteExecutionRefused(
+                        "Note score cold entry requires public origin zero; seek replay is unsupported"
+                    )))));
+            assert_eq!(*probe.lock().unwrap(), before);
+            assert_eq!(cursors(&runtime), before_cursors);
+            runtime.enter_state(entry(7, 0)).unwrap();
+            let identity = runtime.resource_root_identity();
+            let address = AudioNativeProcessorAddress {
+                root: identity,
+                local: identity,
+                epoch: Some(entry(7, 0).epoch),
+                occurrence: AudioProcessorOccurrence {
+                    instance_id: sequence.audio_program.note_lanes[0].target.processor_id,
+                    owner: AudioProcessorOccurrenceOwner::Track(sequence.audio_tracks[0].id),
+                    insertion: AudioProcessorInsertionPoint::PreFader,
+                },
+            };
+            let lease = runtime.native_owner_lease(address).unwrap();
+            {
+                let state = probe.lock().unwrap();
+                let entered = state.calls.iter().position(|c| *c == Call::Enter(0)).unwrap();
+                assert_eq!(
+                    state.calls.iter().filter(|c| matches!(c, Call::Enter(_))).count(),
+                    1
+                );
+                assert!(state.calls[entered + 1..].contains(&Call::Bind));
+            }
+            let mut pcm = [91.0];
+            for frame in 0..5 {
+                // Before any DSP and again after On delivery, same-origin and
+                // seek requests must leave the old continuation untouched.
+                if frame <= 1 {
+                    for start in [0, 3] {
+                        let before = probe.lock().unwrap().clone();
+                        let before_cursors = cursors(&runtime);
+                        assert!(matches!(
+                            runtime.enter_state(entry(8, start)),
+                            Err(AudioExecutionError::ProcessorHost(
+                                AudioProcessorHostError::NoteExecutionRefused(REPEAT)
+                            ))
+                        ));
+                        assert_eq!(*probe.lock().unwrap(), before);
+                        assert_eq!(cursors(&runtime), before_cursors);
+                        assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
+                        assert_eq!(runtime.resource_root_identity(), identity);
+                        assert_eq!(
+                            source.current_claim().unwrap().unwrap().generation(),
+                            claim.generation()
+                        );
+                        runtime
+                            .native_owner_installation_verifier()
+                            .unwrap()
+                            .validate(&claim)
+                            .unwrap();
+                    }
+                }
+                runtime
+                    .render_into(
+                        AudioRenderRequest { start_sample: frame, frames: 1 },
+                        &mut pcm,
+                    )
+                    .unwrap();
+                assert_eq!(pcm, [frame as f32 + 1.0]);
+            }
+            let events = &probe.lock().unwrap().events;
+            assert_eq!(events.len(), 4);
+            assert_eq!(
+                events.iter().map(|e| (e.kind, e.native_note_id)).collect::<Vec<_>>(),
+                vec![
+                    (AudioNoteEventKind::On, 0),
+                    (AudioNoteEventKind::Off, 0),
+                    (AudioNoteEventKind::On, 1),
+                    (AudioNoteEventKind::Off, 1)
+                ]
+            );
+            for pair in events.chunks_exact(2) {
+                assert_eq!(
+                    (pair[0].port_index, pair[0].channel, pair[0].key),
+                    (pair[1].port_index, pair[1].channel, pair[1].key)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_note_failed_first_entry_with_no_origin_stays_poisoned_before_poll() {
+        let sequence = sequence();
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        let mut runtime = build(&sequence, &probe, true).unwrap();
+        let (source, claim) = install(&mut runtime);
+        assert!(matches!(runtime.enter_state(entry(1, 0)),
+            Err(AudioExecutionError::ProcessorHost(AudioProcessorHostError::StateEntry(ref detail)))
+                if detail == "owned initial entry failure"));
+        let before = probe.lock().unwrap().clone();
+        let before_cursors = cursors(&runtime);
+        assert!(matches!(
+            runtime.enter_state(entry(2, 0)),
+            Err(AudioExecutionError::ProcessorHost(
+                AudioProcessorHostError::PoisonedInstance
+            ))
+        ));
+        assert_eq!(*probe.lock().unwrap(), before);
+        assert_eq!(cursors(&runtime), before_cursors);
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+        assert!(
+            before.events.is_empty(),
+            "failed Enter never bound a ledger origin or sent Notes"
+        );
+        assert_eq!(
+            before.calls.iter().filter(|c| matches!(c, Call::Enter(_))).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn vst3_note_later_failed_target_dominates_earlier_entered_origin_before_poll() {
+        let mut sequence = sequence();
+        let first = sequence.audio_program.note_lanes[0].target.processor_id;
+        let second = append_target(&mut sequence, true);
+        let probe = Arc::new(Mutex::new(Probe::default()));
+        let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            &sequence,
+            &[],
+            &RecordingResolver::default(),
+            &Resolver {
+                probe: Arc::clone(&probe),
+                fail_entry: false,
+                fail_entry_at: Some(second),
+            },
+            contract(),
+            None,
+            AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+        )
+        .unwrap();
+        let (source, claim) = install(&mut runtime);
+        assert!(matches!(runtime.enter_state(entry(1, 0)),
+            Err(AudioExecutionError::ProcessorHost(AudioProcessorHostError::StateEntry(ref detail)))
+                if detail == "owned initial entry failure"));
+        let before = probe.lock().unwrap().clone();
+        let before_cursors = cursors(&runtime);
+        assert!(matches!(
+            before_cursors
+                .processors
+                .iter()
+                .find(|p| p.occurrence.instance_id == first)
+                .unwrap()
+                .state,
+            AudioProcessorCursorState::Active { .. }
+        ));
+        assert_eq!(
+            before_cursors
+                .processors
+                .iter()
+                .find(|p| p.occurrence.instance_id == second)
+                .unwrap()
+                .state,
+            AudioProcessorCursorState::Failed
+        );
+        let first_enter = before.calls.iter().position(|c| *c == Call::Enter(0)).unwrap();
+        let failed_enter = before.calls.iter().rposition(|c| *c == Call::Enter(0)).unwrap();
+        assert!(first_enter < failed_enter);
+        assert!(
+            before.calls[first_enter + 1..failed_enter].contains(&Call::Bind),
+            "the first target bound its original ledger before the second Enter failed"
+        );
+        assert!(before.events.is_empty());
+        let identity = runtime.resource_root_identity();
+        let addresses = [first, second].map(|instance_id| AudioNativeProcessorAddress {
+            root: identity,
+            local: identity,
+            epoch: Some(entry(1, 0).epoch),
+            occurrence: AudioProcessorOccurrence {
+                instance_id,
+                owner: AudioProcessorOccurrenceOwner::Track(sequence.audio_tracks[0].id),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+        });
+        let old_leases = addresses.map(|address| runtime.native_owner_lease(address).ok());
+        for start in [0, 3] {
+            assert!(matches!(
+                runtime.enter_state(entry(2, start)),
+                Err(AudioExecutionError::ProcessorHost(
+                    AudioProcessorHostError::PoisonedInstance
+                ))
+            ));
+            assert_eq!(
+                *probe.lock().unwrap(),
+                before,
+                "no native poll, Enter or Bind"
+            );
+            assert_eq!(cursors(&runtime), before_cursors);
+            assert_eq!(runtime.resource_root_identity(), identity);
+            assert_eq!(
+                addresses.map(|address| runtime.native_owner_lease(address).ok()),
+                old_leases
+            );
+            assert_eq!(
+                source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
+        }
+    }
+}

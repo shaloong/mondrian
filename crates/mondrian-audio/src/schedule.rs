@@ -425,8 +425,9 @@ impl PreparedAudioPlan {
     }
 
     /// Read immutable author targets only; no allocation or native query.
-    /// All-non-CLAP/Builtin scores retain their original public refusal family.
-    pub(crate) fn has_clap_note_targets(program: &CompiledAudioProgram) -> bool {
+    /// Include VST even without Some so its cold refusal precedes dependency IO.
+    /// Other formats keep their original refusal family.
+    pub(crate) fn has_native_note_targets(program: &CompiledAudioProgram) -> bool {
         program.note_lanes.iter().filter(|lane| !lane.notes.is_empty()).any(|lane| {
             program.track_channels.get(&lane.target.track_id).is_some_and(|channel| {
                 channel
@@ -440,13 +441,14 @@ impl PreparedAudioPlan {
                             && matches!(
                                 &processor.definition,
                                 AudioProcessorDefinitionRef::Clap { .. }
+                                    | AudioProcessorDefinitionRef::Vst3 { .. }
                             )
                     })
             })
         })
     }
 
-    /// Preflight the entire new CLAP family before dependency/factory IO.
+    /// Preflight every selected native Note target before dependency/factory IO.
     /// Runtime also requires direct root, no window/precompiled, and the original
     /// ledger receipt. This is not an execution permit or installed ownership.
     pub(crate) fn validate_admitted_root_note_preparation(
@@ -489,9 +491,9 @@ impl PreparedAudioPlan {
                 }
             });
             if !target.is_some_and(|processor| {
-                matches!(
+                prepared_notes::admits_note_format(
                     &processor.definition,
-                    AudioProcessorDefinitionRef::Clap { .. }
+                    program.musical_time_reference,
                 )
             }) {
                 return Err(AudioCompileError::NoteExecutionNotSupported {

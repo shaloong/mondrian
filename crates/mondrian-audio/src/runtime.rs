@@ -1364,17 +1364,18 @@ impl AudioProgramRuntime {
                 }
             }
             program.graph().admit_musical_transport(program.musical_time_reference)?;
-            // A CLAP Note candidate must be scoped and all targets checked before
-            // resolving dependencies or preparing any native factory. The original
-            // all-non-CLAP/Builtin family retains its accepted refusal/accounting.
-            let admitted_note_reservation = if PreparedAudioPlan::has_clap_note_targets(&program) {
+            // Native Note candidates must be scoped and all targets checked
+            // before dependency/factory IO. VST additionally requires Some.
+            // Other formats retain their accepted refusal/accounting.
+            let admitted_note_reservation = if PreparedAudioPlan::has_native_note_targets(&program)
+            {
                 PreparedAudioPlan::validate_admitted_root_note_preparation(&program, contract)?;
                 if depth != 0 || selection.is_some() || prepared_closure.is_some() {
                     let lane = program
                         .note_lanes
                         .iter()
                         .find(|lane| !lane.notes.is_empty())
-                        .expect("observed nonempty CLAP Note candidate");
+                        .expect("observed nonempty native Note candidate");
                     return Err(crate::AudioCompileError::NoteExecutionNotSupported {
                         lane_id: lane.id,
                         processor_id: lane.target.processor_id,
@@ -1794,6 +1795,9 @@ impl AudioProgramRuntime {
         } else if let Some(context) = &self.native_installation.entry_context {
             context.validate(Some(cancellation))?;
         }
+        // A VST Note producer is initial-entry only. Reject before any native
+        // poll, Source/binding revocation, delay reset or ledger mutation.
+        self.session.validate_vst3_note_initial_entry(entry)?;
         self.preflight_native_control()?;
         self.enter_state_admitted(entry, cancellation)
     }

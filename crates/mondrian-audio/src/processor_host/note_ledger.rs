@@ -138,7 +138,6 @@ impl NoteLedger {
             &self.records,
         )?)
     }
-    #[cfg(test)]
     pub(crate) const fn origin(&self) -> Option<LedgerOrigin> {
         self.origin
     }

@@ -532,6 +532,7 @@ impl AudioRenderSession {
 
     /// Reset mutable execution history and enter one fresh continuity epoch.
     pub fn enter_state(&mut self, entry: AudioStateEntry) -> Result<(), AudioExecutionError> {
+        self.validate_vst3_note_initial_entry(entry)?;
         self.validate_note_entry_context(entry, false)?;
         self.processor_host.set_native_entry_context(None, self.native_owner_identity());
         self.preflight_native_control()?;
@@ -560,6 +561,7 @@ impl AudioRenderSession {
         cancellation: Option<&ExecutionCancellationToken>,
     ) -> Result<(), AudioExecutionError> {
         self.validate_state_entry(entry)?;
+        self.validate_vst3_note_initial_entry(entry)?;
         self.processor_host.validate_note_entry(entry)?;
         // State entry can reset several delay/processor instances before one
         // later instance fails. Consume and poison the new epoch first so a
@@ -584,6 +586,13 @@ impl AudioRenderSession {
             alignment_primed: self.public_output_lookahead_frames() == 0,
         };
         Ok(())
+    }
+
+    pub(crate) fn validate_vst3_note_initial_entry(
+        &self,
+        entry: AudioStateEntry,
+    ) -> Result<(), AudioExecutionError> {
+        self.processor_host.validate_vst3_note_initial_entry(self.plan.program(), entry)
     }
 
     pub(crate) fn validate_note_entry_context(

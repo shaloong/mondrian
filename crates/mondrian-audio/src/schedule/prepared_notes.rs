@@ -16,6 +16,16 @@ use mondrian_core::{
 };
 use mondrian_timeline::audio::{AudioNoteTarget, AudioProcessorDefinitionRef};
 
+/// Pure format admission on the actual selected target, before resolver IO.
+/// A VST Note always needs an authored musical reference; CLAP keeps None.
+pub(super) fn admits_note_format(
+    definition: &AudioProcessorDefinitionRef,
+    reference: Option<mondrian_core::MusicalTimeReference>,
+) -> bool {
+    matches!(definition, AudioProcessorDefinitionRef::Clap { .. })
+        || reference.is_some() && matches!(definition, AudioProcessorDefinitionRef::Vst3 { .. })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 pub(crate) enum PreparedNotePhase {
@@ -394,10 +404,7 @@ impl ProjectedNoteScore {
             let (insertion, processor) = matched.ok_or_else(|| {
                 invalid("prepared Note target processor is absent from its Track rack")
             })?;
-            if !matches!(
-                &processor.definition,
-                AudioProcessorDefinitionRef::Clap { .. }
-            ) {
+            if !admits_note_format(&processor.definition, program.musical_time_reference) {
                 return Err(AudioCompileError::NoteExecutionNotSupported {
                     lane_id: lane.lane_id,
                     processor_id: lane.target.processor_id,
