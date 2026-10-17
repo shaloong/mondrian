@@ -1,4 +1,4 @@
-//! Actual Product IPC for a retained VST3 parameter-rescan prefix, without a suffix.
+//! Actual Product IPC for VST3 initial input and a retained parameter-rescan prefix.
 //! Child Ack is not a Source installation or Session recovery. Completed may precede
 //! the deferred main callback; one normal Preserve and an explicit preflight retain A.
 use super::*;
@@ -13,11 +13,11 @@ use std::collections::BTreeMap;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, WaitForSingleObject};
 
-fn mode13_state(gain: f64) -> Vec<u8> {
+fn fixture_state(gain: f64, mode: u32) -> Vec<u8> {
     let mut native = b"MIV1".to_vec();
     native.extend_from_slice(&1_u32.to_le_bytes());
     native.extend_from_slice(&gain.to_le_bytes());
-    native.extend_from_slice(&13_u32.to_le_bytes());
+    native.extend_from_slice(&mode.to_le_bytes());
     let mut state = b"VST3HOST_STATE\0\0".to_vec();
     for word in [1_u32, 20, 20] {
         state.extend_from_slice(&word.to_le_bytes());
@@ -44,7 +44,7 @@ fn assert_captured_mode13(state: &[u8]) {
     for (at, expected) in [(16, 1_u32), (20, 24), (24, 44)] {
         assert_eq!(&state[at..at + 4], &expected.to_le_bytes());
     }
-    let expected = mode13_state(0.75);
+    let expected = fixture_state(0.75, 13);
     assert_eq!(&state[28..48], &expected[28..48]);
     assert_eq!(&state[52..72], &expected[48..68]);
     let calls = u32::from_le_bytes(state[48..52].try_into().unwrap());
@@ -78,7 +78,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
         processing_mode: AudioProcessingMode::Offline,
         ..test_render_contract()
     };
-    let state = mode13_state(0.375);
+    let state = fixture_state(0.375, 13);
     let registration = probe_vst3_plugin_registration(
         &helper,
         &binary,
@@ -367,4 +367,148 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
     );
     assert_eq!(exit, 0);
     // Same observed child OS Exit0 within 2s; not proof of 100ms graceful exit.
+}
+
+#[test]
+#[ignore = "current normal Product IPC18 and owned initial-values mode14 DLL; no native counter or Runtime recovery qualification"]
+fn installed_vst3_initial_input_crosses_product_poll_without_authored_lanes() {
+    use NativeAudioAuthorDeliveryState as Delivery;
+    use NativeAudioObservationConsumption as Consumption;
+
+    let material = |name| {
+        let path = PathBuf::from(std::env::var_os(name).expect("explicit current native material"));
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = material("MONDRIAN_VST3_TEST_HELPER");
+    let binary = material("MONDRIAN_VST3_INITIAL_VALUES_TEST_PLUGIN");
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        ..test_render_contract()
+    };
+    // The component independently restores .375; only the controller's actual
+    // restore callback reports .75. No setter or authored lane delivers it.
+    let state = fixture_state(0.375, 14);
+    let registration = probe_vst3_plugin_registration(
+        &helper,
+        &binary,
+        "61921CF43A2B4A68AE5AE08241D85E22",
+        render,
+        Some(&state),
+    )
+    .expect("actual restored mode14 Product probe");
+    assert_eq!(registration.main_audio_input, Vst3MainAudioInput::Present);
+    assert!(registration.auxiliary_inputs.buses.is_empty());
+    assert!(registration.event_bus_contract.inputs.is_empty());
+    assert!(registration.event_bus_contract.outputs.is_empty());
+    assert_eq!(registration.parameters.len(), 1);
+    assert_eq!(registration.parameters[0].id, 0);
+    assert!(!registration.parameters[0].read_only);
+    let definition = AudioProcessorDefinitionRef::Vst3 {
+        class_id: registration.class_id.clone(),
+        vendor: registration.vendor.clone(),
+        schema_version: 1,
+        binary_sha256: Some(registration.binary_sha256),
+    };
+    let resolver = Vst3AudioProcessorSpecResolver::new(helper, [registration]).unwrap();
+    let spec = resolver
+        .resolve(AudioProcessorPrepareRequest::new(
+            AudioProcessorOccurrence {
+                instance_id: AudioProcessorInstanceId::new(),
+                owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: AudioProcessorInsertionPoint::PreFader,
+            },
+            &definition,
+            &BTreeMap::new(),
+            Some(&state),
+            render,
+        ))
+        .expect("actual spec with initial native input and no author automation");
+    assert!(
+        spec.parameter_ids.is_empty(),
+        "no authored lane supplies .75"
+    );
+    assert!(spec.note_input_contract.ports.is_empty());
+    assert!(spec.musical_time_reference.is_none());
+    let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+    let mut processor = factory.create().unwrap();
+    let object = processor.native_audio_object_observation().unwrap().unwrap();
+    assert_ne!(object.process_id().get(), std::process::id());
+    // SAFETY: this authenticated live child identity came from its retained
+    // supervisor. This handle has only query/synchronize rights.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, object.process_id().get()) };
+    assert!(!raw.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+        258
+    );
+    processor.enter_state(73).unwrap();
+    let binding = NativeAudioObjectBindRequest {
+        binding: AudioProcessorBindingId::new(),
+        expected_object: object,
+    };
+    let NativeAudioObjectBindOutcome::Bound(bound) =
+        processor.bind_native_audio_object(binding).unwrap()
+    else {
+        panic!("the same initialized object must bind");
+    };
+    assert_eq!((bound.binding(), bound.object()), (binding.binding, object));
+    let initial = processor.poll_native_observations(Consumption::Preserve).unwrap();
+    assert_eq!(initial.object, Some(object));
+    assert!(initial.pending_reprepare.is_none());
+    let initial = initial.author.unwrap();
+    assert!(
+        initial.source.closed_empty(),
+        "initial handoff consumed its Source"
+    );
+    assert_eq!(initial.delivery, Delivery::Preserved);
+    for _ in 0..2 {
+        // The first bridge must deliver the original initial COM input. The
+        // second retains the old NoPending/GUI replay contract and may process;
+        // this IPC lane exposes no native call/point counter.
+        let observed =
+            processor.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+        assert_eq!(observed.object, Some(object));
+        assert!(observed.pending_reprepare.is_none());
+        let observed = observed.author.unwrap();
+        assert_eq!(observed.source, initial.source);
+        assert!(observed.source.closed_empty());
+        assert_eq!(observed.delivery, Delivery::Preserved);
+    }
+    for start in [73, 77] {
+        let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: Vec::new() };
+        processor
+            .process(
+                block_context(start),
+                &mut audio,
+                AudioParameterEventBatch::new(start, 4, &[], &[], &[]),
+            )
+            .expect("contiguous PCM after the original initial input was delivered");
+        assert_eq!(
+            audio.main, [0.75; 8],
+            "no authored event can replace a dropped initial point"
+        );
+        let observed = processor.poll_native_observations(Consumption::Preserve).unwrap();
+        assert_eq!(observed.object, Some(object));
+        assert!(observed.pending_reprepare.is_none());
+        let observed = observed.author.unwrap();
+        assert_eq!(observed.source, initial.source);
+        assert_eq!(observed.delivery, Delivery::Preserved);
+    }
+    assert!(processor.preflight_reprepare().unwrap().is_none());
+    drop(processor);
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2_000) },
+        0
+    );
+    let mut exit = u32::MAX;
+    assert_ne!(
+        unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) },
+        0
+    );
+    assert_eq!(exit, 0);
+    // Same-child OS Exit0 within 2s is not a new 100ms graceful-exit proof.
 }
