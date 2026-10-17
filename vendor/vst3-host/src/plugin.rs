@@ -1158,7 +1158,8 @@ pub enum PendingParameterFlushRefusal {
     SourceValuesPending,
     /// Real editor-to-DSP feedback must not be merged into this operation.
     DspFeedbackPending,
-    /// The existing input COM owner already exposes a different batch.
+    /// Active COM input is foreign, mixed with a host batch, or no longer the
+    /// unchanged validated initial handoff. It was not consumed.
     ExistingInput,
     /// Uncollected native output cannot be replaced by this operation.
     ExistingOutput,
@@ -1174,7 +1175,8 @@ pub enum PendingParameterFlushRefusal {
 /// Neither success nor an empty queue grants author/install or DSP permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingParameterFlushOutcome {
-    /// The original pending Vec is empty after the pure processing/ingress checks.
+    /// Neither the original pending Vec nor a certified active initial COM
+    /// handoff has work after the pure owner/processing/ingress checks.
     NoPending,
     /// One native zero-sample call consumed the validated original pending batch.
     Flushed,
@@ -1220,11 +1222,12 @@ impl PluginAudioProcessing<'_> {
         self.internal.queue_parameter_at(id, value, sample_offset)
     }
 
-    /// Flush the complete original pending host-parameter batch at offset zero.
+    /// Flush the complete original pending host batch, or an unchanged initial
+    /// handoff already published in the sole input COM owner, at offset zero.
     ///
     /// This is one native zero-sample call with no audio or input events. It
     /// preserves signal context, source callbacks, controller synchronization
-    /// and Note owners. Nonzero offsets and mixed editor/COM input are refused
+    /// and Note owners. Uncertified COM, nonzero offsets and mixed input are refused
     /// without clamping or replay. Once native code is called, input is consumed
     /// on both success and failure; a later error is never a pure refusal.
     /// Temporary COM projection storage is cold allocation, not an RT guarantee.

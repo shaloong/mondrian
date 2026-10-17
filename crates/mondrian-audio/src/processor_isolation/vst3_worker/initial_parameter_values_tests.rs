@@ -1374,3 +1374,131 @@ fn native_pending_zero_offset_flush_uses_same_worker_and_preserves_source() {
         // the SDK real-COM controls independently assert native call count zero.
     }
 }
+
+#[test]
+#[ignore = "requires rebuilt owned mode14 SDK fixture under native Job runner"]
+fn native_initial_com_origin_survives_entry_and_joined_worker_poll() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    // This is a real SDK DLL + joined Worker control, not Product IPC evidence.
+    // Both sides of first Enter must use actual COM provenance, not phase rights.
+    for enter_before_flush in [false, true] {
+        let mut worker = prepare(0.375, 14);
+        let object = worker.native_audio_object_observation().unwrap().unwrap();
+        let before = audit(&worker); // Only before initial COM publication.
+        assert_eq!(before.process, 0);
+        let initial_bytes = worker.plugin.as_ref().unwrap().save_state().unwrap();
+        assert_eq!(
+            f64::from_le_bytes(initial_bytes[36..44].try_into().unwrap()),
+            0.375
+        );
+        let seed = worker.payload.state.clone();
+        let mut binding = crate::NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            expected_object: object,
+        };
+        assert!(matches!(
+            worker.bind_native_audio_object(binding).unwrap(),
+            crate::NativeAudioObjectBindOutcome::Bound(_)
+        ));
+        if enter_before_flush {
+            worker.enter_state(73).unwrap();
+            binding.binding = mondrian_core::AudioProcessorBindingId::new();
+            assert!(matches!(
+                worker.bind_native_audio_object(binding).unwrap(),
+                crate::NativeAudioObjectBindOutcome::Bound(_)
+            ));
+        }
+        let cursor = worker.last_end;
+        let phase = worker.initial_signal_phase;
+        let source = rescan_source_snapshot(&worker);
+        assert!(source.0.closed_empty());
+        assert_eq!(source.0.pending_dsp_feedback_values(), 0);
+        assert!(worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap());
+        assert!(matches!(
+            worker.plugin.as_ref().unwrap().save_state(),
+            Err(vst3_host::Error::PendingParameterDelivery)
+        ));
+        // Reproduce the actual command-service ordering: scoped DSP operation,
+        // explicit join, then the original full owner's Source observation.
+        let poll = |worker: &mut Vst3Worker| {
+            {
+                let mut roles = worker.split_native_processing().unwrap();
+                std::thread::scope(|scope| {
+                    let processing = &mut roles.processing;
+                    assert_eq!(
+                        scope
+                            .spawn(move || processing.flush_native_author_parameters())
+                            .join()
+                            .unwrap()
+                            .unwrap(),
+                        crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+                    );
+                });
+            }
+            let observed =
+                worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+            assert_eq!(observed.object, Some(object));
+            let author = observed.author.unwrap();
+            assert_eq!(
+                (
+                    author.source.pending_events(),
+                    author.source.pending_dsp_feedback_values()
+                ),
+                (0, 0)
+            );
+            assert!(matches!(author.delivery, Delivery::Preserved));
+        };
+        poll(&mut worker);
+        let after = audit(&worker);
+        assert_eq!(
+            (after.process, after.setters, after.wrong_thread),
+            (before.process + 1, before.setters, 0)
+        );
+        assert_eq!(worker.last_end, cursor);
+        assert_eq!(worker.initial_signal_phase, phase);
+        assert_eq!(rescan_source_snapshot(&worker), source);
+        assert_eq!(worker.payload.state, seed);
+        assert_eq!(
+            worker.native_audio_object_observation().unwrap(),
+            Some(object)
+        );
+        assert_eq!(worker.native_binding.unwrap().binding(), binding.binding);
+        assert!(!worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap());
+        // NoPending is not a new skip permission: the complete second Worker
+        // Poll still performs old Source replay's real zero-sample native call.
+        poll(&mut worker);
+        assert_eq!(audit(&worker).process, after.process + 1);
+        assert_eq!(worker.last_end, cursor);
+        assert_eq!(rescan_source_snapshot(&worker), source);
+        if !enter_before_flush {
+            worker.enter_state(73).unwrap();
+        }
+        let render = worker.render;
+        let ids = [worker.payload.parameters[0].parameter_id().unwrap()];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let mut pcm = vec![1.0; 8];
+        worker
+            .process(IsolatedAudioProcessorWorkerBlock::new(
+                73,
+                4,
+                render,
+                &mut pcm,
+                &auxiliary,
+                &[],
+                &ids,
+                &[],
+            ))
+            .unwrap();
+        assert_eq!(pcm, vec![0.75; 8]);
+        assert_eq!(worker.last_end, Some(77));
+        assert_eq!(audit(&worker).process, after.process + 2);
+        assert_eq!(
+            worker.native_audio_object_observation().unwrap(),
+            Some(object)
+        );
+        assert_eq!(rescan_source_snapshot(&worker), source);
+    }
+}

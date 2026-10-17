@@ -587,3 +587,142 @@ fn native_mode13_invalid_unarmed_and_missing_handler_setters_do_not_fake_rescans
     assert_eq!(after.last_observed, 0.75_f64.to_bits());
     native.stop_processing().unwrap();
 }
+
+#[test]
+#[ignore = "requires rebuilt owned mode14 initial-values DLL under native lab runner"]
+fn native_initial_com_origin_flushes_real_handoff_without_context_or_source_replay() {
+    use crate::plugin::PendingParameterFlushOutcome as Outcome;
+    let mut native = load_late_rescan_fixture(14);
+    native.start_processing().unwrap();
+    let owner = native.native_editor_attachment_owner();
+    let before = late_rescan_audit(&native, 14); // Before initial input is published.
+    assert_eq!(before.component_gain, 0.375_f64.to_bits());
+    assert_eq!(before.controller_gain, 0.75_f64.to_bits());
+    assert_eq!(before.process, 0);
+    let mut frame = crate::controller_parameters::ControllerParameterQueryFrame::default();
+    let mut current = InitialParameterValue::default();
+    assert_eq!(
+        native
+            .visit_controller_parameters_bounded(1, &mut frame, &mut |index, value| {
+                assert_eq!(index, 0);
+                current = InitialParameterValue {
+                    id: value.id(),
+                    normalized: value.normalized(),
+                };
+                Ok(())
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!((current.id, current.normalized), (0, 0.75));
+    let source = native.editor_event_source_status().unwrap();
+    assert_eq!(
+        (
+            source.pending_events(),
+            source.pending_dsp_feedback_values()
+        ),
+        (1, 1)
+    );
+    let cohort = native.pending_restart_cohort().unwrap();
+    assert!(!cohort.pending());
+    native
+        .handoff_initial_parameter_input(
+            cohort,
+            source,
+            &[current],
+            InitialParameterStorage::for_parameter_count(1).unwrap(),
+        )
+        .unwrap();
+    let source = native.editor_event_source_status().unwrap();
+    assert!(source.closed_empty());
+    assert!(native.pending_param_changes.is_empty());
+    assert!(native.pending_processor_parameter_input().unwrap());
+    assert!(matches!(
+        native.save_state(),
+        Err(Error::PendingParameterDelivery)
+    ));
+    native
+        .process_fields()
+        .set_process_timeline_context(crate::audio::ProcessTimelineContext {
+            sample_position: -19,
+            sample_rate: 48_000,
+        })
+        .unwrap();
+    let context = native.process_data.as_ref().unwrap().process_context;
+    let input_pointer = native
+        .process_data
+        .as_ref()
+        .unwrap()
+        .process_data
+        .inputParameterChanges;
+    assert_eq!(
+        native
+            .process_fields()
+            .flush_pending_parameter_changes()
+            .unwrap(),
+        Outcome::Flushed
+    );
+    assert_eq!(native.native_editor_attachment_owner(), owner);
+    assert_eq!(native.editor_event_source_status().unwrap(), source);
+    assert_eq!(native.pending_restart_cohort(), Some(cohort));
+    assert_eq!(
+        native
+            .process_data
+            .as_ref()
+            .unwrap()
+            .process_data
+            .inputParameterChanges,
+        input_pointer
+    );
+    let after_context = native.process_data.as_ref().unwrap().process_context;
+    assert_eq!(
+        (
+            after_context.projectTimeSamples,
+            after_context.continousTimeSamples,
+            after_context.state
+        ),
+        (
+            context.projectTimeSamples,
+            context.continousTimeSamples,
+            context.state
+        )
+    );
+    assert!(!native.pending_processor_parameter_input().unwrap());
+    let after = late_rescan_audit(&native, 14);
+    assert_eq!(after.component_gain, 0.75_f64.to_bits());
+    assert_eq!(after.controller_gain, 0.75_f64.to_bits());
+    assert_eq!(
+        (after.process, after.setters, after.wrong_thread),
+        (before.process + 1, before.setters, 0)
+    );
+    assert_eq!(
+        native
+            .process_fields()
+            .flush_pending_parameter_changes()
+            .unwrap(),
+        Outcome::NoPending
+    );
+    assert_eq!(late_rescan_audit(&native, 14).process, after.process);
+    let mut buffers = BusAudioBuffers::new(
+        &native.current_audio_bus_layout().unwrap(),
+        4,
+        native.sample_rate,
+    );
+    for bus in &mut buffers.inputs {
+        for channel in &mut bus.channels {
+            channel.fill(1.0);
+        }
+    }
+    native
+        .process_fields()
+        .process_bus_audio(&mut buffers)
+        .unwrap();
+    for bus in &buffers.outputs {
+        for channel in &bus.channels {
+            assert_eq!(channel, &[0.75; 4]);
+        }
+    }
+    assert_eq!(late_rescan_audit(&native, 14).process, after.process + 1);
+    assert_eq!(native.editor_event_source_status().unwrap(), source);
+    assert_eq!(native.native_editor_attachment_owner(), owner);
+}

@@ -5,7 +5,7 @@ use crate::plugin::StateContext;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
@@ -3784,6 +3784,7 @@ impl PendingParameterProjection {
             queues.push(ComWrapper::new(ParameterValueQueue {
                 param_id: AtomicU32::new(value.id),
                 points: Mutex::new(points),
+                origin: AtomicU8::new(ParameterQueueOrigin::Ordinary as u8),
             }));
         }
         let used = queues.len();
@@ -3841,6 +3842,88 @@ impl ParameterChanges {
             return Err(Failure::RestartRequired);
         }
         Ok(())
+    }
+
+    /// An empty host Vec can also have an actual initial handoff waiting in
+    /// these original COM queues. No other active COM producer gains this right.
+    /// With no active queues, only health is checked so old Source replay remains
+    /// responsible for legitimate Value callbacks and feedback.
+    pub(super) fn initial_pending_flush_input(
+        &self,
+        handler: Option<&ComponentHandler>,
+    ) -> Result<bool, crate::plugin::PendingParameterFlushRefusal> {
+        use crate::plugin::{
+            NativeEditorEvent, ParameterEditKind, PendingParameterFlushRefusal as Failure,
+        };
+        let source = handler
+            .map(|handler| handler.editor_events.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let cohort = handler.map(ComponentHandler::pending_restart_cohort);
+        let feedback = handler
+            .map(|handler| handler.parameter_changes.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let queues = self.queues.try_lock().map_err(pending_flush_lock_refusal)?;
+        if source
+            .as_ref()
+            .is_some_and(|source| source.failure.is_some())
+        {
+            return Err(Failure::InvalidSource);
+        }
+        let used = self.used.load(Ordering::Relaxed);
+        if used > queues.len() || used > crate::initial_parameter_input::MAX_INITIAL_PARAMETERS {
+            return Err(Failure::ExistingInput);
+        }
+        if used != 0 {
+            for (index, queue) in queues[..used].iter().enumerate() {
+                let points = queue
+                    .points
+                    .try_lock()
+                    .map_err(pending_flush_lock_refusal)?;
+                if !queue.has_initial_origin()
+                    || points.len() != 1
+                    || points[0].0 != 0
+                    || !points[0].1.is_finite()
+                    || !(0.0..=1.0).contains(&points[0].1)
+                    || queues[..index]
+                        .iter()
+                        .any(|prior| prior.param_id() == queue.param_id())
+                {
+                    return Err(Failure::ExistingInput);
+                }
+            }
+            let source = source.as_ref().ok_or(Failure::InvalidSource)?;
+            if source.events.iter().any(|event| {
+                matches!(event,
+                NativeEditorEvent::Parameter(edit) if edit.kind == ParameterEditKind::ValueChange)
+            }) {
+                return Err(Failure::SourceValuesPending);
+            }
+            if feedback
+                .as_ref()
+                .is_some_and(|feedback| !feedback.is_empty())
+            {
+                return Err(Failure::DspFeedbackPending);
+            }
+            // A retained addPoint invalidates before acquiring its point lock.
+            // This is not an atomicity claim for writes after final admission.
+            if queues[..used]
+                .iter()
+                .any(|queue| !queue.has_initial_origin())
+            {
+                return Err(Failure::ExistingInput);
+            }
+        }
+        if handler.map(ComponentHandler::pending_restart_cohort) != cohort {
+            return Err(Failure::SourceChanged);
+        }
+        if cohort
+            .is_some_and(|cohort| cohort.exhausted() || !matches!(cohort.flags().bits(), 0 | 4))
+        {
+            return Err(Failure::RestartRequired);
+        }
+        Ok(used != 0)
     }
 
     /// With None, inspect only. With Some, all fallible checks finish before
@@ -4011,8 +4094,9 @@ impl ParameterChanges {
     }
 
     /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
-    /// Only resets the active count — the queue objects are retained for reuse (their points are
-    /// cleared when a slot is recycled), so this allocates and drops nothing.
+    /// Only resets the active count — inactive queues confer no initial-input
+    /// right. Every reactivation invalidates their historical origin first.
+    /// Queue objects/points remain retained, so this allocates and drops nothing.
     pub fn clear_all(&self) {
         self.used.store(0, Ordering::Relaxed);
     }
@@ -4109,6 +4193,7 @@ impl IParameterChangesTrait for ParameterChanges {
                 // Reuse an already-active queue for this parameter if present.
                 for (i, queue) in queues[..used].iter().enumerate() {
                     if queue.param_id() == param_id {
+                        queue.invalidate_initial_origin();
                         if !index.is_null() {
                             *index = i as i32;
                         }
@@ -4164,12 +4249,21 @@ impl IParameterChangesTrait for ParameterChanges {
     }
 }
 
+// One queue owns its provenance with its actual point projection. No parent
+// batch flag, Source copy or retained back-pointer is needed.
+#[repr(u8)]
+enum ParameterQueueOrigin {
+    Ordinary,
+    InitialHandoff,
+}
+
 // Parameter Value Queue implementation
 pub struct ParameterValueQueue {
     // Atomic so a pooled queue can be re-targeted to a different parameter (see `reset`) without
     // dropping and reallocating the ComWrapper each block.
     pub param_id: AtomicU32,
     pub points: Mutex<Vec<(i32, f64)>>, // sample offset, value
+    origin: AtomicU8,
 }
 
 impl ParameterValueQueue {
@@ -4188,7 +4282,26 @@ impl ParameterValueQueue {
         Self {
             param_id: AtomicU32::new(param_id),
             points: Mutex::new(Vec::new()),
+            origin: AtomicU8::new(ParameterQueueOrigin::Ordinary as u8),
         }
+    }
+
+    fn has_initial_origin(&self) -> bool {
+        self.origin.load(Ordering::Acquire) == ParameterQueueOrigin::InitialHandoff as u8
+    }
+
+    fn invalidate_initial_origin(&self) {
+        self.origin
+            .store(ParameterQueueOrigin::Ordinary as u8, Ordering::Release);
+    }
+
+    /// Only the final successful initial publication may call this, while the
+    /// original input pool is locked and before its active count is published.
+    fn publish_initial_origin(&self) {
+        self.origin.store(
+            ParameterQueueOrigin::InitialHandoff as u8,
+            Ordering::Release,
+        );
     }
 
     /// This queue's current parameter id.
@@ -4200,6 +4313,7 @@ impl ParameterValueQueue {
     /// `points` Vec's capacity). Used when recycling a queue object for a different parameter so
     /// the steady-state path allocates nothing.
     fn reset(&self, param_id: u32) {
+        self.invalidate_initial_origin();
         self.param_id.store(param_id, Ordering::Relaxed);
         if let Ok(mut points) = self.points.lock() {
             points.clear();
@@ -4209,6 +4323,7 @@ impl ParameterValueQueue {
     /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
     /// COM `addPoint`).
     fn insert_point(&self, sample_offset: i32, value: f64) {
+        self.invalidate_initial_origin();
         if let Ok(mut points) = self.points.lock() {
             // Later host input overrides an earlier initialization baseline.
             // The separate plugin COM addPoint method is unchanged.
@@ -4260,6 +4375,7 @@ impl IParamValueQueueTrait for ParameterValueQueue {
     }
 
     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
+        self.invalidate_initial_origin();
         let mut points = self.points.lock().unwrap_or_else(|p| p.into_inner());
 
         // Find insertion point

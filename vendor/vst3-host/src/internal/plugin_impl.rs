@@ -6678,6 +6678,11 @@ impl PluginProcessFields<'_> {
         use crate::plugin::{
             PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Failure,
         };
+        #[derive(Clone, Copy)]
+        enum Input {
+            Vector,
+            Initial,
+        }
         let preflight = (|| {
             if !self.is_active || !self.is_processing {
                 return Err(Failure::NotProcessing);
@@ -6732,11 +6737,14 @@ impl PluginProcessFields<'_> {
             self.output_events
                 .require_collected_output()
                 .map_err(pending_flush_output_refusal)?;
+            if self.pending_param_changes.is_empty() {
+                return data
+                    .input_param_changes
+                    .initial_pending_flush_input(self.component_handler.as_deref())
+                    .map(|initial| initial.then_some(Input::Initial));
+            }
             data.input_param_changes
                 .require_empty_pending_flush_input(self.component_handler.as_deref())?;
-            if self.pending_param_changes.is_empty() {
-                return Ok(false);
-            }
             if self.pending_param_changes.len() > MAX_PENDING_PARAM_CHANGES
                 || self.pending_param_changes.capacity() > MAX_PENDING_PARAM_CHANGES
                 || self.pending_param_changes.iter().any(|change| {
@@ -6749,19 +6757,22 @@ impl PluginProcessFields<'_> {
             }
             data.input_param_changes
                 .pending_flush_input(self.component_handler.as_deref(), None)?;
-            Ok(true)
+            Ok(Some(Input::Vector))
         })();
-        match preflight {
-            Ok(false) => return Ok(Outcome::NoPending),
+        let input = match preflight {
+            Ok(None) => return Ok(Outcome::NoPending),
             Err(reason) => return Ok(Outcome::Refused(reason)),
-            Ok(true) => {}
-        }
-        let mut candidate = match PendingParameterProjection::prepare(
-            self.pending_param_changes,
-            MAX_PENDING_PARAM_CHANGES,
-        ) {
-            Ok(candidate) => candidate,
-            Err(reason) => return Ok(Outcome::Refused(reason)),
+            Ok(Some(input)) => input,
+        };
+        let mut candidate = match input {
+            Input::Initial => None,
+            Input::Vector => match PendingParameterProjection::prepare(
+                self.pending_param_changes,
+                MAX_PENDING_PARAM_CHANGES,
+            ) {
+                Ok(candidate) => Some(candidate),
+                Err(reason) => return Ok(Outcome::Refused(reason)),
+            },
         };
         // Allocation may have allowed a later producer to arrive. Nothing has
         // been published: recheck actual ingress and the original owners.
@@ -6786,13 +6797,24 @@ impl PluginProcessFields<'_> {
         }
         let saved_data = data.process_data;
         let saved_context = data.process_context;
-        if let Err(reason) = data
-            .input_param_changes
-            .pending_flush_input(self.component_handler.as_deref(), Some(&mut candidate))
-        {
+        let admitted = match input {
+            Input::Vector => data
+                .input_param_changes
+                .pending_flush_input(self.component_handler.as_deref(), candidate.as_mut()),
+            Input::Initial => match data
+                .input_param_changes
+                .initial_pending_flush_input(self.component_handler.as_deref())
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(Failure::SourceChanged),
+                Err(reason) => Err(reason),
+            },
+        };
+        if let Err(reason) = admitted {
             return Ok(Outcome::Refused(reason));
         }
-        // Publication is followed only by infallible assignments and one FFI.
+        // Publication/admission is followed only by infallible assignments and one FFI.
+        // Initial input keeps the same original COM pool and points throughout.
         // No generic chunk/GUI/event routing or transport advancement is used.
         data.process_data.numSamples = 0;
         data.process_data.numInputs = 0;
@@ -11064,6 +11086,250 @@ mod checked_native_note_tests {
                 .map(|p| (p.id, p.sample_offset, p.value.to_bits()))
                 .collect(),
         )
+    }
+
+    fn initial_flush_fixture() -> Fixture {
+        use crate::initial_parameter_input::{InitialParameterStorage, InitialParameterValue};
+        let mut fixture = Fixture::new();
+        let handler = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(
+            Vec::with_capacity(16),
+        ))));
+        for (id, value) in [(7, 0.75), (3, 0.25)] {
+            assert_eq!(unsafe { handler.performEdit(id, value) }, kResultOk);
+        }
+        let source = handler.editor_event_source_status();
+        let cohort = handler.pending_restart_cohort();
+        handler
+            .handoff_initial_parameters(
+                &fixture.data.as_ref().unwrap().input_param_changes,
+                cohort,
+                source,
+                &[
+                    InitialParameterValue {
+                        id: 7,
+                        normalized: 0.75,
+                    },
+                    InitialParameterValue {
+                        id: 3,
+                        normalized: 0.25,
+                    },
+                ],
+                InitialParameterStorage::for_parameter_count(2).unwrap(),
+            )
+            .unwrap();
+        assert!(handler.editor_event_source_status().closed_empty());
+        assert!(fixture.parameters.is_empty());
+        assert!(fixture
+            .data
+            .as_ref()
+            .unwrap()
+            .input_param_changes
+            .has_active_points()
+            .unwrap());
+        fixture.handler = Some(handler);
+        fixture
+    }
+
+    #[test]
+    fn pending_parameter_flush_consumes_only_certified_initial_com_once() {
+        use crate::plugin::PendingParameterFlushOutcome as Outcome;
+        for failed in [false, true] {
+            let mut fixture = initial_flush_fixture();
+            let input = fixture.data.as_ref().unwrap().input_param_changes.clone();
+            let retained = input.queues.lock().unwrap()[0]
+                .to_com_ptr::<IParamValueQueue>()
+                .unwrap();
+            assert_eq!(unsafe { input.getParameterCount() }, 2);
+            assert_eq!(unsafe { input.getParameterData(0) }, retained.as_ptr());
+            // Actual COM reads preserve the initial projection's provenance.
+            assert_eq!(unsafe { retained.getParameterId() }, 7);
+            assert_eq!(unsafe { retained.getPointCount() }, 1);
+            let mut offset = -1;
+            let mut value = 0.0;
+            assert_eq!(
+                unsafe { retained.getPoint(0, &mut offset, &mut value) },
+                kResultOk
+            );
+            assert_eq!((offset, value), (0, 0.75));
+            let before = pending_flush_snapshot(&fixture);
+            let source = fixture
+                .handler
+                .as_ref()
+                .unwrap()
+                .editor_event_source_status();
+            let cohort = fixture.handler.as_ref().unwrap().pending_restart_cohort();
+            if failed {
+                fixture.fail_call.store(1, Ordering::Relaxed);
+            }
+            let result = fixture.fields().flush_pending_parameter_changes();
+            if failed {
+                assert!(matches!(result, Err(Error::ProcessFailed(code)) if code == kResultFalse));
+            } else {
+                assert_eq!(result.unwrap(), Outcome::Flushed);
+            }
+            assert_eq!(pending_flush_snapshot(&fixture), before);
+            assert_eq!(
+                fixture
+                    .handler
+                    .as_ref()
+                    .unwrap()
+                    .editor_event_source_status(),
+                source
+            );
+            assert_eq!(
+                fixture.handler.as_ref().unwrap().pending_restart_cohort(),
+                cohort
+            );
+            assert!(!input.has_active_points().unwrap());
+            assert_eq!(
+                fixture.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::NoPending
+            );
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.calls, 1);
+            assert_eq!(observed.frames, [0]);
+            assert_eq!(
+                observed.parameters,
+                [vec![(7, 0, 0.75_f64.to_bits()), (3, 0, 0.25_f64.to_bits())]]
+            );
+            assert_eq!(observed.native_io, [(0, 0, true, true, true)]);
+            drop(observed);
+            // The retained queue remains a real COM object after consumption.
+            assert_eq!(unsafe { retained.getPointCount() }, 1);
+            input.enqueue(7, 0, 0.5);
+            assert_eq!(
+                fixture.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::Refused(crate::plugin::PendingParameterFlushRefusal::ExistingInput)
+            );
+            assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+        }
+    }
+
+    #[test]
+    fn pending_parameter_flush_initial_provenance_rejects_every_new_producer() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        for case in [
+            "add_point",
+            "add_data",
+            "enqueue",
+            "reactivate",
+            "mixed",
+            "empty",
+            "offset_one",
+            "offset_negative",
+            "nan",
+            "duplicate",
+            "feedback",
+            "point_busy",
+        ] {
+            let mut fixture = initial_flush_fixture();
+            let input = fixture.data.as_ref().unwrap().input_param_changes.clone();
+            assert!(input
+                .initial_pending_flush_input(fixture.handler.as_deref())
+                .unwrap());
+            let retained = input.queues.lock().unwrap()[0]
+                .to_com_ptr::<IParamValueQueue>()
+                .unwrap();
+            let mut expected = Refusal::ExistingInput;
+            match case {
+                "add_point" => {
+                    assert_eq!(unsafe { retained.addPoint(0, 0.875, &mut 0) }, kResultOk);
+                }
+                "add_data" => {
+                    assert!(!unsafe { input.addParameterData(&7, &mut 0) }.is_null());
+                }
+                "enqueue" => input.enqueue(7, 0, 0.875),
+                "reactivate" => {
+                    input.clear_all();
+                    input.enqueue(7, 0, 0.75);
+                }
+                "mixed" => fixture.parameters.push(ParameterChange {
+                    id: 9,
+                    sample_offset: 0,
+                    value: 0.5,
+                }),
+                "empty" => input.queues.lock().unwrap()[0]
+                    .points
+                    .lock()
+                    .unwrap()
+                    .clear(),
+                "offset_one" => input.queues.lock().unwrap()[0].points.lock().unwrap()[0].0 = 1,
+                "offset_negative" => {
+                    input.queues.lock().unwrap()[0].points.lock().unwrap()[0].0 = -1
+                }
+                "nan" => input.queues.lock().unwrap()[0].points.lock().unwrap()[0].1 = f64::NAN,
+                "duplicate" => input.queues.lock().unwrap()[1]
+                    .param_id
+                    .store(7, Ordering::Relaxed),
+                "feedback" => {
+                    assert_eq!(
+                        unsafe { fixture.handler.as_ref().unwrap().performEdit(7, 0.5) },
+                        kResultOk
+                    );
+                    expected = Refusal::SourceValuesPending;
+                }
+                "point_busy" => expected = Refusal::StorageBusy,
+                _ => unreachable!(),
+            }
+            let queue = input.queues.lock().unwrap()[0].clone();
+            let guard = (case == "point_busy").then(|| queue.points.lock().unwrap());
+            let source = fixture
+                .handler
+                .as_ref()
+                .unwrap()
+                .editor_event_source_status();
+            let cohort = fixture.handler.as_ref().unwrap().pending_restart_cohort();
+            let before = pending_flush_snapshot(&fixture);
+            assert_eq!(
+                fixture.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::Refused(expected),
+                "{case}"
+            );
+            assert_eq!(pending_flush_snapshot(&fixture), before, "{case}");
+            assert_eq!(
+                fixture
+                    .handler
+                    .as_ref()
+                    .unwrap()
+                    .editor_event_source_status(),
+                source,
+                "{case}"
+            );
+            assert_eq!(
+                fixture.handler.as_ref().unwrap().pending_restart_cohort(),
+                cohort,
+                "{case}"
+            );
+            assert_eq!(fixture.observed.lock().unwrap().calls, 0, "{case}");
+            drop(guard);
+        }
+    }
+
+    #[test]
+    fn generic_processing_consumes_initial_com_without_reactivating_its_origin() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        let mut fixture = initial_flush_fixture();
+        let input = fixture.data.as_ref().unwrap().input_param_changes.clone();
+        fixture.fields().process_bus_audio(&mut buffers(4)).unwrap();
+        assert!(!input.has_active_points().unwrap());
+        assert_eq!(
+            fixture.fields().flush_pending_parameter_changes().unwrap(),
+            Outcome::NoPending
+        );
+        assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+        let mut index = -1;
+        let queue = unsafe { input.addParameterData(&7, &mut index) };
+        let queue = unsafe { ComRef::from_raw(queue) }.unwrap();
+        assert_eq!(unsafe { queue.addPoint(0, 0.75, &mut index) }, kResultOk);
+        assert_eq!(
+            fixture.fields().flush_pending_parameter_changes().unwrap(),
+            Outcome::Refused(Refusal::ExistingInput)
+        );
+        assert_eq!(fixture.observed.lock().unwrap().calls, 1);
     }
 
     #[test]

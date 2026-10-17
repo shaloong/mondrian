@@ -76,6 +76,9 @@ impl PreparedInput {
             prepared.queues.push(ComWrapper::new(ParameterValueQueue {
                 param_id: AtomicU32::new(value.id),
                 points: Mutex::new(points),
+                origin: std::sync::atomic::AtomicU8::new(
+                    super::ParameterQueueOrigin::Ordinary as u8,
+                ),
             }));
         }
         if !grant.admits(prepared.census()?) {
@@ -265,6 +268,9 @@ impl ComponentHandler {
                 return Err(Failure::CohortChanged);
             }
             std::mem::swap(&mut *old_pool, &mut candidate.queues);
+            for queue in &old_pool[..candidate.used] {
+                queue.publish_initial_origin();
+            }
             input.used.store(candidate.used, Ordering::Relaxed);
             events.events.clear();
             feedback.clear();
@@ -340,6 +346,14 @@ mod tests {
         assert!(!handler.pending_restart_cohort().pending());
         assert!(input.has_active_points().unwrap());
         assert_eq!(input.used.load(Ordering::Relaxed), 1);
+        {
+            let queues = input.queues.lock().unwrap();
+            assert!(queues[0].has_initial_origin());
+            assert!(
+                !queues[1].has_initial_origin(),
+                "unused reserved queues gain no right"
+            );
+        }
         {
             let queues = input.queues.lock().unwrap();
             assert_eq!(*queues[0].points.lock().unwrap(), vec![(0, 0.25)]);
