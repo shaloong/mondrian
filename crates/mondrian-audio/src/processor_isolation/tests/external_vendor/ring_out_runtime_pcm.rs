@@ -96,11 +96,11 @@ fn accept_cold_startup(
         let mut writes = Vec::new();
         for callback in proposal.callbacks() {
             match callback {
-                NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } => {
-                    assert_eq!(flags & !15, 0, "unknown actual rescan flags");
+                NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } => {
+                    assert!(kind.refreshes_values() || values.is_empty());
                     // App native_audio_editor.rs: rescan VALUES refreshes only
                     // existing unkeyed references, never records automation.
-                    if flags & 9 != 0 {
+                    if kind.refreshes_values() {
                         for (id, bits) in values {
                             let parameter =
                                 current.parameters.get(id).expect("actual rescan schema");

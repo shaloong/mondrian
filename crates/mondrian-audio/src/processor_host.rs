@@ -538,7 +538,7 @@ impl PreparedProcessorHost {
                                                 .map_err(|_| crate::AudioProcessorHostError::NativeParameterSourceUnavailable)?,
                                         ),
                                     },
-                                    crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags, values } => {
+                                    crate::NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values } => {
                                         let limit = mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES;
                                         if values.len() > limit || values.capacity() > limit {
                                             return Err(crate::AudioProcessorHostError::InvalidContract(
@@ -566,7 +566,7 @@ impl PreparedProcessorHost {
                                             projected.push((event.parameter, scalar.bits()));
                                         }
                                         mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned {
-                                            flags, values: projected,
+                                            kind, values: projected,
                                         }
                                     },
                                     crate::NativeAudioAuthorEvent::ParameterReferencesCleared { parameter, flags } => mondrian_core::NativeAudioAuthorCallback::ParameterReferencesCleared { parameter, flags },

@@ -166,7 +166,7 @@ mod inline_command_contracts {
         paired_socket(|parent, child| {
             let bytes = [3, 5, 7];
             let seed = ticket(&bytes);
-            for version in [8_u32, 9, 10, 11, 12, 13, 14, 15] {
+            for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
                 let mut old = Vec::new();
                 header(1).write_to(&mut old).expect("one complete old command");
                 old[4..8].copy_from_slice(&version.to_le_bytes());
@@ -183,7 +183,7 @@ mod inline_command_contracts {
                 command.write_to(&mut wire).expect("existing command codec");
                 assert_eq!(
                     &wire[4..12],
-                    &[16, 0, 0, 0, tag as u8, 0, 0, 0],
+                    &[17, 0, 0, 0, tag as u8, 0, 0, 0],
                     "independent version/tag contract"
                 );
                 use std::io::Write;

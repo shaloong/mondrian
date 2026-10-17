@@ -482,14 +482,11 @@ impl AppState {
                         );
                     }
                 }
-                Callback::ParameterValuesRescanned { flags, values } => {
-                    if flags & !15 != 0 {
-                        return Err(failure("native rescan flags changed"));
-                    }
+                Callback::ParameterValuesRescanned { kind, values } => {
                     // Actual get_value facts refresh only an existing unkeyed
                     // reference. No key is created, keyed playback remains the
                     // sole curve, and a preceding Clear remains absent.
-                    if flags & 9 != 0 {
+                    if kind.refreshes_values() {
                         for (id, bits) in values {
                             let schema = context
                                 .schemas

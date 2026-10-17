@@ -14,6 +14,20 @@ use crate::{
     NativeAudioAuthorScalar, NativeAudioAuthorSourceFailure, NativeAudioAuthorSourceStatus,
 };
 
+fn classify_rescan(flags: u32) -> Result<mondrian_core::NativeAudioParameterRescanKind, Refusal> {
+    use mondrian_core::NativeAudioParameterRescanKind as Kind;
+    if flags & !15 != 0 {
+        return Err(Refusal::InvalidSource);
+    }
+    Ok(if flags & 8 != 0 {
+        Kind::ParameterSetAndValues
+    } else if flags & 1 != 0 {
+        Kind::Values
+    } else {
+        Kind::NoValueRefresh
+    })
+}
+
 pub(super) struct PendingDelivery {
     binding: crate::NativeAudioObjectBindRequest,
     prefix: PreparedClapParameterPrefix,
@@ -141,11 +155,9 @@ fn project(
                     Event::ParameterReferencesCleared { parameter, flags }
                 }
                 ClapParameterControlKind::Rescan { flags } => {
-                    if flags & !15 != 0 {
-                        return Err(Refusal::InvalidSource);
-                    }
+                    let kind = classify_rescan(flags)?;
                     let mut values = Vec::new();
-                    if flags & 9 != 0 {
+                    if kind.refreshes_values() {
                         values
                             .try_reserve_exact(parameters.len())
                             .map_err(|_| Refusal::ResourceLimit)?;
@@ -166,7 +178,7 @@ fn project(
                             )?);
                         }
                     }
-                    Event::ParameterValuesRescanned { flags, values }
+                    Event::ParameterValuesRescanned { kind, values }
                 }
             },
         };
@@ -354,7 +366,7 @@ impl ClapWorker {
                         delivery: Delivery::Refused(Refusal::ConfigurationUnavailable),
                     });
                 }
-                if events.iter().any(|event| matches!(event, Event::ParameterValuesRescanned { flags, .. } if flags & 8 != 0)) {
+                if events.iter().any(|event| matches!(event, Event::ParameterValuesRescanned { kind, .. } if *kind == mondrian_core::NativeAudioParameterRescanKind::ParameterSetAndValues)) {
                     // ALL is a schema/state-entry transaction, independent of the
                     // optional State capability. This parameter-only path retains
                     // it for the actual dynamic candidate consumer.
@@ -506,6 +518,138 @@ mod observation_closure_contracts {
             )
             .expect("actual standard output callback accepts");
     }
+    #[test]
+    fn clap_rescan_all_sixteen_masks_keep_raw_source_order_and_query_facts() {
+        use super::super::super::clap_parameter_source::{
+            ClapParameterControlKind, ClapParameterControlSource,
+        };
+        use mondrian_core::{
+            NativeAudioParameterFact, NativeAudioParameterObservationOrigin,
+            NativeAudioParameterRescanKind as Kind, ParameterId,
+        };
+        const EXPECTED: [Kind; 16] = [
+            Kind::NoValueRefresh,
+            Kind::Values,
+            Kind::NoValueRefresh,
+            Kind::Values,
+            Kind::NoValueRefresh,
+            Kind::Values,
+            Kind::NoValueRefresh,
+            Kind::Values,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+            Kind::ParameterSetAndValues,
+        ];
+        let order =
+            Arc::new(super::super::super::clap_parameter_source::ClapParameterSource::new());
+        let controls = ClapParameterControlSource::new(&order);
+        let mut output = ClapOutputEvents::new(&[descriptor(false)], Arc::clone(&order)).unwrap();
+        for flags in 0..16 {
+            assert!(controls.record(ClapParameterControlKind::Rescan { flags }));
+        }
+        let facts = vec![NativeAudioParameterFact {
+            revision: 16,
+            parameter: ParameterId::new("clap.param.17").unwrap(),
+            event_flags: 0,
+            value_bits: Some(0.625_f64.to_bits()),
+            origin: NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 15 },
+            hidden: None,
+            periodic: None,
+            name: None,
+            module: None,
+            info_flags: None,
+            display: None,
+        }];
+        let original_facts = facts.clone();
+        for (index, expected) in EXPECTED.into_iter().enumerate() {
+            let before = order.snapshot();
+            assert_eq!(before.revision, 16);
+            assert_eq!(before.pending_controls as usize, 16 - index);
+            let prefix =
+                PreparedClapParameterPrefix::prepare(Arc::clone(&order), &output, &controls)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                prefix.records.len(),
+                1,
+                "a real rescan closes its own query prefix"
+            );
+            assert!(
+                matches!(&prefix.records[0], ClapParameterRecord::Control(control)
+                if control.sequence == index as u64 + 1 && control.kind == (ClapParameterControlKind::Rescan { flags: index as u32 }))
+            );
+            let events = project(&prefix, &[descriptor(false)], &facts).unwrap();
+            assert_eq!(events.len(), 1);
+            let Event::ParameterValuesRescanned { kind, values } = &events[0] else {
+                panic!("original rescan order");
+            };
+            assert_eq!(*kind, expected);
+            if expected.refreshes_values() {
+                assert_eq!(values.len(), 1);
+                assert_eq!(values[0].parameter.as_str(), "clap.param.17");
+                assert_eq!(values[0].value().unwrap().bits(), 0.625_f64.to_bits());
+            } else {
+                assert!(values.is_empty());
+            }
+            assert_eq!(
+                order.snapshot(),
+                before,
+                "projection cannot retire actual callbacks"
+            );
+            assert!(prefix.acknowledge(&mut output, &controls).is_ok());
+            let after = order.snapshot();
+            assert_eq!(
+                after.revision, 16,
+                "exact Ack never resets the source revision"
+            );
+            assert_eq!(after.pending_controls as usize, 15 - index);
+            let (remaining, count) = controls.snapshot();
+            assert_eq!(count, 15 - index);
+            if index < 15 {
+                assert_eq!(remaining[0].unwrap().sequence, index as u64 + 2);
+            }
+        }
+        assert_eq!(
+            facts, original_facts,
+            "raw query origins are never rewritten to shared kinds"
+        );
+        assert!(
+            PreparedClapParameterPrefix::prepare(Arc::clone(&order), &output, &controls)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn clap_rescan_unknown_bits_refuse_without_consuming_the_original_source() {
+        use super::super::super::clap_parameter_source::{
+            ClapParameterControlKind, ClapParameterControlSource,
+        };
+        for flags in [16, 17, 1 << 31, u32::MAX] {
+            let order =
+                Arc::new(super::super::super::clap_parameter_source::ClapParameterSource::new());
+            let controls = ClapParameterControlSource::new(&order);
+            let output = ClapOutputEvents::new(&[descriptor(false)], Arc::clone(&order)).unwrap();
+            assert!(controls.record(ClapParameterControlKind::Rescan { flags }));
+            let prefix =
+                PreparedClapParameterPrefix::prepare(Arc::clone(&order), &output, &controls)
+                    .unwrap()
+                    .unwrap();
+            let before = order.snapshot();
+            assert_eq!(
+                project(&prefix, &[descriptor(false)], &[]),
+                Err(Refusal::InvalidSource)
+            );
+            assert_eq!(order.snapshot(), before);
+            assert_eq!(controls.snapshot().1, 1);
+        }
+    }
+
     #[test]
     fn clap_raw_transient_output_is_not_a_closed_lifecycle_source() {
         for read_only in [false, true] {

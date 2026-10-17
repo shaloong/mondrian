@@ -167,18 +167,17 @@ fn accept_actual_rescans(
         let mut scanned = 0usize;
         for callback in proposal.callbacks() {
             match callback {
-                NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } => {
-                    assert_eq!(flags & !15, 0, "unknown rescan flags");
+                NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } => {
                     scanned = scanned.checked_add(values.len()).expect("bounded rescan sum");
                     assert!(scanned <= 1024, "original actual rescan value bound");
-                    assert!(flags & 9 != 0 || values.is_empty());
+                    assert!(kind.refreshes_values() || values.is_empty());
                     for (id, bits) in values {
                         let parameter = current.parameters.get(id).expect("unknown rescan schema");
                         let value = f64::from_bits(*bits);
                         assert!(value.is_finite());
                         // Match the App: absent references stay absent; keyed
                         // automation stays sole authority. Unknown IDs refuse.
-                        if flags & 9 != 0
+                        if kind.refreshes_values()
                             && parameter
                                 .automation
                                 .as_ref()
@@ -564,8 +563,8 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
                                         "phase":format!("{phase:?}"), "value_bits":value_bits,
                                         "position":format!("{position:?}"),
                                     }),
-                                    Callback::ParameterValuesRescanned { flags, values } => json!({
-                                        "kind":"ParameterValuesRescanned", "flags":flags,
+                                    Callback::ParameterValuesRescanned { kind, values } => json!({
+                                        "kind":"ParameterValuesRescanned", "rescan_kind":format!("{kind:?}"),
                                         "value_count":values.len(),
                                     }),
                                     Callback::ParameterReferencesCleared { parameter, flags } => json!({

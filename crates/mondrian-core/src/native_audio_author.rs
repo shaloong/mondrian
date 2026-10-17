@@ -31,6 +31,26 @@ pub enum NativeAudioParameterCallbackPhase {
     End,
 }
 
+/// Adapter-classified rescan behavior, independent of any native ABI bitmask.
+/// Original callback flags remain with the adapter's actual retained source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAudioParameterRescanKind {
+    /// No current-value refresh. This includes a native no-change request and
+    /// presentation-only requests; it does not assert that metadata changed.
+    NoValueRefresh,
+    /// Refresh current values without changing the admitted parameter set.
+    Values,
+    /// The parameter-set boundary also requires coherent configuration handling.
+    ParameterSetAndValues,
+}
+
+impl NativeAudioParameterRescanKind {
+    /// Whether this completion can carry main-thread current scalar facts.
+    pub const fn refreshes_values(self) -> bool {
+        !matches!(self, Self::NoValueRefresh)
+    }
+}
+
 /// One observed native author callback. Values retain exact finite Float64 bits;
 /// their numeric type, range and unit still come from the canonical author schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,8 +78,8 @@ pub enum NativeAudioAuthorCallback {
     /// Refresh current values without creating recorded automation points.
     /// Existing keyed curves and absent references remain unchanged.
     ParameterValuesRescanned {
-        /// Original official rescan bits.
-        flags: u32,
+        /// Behavior classified by the originating adapter, not external ABI bits.
+        kind: NativeAudioParameterRescanKind,
         /// Actual finite plain values read on the plugin's main thread.
         values: Vec<(ParameterId, u64)>,
     },
@@ -173,16 +193,15 @@ impl NativeAudioAuthorProposal {
                         return Err(NativeAudioAuthorProjectionError::Callback);
                     }
                 }
-                NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } => {
+                NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } => {
                     scanned_values = scanned_values
                         .checked_add(values.capacity())
                         .ok_or(NativeAudioAuthorProjectionError::Extent)?;
                     if scanned_values > NATIVE_AUDIO_AUTHOR_RESCAN_VALUES {
                         return Err(NativeAudioAuthorProjectionError::Extent);
                     }
-                    if flags & !15 != 0
-                        || values.capacity() > NATIVE_AUDIO_AUTHOR_RESCAN_VALUES
-                        || (flags & 9 == 0 && !values.is_empty())
+                    if values.capacity() > NATIVE_AUDIO_AUTHOR_RESCAN_VALUES
+                        || (!kind.refreshes_values() && !values.is_empty())
                         || values.iter().any(|(id, bits)| {
                             id.storage_owner().capacity() > 255
                                 || !f64::from_bits(*bits).is_finite()
@@ -224,7 +243,7 @@ impl NativeAudioAuthorProposal {
                             | NativeAudioAuthorCallback::GroupStarted
                             | NativeAudioAuthorCallback::GroupFinished
                             | NativeAudioAuthorCallback::ParameterReferencesCleared { .. }
-                    ) && !matches!(callback, NativeAudioAuthorCallback::ParameterValuesRescanned { flags, .. } if flags & 8 == 0)
+                    ) && !matches!(callback, NativeAudioAuthorCallback::ParameterValuesRescanned { kind, .. } if *kind != NativeAudioParameterRescanKind::ParameterSetAndValues)
                 })
         {
             return Err(NativeAudioAuthorProjectionError::IncompleteState);
@@ -351,5 +370,139 @@ impl NativeAudioObservationBatch {
     /// author proposals stay with their private Hosted owner and may reappear.
     pub fn diagnostic_record_count(&self) -> usize {
         self.diagnostics.as_ref().map_or(0, |batch| batch.records().len())
+    }
+}
+
+#[cfg(test)]
+mod typed_rescan_contracts {
+    use super::*;
+    use crate::{
+        AudioPreparedPlanId, AudioProcessorBindingId, AudioProcessorInstanceId,
+        AudioRenderSessionId, NativeAudioEditorInsertion, NativeAudioEditorOccurrenceOwner,
+        ProgramOutputId,
+    };
+    use std::num::NonZeroU64;
+
+    fn project(
+        callbacks: Vec<NativeAudioAuthorCallback>,
+        completion: NativeAudioAuthorCompletion,
+        state: Option<Vec<u8>>,
+    ) -> Result<NativeAudioAuthorProposal, NativeAudioAuthorProjectionError> {
+        NativeAudioAuthorProposal::project(
+            NativeAudioEditorTarget {
+                root_plan: AudioPreparedPlanId::new(),
+                root_session: AudioRenderSessionId::new(),
+                local_plan: AudioPreparedPlanId::new(),
+                local_session: AudioRenderSessionId::new(),
+                instance: AudioProcessorInstanceId::new(),
+                owner: NativeAudioEditorOccurrenceOwner::Output(ProgramOutputId::new()),
+                insertion: NativeAudioEditorInsertion::PreFader,
+                continuity_epoch: None,
+                binding: AudioProcessorBindingId::new(),
+                installed_generation: NonZeroU64::new(1).unwrap(),
+            },
+            SequenceId::new(),
+            7,
+            NativeAudioAuthorBoundaryFacts {
+                completion,
+                open_parameter_edits: 0,
+                group_depth: 0,
+            },
+            callbacks,
+            state,
+        )
+    }
+    fn rescan(kind: NativeAudioParameterRescanKind, count: usize) -> NativeAudioAuthorCallback {
+        let mut values = Vec::with_capacity(count);
+        for index in 0..count {
+            values.push((
+                ParameterId::new(format!("test.value{index}")).unwrap(),
+                0.625_f64.to_bits(),
+            ));
+        }
+        NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values }
+    }
+
+    #[test]
+    fn native_rescan_kind_preserves_value_and_structural_completion_boundaries() {
+        use NativeAudioAuthorCompletion as Completion;
+        use NativeAudioParameterRescanKind as Kind;
+        assert!(!Kind::NoValueRefresh.refreshes_values());
+        assert!(Kind::Values.refreshes_values());
+        assert!(Kind::ParameterSetAndValues.refreshes_values());
+        for (kind, count) in [(Kind::NoValueRefresh, 0), (Kind::Values, 1)] {
+            let proposal =
+                project(vec![rescan(kind, count)], Completion::ParametersOnly, None).unwrap();
+            assert_eq!(proposal.callbacks().len(), 1);
+            assert!(proposal.state().is_none());
+        }
+        assert_eq!(
+            project(
+                vec![rescan(Kind::NoValueRefresh, 1)],
+                Completion::ParametersOnly,
+                None
+            ),
+            Err(NativeAudioAuthorProjectionError::Callback)
+        );
+        assert_eq!(
+            project(
+                vec![rescan(Kind::ParameterSetAndValues, 1)],
+                Completion::ParametersOnly,
+                None
+            ),
+            Err(NativeAudioAuthorProjectionError::IncompleteState)
+        );
+        let proposal = project(
+            vec![rescan(Kind::ParameterSetAndValues, 1)],
+            Completion::CoherentConfiguration,
+            Some(vec![3, 5]),
+        )
+        .unwrap();
+        assert_eq!(proposal.state().unwrap().as_slice(), &[3, 5]);
+        assert_eq!(proposal.completion(), Completion::CoherentConfiguration);
+    }
+
+    #[test]
+    fn native_rescan_kind_keeps_finite_and_aggregate_capacity_guards() {
+        use NativeAudioAuthorCompletion::ParametersOnly;
+        use NativeAudioParameterRescanKind::Values;
+        assert!(project(
+            vec![rescan(Values, 512), rescan(Values, 512)],
+            ParametersOnly,
+            None
+        )
+        .is_ok());
+        assert_eq!(
+            project(
+                vec![rescan(Values, 513), rescan(Values, 513)],
+                ParametersOnly,
+                None
+            ),
+            Err(NativeAudioAuthorProjectionError::Extent)
+        );
+        let mut oversized = Vec::with_capacity(1025);
+        oversized.push((ParameterId::new("test.value").unwrap(), 0.5_f64.to_bits()));
+        assert_eq!(
+            project(
+                vec![NativeAudioAuthorCallback::ParameterValuesRescanned {
+                    kind: Values,
+                    values: oversized,
+                }],
+                ParametersOnly,
+                None
+            ),
+            Err(NativeAudioAuthorProjectionError::Extent)
+        );
+        assert_eq!(
+            project(
+                vec![NativeAudioAuthorCallback::ParameterValuesRescanned {
+                    kind: Values,
+                    values: vec![(ParameterId::new("test.value").unwrap(), f64::NAN.to_bits())],
+                }],
+                ParametersOnly,
+                None
+            ),
+            Err(NativeAudioAuthorProjectionError::Callback)
+        );
     }
 }

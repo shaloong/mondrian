@@ -2171,7 +2171,10 @@ fn native_author_rescan_runtime_poll_preserves_all_1024_ordered_values() {
     let target = publish_native_rescan_probe(
         &mut runtime,
         &state,
-        vec![crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags: 1, values }],
+        vec![crate::NativeAudioAuthorEvent::ParameterValuesRescanned {
+            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
+            values,
+        }],
     );
     let batch = runtime
         .poll_native_observations(&ExecutionCancellationToken::new())
@@ -2187,12 +2190,12 @@ fn native_author_rescan_runtime_poll_preserves_all_1024_ordered_values() {
     );
     assert!(proposal.state().is_none());
     assert_eq!(proposal.callbacks().len(), 1);
-    let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } =
+    let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } =
         &proposal.callbacks()[0]
     else {
         panic!("actual rescan callback kind must be retained")
     };
-    assert_eq!(*flags, 1);
+    assert_eq!(*kind, mondrian_core::NativeAudioParameterRescanKind::Values);
     assert_eq!(
         values.len(),
         1024,
@@ -2219,11 +2222,11 @@ fn native_author_rescan_runtime_poll_preserves_exact_512_plus_512_aggregate() {
     let source = mondrian_core::AudioOwnerInstallationSource::new();
     let (verifier, claim) = install_probe_runtime(&mut runtime, &source);
     let mut events = Vec::with_capacity(2);
-    for flags in [1, 3] {
+    for kind in [mondrian_core::NativeAudioParameterRescanKind::Values; 2] {
         let values = native_rescan_probe_values(512);
         assert_eq!(values.len(), 512);
         assert!(values.capacity() <= 1024);
-        events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags, values });
+        events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
     }
     let target = publish_native_rescan_probe(&mut runtime, &state, events);
     let batch = runtime
@@ -2241,13 +2244,13 @@ fn native_author_rescan_runtime_poll_preserves_exact_512_plus_512_aggregate() {
     assert!(proposal.state().is_none());
     assert_eq!(proposal.callbacks().len(), 2);
     let mut actual_capacity = 0;
-    for (callback, expected_flags) in proposal.callbacks().iter().zip([1, 3]) {
-        let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { flags, values } =
+    for callback in proposal.callbacks() {
+        let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } =
             callback
         else {
             panic!("each original ordered rescan must be retained")
         };
-        assert_eq!(*flags, expected_flags);
+        assert_eq!(*kind, mondrian_core::NativeAudioParameterRescanKind::Values);
         assert_eq!(values.len(), 512);
         actual_capacity += values.capacity();
         for (index, (parameter, bits)) in values.iter().enumerate() {
@@ -2276,7 +2279,10 @@ fn native_author_rescan_runtime_poll_refuses_aggregate_values_above_existing_ext
         let values = native_rescan_probe_values(513);
         assert_eq!(values.len(), 513);
         assert!(values.capacity() <= 1024);
-        events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags: 1, values });
+        events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned {
+            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
+            values,
+        });
     }
     publish_native_rescan_probe(&mut runtime, &state, events);
     let error = runtime
@@ -2308,7 +2314,10 @@ fn native_author_rescan_runtime_poll_refuses_missing_scalar_without_fabricating_
     publish_native_rescan_probe(
         &mut runtime,
         &state,
-        vec![crate::NativeAudioAuthorEvent::ParameterValuesRescanned { flags: 1, values }],
+        vec![crate::NativeAudioAuthorEvent::ParameterValuesRescanned {
+            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
+            values,
+        }],
     );
     assert!(matches!(
         runtime.poll_native_observations(&ExecutionCancellationToken::new()),

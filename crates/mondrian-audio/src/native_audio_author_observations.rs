@@ -214,12 +214,12 @@ pub enum NativeAudioAuthorEvent {
         /// Actual prepared sample rate, never a guessed transport rate.
         sample_rate: u32,
     },
-    /// One actual CLAP rescan and its main-thread current plain-value scan.
+    /// One adapter-classified rescan and its main-thread current plain-value scan.
     /// A scan is not a historic value at the callback's original timestamp.
     ParameterValuesRescanned {
-        /// Original official VALUES/TEXT/INFO/ALL bits.
-        flags: u32,
-        /// Writable actual values, populated only for VALUES or ALL.
+        /// Format-neutral behavior; original raw flags stay in the adapter source.
+        kind: mondrian_core::NativeAudioParameterRescanKind,
+        /// Writable actual values, populated only for kinds that refresh values.
         values: Vec<NativeAudioAuthorParameterEvent>,
     },
     /// Exact CLAP reference-clear request in cross-kind source order. An ID may
@@ -359,6 +359,9 @@ impl NativeAudioAuthorDelivery {
             || (self.completion
                 == mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration)
                 != self.configuration.is_some()
+            || self.events.iter().any(|event| matches!(event,
+                NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values }
+                    if !kind.refreshes_values() && !values.is_empty()))
             || self.completion == mondrian_core::NativeAudioAuthorCompletion::ParametersOnly
                 && self.events.iter().any(|event| {
                     !matches!(
@@ -368,7 +371,7 @@ impl NativeAudioAuthorDelivery {
                             | NativeAudioAuthorEvent::GroupStarted
                             | NativeAudioAuthorEvent::GroupFinished
                             | NativeAudioAuthorEvent::ParameterReferencesCleared { .. }
-                    ) && !matches!(event, NativeAudioAuthorEvent::ParameterValuesRescanned { flags, .. } if flags & 8 == 0)
+                    ) && !matches!(event, NativeAudioAuthorEvent::ParameterValuesRescanned { kind, .. } if *kind != mondrian_core::NativeAudioParameterRescanKind::ParameterSetAndValues)
                 })
             || self.completion != mondrian_core::NativeAudioAuthorCompletion::Nonterminal
                 && (!source.boundaries_closed()

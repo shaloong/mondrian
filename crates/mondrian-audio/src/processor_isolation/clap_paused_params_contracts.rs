@@ -1238,7 +1238,7 @@ fn clap_stateless_clear_values_rescan_retains_order_and_exact_ack_old_api() {
         if parameter.as_str() == "clap.param.17")
     );
     assert!(
-        matches!(&delivery.events[1], Event::ParameterValuesRescanned { flags: 1, values }
+        matches!(&delivery.events[1], Event::ParameterValuesRescanned { kind: mondrian_core::NativeAudioParameterRescanKind::Values, values }
         if values.len() == 1 && values[0].value().map(|value| value.bits()) == Some(0.625_f64.to_bits()))
     );
     assert!(
