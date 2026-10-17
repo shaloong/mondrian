@@ -906,3 +906,360 @@ fn installed_vst3_note_oracle_rejects_overflowing_signal_windows_before_native()
         plugin.stop_processing().unwrap();
     }
 }
+
+// Same real object and existing DLL class; no new host/API/clock authority.
+fn open_anchored_main(host: &mut Vst3Host, retain: bool, fail: u32) -> Plugin {
+    let mut plugin = host.load_plugin_class(fixture(), CLASS).unwrap();
+    let mut state = main_configuration(fail);
+    if retain {
+        // Same versioned 12-byte component/controller config, independent MNE5.
+        for offset in [28, 40] {
+            state[offset..offset + 4].copy_from_slice(b"MNE5");
+            state[offset + 4..offset + 8].copy_from_slice(&5_u32.to_le_bytes());
+        }
+    }
+    plugin.load_state(&state).unwrap();
+    let info = plugin.native_event_bus_info().unwrap();
+    assert_eq!(info.inputs.len(), 2);
+    assert!(info.outputs.is_empty());
+    assert_eq!(
+        info.inputs.iter().map(|row| row.host_active).collect::<Vec<_>>(),
+        [true, false]
+    );
+    plugin.set_process_mode(ProcessMode::Offline).unwrap();
+    plugin.start_processing().unwrap();
+    plugin
+}
+
+#[test]
+#[ignore = "requires rebuilt MONDRIAN_VST3_NOTE_ORACLE_PLUGIN and existing absolute MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR; SDK anchored checked Notes, not canonical routing"]
+fn installed_vst3_anchored_checked_notes_preserve_literal_ppq_pcm_and_failure_boundaries() {
+    use vst3_host::audio::{ProcessMusicalReference, ProcessTimelineContext};
+    use vst3_host::error::NativeEventError;
+    let directory = PathBuf::from(std::env::var_os("MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR").unwrap());
+    assert!(directory.is_absolute() && directory.is_dir());
+    let path = directory.join(format!("mne4-{}.audit", std::process::id()));
+    let prefix = match std::fs::metadata(&path) {
+        Ok(metadata) => metadata.len() as usize,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("audit metadata failed: {error}"),
+    };
+    // Generated independently from exact fractions, never SDK projection output.
+    const Q: [[[u64; 4]; 2]; 2] = [
+        [
+            [
+                0x400cf2c1c345a6f2,
+                0x400cf2f151373595,
+                0x400cf3012b326521,
+                0x400cf340931f2351,
+            ],
+            [
+                0x3f07c6f8c751f177,
+                0x3f27c6f8c751f177,
+                0x3f2db8b6f9266dd5,
+                0x3f3abfd7e03c2fa6,
+            ],
+        ],
+        [
+            [
+                0x400cf2d7a85bcd6b,
+                0x400cf303592b5545,
+                0x400cf311e970828d,
+                0x400cf34c2a8537b0,
+            ],
+            [
+                0x3f05d867c3ece2a5,
+                0x3f25d867c3ece2a5,
+                0x3f2b4e81b4e81b4f,
+                0x3f389374bc6a7efa,
+            ],
+        ],
+    ];
+    let mut expected_records = Vec::new();
+    for (rate_index, rate) in [44_100_u32, 48_000].into_iter().enumerate() {
+        let mut host = Vst3Host::builder()
+            .sample_rate(f64::from(rate))
+            .block_size(4)
+            .input_channels(2)
+            .output_channels(2)
+            .build()
+            .unwrap();
+        for scoped in [false, true] {
+            for near_max in [false, true] {
+                let mut plugin = open_anchored_main(&mut host, false, 0);
+                let (start, reference) = if near_max {
+                    (
+                        i64::MAX - 16,
+                        ProcessMusicalReference::new(i64::MAX - 17, i64::from(rate), 1, 2).unwrap(),
+                    )
+                } else {
+                    (-17, ProcessMusicalReference::new(-19, 7, 3, 4).unwrap())
+                };
+                let events = [
+                    note(true, 0, 0, 10, 0.5),
+                    note(false, 0, 3, 10, 0.125),
+                    note(true, 0, 4, 11, 0.25),
+                    note(false, 0, 8, 11, 0.125),
+                ];
+                plugin
+                    .set_process_musical_timeline_context(
+                        ProcessTimelineContext { sample_position: i64::MAX - 4, sample_rate: rate },
+                        reference,
+                    )
+                    .unwrap();
+                let mut rejected = plugin.create_bus_audio_buffers(9).unwrap();
+                for channel in &mut rejected.outputs[0].channels {
+                    channel.fill(123.0);
+                }
+                let before = rejected.clone();
+                assert!(matches!(
+                    invoke(&mut plugin, &mut rejected, &events, scoped),
+                    Err(vst3_host::Error::NativeEvent(
+                        NativeEventError::InvalidFrames
+                    ))
+                ));
+                assert_eq!(rejected, before);
+                plugin
+                    .set_process_musical_timeline_context(
+                        ProcessTimelineContext { sample_position: start, sample_rate: rate },
+                        reference,
+                    )
+                    .unwrap();
+                let mut invalid = events.clone();
+                invalid[3].ppq_position = f64::NAN;
+                assert!(matches!(
+                    invoke(&mut plugin, &mut rejected, &invalid, scoped),
+                    Err(vst3_host::Error::NativeEvent(
+                        NativeEventError::InvalidEvent { index: 3 }
+                    ))
+                ));
+                assert_eq!(rejected, before);
+                invoke(&mut plugin, &mut rejected, &events, scoped).unwrap();
+                assert_pcm(
+                    &rejected,
+                    &[0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0],
+                );
+                let mut projected = events.clone();
+                for (event, bits) in projected.iter_mut().zip(Q[rate_index][usize::from(near_max)])
+                {
+                    event.ppq_position = f64::from_bits(bits);
+                }
+                let mut tuples = vec![
+                    expected_tuple(1, &projected[0], 0),
+                    expected_tuple(1, &projected[1], 3),
+                    expected_tuple(2, &projected[2], 0),
+                    expected_tuple(3, &projected[3], 0),
+                ];
+                // Clearing Some on the same prepared native object restores caller PPQ responsibility.
+                plugin
+                    .set_process_timeline_context(ProcessTimelineContext {
+                        sample_position: 100,
+                        sample_rate: rate,
+                    })
+                    .unwrap();
+                invoke(&mut plugin, &mut rejected, &events, scoped).unwrap();
+                assert_pcm(
+                    &rejected,
+                    &[0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0],
+                );
+                tuples.extend([
+                    expected_tuple(4, &events[0], 0),
+                    expected_tuple(4, &events[1], 3),
+                    expected_tuple(5, &events[2], 0),
+                    expected_tuple(6, &events[3], 0),
+                ]);
+                plugin.stop_processing().unwrap();
+                drop(plugin);
+                expected_records.push((
+                    rate,
+                    vec![
+                        (4, 0, 0, 2),
+                        (4, 0, 2, 1),
+                        (1, 0, 3, 1),
+                        (4, 0, 4, 2),
+                        (4, 0, 6, 1),
+                        (1, 0, 7, 1),
+                    ],
+                    tuples,
+                ));
+            }
+        }
+    }
+    // Actual middle-native failure: successful prefix may have advanced. No
+    // rollback, retry or replay of that batch's unexecuted final Off is allowed.
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(4)
+        .input_channels(2)
+        .output_channels(2)
+        .build()
+        .unwrap();
+    for scoped in [false, true] {
+        let mut plugin = open_anchored_main(&mut host, false, 2);
+        let reference = ProcessMusicalReference::new(-19, 7, 3, 4).unwrap();
+        plugin
+            .set_process_musical_timeline_context(
+                ProcessTimelineContext { sample_position: -17, sample_rate: 48_000 },
+                reference,
+            )
+            .unwrap();
+        let events = [
+            note(true, 0, 0, 10, 0.5),
+            note(false, 0, 3, 10, 0.125),
+            note(true, 0, 4, 11, 0.25),
+            note(false, 0, 8, 11, 0.125),
+        ];
+        let mut pcm = plugin.create_bus_audio_buffers(9).unwrap();
+        for channel in &mut pcm.outputs[0].channels {
+            channel.fill(123.0);
+        }
+        assert!(matches!(
+            invoke(&mut plugin, &mut pcm, &events, scoped),
+            Err(vst3_host::Error::ProcessFailed(1))
+        ));
+        assert_eq!(pcm.outputs[0].channels[0][..4], [0.25, 0.25, 0.25, 0.0]);
+        assert_eq!(
+            pcm.outputs[0].channels[1][..4],
+            [-0.125, -0.125, -0.125, 0.0]
+        );
+        assert!(pcm.outputs[0].channels.iter().all(|channel| channel[4..] == [123.0; 5]));
+        let (empty, result) = process(&mut plugin, 1, &[], scoped);
+        result.unwrap();
+        assert_pcm(&empty, &[0.0]);
+        let mut projected = events.clone();
+        for (event, bits) in projected.iter_mut().zip(Q[1][0]) {
+            event.ppq_position = f64::from_bits(bits);
+        }
+        plugin.stop_processing().unwrap();
+        drop(plugin);
+        expected_records.push((
+            48_000,
+            vec![(4, 0, 0, 2), (4, 1, 2, 1), (1, 0, 3, 0)],
+            vec![
+                expected_tuple(1, &projected[0], 0),
+                expected_tuple(1, &projected[1], 3),
+                expected_tuple(2, &projected[2], 0),
+            ],
+        ));
+    }
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() >= prefix && bytes.len() <= 2 * 1024 * 1024);
+    let records = main_file_audits(&bytes[prefix..]);
+    assert_eq!(records.len(), 10);
+    assert_eq!(records.len(), expected_records.len());
+    for (actual, (rate, calls, events)) in records.iter().zip(expected_records) {
+        assert_eq!(actual.sample_rate_bits, f64::from(rate).to_bits());
+        assert_eq!(actual.max_frames, 4);
+        assert_eq!(
+            actual.calls, calls,
+            "invalid whole windows/batches made no native callback"
+        );
+        assert_eq!(
+            actual.events, events,
+            "independent literal PPQ and exact native tuple history"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires rebuilt MONDRIAN_VST3_NOTE_ORACLE_PLUGIN; actual MNE5 AddRef across process and cold empty-view query/Release"]
+fn installed_vst3_anchored_note_list_retains_real_com_lifetime_and_closes_between_calls() {
+    use vst3_host::audio::{ProcessMusicalReference, ProcessTimelineContext};
+    fn observation(plugin: &Plugin) -> (u64, u32, u32, i32) {
+        let bytes = plugin.save_state().expect("joined control-side retained COM query");
+        assert_eq!(&bytes[..16], b"VST3HOST_STATE\0\0");
+        assert_eq!((u32_at(&bytes, 20), u32_at(&bytes, 24)), (44, 12));
+        assert_eq!(bytes.len(), 28 + 44 + 12);
+        let body = &bytes[28..72];
+        assert_eq!(&body[..4], b"MNE5");
+        assert_eq!(u32_at(body, 4), 5);
+        assert_eq!(&body[12..16], b"MNR5");
+        assert_eq!(u32_at(body, 16), 5);
+        assert_eq!(u32_at(body, 28), std::process::id());
+        let instance = u64::from_le_bytes(body[20..28].try_into().unwrap());
+        assert_ne!(instance, 0);
+        (
+            instance,
+            u32_at(body, 32),
+            u32_at(body, 36),
+            i32::from_le_bytes(body[40..44].try_into().unwrap()),
+        )
+    }
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(4)
+        .input_channels(2)
+        .output_channels(2)
+        .build()
+        .unwrap();
+    for scoped in [false, true] {
+        let mut plugin = open_anchored_main(&mut host, true, 0);
+        let before = observation(&plugin);
+        assert_eq!((before.1, before.2, before.3), (0, 0, -1));
+        for pass in 0..2 {
+            plugin
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17 + pass * 9,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(-19, 7, 3, 4).unwrap(),
+                )
+                .unwrap();
+            let events = [
+                note(true, 0, 0, 10, 0.5),
+                note(false, 0, 3, 10, 0.125),
+                note(true, 0, 4, 11, 0.25),
+                note(false, 0, 8, 11, 0.125),
+            ];
+            let (pcm, result) = process(&mut plugin, 9, &events, scoped);
+            result.unwrap();
+            assert_pcm(
+                &pcm,
+                &[0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0],
+            );
+            // No query between these two calls: the plugin holds the same real
+            // AddRef across both SDK windows, not just while process() is on stack.
+        }
+        let after = observation(&plugin);
+        assert_eq!(after, (before.0, 1, 1, 0));
+        assert_eq!(
+            observation(&plugin),
+            after,
+            "without a retained view no fake query/release is counted"
+        );
+        let state = plugin.save_state().unwrap();
+        plugin.stop_processing().unwrap();
+        for field in [28 + 12, 28 + 16] {
+            let mut invalid = state.clone();
+            invalid[field] ^= 1;
+            assert!(
+                plugin.load_state(&invalid).is_err(),
+                "MNE5 rejects malformed trailer magic/version"
+            );
+            assert_eq!(observation(&plugin), after);
+        }
+        for extra in [false, true] {
+            let mut invalid = state.clone();
+            if extra {
+                invalid.insert(28 + 44, 0);
+                invalid[20..24].copy_from_slice(&45_u32.to_le_bytes());
+            } else {
+                invalid.remove(28 + 43);
+                invalid[20..24].copy_from_slice(&43_u32.to_le_bytes());
+            }
+            assert!(
+                plugin.load_state(&invalid).is_err(),
+                "MNE5 rejects truncated/oversized transient audit"
+            );
+            assert_eq!(observation(&plugin), after);
+        }
+        plugin.load_state(&state).unwrap();
+        assert_eq!(
+            observation(&plugin),
+            after,
+            "configuration restore cannot rewind lifetime audit"
+        );
+        plugin.stop_processing().unwrap();
+    }
+}

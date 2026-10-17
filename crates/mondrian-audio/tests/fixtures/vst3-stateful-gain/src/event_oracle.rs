@@ -3,7 +3,7 @@
 //! replays it. A callback may fail after earlier chunks advanced: no rollback.
 use super::*;
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32};
 use std::sync::Mutex;
 use std::thread::{self, ThreadId};
 use std::{fs::File, io::Write, path::PathBuf};
@@ -69,6 +69,8 @@ pub(super) fn create_instance(cid: TUID) -> Option<vst3::ComPtr<FUnknown>> {
 struct Config {
     fail_call: u32,
     main_only: bool,
+    // MNE5 alone retains a real IEventList reference across native callbacks.
+    retain_events: bool,
     // None retains the original MNE1 configuration, audit and Note DSP.
     auxiliary_default: Option<bool>,
     // MNE3 input-only first-stop command: 0 stable, 1 retain, 2 flip default.
@@ -80,13 +82,16 @@ impl Config {
         Self {
             fail_call,
             main_only: false,
+            retain_events: false,
             auxiliary_default: None,
             service_action: None,
         }
     }
     fn encode(self) -> ([u8; SERVICE_CONFIG_BYTES], usize) {
         let mut bytes = [0; SERVICE_CONFIG_BYTES];
-        let (magic, version, len) = if self.main_only {
+        let (magic, version, len) = if self.retain_events {
+            (b"MNE5", 5_u32, CONFIG_BYTES)
+        } else if self.main_only {
             (b"MNE4", 4_u32, CONFIG_BYTES)
         } else if self.service_action.is_some() {
             (b"MNE3", 3_u32, SERVICE_CONFIG_BYTES)
@@ -118,12 +123,28 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let fail_call = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    let main_only = &bytes[..4] == b"MNE4" && version == 4;
+    let retain_events = &bytes[..4] == b"MNE5" && version == 5;
+    let main_only = (&bytes[..4] == b"MNE4" && version == 4) || retain_events;
     if fail_call > if main_only { MAIN_MAX_CALLS } else { MAX_CALLS } as u32 {
         return None;
     }
+    if retain_events {
+        // MNE5 accepts its 12-byte configuration or its own complete 44-byte
+        // getState output. The 32-byte MNR5 trailer is transient observation,
+        // never restored. One extra requested byte rejects a longer payload.
+        let mut trailer = [0_u8; 33];
+        let result = stream.read(trailer.as_mut_ptr().cast(), 33, &mut read);
+        if !matches!(result, kResultOk | kResultFalse)
+            || !matches!(read, 0 | 32)
+            || (read == 32
+                && (&trailer[..4] != b"MNR5"
+                    || u32::from_le_bytes(trailer[4..8].try_into().ok()?) != 5))
+        {
+            return None;
+        }
+    }
     let (auxiliary_default, service_action) = match (&bytes[..4], version) {
-        (b"MNE1", 1) | (b"MNE4", 4) => (None, None),
+        (b"MNE1", 1) | (b"MNE4", 4) | (b"MNE5", 5) => (None, None),
         (b"MNE2", 2) => {
             if stream.read(bytes[12..].as_mut_ptr().cast(), 4, &mut read) != kResultOk || read != 4
             {
@@ -156,6 +177,7 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     Some(Config {
         fail_call,
         main_only,
+        retain_events,
         auxiliary_default,
         service_action,
     })
@@ -495,6 +517,11 @@ struct NoteProcessor {
     fail_call: AtomicU32,
     admission_mode: AtomicBool,
     main_only: AtomicBool,
+    retain_mode: AtomicBool,
+    retained_input: Mutex<Option<ComPtr<IEventList>>>,
+    retain_queries: AtomicU32,
+    retain_releases: AtomicU32,
+    retain_last_count: AtomicI32,
     main_audit: Mutex<Option<MainAuditOutput>>,
     auxiliary_default: AtomicBool,
     service_mode: AtomicBool,
@@ -512,6 +539,7 @@ impl NoteProcessor {
         Config {
             fail_call: self.fail_call.load(Ordering::Relaxed),
             main_only: self.main_only.load(Ordering::Relaxed),
+            retain_events: self.retain_mode.load(Ordering::Relaxed),
             auxiliary_default: self
                 .admission_mode
                 .load(Ordering::Relaxed)
@@ -519,6 +547,37 @@ impl NoteProcessor {
             // A configuration read is not a checkpoint of a queued test command.
             service_action: self.service_mode.load(Ordering::Relaxed).then_some(0),
         }
+    }
+    // Only the joined control-side getState/terminate path queries and releases
+    // the MNE5 reference. Audit is transient; setState never restores counters.
+    fn release_retained_input(&self) -> bool {
+        let Ok(mut retained) = self.retained_input.try_lock() else {
+            return false;
+        };
+        let Some(events) = retained.as_ref() else {
+            return true;
+        };
+        let count = unsafe { events.getEventCount() };
+        self.retain_last_count.store(count, Ordering::Relaxed);
+        if self
+            .retain_queries
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_add(1)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if count != 0 {
+            return false;
+        }
+        // Genuine ComPtr Release, after observing the closed retained view.
+        drop(retained.take());
+        self.retain_releases
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                count.checked_add(1)
+            })
+            .is_ok()
     }
     fn trace(&self, stage: &str, index: i32, calls: usize) -> bool {
         let Ok(mut trace) = self.trace.try_lock() else {
@@ -548,6 +607,11 @@ impl NoteProcessor {
             fail_call: AtomicU32::new(0),
             admission_mode: AtomicBool::new(false),
             main_only: AtomicBool::new(false),
+            retain_mode: AtomicBool::new(false),
+            retained_input: Mutex::new(None),
+            retain_queries: AtomicU32::new(0),
+            retain_releases: AtomicU32::new(0),
+            retain_last_count: AtomicI32::new(-1),
             main_audit: Mutex::new(None),
             auxiliary_default: AtomicBool::new(false),
             service_mode: AtomicBool::new(false),
@@ -571,6 +635,9 @@ impl IPluginBaseTrait for NoteProcessor {
         kResultOk
     }
     unsafe fn terminate(&self) -> tresult {
+        if self.retain_mode.load(Ordering::Relaxed) && !self.release_retained_input() {
+            return kResultFalse;
+        }
         let Ok(audit) = self.audit.try_lock() else {
             return kResultFalse;
         };
@@ -719,7 +786,10 @@ impl IComponentTrait for NoteProcessor {
         let Some(config) = read_config(stream) else {
             return kInvalidArgument;
         };
-        let main_audit = if config.main_only {
+        if self.retain_mode.load(Ordering::Relaxed) && !self.release_retained_input() {
+            return kResultFalse;
+        }
+        let main_audit = if config.main_only && !config.retain_events {
             match MainAuditOutput::from_env() {
                 Ok(output) => output,
                 Err(_) => return kResultFalse,
@@ -755,6 +825,7 @@ impl IComponentTrait for NoteProcessor {
         *current_trace = trace;
         audit.voices = [EMPTY_VOICE; 16];
         self.main_only.store(config.main_only, Ordering::Relaxed);
+        self.retain_mode.store(config.retain_events, Ordering::Relaxed);
         self.fail_call.store(config.fail_call, Ordering::Relaxed);
         self.admission_mode.store(config.auxiliary_default.is_some(), Ordering::Relaxed);
         self.service_mode.store(config.service_action.is_some(), Ordering::Relaxed);
@@ -770,6 +841,29 @@ impl IComponentTrait for NoteProcessor {
         }
     }
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
+        if self.retain_mode.load(Ordering::Relaxed) {
+            if !self.release_retained_input() {
+                return kResultFalse;
+            }
+            let (configuration, len) = self.config().encode();
+            if len != CONFIG_BYTES {
+                return kResultFalse;
+            }
+            // Fixed MNR5 diagnostic, not restorable DSP or event state.
+            let mut bytes = [0_u8; 44];
+            bytes[..12].copy_from_slice(&configuration[..12]);
+            bytes[12..16].copy_from_slice(b"MNR5");
+            bytes[16..20].copy_from_slice(&5_u32.to_le_bytes());
+            bytes[20..28].copy_from_slice(&self.instance.to_le_bytes());
+            bytes[28..32].copy_from_slice(&std::process::id().to_le_bytes());
+            bytes[32..36]
+                .copy_from_slice(&self.retain_queries.load(Ordering::Relaxed).to_le_bytes());
+            bytes[36..40]
+                .copy_from_slice(&self.retain_releases.load(Ordering::Relaxed).to_le_bytes());
+            bytes[40..44]
+                .copy_from_slice(&self.retain_last_count.load(Ordering::Relaxed).to_le_bytes());
+            return write_bytes(stream, &bytes);
+        }
         if self.main_only.load(Ordering::Relaxed) {
             // MNE4 state is configuration only. Audit is not a DSP checkpoint.
             let (bytes, len) = self.config().encode();
@@ -975,6 +1069,17 @@ impl IAudioProcessorTrait for NoteProcessor {
         let outputs = slice::from_raw_parts(output.__field0.channelBuffers32, 2);
         if inputs.iter().chain(outputs).any(|pointer| pointer.is_null()) {
             return kInvalidArgument;
+        }
+        if self.retain_mode.load(Ordering::Relaxed) {
+            let Some(events) = ComRef::from_raw(data.inputEvents) else {
+                return kInvalidArgument;
+            };
+            let Ok(mut retained) = self.retained_input.try_lock() else {
+                return kResultFalse;
+            };
+            if retained.is_none() {
+                *retained = Some(events.to_com_ptr()); // Real FUnknown AddRef.
+            }
         }
         let count = if let Some(events) = ComRef::from_raw(data.inputEvents) {
             let count = events.getEventCount();
