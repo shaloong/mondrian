@@ -10464,7 +10464,10 @@ mod checked_native_note_tests {
             pcm.outputs[0].channels[0].fill(93.0);
             let result = fixture.run(&mut pcm, &[on(0, 71)]);
             if native_failure {
-                assert!(matches!(result, Err(Error::ProcessFailed(kResultFalse))));
+                assert!(matches!(
+                    result,
+                    Err(Error::ProcessFailed(code)) if code == kResultFalse
+                ));
             } else {
                 assert!(matches!(
                     result,
@@ -10585,7 +10588,10 @@ mod checked_native_note_tests {
             pcm.outputs[0].channels[0].fill(93.0);
             let result = fixture.run(&mut pcm, &[on(0, 71), off(8, 71)]);
             if native_failure {
-                assert!(matches!(result, Err(Error::ProcessFailed(kResultFalse))));
+                assert!(matches!(
+                    result,
+                    Err(Error::ProcessFailed(code)) if code == kResultFalse
+                ));
             } else {
                 assert!(matches!(
                     result,

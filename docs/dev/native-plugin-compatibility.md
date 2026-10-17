@@ -99,7 +99,7 @@ The table describes implementation boundaries. Qualification below states the te
 | --- | --- | --- |
 | Shared processor outputs | Shared-slice baseline: 5,343 ordinary tests across eight libraries passed, including 16 new controls; 269 ignored tests excluded. Three strict groups and the normal Product build passed. | Track/Bus shared DAG qualification; native adapters have their separate conditions below. Product output selection, realtime/performance and other platforms remain open. |
 | Owned zero-input CLAP | Six fresh mono/offline Runtime cases at 44.1/48 kHz passed literal 14-frame PCM, NoMedia, Source/author/install/Ack and same-object/Drop-exit checks. | Owned fixture, not general third-party instrument support. |
-| Current Audio checks | The final candidate passes 669 ordinary Audio tests; 114 native controls were precisely excluded. Full Audio Strict and eight resource tests pass. The matching normal IPC15/Discovery3/CLAP Probe4 test-profile Product builds with the original ten App library warnings. Twelve owned/real-plugin native gates and the SDK Gain probe pass under the original budgets. | Not whole-workspace or App test-suite regression. Earlier TestWorker and Unprobed CLAP retained-configuration post-ACK exit failures remain open. The new fresh-probe retained path passes without closing those failures. Overall integration remains HOLD; no budget or retry workaround changed. |
+| Latest Audio/CLAP baseline | The CLAP/probe-reuse baseline passes 669 ordinary Audio tests; 114 native controls were precisely excluded. Full Audio Strict and eight resource tests pass. Its matching normal IPC15/Discovery3/CLAP Probe4 test-profile Product builds with the original ten App library warnings. Twelve owned/real-plugin native gates and the SDK Gain probe pass under the original budgets. | The newer checked-Note SDK below awaits matched Audio/Product regression. Not whole-workspace or App test-suite regression. Earlier TestWorker and Unprobed CLAP retained-configuration post-ACK exit failures remain open. The new fresh-probe retained path passes without closing those failures. Overall integration remains HOLD; no budget or retry workaround changed. |
 | Native-probe Factory preparation | Fresh discovered VST3 and normal CLAP probes move their bounded input-name snapshot into the existing Factory; actual create still validates restored native contracts and names in the original same-child Ready scope. Ten new ordinary controls pass, including 0+1 versus 1+1 launches, keyed name equality/drift cleanup, storage/seed ownership, strict Discovery3/normal Probe4 and the 31-port boundary. Both native sidechain negatives require the exact restored-port error from actual create; original PCM/state controls pass. CLAP seed, overflow and retained controls pass. | Manual/generic and CLAP Note-offer specs retain real validation launch plus strict shutdown. Probe is not proof of start/split/Ready; a name change is explicit unsupported presentation drift. Root-grant coverage of cold probes, complete native heaps, realtime safety and timed overhead improvement are not established. |
 | CLAP authored constant Tempo | One exact native gate passed four rate × None/Some Runtime cases at 44.1/48 kHz: two epochs, different partitions, literal PCM, Scope-local gain automation, 3/2 source retiming and six-frame PDC. The same actual native objects survived re-entry and their retained OS handles observed Drop exit0. | Owned stereo/offline fixture; 32 MiB local scratch and explicitly unbounded aggregate grant, not a budget-edge test. No beat/bar/meter/playing, tempo map, selected nested musical execution, third-party, realtime/performance or other-platform qualification. The separate 2s Drop observation does not prove the 100ms graceful budget. |
 | Candidate VST3 anchored musical audio | The bounded Worker gate now passes all eight 44.1/48 kHz × None/Some × signed-start cases. The canonical gate again passes Scope-local automation, 3/2 source retiming, two three-frame delays, six-frame PDC and two epochs with independent Q/Tempo bits and PCM. Continuous objects and host-serial seek rebuilds pass. | The previous failing temporary Factory validation instance is removed from the fresh discovered VST3 path; this does not establish a 100ms teardown fix. Canonical control uses 32 MiB session scratch and an unbounded aggregate grant. No full callback-count/order, Note/Event PPQ, realtime/performance or other-platform qualification; overall integration remains HOLD. |
@@ -148,7 +148,7 @@ complete transient-peak grant or whole-plugin heap qualification.
 
 ## VST3 event contracts and local Note adapter
 
-Required discovery/payload version 2 carries the expected event-bus contract
+Required Discovery3/payload2 carries the expected event-bus contract
 through the existing probe, registration and payload owners. The actual restored,
 configured, stopped instance is rechecked during preparation, cold rebuilding and
 retained configuration. Canonical VST3 Note remains refused; the new musical
@@ -189,18 +189,29 @@ consumption or DSP, including continuous time only when valid. Five newly linked
 Main SDK Note integration gates pass: public/scoped near-limit refusal preserves
 PCM and same-instance audit; negative, partial and exact-limit windows remain
 valid. Post-native counter failure keeps cleanup and the original plugin error.
-The anchored musical SDK slice separately passes 335 ordinary controls and nine
+The anchored musical SDK slice now passes 342 ordinary controls and sixteen
 owned DLL gates. Its validated exact reference projects absolute signed samples
 to quarter notes and constant Tempo, with nearest-even binary64 rounding across
 native chunks. Independent mode7 DSP controls cover 44.1/48 kHz, local/scoped
 roles, None/Some and negative/near-limit positions, including same-object
-processing counts and queued-parameter refusal/recovery. The new reference
-currently admits pure audio only: queued/staged events, busy/poisoned ingress
-and nonempty checked batches refuse before consumption. Late ingress survives
-success and error paths; callback inputEvents is temporarily null and restored.
-This does not project Event PPQ. The existing process Box contains the reference
-in place; the SDK complete-Box observer does not charge that nested owner to
-the Audio grant.
+processing counts and queued-parameter refusal/recovery. Explicit checked Note
+batches now project Event PPQ from the same immutable reference, original call
+start and event offset, after whole-batch validation. Queued/staged legacy events
+and busy/poisoned ingress still refuse before consumption. A real reference-counted
+COM list, created during cold preparation even for None, temporarily owns the
+original chunk vector backing. Only the native callback exposes its read-only
+window; exposure closes before the original inputEvents pointer is restored.
+Nonblocking query/cleanup faults prevent later Some and None processing; late
+legacy ingress remains in its original owner. Native failure retains priority.
+Only the current failed chunk avoids output copy: earlier successful chunks or
+an outer cleanup failure can leave a written prefix, without event replay.
+New Main-only MNE4 controls verify ten complete actual-PID records against
+independent PPQ bits and PCM at both rates, scoped/local roles and signed anchors.
+MNE5 tests actual retained COM references, closed views, cold release and its
+44-byte state round trip without restoring observation counters.
+The SDK storage observer reports the complete process Box, concrete COM payload
+and unique vector capacity separately. This does not qualify the complete Arc
+allocation or nested native owners against the Audio Root grant.
 The candidate no-Note VST3 adapter now consumes the same Core reference without
 a second clock or state source. Exact preparation/Ready/seed and original native
 metadata/rebuild checks remain; selected nested musical execution and canonical
@@ -226,8 +237,9 @@ zero-channel declarations remain visible. The checked subset requires nonnegativ
 note IDs, MIDI channels 0..15 within an active declared bus, valid ordered offsets
 and an empty legacy input, preserves original
 scalar values, and retires remaining input after a started processing failure.
-It does not roll back an executed prefix. Canonical VST3 Note still needs an
-SDK/adapter consumption of the existing Sequence musical reference for event PPQ. Third-party
+It does not roll back an executed prefix. Canonical VST3 Note still needs adapter
+lowering of the existing Note IR and Sequence reference, accounted conversion
+storage and early refusal of unsupported re-entry. Third-party
 instruments, other platforms, realtime and performance remain unqualified.
 
 ## Open issues and integration constraints
