@@ -921,3 +921,295 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
         "terminal_off_acoustics_qualified":false,"graceful_100ms_qualified":false,"realtime_qualified":false})
     );
 }
+
+/// Two fresh SDK owners differ only in NoteOn offset. This intentionally has no
+/// Runtime, author service, graph, media or voice-state observation after On.
+#[test]
+#[ignore = "normal Product capture, explicit official SDK mda DLL and outer native Job"]
+fn external_mda_dx10_vst3_sdk_note_on_offsets() {
+    use std::collections::BTreeMap;
+    use vst3_host::audio::{
+        AudioBusRole, NativeEventBusRole, ProcessMusicalReference, ProcessTimelineContext,
+    };
+    use vst3_host::controller_parameters::ControllerParameterQueryFrame;
+    use vst3_host::initial_parameter_input::{InitialParameterStorage, InitialParameterValue};
+    use vst3_host::plugin::ProcessMode;
+    use vst3_host::{PluginEvent, PluginEventData, Vst3Host};
+
+    let mut in_job = 0;
+    // SAFETY: the process pseudo handle and call-local BOOL are valid here.
+    assert_ne!(
+        unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) },
+        0
+    );
+    assert_ne!(in_job, 0, "the caller must own the complete native tree");
+    let file = |name| {
+        let path = PathBuf::from(std::env::var_os(name).expect("explicit current material"));
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = file("MONDRIAN_VST3_TEST_HELPER");
+    let library = file("MONDRIAN_MDA_VST3_PLUGIN");
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        channel_layout: AudioChannelLayout::Stereo,
+        max_block_frames: BLOCK,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 32 * 1024 * 1024,
+        ..super::super::test_render_contract()
+    };
+    // One original Product default capture, before either SDK owner receives On.
+    // Neither direct instance saves state, drains callbacks or flushes parameters.
+    let captured =
+        probe_vst3_plugin_registration_with_state(&helper, &library, CLASS, render, None, true)
+            .expect("actual default-state capture with the strict current Probe");
+    let state = captured.captured_state.as_ref().expect("real nonempty default state");
+    assert!(!state.is_empty() && state.len() <= 64 * 1024);
+    assert_eq!(
+        captured.registration.main_audio_input,
+        Vst3MainAudioInput::Absent
+    );
+    assert!(captured.registration.auxiliary_inputs.buses.is_empty());
+    assert!(captured.input_names.is_empty());
+    let admitted = &captured.registration.parameters;
+    assert_eq!(admitted.len(), 19);
+    assert_eq!(captured.current_values.len(), admitted.len());
+
+    // The resolver builds payload.parameter_ids in the authored BTreeMap order,
+    // not native numeric ID or controller enumeration order. Reproduce its same
+    // scalar-to-normalized projection for every writable lane, including preset.
+    let mut ordered = BTreeMap::new();
+    for (descriptor, &(id, normalized)) in admitted.iter().zip(&captured.current_values) {
+        assert_eq!(descriptor.id, id);
+        if !descriptor.read_only {
+            let scalar = descriptor.author_scalar_from_normalized(normalized).unwrap();
+            let normalized = descriptor.normalized_from_author_scalar(scalar).unwrap();
+            assert!(ordered.insert(descriptor.parameter_id().unwrap(), (id, normalized)).is_none());
+        }
+    }
+    let parameter_queue: Vec<_> = ordered.into_values().collect();
+    assert_eq!(parameter_queue.len(), 19);
+    let parameter_order: Vec<_> = parameter_queue
+        .iter()
+        .map(|&(id, value)| json!({"native_id":id,"normalized_bits":value.to_bits()}))
+        .collect();
+    let reference = ProcessMusicalReference::new(0, 1, 1, 2).unwrap();
+    let _native_main = vst3_host::window::WindowsEditorMainThread::initialize().unwrap();
+    let mut observations = Vec::with_capacity(2);
+    let mut checks = Vec::with_capacity(2);
+    for on_offset in [0_usize, 127] {
+        let mut host = Vst3Host::builder()
+            .plugin_interfaces(crate::processor_isolation::vst3_worker::product_plugin_interfaces())
+            .sample_rate(48_000.0)
+            .block_size(BLOCK)
+            .input_channels(2)
+            .output_channels(2)
+            .build()
+            .unwrap();
+        let mut plugin = host.load_plugin_class(&library, CLASS).unwrap();
+        assert_eq!(plugin.info().uid, CLASS);
+        assert_eq!(plugin.info().name, "mda DX10");
+        assert_eq!(plugin.info().vendor, "mda");
+        plugin.load_state(state).expect("restore the same actual captured default");
+        plugin.set_process_mode(ProcessMode::Offline).unwrap();
+        let audio = plugin.native_audio_bus_info().unwrap();
+        assert!(audio.inputs.is_empty());
+        assert_eq!(audio.outputs.len(), 1);
+        assert_eq!(audio.outputs[0].role, AudioBusRole::Main);
+        assert_eq!(audio.outputs[0].channel_count, 2);
+        assert!(audio.outputs[0].default_active);
+        let events = plugin.native_event_bus_info().unwrap();
+        assert_eq!(events.inputs.len(), 1);
+        assert!(events.outputs.is_empty());
+        assert_eq!(events.inputs[0].role, NativeEventBusRole::Main);
+        assert_eq!(events.inputs[0].channel_count, 1);
+        assert!(events.inputs[0].host_active);
+        let mut buffers = plugin.create_bus_audio_buffers(BLOCK).unwrap();
+        assert!(buffers.inputs.is_empty());
+        assert_eq!(buffers.outputs.len(), 1);
+        assert!(buffers.outputs[0].active);
+        assert_eq!(buffers.outputs[0].channels.len(), 2);
+        plugin.start_processing().unwrap();
+
+        // Match the Worker's initial-only capability. N current query values do
+        // not imply N initial COM points: inspect the actual input owner too.
+        let cohort = plugin.pending_restart_cohort().expect("local raw owner");
+        assert!(!cohort.exhausted());
+        assert!(matches!(cohort.flags().bits(), 0 | 4 | 20));
+        let source = plugin.editor_event_source_status().unwrap();
+        assert_eq!(source.failure(), None);
+        assert_eq!(source.open_parameter_edits(), 0);
+        assert_eq!(source.group_depth(), 0);
+        let mut frame = ControllerParameterQueryFrame::default();
+        let mut initial_values = Vec::with_capacity(admitted.len());
+        let count = plugin
+            .visit_controller_parameters_bounded(
+                admitted.len(),
+                &mut frame,
+                &mut |index, actual| {
+                    let expected = &admitted[index];
+                    assert_eq!(actual.id(), expected.id);
+                    assert!(actual.title_matches(&expected.name));
+                    assert_eq!(
+                        actual.default_normalized().to_bits(),
+                        expected.default_normalized.to_bits()
+                    );
+                    assert_eq!(actual.step_count(), expected.step_count);
+                    assert_eq!(actual.flags(), expected.flags);
+                    assert!(actual.normalized().is_finite());
+                    assert!((0.0..=1.0).contains(&actual.normalized()));
+                    let &(id, normalized) = &captured.current_values[index];
+                    assert_eq!(actual.id(), id);
+                    assert_eq!(actual.normalized().to_bits(), normalized.to_bits());
+                    if !expected.read_only {
+                        initial_values
+                            .push(InitialParameterValue { id, normalized: actual.normalized() });
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(count, admitted.len());
+        assert_eq!(plugin.pending_restart_cohort(), Some(cohort));
+        assert_eq!(plugin.editor_event_source_status().unwrap(), source);
+        let pending_input_before = plugin.pending_processor_parameter_input().unwrap();
+        plugin
+            .handoff_initial_parameter_input(
+                cohort,
+                source,
+                &initial_values,
+                InitialParameterStorage::for_parameter_count(initial_values.len()).unwrap(),
+            )
+            .expect("original initial handoff, never manual retirement or a hidden DSP flush");
+        let after = plugin.editor_event_source_status().unwrap();
+        let after_cohort = plugin.pending_restart_cohort().unwrap();
+        let pending_input_after = plugin.pending_processor_parameter_input().unwrap();
+        assert!(after.closed_empty());
+        assert_eq!(after.pending_dsp_feedback_values(), 0);
+        assert_eq!(after_cohort.serial(), cohort.serial());
+        assert_eq!(after_cohort.flags().bits(), 0);
+        assert!(!pending_input_after,
+            "initial input is a real blocker; do not clear or mix it with authored points: {source:?} -> {after:?}");
+        let initial = json!({
+            "cohort_serial":cohort.serial(),"cohort_flags":cohort.flags().bits(),
+            "source_revision":source.revision(),"pending_events":source.pending_events(),
+            "pending_feedback":source.pending_dsp_feedback_values(),
+            "pending_input_before":pending_input_before,"pending_input_after":pending_input_after,
+            "remaining_events":after.pending_events(),
+            "remaining_feedback":after.pending_dsp_feedback_values(),
+            "remaining_flags":after_cohort.flags().bits()
+        });
+        let on = [PluginEvent {
+            bus_index: 0,
+            sample_offset: on_offset as i32,
+            // Some derives the actual PPQ from the immutable start + offset.
+            ppq_position: 0.0,
+            flags: 0,
+            data: PluginEventData::NoteOn {
+                channel: 0,
+                pitch: 60,
+                tuning: 0.0,
+                velocity: 0.75,
+                length: 0,
+                note_id: 0,
+            },
+        }];
+        let split = plugin.split_editor_processing().unwrap();
+        let mut processor = split.processor;
+        let pcm = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut pcm = [Vec::with_capacity(2 * BLOCK), Vec::with_capacity(2 * BLOCK)];
+                    // Fixed second request diagnoses postponement; it never
+                    // retries a failed call or repeats On. No main-role service,
+                    // getState, controller query or stop/resume occurs between.
+                    for start in [0_i64, BLOCK as i64] {
+                        processor
+                            .set_process_musical_timeline_context(
+                                ProcessTimelineContext {
+                                    sample_position: start,
+                                    sample_rate: 48_000,
+                                },
+                                reference,
+                            )
+                            .unwrap();
+                        for &(id, normalized) in &parameter_queue {
+                            processor.queue_parameter_at(id, normalized, 0).unwrap();
+                        }
+                        buffers.clear();
+                        processor
+                            .process_bus_audio_with_note_events(
+                                &mut buffers,
+                                if start == 0 { &on } else { &[] },
+                            )
+                            .expect("one checked SDK request; no native failure retry");
+                        assert!(buffers.inputs.is_empty());
+                        assert_eq!(buffers.outputs.len(), 1);
+                        assert_eq!(buffers.outputs[0].channels.len(), 2);
+                        for (channel, output) in buffers.outputs[0].channels.iter().enumerate() {
+                            assert_eq!(output.len(), BLOCK);
+                            pcm[channel].extend_from_slice(output);
+                        }
+                    }
+                    pcm
+                })
+                .join()
+                .expect("joined same-owner SDK processing role")
+        });
+        drop(processor);
+        drop(split.editor);
+        // All post-On observations below are copied PCM only. The final ordinary
+        // Plugin Drop happens after both fixed requests; it is not an intervening
+        // stop/resume, state capture or a callback service to obtain sound.
+        let mut windows = Vec::with_capacity(2);
+        let mut finite = true;
+        for start in [0, BLOCK] {
+            let values = pcm.iter().flat_map(|channel| &channel[start..start + BLOCK]);
+            let window_finite = values.clone().all(|value| value.is_finite());
+            let energy = values.clone().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+            let peak = values.clone().map(|&v| f64::from(v.abs())).fold(0.0_f64, f64::max);
+            let nonzero = values.filter(|&&value| value != 0.0).count();
+            let first_nonzero_sample = (start..start + BLOCK)
+                .find(|&sample| pcm.iter().any(|channel| channel[sample] != 0.0));
+            finite &= window_finite;
+            windows.push(json!({"start":start,"frames":BLOCK,"finite":window_finite,
+                "energy":energy,"peak":peak,"nonzero":nonzero,
+                "first_nonzero_sample":first_nonzero_sample}));
+        }
+        let pre_on_nonzero = pcm
+            .iter()
+            .flat_map(|channel| &channel[..on_offset])
+            .filter(|&&value| value != 0.0)
+            .count();
+        let post_on_energy = pcm
+            .iter()
+            .flat_map(|channel| &channel[on_offset..])
+            .map(|&value| f64::from(value).powi(2))
+            .sum::<f64>();
+        checks.push((on_offset, finite, pre_on_nonzero, post_on_energy));
+        observations.push(json!({"on_offset":on_offset,"sdk_requests":2,
+            "initial":initial,"pre_on_nonzero":pre_on_nonzero,
+            "post_on_energy":post_on_energy,"windows":windows}));
+        drop(plugin);
+        drop(host);
+    }
+    // Preserve BOTH initial observations even if either produces only silence.
+    // Counts below are SDK requests, not evidence of internal native FFI counts.
+    println!(
+        "{}",
+        json!({"case":"mda-dx10-sdk-note-offset","rate":48000,
+        "block":BLOCK,"sdk_requests":4,"parameter_count":parameter_queue.len(),
+        "parameter_order":parameter_order,"observations":observations,
+        "worker_ipc_qualified":false,"runtime_handoff_qualified":false,
+        "native_ffi_count_qualified":false,"dsp_voice_state_audited":false,
+        "realtime_qualified":false})
+    );
+    for (offset, finite, pre_on_nonzero, post_on_energy) in checks {
+        assert!(finite, "nonfinite SDK PCM for NoteOn offset {offset}");
+        assert_eq!(pre_on_nonzero, 0, "PCM before NoteOn offset {offset}");
+        assert!(
+            post_on_energy.is_finite() && post_on_energy > 0.0,
+            "no audible SDK PCM in two fixed windows after NoteOn offset {offset}"
+        );
+    }
+}
