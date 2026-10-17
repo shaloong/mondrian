@@ -833,14 +833,14 @@ fn native_late_rescan_ack_preserves_new_suffix_and_refuses_external_retirement()
     };
     use vst3_host::plugin::{NativeEditorEvent as Raw, RestartCohort};
 
-    fn snapshot(
-        worker: &Vst3Worker,
-    ) -> (
+    type Snapshot = (
         vst3_host::plugin::NativeEditorEventSourceStatus,
         Vec<Raw>,
         Vec<(u32, f64)>,
         Option<RestartCohort>,
-    ) {
+    );
+
+    fn snapshot(worker: &Vst3Worker) -> Snapshot {
         let plugin = worker.plugin.as_ref().unwrap();
         let mut events = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
         let mut feedback = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
