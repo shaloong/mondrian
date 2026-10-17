@@ -17,6 +17,7 @@ pub(super) enum PendingDelivery {
         revision: u64,
         configuration: Option<NativeAudioAuthorConfiguration>,
         request_cohort: Option<crate::NativeRequestCohort>,
+        rescan_witness: Option<vst3_host::plugin::RestartSourceWitness>,
     },
     Rejected {
         binding: crate::NativeAudioObjectBindRequest,
@@ -213,6 +214,30 @@ impl Vst3Worker {
             };
             return Ok(Some(NativeAudioAuthorObservation { source, delivery }));
         }
+        // Existing Source obligations refuse before any deferred native setter.
+        // The same gates below are repeated after real controller service.
+        if source.failure.is_some() {
+            return Ok(Some(refused(source, Refusal::InvalidSource)));
+        }
+        if source.pending_dsp_feedback_values != 0 {
+            return Ok(Some(refused(source, Refusal::DspFeedbackPending)));
+        }
+        // Only the actual joined/full owner services its deferred controller.
+        // Preserve/awaiting-Ack paths above never manufacture a second delivery.
+        let plugin = self.plugin.as_mut().ok_or_else(|| unavailable("VST3 object closed"))?;
+        if plugin.pending_processor_parameter_input().map_err(|error| {
+            unavailable(format!("VST3 author input observation failed: {error}"))
+        })? {
+            return Ok(Some(refused(source, Refusal::DspFeedbackPending)));
+        }
+        plugin
+            .borrow_editor_control()
+            .map_err(|error| unavailable(format!("VST3 author controller borrow failed: {error}")))?
+            .service_controller()
+            .map_err(|error| {
+                unavailable(format!("VST3 author controller service failed: {error}"))
+            })?;
+        source = current_source(plugin)?;
         if source.failure.is_some() {
             return Ok(Some(NativeAudioAuthorObservation {
                 source,
@@ -224,6 +249,50 @@ impl Vst3Worker {
                 source,
                 delivery: Delivery::Refused(Refusal::DspFeedbackPending),
             }));
+        }
+        // This short-lived peek classifies retained markers even if a public
+        // raw consumer already retired their cohort. It is gone before query or
+        // large state capture; it is not another persistent Source owner.
+        let plugin = self.plugin.as_ref().ok_or_else(|| unavailable("VST3 object closed"))?;
+        let cohort = plugin.pending_restart_cohort();
+        let count = source.pending_events as usize;
+        if count > crate::NATIVE_AUDIO_AUTHOR_EVENTS {
+            return Ok(Some(refused(source, Refusal::ResourceLimit)));
+        }
+        let mut peek = Vec::new();
+        if peek.try_reserve_exact(count).is_err()
+            || peek.capacity() > crate::NATIVE_AUDIO_AUTHOR_EVENTS
+        {
+            return Ok(Some(refused(source, Refusal::ResourceLimit)));
+        }
+        let mut feedback = Vec::new();
+        let observed = plugin.observe_editor_source_bounded(count, &mut peek, &mut feedback);
+        if !matches!(observed, Ok(actual) if status(actual)? == source)
+            || plugin.pending_restart_cohort() != cohort
+        {
+            return Ok(Some(refused(
+                current_source(plugin)?,
+                Refusal::SourceChanged,
+            )));
+        }
+        let rescan = classify_rescan(&peek, source, cohort);
+        drop(peek);
+        drop(feedback);
+        let rescan = match rescan {
+            Ok(rescan) => rescan,
+            Err(reason) => return Ok(Some(refused(source, reason))),
+        };
+        if let Some(cohort) = rescan {
+            if self.initial_signal_phase != InitialSignalPhase::Entered
+                || self.prepared_author_entry.is_some()
+                || !matches!(
+                    self.configuration_phase,
+                    super::super::native_configuration_control::NativeConfigurationPhase::Admitted
+                )
+            {
+                return Ok(Some(refused(source, Refusal::UnsupportedAdapter)));
+            }
+            return self.collect_single_rescan(binding, source, cohort).map(Some);
         }
         if source.pending_events == 0 {
             return Ok(Some(NativeAudioAuthorObservation {
@@ -386,6 +455,7 @@ impl Vst3Worker {
             revision: source.revision,
             configuration,
             request_cohort: None,
+            rescan_witness: None,
         });
         Ok(Some(NativeAudioAuthorObservation {
             source: after,
@@ -407,6 +477,14 @@ impl Vst3Worker {
                 delivery: Delivery::Refused(Refusal::StaleDelivery),
             });
         }
+        if matches!(
+            &self.native_author_delivery,
+            Some(PendingDelivery::Delivered { rescan_witness: Some(_), .. })
+        ) {
+            // Collection is not Runtime/Session acceptance. A later slice must
+            // settle the real SDK witness and matching parent hold together.
+            return Ok(refused(source, Refusal::UnsupportedAdapter));
+        }
         let Some(PendingDelivery::Delivered { configuration, request_cohort, .. }) =
             self.native_author_delivery.take()
         else {
@@ -423,5 +501,352 @@ impl Vst3Worker {
             source,
             delivery: Delivery::Acknowledged { acknowledgement: ack, request_cohort },
         })
+    }
+}
+
+fn refused(source: NativeAudioAuthorSourceStatus, reason: Refusal) -> NativeAudioAuthorObservation {
+    NativeAudioAuthorObservation { source, delivery: Delivery::Refused(reason) }
+}
+
+fn current_source(
+    plugin: &Plugin,
+) -> Result<NativeAudioAuthorSourceStatus, AudioProcessorHostError> {
+    status(
+        plugin.editor_event_source_status().map_err(|error| {
+            unavailable(format!("VST3 author source observation failed: {error}"))
+        })?,
+    )
+}
+
+fn classify_rescan(
+    events: &[vst3_host::plugin::NativeEditorEvent],
+    source: NativeAudioAuthorSourceStatus,
+    current: Option<vst3_host::plugin::RestartCohort>,
+) -> Result<Option<vst3_host::plugin::RestartCohort>, Refusal> {
+    use vst3_host::plugin::NativeEditorEvent;
+    let has_marker = events
+        .iter()
+        .any(|event| matches!(event, NativeEditorEvent::ParameterRescanRequested { .. }));
+    let parameter_request = current.is_some_and(|cohort| cohort.flags().bits() & 20 != 0);
+    if !has_marker && !parameter_request {
+        return Ok(None);
+    }
+    let [NativeEditorEvent::ParameterRescanRequested { flags: 4, cohort }] = events else {
+        return Err(Refusal::UnsupportedAdapter);
+    };
+    if !source.boundaries_closed()
+        || source.failure.is_some()
+        || source.pending_dsp_feedback_values != 0
+        || source.pending_events != 1
+        || cohort.flags().bits() != 4
+        || cohort.serial() == 0
+        || cohort.exhausted()
+        || current != Some(*cohort)
+    {
+        return Err(Refusal::UnsupportedAdapter);
+    }
+    Ok(Some(*cohort))
+}
+
+impl Vst3Worker {
+    fn collect_single_rescan(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+        baseline: NativeAudioAuthorSourceStatus,
+        cohort: vst3_host::plugin::RestartCohort,
+    ) -> Result<NativeAudioAuthorObservation, AudioProcessorHostError> {
+        use vst3_host::plugin::NativeEditorEventDrain;
+        let plugin = self.plugin.as_mut().ok_or_else(|| unavailable("VST3 object closed"))?;
+        let parameters = &self.payload.parameters;
+        let writable = parameters.iter().filter(|parameter| !parameter.read_only).count();
+        if parameters.len() > MAX_PARAMETERS {
+            return Ok(refused(baseline, Refusal::ResourceLimit));
+        }
+        let mut values = Vec::new();
+        if values.try_reserve_exact(writable).is_err() || values.capacity() > MAX_PARAMETERS {
+            return Ok(refused(baseline, Refusal::ResourceLimit));
+        }
+        let mut frame = vst3_host::controller_parameters::ControllerParameterQueryFrame::default();
+        let mut projection_refusal = None;
+        let query = super::initial_parameter_values::visit_admitted_controller_values(
+            plugin,
+            parameters,
+            &mut frame,
+            &mut |index, normalized| {
+                let descriptor = &parameters[index];
+                if descriptor.read_only {
+                    return Ok(());
+                }
+                let projected = (|| {
+                    let id = descriptor.parameter_id().map_err(|_| Refusal::UnknownParameter)?;
+                    let value = descriptor
+                        .author_scalar_from_normalized(normalized)
+                        .map_err(|_| Refusal::InvalidValue)?;
+                    NativeAudioAuthorParameterEvent::admit(
+                        id,
+                        Phase::Value,
+                        Some(NativeAudioAuthorScalar::admit(value)?),
+                    )
+                })();
+                match projected {
+                    Ok(value) => {
+                        values.push(value);
+                        Ok(())
+                    }
+                    Err(reason) => {
+                        projection_refusal = Some(reason);
+                        Err(vst3_host::Error::InvalidParameter(
+                            "VST3 author value refused".to_owned(),
+                        ))
+                    }
+                }
+            },
+        );
+        let queried = current_source(plugin)?;
+        if query.is_err() || queried != baseline || plugin.pending_restart_cohort() != Some(cohort)
+        {
+            return Ok(refused(
+                queried,
+                projection_refusal.unwrap_or(Refusal::SourceChanged),
+            ));
+        }
+        let limit = crate::NATIVE_AUDIO_AUTHOR_CONFIGURATION_BYTES;
+        let grant = limit.checked_mul(3).ok_or_else(|| invalid("VST3 capture extent overflow"))?;
+        let configuration = match plugin.capture_author_state_bounded(limit, grant) {
+            Ok(capture) => match NativeAudioAuthorConfiguration::admit(capture.into_bytes()) {
+                Ok(configuration) => configuration,
+                Err(reason) => return Ok(refused(current_source(plugin)?, reason)),
+            },
+            Err(error) => {
+                use vst3_host::configuration_capture::ConfigurationCaptureError as Error;
+                let reason = match error {
+                    Error::InvalidLimit { .. }
+                    | Error::BufferGrantExceeded { .. }
+                    | Error::StateLimitExceeded { .. }
+                    | Error::AllocationFailed
+                    | Error::AllocationExtent { .. }
+                    | Error::ExtentOverflow => Refusal::ResourceLimit,
+                    _ => Refusal::ConfigurationUnavailable,
+                };
+                return Ok(refused(current_source(plugin)?, reason));
+            }
+        };
+        let coherent =
+            plugin.editor_capture_source_status_since(baseline.revision).map_err(|error| {
+                unavailable(format!("VST3 rescan capture coherence failed: {error}"))
+            })?;
+        let Some(coherent) = coherent else {
+            return Ok(refused(current_source(plugin)?, Refusal::SourceChanged));
+        };
+        // Only this fresh post-getState witness may label the delivered prefix.
+        // Legitimate Dirty(false) callbacks remain in its exact revision/order.
+        let witness = match plugin.capture_restart_source_witness() {
+            Ok(witness) if witness.source() == coherent && witness.cohort() == cohort => witness,
+            _ => return Ok(refused(current_source(plugin)?, Refusal::SourceChanged)),
+        };
+        let source = status(coherent)?;
+        let count = source.pending_events as usize;
+        let Some(dirty_count) = source.revision.checked_sub(baseline.revision) else {
+            return Ok(refused(source, Refusal::SourceChanged));
+        };
+        if count > crate::NATIVE_AUDIO_AUTHOR_EVENTS
+            || usize::try_from(dirty_count).ok().and_then(|n| n.checked_add(1)) != Some(count)
+        {
+            return Ok(refused(source, Refusal::SourceChanged));
+        }
+        let mut projected = Vec::new();
+        if projected.try_reserve_exact(count).is_err()
+            || projected.capacity() > crate::NATIVE_AUDIO_AUTHOR_EVENTS
+        {
+            return Ok(refused(source, Refusal::ResourceLimit));
+        }
+        projected.push(Event::ParameterValuesRescanned {
+            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
+            values,
+        });
+        projected.extend((1..count).map(|_| Event::DirtyChanged(false)));
+        let request_cohort = Some(crate::NativeRequestCohort {
+            serial: witness.cohort().serial(),
+            request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                flags: witness.cohort().flags().bits() as u32,
+            },
+        });
+        let delivery = NativeAudioAuthorDelivery {
+            binding,
+            revision: source.revision,
+            request_cohort,
+            events: projected,
+            configuration: Some(configuration.clone()),
+            completion: mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration,
+        };
+        if let Err(reason) = delivery.validate(source) {
+            return Ok(refused(source, reason));
+        }
+        // No native call follows the final witness before this direct drain.
+        // Plugin::take_editor_events would implicitly service caches/setters.
+        let drained = plugin
+            .borrow_editor_control()
+            .map_err(|error| unavailable(format!("VST3 rescan drain borrow failed: {error}")))?
+            .take_editor_events()
+            .map_err(|error| unavailable(format!("VST3 rescan direct drain failed: {error}")))?;
+        let events = match drained {
+            NativeEditorEventDrain::Complete { events } => events,
+            NativeEditorEventDrain::Incomplete { .. } => {
+                return Ok(refused(current_source(plugin)?, Refusal::InvalidSource));
+            }
+        };
+        let after = current_source(plugin);
+        let exact = captured_rescan_prefix(&events, count, cohort)
+            && plugin.pending_restart_cohort() == Some(cohort);
+        let reason = match &after {
+            Ok(after)
+                if exact
+                    && after.revision == source.revision
+                    && after.closed_empty()
+                    && after.pending_dsp_feedback_values == 0 =>
+            {
+                None
+            }
+            _ => Some(Refusal::SourceChanged),
+        };
+        if let Some(reason) = reason {
+            // Unexpected SDK/racing loss after drain retains the original batch.
+            self.native_author_delivery = Some(PendingDelivery::Rejected {
+                binding,
+                revision: source.revision,
+                reason,
+                events,
+            });
+            return Ok(refused(after?, reason));
+        }
+        self.native_author_delivery = Some(PendingDelivery::Delivered {
+            binding,
+            revision: source.revision,
+            configuration: Some(configuration),
+            request_cohort,
+            rescan_witness: Some(witness),
+        });
+        Ok(NativeAudioAuthorObservation {
+            source: after?,
+            delivery: Delivery::Delivered(delivery),
+        })
+    }
+}
+
+fn captured_rescan_prefix(
+    events: &[vst3_host::plugin::NativeEditorEvent],
+    count: usize,
+    cohort: vst3_host::plugin::RestartCohort,
+) -> bool {
+    use vst3_host::plugin::NativeEditorEvent;
+    count != 0 && events.len() == count && events.iter().enumerate().all(|(index, event)| {
+        if index == 0 {
+            matches!(event, NativeEditorEvent::ParameterRescanRequested { flags: 4, cohort: actual }
+                if *actual == cohort)
+        } else {
+            matches!(event, NativeEditorEvent::DirtyChanged(false))
+        }
+    })
+}
+
+#[cfg(test)]
+mod rescan_tests {
+    use super::*;
+    use vst3_host::plugin::{NativeEditorEvent as Raw, RestartCohort};
+
+    fn cohort(serial: u32, flags: u32) -> RestartCohort {
+        serde_json::from_value(serde_json::json!(
+            (u64::from(serial) << 32) | u64::from(flags)
+        ))
+        .unwrap()
+    }
+    fn source(count: usize) -> NativeAudioAuthorSourceStatus {
+        NativeAudioAuthorSourceStatus {
+            parameter_flush_pending: false,
+            publishing: false,
+            revision: 7,
+            pending_events: count as u32,
+            pending_parameter_observations: 0,
+            pending_dsp_feedback_values: 0,
+            open_parameter_edits: 0,
+            group_depth: 0,
+            failure: None,
+        }
+    }
+    fn marker(cohort: RestartCohort) -> Raw {
+        Raw::ParameterRescanRequested { flags: cohort.flags().bits(), cohort }
+    }
+
+    #[test]
+    fn single_rescan_requires_one_current_exact4_marker_before_drain() {
+        let exact = cohort(3, 4);
+        assert_eq!(
+            classify_rescan(&[marker(exact)], source(1), Some(exact)),
+            Ok(Some(exact))
+        );
+        for (events, live) in [
+            (
+                vec![marker(exact), marker(cohort(4, 4))],
+                Some(cohort(4, 4)),
+            ),
+            (vec![marker(exact), Raw::GroupEditStarted], Some(exact)),
+            (vec![marker(exact), Raw::DirtyChanged(false)], Some(exact)),
+            (vec![marker(cohort(3, 16))], Some(cohort(3, 16))),
+            (vec![marker(cohort(3, 20))], Some(cohort(3, 20))),
+            (vec![marker(cohort(3, 36))], Some(cohort(3, 36))),
+            (vec![marker(exact)], Some(cohort(3, 0))),
+            (vec![marker(exact)], None),
+            (vec![marker(exact)], Some(cohort(4, 4))),
+            (vec![marker(cohort(u32::MAX, 4))], Some(cohort(u32::MAX, 4))),
+            (vec![marker(cohort(0, 4))], Some(cohort(0, 4))),
+            (vec![], Some(exact)),
+        ] {
+            assert_eq!(
+                classify_rescan(&events, source(events.len()), live),
+                Err(Refusal::UnsupportedAdapter)
+            );
+        }
+        let mut open = source(1);
+        open.open_parameter_edits = 1;
+        assert!(classify_rescan(&[marker(exact)], open, Some(exact)).is_err());
+        open = source(1);
+        open.pending_dsp_feedback_values = 1;
+        assert!(classify_rescan(&[marker(exact)], open, Some(exact)).is_err());
+    }
+
+    #[test]
+    fn single_rescan_classification_preserves_the_nonrescan_ui_route() {
+        let events = [
+            Raw::GroupEditStarted,
+            Raw::GroupEditFinished,
+            Raw::DirtyChanged(true),
+        ];
+        for live in [None, Some(cohort(4, 0)), Some(cohort(5, 8))] {
+            assert_eq!(
+                classify_rescan(&events, source(events.len()), live),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn captured_rescan_prefix_accepts_only_the_original_marker_and_dirty_false_suffix() {
+        let exact = cohort(3, 4);
+        let complete = [
+            marker(exact),
+            Raw::DirtyChanged(false),
+            Raw::DirtyChanged(false),
+        ];
+        assert!(captured_rescan_prefix(&complete, 3, exact));
+        assert!(!captured_rescan_prefix(&complete, 2, exact));
+        assert!(!captured_rescan_prefix(&complete, 3, cohort(4, 4)));
+        assert!(!captured_rescan_prefix(&[], 0, exact));
+        for suffix in [
+            Raw::DirtyChanged(true),
+            marker(cohort(4, 4)),
+            Raw::GroupEditStarted,
+        ] {
+            assert!(!captured_rescan_prefix(&[marker(exact), suffix], 2, exact));
+        }
     }
 }

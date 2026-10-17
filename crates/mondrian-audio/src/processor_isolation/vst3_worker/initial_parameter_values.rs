@@ -67,27 +67,14 @@ impl Vst3Worker {
         };
         let mut writable = 0;
         let mut frame = ControllerParameterQueryFrame::default();
-        let count = plugin.visit_controller_parameters_bounded(
-            admitted.len(),
+        let count = visit_admitted_controller_values(
+            plugin,
+            admitted,
             &mut frame,
-            &mut |index, observed| {
-                let expected = admitted.get(index).ok_or_else(invalid_native_parameter)?;
-                if observed.id() != expected.id
-                    || !observed.title_matches(&expected.name)
-                    || observed.default_normalized().to_bits()
-                        != expected.default_normalized.to_bits()
-                    || observed.step_count() != expected.step_count
-                    || observed.flags() != expected.flags
-                    || !observed.normalized().is_finite()
-                    || !(0.0..=1.0).contains(&observed.normalized())
-                {
-                    return Err(invalid_native_parameter());
-                }
-                if !expected.read_only {
-                    observations.values[writable] = InitialParameterValue {
-                        id: observed.id(),
-                        normalized: observed.normalized(),
-                    };
+            &mut |index, normalized| {
+                if !admitted[index].read_only {
+                    observations.values[writable] =
+                        InitialParameterValue { id: admitted[index].id, normalized };
                     writable += 1;
                 }
                 Ok(())
@@ -185,7 +172,41 @@ impl Vst3Worker {
         true
     }
 }
-#[cfg(target_os = "windows")]
 fn invalid_native_parameter() -> vst3_host::Error {
     vst3_host::Error::InvalidParameter("controller identity or normalized value changed".to_owned())
+}
+
+/// Two same-owner consumers share the admitted metadata comparison, not a
+/// second parameter inventory. The callback receives each actual current value.
+pub(super) fn visit_admitted_controller_values(
+    plugin: &Plugin,
+    admitted: &[Vst3ParameterDescriptor],
+    frame: &mut ControllerParameterQueryFrame,
+    visit: &mut impl FnMut(usize, f64) -> vst3_host::Result<()>,
+) -> vst3_host::Result<usize> {
+    if admitted.len() > MAX_PARAMETERS {
+        return Err(invalid_native_parameter());
+    }
+    let count = plugin.visit_controller_parameters_bounded(
+        admitted.len(),
+        frame,
+        &mut |index, observed| {
+            let expected = admitted.get(index).ok_or_else(invalid_native_parameter)?;
+            if observed.id() != expected.id
+                || !observed.title_matches(&expected.name)
+                || observed.default_normalized().to_bits() != expected.default_normalized.to_bits()
+                || observed.step_count() != expected.step_count
+                || observed.flags() != expected.flags
+                || !observed.normalized().is_finite()
+                || !(0.0..=1.0).contains(&observed.normalized())
+            {
+                return Err(invalid_native_parameter());
+            }
+            visit(index, observed.normalized())
+        },
+    )?;
+    if count != admitted.len() {
+        return Err(invalid_native_parameter());
+    }
+    Ok(count)
 }
