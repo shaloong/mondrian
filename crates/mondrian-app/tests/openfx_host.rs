@@ -313,6 +313,9 @@ fn curve_source_lifecycle(expected_mode: &str) {
     )
     .expect("prepare");
     let worker = session.worker_process_id();
+    if expected_mode == "curve_animation_state" {
+        println!("curve-animation-worker-pid={worker}");
+    }
     for (phase, (binding, gain)) in [
         (&first, 2.0),
         (&first, 2.0),
