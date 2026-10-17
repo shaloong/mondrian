@@ -150,6 +150,41 @@ fn check_owner(
     Ok(())
 }
 
+// A real exit still settles the sole Child when its observation is late, but
+// only a status observed strictly before the original deadline is graceful.
+struct ObservedRetirementExit {
+    status: std::process::ExitStatus,
+    graceful: Result<(), OpenFxHostError>,
+}
+
+// One nonblocking query of the existing owner, not a second waiter. The private
+// clock/query seam also exercises the production deadline ordering in tests.
+fn observe_retirement_exit(
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut query: impl FnMut() -> io::Result<Option<std::process::ExitStatus>>,
+) -> Result<Option<ObservedRetirementExit>, OpenFxHostError> {
+    if now() >= deadline {
+        return Err(OpenFxHostError::DeadlineExceeded);
+    }
+    let status = query().map_err(control_error)?;
+    let observed_at = now();
+    match status {
+        Some(status) => {
+            let graceful = if observed_at >= deadline {
+                Err(OpenFxHostError::DeadlineExceeded)
+            } else if status.success() {
+                Ok(())
+            } else {
+                Err(OpenFxHostError::WorkerFailed(status.to_string()))
+            };
+            Ok(Some(ObservedRetirementExit { status, graceful }))
+        }
+        None if observed_at >= deadline => Err(OpenFxHostError::DeadlineExceeded),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug)]
 struct ProcessOwner {
     child: Child,
@@ -1332,20 +1367,15 @@ impl OpenFxFilterSession {
                 .close_trace
                 .record(close_observation::Stage::ParentClosedObserved, 0);
             loop {
-                if let Some(status) = self.process.child.try_wait().map_err(control_error)? {
+                if let Some(observed) = observe_retirement_exit(deadline, Instant::now, || {
+                    self.process.child.try_wait()
+                })? {
                     self.process.close_trace.record(
                         close_observation::Stage::ParentOsExitObserved,
-                        status.code().unwrap_or(-1) as u32,
+                        observed.status.code().unwrap_or(-1) as u32,
                     );
                     self.process.confirmed_exit();
-                    return if status.success() {
-                        Ok(())
-                    } else {
-                        Err(OpenFxHostError::WorkerFailed(status.to_string()))
-                    };
-                }
-                if Instant::now() >= deadline {
-                    return Err(OpenFxHostError::DeadlineExceeded);
+                    return observed.graceful;
                 }
                 thread::sleep(Duration::from_millis(1));
             }
@@ -2178,6 +2208,147 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<Response>(packet).is_err());
         }
+    }
+
+    #[cfg(any(windows, unix))]
+    fn retirement_status(code: u32) -> std::process::ExitStatus {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw((code as i32) << 8)
+        }
+    }
+
+    #[test]
+    fn retirement_exit_expired_before_query_never_observes_or_accepts_a_child() {
+        let deadline = Instant::now();
+        for resumed_at in [deadline, deadline + Duration::from_nanos(1)] {
+            assert!(matches!(
+                observe_retirement_exit(
+                    deadline,
+                    || resumed_at,
+                    || panic!("expired observation must not query the Child"),
+                ),
+                Err(OpenFxHostError::DeadlineExceeded)
+            ));
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn retirement_exit_query_crossing_deadline_retains_status_but_never_succeeds() {
+        let start = Instant::now();
+        let deadline = start + RETIRE;
+        for code in [0, 7] {
+            for observed_at in [deadline, deadline + Duration::from_nanos(1)] {
+                let mut times = [start, observed_at].into_iter();
+                let mut queries = 0;
+                let observed = observe_retirement_exit(
+                    deadline,
+                    || times.next().expect("only pre/post query clock reads"),
+                    || {
+                        queries += 1;
+                        Ok(Some(retirement_status(code)))
+                    },
+                )
+                .expect("actual late OS exit remains available for settlement")
+                .expect("same queried Child has exited");
+                assert_eq!(queries, 1);
+                assert!(times.next().is_none());
+                assert_eq!(observed.status.code(), Some(code as i32));
+                assert!(matches!(
+                    observed.graceful,
+                    Err(OpenFxHostError::DeadlineExceeded)
+                ));
+            }
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn retirement_exit_before_deadline_preserves_success_and_nonzero_failure() {
+        let start = Instant::now();
+        let deadline = start + RETIRE;
+        for code in [0, 7] {
+            let mut times = [start, deadline - Duration::from_nanos(1)].into_iter();
+            let observed = observe_retirement_exit(
+                deadline,
+                || times.next().expect("pre/post query clock reads"),
+                || Ok(Some(retirement_status(code))),
+            )
+            .expect("query succeeds")
+            .expect("actual OS exit");
+            assert!(times.next().is_none());
+            assert_eq!(observed.status.code(), Some(code as i32));
+            if code == 0 {
+                assert!(observed.graceful.is_ok());
+            } else {
+                assert!(matches!(observed.graceful,
+                    Err(OpenFxHostError::WorkerFailed(detail))
+                        if detail == observed.status.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn retirement_exit_pending_uses_original_deadline_without_an_extra_query() {
+        let start = Instant::now();
+        let deadline = start + RETIRE;
+        let mut times = [
+            start,
+            start + Duration::from_millis(1),
+            deadline - Duration::from_nanos(1),
+            deadline,
+        ]
+        .into_iter();
+        let mut queries = 0;
+        for pending in [true, false] {
+            let result = observe_retirement_exit(
+                deadline,
+                || times.next().expect("bounded original clock sequence"),
+                || {
+                    queries += 1;
+                    Ok(None)
+                },
+            );
+            if pending {
+                assert!(matches!(result, Ok(None)));
+            } else {
+                assert!(matches!(result, Err(OpenFxHostError::DeadlineExceeded)));
+            }
+        }
+        assert_eq!(queries, 2);
+        assert!(times.next().is_none());
+    }
+
+    #[test]
+    fn retirement_exit_query_error_keeps_original_control_error() {
+        let start = Instant::now();
+        let mut clocks = 0;
+        let mut queries = 0;
+        let result = observe_retirement_exit(
+            start + RETIRE,
+            || {
+                clocks += 1;
+                start
+            },
+            || {
+                queries += 1;
+                Err(io::Error::from_raw_os_error(6))
+            },
+        );
+        assert_eq!(
+            clocks, 1,
+            "query error is not reclassified by a later clock read"
+        );
+        assert_eq!(queries, 1);
+        assert!(matches!(result, Err(OpenFxHostError::Unavailable(detail))
+            if detail == format!("native session control failed: {}", io::Error::from_raw_os_error(6))));
     }
 
     fn pair() -> (TcpStream, TcpStream) {
