@@ -5359,7 +5359,7 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
             receipt.binding() == request.binding
                 && receipt.object() == request.expected_object
                 && request.expected_object == self.object
-        }))
+        }) && self.author_delivery.is_none())
     }
 
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {

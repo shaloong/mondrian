@@ -1,4 +1,4 @@
-//! Real socket/ingress controls for the existing main service with no DSP role.
+//! Real socket/ingress controls for control-only and scoped DSP command routing.
 use super::*;
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -233,4 +233,216 @@ fn control_only_matching_author_drain_returns_intact_to_owner_without_dsp_or_rep
         );
         child.join().unwrap();
     });
+}
+
+// These synthetic roles prove real command/slot dispatch, not a native author
+// producer or prepared-entry/Ack lifecycle. Actual adapter evidence is separate.
+struct DispatchMain {
+    binding: crate::NativeAudioObjectBindRequest,
+    eligible: bool,
+    checks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl super::super::IsolatedAudioProcessorMainRole for DispatchMain {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        Some([
+            dispatch_layout(std::alloc::Layout::for_value(self)),
+            dispatch_empty(),
+        ])
+    }
+    fn service_native_main_thread(&mut self) -> Result<(), AudioProcessorHostError> {
+        Ok(())
+    }
+    fn finish_processing_scope(&mut self) -> Result<(), AudioProcessorHostError> {
+        self.finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn native_configuration_cohort(
+        &self,
+    ) -> Result<Option<super::super::NativeRequestCohort>, AudioProcessorHostError> {
+        Ok(None)
+    }
+    fn pending_reprepare(
+        &self,
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
+        Ok(None)
+    }
+    fn native_author_binding_matches(
+        &self,
+        binding: crate::NativeAudioObjectBindRequest,
+    ) -> Result<bool, AudioProcessorHostError> {
+        self.checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self.eligible && self.binding == binding)
+    }
+}
+struct DispatchDsp {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pending: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+}
+impl super::super::IsolatedAudioProcessorProcessingRole for DispatchDsp {
+    fn allocation_layouts(&self) -> Option<[crate::NativeHostBufferLayout; 2]> {
+        Some([
+            dispatch_layout(std::alloc::Layout::for_value(self)),
+            dispatch_empty(),
+        ])
+    }
+    fn process(
+        &mut self,
+        _: super::super::IsolatedAudioProcessorWorkerBlock<'_>,
+    ) -> Result<(), AudioProcessorHostError> {
+        panic!("DrainAuthor cannot become a PCM job")
+    }
+    fn flush_native_author_parameters(
+        &mut self,
+    ) -> Result<crate::NativeAudioAuthorParameterFlushOutcome, AudioProcessorHostError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pending.lock().unwrap().clear();
+        Ok(crate::NativeAudioAuthorParameterFlushOutcome::Flushed)
+    }
+}
+fn dispatch_empty() -> crate::NativeHostBufferLayout {
+    crate::NativeHostBufferLayout { bytes: 0, alignment: 1 }
+}
+fn dispatch_layout(layout: std::alloc::Layout) -> crate::NativeHostBufferLayout {
+    crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() }
+}
+
+#[test]
+fn author_drain_eligibility_controls_the_real_scoped_dsp_slot_before_owner_handoff() {
+    use super::super::native_audio_object_wire::write_observation_request;
+    use super::super::native_worker_command::NativeCommand;
+    use super::super::native_worker_ingress::{
+        with_native_ingress, NativeCommandIngress, NativeReaderSlots,
+    };
+    use super::super::native_worker_processing::{
+        with_processing_scope, NativeDspDispatch, NativeProcessingSlots,
+    };
+    use crate::NativeAudioObservationConsumption as Consumption;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    for eligible in [false, true] {
+        for matching in [false, true] {
+            let binding = crate::NativeAudioObjectBindRequest {
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                expected_object: crate::NativeAudioObjectObservation::new(
+                    std::num::NonZeroU32::new(std::process::id()).unwrap(),
+                    std::num::NonZeroU64::new(29).unwrap(),
+                ),
+            };
+            let requested = if matching {
+                binding
+            } else {
+                crate::NativeAudioObjectBindRequest {
+                    binding: mondrian_core::AudioProcessorBindingId::new(),
+                    ..binding
+                }
+            };
+            let calls = Arc::new(AtomicUsize::new(0));
+            let checks = Arc::new(AtomicUsize::new(0));
+            let finished = Arc::new(AtomicUsize::new(0));
+            let pending = Arc::new(Mutex::new(vec![0.875]));
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut parent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (mut child, _) = listener.accept().unwrap();
+            for socket in [&parent, &child] {
+                socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                socket.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+            }
+            let owners = crate::NativeWorkerLaneOwnedLayouts {
+                // This control constructs roles, not an adapter Worker Box.
+                adapter_resident: dispatch_empty(),
+                reader_slots: dispatch_layout(std::alloc::Layout::new::<NativeReaderSlots>()),
+                processing_slots: dispatch_layout(
+                    std::alloc::Layout::new::<NativeProcessingSlots>(),
+                ),
+                main_inline: dispatch_layout(std::alloc::Layout::new::<(
+                    NativeCommandIngress<'static>,
+                    WorkerProcessContext<'static>,
+                    NativeDspDispatch<'static>,
+                )>()),
+                runtime_main_role: dispatch_layout(std::alloc::Layout::new::<DispatchMain>()),
+                runtime_dsp_role: dispatch_layout(std::alloc::Layout::new::<DispatchDsp>()),
+                sdk_main_role: dispatch_empty(),
+                sdk_dsp_role: dispatch_empty(),
+            };
+            let bytes = super::super::protocol::MAX_CONTROL_FRAME_BYTES;
+            let profile = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+                owners,
+                crate::NativeWorkerControlOverlapLayout {
+                    decoded_input: crate::NativeHostBufferLayout {
+                        bytes,
+                        alignment: std::mem::align_of::<f64>(),
+                    },
+                    reply_storage: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+                    staged_seed: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+                },
+            )
+            .unwrap();
+            let contract = AudioRenderContract {
+                sample_rate: 48000,
+                channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+                max_block_frames: 1,
+                processing_mode: crate::AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: 0,
+                public_output_lookahead_budget_frames: 0,
+                compensation_delay_scratch_budget_bytes: 0,
+            };
+            let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+            let auxiliary_outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
+            let notes = crate::AudioProcessorNoteInputContract::default();
+            let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+            let context = WorkerProcessContext {
+                musical_time_reference: None,
+                layout,
+                auxiliary_inputs: &auxiliary,
+                auxiliary_outputs: &auxiliary_outputs,
+                note_input_contract: &notes,
+                parameter_ids: &[],
+                render_contract: contract,
+            };
+            let mut storage = vec![0_u64; layout.total_bytes.div_ceil(size_of::<u64>())];
+            let shared = bytemuck::cast_slice_mut(&mut storage);
+            std::thread::scope(|scope| {
+                let child = scope.spawn(|| {
+                    with_native_ingress(&mut child, 0, Some(profile), |control, ingress| {
+                        let split = super::super::IsolatedAudioProcessorWorkerSplit {
+                            main: Box::new(DispatchMain { binding, eligible, checks: checks.clone(), finished: finished.clone() }),
+                            processing: Box::new(DispatchDsp { calls: calls.clone(), pending: pending.clone() }),
+                        };
+                        let result = with_processing_scope(split, profile, shared, context,
+                            |main, dsp| service_native_main_scope(main, Some(dsp), ingress, control))?;
+                        assert!(matches!(result.value, NativeScopeExit::OwnerCommand(NativeCommand::PollObservations(
+                            Consumption::DrainAuthor(actual))) if actual == requested));
+                        // This is a synthetic owner boundary reply, not native
+                        // AwaitingA or a successful author delivery/acceptance.
+                        WorkerResponse::Failed("test joined owner boundary; no author reply".into()).write_to(control).unwrap();
+                        ingress.acknowledge()?;
+                        Ok(())
+                    }).unwrap();
+                });
+                command(CommandKind::PollNativeObservations, 0).write_to(&mut parent).unwrap();
+                write_observation_request(&mut parent, Consumption::DrainAuthor(requested))
+                    .unwrap();
+                assert_eq!(
+                    WorkerResponse::read_from(&mut parent).unwrap(),
+                    WorkerResponse::Failed("test joined owner boundary; no author reply".into())
+                );
+                child.join().unwrap();
+            });
+            let expected = usize::from(eligible && matching);
+            assert_eq!(checks.load(Ordering::Relaxed), 1);
+            assert_eq!(calls.load(Ordering::Relaxed), expected);
+            assert_eq!(
+                finished.load(Ordering::Relaxed),
+                1,
+                "the actual DSP thread joined"
+            );
+            assert_eq!(
+                *pending.lock().unwrap(),
+                if expected == 0 { vec![0.875] } else { vec![] }
+            );
+        }
+    }
 }

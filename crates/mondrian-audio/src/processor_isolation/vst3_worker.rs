@@ -2150,7 +2150,9 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
         Ok(self.native_binding.as_ref().is_some_and(|receipt| {
             receipt.binding() == binding.binding && receipt.object() == binding.expected_object
         }) && binding.expected_object.process_id().get() == pid
-            && binding.expected_object.object_serial() == owner.serial())
+            && binding.expected_object.object_serial() == owner.serial()
+            && self.native_author_delivery.is_none()
+            && !self.prepared_author_entry.as_ref().is_some_and(|entry| entry.awaiting_ack()))
     }
 
     fn native_editor_close_requested(&self) -> Result<bool, AudioProcessorHostError> {

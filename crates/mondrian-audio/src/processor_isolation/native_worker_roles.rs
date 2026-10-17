@@ -52,8 +52,11 @@ pub trait IsolatedAudioProcessorMainRole {
         Ok(crate::NativeAudioObservations::default())
     }
 
-    /// Check the current child binding and actual object before an author
-    /// control job. Public metadata alone cannot authorize a native callback.
+    /// Admit this DrainAuthor command's DSP job only for the current binding
+    /// and actual object when the full owner will collect new author work.
+    /// A retained delivery/awaiting acceptance returns to that owner unchanged.
+    /// Independent adapter idle service is not gated by this command check.
+    /// Public metadata alone cannot authorize a native callback.
     fn native_author_binding_matches(
         &self,
         _binding: crate::NativeAudioObjectBindRequest,
