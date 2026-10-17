@@ -3002,6 +3002,7 @@ impl HostEventList {
     }
 
     /// True if the list currently holds no events.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.events
             .lock()
@@ -3012,6 +3013,7 @@ impl HostEventList {
     /// Move each queued event into `f`, leaving the list empty while retaining its backing
     /// allocation. Pointer-backed payloads therefore cross into the output queue without a
     /// second allocation or byte copy on the audio thread.
+    #[cfg(test)]
     pub fn drain_each(&self, mut f: impl FnMut(PluginEvent)) {
         if let Ok(mut events) = self.events.lock() {
             for event in events.drain(..) {
@@ -4015,11 +4017,8 @@ impl ParameterChanges {
         self.used.store(0, Ordering::Relaxed);
     }
 
-    /// Visit every point the plugin wrote into the active queues for this block.
-    ///
-    /// The callback runs while the small queue/point mutexes are held, so it must stay
-    /// allocation-free and non-blocking. This is used immediately after `process()` to copy
-    /// processor-originated automation into the host's bounded feedback queue.
+    /// Inspect the original active queues for storage and per-block reset tests.
+    #[cfg(test)]
     pub fn for_each_active_point(&self, mut f: impl FnMut(u32, i32, f64)) {
         let queues = self.queues.lock().unwrap_or_else(|p| p.into_inner());
         let used = self.used.load(Ordering::Relaxed).min(queues.len());

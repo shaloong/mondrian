@@ -6834,7 +6834,7 @@ impl PluginProcessFields<'_> {
         active_notes: bool,
     ) -> Result<()> {
         let result = if let Some(data) = self.process_data.as_mut() {
-            unsafe {
+            {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
 
