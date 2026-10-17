@@ -106,6 +106,7 @@ impl IsolatedAudioProcessorWorkerFactory for ResidentFactory {
 
 fn request(profile: NativeWorkerLaneResourceProfile) -> IsolatedAudioProcessorWorkerPrepareRequest {
     IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: None,
         native_lane: Some(profile),
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::stateless(),

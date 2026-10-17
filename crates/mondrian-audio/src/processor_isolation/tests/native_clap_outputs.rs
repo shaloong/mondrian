@@ -327,6 +327,7 @@ fn native_output_seed_keeps_concrete_identity_and_vst3_refuses_unimplemented_aux
     );
     assert_eq!(actual.state, Some(vec![2, 3]));
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: None,
         native_lane: None,
         payload: Vec::new(),
         plugin_execution_contract: AudioProcessorExecutionContract::stateless(),
@@ -365,6 +366,7 @@ fn clap_output_process_validates_every_port_before_publication_and_reads_complet
         let inputs = super::super::protocol::auxiliary_from_wire(probe.auxiliary_buses);
         let outputs = super::super::protocol::outputs_from_wire(probe.auxiliary_outputs);
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             native_lane: clap_native_worker_lane_profile().unwrap(),
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(
@@ -503,6 +505,7 @@ mod installed {
         let observed = offer.parameters().iter().find(|p| p.id == 29).unwrap();
         assert!(observed.read_only && !observed.automatable);
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             native_lane: clap_native_worker_lane_profile().unwrap(),
             payload: Vec::new(),
             plugin_execution_contract: AudioProcessorExecutionContract::new(
@@ -584,6 +587,7 @@ mod installed {
             profile,
             shared,
             WorkerProcessContext {
+                musical_time_reference: None,
                 layout,
                 auxiliary_inputs: &inputs,
                 auxiliary_outputs: &outputs,

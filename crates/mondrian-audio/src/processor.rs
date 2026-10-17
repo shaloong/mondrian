@@ -281,6 +281,7 @@ pub struct AudioProcessorPrepareRequest<'a> {
     opaque_state: Option<&'a [u8]>,
     render_contract: AudioRenderContract,
     note_input_requested: bool,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
 }
 
 impl<'a> AudioProcessorPrepareRequest<'a> {
@@ -298,6 +299,7 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
             opaque_state,
             render_contract,
             note_input_requested: false,
+            musical_time_reference: None,
         }
     }
 
@@ -341,6 +343,42 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
     pub const fn note_input_requested(&self) -> bool {
         self.note_input_requested
     }
+
+    pub(crate) const fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Self {
+        self.musical_time_reference = reference;
+        self
+    }
+
+    /// Immutable musical reference of this occurrence's owning Sequence.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
+}
+
+/// Project only the available constant tempo. No beat, bar or playing facts
+/// follow from this value. Success is allocation-free and uses no clock state.
+pub(crate) fn musical_tempo(
+    reference: Option<mondrian_core::MusicalTimeReference>,
+) -> Result<Option<f64>, AudioProcessorHostError> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let duration = reference.quarter_note_duration();
+    if duration.numerator() <= 0 || duration.denominator() <= 0 {
+        return Err(AudioProcessorHostError::InvalidContract(
+            "musical quarter-note duration must be positive".to_owned(),
+        ));
+    }
+    let tempo = 60.0 * duration.denominator() as f64 / duration.numerator() as f64;
+    if !tempo.is_finite() || tempo <= 0.0 {
+        return Err(AudioProcessorHostError::InvalidContract(
+            "musical tempo is not positive and finite".to_owned(),
+        ));
+    }
+    Ok(Some(tempo))
 }
 
 /// Non-realtime resolver for built-in or separately hosted processor definitions.
@@ -609,6 +647,7 @@ pub struct AudioProcessorProcessContext {
     processing_mode: AudioProcessingMode,
     kernel_backend: AudioKernelBackend,
     admitted_root_window: bool,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
 }
 
 impl AudioProcessorProcessContext {
@@ -626,12 +665,26 @@ impl AudioProcessorProcessContext {
             processing_mode,
             kernel_backend,
             admitted_root_window: false,
+            musical_time_reference: None,
         }
     }
 
     pub(crate) const fn admitted_root_window(mut self) -> Self {
         self.admitted_root_window = true;
         self
+    }
+
+    pub(crate) const fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Self {
+        self.musical_time_reference = reference;
+        self
+    }
+
+    /// Same immutable Sequence reference admitted during factory preparation.
+    pub const fn musical_time_reference(self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
     }
 
     pub(crate) const fn has_root_window_admission(self) -> bool {

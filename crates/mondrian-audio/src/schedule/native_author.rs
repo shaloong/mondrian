@@ -113,7 +113,8 @@ fn compatible_program(
             "native author handoff changed immutable Note score",
         ));
     }
-    if old.output_id != next.output_id
+    if old.musical_time_reference != next.musical_time_reference
+        || old.output_id != next.output_id
         || old.contributions != next.contributions
         || old.transitions != next.transitions
         || old.routes != next.routes
@@ -499,6 +500,7 @@ mod note_handoff_tests {
             opaque_state: None,
         });
         let program = CompiledAudioProgram {
+            musical_time_reference: None,
             output_id: ProgramOutputId::new(),
             contributions: Vec::new(),
             processing_scopes: BTreeMap::new(),
@@ -518,6 +520,35 @@ mod note_handoff_tests {
             insertion: Insertion::PreFader,
         };
         assert!(compatible_program(&program, &program.clone(), locator).is_ok());
+        // The same immutable signal identity includes the exact reference origin,
+        // even though this CLAP slice consumes only its constant tempo.
+        let mut with_music = program.clone();
+        with_music.musical_time_reference = Some(
+            mondrian_core::MusicalTimeReference::new(
+                TimelineTime::new(-1, 7).unwrap(),
+                TimelineTime::new(3, 4).unwrap(),
+            )
+            .unwrap(),
+        );
+        for next in [program.clone(), {
+            let mut next = with_music.clone();
+            next.musical_time_reference = Some(
+                mondrian_core::MusicalTimeReference::new(
+                    TimelineTime::new(2, 7).unwrap(),
+                    TimelineTime::new(3, 4).unwrap(),
+                )
+                .unwrap(),
+            );
+            next
+        }] {
+            assert_eq!(
+                compatible_program(&with_music, &next, locator),
+                Err(refused(
+                    "native author handoff changed signal topology or source/time mapping"
+                ))
+            );
+        }
+
         let mut changed = program.clone();
         changed.note_lanes[0].notes[0].on_velocity = 0.0;
         assert_eq!(

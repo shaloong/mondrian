@@ -229,6 +229,11 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
                 "only VST3 definitions are handled by this resolver",
             ));
         };
+        if request.musical_time_reference().is_some() {
+            return Err(unavailable(
+                "VST3 musical reference transport is not supported",
+            ));
+        }
         if *schema_version != 1 {
             return Err(unavailable("VST3 definition schema version is unsupported"));
         }
@@ -408,6 +413,11 @@ impl Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Vst3Worker, AudioProcessorHostError> {
+        if request.musical_time_reference().is_some() {
+            return Err(unavailable(
+                "VST3 musical transport is not supported by this adapter",
+            ));
+        }
         if !request.auxiliary_outputs().buses.is_empty() {
             return Err(unavailable(
                 "VST3 auxiliary outputs are not supported by this adapter",
@@ -2079,6 +2089,7 @@ mod bus_contract_tests {
             parameter_ids: vec![0],
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             native_lane: native_worker_lane_profile().unwrap(),
             payload: serde_json::to_vec(&payload).unwrap(),

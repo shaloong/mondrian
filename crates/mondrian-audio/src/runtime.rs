@@ -1353,6 +1353,17 @@ impl AudioProgramRuntime {
                 }
                 Arc::new(program)
             };
+            if depth == 0 {
+                if let Some(closure) = prepared_closure {
+                    closure.validate_musical_references(sequence, sequences)?;
+                    closure.reject_nested_musical_reference()?;
+                } else {
+                    crate::dependency::reject_nested_musical_reference(
+                        sequence, &program, sequences, selection,
+                    )?;
+                }
+            }
+            program.graph().admit_musical_transport(program.musical_time_reference)?;
             // A CLAP Note candidate must be scoped and all targets checked before
             // resolving dependencies or preparing any native factory. The original
             // all-non-CLAP/Builtin family retains its accepted refusal/accounting.
@@ -2314,6 +2325,9 @@ pub enum AudioRuntimeBuildError {
     /// A complete local allocation union could not be admitted.
     #[error(transparent)]
     ResourceOwner(#[from] crate::NativeHostLedgerError),
+    /// A selected musical reference requires unsupported nested transport.
+    #[error(transparent)]
+    Dependency(#[from] crate::AudioDependencyError),
     /// Authoring-to-execution compile failure.
     #[error(transparent)]
     Compile(#[from] crate::AudioCompileError),

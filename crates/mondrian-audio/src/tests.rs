@@ -4262,3 +4262,341 @@ fn native_parameter_references_same_contract_none_to_curve_uses_original_owner_t
         vec![0.1, 0.5, 0.9]
     );
 }
+
+#[test]
+fn compiled_music_reference_changes_semantic_identity_without_author_revision_change() {
+    let mut sequence = sequence_with_audio_clip();
+    let request = AudioCompileRequest::program(sequence.audio_program.outputs[0].id);
+    let before = compile_audio_program(&sequence, request.clone()).unwrap();
+    let closure = compile_full_audio_dependency_closure(&sequence, &[], request.clone()).unwrap();
+    let identity = (sequence.id, sequence.revision);
+    let mut previous = before.clone();
+    let mut previous_closure = closure.clone();
+    for zero in [-19, 23] {
+        sequence.audio_program.musical_time_reference =
+            Some(mondrian_core::MusicalTimeReference::new(tt(zero, 7), tt(3, 4)).unwrap());
+        let next = compile_audio_program(&sequence, request.clone()).unwrap();
+        assert_eq!((sequence.id, sequence.revision), identity);
+        assert_ne!(next, before);
+        assert_ne!(next, previous);
+        assert_eq!(
+            next.musical_time_reference(),
+            sequence.audio_program.musical_time_reference
+        );
+        let next_closure =
+            compile_full_audio_dependency_closure(&sequence, &[], request.clone()).unwrap();
+        assert_ne!(next_closure, closure);
+        assert_ne!(next_closure, previous_closure);
+        previous = next;
+        previous_closure = next_closure;
+    }
+}
+
+#[test]
+fn selected_nested_music_refuses_before_any_media_or_factory_in_direct_and_prepared_paths() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountFactory(AtomicUsize);
+    impl AudioProcessorResolver for CountFactory {
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            BuiltInAudioProcessorResolver.prepare(request)
+        }
+    }
+    fn nested(root: &mut Sequence, child: &Sequence) {
+        root.add_nested_audio_clip(
+            root.audio_tracks[0].id,
+            Clip::new_nested_sequence(child.id, tt(0, 1), tt(2, 1), None).unwrap(),
+            child.audio_program.outputs[0].id,
+        )
+        .unwrap();
+    }
+    let music = Some(mondrian_core::MusicalTimeReference::new(tt(-7, 3), tt(3, 4)).unwrap());
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 1024 * 1024,
+        public_output_lookahead_budget_frames: 1024,
+        compensation_delay_scratch_budget_bytes: 1024 * 1024,
+    };
+    for owner in 0..3 {
+        let mut root = sequence_with_audio_clip();
+        let mut child = sequence_with_audio_clip();
+        let mut grandchild = sequence_with_audio_clip();
+        nested(&mut child, &grandchild);
+        nested(&mut root, &child);
+        match owner {
+            0 => root.audio_program.musical_time_reference = music,
+            1 => child.audio_program.musical_time_reference = music,
+            _ => grandchild.audio_program.musical_time_reference = music,
+        }
+        root.audio_program
+            .track_channels
+            .get_mut(&root.audio_tracks[0].id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(AudioProcessorInstance::built_in(
+                BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ));
+        let sequences = [child, grandchild];
+        let range = TimelineTimeRange::new(tt(0, 1), tt(4, 1)).unwrap();
+        let closure = compile_audio_dependency_closure(&root, &sequences, None, range).unwrap();
+        let media = RecordingResolver::default();
+        let factory = CountFactory(AtomicUsize::new(0));
+        if owner == 0 {
+            let plan = PreparedAudioPlan::prepare_with_processor_resolver(
+                Arc::clone(closure.root_program()),
+                contract,
+                AudioKernelBackend::ScalarReference,
+                &factory,
+            );
+            assert!(matches!(
+                plan,
+                Err(AudioCompileError::SemanticProjectionNotExecutableYet)
+            ));
+            assert_eq!(factory.0.load(Ordering::SeqCst), 0);
+        }
+        let direct = AudioProgramRuntime::build_with_processor_resolver(
+            &root, &sequences, &media, &factory, contract, None,
+        );
+        assert!(matches!(
+            direct,
+            Err(AudioRuntimeBuildError::Dependency(
+                AudioDependencyError::UnsupportedNestedMusicalTime
+            ))
+        ));
+        let prepared = AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+            &root, &sequences, &media, &factory, contract, None, range, &closure,
+            AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX));
+        assert!(matches!(
+            prepared,
+            Err(AudioRuntimeBuildError::Dependency(
+                AudioDependencyError::UnsupportedNestedMusicalTime
+            ))
+        ));
+        assert!(media.resolved_assets.lock().unwrap().is_empty());
+        assert_eq!(factory.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn unselected_nested_music_and_unrelated_candidates_do_not_reject_selected_none_window() {
+    let mut root = sequence_with_audio_clip();
+    let mut child = sequence_with_audio_clip();
+    child.audio_program.musical_time_reference =
+        Some(mondrian_core::MusicalTimeReference::new(tt(-1, 1), tt(3, 4)).unwrap());
+    root.add_nested_audio_clip(
+        root.audio_tracks[0].id,
+        Clip::new_nested_sequence(child.id, tt(8, 1), tt(2, 1), None).unwrap(),
+        child.audio_program.outputs[0].id,
+    )
+    .unwrap();
+    let range = TimelineTimeRange::new(tt(0, 1), tt(1, 1)).unwrap();
+    let closure = compile_audio_dependency_closure(&root, &[child.clone()], None, range).unwrap();
+    assert!(closure.reject_nested_musical_reference().is_ok());
+    let mut root_program = compile_audio_program(
+        &root,
+        AudioCompileRequest::program(root.audio_program.outputs[0].id),
+    )
+    .unwrap();
+    let window = crate::dependency::DependencyWindow::from_half_open(range).unwrap();
+    crate::dependency::select_program_window(&mut root_program, window).unwrap();
+    assert!(crate::dependency::reject_nested_musical_reference(
+        &root,
+        &root_program,
+        &[child],
+        Some(window)
+    )
+    .is_ok());
+}
+
+#[test]
+fn prepared_closure_rejects_stale_root_and_descendant_music_before_media_binding() {
+    let music =
+        |zero| Some(mondrian_core::MusicalTimeReference::new(tt(zero, 7), tt(3, 4)).unwrap());
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 1024 * 1024,
+        public_output_lookahead_budget_frames: 1024,
+        compensation_delay_scratch_budget_bytes: 1024 * 1024,
+    };
+    for descendant in [false, true] {
+        for (old, next) in [(None, music(-2)), (music(-2), None), (music(-2), music(3))] {
+            let mut root = sequence_with_audio_clip();
+            let mut child = sequence_with_audio_clip();
+            root.add_nested_audio_clip(
+                root.audio_tracks[0].id,
+                Clip::new_nested_sequence(child.id, tt(0, 1), tt(2, 1), None).unwrap(),
+                child.audio_program.outputs[0].id,
+            )
+            .unwrap();
+            if descendant {
+                child.audio_program.musical_time_reference = old;
+            } else {
+                root.audio_program.musical_time_reference = old;
+            }
+            let range = TimelineTimeRange::new(tt(0, 1), tt(2, 1)).unwrap();
+            let closure =
+                compile_audio_dependency_closure(&root, &[child.clone()], None, range).unwrap();
+            if descendant {
+                child.audio_program.musical_time_reference = next;
+            } else {
+                root.audio_program.musical_time_reference = next;
+            }
+            let media = RecordingResolver::default();
+            let expected = if descendant { child.id } else { root.id };
+            let error =
+                AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
+                    &root,
+                    &[child],
+                    &media,
+                    contract,
+                    None,
+                    range,
+                    &closure,
+                    AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+                );
+            assert!(
+                matches!(error, Err(AudioRuntimeBuildError::Dependency(AudioDependencyError::MusicalReferenceChanged(id))) if id==expected)
+            );
+            assert!(media.resolved_assets.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
+fn selected_vst3_music_refuses_before_media_and_direct_plan_factory() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct NeverFactory(AtomicUsize);
+    impl AudioProcessorResolver for NeverFactory {
+        fn prepare(
+            &self,
+            _: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("pure VST clock refusal must precede factory")
+        }
+    }
+    let mut sequence = sequence_with_audio_clip();
+    sequence.audio_program.musical_time_reference =
+        Some(mondrian_core::MusicalTimeReference::new(tt(-9, 7), tt(3, 4)).unwrap());
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&sequence.audio_tracks[0].id)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+                class_id: "nonexistent-musical-plugin".into(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        });
+    let contract = AudioRenderContract {
+        sample_rate: 2,
+        channel_layout: AudioChannelLayout::Mono,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 1024 * 1024,
+        public_output_lookahead_budget_frames: 1024,
+        compensation_delay_scratch_budget_bytes: 1024 * 1024,
+    };
+    let media = RecordingResolver::default();
+    let factory = NeverFactory(AtomicUsize::new(0));
+    let compiled = Arc::new(
+        compile_audio_program(
+            &sequence,
+            AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            contract,
+            AudioKernelBackend::ScalarReference,
+            &factory
+        ),
+        Err(AudioCompileError::Vst3MusicalTransportNotSupported)
+    ));
+    assert!(matches!(
+        AudioProgramRuntime::build_with_processor_resolver(
+            &sequence,
+            &[],
+            &media,
+            &factory,
+            contract,
+            None
+        ),
+        Err(AudioRuntimeBuildError::Compile(
+            AudioCompileError::Vst3MusicalTransportNotSupported
+        ))
+    ));
+    let range = TimelineTimeRange::new(tt(0, 1), tt(1, 1)).unwrap();
+    let closure = compile_audio_dependency_closure(&sequence, &[], None, range).unwrap();
+    assert!(matches!(AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+        &sequence, &[], &media, &factory, contract, None, range, &closure,
+        AudioRuntimeResourceGrant::new(usize::MAX,usize::MAX,usize::MAX)),
+        Err(AudioRuntimeBuildError::Compile(AudioCompileError::Vst3MusicalTransportNotSupported))));
+    assert!(media.resolved_assets.lock().unwrap().is_empty());
+    assert_eq!(factory.0.load(Ordering::SeqCst), 0);
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&sequence.audio_tracks[0].id)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors[0]
+        .bypassed = true;
+    let bypassed = AudioProgramRuntime::build(&sequence, &[], &media, contract, None);
+    assert!(
+        bypassed.is_ok(),
+        "bypassed VST definition is not a selected processor"
+    );
+    assert_eq!(media.resolved_assets.lock().unwrap().len(), 1);
+    let other_track = sequence.add_audio_track();
+    let mut unselected = sequence.audio_program.track_channels[&sequence.audio_tracks[0].id]
+        .strip
+        .pre_fader
+        .processors[0]
+        .clone();
+    unselected.id = mondrian_core::AudioProcessorInstanceId::new();
+    unselected.bypassed = false;
+    sequence
+        .audio_program
+        .track_channels
+        .get_mut(&other_track)
+        .unwrap()
+        .strip
+        .pre_fader
+        .processors
+        .push(unselected);
+    sequence.audio_program.routes.retain(|route| {
+        !matches!(route.source,
+        AudioRouteSource::Track { track_id, .. } if track_id == other_track)
+    });
+    assert!(
+        AudioProgramRuntime::build(&sequence, &[], &media, contract, None).is_ok(),
+        "unrouted VST is not a selected processor"
+    );
+    assert_eq!(media.resolved_assets.lock().unwrap().len(), 2);
+}

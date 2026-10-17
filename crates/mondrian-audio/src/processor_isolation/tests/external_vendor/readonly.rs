@@ -658,6 +658,7 @@ fn readonly_worker_lane_refusal_precedes_library_access() {
             "main_audio_output_id":0,"auxiliary_outputs":[],
         })).expect("forged native lane payload");
         let prepared = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: factory

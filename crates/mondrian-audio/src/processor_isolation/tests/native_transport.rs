@@ -175,3 +175,290 @@ fn transport_samples(bus: usize, start: usize, frames: usize) -> Vec<f32> {
         })
         .collect()
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "fresh normal Product and owned CLAP sidechain mode11; actual canonical Sequence tempo/Scope/retime/PDC"]
+fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
+    use crate::{
+        AudioContinuityEpoch, AudioContinuityEvidenceVisitor, AudioDecodedSource,
+        AudioExecutionError, AudioMediaResolver, AudioProcessorCursorEvidence,
+        AudioProcessorCursorState, AudioProgramRuntime, AudioRuntimeResourceGrant,
+        AudioSessionCursorEvidence, AudioStateEntry, ResolvedAudioSource,
+    };
+    use mondrian_core::{
+        AssetId, AudioOwnerInstallationSource, AudioSourceComponentId, ExactAutomationCurve,
+        ExactAutomationKeyframe, ExecutionCancellationToken, MusicalTimeReference, TimeScale,
+        TimelineTime,
+    };
+    use mondrian_timeline::{Clip, Sequence};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, WaitForSingleObject,
+    };
+
+    struct IndexedMedia;
+    impl AudioDecodedSource for IndexedMedia {
+        fn read_interleaved(
+            &self,
+            start: i64,
+            frames: usize,
+            destination: &mut [f32],
+            _: &ExecutionCancellationToken,
+        ) -> Result<(), String> {
+            if destination.len() != frames * 2 {
+                return Err("stereo extent".into());
+            }
+            for (offset, pair) in destination.chunks_exact_mut(2).enumerate() {
+                let frame = start.checked_add(offset as i64).ok_or("source position")?;
+                let value = if frame < 0 {
+                    0.0
+                } else {
+                    ((frame % 31) - 15) as f32 / 1024.0
+                };
+                pair.copy_from_slice(&[value, -0.5 * value]);
+            }
+            Ok(())
+        }
+    }
+    struct Media(AtomicUsize);
+    impl AudioMediaResolver for Media {
+        fn resolve(
+            &self,
+            _: AssetId,
+            _: AudioSourceComponentId,
+            _: u32,
+        ) -> Result<ResolvedAudioSource, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ResolvedAudioSource::new(
+                AudioChannelLayout::Stereo,
+                Arc::new(IndexedMedia),
+            ))
+        }
+    }
+    #[derive(Default)]
+    struct Cursors {
+        sessions: Vec<AudioSessionCursorEvidence>,
+        processors: Vec<AudioProcessorCursorEvidence>,
+    }
+    impl AudioContinuityEvidenceVisitor for Cursors {
+        fn session(
+            &mut self,
+            value: AudioSessionCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.sessions.push(value);
+            Ok(())
+        }
+        fn processor(
+            &mut self,
+            value: AudioProcessorCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.processors.push(value);
+            Ok(())
+        }
+    }
+    fn owners(runtime: &AudioProgramRuntime) -> Vec<crate::AudioNativeProcessorOwnerLease> {
+        let mut cursors = Cursors::default();
+        runtime.visit_continuity_evidence(&mut cursors).unwrap();
+        assert_eq!((cursors.sessions.len(), cursors.processors.len()), (1, 2));
+        cursors
+            .processors
+            .iter()
+            .map(|processor| {
+                let epoch = match processor.state {
+                    AudioProcessorCursorState::Unentered => None,
+                    AudioProcessorCursorState::WaitingForFirstSignal { epoch }
+                    | AudioProcessorCursorState::Active { epoch, .. } => Some(epoch),
+                    state => panic!("unexpected native state {state:?}"),
+                };
+                runtime
+                    .native_owner_lease(crate::AudioNativeProcessorAddress {
+                        root: cursors.sessions[0].identity,
+                        local: processor.identity,
+                        occurrence: processor.occurrence,
+                        epoch,
+                    })
+                    .unwrap()
+            })
+            .collect()
+    }
+    let native_path = |name| PathBuf::from(std::env::var_os(name).expect("native transport input"));
+    let catalog = Arc::new(
+        DiscoveredClapAudioProcessorSpecResolver::discover(
+            native_path("MONDRIAN_CLAP_TEST_HELPER"),
+            [native_path("MONDRIAN_CLAP_SIDECHAIN_TEST_PLUGIN")],
+        )
+        .unwrap(),
+    );
+    let processors = IsolatedAudioProcessorResolver::new(catalog.clone());
+    for rate in [44_100, 48_000] {
+        let time = |sample| TimelineTime::new(sample, i64::from(rate)).unwrap();
+        for with_music in [false, true] {
+            let render = AudioRenderContract {
+                sample_rate: rate,
+                processing_mode: AudioProcessingMode::Offline,
+                // Two isolated native owners exceed the small unit-test default.
+                // This transport oracle does not qualify a scratch-budget edge.
+                processor_session_scratch_budget_bytes: 32 * 1024 * 1024,
+                ..test_render_contract()
+            };
+            let mut sequence = Sequence::new("actual tempo-only Scope with retimed source");
+            sequence.audio_program.musical_time_reference = with_music.then(|| {
+                MusicalTimeReference::new(
+                    TimelineTime::new(-19, 7).unwrap(),
+                    TimelineTime::new(3, 4).unwrap(),
+                )
+                .unwrap()
+            });
+            let mut clip = Clip::new(AssetId::new(), time(0), time(64)).unwrap();
+            clip.set_constant_source_time_map(time(5), TimeScale::new(3, 2).unwrap())
+                .unwrap();
+            sequence
+                .add_media_audio_clip(
+                    sequence.audio_tracks[0].id,
+                    clip,
+                    AudioSourceComponentId::primary(),
+                )
+                .unwrap();
+            let scope = &mut sequence.audio_program.processing_scopes[0];
+            sequence.audio_tracks[0].clips[0].audio_components[0].processing.scope_in =
+                TimelineTime::new(5, 1).unwrap();
+            let mut gain = ExactAutomationCurve::new(
+                ParameterId::new_static(mondrian_timeline::audio::INPUT_GAIN_DB_PARAMETER_ID),
+                -6.0,
+            )
+            .unwrap();
+            gain.set_keyframe(ExactAutomationKeyframe::linear(
+                TimelineTime::new(5, 1).unwrap(),
+                -6.0,
+            ))
+            .unwrap();
+            gain.set_keyframe(ExactAutomationKeyframe::linear(
+                TimelineTime::new(5, 1).unwrap().checked_add(time(64)).unwrap(),
+                0.0,
+            ))
+            .unwrap();
+            scope.input_gain_automation = Some(gain);
+            // Original mode0 contributes one genuine native 3-frame delay.
+            // Mode11 must see its PDC-adjusted Sequence signal, not Scope-local
+            // automation seconds or the retimed 3/2-speed source coordinate.
+            for mode in [0, 11] {
+                let mut state = vec![mode];
+                state.extend_from_slice(&0.5_f32.to_le_bytes());
+                let instance = catalog
+                    .create_instance("org.mondrian.fixture.sidechain", render, Some(state))
+                    .unwrap();
+                assert!(instance.parameters.is_empty());
+                scope.processors.processors.push(instance);
+            }
+            let media = Media(AtomicUsize::new(0));
+            let mut runtime =
+                AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+                    &sequence,
+                    &[],
+                    &media,
+                    &processors,
+                    render,
+                    None,
+                    AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+                )
+                .unwrap();
+            assert_eq!(runtime.public_output_lookahead_frames(), 6);
+            assert_eq!(media.0.load(Ordering::SeqCst), 1);
+            let source = AudioOwnerInstallationSource::new();
+            let (registration, verifier) = source.register().unwrap();
+            runtime.bind_native_owner_installation(verifier).unwrap();
+            let claim = source
+                .reserve_install(&registration, None)
+                .and_then(|r| source.begin_commit(r))
+                .unwrap()
+                .commit()
+                .unwrap();
+            runtime
+                .install_native_owner_bindings(&claim, &ExecutionCancellationToken::new())
+                .unwrap();
+            let cold: Vec<_> = owners(&runtime)
+                .into_iter()
+                .map(|lease| runtime.observe_native_owner_object(lease).unwrap())
+                .collect();
+            let handles: Vec<_> = cold
+                .iter()
+                .map(|object| {
+                    let pid = object.process_id().get();
+                    assert_ne!(pid, std::process::id());
+                    // SAFETY: this observed actual Runtime child supplies PID; the
+                    // extra read-only HANDLE is held only to observe this exact Drop.
+                    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+                    assert!(!raw.is_null());
+                    unsafe { OwnedHandle::from_raw_handle(raw.cast()) }
+                })
+                .collect();
+            for (epoch, origin, partitions) in [
+                (1, 0_i64, &[4_usize, 4, 4, 2][..]),
+                (2, 9_i64, &[3, 2, 1, 4, 4][..]),
+            ] {
+                runtime
+                    .enter_state(AudioStateEntry {
+                        epoch: AudioContinuityEpoch::new(epoch),
+                        start_sample: origin,
+                    })
+                    .unwrap();
+                let mut position = origin;
+                for &frames in partitions {
+                    let mut pcm = vec![99.0; frames * 2];
+                    runtime
+                        .render_into(
+                            AudioRenderRequest { start_sample: position, frames },
+                            &mut pcm,
+                        )
+                        .unwrap();
+                    for (offset, pair) in pcm.chunks_exact(2).enumerate() {
+                        let sample = position + offset as i64;
+                        let indexed_source = 5 + (3 * sample).div_euclid(2);
+                        let source = ((indexed_source % 31) - 15) as f32 / 1024.0;
+                        let db = -6.0 + 6.0 * sample as f64 / 64.0;
+                        let scope_input = source * 10.0_f64.powf(db / 20.0) as f32;
+                        let native_gain = 0.5_f32
+                            + (sample % 251) as f32 / 1024.0
+                            + if with_music { 80.0 / 1024.0 } else { 0.0 };
+                        let expected = (scope_input * 2.0) * native_gain;
+                        assert!((pair[0] - expected).abs() <= 2.0e-6, "rate={rate} music={with_music} epoch={epoch} sample={sample} actual={} expected={expected}", pair[0]);
+                        assert!((pair[1] + expected * 0.5).abs() <= 1.0e-6);
+                    }
+                    position += frames as i64;
+                }
+                let actual: Vec<_> = owners(&runtime)
+                    .into_iter()
+                    .map(|lease| runtime.observe_native_owner_object(lease).unwrap())
+                    .collect();
+                assert_eq!(
+                    actual, cold,
+                    "same actual CLAP objects survive the new epoch"
+                );
+            }
+            runtime
+                .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                .unwrap();
+            drop(runtime);
+            for handle in &handles {
+                // Same observed child OS completion is separate from the
+                // supervisor's original 100ms graceful-shutdown result.
+                assert_eq!(
+                    unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2000) },
+                    0
+                );
+                let mut code = u32::MAX;
+                assert_ne!(
+                    unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut code) },
+                    0
+                );
+                assert_eq!(code, 0);
+            }
+            println!(
+                "{}",
+                serde_json::json!({"case":"canonical-clap-tempo-only-scope-retime", "rate":rate,"music":with_music,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"beats_or_rt_qualified":false})
+            );
+        }
+    }
+}

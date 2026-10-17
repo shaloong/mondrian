@@ -815,6 +815,7 @@ fn resolve_clap_registration(
         parameter_ids,
         request.render_contract(),
     )?
+    .with_musical_time_reference(request.musical_time_reference())?
     .with_auxiliary_output_contract(plugin.auxiliary_outputs.clone())?
     .with_native_worker_lane_resources(clap_native_worker_lane_profile()?)
     .with_note_input_contract(notes)
@@ -2188,13 +2189,20 @@ fn clap_seconds_position(
 pub(super) fn clap_transport(
     start_sample: i64,
     sample_rate: u32,
+    reference: Option<mondrian_core::MusicalTimeReference>,
 ) -> Result<TransportEvent, AudioProcessorHostError> {
+    let tempo = crate::processor::musical_tempo(reference)?;
     Ok(TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
-        flags: TransportFlags::HAS_SECONDS_TIMELINE,
+        flags: TransportFlags::HAS_SECONDS_TIMELINE
+            | if tempo.is_some() {
+                TransportFlags::HAS_TEMPO
+            } else {
+                TransportFlags::empty()
+            },
         song_pos_seconds: clap_seconds_position(start_sample, sample_rate)?,
         song_pos_beats: BeatTime::from_bits(0),
-        tempo: 0.0,
+        tempo: tempo.unwrap_or(0.0),
         tempo_inc: 0.0,
         loop_start_beats: BeatTime::from_bits(0),
         loop_end_beats: BeatTime::from_bits(0),
@@ -2525,6 +2533,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clap_transport_music_advertises_only_seconds_and_explicit_finite_tempo() {
+        use mondrian_core::{MusicalTimeReference, TimelineTime};
+        for rate in [44_100, 48_000] {
+            for sample in [-120_007, -1, 0, 99_317] {
+                let old = clap_transport(sample, rate, None).unwrap();
+                assert_eq!(old.flags, TransportFlags::HAS_SECONDS_TIMELINE);
+                assert_eq!(old.tempo, 0.0);
+                for zero in [-91, 713] {
+                    let music = MusicalTimeReference::new(
+                        TimelineTime::new(zero, 7).unwrap(),
+                        TimelineTime::new(3, 4).unwrap(),
+                    )
+                    .unwrap();
+                    let actual = clap_transport(sample, rate, Some(music)).unwrap();
+                    assert_eq!(
+                        actual.flags,
+                        TransportFlags::HAS_SECONDS_TIMELINE | TransportFlags::HAS_TEMPO
+                    );
+                    assert_eq!(actual.song_pos_seconds, old.song_pos_seconds);
+                    assert_eq!(actual.tempo, 80.0);
+                    assert_eq!(actual.tempo_inc, 0.0);
+                    assert_eq!(actual.song_pos_beats.to_bits(), 0);
+                    assert_eq!(actual.bar_start.to_bits(), 0);
+                    assert_eq!(actual.bar_number, 0);
+                    assert_eq!(actual.time_signature_numerator, 0);
+                    assert_eq!(actual.time_signature_denominator, 0);
+                }
+            }
+        }
+    }
+
     struct SidechainPlugin<const CASE: u8>;
     struct SidechainShared(AtomicBool, bool, usize);
     struct SidechainMain<'a, const CASE: u8>(&'a SidechainShared);
@@ -2750,6 +2790,7 @@ mod tests {
 
     fn sidechain_request() -> IsolatedAudioProcessorWorkerPrepareRequest {
         IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -4015,6 +4056,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -4048,6 +4090,7 @@ mod tests {
         })
         .expect("payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: clap_native_worker_lane_profile().expect("actual native lane profile"),
@@ -4133,6 +4176,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -4319,6 +4363,7 @@ mod tests {
         })
         .expect("encode worker payload");
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -4372,6 +4417,7 @@ mod tests {
         };
         let parameter_ids = vec![ParameterId::new("clap.param.1").expect("parameter identity")];
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -4845,6 +4891,7 @@ mod tests {
             )
             .expect("mode facts");
             let request = IsolatedAudioProcessorWorkerPrepareRequest {
+                musical_time_reference: None,
                 auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
                 note_input_contract: crate::AudioProcessorNoteInputContract::default(),
                 native_lane: None,
@@ -5016,6 +5063,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,
@@ -5064,6 +5112,7 @@ mod tests {
             compensation_delay_scratch_budget_bytes: 1024 * 1024,
         };
         let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: None,

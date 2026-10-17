@@ -3815,6 +3815,63 @@ mod tests {
     }
 
     #[test]
+    fn musical_time_reference_revision_clone_and_duplicate_keep_one_author_value() {
+        let environment = standard_environment();
+        let original = Sequence::new("musical reference");
+        let certificate = original.prepare_author_contract_certificate(&environment).unwrap();
+        let reference = mondrian_core::MusicalTimeReference::new(
+            TimelineTime::new(-1001, 30000).unwrap(),
+            TimelineTime::new(1001, 2000).unwrap(),
+        )
+        .unwrap();
+        let mut changed = original.clone();
+        changed.audio_program.musical_time_reference = Some(reference);
+        assert!(!changed.author_state_eq_ignoring_revision(&original));
+        assert!(certificate
+            .prepare_replacement(&original, &changed, &environment)
+            .expect_err("reference edit needs a newer author revision")
+            .to_string()
+            .contains("must be newer"));
+        changed.revision = changed.revision.checked_next().unwrap();
+        certificate
+            .prepare_replacement(&original, &changed, &environment)
+            .expect("reference follows the existing author revision authority");
+        let mut stale_current = original.clone();
+        stale_current.audio_program.musical_time_reference = Some(reference);
+        let mut future = changed.clone();
+        future.revision = future.revision.checked_next().unwrap();
+        assert!(certificate
+            .prepare_replacement(&stale_current, &future, &environment)
+            .expect_err("reference edit also stales the old certificate baseline")
+            .to_string()
+            .contains("author state"));
+        let mut revision_only = changed.clone();
+        revision_only.revision = future.revision;
+        assert!(revision_only.author_state_eq_ignoring_revision(&changed));
+        let mut duplicate = changed.clone();
+        assert_eq!(
+            duplicate.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        duplicate.fork_author_identities_for_sequence_duplicate();
+        assert_ne!(duplicate.id, changed.id);
+        assert_eq!(duplicate.revision, SequenceRevision::INITIAL);
+        assert_eq!(
+            duplicate.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        assert_eq!(
+            changed.audio_program.musical_time_reference,
+            Some(reference)
+        );
+        assert_eq!(original.audio_program.musical_time_reference, None);
+        let restored: Sequence =
+            serde_json::from_slice(&serde_json::to_vec(&duplicate).unwrap()).unwrap();
+        assert_eq!(restored, duplicate);
+        duplicate.validate_author_contract(&environment).unwrap();
+    }
+
+    #[test]
     fn structured_sequence_equality_ignores_only_revision() {
         let original = populated_authoring_collection().sequences[0].clone();
         let json = serde_json::to_vec(&original).expect("serialize Sequence");

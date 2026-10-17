@@ -230,6 +230,48 @@ pub(crate) struct CompiledAudioGraph<'a> {
     pub(crate) sidechain_routes: &'a [CompiledProcessorSidechainRoute],
 }
 
+impl CompiledAudioGraph<'_> {
+    /// Pure selected-graph capability admission, shared by direct Plan and
+    /// Runtime preparation before any source or foreign factory is accessed.
+    pub(crate) fn admit_musical_transport(
+        self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Result<(), crate::AudioCompileError> {
+        if reference.is_none() {
+            return Ok(());
+        }
+        // Direct PreparedAudioPlan callers have no dependency closure service.
+        // Refuse the selected nested projection before preparing any factory;
+        // Runtime additionally checks descendant references across its closure.
+        if self.contributions.iter().any(|contribution| {
+            matches!(
+                contribution.source,
+                CompiledAudioSource::NestedOutput { .. }
+            )
+        }) {
+            return Err(crate::AudioCompileError::SemanticProjectionNotExecutableYet);
+        }
+        let vst3 = |rack: &CompiledRack| {
+            rack.processors.iter().any(|processor| {
+                matches!(
+                    processor.definition,
+                    AudioProcessorDefinitionRef::Vst3 { .. }
+                )
+            })
+        };
+        let strip =
+            |strip: &CompiledChannelStrip| vst3(&strip.pre_fader) || vst3(&strip.post_fader);
+        if self.processing_scopes.values().any(|scope| vst3(&scope.rack))
+            || self.track_channels.values().any(|track| strip(&track.strip))
+            || self.buses.values().any(strip)
+            || strip(self.output)
+        {
+            return Err(crate::AudioCompileError::Vst3MusicalTransportNotSupported);
+        }
+        Ok(())
+    }
+}
+
 /// Stack-local selected Note requests, not retained payload or execution permission.
 #[derive(Clone, Copy)]
 pub(crate) struct CompiledNoteStorageRequest {
@@ -242,6 +284,7 @@ pub(crate) struct CompiledNoteStorageRequest {
 /// Context-independent exact-time semantic Signal Closure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAudioProgram {
+    pub(crate) musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     pub(crate) output_id: ProgramOutputId,
     pub(crate) contributions: Vec<CompiledAudioContribution>,
     pub(crate) processing_scopes: BTreeMap<AudioProcessingScopeId, CompiledProcessingScope>,
@@ -277,6 +320,11 @@ impl AudioProgramExecutionDemand {
 }
 
 impl CompiledAudioProgram {
+    /// Musical reference of this local Sequence, not an inherited root clock.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
+
     pub(crate) fn graph(&self) -> CompiledAudioGraph<'_> {
         CompiledAudioGraph {
             contributions: &self.contributions,

@@ -116,9 +116,32 @@ call and all returned facts succeed, with no claim about DSP release voices.
 Whole-root admission uses real priming/public call boundaries and grants no
 same-call Off credit. Cached-IR identity checks still scan prior window events
 and can take quadratic work; this foundation grants no RT/performance scope.
-IPC 14, full CLAP offer 5 and independent Note probe 2 reject older shapes;
+IPC15, full CLAP offer 5 and independent Note probe 2 reject older shapes;
 CLAP remains explicitly NativeEnd/16 channels. VST3/canonical Note admission
 is unchanged.
+
+The first musical-time slice is implemented and qualified by owned Windows
+CLAP constant-tempo controls.
+Sample coordinates alone cannot supply authored musical time, and SDK defaults
+are not a Sequence authority. `AudioProgram` owns one optional validated
+`MusicalTimeReference`: the Sequence-second position of quarter-note zero and a
+strictly positive quarter-note duration in seconds. Existing author/sample time
+and Note coordinates remain unchanged. The same immutable value participates in
+compiled/closure identity, preparation, Ready and callback binding; parameter
+handoffs and configuration seeds cannot substitute another reference.
+Document schema34 migrates old schema33 absent/null to None and rejects a
+legacy-tagged non-null reference; archive/library versions stay unchanged.
+IPC15 carries a required nullable value, without another clock registry.
+The first CLAP consumer supplies only seconds and constant tempo. Beats, bars,
+meter, playback state and VST3 musical time remain unqualified. Scope parameters
+retain local time while DSP transport retains Sequence signal time after PDC;
+source retiming occurs before Scope DSP and does not multiply project tempo.
+Selected nested execution involving a reference is refused before source or
+native preparation until its actual cache-window semantics are qualified.
+Selected VST3 execution with a reference is also refused before source or factory
+creation until its SDK/adapter consumes that reference. Native controls cover
+44.1/48 kHz, None/Some, two entries, partitions, Scope-local automation, source
+retiming and PDC. They do not qualify realtime, third-party or other-platform use.
 
 Note-enabled CLAP probes/workers now offer the actual shared NotePorts callback
 table and validate the restored, render-bound port cohort. Raw rescan flags and

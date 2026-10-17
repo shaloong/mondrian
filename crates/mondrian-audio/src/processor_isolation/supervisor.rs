@@ -314,6 +314,7 @@ impl SupervisedAudioWorker {
         // opaque payload survive this block; no payload clone is made.
         let encoded_prepare = {
             let prepare = PrepareWire {
+                musical_time_reference: spec.musical_time_reference,
                 schema_version: PROTOCOL_VERSION,
                 native_lane: super::native_worker_lane_wire::NativeWorkerLaneWire::capture(
                     spec.native_lane,
@@ -377,6 +378,7 @@ impl SupervisedAudioWorker {
         }
         let input_names = match ready.result {
             ReadyResultWire::Ready {
+                musical_time_reference,
                 execution_contract,
                 auxiliary_buses,
                 auxiliary_outputs,
@@ -391,7 +393,8 @@ impl SupervisedAudioWorker {
                     }
                 };
                 let worker_auxiliary = auxiliary_from_wire(auxiliary_buses);
-                if worker_contract != spec.plugin_execution_contract
+                if musical_time_reference != spec.musical_time_reference
+                    || worker_contract != spec.plugin_execution_contract
                     || worker_auxiliary != spec.auxiliary_inputs
                     || super::protocol::outputs_from_wire(auxiliary_outputs)
                         != spec.auxiliary_outputs

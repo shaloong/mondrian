@@ -431,6 +431,7 @@ fn owned_worker() -> Box<dyn IsolatedAudioProcessorWorker> {
         .expect("actual factory profile");
     prepare_loaded(
         IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: profile,
@@ -523,6 +524,7 @@ fn clap_native_gui_idle_timer_and_callback_after_real_dsp_old_api() {
     }
     let aux = AudioProcessorAuxiliaryInputContract::default();
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &aux,
@@ -604,6 +606,7 @@ fn clap_native_gui_closed_true_acknowledges_destroy_without_hide() {
     let shared: &mut [u8] = bytemuck::cast_slice_mut(&mut aligned);
     let auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &auxiliary_inputs,
@@ -753,6 +756,7 @@ fn native_entry_binding_clap_first_signal_keeps_real_idle_gui_without_reset_old_
     }
     let aux = AudioProcessorAuxiliaryInputContract::default();
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &aux,

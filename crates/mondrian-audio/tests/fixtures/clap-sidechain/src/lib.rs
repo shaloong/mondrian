@@ -179,7 +179,7 @@ impl PluginStateImpl for Main<'_> {
         let mut bytes = [0; 5];
         input.read_exact(&mut bytes)?;
         let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        if bytes[0] > 10 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+        if bytes[0] > 11 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
             return Err(PluginError::Message("invalid fixture state"));
         }
         let restart_seen = if (7..=9).contains(&bytes[0]) {
@@ -371,6 +371,26 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             let factor = 1_i128 << 31;
             let samples = scaled / factor + if (scaled % factor).abs() * 2 >= factor { scaled.signum() } else { 0 };
             Some(i64::try_from(samples).map_err(|_| PluginError::Message("transport sample overflow"))?)
+        } else if self.mode == 11 {
+            // Independent TEMPO-only ABI mode. No beat/bar/signature or playing
+            // facts exist; the reference has a 3/4-second quarter note (80 BPM).
+            let transport = process.transport.ok_or(PluginError::Message("missing tempo transport"))?;
+            let has_tempo = transport.flags.contains(TransportFlags::HAS_TEMPO);
+            let expected_flags = TransportFlags::HAS_SECONDS_TIMELINE
+                | if has_tempo { TransportFlags::HAS_TEMPO } else { TransportFlags::empty() };
+            if transport.flags != expected_flags || transport.header.time() != 0
+                || process.steady_time.is_some() || transport.song_pos_beats.to_bits() != 0
+                || transport.tempo != if has_tempo { 80.0 } else { 0.0 }
+                || transport.tempo_inc != 0.0 || transport.bar_start.to_bits() != 0
+                || transport.bar_number != 0 || transport.time_signature_numerator != 0
+                || transport.time_signature_denominator != 0 || transport.loop_start_beats.to_bits() != 0
+                || transport.loop_end_beats.to_bits() != 0 || transport.loop_start_seconds.to_bits() != 0
+                || transport.loop_end_seconds.to_bits() != 0
+            { return Err(PluginError::Message("invalid tempo-only transport facts")); }
+            let scaled = i128::from(transport.song_pos_seconds.to_bits()) * i128::from(self.sample_rate);
+            let factor = 1_i128 << 31;
+            let samples = scaled / factor + if (scaled % factor).abs() * 2 >= factor { scaled.signum() } else { 0 };
+            Some(i64::try_from(samples).map_err(|_| PluginError::Message("tempo transport sample overflow"))?)
         } else { None };
         let mix = self
             .mix
@@ -397,7 +417,12 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
                 let sample = start.checked_add(index as i64).ok_or(PluginError::Message("transport sample overflow"))?;
                 (sample % 251) as f32 / 1024.0
             } else { 0.0 };
-            let gain = if timeline_start.is_some() { self.gain + tag } else { self.gain };
+            let gain = if self.mode == 11 {
+                let start = timeline_start.ok_or(PluginError::Message("missing tempo timeline"))?;
+                let sample = start.checked_add(index as i64).ok_or(PluginError::Message("tempo sample overflow"))?;
+                let tempo = process.transport.ok_or(PluginError::Message("missing tempo"))?.tempo as f32;
+                self.gain + (sample % 251) as f32 / 1024.0 + tempo / 1024.0
+            } else if timeline_start.is_some() { self.gain + tag } else { self.gain };
             let delayed = self.delay[self.cursor];
             self.delay[self.cursor] = [frame[0] * gain, frame[1] * gain];
             *frame = delayed;

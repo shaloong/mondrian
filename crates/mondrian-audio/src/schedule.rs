@@ -394,6 +394,9 @@ impl PreparedAudioPlan {
         processor_resolver: &dyn AudioProcessorResolver,
     ) -> Result<Self, AudioCompileError> {
         contract.validate()?;
+        program.graph().admit_musical_transport(program.musical_time_reference)?;
+        crate::processor::musical_tempo(program.musical_time_reference)
+            .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))?;
         // Preserve the accepted allocation-free endpoint/error precedence until
         // Note preparation has its actual preallocation grant and runtime gate.
         validate_selected_note_preparation(program.as_ref(), contract.sample_rate)?;
@@ -978,6 +981,7 @@ fn checked_sum<const N: usize>(values: [usize; N]) -> Result<usize, AudioResourc
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedAudioSchedule {
+    pub(crate) musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     pub(crate) notes: PreparedNoteScore,
     pub(crate) nodes: Vec<PreparedNode>,
     pub(crate) execution_order: Vec<(usize, AudioChannelSignalStage)>,
@@ -1347,6 +1351,7 @@ impl PreparedAudioSchedule {
                 TimelineTime::ZERO,
                 sample_rate,
                 contract,
+                program.musical_time_reference,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1358,6 +1363,7 @@ impl PreparedAudioSchedule {
                 TimelineTime::ZERO,
                 sample_rate,
                 contract,
+                program.musical_time_reference,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1396,6 +1402,7 @@ impl PreparedAudioSchedule {
                 TimelineTime::ZERO,
                 sample_rate,
                 contract,
+                program.musical_time_reference,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1407,6 +1414,7 @@ impl PreparedAudioSchedule {
                 TimelineTime::ZERO,
                 sample_rate,
                 contract,
+                program.musical_time_reference,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1437,6 +1445,7 @@ impl PreparedAudioSchedule {
             TimelineTime::ZERO,
             sample_rate,
             contract,
+            program.musical_time_reference,
             processor_resolver,
             &requested_notes,
             &mut processors,
@@ -1448,6 +1457,7 @@ impl PreparedAudioSchedule {
             TimelineTime::ZERO,
             sample_rate,
             contract,
+            program.musical_time_reference,
             processor_resolver,
             &requested_notes,
             &mut processors,
@@ -1611,6 +1621,7 @@ impl PreparedAudioSchedule {
                 scope_time_offset,
                 sample_rate,
                 contract,
+                program.musical_time_reference,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -2053,6 +2064,7 @@ impl PreparedAudioSchedule {
         };
         Ok(Self {
             notes,
+            musical_time_reference: program.musical_time_reference,
             nodes,
             execution_order,
             routes,
@@ -2387,6 +2399,7 @@ fn prepare_rack(
     owner_time_offset: TimelineTime,
     sample_rate: AudioSampleRate,
     contract: AudioRenderContract,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     processor_resolver: &dyn AudioProcessorResolver,
     requested_notes: &prepared_notes::RequestedNoteScore,
     destination: &mut Vec<PreparedProcessor>,
@@ -2405,6 +2418,7 @@ fn prepare_rack(
             occurrence,
             contract,
             requested_notes.requests_input_for(occurrence),
+            musical_time_reference,
         )?;
         let processor_algorithmic_latency_frames = factory.contract().algorithmic_latency_frames();
         let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
@@ -2723,6 +2737,7 @@ mod prospective_prepared_plan_parity_tests {
         let transition_range = TimelineTimeRange::new(TimelineTime::ZERO, TimelineTime::ONE)
             .expect("fixture transition range");
         let program = CompiledAudioProgram {
+            musical_time_reference: None,
             output_id: output,
             transitions: vec![
                 CompiledTransition {

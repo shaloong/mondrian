@@ -203,7 +203,8 @@ mod tests {
 
     fn metadata(raw_bytes: usize) -> PrepareWire {
         PrepareWire {
-            schema_version: 14,
+            musical_time_reference: None,
+            schema_version: 15,
             native_lane: NativeWorkerLaneWire::Inline {},
             nonce: "same-startup-nonce".into(),
             payload_bytes: raw_bytes as u64,
@@ -265,7 +266,7 @@ mod tests {
             assert_eq!(body_length, serde_json::to_vec(&metadata).unwrap().len());
             assert_eq!(&stream[4 + body_length..], payload);
             let ready = ReadyWire {
-                schema_version: 14,
+                schema_version: 15,
                 result: ReadyResultWire::Rejected { detail: "alignment-only".into() },
             };
             write_json_frame(&mut stream, &ready).unwrap();
@@ -346,7 +347,7 @@ mod tests {
     #[test]
     fn startup_raw_validates_current_version_nonce_and_mandatory_shape_before_payload_phase() {
         let good = metadata(256);
-        for version in [8, 9, 10, 11, 12, 13, 15] {
+        for version in [8, 9, 10, 11, 12, 13, 14, 16] {
             let mut old = good.clone();
             old.schema_version = version;
             assert!(EncodedPrepare::new(&old, &[0; 256]).is_err());
@@ -408,6 +409,91 @@ mod tests {
             assert_eq!(
                 read_prepare_frame(&mut input, &metadata.nonce).unwrap_err().kind(),
                 io::ErrorKind::UnexpectedEof
+            );
+        }
+    }
+
+    #[test]
+    fn startup_and_ready_require_explicit_nullable_music_and_preserve_exact_reference() {
+        use mondrian_core::{MusicalTimeReference, TimelineTime};
+        let reference = |zero| {
+            MusicalTimeReference::new(
+                TimelineTime::new(zero, 7).unwrap(),
+                TimelineTime::new(3, 4).unwrap(),
+            )
+            .unwrap()
+        };
+        for music in [None, Some(reference(-19)), Some(reference(23))] {
+            let mut prepare = metadata(3);
+            prepare.musical_time_reference = music;
+            let mut bytes = Vec::new();
+            EncodedPrepare::new(&prepare, &[0, 128, 255])
+                .unwrap()
+                .write_to(&mut bytes)
+                .unwrap();
+            let (actual, payload) =
+                read_prepare_frame(&mut bytes.as_slice(), &prepare.nonce).unwrap();
+            assert_eq!(actual.musical_time_reference, music);
+            assert_eq!(payload, [0, 128, 255]);
+            let ready = ReadyWire {
+                schema_version: 15,
+                result: ReadyResultWire::Ready {
+                    musical_time_reference: music,
+                    execution_contract: prepare.execution_contract,
+                    auxiliary_buses: Vec::new(),
+                    auxiliary_outputs: Vec::new(),
+                    note_input_contract: AudioProcessorNoteInputContract::default(),
+                    input_names: Vec::new(),
+                },
+            };
+            let mut value = serde_json::to_value(&ready).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ReadyWire>(value.clone()).unwrap(),
+                ready
+            );
+            for outer in [false, true] {
+                let mut unknown = value.clone();
+                if outer {
+                    unknown["unknown_music"] = serde_json::json!(null);
+                } else {
+                    unknown["result"]["unknown_music"] = serde_json::json!(null);
+                }
+                assert!(serde_json::from_value::<ReadyWire>(unknown).is_err());
+            }
+            value["result"].as_object_mut().unwrap().remove("musical_time_reference");
+            assert!(serde_json::from_value::<ReadyWire>(value).is_err());
+        }
+        let good = metadata(3);
+        for malformed in 0..3 {
+            let mut value = serde_json::to_value(&good).unwrap();
+            match malformed {
+                0 => {
+                    value.as_object_mut().unwrap().remove("musical_time_reference");
+                }
+                1 => {
+                    value["musical_time_reference"] = serde_json::json!({
+                        "quarter_note_zero": {"numerator":0,"denominator":1},
+                        "quarter_note_duration": {"numerator":0,"denominator":1}
+                    });
+                }
+                _ => {
+                    value["unknown_music"] = serde_json::json!(null);
+                }
+            }
+            let body = serde_json::to_vec(&value).unwrap();
+            let metadata_end = 4 + body.len();
+            let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
+            bytes.extend(body);
+            bytes.extend([0, 128, 255]);
+            let mut input = Cursor::new(bytes);
+            assert_eq!(
+                read_prepare_frame(&mut input, &good.nonce).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                input.position() as usize,
+                metadata_end,
+                "raw payload must remain unread"
             );
         }
     }

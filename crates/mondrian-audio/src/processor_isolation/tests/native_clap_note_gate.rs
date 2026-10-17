@@ -119,6 +119,7 @@ fn prepare_gate() -> Box<dyn IsolatedAudioProcessorWorker> {
     let notes = requested_notes();
     notes.validate().expect("valid requested extent, not native capability");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: None,
         auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         native_lane: None,
         payload: Vec::new(),

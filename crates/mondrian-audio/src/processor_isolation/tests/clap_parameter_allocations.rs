@@ -307,6 +307,7 @@ fn prepared_worker(
     )
     .expect("SDK-owned reference entry");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: None,
         auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,
@@ -524,6 +525,7 @@ fn prepared_log_worker(
         PluginEntry::load_from_clack::<SinglePluginEntry<LogOrderPlugin>>(c"/test/log-order")
             .expect("owned independent native logger entry");
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: None,
         auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
         note_input_contract: crate::AudioProcessorNoteInputContract::default(),
         native_lane: None,

@@ -490,6 +490,7 @@ fn owned_worker() -> Box<dyn IsolatedAudioProcessorWorker> {
     };
     prepare_loaded(
         IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: None,
             auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
             note_input_contract: crate::AudioProcessorNoteInputContract::default(),
             native_lane: profile,
@@ -565,6 +566,7 @@ fn clap_paused_gui_requests_actual_audio_flush_without_process_old_api() {
     let auxiliary = AudioProcessorAuxiliaryInputContract::default();
     let parameter_ids = [parameter];
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &auxiliary,
@@ -783,6 +785,7 @@ fn exchange_another_paused_gui_value(worker: &mut dyn IsolatedAudioProcessorWork
     let auxiliary = AudioProcessorAuxiliaryInputContract::default();
     let ids = [parameter];
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &auxiliary,
@@ -1180,6 +1183,7 @@ fn emit_paused_host_reference_controls(worker: &mut dyn IsolatedAudioProcessorWo
     let shared = bytemuck::cast_slice_mut(&mut aligned);
     let auxiliary = AudioProcessorAuxiliaryInputContract::default();
     let context = super::super::worker::WorkerProcessContext {
+        musical_time_reference: None,
         auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
         layout,
         auxiliary_inputs: &auxiliary,

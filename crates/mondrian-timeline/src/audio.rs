@@ -10,10 +10,10 @@ use mondrian_core::{
     AudioProcessingScopeId, AudioProcessorInstanceId, AudioRoleId, AudioRouteId,
     AudioSourceComponentId, AudioTransitionId, AuthoringFootprint, AuthoringFootprintCollector,
     AuthoringFootprintError, AuthoringList, AuthoringMap, AutomationSegmentInterpolation, ClipId,
-    ExactAutomationCurve, MixBusId, ParameterCacheImpact, ParameterId, ParameterInterpolation,
-    ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange, ParameterSchema,
-    ParameterUnit, ProgramOutputId, PropertyValue, PropertyValueType, TimelineTime,
-    TimelineTimeRange, TrackId,
+    ExactAutomationCurve, MixBusId, MusicalTimeReference, ParameterCacheImpact, ParameterId,
+    ParameterInterpolation, ParameterInvalidValuePolicy, ParameterNumericContract,
+    ParameterNumericRange, ParameterSchema, ParameterUnit, ProgramOutputId, PropertyValue,
+    PropertyValueType, TimelineTime, TimelineTimeRange, TrackId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1071,6 +1071,9 @@ pub struct AudioProgram {
     /// Exact authored score, preserved even when note execution is unsupported.
     #[serde(default, skip_serializing_if = "note_lanes_are_empty")]
     pub note_lanes: AuthoringList<AudioNoteLane>,
+    /// Optional constant musical reference in the owning Sequence's seconds domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub musical_time_reference: Option<MusicalTimeReference>,
 }
 
 impl AuthoringFootprint for AudioProcessorDefinitionRef {
@@ -1431,6 +1434,7 @@ impl AuthoringFootprint for AudioProgram {
             routes,
             sidechain_routes,
             note_lanes,
+            musical_time_reference,
         } = self;
         collector.collect(processing_scopes)?;
         collector.collect(transitions)?;
@@ -1439,7 +1443,8 @@ impl AuthoringFootprint for AudioProgram {
         collector.collect(outputs)?;
         collector.collect(routes)?;
         collector.collect(sidechain_routes)?;
-        collector.collect(note_lanes)
+        collector.collect(note_lanes)?;
+        collector.collect(musical_time_reference)
     }
 }
 
@@ -1498,6 +1503,7 @@ impl AudioProgram {
             routes: AuthoringList::from(routes),
             sidechain_routes: AuthoringList::new(),
             note_lanes: AuthoringList::new(),
+            musical_time_reference: None,
         }
     }
 
@@ -2417,6 +2423,54 @@ pub enum AudioAuthoringError {
 mod tests {
     use super::*;
     use crate::Sequence;
+
+    #[test]
+    fn musical_time_reference_is_optional_and_adds_no_heap_footprint() {
+        let track = Track::new_audio("reference");
+        let original = AudioProgram::for_tracks([track.id]);
+        assert_eq!(original.musical_time_reference, None);
+        let absent = serde_json::to_value(&original).expect("absent reference");
+        assert!(absent.get("musical_time_reference").is_none());
+        assert_eq!(
+            serde_json::from_value::<AudioProgram>(absent).unwrap(),
+            original
+        );
+        let mut with_reference = original.clone();
+        let reference = MusicalTimeReference::new(
+            TimelineTime::new(-1001, 30000).unwrap(),
+            TimelineTime::new(1001, 2000).unwrap(),
+        )
+        .unwrap();
+        with_reference.musical_time_reference = Some(reference);
+        let value = serde_json::to_value(&with_reference).unwrap();
+        assert_eq!(
+            value["musical_time_reference"],
+            serde_json::to_value(reference).unwrap()
+        );
+        assert_eq!(
+            serde_json::from_value::<AudioProgram>(value).unwrap(),
+            with_reference
+        );
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&original).unwrap();
+        let baseline = collector.finish();
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&with_reference).unwrap();
+        assert_eq!(
+            collector.finish(),
+            baseline,
+            "inline reference adds no heap owner"
+        );
+        let mut collector = AuthoringFootprintCollector::new();
+        collector.collect(&original).unwrap();
+        collector.collect(&with_reference).unwrap();
+        assert_eq!(
+            collector.finish(),
+            baseline,
+            "shared author allocations remain deduplicated"
+        );
+        assert_eq!(original.musical_time_reference, None);
+    }
 
     fn note_program_fixture() -> (Track, AudioProgram) {
         let track = Track::new_audio("score");

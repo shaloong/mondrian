@@ -65,6 +65,7 @@ pub(super) fn run_worker(
         ));
     }
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
+        musical_time_reference: prepare.musical_time_reference,
         native_lane,
         payload,
         plugin_execution_contract,
@@ -123,6 +124,7 @@ pub(super) fn run_worker(
     let ready = ReadyWire {
         schema_version: PROTOCOL_VERSION,
         result: ReadyResultWire::Ready {
+            musical_time_reference: prepare.musical_time_reference,
             execution_contract: prepare.execution_contract,
             auxiliary_buses: auxiliary_to_wire(&auxiliary_inputs),
             auxiliary_outputs: super::protocol::outputs_to_wire(&auxiliary_outputs),
@@ -131,6 +133,7 @@ pub(super) fn run_worker(
         },
     };
     let context = WorkerProcessContext {
+        musical_time_reference: prepare.musical_time_reference,
         layout,
         auxiliary_inputs: &auxiliary_inputs,
         auxiliary_outputs: &auxiliary_outputs,
@@ -184,6 +187,7 @@ pub(super) fn run_worker(
 /// object or alternate author/runtime owner.
 #[derive(Clone, Copy)]
 pub(super) struct WorkerProcessContext<'a> {
+    pub(super) musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     pub(super) layout: SharedBlockLayout,
     pub(super) auxiliary_inputs: &'a crate::AudioProcessorAuxiliaryInputContract,
     pub(super) auxiliary_outputs: &'a crate::AudioProcessorAuxiliaryOutputContract,
@@ -376,6 +380,7 @@ impl WorkerProcessContext<'_> {
             self.parameter_ids,
             events,
         )
+        .with_musical_time_reference(self.musical_time_reference)
         .with_auxiliary_outputs(self.auxiliary_outputs, output)
         .with_note_regions(
             self.note_input_contract,
@@ -1166,6 +1171,7 @@ mod inline_dispatch_contracts {
         let note_input_contract = crate::AudioProcessorNoteInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).expect("exact shared extent");
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1435,6 +1441,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 2).unwrap();
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1509,6 +1516,7 @@ mod note_process_contracts {
         let outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 0).unwrap();
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &outputs,
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1579,6 +1587,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(2, 1).unwrap();
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1651,6 +1660,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1721,6 +1731,7 @@ mod note_process_contracts {
         let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(1, 1).unwrap();
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,
@@ -1764,6 +1775,7 @@ mod note_process_contracts {
         let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap().with_notes(0, 0).unwrap();
         assert_eq!(layout.total_bytes, 8);
         let context = WorkerProcessContext {
+            musical_time_reference: None,
             auxiliary_outputs: &crate::AudioProcessorAuxiliaryOutputContract::default(),
             layout,
             auxiliary_inputs: &auxiliary,

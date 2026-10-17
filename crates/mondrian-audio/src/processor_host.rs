@@ -382,6 +382,7 @@ impl HostedProcessorContinuity {
 }
 
 pub(crate) struct PreparedProcessorHost {
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     instances: Vec<HostedProcessorInstance>,
     entry_binding: Option<(
         crate::native_runtime_owner::NativeStateEntryBindingContext,
@@ -1236,6 +1237,7 @@ impl PreparedProcessorHost {
         }
         Ok(Self {
             instances: Vec::with_capacity(schedule.processors.len()),
+            musical_time_reference: schedule.musical_time_reference,
             entry_binding: None,
             parameter_events: ProcessorParameterEventScratch::new(
                 maximum_parameter_lanes,
@@ -1551,6 +1553,7 @@ impl PreparedProcessorHost {
                 self.render_contract.processing_mode,
                 backend,
             )
+            .with_musical_time_reference(self.musical_time_reference)
             .admitted_root_window();
             let auxiliary_buses = prepare_processor_auxiliary_buses(
                 processor,
@@ -1825,6 +1828,7 @@ pub(crate) fn prepare_processor_factory(
     occurrence: AudioProcessorOccurrence,
     contract: AudioRenderContract,
     note_input_requested: bool,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
 ) -> Result<PreparedProcessorFactoryBinding, AudioProcessorHostError> {
     PreparedProcessorFactoryBinding::resolve(
         resolver,
@@ -1835,6 +1839,7 @@ pub(crate) fn prepare_processor_factory(
             processor.opaque_state.as_deref(),
             contract,
         )
-        .with_note_input_requested(note_input_requested),
+        .with_note_input_requested(note_input_requested)
+        .with_musical_time_reference(musical_time_reference),
     )
 }

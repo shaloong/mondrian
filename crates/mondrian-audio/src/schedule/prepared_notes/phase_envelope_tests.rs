@@ -253,6 +253,7 @@ fn program(lanes: Vec<CompiledNoteLane>) -> CompiledAudioProgram {
     }
     // Owned semantic fixture, not author validation, routing, Session or DSP.
     CompiledAudioProgram {
+        musical_time_reference: None,
         output_id: ProgramOutputId::new(),
         contributions: Vec::new(),
         processing_scopes: BTreeMap::new(),

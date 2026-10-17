@@ -126,6 +126,7 @@ pub(super) struct NativeAudioInputMetadata {
 /// Immutable launch and capacity facts for one process-isolated processor definition.
 #[derive(Clone)]
 pub struct IsolatedAudioProcessorWorkerSpec {
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     helper_executable: PathBuf,
     helper_arguments: Vec<OsString>,
     dispatch_argument: Option<OsString>,
@@ -162,6 +163,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             AudioProcessingMode::Offline => Duration::from_secs(30),
         };
         let spec = Self {
+            musical_time_reference: None,
             helper_executable,
             helper_arguments: Vec::new(),
             dispatch_argument: Some(OsString::from(ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT)),
@@ -188,6 +190,17 @@ impl IsolatedAudioProcessorWorkerSpec {
     pub fn with_helper_arguments(mut self, arguments: Vec<OsString>) -> Self {
         self.helper_arguments = arguments;
         self
+    }
+
+    /// Bind the owning Sequence's immutable musical reference, separate from
+    /// the opaque plugin configuration and any native capability declaration.
+    pub fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Result<Self, AudioProcessorHostError> {
+        crate::processor::musical_tempo(reference)?;
+        self.musical_time_reference = reference;
+        Ok(self)
     }
 
     /// Override or remove the standard product dispatch argument.
@@ -258,6 +271,7 @@ impl IsolatedAudioProcessorWorkerSpec {
     }
 
     fn validate(&self) -> Result<(), AudioProcessorHostError> {
+        crate::processor::musical_tempo(self.musical_time_reference)?;
         if self.helper_executable.as_os_str().is_empty()
             || self.preparation_payload.len() > MAX_PREPARATION_PAYLOAD_BYTES
             || self.render_contract.sample_rate == 0
@@ -353,8 +367,11 @@ impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
         let expected_contract = request.render_contract();
         let expected_parameter_ids = request.parameters().keys().cloned().collect::<Vec<_>>();
         let note_input_requested = request.note_input_requested();
+        let expected_reference = request.musical_time_reference();
         let spec = self.external.resolve(request)?;
-        if spec.render_contract != expected_contract || spec.parameter_ids != expected_parameter_ids
+        if spec.render_contract != expected_contract
+            || spec.parameter_ids != expected_parameter_ids
+            || spec.musical_time_reference != expected_reference
         {
             return Err(invalid_contract(
                 "external resolver changed the prepared render contract or parameter-lane identity",
@@ -410,6 +427,7 @@ impl IsolatedAudioProcessorFactory {
             ));
         }
         let spec = IsolatedAudioProcessorWorkerSpec {
+            musical_time_reference: self.spec.musical_time_reference,
             helper_executable: self.spec.helper_executable.clone(),
             helper_arguments: self.spec.helper_arguments.clone(),
             dispatch_argument: self.spec.dispatch_argument.clone(),
@@ -564,6 +582,7 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         let (worker, _) =
             SupervisedAudioWorker::launch(&self.spec, self.spec.render_contract, self.layout)?;
         Ok(Box::new(IsolatedAudioProcessor {
+            musical_time_reference: self.spec.musical_time_reference,
             worker,
             parameter_ids: self.spec.parameter_ids.clone(),
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
@@ -694,6 +713,7 @@ fn isolated_output_contract_allocated_bytes(
 }
 
 struct IsolatedAudioProcessor {
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     worker: SupervisedAudioWorker,
     parameter_ids: Vec<ParameterId>,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
@@ -987,6 +1007,13 @@ impl AudioProcessor for IsolatedAudioProcessor {
     ) -> Result<(), AudioProcessorHostError> {
         if self.failed {
             return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        // Pure caller-contract refusal precedes foreign polling and every
+        // shared PCM/event write. Equal tempo with a different zero is drift.
+        if context.musical_time_reference() != self.musical_time_reference {
+            return Err(invalid_contract(
+                "isolated processor musical reference changed",
+            ));
         }
         if !context.has_root_window_admission()
             && let Some(request) = self.preflight_reprepare()?
@@ -1316,6 +1343,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
 
 /// Immutable request received by a child-side native plugin Adapter.
 pub struct IsolatedAudioProcessorWorkerPrepareRequest {
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
     payload: Vec<u8>,
     plugin_execution_contract: AudioProcessorExecutionContract,
@@ -1327,6 +1355,10 @@ pub struct IsolatedAudioProcessorWorkerPrepareRequest {
 }
 
 impl IsolatedAudioProcessorWorkerPrepareRequest {
+    /// Same immutable Sequence reference carried in the startup envelope.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
+    }
     /// Matching known native lane request, never a complete grant or owner lease.
     pub const fn native_worker_lane_resources(
         &self,
@@ -1672,6 +1704,7 @@ impl Iterator for IsolatedAudioParameterEvents<'_> {
 
 /// Borrowed fixed-capacity audio and parameter views inside one Worker callback.
 pub struct IsolatedAudioProcessorWorkerBlock<'a> {
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     start_sample: i64,
     frames: usize,
     render_contract: AudioRenderContract,
@@ -1701,6 +1734,7 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
     ) -> Self {
         Self {
             start_sample,
+            musical_time_reference: None,
             frames,
             render_contract,
             main,
@@ -1724,6 +1758,19 @@ impl<'a> IsolatedAudioProcessorWorkerBlock<'a> {
         self.auxiliary_outputs = Some(contract);
         self.output = output;
         self
+    }
+
+    fn with_musical_time_reference(
+        mut self,
+        reference: Option<mondrian_core::MusicalTimeReference>,
+    ) -> Self {
+        self.musical_time_reference = reference;
+        self
+    }
+
+    /// Prepared Sequence reference; no beat or bar facts are implied.
+    pub const fn musical_time_reference(&self) -> Option<mondrian_core::MusicalTimeReference> {
+        self.musical_time_reference
     }
 
     /// Mutable additional output in the frozen native order, keyed by definition identity.

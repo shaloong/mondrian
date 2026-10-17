@@ -189,7 +189,11 @@ impl ClapSignalFields<'_> {
                 expected_channels[index][channel] = pcm.as_mut_ptr();
             }
         }
-        let transport = clap_transport(block.start_sample(), block.sample_rate())?;
+        let transport = clap_transport(
+            block.start_sample(),
+            block.sample_rate(),
+            block.musical_time_reference(),
+        )?;
         let output_origin = ClapOutputOrigin::Process {
             start_sample: block.start_sample(),
             sample_rate: block.sample_rate(),

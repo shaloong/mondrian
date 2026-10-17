@@ -765,6 +765,7 @@ mod tests {
         // Pure semantic fixture for projection/target checks. No routing/audio
         // execution or real compiled-author validation is claimed by it.
         CompiledAudioProgram {
+            musical_time_reference: None,
             output_id: ProgramOutputId::new(),
             contributions: Vec::new(),
             processing_scopes: BTreeMap::new(),

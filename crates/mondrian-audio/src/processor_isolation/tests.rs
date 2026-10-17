@@ -58,6 +58,7 @@ impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
             behavior,
             contract,
             auxiliary: request.auxiliary_inputs().clone(),
+            musical_time_reference: request.musical_time_reference(),
             entered: false,
         }))
     }
@@ -67,6 +68,7 @@ struct TestWorker {
     behavior: TestBehavior,
     contract: AudioProcessorExecutionContract,
     auxiliary: AudioProcessorAuxiliaryInputContract,
+    musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     entered: bool,
 }
 
@@ -98,6 +100,11 @@ impl IsolatedAudioProcessorWorker for TestWorker {
         if self.contract.requires_state_entry() && !self.entered {
             return Err(AudioProcessorHostError::StateEntry(
                 "test Worker was not entered".to_owned(),
+            ));
+        }
+        if block.musical_time_reference() != self.musical_time_reference {
+            return Err(invalid_contract(
+                "test worker music differs from prepared request",
             ));
         }
         let gain = block
@@ -1773,3 +1780,77 @@ mod native_clap_public_notes;
 #[cfg(all(test, windows))]
 #[path = "tests/native_clap_public_note_refusals.rs"]
 mod native_clap_public_note_refusals;
+
+#[test]
+fn isolated_music_context_mismatch_preserves_shared_pcm_parameters_and_live_child() {
+    use mondrian_core::{MusicalTimeReference, TimelineTime};
+    let reference = |zero| {
+        MusicalTimeReference::new(
+            TimelineTime::new(zero, 7).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap()
+    };
+    let parameter = ParameterId::new_static("test.gain");
+    let spec = test_spec(
+        TestBehavior::Normal,
+        stateful_contract(),
+        AudioProcessorAuxiliaryInputContract::default(),
+        vec![parameter.clone()],
+        Duration::from_secs(2),
+    )
+    .with_musical_time_reference(Some(reference(1)))
+    .unwrap();
+    let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+    let (worker, _) =
+        SupervisedAudioWorker::launch(&factory.spec, factory.spec.render_contract, factory.layout)
+            .unwrap();
+    let mut processor = IsolatedAudioProcessor {
+        musical_time_reference: factory.spec.musical_time_reference,
+        worker,
+        parameter_ids: factory.spec.parameter_ids.clone(),
+        auxiliary_inputs: factory.spec.auxiliary_inputs.clone(),
+        auxiliary_outputs: factory.spec.auxiliary_outputs.clone(),
+        note_input_contract: factory.spec.note_input_contract.clone(),
+        render_contract: factory.spec.render_contract,
+        failed: false,
+        pending_reprepare: None,
+        staged_configuration_seed: None,
+        native_plugin_contract: factory.spec.plugin_execution_contract,
+    };
+    processor.enter_state(-17).unwrap();
+    let before = processor.worker.shared_mut().to_vec();
+    let mut io = TestAudioIo { main: vec![2.0; 8], auxiliary: Vec::new() };
+    let ids = [parameter];
+    let event_range = 0..1;
+    let ranges = [event_range];
+    let events = [AudioParameterEvent { sample_offset: 0, value: 3.0 }];
+    for wrong in [None, Some(reference(2))] {
+        let error = processor
+            .process(
+                test_context(-17).with_musical_time_reference(wrong),
+                &mut io,
+                AudioParameterEventBatch::new(-17, 4, &ids, &ranges, &events),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            invalid_contract("isolated processor musical reference changed")
+        );
+        assert_eq!(io.main, vec![2.0; 8]);
+        assert_eq!(processor.worker.shared_mut(), before.as_slice());
+        assert!(!processor.failed);
+    }
+    processor
+        .process(
+            test_context(-17).with_musical_time_reference(Some(reference(1))),
+            &mut io,
+            AudioParameterEventBatch::new(-17, 4, &ids, &ranges, &events),
+        )
+        .unwrap();
+    assert_eq!(io.main, vec![6.0; 8]);
+    assert!(
+        processor.worker.shutdown(),
+        "original bounded shutdown must still succeed"
+    );
+}

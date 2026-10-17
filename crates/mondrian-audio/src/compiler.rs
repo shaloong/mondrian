@@ -119,6 +119,55 @@ pub(crate) fn compile_audio_program_with_note_admission<R, E>(
 where
     E: From<AudioCompileError>,
 {
+    match compile_audio_program_inner(sequence, request, admit, None)? {
+        AudioCompileStep::Program(program, receipt) => Ok((program, receipt)),
+        AudioCompileStep::GraphVisited => unreachable!("no graph visitor supplied"),
+    }
+}
+
+// This control result never publishes a graph with silently omitted Notes.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Cold compilation returns the existing Program by value; boxing would add a new heap owner."
+)]
+enum AudioCompileStep<R> {
+    Program(CompiledAudioProgram, Option<R>),
+    GraphVisited,
+}
+
+type AudioGraphVisitor<'visitor, E> =
+    dyn for<'graph> FnMut(CompiledAudioGraph<'graph>) -> Result<(), E> + 'visitor;
+
+/// Borrow the exact common non-Note projection before Note extent requests or
+/// ownership. Only cold dependency refusal uses this continuation; it creates
+/// no complete Program, grant, persistent cache or alternate routing model.
+pub(crate) fn visit_audio_program_graph<E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    visitor: &mut AudioGraphVisitor<'_, E>,
+) -> Result<(), E>
+where
+    E: From<AudioCompileError>,
+{
+    match compile_audio_program_inner(sequence, request, |_, _| Ok(()), Some(visitor))? {
+        AudioCompileStep::GraphVisited => Ok(()),
+        AudioCompileStep::Program(_, _) => {
+            unreachable!("graph visitor always returns before Notes")
+        }
+    }
+}
+
+fn compile_audio_program_inner<R, E>(
+    sequence: &Sequence,
+    request: AudioCompileRequest,
+    admit: impl FnOnce(CompiledAudioGraph<'_>, CompiledNoteStorageRequest) -> Result<R, E>,
+    graph_visitor: Option<&mut AudioGraphVisitor<'_, E>>,
+) -> Result<AudioCompileStep<R>, E>
+where
+    E: From<AudioCompileError>,
+{
+    crate::processor::musical_tempo(sequence.audio_program.musical_time_reference)
+        .map_err(|error| AudioCompileError::InvalidPreparedGraph(error.to_string()))?;
     sequence
         .audio_program
         .validate(
@@ -461,6 +510,21 @@ where
         .collect::<Vec<_>>();
     sidechain_routes.sort_by_key(|route| route.id);
 
+    if let Some(visitor) = graph_visitor {
+        visitor(CompiledAudioGraph {
+            contributions: &contributions,
+            processing_scopes: &processing_scopes,
+            transitions: &transitions,
+            track_channels: &track_channels,
+            buses: &buses,
+            bus_order: &bus_order,
+            output: &compiled_output,
+            routes: &routes,
+            sidechain_routes: &sidechain_routes,
+        })?;
+        return Ok(AudioCompileStep::GraphVisited);
+    }
+
     // Only the selected active Track rack is a Note consumer. Required Track
     // presence alone does not retain a pruned post-fader or bypassed processor.
     let selected_note_lane = |lane: &mondrian_timeline::audio::AudioNoteLane| {
@@ -517,6 +581,7 @@ where
     note_materialization_tests::observe_owners(&note_lanes);
 
     let program = CompiledAudioProgram {
+        musical_time_reference: sequence.audio_program.musical_time_reference,
         output_id: request.output_id,
         contributions,
         processing_scopes,
@@ -533,7 +598,7 @@ where
         .compiled_note_payload_bytes()
         .map_err(|_| AudioCompileError::NoteEventCountOverflow)?;
     require_compiled_note_payload(actual_payload, requested_payload)?;
-    Ok((program, reservation))
+    Ok(AudioCompileStep::Program(program, reservation))
 }
 
 fn compile_scope(
@@ -821,6 +886,9 @@ fn topological_bus_order(
 /// Author validation, dependency, or lowering failure.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AudioCompileError {
+    /// VST3 has no adapter for the authored Sequence musical reference yet.
+    #[error("VST3 musical transport is not supported by this audio adapter")]
+    Vst3MusicalTransportNotSupported,
     /// A raw output cannot be fabricated by host bypass.
     #[error("routed processor {0} is bypassed")]
     BypassedProcessorOutput(mondrian_core::AudioProcessorInstanceId),
