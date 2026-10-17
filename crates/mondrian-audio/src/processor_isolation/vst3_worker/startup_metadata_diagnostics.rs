@@ -482,6 +482,7 @@ fn native_startup_metadata_phase_observation() {
         captured_state,
         auxiliary_buses,
         event_bus_contract,
+        main_audio_input,
         ..
     } = serde_json::from_slice(&probe.read()).expect("exact captured probe")
     else {
@@ -519,6 +520,7 @@ fn native_startup_metadata_phase_observation() {
             .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {
             schema_version: PAYLOAD_VERSION,
+            main_audio_input,
             event_bus_contract,
             class_id,
             vendor,

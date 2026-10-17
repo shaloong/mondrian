@@ -106,8 +106,8 @@ pub use vst3_processing_metadata::{
     Vst3EventBusContractRow, Vst3EventBusContractRows, Vst3EventBusContractV1, Vst3EventBusRole,
 };
 pub use vst3_worker::{
-    Vst3AudioProcessorSpecResolver, Vst3AudioProcessorWorkerFactory, Vst3ParameterDescriptor,
-    Vst3PluginRegistration, VST3_AUDIO_WORKER_ARGUMENT,
+    Vst3AudioProcessorSpecResolver, Vst3AudioProcessorWorkerFactory, Vst3MainAudioInput,
+    Vst3ParameterDescriptor, Vst3PluginRegistration, VST3_AUDIO_WORKER_ARGUMENT,
 };
 
 /// Hidden endpoint environment used only between a parent Adapter and its Worker.
