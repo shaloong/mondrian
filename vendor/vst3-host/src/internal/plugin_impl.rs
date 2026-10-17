@@ -7138,14 +7138,6 @@ impl PluginProcessFields<'_> {
             .process_data
             .as_ref()
             .ok_or_else(|| Error::Other("Process data not initialized".to_owned()))?;
-        // Uncollected native output remains an obligation after a failed
-        // cleanup, including on a later switch to ordinary audio processing.
-        data.output_param_changes
-            .require_collected_output()
-            .map_err(Error::NativeOutput)?;
-        self.output_events
-            .require_collected_output()
-            .map_err(Error::NativeOutput)?;
         checked_process_sample_end(&data.process_context, total)?;
         preflight_musical_window(
             &data.process_context,
@@ -7159,6 +7151,14 @@ impl PluginProcessFields<'_> {
         data.active_note_events
             .require_quiescent()
             .map_err(Error::NativeEvent)?;
+        // Preserve the pure window/owner checks' existing error priority.
+        // Uncollected output still refuses every entry before input consumption.
+        data.output_param_changes
+            .require_collected_output()
+            .map_err(Error::NativeOutput)?;
+        self.output_events
+            .require_collected_output()
+            .map_err(Error::NativeOutput)?;
         let anchored = data.musical_reference.is_some();
         let active_notes = anchored && notes.is_some_and(|events| !events.is_empty());
         if let Some(reference) = data.musical_reference {
