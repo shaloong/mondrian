@@ -422,7 +422,12 @@ pub enum NativeEditorEvent {
     /// Re-read parameters after this raw callback. The cohort is the complete
     /// post-callback raw restart state, not its acknowledgement. JSON helpers
     /// must be paired with a decoder that knows this variant.
-    ParameterRescanRequested { flags: i32, cohort: RestartCohort },
+    ParameterRescanRequested {
+        /// This callback's original raw restart bits, including mixed or unknown bits.
+        flags: i32,
+        /// The complete coalesced cohort returned by this callback's atomic update.
+        cohort: RestartCohort,
+    },
     /// The plugin changed whether its authored configuration needs saving.
     DirtyChanged(bool),
 
