@@ -435,7 +435,7 @@ fn tuple(call: u32, note: AudioNoteEvent, ppq_bits: u64) -> [u8; 48] {
 }
 
 #[test]
-#[ignore = "requires current normal Product IPC16, owned MNE4 DLL and existing absolute audit directory; local Worker only"]
+#[ignore = "requires current normal Product IPC17, owned MNE4 DLL and existing absolute audit directory; local Worker only"]
 fn installed_vst3_note_worker_delivers_literal_ppq_pcm_and_complete_same_pid_audit() {
     let materials = Materials::load();
     // Independent exact-Fraction binary64 results for offsets0,3,4,8.
@@ -548,7 +548,7 @@ fn installed_vst3_note_worker_delivers_literal_ppq_pcm_and_complete_same_pid_aud
 }
 
 #[test]
-#[ignore = "requires current normal Product IPC16 and owned MNE4 DLL; cold contracts and pure parent refusals only"]
+#[ignore = "requires current normal Product IPC17 and owned MNE4 DLL; cold contracts and pure parent refusals only"]
 fn installed_vst3_note_worker_refuses_incompatible_contracts_before_consumption() {
     let materials = Materials::load();
     let render = render(48_000);
@@ -656,7 +656,7 @@ fn installed_vst3_note_worker_refuses_incompatible_contracts_before_consumption(
 }
 
 #[test]
-#[ignore = "requires current normal Product IPC16 and owned MNE4 DLL; parent fail-closed, no failed-tail audit guarantee"]
+#[ignore = "requires current normal Product IPC17 and owned MNE4 DLL; parent fail-closed, no failed-tail audit guarantee"]
 fn installed_vst3_note_worker_failures_do_not_replay_or_rebuild() {
     let materials = Materials::load();
     let render = render(48_000);
