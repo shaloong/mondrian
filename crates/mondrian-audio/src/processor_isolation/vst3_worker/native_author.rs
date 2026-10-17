@@ -477,13 +477,54 @@ impl Vst3Worker {
                 delivery: Delivery::Refused(Refusal::StaleDelivery),
             });
         }
-        if matches!(
-            &self.native_author_delivery,
-            Some(PendingDelivery::Delivered { rescan_witness: Some(_), .. })
-        ) {
-            // Collection is not Runtime/Session acceptance. A later slice must
-            // settle the real SDK witness and matching parent hold together.
-            return Ok(refused(source, Refusal::UnsupportedAdapter));
+        if let Some(PendingDelivery::Delivered {
+            revision,
+            configuration,
+            request_cohort,
+            rescan_witness: Some(witness),
+            ..
+        }) = self.native_author_delivery.as_mut()
+        {
+            let Some(plugin) = self.plugin.as_mut() else {
+                return Ok(refused(source, Refusal::StaleDelivery));
+            };
+            let cohort = witness.cohort();
+            let prefix = Some(crate::NativeRequestCohort {
+                serial: cohort.serial(),
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+            });
+            if configuration.is_none()
+                || *revision != witness.source().revision()
+                || *request_cohort != prefix
+                || cohort.flags().bits() != 4
+                || cohort.serial() == 0
+                || cohort.exhausted()
+                || plugin.native_editor_attachment_owner() != Some(witness.owner())
+            {
+                return Ok(refused(source, Refusal::StaleDelivery));
+            }
+            // The held final witness identifies prefix A, never a later live B.
+            // SDK settlement neither services native code nor changes Source or
+            // feedback; new open bounds/values remain later obligations.
+            match plugin.settle_restart_source_prefix(*witness) {
+                Ok(
+                    vst3_host::plugin::RestartSourceSettlement::Retired
+                    | vst3_host::plugin::RestartSourceSettlement::NewerParameterSuffixPending {
+                        ..
+                    },
+                ) => {}
+                Err(error) => return Ok(refused(source, rescan_settlement_refusal(error))),
+            }
+            // Every fallible check precedes settlement. Move the already admitted
+            // configuration and retire only this pending receipt, without native
+            // calls, recapture or another validation after the SDK commit.
+            self.payload.state =
+                configuration.take().map(NativeAudioAuthorConfiguration::into_bytes);
+            self.native_author_delivery = None;
+            return Ok(NativeAudioAuthorObservation {
+                source,
+                delivery: Delivery::Acknowledged { acknowledgement: ack, request_cohort: prefix },
+            });
         }
         let Some(PendingDelivery::Delivered { configuration, request_cohort, .. }) =
             self.native_author_delivery.take()
@@ -506,6 +547,16 @@ impl Vst3Worker {
 
 fn refused(source: NativeAudioAuthorSourceStatus, reason: Refusal) -> NativeAudioAuthorObservation {
     NativeAudioAuthorObservation { source, delivery: Delivery::Refused(reason) }
+}
+
+fn rescan_settlement_refusal(error: vst3_host::plugin::RestartSourceError) -> Refusal {
+    use vst3_host::plugin::RestartSourceError as Error;
+    match error {
+        Error::Unsupported | Error::WrongThread => Refusal::UnsupportedAdapter,
+        Error::InvalidSource | Error::PoisonedOwner => Refusal::InvalidSource,
+        Error::Busy => Refusal::SourceChanged,
+        Error::Conflict | Error::Exhausted => Refusal::StaleDelivery,
+    }
 }
 
 fn current_source(
