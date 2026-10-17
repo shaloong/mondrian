@@ -270,6 +270,7 @@ impl SupervisedAudioWorker {
         spec: &IsolatedAudioProcessorWorkerSpec,
         contract: AudioRenderContract,
         layout: SharedBlockLayout,
+        expected_input_names: Option<&[crate::AudioProcessorInputName]>,
     ) -> Result<(Self, Vec<crate::AudioProcessorInputName>), AudioProcessorHostError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(|error| worker_failed("startup", error))?;
@@ -411,6 +412,20 @@ impl SupervisedAudioWorker {
                 {
                     process.terminate_reported("audio startup failure");
                     return Err(error);
+                }
+                // Names are keyed presentation metadata. Both lists are already
+                // unique/validated; order carries no identity and needs no cache.
+                if expected_input_names.is_some_and(|expected| {
+                    expected.len() != input_names.len()
+                        || expected
+                            .iter()
+                            .any(|name| !input_names.iter().any(|actual| actual == name))
+                }) {
+                    process.terminate_reported("audio startup failure");
+                    return Err(worker_failed_detail(
+                        "startup",
+                        "Worker input presentation metadata changed since preparation",
+                    ));
                 }
                 input_names
             }
@@ -1441,6 +1456,7 @@ mod startup_preflight_tests {
             &spec,
             render,
             SharedBlockLayout::new(4, 2, 1, 0).unwrap(),
+            None,
         )
         .err()
         .expect("preflight must refuse without starting an executable");
@@ -1495,8 +1511,12 @@ mod control_timeout_worker_lifecycle {
         .with_dispatch_argument(None)
         .with_deadlines(Duration::from_secs(5), operation)?
         .with_state_entry_timeout(enter)?;
-        let (worker, names) =
-            SupervisedAudioWorker::launch(&spec, render, SharedBlockLayout::new(4, 2, 0, 0)?)?;
+        let (worker, names) = SupervisedAudioWorker::launch(
+            &spec,
+            render,
+            SharedBlockLayout::new(4, 2, 0, 0)?,
+            None,
+        )?;
         assert!(names.is_empty());
         Ok(worker)
     }
@@ -2910,8 +2930,8 @@ mod control_timeout_worker_lifecycle {
                 let path = staging.path().to_owned();
                 let response = path.join("response.json");
                 match case {
-                    0 => std::fs::write(&response, br#"{"kind":"list_v2","schema_version":2,"descriptors":[]}"#).unwrap(),
-                    1 => std::fs::write(&response, br#"{"kind":"probe_v2","schema_version":2,"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
+                    0 => std::fs::write(&response, br#"{"kind":"list_v3","schema_version":3,"descriptors":[]}"#).unwrap(),
+                    1 => std::fs::write(&response, br#"{"kind":"probe_v3","schema_version":3,"input_names":[],"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
                     2 => {},
                     3 => std::fs::write(&response, b"not valid JSON").unwrap(),
                     4 => std::fs::write(&response, vec![b' '; 512 * 1024 + 1]).unwrap(),

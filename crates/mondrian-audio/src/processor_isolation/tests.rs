@@ -41,6 +41,37 @@ impl TestBehavior {
     }
 }
 
+// A test-only extension of the original child entry. Each actual preparation
+// creates one PID marker; optional rendezvous retains an observation handle
+// before Ready refusal, without changing the production launch/owner path.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ColdTestPreparation {
+    directory: PathBuf,
+    input_names: Vec<crate::AudioProcessorInputName>,
+    wait_for_observer: bool,
+}
+
+impl ColdTestPreparation {
+    fn record(&self) -> Result<(), AudioProcessorHostError> {
+        let pid = std::process::id();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.directory.join(format!("{pid}.prepared")))
+            .map_err(|error| invalid_contract(&format!("record test preparation: {error}")))?;
+        if self.wait_for_observer {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !self.directory.join(format!("{pid}.observed")).exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(invalid_contract("test preparation observer did not arrive"));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        Ok(())
+    }
+}
+
 struct TestWorkerFactory;
 
 impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
@@ -48,7 +79,18 @@ impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Box<dyn IsolatedAudioProcessorWorker>, AudioProcessorHostError> {
-        let behavior = TestBehavior::decode(request.payload())?;
+        let observation = request
+            .payload()
+            .strip_prefix(&[4])
+            .map(serde_json::from_slice::<ColdTestPreparation>)
+            .transpose()
+            .map_err(|error| invalid_contract(&format!("test preparation payload: {error}")))?;
+        let (behavior, input_names) = if let Some(observation) = observation {
+            observation.record()?;
+            (TestBehavior::Normal, observation.input_names)
+        } else {
+            (TestBehavior::decode(request.payload())?, Vec::new())
+        };
         let contract = if behavior == TestBehavior::ContractDrift {
             AudioProcessorExecutionContract::stateless()
         } else {
@@ -58,6 +100,7 @@ impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
             behavior,
             contract,
             auxiliary: request.auxiliary_inputs().clone(),
+            input_names,
             musical_time_reference: request.musical_time_reference(),
             entered: false,
         }))
@@ -68,6 +111,7 @@ struct TestWorker {
     behavior: TestBehavior,
     contract: AudioProcessorExecutionContract,
     auxiliary: AudioProcessorAuxiliaryInputContract,
+    input_names: Vec<crate::AudioProcessorInputName>,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     entered: bool,
 }
@@ -79,6 +123,10 @@ impl IsolatedAudioProcessorWorker for TestWorker {
 
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
         self.auxiliary.clone()
+    }
+
+    fn auxiliary_input_names(&self) -> Vec<crate::AudioProcessorInputName> {
+        self.input_names.clone()
     }
 
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
@@ -130,6 +178,258 @@ fn isolated_worker_child_entry() {
         return;
     }
     run_isolated_audio_processor_worker(&TestWorkerFactory).expect("run isolated test Worker");
+}
+
+fn cold_input_names() -> Vec<crate::AudioProcessorInputName> {
+    [("detector", "Detector"), ("monitor", "Monitor")]
+        .into_iter()
+        .map(|(bus_key, name)| crate::AudioProcessorInputName {
+            bus_key: bus_key.to_owned(),
+            name: name.to_owned(),
+        })
+        .collect()
+}
+
+fn cold_test_spec(
+    directory: &std::path::Path,
+    actual_names: Vec<crate::AudioProcessorInputName>,
+    wait_for_observer: bool,
+) -> IsolatedAudioProcessorWorkerSpec {
+    let auxiliary = AudioProcessorAuxiliaryInputContract {
+        buses: ["detector", "monitor"]
+            .into_iter()
+            .map(|key| crate::AudioProcessorAuxiliaryInputBusContract {
+                bus_key: key.to_owned(),
+                channel_layout: AudioChannelLayout::Stereo,
+            })
+            .collect(),
+    };
+    let mut spec = test_spec(
+        TestBehavior::Normal,
+        stateful_contract(),
+        auxiliary,
+        Vec::new(),
+        Duration::from_secs(2),
+    );
+    spec.preparation_payload = vec![4];
+    spec.preparation_payload.extend(
+        serde_json::to_vec(&ColdTestPreparation {
+            directory: directory.to_owned(),
+            input_names: actual_names,
+            wait_for_observer,
+        })
+        .unwrap(),
+    );
+    spec
+}
+
+fn cold_prepared_pids(directory: &std::path::Path) -> Vec<u32> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter_map(|name| name.to_str().unwrap().strip_suffix(".prepared").map(str::to_owned))
+        .map(|pid| pid.parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn native_probe_evidence_consumes_names_once_and_keeps_static_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let spec = cold_test_spec(directory.path(), cold_input_names(), false);
+    for names in [
+        vec![crate::AudioProcessorInputName { bus_key: "absent".into(), name: "Valid".into() }],
+        vec![cold_input_names()[0].clone(), cold_input_names()[0].clone()],
+        vec![crate::AudioProcessorInputName { bus_key: "detector".into(), name: "\n".into() }],
+    ] {
+        assert!(spec.clone().with_native_probe_input_names(names).is_err());
+    }
+    let mut names = Vec::with_capacity(7);
+    names.extend(cold_input_names());
+    let pointer = names.as_ptr();
+    let capacity = names.capacity();
+    let evidenced = spec.clone().with_native_probe_input_names(names).unwrap();
+    let mut invalid = evidenced.clone();
+    invalid.render_contract.max_block_frames = usize::MAX;
+    assert!(IsolatedAudioProcessorFactory::prepare(invalid).is_err());
+    let mut invalid = evidenced.clone();
+    invalid.plugin_execution_contract = AudioProcessorExecutionContract::new(
+        0,
+        AudioProcessorTail::None,
+        true,
+        true,
+        true,
+        usize::MAX,
+    )
+    .unwrap();
+    assert!(IsolatedAudioProcessorFactory::prepare(invalid).is_err());
+    assert!(cold_prepared_pids(directory.path()).is_empty());
+    let factory = IsolatedAudioProcessorFactory::prepare(evidenced).unwrap();
+    assert_eq!(factory.input_names.as_ptr(), pointer);
+    assert_eq!(factory.input_names.capacity(), capacity);
+    assert!(matches!(
+        factory.spec.preparation_evidence,
+        PreparationEvidence::Unprobed
+    ));
+    assert!(cold_prepared_pids(directory.path()).is_empty());
+    assert_eq!(
+        factory.execution_contract,
+        IsolatedAudioProcessorFactory::requested_execution_contract(&spec, factory.layout).unwrap()
+    );
+    let inventory = factory_storage_inventory(&factory);
+    let names_owner = inventory
+        .iter()
+        .filter(|storage| storage.address() == pointer as usize)
+        .collect::<Vec<_>>();
+    assert_eq!(names_owner.len(), 1);
+    assert_eq!(
+        names_owner[0].layout().size(),
+        capacity * size_of::<crate::AudioProcessorInputName>()
+    );
+    let erased: Arc<dyn AudioProcessorFactory> = factory;
+    let observed = crate::AudioProcessorFactoryStorageBorrow::arc_payload(&erased);
+    assert_eq!(
+        observed.layout(),
+        std::alloc::Layout::new::<IsolatedAudioProcessorFactory>()
+    );
+}
+
+#[test]
+fn native_probe_factory_starts_one_worker_and_unprobed_keeps_validation_worker() {
+    for native_probed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut actual_names = cold_input_names();
+        actual_names.reverse();
+        let mut spec = cold_test_spec(directory.path(), actual_names.clone(), false);
+        if native_probed {
+            spec = spec.with_native_probe_input_names(cold_input_names()).unwrap();
+        }
+        let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+        let prepared = cold_prepared_pids(directory.path());
+        assert_eq!(prepared.len(), usize::from(!native_probed));
+        let processor = factory.create().expect("Ready accepts equivalent keyed name order");
+        let created = cold_prepared_pids(directory.path());
+        assert_eq!(created.len(), prepared.len() + 1);
+        assert_eq!(
+            created.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            created.len()
+        );
+        assert_eq!(
+            factory.input_names,
+            if native_probed {
+                cold_input_names()
+            } else {
+                actual_names
+            }
+        );
+        drop(processor);
+        assert_eq!(cold_prepared_pids(directory.path()).len(), created.len());
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn native_probe_ready_name_drift_preserves_startup_error_and_reaps_original_child() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    let mut changed = cold_input_names();
+    changed[0].name = "Changed detector".into();
+    for actual_names in [changed, vec![cold_input_names()[0].clone()]] {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = cold_test_spec(directory.path(), actual_names, true)
+            .with_native_probe_input_names(cold_input_names())
+            .unwrap();
+        let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+        assert!(cold_prepared_pids(directory.path()).is_empty());
+        std::thread::scope(|scope| {
+            let creation = scope.spawn(|| match factory.create() {
+                Ok(_) => panic!("presentation drift must refuse before publishing an instance"),
+                Err(error) => error,
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let pid = loop {
+                let prepared = cold_prepared_pids(directory.path());
+                if let [pid] = prepared.as_slice() {
+                    break *pid;
+                }
+                assert!(prepared.is_empty());
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "actual child did not prepare"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            // SAFETY: The test child remains in its bounded pre-Ready rendezvous.
+            // This handle only observes that exact process; ProcessOwner retains
+            // all kill/reap authority. Adopt the checked nonnull handle once.
+            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+            assert!(
+                !raw.is_null(),
+                "retain actual child observation: {}",
+                std::io::Error::last_os_error()
+            );
+            let observed = unsafe { OwnedHandle::from_raw_handle(raw) };
+            std::fs::write(directory.path().join(format!("{pid}.observed")), []).unwrap();
+            let error = creation.join().unwrap();
+            assert!(
+                matches!(error, AudioProcessorHostError::WorkerFailed { operation: "startup", detail }
+                if detail == "Worker input presentation metadata changed since preparation")
+            );
+            // SAFETY: This same-process observation handle remains live. Ready
+            // refusal has already completed the original owner's cleanup.
+            assert_eq!(
+                unsafe { WaitForSingleObject(observed.as_raw_handle(), 0) },
+                WAIT_OBJECT_0
+            );
+            assert_eq!(cold_prepared_pids(directory.path()), [pid]);
+        });
+    }
+}
+
+#[test]
+fn native_probe_seed_rebind_preserves_name_snapshot_without_rearming_evidence() {
+    let mut original = pure_seed_factory(NativeConfigurationFormat::ClapState, Some(&[1, 2]));
+    original.spec.auxiliary_inputs.buses =
+        cold_test_spec(std::path::Path::new("unused"), Vec::new(), false)
+            .auxiliary_inputs
+            .buses;
+    original.input_names = cold_input_names();
+    let next = original
+        .rebind_configuration_seed(NativeConfigurationFormat::ClapState, &[3, 4])
+        .unwrap();
+    assert_eq!(next.input_names, original.input_names);
+    assert_ne!(next.input_names.as_ptr(), original.input_names.as_ptr());
+    assert!(matches!(
+        original.spec.preparation_evidence,
+        PreparationEvidence::Unprobed
+    ));
+    assert!(matches!(
+        next.spec.preparation_evidence,
+        PreparationEvidence::Unprobed
+    ));
+    assert_eq!(next.execution_contract, original.execution_contract);
+    assert_eq!(next.layout, original.layout);
+    for factory in [&original, &next] {
+        let inventory = factory_storage_inventory(factory);
+        for (address, bytes) in [
+            (
+                factory.input_names.as_ptr() as usize,
+                factory.input_names.capacity() * size_of::<crate::AudioProcessorInputName>(),
+            ),
+            (
+                factory.input_names[0].name.as_ptr() as usize,
+                factory.input_names[0].name.capacity(),
+            ),
+        ] {
+            let owner =
+                inventory.iter().filter(|owner| owner.address() == address).collect::<Vec<_>>();
+            assert_eq!(owner.len(), 1);
+            assert_eq!(owner[0].layout().size(), bytes);
+        }
+    }
 }
 
 #[test]
@@ -1802,9 +2102,13 @@ fn isolated_music_context_mismatch_preserves_shared_pcm_parameters_and_live_chil
     .with_musical_time_reference(Some(reference(1)))
     .unwrap();
     let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
-    let (worker, _) =
-        SupervisedAudioWorker::launch(&factory.spec, factory.spec.render_contract, factory.layout)
-            .unwrap();
+    let (worker, _) = SupervisedAudioWorker::launch(
+        &factory.spec,
+        factory.spec.render_contract,
+        factory.layout,
+        Some(&factory.input_names),
+    )
+    .unwrap();
     let mut processor = IsolatedAudioProcessor {
         musical_time_reference: factory.spec.musical_time_reference,
         worker,

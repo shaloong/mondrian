@@ -123,6 +123,14 @@ pub(super) struct NativeAudioInputMetadata {
     pub(super) names: Vec<crate::AudioProcessorInputName>,
 }
 
+#[derive(Clone)]
+enum PreparationEvidence {
+    Unprobed,
+    NativeProbed {
+        input_names: Vec<crate::AudioProcessorInputName>,
+    },
+}
+
 /// Immutable launch and capacity facts for one process-isolated processor definition.
 #[derive(Clone)]
 pub struct IsolatedAudioProcessorWorkerSpec {
@@ -131,6 +139,7 @@ pub struct IsolatedAudioProcessorWorkerSpec {
     helper_arguments: Vec<OsString>,
     dispatch_argument: Option<OsString>,
     preparation_payload: Vec<u8>,
+    preparation_evidence: PreparationEvidence,
     plugin_execution_contract: AudioProcessorExecutionContract,
     auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     auxiliary_outputs: AudioProcessorAuxiliaryOutputContract,
@@ -168,6 +177,7 @@ impl IsolatedAudioProcessorWorkerSpec {
             helper_arguments: Vec::new(),
             dispatch_argument: Some(OsString::from(ISOLATED_AUDIO_PROCESSOR_WORKER_ARGUMENT)),
             preparation_payload,
+            preparation_evidence: PreparationEvidence::Unprobed,
             plugin_execution_contract,
             auxiliary_inputs,
             auxiliary_outputs: AudioProcessorAuxiliaryOutputContract::default(),
@@ -181,6 +191,18 @@ impl IsolatedAudioProcessorWorkerSpec {
         };
         spec.validate()?;
         Ok(spec)
+    }
+
+    // Only a fresh format-specific native probe may supply this evidence. It is
+    // consumed into the Factory's existing presentation snapshot, not a second
+    // retained owner or permission to skip the actual instance's Ready checks.
+    pub(crate) fn with_native_probe_input_names(
+        mut self,
+        input_names: Vec<crate::AudioProcessorInputName>,
+    ) -> Result<Self, AudioProcessorHostError> {
+        crate::AudioProcessorInputName::validate_all(&input_names, &self.auxiliary_inputs)?;
+        self.preparation_evidence = PreparationEvidence::NativeProbed { input_names };
+        Ok(self)
     }
 
     /// Prepend helper-specific arguments before the optional dispatch argument.
@@ -293,6 +315,9 @@ impl IsolatedAudioProcessorWorkerSpec {
             ));
         }
         self.note_input_contract.validate()?;
+        if let PreparationEvidence::NativeProbed { input_names } = &self.preparation_evidence {
+            crate::AudioProcessorInputName::validate_all(input_names, &self.auxiliary_inputs)?;
+        }
         let mut parameter_ids = BTreeSet::new();
         if self
             .parameter_ids
@@ -432,6 +457,7 @@ impl IsolatedAudioProcessorFactory {
             helper_arguments: self.spec.helper_arguments.clone(),
             dispatch_argument: self.spec.dispatch_argument.clone(),
             preparation_payload,
+            preparation_evidence: PreparationEvidence::Unprobed,
             plugin_execution_contract: self.spec.plugin_execution_contract,
             auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
             auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
@@ -451,10 +477,12 @@ impl IsolatedAudioProcessorFactory {
         })
     }
 
-    /// Validate a Worker contract through a real launch/handshake before a Plan
-    /// retains this Factory.
+    /// Validate immutable preparation facts before a Plan retains this Factory.
+    /// A fresh native probe supplies presentation metadata without an additional
+    /// Worker; generic/manual specs retain the real validation launch and shutdown.
+    /// Every actual instance still passes the complete same-owner Ready checks.
     pub fn prepare(
-        spec: IsolatedAudioProcessorWorkerSpec,
+        mut spec: IsolatedAudioProcessorWorkerSpec,
     ) -> Result<Arc<Self>, AudioProcessorHostError> {
         spec.validate()?;
         let layout = SharedBlockLayout::new(
@@ -469,9 +497,18 @@ impl IsolatedAudioProcessorFactory {
             spec.note_input_contract.limits.output_ends,
         )?;
         let execution_contract = Self::requested_execution_contract(&spec, layout)?;
-        let (mut validation, input_names) =
-            SupervisedAudioWorker::launch(&spec, spec.render_contract, layout)?;
-        validation.shutdown_observed().validation_result()?;
+        let input_names = match std::mem::replace(
+            &mut spec.preparation_evidence,
+            PreparationEvidence::Unprobed,
+        ) {
+            PreparationEvidence::NativeProbed { input_names } => input_names,
+            PreparationEvidence::Unprobed => {
+                let (mut validation, input_names) =
+                    SupervisedAudioWorker::launch(&spec, spec.render_contract, layout, None)?;
+                validation.shutdown_observed().validation_result()?;
+                input_names
+            }
+        };
         Ok(Arc::new(Self {
             spec,
             execution_contract,
@@ -579,8 +616,12 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
                 "isolated parent output metadata exceeds its admitted clone reservation",
             ));
         }
-        let (worker, _) =
-            SupervisedAudioWorker::launch(&self.spec, self.spec.render_contract, self.layout)?;
+        let (worker, _) = SupervisedAudioWorker::launch(
+            &self.spec,
+            self.spec.render_contract,
+            self.layout,
+            Some(&self.input_names),
+        )?;
         Ok(Box::new(IsolatedAudioProcessor {
             musical_time_reference: self.spec.musical_time_reference,
             worker,
