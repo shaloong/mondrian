@@ -69,6 +69,8 @@ pub(super) fn create_instance(cid: TUID) -> Option<vst3::ComPtr<FUnknown>> {
 struct Config {
     fail_call: u32,
     main_only: bool,
+    // MNE6 alone removes the native audio-input bus on inactive restore.
+    zero_audio_input: bool,
     // MNE5 alone retains a real IEventList reference across native callbacks.
     retain_events: bool,
     // None retains the original MNE1 configuration, audit and Note DSP.
@@ -82,6 +84,7 @@ impl Config {
         Self {
             fail_call,
             main_only: false,
+            zero_audio_input: false,
             retain_events: false,
             auxiliary_default: None,
             service_action: None,
@@ -89,7 +92,9 @@ impl Config {
     }
     fn encode(self) -> ([u8; SERVICE_CONFIG_BYTES], usize) {
         let mut bytes = [0; SERVICE_CONFIG_BYTES];
-        let (magic, version, len) = if self.retain_events {
+        let (magic, version, len) = if self.zero_audio_input {
+            (b"MNE6", 6_u32, CONFIG_BYTES)
+        } else if self.retain_events {
             (b"MNE5", 5_u32, CONFIG_BYTES)
         } else if self.main_only {
             (b"MNE4", 4_u32, CONFIG_BYTES)
@@ -124,9 +129,17 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let fail_call = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
     let retain_events = &bytes[..4] == b"MNE5" && version == 5;
-    let main_only = (&bytes[..4] == b"MNE4" && version == 4) || retain_events;
+    let zero_audio_input = &bytes[..4] == b"MNE6" && version == 6;
+    let main_only = (&bytes[..4] == b"MNE4" && version == 4) || retain_events || zero_audio_input;
     if fail_call > if main_only { MAIN_MAX_CALLS } else { MAX_CALLS } as u32 {
         return None;
+    }
+    if zero_audio_input {
+        let mut extra = [0_u8; 1];
+        let result = stream.read(extra.as_mut_ptr().cast(), 1, &mut read);
+        if !matches!(result, kResultOk | kResultFalse) || read != 0 {
+            return None;
+        }
     }
     if retain_events {
         // MNE5 accepts its 12-byte configuration or its own complete 44-byte
@@ -144,7 +157,7 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
         }
     }
     let (auxiliary_default, service_action) = match (&bytes[..4], version) {
-        (b"MNE1", 1) | (b"MNE4", 4) | (b"MNE5", 5) => (None, None),
+        (b"MNE1", 1) | (b"MNE4", 4) | (b"MNE5", 5) | (b"MNE6", 6) => (None, None),
         (b"MNE2", 2) => {
             if stream.read(bytes[12..].as_mut_ptr().cast(), 4, &mut read) != kResultOk || read != 4
             {
@@ -177,6 +190,7 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     Some(Config {
         fail_call,
         main_only,
+        zero_audio_input,
         retain_events,
         auxiliary_default,
         service_action,
@@ -240,7 +254,7 @@ impl AdmissionTrace {
     }
 }
 
-// MNE4 alone can publish complete post-join evidence. File offsets, not the
+// MNE4 and MNE6 can publish complete post-join evidence. File offsets, not the
 // DLL-local serial alone, separate lifetimes after module unload/reload.
 struct MainAuditOutput {
     directory: PathBuf,
@@ -263,12 +277,13 @@ impl MainAuditOutput {
     fn record(
         &self,
         instance: u64,
+        mode: u32,
         active_buses: u32,
         sample_rate: u64,
         max_frames: u32,
         audit: &Audit,
     ) -> std::io::Result<()> {
-        if thread::current().id() != self.control_thread {
+        if !matches!(mode, 4 | 6) || thread::current().id() != self.control_thread {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         let length = MAIN_AUDIT_HEADER_BYTES
@@ -284,7 +299,7 @@ impl MainAuditOutput {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(length).map_err(std::io::Error::other)?;
         bytes.extend_from_slice(b"MNA4");
-        for value in [4_u32, length as u32, 4, std::process::id(), 1] {
+        for value in [4_u32, length as u32, mode, std::process::id(), 1] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes.extend_from_slice(&instance.to_le_bytes());
@@ -318,7 +333,7 @@ impl MainAuditOutput {
         if bytes.len() != length {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
-        let path = self.directory.join(format!("mne4-{}.audit", std::process::id()));
+        let path = self.directory.join(format!("mne{mode}-{}.audit", std::process::id()));
         let mut file = File::options().create(true).append(true).open(path)?;
         if file
             .metadata()?
@@ -517,6 +532,7 @@ struct NoteProcessor {
     fail_call: AtomicU32,
     admission_mode: AtomicBool,
     main_only: AtomicBool,
+    zero_audio_input: AtomicBool,
     retain_mode: AtomicBool,
     retained_input: Mutex<Option<ComPtr<IEventList>>>,
     retain_queries: AtomicU32,
@@ -539,6 +555,7 @@ impl NoteProcessor {
         Config {
             fail_call: self.fail_call.load(Ordering::Relaxed),
             main_only: self.main_only.load(Ordering::Relaxed),
+            zero_audio_input: self.zero_audio_input.load(Ordering::Relaxed),
             retain_events: self.retain_mode.load(Ordering::Relaxed),
             auxiliary_default: self
                 .admission_mode
@@ -607,6 +624,7 @@ impl NoteProcessor {
             fail_call: AtomicU32::new(0),
             admission_mode: AtomicBool::new(false),
             main_only: AtomicBool::new(false),
+            zero_audio_input: AtomicBool::new(false),
             retain_mode: AtomicBool::new(false),
             retained_input: Mutex::new(None),
             retain_queries: AtomicU32::new(0),
@@ -652,6 +670,11 @@ impl IPluginBaseTrait for NoteProcessor {
                 if output
                     .record(
                         self.instance,
+                        if self.zero_audio_input.load(Ordering::Relaxed) {
+                            6
+                        } else {
+                            4
+                        },
                         self.active_buses.load(Ordering::Relaxed),
                         self.sample_rate.load(Ordering::Relaxed),
                         self.max_frames.load(Ordering::Relaxed),
@@ -683,7 +706,10 @@ impl IComponentTrait for NoteProcessor {
     }
     unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> i32 {
         match (media as MediaTypes, direction as BusDirections) {
-            (MediaTypes_::kAudio, BusDirections_::kInput | BusDirections_::kOutput) => 1,
+            (MediaTypes_::kAudio, BusDirections_::kInput) => {
+                i32::from(!self.zero_audio_input.load(Ordering::Relaxed))
+            }
+            (MediaTypes_::kAudio, BusDirections_::kOutput) => 1,
             (MediaTypes_::kEvent, BusDirections_::kInput) => 2,
             _ => 0,
         }
@@ -786,6 +812,11 @@ impl IComponentTrait for NoteProcessor {
         let Some(config) = read_config(stream) else {
             return kInvalidArgument;
         };
+        if (config.zero_audio_input || self.zero_audio_input.load(Ordering::Relaxed))
+            && (self.active.load(Ordering::Acquire) || self.processing.load(Ordering::Acquire))
+        {
+            return kResultFalse;
+        }
         if self.retain_mode.load(Ordering::Relaxed) && !self.release_retained_input() {
             return kResultFalse;
         }
@@ -825,6 +856,12 @@ impl IComponentTrait for NoteProcessor {
         *current_trace = trace;
         audit.voices = [EMPTY_VOICE; 16];
         self.main_only.store(config.main_only, Ordering::Relaxed);
+        self.zero_audio_input.store(config.zero_audio_input, Ordering::Relaxed);
+        if config.zero_audio_input {
+            // The removed bus has no current activation. Reappearing inputs
+            // require a new host activation rather than a fabricated ACK.
+            self.active_buses.fetch_and(!1, Ordering::Relaxed);
+        }
         self.retain_mode.store(config.retain_events, Ordering::Relaxed);
         self.fail_call.store(config.fail_call, Ordering::Relaxed);
         self.admission_mode.store(config.auxiliary_default.is_some(), Ordering::Relaxed);
@@ -865,7 +902,7 @@ impl IComponentTrait for NoteProcessor {
             return write_bytes(stream, &bytes);
         }
         if self.main_only.load(Ordering::Relaxed) {
-            // MNE4 state is configuration only. Audit is not a DSP checkpoint.
+            // MNE4/MNE6 state is configuration only. Audit is not a DSP checkpoint.
             let (bytes, len) = self.config().encode();
             return write_bytes(stream, &bytes[..len]);
         }
@@ -916,11 +953,13 @@ impl IAudioProcessorTrait for NoteProcessor {
         output: *mut SpeakerArrangement,
         outputs: i32,
     ) -> tresult {
-        if inputs != 1
-            || outputs != 1
-            || input.is_null()
+        let zero_input = self.zero_audio_input.load(Ordering::Relaxed);
+        if (if zero_input {
+            inputs != 0
+        } else {
+            inputs != 1 || input.is_null() || *input != SpeakerArr::kStereo
+        }) || outputs != 1
             || output.is_null()
-            || *input != SpeakerArr::kStereo
             || *output != SpeakerArr::kStereo
         {
             kResultFalse
@@ -936,6 +975,8 @@ impl IAudioProcessorTrait for NoteProcessor {
     ) -> tresult {
         if out.is_null()
             || index != 0
+            || (direction == BusDirections_::kInput as BusDirection
+                && self.zero_audio_input.load(Ordering::Relaxed))
             || !matches!(
                 direction as BusDirections,
                 BusDirections_::kInput | BusDirections_::kOutput
@@ -1037,10 +1078,13 @@ impl IAudioProcessorTrait for NoteProcessor {
         }
         let data = &*data;
         let admission = self.admission_mode.load(Ordering::Relaxed);
+        let zero_input = self.zero_audio_input.load(Ordering::Relaxed);
         let active = self.active_buses.load(Ordering::Relaxed);
         if !self.processing.load(Ordering::Acquire)
             || if admission {
                 active & 3 != 3
+            } else if zero_input {
+                active != 6
             } else if main_only {
                 active != 7
             } else {
@@ -1049,23 +1093,29 @@ impl IAudioProcessorTrait for NoteProcessor {
             || data.numSamples <= 0
             || data.numSamples as u32 > self.max_frames.load(Ordering::Relaxed)
             || data.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32
-            || data.numInputs != 1
+            || (if zero_input {
+                data.numInputs != 0 || !data.inputs.is_null()
+            } else {
+                data.numInputs != 1 || data.inputs.is_null()
+            })
             || data.numOutputs != 1
-            || data.inputs.is_null()
             || data.outputs.is_null()
         {
             return kInvalidArgument;
         }
-        let input = &*data.inputs;
         let output = &*data.outputs;
-        if input.numChannels != 2
-            || output.numChannels != 2
-            || input.__field0.channelBuffers32.is_null()
-            || output.__field0.channelBuffers32.is_null()
-        {
+        if output.numChannels != 2 || output.__field0.channelBuffers32.is_null() {
             return kInvalidArgument;
         }
-        let inputs = slice::from_raw_parts(input.__field0.channelBuffers32, 2);
+        let inputs: &[*mut f32] = if zero_input {
+            &[]
+        } else {
+            let input = &*data.inputs;
+            if input.numChannels != 2 || input.__field0.channelBuffers32.is_null() {
+                return kInvalidArgument;
+            }
+            slice::from_raw_parts(input.__field0.channelBuffers32, 2)
+        };
         let outputs = slice::from_raw_parts(output.__field0.channelBuffers32, 2);
         if inputs.iter().chain(outputs).any(|pointer| pointer.is_null()) {
             return kInvalidArgument;
