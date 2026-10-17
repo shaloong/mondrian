@@ -277,3 +277,313 @@ fn native_initial_input_barriers_and_real_paused_flush_share_the_existing_queue(
         0.75
     );
 }
+
+fn load_late_rescan_fixture(mode: u32) -> PluginImpl {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_INITIAL_VALUES_TEST_PLUGIN")
+            .expect("rebuilt owned initial-values DLL with mode13"),
+    );
+    assert!(path.is_absolute() && path.is_file());
+    let policy = crate::PluginInterfaceSupport::none()
+        .with(crate::PluginInterface::Component)
+        .with(crate::PluginInterface::AudioProcessor)
+        .with(crate::PluginInterface::EditController)
+        .with(crate::PluginInterface::ConnectionPoint);
+    let mut native =
+        PluginImpl::load_with_class(&path, Some("61921CF43A2B4A68AE5AE08241D85E22"), policy)
+            .unwrap();
+    let mut configuration = b"MIV1".to_vec();
+    configuration.extend_from_slice(&1_u32.to_le_bytes());
+    configuration.extend_from_slice(&0.375_f64.to_le_bytes());
+    configuration.extend_from_slice(&mode.to_le_bytes());
+    let state = encode_state_snapshot(&StateSnapshot {
+        component: configuration.clone(),
+        controller: Some(configuration),
+    })
+    .unwrap();
+    native
+        .load_state_with_context(&state, &StateContext::Project)
+        .unwrap();
+    native.reconfigure(48_000.0, 8).unwrap();
+    assert!(!native.has_editor());
+    native
+}
+
+#[derive(Debug)]
+struct LateRescanAudit {
+    component_gain: u64,
+    controller_gain: u64,
+    process: u32,
+    metadata: u32,
+    reads: u32,
+    setters: u32,
+    last_observed: u64,
+    wrong_thread: u32,
+}
+
+fn late_rescan_audit(native: &PluginImpl, mode: u32) -> LateRescanAudit {
+    // save_state services deferred controller values. Call only before enqueue
+    // or after the explicit controller service, never to observe an unserviced queue.
+    let bytes = native.save_state().unwrap();
+    let state = decode_state_snapshot(&bytes).unwrap();
+    let controller = state.controller.as_ref().unwrap();
+    assert_eq!(state.component.len(), 24);
+    assert_eq!(controller.len(), 44);
+    for configuration in [&state.component, controller] {
+        assert_eq!(&configuration[..4], b"MIV1");
+        assert_eq!(&configuration[4..8], &1_u32.to_le_bytes());
+        assert_eq!(&configuration[16..20], &mode.to_le_bytes());
+    }
+    LateRescanAudit {
+        component_gain: u64::from_le_bytes(state.component[8..16].try_into().unwrap()),
+        controller_gain: u64::from_le_bytes(controller[8..16].try_into().unwrap()),
+        process: u32::from_le_bytes(state.component[20..24].try_into().unwrap()),
+        metadata: u32::from_le_bytes(controller[20..24].try_into().unwrap()),
+        reads: u32::from_le_bytes(controller[24..28].try_into().unwrap()),
+        setters: u32::from_le_bytes(controller[28..32].try_into().unwrap()),
+        last_observed: u64::from_le_bytes(controller[32..40].try_into().unwrap()),
+        wrong_thread: u32::from_le_bytes(controller[40..44].try_into().unwrap()),
+    }
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode13 initial-values DLL under native lab runner"]
+fn native_deferred_controller_mode13_retains_source_until_explicit_service() {
+    use crate::plugin::{NativeEditorEvent, PluginEditorProcessingSplit};
+
+    for mode in [0, 13] {
+        let mut native = load_late_rescan_fixture(mode);
+        native.start_processing().unwrap();
+        let owner = native.native_editor_attachment_owner().unwrap();
+        let mut frame = crate::controller_parameters::ControllerParameterQueryFrame::default();
+        let mut current = InitialParameterValue::default();
+        assert_eq!(
+            native
+                .visit_controller_parameters_bounded(1, &mut frame, &mut |index, value| {
+                    assert_eq!(index, 0);
+                    current = InitialParameterValue {
+                        id: value.id(),
+                        normalized: value.normalized(),
+                    };
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!((current.id, current.normalized), (0, 0.375));
+        let initial_source = native.editor_event_source_status().unwrap();
+        let initial_cohort = native.pending_restart_cohort().unwrap();
+        assert_eq!(
+            initial_cohort.flags().bits(),
+            if mode == 13 { 4 } else { 0 }
+        );
+        assert_eq!(initial_source.pending_dsp_feedback_values(), 0);
+        native
+            .handoff_initial_parameter_input(
+                initial_cohort,
+                initial_source,
+                &[current],
+                InitialParameterStorage::for_parameter_count(1).unwrap(),
+            )
+            .unwrap();
+        assert!(!native.pending_processor_parameter_input().unwrap());
+        assert!(native.pending_param_changes.is_empty());
+        let source = native.editor_event_source_status().unwrap();
+        let cohort = native.pending_restart_cohort().unwrap();
+        assert!(source.closed_empty() && !cohort.pending());
+        let before = late_rescan_audit(&native, mode);
+        assert_eq!((before.process, before.wrong_thread), (0, 0));
+        assert_eq!(before.component_gain, 0.375_f64.to_bits());
+        assert_eq!(before.controller_gain, 0.375_f64.to_bits());
+        let setup = native.applied_setup;
+        let data = std::ptr::from_ref(native.process_data.as_ref().unwrap().as_ref());
+        let mut buffers = BusAudioBuffers::new(
+            &native.current_audio_bus_layout().unwrap(),
+            8,
+            native.sample_rate,
+        );
+        assert_eq!((buffers.inputs.len(), buffers.outputs.len()), (1, 1));
+        for (channel, samples) in buffers.inputs[0].channels.iter_mut().enumerate() {
+            for (index, value) in samples.iter_mut().enumerate() {
+                *value = ((channel + 1) * (index + 1)) as f32 / 16.0;
+            }
+        }
+        let inputs = buffers.inputs.clone();
+        for channel in &mut buffers.outputs[0].channels {
+            channel.fill(-99.0);
+        }
+        {
+            let PluginEditorProcessingSplit {
+                editor,
+                mut processor,
+            } = native.split_editor_processing().unwrap();
+            assert_eq!(editor.attachment_owner().unwrap(), owner);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        processor.queue_parameter_at(0, 0.75, 3).unwrap();
+                        processor.process_bus_audio(&mut buffers).unwrap();
+                    })
+                    .join()
+                    .unwrap();
+            });
+            // These role observations do not service the deferred controller queue.
+            assert_eq!(editor.pending_restart_cohort().unwrap(), Some(cohort));
+            assert_eq!(editor.editor_event_source_status().unwrap(), source);
+            assert_eq!(editor.parameter(0).unwrap().to_bits(), 0.375_f64.to_bits());
+            assert_eq!(editor.pending_restart_cohort().unwrap(), Some(cohort));
+            assert_eq!(editor.editor_event_source_status().unwrap(), source);
+        }
+        assert_eq!(buffers.inputs, inputs);
+        for (input, output) in inputs[0].channels.iter().zip(&buffers.outputs[0].channels) {
+            for (index, (&input, &output)) in input.iter().zip(output).enumerate() {
+                let gain = if index < 3 { 0.375 } else { 0.75 };
+                assert_eq!(output.to_bits(), (input * gain).to_bits());
+            }
+        }
+        assert!(native.pending_param_changes.is_empty());
+        assert!(!native.pending_processor_parameter_input().unwrap());
+        assert_eq!(native.deferred_controller_sync.len(), 1);
+        let (served_source, served_cohort);
+        {
+            // A full/joined owner can service the same no-GUI controller role.
+            let mut editor = native.borrow_editor_control().unwrap();
+            assert_eq!(editor.attachment_owner().unwrap(), owner);
+            editor.service_controller().unwrap();
+            served_source = editor.editor_event_source_status().unwrap();
+            served_cohort = editor.pending_restart_cohort().unwrap().unwrap();
+            assert_eq!(editor.parameter(0).unwrap().to_bits(), 0.75_f64.to_bits());
+            assert_eq!(editor.editor_event_source_status().unwrap(), served_source);
+            assert_eq!(
+                editor.pending_restart_cohort().unwrap(),
+                Some(served_cohort)
+            );
+            editor.service_controller().unwrap();
+            assert_eq!(editor.parameter(0).unwrap().to_bits(), 0.75_f64.to_bits());
+            assert_eq!(editor.editor_event_source_status().unwrap(), served_source);
+            assert_eq!(
+                editor.pending_restart_cohort().unwrap(),
+                Some(served_cohort)
+            );
+        }
+        assert!(native.deferred_controller_sync.is_empty());
+        assert_eq!(served_source.pending_dsp_feedback_values(), 0);
+        assert_eq!(served_source.open_parameter_edits(), 0);
+        assert_eq!(served_source.group_depth(), 0);
+        assert_eq!(served_source.failure(), None);
+        let mut events = Vec::with_capacity(1);
+        let mut feedback = Vec::with_capacity(1);
+        assert_eq!(
+            native
+                .observe_editor_source_bounded(1, &mut events, &mut feedback)
+                .unwrap(),
+            served_source
+        );
+        assert!(feedback.is_empty());
+        if mode == 13 {
+            assert_eq!(served_cohort.serial(), cohort.serial() + 1);
+            assert_eq!(served_cohort.flags().bits(), 4);
+            assert_eq!(served_source.revision(), source.revision() + 1);
+            assert_eq!(served_source.pending_events(), 1);
+            assert_eq!(
+                events,
+                vec![NativeEditorEvent::ParameterRescanRequested {
+                    flags: 4,
+                    cohort: served_cohort,
+                }]
+            );
+        } else {
+            assert_eq!(served_cohort, cohort);
+            assert_eq!(served_source, source);
+            assert!(events.is_empty());
+        }
+        let after = late_rescan_audit(&native, mode);
+        assert_eq!(after.process, before.process + 1);
+        assert_eq!(after.setters, before.setters + 1);
+        assert_eq!(after.reads, before.reads + 3);
+        assert_eq!(after.metadata, before.metadata);
+        assert_eq!(after.wrong_thread, 0);
+        assert_eq!(after.last_observed, 0.75_f64.to_bits());
+        assert_eq!(after.component_gain, 0.75_f64.to_bits());
+        assert_eq!(after.controller_gain, 0.75_f64.to_bits());
+        assert_eq!(native.native_editor_attachment_owner(), Some(owner));
+        assert_eq!(native.applied_setup, setup);
+        assert_eq!(native.current_setup().sample_rate, 48_000.0);
+        assert_eq!(native.current_setup().block_size, 8);
+        assert_eq!(
+            std::ptr::from_ref(native.process_data.as_ref().unwrap().as_ref()),
+            data
+        );
+        assert!(native.is_active && native.is_processing);
+        assert_eq!(native.editor_event_source_status().unwrap(), served_source);
+        assert_eq!(native.pending_restart_cohort(), Some(served_cohort));
+        // Neither observation nor controller service acknowledges the new Source/raw request.
+        native.stop_processing().unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode13 initial-values DLL under native lab runner"]
+fn native_mode13_invalid_unarmed_and_missing_handler_setters_do_not_fake_rescans() {
+    let mut native = load_late_rescan_fixture(13);
+    let controller = native.controller.as_ref().unwrap().clone();
+    let handler = native.component_handler.as_ref().unwrap().clone();
+    let source = native.editor_event_source_status().unwrap();
+    let cohort = native.pending_restart_cohort().unwrap();
+    let before = late_rescan_audit(&native, 13);
+    unsafe {
+        // Only setProcessing(true) arms the actual fixture through its connection.
+        assert_eq!(controller.setParamNormalized(0, 0.5), kResultOk);
+        assert_eq!(
+            controller.getParamNormalized(0).to_bits(),
+            0.5_f64.to_bits()
+        );
+    }
+    assert_eq!(native.editor_event_source_status().unwrap(), source);
+    assert_eq!(native.pending_restart_cohort(), Some(cohort));
+    native.start_processing().unwrap();
+    let invalid = [
+        (1, 0.75),
+        (0, f64::NAN),
+        (0, f64::INFINITY),
+        (0, f64::NEG_INFINITY),
+        (0, -0.125),
+        (0, 1.125),
+    ];
+    for (id, value) in invalid {
+        unsafe {
+            assert_eq!(controller.setParamNormalized(id, value), kInvalidArgument);
+            assert_eq!(
+                controller.getParamNormalized(0).to_bits(),
+                0.5_f64.to_bits()
+            );
+        }
+        assert_eq!(native.editor_event_source_status().unwrap(), source);
+        assert_eq!(native.pending_restart_cohort(), Some(cohort));
+    }
+    unsafe {
+        assert_eq!(
+            controller.setComponentHandler(std::ptr::null_mut()),
+            kResultOk
+        );
+        assert_eq!(controller.setParamNormalized(0, 0.75), kResultFalse);
+        // A refused callback does not roll back an already accepted controller value.
+        assert_eq!(
+            controller.getParamNormalized(0).to_bits(),
+            0.75_f64.to_bits()
+        );
+        let retained = handler.to_com_ptr::<IComponentHandler>().unwrap();
+        assert_eq!(controller.setComponentHandler(retained.as_ptr()), kResultOk);
+    }
+    assert_eq!(native.editor_event_source_status().unwrap(), source);
+    assert_eq!(native.pending_restart_cohort(), Some(cohort));
+    let after = late_rescan_audit(&native, 13);
+    assert_eq!(after.setters, before.setters + invalid.len() as u32 + 2);
+    assert_eq!(after.reads, before.reads + invalid.len() as u32 + 2);
+    assert_eq!(after.process, before.process);
+    assert_eq!(after.wrong_thread, 0);
+    assert_eq!(after.component_gain, 0.375_f64.to_bits());
+    assert_eq!(after.controller_gain, 0.75_f64.to_bits());
+    assert_eq!(after.last_observed, 0.75_f64.to_bits());
+    native.stop_processing().unwrap();
+}
