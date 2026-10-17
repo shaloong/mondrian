@@ -275,13 +275,22 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
         installed_binding,
         revision: delivery.revision(),
     };
-    for wrong in [
-        NativeAudioAuthorAcknowledgement { installed_binding: source_binding, ..ack },
-        NativeAudioAuthorAcknowledgement { source_binding: installed_binding, ..ack },
-        NativeAudioAuthorAcknowledgement {
-            revision: ack.revision.checked_add(1).unwrap(),
-            ..ack
-        },
+    for (wrong, expected_refusal) in [
+        (
+            NativeAudioAuthorAcknowledgement { installed_binding: source_binding, ..ack },
+            NativeAudioAuthorRefusal::OwnerChanged,
+        ),
+        (
+            NativeAudioAuthorAcknowledgement { source_binding: installed_binding, ..ack },
+            NativeAudioAuthorRefusal::StaleDelivery,
+        ),
+        (
+            NativeAudioAuthorAcknowledgement {
+                revision: ack.revision.checked_add(1).unwrap(),
+                ..ack
+            },
+            NativeAudioAuthorRefusal::StaleDelivery,
+        ),
     ] {
         let refused = processor
             .poll_native_observations(Consumption::AcknowledgeAuthor(wrong))
@@ -290,10 +299,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
         assert_eq!(refused.pending_reprepare, Some(pending));
         let refused = refused.author.unwrap();
         assert_eq!(refused.source, author.source);
-        assert_eq!(
-            refused.delivery,
-            Delivery::Refused(NativeAudioAuthorRefusal::StaleDelivery)
-        );
+        assert_eq!(refused.delivery, Delivery::Refused(expected_refusal));
         let retained = processor.poll_native_observations(Consumption::Preserve).unwrap();
         assert_eq!(retained.author.unwrap().delivery, expected_await);
     }
