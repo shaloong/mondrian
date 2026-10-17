@@ -755,9 +755,11 @@ impl AudioRenderSession {
         &mut self,
         proposal: &mondrian_core::NativeAudioAuthorProposal,
         serial: std::num::NonZeroU64,
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<mondrian_core::NativeAudioEditorTarget, crate::NativeAudioAuthorAdmissionError>
     {
-        self.processor_host.acknowledge_parameter_native_author(proposal, serial)
+        self.processor_host
+            .acknowledge_parameter_native_author(proposal, serial, cancellation)
     }
 
     pub(crate) fn validate_parameter_plan_swap(

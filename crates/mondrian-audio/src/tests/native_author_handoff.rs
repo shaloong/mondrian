@@ -11,6 +11,9 @@ use std::num::{NonZeroU32, NonZeroU64};
 #[path = "native_author_handoff_note_controls.rs"]
 mod note_controls;
 
+#[path = "native_author_ack_cancellation.rs"]
+mod ack_cancellation;
+
 #[derive(Default)]
 struct HandoffProbe {
     revision: u64,
@@ -27,6 +30,11 @@ struct HandoffProbe {
     reported_request_cohort: Option<Option<crate::NativeRequestCohort>>,
     binding: Option<NativeAudioObjectBindRequest>,
     reject_ack: bool,
+    cancel_on_accepted_ack: Option<ExecutionCancellationToken>,
+    ack_attempts: usize,
+    accepted_acks: usize,
+    creates: usize,
+    binds: usize,
     configuration: Option<Vec<u8>>,
     retained_configuration: Option<Vec<u8>>,
     accepted_seed: Option<Vec<u8>>,
@@ -98,6 +106,7 @@ impl AudioProcessorFactory for HandoffFactory {
         })))
     }
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        self.probe.lock().expect("fixture owner").creates += 1;
         Ok(Box::new(HandoffProcessor {
             probe: Arc::clone(&self.probe),
             object_serial: NonZeroU64::new(1).expect("nonzero actual test load"),
@@ -127,7 +136,9 @@ impl AudioProcessor for HandoffProcessor {
     ) -> Result<NativeAudioObjectBindOutcome, AudioProcessorHostError> {
         let receipt = NativeAudioObjectBindReceipt::acknowledge(request, self.object())
             .map_err(|_| AudioProcessorHostError::PoisonedInstance)?;
-        self.probe.lock().expect("fixture owner").binding = Some(request);
+        let mut probe = self.probe.lock().expect("fixture owner");
+        probe.binding = Some(request);
+        probe.binds += 1;
         Ok(NativeAudioObjectBindOutcome::Bound(receipt))
     }
     fn poll_native_observations(
@@ -177,6 +188,7 @@ impl AudioProcessor for HandoffProcessor {
                 })
             }
             NativeAudioObservationConsumption::AcknowledgeAuthor(ack) => {
+                probe.ack_attempts += 1;
                 if !probe.reject_ack
                     && probe.retained.is_some_and(|(binding, revision, _)| {
                         binding == ack.source_binding && revision == ack.revision
@@ -190,6 +202,10 @@ impl AudioProcessor for HandoffProcessor {
                         probe.retained = None;
                         if let Some(configuration) = probe.retained_configuration.take() {
                             probe.accepted_seed = Some(configuration);
+                        }
+                        probe.accepted_acks += 1;
+                        if let Some(cancellation) = probe.cancel_on_accepted_ack.take() {
+                            cancellation.cancel();
                         }
                     }
                     NativeAudioAuthorDeliveryState::Acknowledged {
@@ -564,11 +580,44 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     let proposal = fixture.value(0.75);
     fixture.install(&proposal, 0.75);
     let target = fixture.target;
+    let owner_counts = {
+        let probe = fixture.probe.lock().expect("same installed owner");
+        (
+            probe.creates,
+            probe.binds,
+            probe.entries,
+            probe.processed.len(),
+        )
+    };
     fixture.probe.lock().expect("fixture owner").reject_ack = true;
-    assert!(fixture
+    let rejected = fixture
         .runtime
-        .acknowledge_native_author_parameter_handoff(&proposal, &ExecutionCancellationToken::new())
-        .is_err());
+        .acknowledge_native_author_parameter_handoff(&proposal, &ExecutionCancellationToken::new());
+    assert!(rejected.is_err());
+    assert!(matches!(
+        rejected,
+        Err(NativeAudioParameterHandoffError::Admission(
+            NativeAudioAuthorAdmissionError::Pending {
+                reason: NativeAudioAuthorHoldReason::OutstandingDelivery,
+                ..
+            }
+        ))
+    ));
+    {
+        let probe = fixture.probe.lock().expect("rejected actual Ack");
+        assert_eq!(probe.ack_attempts, 1);
+        assert_eq!(probe.accepted_acks, 0);
+        assert!(probe.retained.is_some());
+        assert_eq!(
+            (
+                probe.creates,
+                probe.binds,
+                probe.entries,
+                probe.processed.len()
+            ),
+            owner_counts
+        );
+    }
     fixture.queue_value(0.25);
     let mut destination = [91.0];
     assert!(matches!(
@@ -581,6 +630,21 @@ fn native_author_handoff_ack_retry_does_not_reinstall_plan_or_erase_newer_suffix
     assert_eq!(destination, [91.0]);
     fixture.probe.lock().expect("fixture owner").reject_ack = false;
     fixture.ack(&proposal);
+    {
+        let probe = fixture.probe.lock().expect("accepted original Ack retry");
+        assert_eq!(probe.ack_attempts, 2);
+        assert_eq!(probe.accepted_acks, 1);
+        assert_eq!(probe.retained, None);
+        assert_eq!(
+            (
+                probe.creates,
+                probe.binds,
+                probe.entries,
+                probe.processed.len()
+            ),
+            owner_counts
+        );
+    }
     assert_eq!(
         fixture.target, target,
         "retry only Ack, no second Source/Plan installation"

@@ -572,16 +572,16 @@ impl AudioProgramRuntime {
             return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
         }
         let serial = self.native_author_installation_serial()?;
-        let target = self.ack_parameter_author(proposal, serial)?;
         let claim = self
             .native_installation
             .claim
             .as_ref()
             .ok_or(AudioNativeOwnerError::OwnerUnavailable)?
             .clone();
-        if cancellation.is_canceled() || self.native_author_installation_serial()? != serial {
-            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
-        }
+        // The actual Ack may consume the retained source irreversibly. All
+        // fallible owner checks precede it; cancellation during a successful
+        // Ack cannot turn that confirmed retirement into a retryable error.
+        let target = self.ack_parameter_author(proposal, serial, cancellation)?;
         let state_entry = self.scope_acknowledged(proposal);
         Ok(NativeAudioParameterHandoffReceipt {
             claim,
@@ -599,19 +599,24 @@ impl AudioProgramRuntime {
         &mut self,
         proposal: &NativeAudioAuthorProposal,
         serial: NonZeroU64,
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<mondrian_core::NativeAudioEditorTarget, NativeAudioParameterHandoffError> {
         let local = self.session.native_owner_identity();
         // The selected local Plan changed; Session identity remains exact.
         if local.session_id == proposal.target().local_session
             || self.session.retains_parameter_author(proposal)
         {
-            return Ok(self.session.acknowledge_parameter_native_author(proposal, serial)?);
+            return Ok(self.session.acknowledge_parameter_native_author(
+                proposal,
+                serial,
+                cancellation,
+            )?);
         }
         for source in self.sources.entries.values_mut() {
             if let RuntimeSource::Nested(nested) = source
                 && nested.runtime.contains_retained_parameter_author(proposal)
             {
-                return nested.runtime.ack_parameter_author(proposal, serial);
+                return nested.runtime.ack_parameter_author(proposal, serial, cancellation);
             }
         }
         Err(AudioNativeOwnerError::OwnerUnavailable.into())

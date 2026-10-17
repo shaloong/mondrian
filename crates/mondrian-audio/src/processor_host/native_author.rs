@@ -415,6 +415,7 @@ impl PreparedProcessorHost {
         &mut self,
         proposal: &NativeAudioAuthorProposal,
         serial: NonZeroU64,
+        cancellation: &ExecutionCancellationToken,
     ) -> Result<mondrian_core::NativeAudioEditorTarget, NativeAudioAuthorAdmissionError> {
         for instance in &mut self.instances {
             if !instance
@@ -465,6 +466,9 @@ impl PreparedProcessorHost {
                         expected_object: object,
                     },
                 };
+                if cancellation.is_canceled() {
+                    return Err(NativeAudioAuthorAdmissionError::Cancelled);
+                }
                 let observed = isolate_adapter_call("state-entry retained prefix Ack", || {
                     instance.processor.poll_native_observations(
                         crate::NativeAudioObservationConsumption::AcknowledgeReenteredAuthor(ack),
@@ -493,6 +497,9 @@ impl PreparedProcessorHost {
                 },
                 revision: proposal.revision(),
             };
+            if cancellation.is_canceled() {
+                return Err(NativeAudioAuthorAdmissionError::Cancelled);
+            }
             let observation = isolate_adapter_call("parameter handoff exact source Ack", || {
                 instance.processor.poll_native_observations(
                     crate::NativeAudioObservationConsumption::AcknowledgeAuthor(ack),
