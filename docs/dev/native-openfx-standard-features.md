@@ -57,6 +57,14 @@ Product 的首个 readonly 原生门在至少一轮五帧像素等断言后 shut
 OS退出观察约66.7–75.8ms（相对 ParentBegin QPC）；未复现或解释首失败，不能
 分摊 DLL/CRT/OS/调度成本。原十一项与本次失败仍开放，预算和断言不变。
 
+2026-10-18 Windows x64：`bed1d101` 在提交既有参数来源后、插件回调前更新实例
+`IsAnimating`，与常量/CurrentFrame/Curve 查询共用来源权威。修复前真实 CreateInstance
+查询成功却返回0（预期1）；修复后九轮同当前值来源切换的查询、通知、像素及同PID
+断言通过；fixture源码亦检查Destroy，resident完整记录直到Unload return0、未报告属性错配。
+新门最终 shutdown 超时，整门仍 HOLD。
+四个原有生命周期、稀疏曲线、常量和 CurrentFrame 查询回归均 exact1/stderr0、原180秒/2秒
+Job 回收通过。此结果不关闭既有退出问题，不新增第三方、GPU、性能或其它平台资格。
+
 Describe 请求/响应必须 schema2；保留原隐藏入口以使旧 worker 明确拒绝新请求。
 通知属于已核验 binary/请求 class 的整次元数据请求，不冒充发出通知的 class 或 Render invocation。
 单请求最多32条，文本4096/id256 UTF-8字节；丢失、Fatal 均拒定义并保留可信前缀。
@@ -226,7 +234,7 @@ authoring transaction/Undo/save；worker中局部赋值不能替代这个闭环�
 | P17 | paramGetDerivative/GetIntegral | 实现admitted Double/tuple canonical evaluator；unsupportedcalculus显式状态，nonfinite/overflow请求不改输出；Discrete不是浮点calculus | `curves`; `NumericTupleState`; nativecalculusfixtures | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html) |
 | P18 | paramGetNumKeys/GetKeyTime/GetKeyIndex | 实现canonical sparsecurvekeys/time/indexdirection；constant0keys；FrameSample无suppliedcurve拒绝 | `ParameterQueryInstance`; `curves.rs` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html) |
 | P19 | paramSetValue/SetValueAtTime/DeleteKey/DeleteAllKeys/Copy/EditBegin/EditEnd | 部分：局部constantset存在但noauthorresponse；animatingwrite/delete/copy/edit缺失/unsupported，不形成Undo/save。不能仅SDKsetterOK认为可persist | `parameter_instance.*`; vendor`paramChangedByPlugin`; `FilterEffectInstance::editBegin/End` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html)；S07 |
-| P20 | Animates/IsAnimating/IsAutoKeying/Persistant/EvaluateOnChange/CacheInvalidation/CanUndo | 部分：author supports admittednumericcurves/cachepolicyUncacheable；完整autokey/nativeprivatepersist/dirtymetadata响应无资格 | host/parameterpropertytables；`openfx_effect` | [Parameter properties](https://openfx.readthedocs.io/en/main/Reference/ofxParameter.html)；S06–S07 |
+| P20 | Animates/IsAnimating/IsAutoKeying/Persistant/EvaluateOnChange/CacheInvalidation/CanUndo | 部分：IsAnimating由既有参数来源推导，九轮functional与四原回归通过，新门shutdown仍HOLD；author supports admittednumericcurves/cachepolicyUncacheable；完整autokey/nativeprivatepersist/dirtymetadata响应无资格 | host/parameterpropertytables；`render.cpp`；`openfx_effect` | [Parameter properties](https://openfx.readthedocs.io/en/main/Reference/ofxParameter.html)；S06–S07 |
 | P21 | Secret/enabled/label/hint/choiceoptions/ranges/script/parent/parameterinteract dynamicmetadata | 部分：注册时snapshot，secret/disabled不提供editcontrol；postInstanceChanged动态值未回refresh，可能staleUI/default | `describe`; `build_definition`; no metadataresponse | [Parameter properties](https://openfx.readthedocs.io/en/main/Reference/ofxParameter.html)；S05 |
 | P22 | Parametric曲线（独立于timeline），optional | 未实现，不用timelinekeyframes代替x-function；需要曲线default/domain/controlpoint/animation及sharedauthorowner | no suite；no type | [Parametric](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxParametricParam_8h.html)；S08 |
 
