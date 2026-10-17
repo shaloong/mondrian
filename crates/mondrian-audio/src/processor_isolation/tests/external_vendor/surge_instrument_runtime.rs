@@ -1,5 +1,7 @@
 //! One real Surge XT CLAP state/Note/Main-output Runtime consumer.
 //! Other outputs are prepared, never used as a sound or algorithm oracle.
+//! Some supplies constant tempo only; no plugin tempo response, beats or playing
+//! state is inferred from successful Note/PCM processing.
 
 use super::{owner, Cursors};
 use crate::processor_isolation::clap_discovery::probe_clap_plugin_registration_with_state;
@@ -16,8 +18,8 @@ use crate::{
 };
 use mondrian_core::{
     AssetId, AudioChannelLayout, AudioNoteId, AudioNoteLaneId, AudioOwnerInstallationSource,
-    AudioSourceComponentId, AuthoringList, ExecutionCancellationToken, NativeAudioAuthorCallback,
-    NativeAudioAuthorCompletion, TimelineTime,
+    AudioSourceComponentId, AuthoringList, ExecutionCancellationToken, MusicalTimeReference,
+    NativeAudioAuthorCallback, NativeAudioAuthorCompletion, TimelineTime,
 };
 use mondrian_timeline::audio::{AudioChannelStripOwner, AudioNote, AudioNoteLane, AudioNoteTarget};
 use mondrian_timeline::{
@@ -64,8 +66,19 @@ fn accept_actual_rescans(
     sequence: &mut Sequence,
     source: &AudioOwnerInstallationSource,
     expected_object: crate::NativeAudioObjectObservation,
+    reference: Option<MusicalTimeReference>,
 ) -> (usize, usize) {
     let cancel = ExecutionCancellationToken::new();
+    assert_eq!(sequence.audio_program.musical_time_reference, reference);
+    assert_eq!(
+        runtime
+            .find_resource_session(runtime.resource_root_identity())
+            .unwrap()
+            .resource_plan()
+            .program()
+            .musical_time_reference(),
+        reference
+    );
     let track = sequence.audio_tracks[0].id;
     let output = sequence.audio_program.outputs[0].id;
     let score = sequence.audio_program.note_lanes.clone();
@@ -214,6 +227,7 @@ fn accept_actual_rescans(
         };
         apply_audio_processor_rack_edit(sequence, &request)
             .expect("atomic actual Track native-author transaction");
+        assert_eq!(sequence.audio_program.musical_time_reference, reference);
         assert_eq!(sequence.audio_program.note_lanes, score);
         assert_eq!(sequence.audio_program.routes, routes);
         assert!(sequence.audio_program.sidechain_routes.is_empty());
@@ -224,6 +238,7 @@ fn accept_actual_rescans(
                     .expect("same canonical output and Note score"),
             ),
         }];
+        assert_eq!(programs[0].program.musical_time_reference(), reference);
         let mut before = Cursors::default();
         runtime.visit_continuity_evidence(&mut before).unwrap();
         let (registration, destination) = source.register().expect("same Source registration");
@@ -236,6 +251,15 @@ fn accept_actual_rescans(
         let installed = runtime
             .install_native_author_parameter_handoff(&mut prepared, &mut authorization, &cancel)
             .expect("actual Plan/Source installation");
+        assert_eq!(
+            runtime
+                .find_resource_session(runtime.resource_root_identity())
+                .unwrap()
+                .resource_plan()
+                .program()
+                .musical_time_reference(),
+            reference
+        );
         assert_eq!(
             installed.continuity,
             NativeAudioParameterHandoffContinuity::Preserved
@@ -255,6 +279,15 @@ fn accept_actual_rescans(
             NativeAudioParameterHandoffContinuity::Preserved
         );
         assert_eq!(acknowledged.target, installed.target);
+        assert_eq!(
+            runtime
+                .find_resource_session(runtime.resource_root_identity())
+                .unwrap()
+                .resource_plan()
+                .program()
+                .musical_time_reference(),
+            reference
+        );
         assert_eq!(
             acknowledged.claim.generation(),
             installed.claim.generation()
@@ -302,6 +335,22 @@ fn accept_actual_rescans(
 #[test]
 #[ignore = "requires actual outer owner Job, current normal MONDRIAN_CLAP_TEST_HELPER and real MONDRIAN_SURGE_XT_CLAP_DLL"]
 fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
+    run_captured_state_notes_main_runtime(None);
+}
+
+#[test]
+#[ignore = "requires actual outer owner Job, current normal MONDRIAN_CLAP_TEST_HELPER and real MONDRIAN_SURGE_XT_CLAP_DLL"]
+fn external_surge_xt_clap_captured_state_notes_musical_runtime_without_media() {
+    run_captured_state_notes_main_runtime(Some(
+        MusicalTimeReference::new(
+            TimelineTime::new(-19, 7).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap(),
+    ));
+}
+
+fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>) {
     let mut in_job = 0;
     // SAFETY: the current-process pseudo handle is valid; the BOOL output lives
     // for this call. Membership is a guard, not proof of the outer Job identity.
@@ -348,6 +397,13 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
         );
     let state = state.expect("Surge must expose actual state capture");
     assert!(!state.is_empty() && state.len() <= 64 * 1024);
+    if reference.is_some() {
+        assert_eq!(
+            state.len(),
+            50_208,
+            "same real Surge XT captured default state"
+        );
+    }
     let offer = probe_clap_note_processing_offer(&helper, &library, ID, render, Some(&state))
         .expect("same restored-instance NoteOffer5, no inferred Note dialect or port");
     assert_eq!(offer.schema_version, 5);
@@ -419,6 +475,7 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     let processor_id = instance.id;
     let mut sequence = Sequence::new("real Surge XT Note/Main Runtime control");
     sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence.audio_program.musical_time_reference = reference;
     let track = sequence.audio_tracks[0].id;
     sequence
         .audio_program
@@ -458,6 +515,7 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     assert!(sequence.audio_program.sidechain_routes.is_empty());
     let selected = crate::compile_audio_program(&sequence, AudioCompileRequest::program(output))
         .expect("same canonical selected Signal Closure");
+    assert_eq!(selected.musical_time_reference(), reference);
     assert_eq!(
         selected.note_lanes.len(),
         1,
@@ -482,6 +540,15 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
         AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
     )
     .expect("canonical real instrument Runtime including original validation shutdown");
+    assert_eq!(
+        runtime
+            .find_resource_session(runtime.resource_root_identity())
+            .unwrap()
+            .resource_plan()
+            .program()
+            .musical_time_reference(),
+        reference
+    );
     let source = AudioOwnerInstallationSource::new();
     let (registration, verifier) = source.register().unwrap();
     runtime.bind_native_owner_installation(verifier).unwrap();
@@ -531,7 +598,7 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
         })
         .expect("actual instrument state entry, no seek/reset substitute");
     let (mut author_handoffs, mut rescan_handoffs) =
-        accept_actual_rescans(&mut runtime, &mut sequence, &source, cold);
+        accept_actual_rescans(&mut runtime, &mut sequence, &source, cold, reference);
     let mut energy = 0.0_f64;
     let mut peak = 0.0_f32;
     for (completed_blocks, start) in (0..TOTAL).step_by(BLOCK).enumerate() {
@@ -614,7 +681,8 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
             pcm.iter().all(|sample| sample.is_finite()),
             "all requested stereo PCM must be written and finite"
         );
-        let (handoffs, rescans) = accept_actual_rescans(&mut runtime, &mut sequence, &source, cold);
+        let (handoffs, rescans) =
+            accept_actual_rescans(&mut runtime, &mut sequence, &source, cold, reference);
         author_handoffs += handoffs;
         rescan_handoffs += rescans;
         for sample in pcm {
@@ -667,7 +735,7 @@ fn external_surge_xt_clap_captured_state_notes_main_runtime_without_media() {
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
     println!(
         "{}",
-        json!({"case":"surge-xt-clap-main-runtime", "stage":"completed", "plugin_id":descriptor.plugin_id, "plugin_name":descriptor.name, "plugin_version":descriptor.version, "state_bytes":state_bytes, "rate":render.sample_rate, "block":BLOCK, "frames":TOTAL, "author_handoffs":author_handoffs, "nonempty_rescan_handoffs":rescan_handoffs, "channels":2, "mode":"Offline", "note_on":ON, "note_off":OFF, "next_input_signal_sample":processed_through, "main_energy":energy, "main_peak":peak, "media_resolves":media_resolves.load(Ordering::SeqCst), "native_pid":pid, "post_drop_wait_status":settled, "exit_query_succeeded":queried!=0, "exit_code":exit_code, "explicit_unbounded_runtime_grant":true, "auxiliary_output_sound_qualified":false, "algorithm_or_note_release_qualified":false, "terminal_off_qualified":false, "graceful_ack_qualified":false, "realtime_qualified":false})
+        json!({"case":"surge-xt-clap-main-runtime", "stage":"completed", "musical_reference":reference, "plugin_id":descriptor.plugin_id, "plugin_name":descriptor.name, "plugin_version":descriptor.version, "state_bytes":state_bytes, "rate":render.sample_rate, "block":BLOCK, "frames":TOTAL, "author_handoffs":author_handoffs, "nonempty_rescan_handoffs":rescan_handoffs, "channels":2, "mode":"Offline", "note_on":ON, "note_off":OFF, "next_input_signal_sample":processed_through, "main_energy":energy, "main_peak":peak, "media_resolves":media_resolves.load(Ordering::SeqCst), "native_pid":pid, "post_drop_wait_status":settled, "exit_query_succeeded":queried!=0, "exit_code":exit_code, "explicit_unbounded_runtime_grant":true, "auxiliary_output_sound_qualified":false, "algorithm_or_note_release_qualified":false, "terminal_off_qualified":false, "graceful_ack_qualified":false, "realtime_qualified":false})
     );
     assert_eq!(
         settled, WAIT_OBJECT_0,
