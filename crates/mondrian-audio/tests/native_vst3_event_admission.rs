@@ -736,12 +736,19 @@ fn installed_vst3_retained_event_metadata_refuses_unannounced_default_drift() {
         };
         // A candidate is not an installation; both retained outcomes keep old
         // PCM blocked. This does not exercise the not-yet-admitted Note path.
+        // Metadata refusal retains the live callback. Successful service has
+        // retired it; only the old uninstalled configuration barrier remains.
+        let expected_pending = if drift {
+            mondrian_audio::NativeObservedRequest::Cohort(cohort)
+        } else {
+            mondrian_audio::NativeObservedRequest::RequestOnly(cohort.request)
+        };
         assert_eq!(
             subject.preflight_reprepare().unwrap(),
-            Some(mondrian_audio::NativeObservedRequest::Cohort(cohort))
+            Some(expected_pending)
         );
         assert!(
-            matches!(subject.enter_state(0), Err(AudioProcessorHostError::ReprepareRequired(request)) if request == mondrian_audio::NativeObservedRequest::Cohort(cohort))
+            matches!(subject.enter_state(0), Err(AudioProcessorHostError::ReprepareRequired(request)) if request == expected_pending)
         );
         drop(subject);
         assert_child_exit(handle);
