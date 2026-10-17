@@ -229,9 +229,9 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
                 "only VST3 definitions are handled by this resolver",
             ));
         };
-        if request.musical_time_reference().is_some() {
+        if request.note_input_requested() {
             return Err(unavailable(
-                "VST3 musical reference transport is not supported",
+                "VST3 Note input is not supported by this adapter",
             ));
         }
         if *schema_version != 1 {
@@ -287,6 +287,7 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             parameter_ids,
             request.render_contract(),
         )?
+        .with_musical_time_reference(request.musical_time_reference())?
         .with_native_worker_lane_resources(native_worker_lane_profile_for_parameters(
             &plugin.parameters,
         )?)
@@ -413,11 +414,6 @@ impl Vst3AudioProcessorWorkerFactory {
         &self,
         request: IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Vst3Worker, AudioProcessorHostError> {
-        if request.musical_time_reference().is_some() {
-            return Err(unavailable(
-                "VST3 musical transport is not supported by this adapter",
-            ));
-        }
         if !request.auxiliary_outputs().buses.is_empty() {
             return Err(unavailable(
                 "VST3 auxiliary outputs are not supported by this adapter",
@@ -1219,6 +1215,7 @@ trait VstNativeSignal {
     fn deliver_timeline(
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
+        reference: Option<vst3_host::audio::ProcessMusicalReference>,
     ) -> vst3_host::error::Result<()>;
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()>;
 }
@@ -1235,8 +1232,12 @@ impl VstNativeSignal for Plugin {
     fn deliver_timeline(
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
+        reference: Option<vst3_host::audio::ProcessMusicalReference>,
     ) -> vst3_host::error::Result<()> {
-        self.set_process_timeline_context(context)
+        match reference {
+            Some(reference) => self.set_process_musical_timeline_context(context, reference),
+            None => self.set_process_timeline_context(context),
+        }
     }
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
@@ -1255,8 +1256,12 @@ impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
     fn deliver_timeline(
         &mut self,
         context: vst3_host::audio::ProcessTimelineContext,
+        reference: Option<vst3_host::audio::ProcessMusicalReference>,
     ) -> vst3_host::error::Result<()> {
-        self.set_process_timeline_context(context)
+        match reference {
+            Some(reference) => self.set_process_musical_timeline_context(context, reference),
+            None => self.set_process_timeline_context(context),
+        }
     }
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
@@ -1273,7 +1278,10 @@ impl VstSignalFields<'_> {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
         let frames = block.frames();
-        let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {
+        let signed_frames = i64::try_from(frames).map_err(|_| {
+            AudioProcessorHostError::Process("VST3 sample extent is not representable".to_owned())
+        })?;
+        let end_sample = block.start_sample().checked_add(signed_frames).ok_or_else(|| {
             AudioProcessorHostError::Process("VST3 sample position overflowed".to_owned())
         })?;
         let channels = self.render.channel_count();
@@ -1287,6 +1295,40 @@ impl VstSignalFields<'_> {
                 "VST3 block violates continuity, extent, or parameter lanes".to_owned(),
             ));
         }
+        // Lower the Sequence reference directly for this original native block.
+        // The SDK owns the only installed native copy; no derived clock is cached
+        // by this adapter. Refuse the entire signed window/setter before enqueue
+        // or PCM scratch writes. Later SDK ingress refusals are not a parameter
+        // transaction rollback and still fail this worker operation normally.
+        let reference = block
+            .musical_time_reference()
+            .map(|reference| {
+                let zero = reference.quarter_note_zero();
+                let duration = reference.quarter_note_duration();
+                vst3_host::audio::ProcessMusicalReference::new(
+                    zero.numerator(),
+                    zero.denominator(),
+                    duration.numerator(),
+                    duration.denominator(),
+                )
+            })
+            .transpose()
+            .map_err(|error| {
+                AudioProcessorHostError::Process(format!(
+                    "VST3 musical reference delivery failed: {error:?}"
+                ))
+            })?;
+        native
+            .deliver_timeline(
+                vst3_host::audio::ProcessTimelineContext {
+                    sample_position: block.start_sample(),
+                    sample_rate: block.sample_rate(),
+                },
+                reference,
+            )
+            .map_err(|error| {
+                AudioProcessorHostError::Process(format!("VST3 timeline delivery failed: {error}"))
+            })?;
         let mut event_count = 0;
         for (lane, native_id) in self.payload.parameter_ids.iter().copied().enumerate() {
             let descriptor = self
@@ -1354,14 +1396,6 @@ impl VstSignalFields<'_> {
             }
         }
         self.buffers.block_size = frames;
-        native
-            .deliver_timeline(vst3_host::audio::ProcessTimelineContext {
-                sample_position: block.start_sample(),
-                sample_rate: block.sample_rate(),
-            })
-            .map_err(|error| {
-                AudioProcessorHostError::Process(format!("VST3 timeline delivery failed: {error}"))
-            })?;
         native.process_buses(self.buffers).map_err(|error| {
             AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
         })?;
@@ -2311,5 +2345,335 @@ mod bus_contract_tests {
         let mut speakers = arrangements.clone();
         speakers.outputs.clear();
         assert_invalid(&native, &layout, &speakers);
+    }
+}
+
+#[cfg(test)]
+mod musical_effect_tests {
+    use super::super::native_configuration_control::NativeConfigurationPhase;
+    use super::super::protocol::SharedParameterEvent;
+    use super::*;
+    use mondrian_core::{MusicalTimeReference, TimelineTime};
+    use vst3_host::audio::{AudioBusConfig, ProcessMusicalReference, ProcessTimelineContext};
+
+    fn render() -> crate::AudioRenderContract {
+        crate::AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: usize::MAX,
+            public_output_lookahead_budget_frames: usize::MAX,
+            compensation_delay_scratch_budget_bytes: usize::MAX,
+        }
+    }
+
+    fn payload() -> Vst3Payload {
+        Vst3Payload {
+            schema_version: PAYLOAD_VERSION,
+            event_bus_contract: Vst3EventBusContractV1::empty(),
+            binary_path: std::env::temp_dir().join("unopened-musical-effect.dll"),
+            class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+            vendor: None,
+            binary_sha256: [1; 32],
+            state: None,
+            parameters: vec![Vst3ParameterDescriptor {
+                id: 0,
+                name: "Gain".into(),
+                default_normalized: 0.5,
+                step_count: 0,
+                can_automate: true,
+                read_only: false,
+                flags: 1,
+            }],
+            parameter_ids: vec![0],
+        }
+    }
+
+    fn buffers() -> BusAudioBuffers {
+        let mut buffers = BusAudioBuffers::new(
+            &AudioBusLayout {
+                inputs: vec![AudioBusConfig { channel_count: 2, active: true }],
+                outputs: vec![AudioBusConfig { channel_count: 2, active: true }],
+            },
+            4,
+            48_000.0,
+        );
+        for bus in buffers.inputs.iter_mut().chain(&mut buffers.outputs) {
+            for channel in &mut bus.channels {
+                channel.fill(7.0);
+            }
+        }
+        buffers
+    }
+
+    #[derive(Default)]
+    struct Native {
+        calls: Vec<&'static str>,
+        timeline: Option<(ProcessTimelineContext, Option<ProcessMusicalReference>)>,
+        reject_timeline: bool,
+    }
+
+    impl VstNativeSignal for Native {
+        fn deliver_parameter_at(&mut self, _: u32, _: f64, _: i32) -> vst3_host::error::Result<()> {
+            self.calls.push("parameter");
+            Ok(())
+        }
+        fn deliver_timeline(
+            &mut self,
+            context: ProcessTimelineContext,
+            reference: Option<ProcessMusicalReference>,
+        ) -> vst3_host::error::Result<()> {
+            self.calls.push("timeline");
+            if self.reject_timeline {
+                return Err(vst3_host::error::Error::MusicalTime(
+                    vst3_host::error::MusicalTimeError::SampleRate,
+                ));
+            }
+            self.timeline = Some((context, reference));
+            Ok(())
+        }
+        fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
+            self.calls.push("process");
+            for (input, output) in
+                buffers.inputs[0].channels.iter().zip(&mut buffers.outputs[0].channels)
+            {
+                output.copy_from_slice(input);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn vst3_musical_effect_spec_keeps_exact_reference_and_refuses_explicit_note_prepare() {
+        use crate::{
+            AudioProcessorInsertionPoint, AudioProcessorOccurrence, AudioProcessorOccurrenceOwner,
+        };
+        use mondrian_core::{AudioProcessorInstanceId, ProgramOutputId};
+        let payload = payload();
+        let definition = AudioProcessorDefinitionRef::Vst3 {
+            class_id: payload.class_id.clone(),
+            vendor: None,
+            schema_version: 1,
+            binary_sha256: Some(payload.binary_sha256),
+        };
+        let resolver = Vst3AudioProcessorSpecResolver::new(
+            std::env::temp_dir().join("unlaunched-musical-helper.exe"),
+            [Vst3PluginRegistration {
+                class_id: payload.class_id.clone(),
+                vendor: None,
+                binary_path: payload.binary_path,
+                binary_sha256: payload.binary_sha256,
+                execution_contract: AudioProcessorExecutionContract::new(
+                    0,
+                    AudioProcessorTail::None,
+                    true,
+                    true,
+                    true,
+                    0,
+                )
+                .unwrap(),
+                auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+                parameters: payload.parameters,
+                event_bus_contract: payload.event_bus_contract,
+            }],
+        )
+        .unwrap();
+        let occurrence = AudioProcessorOccurrence {
+            instance_id: AudioProcessorInstanceId::new(),
+            owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+            insertion: AudioProcessorInsertionPoint::PreFader,
+        };
+        let parameters = BTreeMap::new();
+        for reference in [
+            None,
+            Some(
+                MusicalTimeReference::new(
+                    TimelineTime::new(-19, 7).unwrap(),
+                    TimelineTime::new(3, 4).unwrap(),
+                )
+                .unwrap(),
+            ),
+        ] {
+            let request = || {
+                AudioProcessorPrepareRequest::new(
+                    occurrence,
+                    &definition,
+                    &parameters,
+                    Some(&[1, 2, 3]),
+                    render(),
+                )
+                .with_musical_time_reference(reference)
+            };
+            let spec = resolver.resolve(request()).unwrap();
+            assert_eq!(spec.musical_time_reference, reference);
+            assert!(spec.note_input_contract.ports.is_empty());
+            assert_eq!(
+                decode_payload(&spec.preparation_payload).unwrap().state,
+                Some(vec![1, 2, 3])
+            );
+            assert_eq!(
+                resolver.resolve(request().with_note_input_requested(true)).unwrap_err(),
+                unavailable("VST3 Note input is not supported by this adapter")
+            );
+        }
+    }
+
+    #[test]
+    fn vst3_musical_effect_signal_installs_exact_context_before_parameters_and_pcm() {
+        let payload = payload();
+        let ids = [payload.parameters[0].parameter_id().unwrap()];
+        let events = [SharedParameterEvent { lane: 0, sample_offset: 1, value: 0.25 }];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        for rate in [44_100, 48_000] {
+            for start in [-17, i64::MAX - 32] {
+                for with_music in [true, false] {
+                    let reference = with_music.then(|| {
+                        MusicalTimeReference::new(
+                            TimelineTime::new(start - 1, i64::from(rate)).unwrap(),
+                            TimelineTime::new(3, 4).unwrap(),
+                        )
+                        .unwrap()
+                    });
+                    let mut render = render();
+                    render.sample_rate = rate;
+                    let mut native = Native::default();
+                    let mut pcm = [11.0; 8];
+                    let mut scratch = buffers();
+                    let mut values = vec![None];
+                    let mut last_end = Some(start);
+                    VstSignalFields {
+                        last_parameter_values: &mut values,
+                        configuration_phase: &NativeConfigurationPhase::Admitted,
+                        payload: &payload,
+                        render,
+                        buffers: &mut scratch,
+                        auxiliary_inputs: &auxiliary,
+                        last_end: &mut last_end,
+                    }
+                    .process(
+                        &mut native,
+                        IsolatedAudioProcessorWorkerBlock::new(
+                            start,
+                            4,
+                            render,
+                            &mut pcm,
+                            &auxiliary,
+                            &[],
+                            &ids,
+                            &events,
+                        )
+                        .with_musical_time_reference(reference),
+                    )
+                    .unwrap();
+                    assert_eq!(native.calls, ["timeline", "parameter", "process"]);
+                    let (timeline, musical) = native.timeline.unwrap();
+                    assert_eq!(
+                        timeline,
+                        ProcessTimelineContext { sample_position: start, sample_rate: rate }
+                    );
+                    assert_eq!(
+                        musical,
+                        reference.map(|reference| {
+                            let zero = reference.quarter_note_zero();
+                            ProcessMusicalReference::new(zero.numerator(), zero.denominator(), 3, 4)
+                                .unwrap()
+                        })
+                    );
+                    if let Some(reference) = musical {
+                        let expected = if rate == 44_100 {
+                            0x3eff_b3f6_5f17_ec9e
+                        } else {
+                            0x3efd_208a_5a91_2e32
+                        };
+                        assert_eq!(
+                            reference.quarter_notes_at(start, rate).unwrap().to_bits(),
+                            expected
+                        );
+                    }
+                    assert_eq!(pcm, [11.0; 8]);
+                    assert_eq!(values, [Some(0.25)]);
+                    assert_eq!(last_end, Some(start + 4));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_musical_effect_window_and_setter_refusals_leave_parameters_pcm_and_cursor_untouched() {
+        let payload = payload();
+        let ids = [payload.parameters[0].parameter_id().unwrap()];
+        let events = [SharedParameterEvent { lane: 0, sample_offset: 1, value: 0.25 }];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let reference = MusicalTimeReference::new(
+            TimelineTime::new(-19, 7).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap();
+        let mut cases = vec![
+            (-17, 4, true, 1, "VST3 timeline delivery failed:"),
+            (i64::MAX - 1, 4, false, 0, "VST3 sample position overflowed"),
+        ];
+        if let Ok(frames) = usize::try_from(i64::MAX as u64 + 1) {
+            cases.push((
+                i64::MIN,
+                frames,
+                false,
+                0,
+                "VST3 sample extent is not representable",
+            ));
+        }
+        for (start, frames, reject_setter, expected_calls, detail) in cases {
+            let mut native = Native {
+                reject_timeline: reject_setter,
+                ..Native::default()
+            };
+            let mut pcm = [11.0; 8];
+            let mut scratch = buffers();
+            let before = scratch.clone();
+            let mut values = vec![Some(0.75)];
+            let mut last_end = Some(start);
+            let error = VstSignalFields {
+                last_parameter_values: &mut values,
+                configuration_phase: &NativeConfigurationPhase::Admitted,
+                payload: &payload,
+                render: render(),
+                buffers: &mut scratch,
+                auxiliary_inputs: &auxiliary,
+                last_end: &mut last_end,
+            }
+            .process(
+                &mut native,
+                IsolatedAudioProcessorWorkerBlock::new(
+                    start,
+                    frames,
+                    render(),
+                    &mut pcm,
+                    &auxiliary,
+                    &[],
+                    &ids,
+                    &events,
+                )
+                .with_musical_time_reference(Some(reference)),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AudioProcessorHostError::Process(message) if message.starts_with(detail))
+            );
+            assert_eq!(native.calls.len(), expected_calls);
+            assert_eq!(
+                native.calls,
+                if expected_calls == 0 {
+                    vec![]
+                } else {
+                    vec!["timeline"]
+                }
+            );
+            assert_eq!(native.timeline, None);
+            assert_eq!(scratch, before);
+            assert_eq!(pcm, [11.0; 8]);
+            assert_eq!(values, [Some(0.75)]);
+            assert_eq!(last_end, Some(start));
+        }
     }
 }

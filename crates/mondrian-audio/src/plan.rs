@@ -251,23 +251,6 @@ impl CompiledAudioGraph<'_> {
         }) {
             return Err(crate::AudioCompileError::SemanticProjectionNotExecutableYet);
         }
-        let vst3 = |rack: &CompiledRack| {
-            rack.processors.iter().any(|processor| {
-                matches!(
-                    processor.definition,
-                    AudioProcessorDefinitionRef::Vst3 { .. }
-                )
-            })
-        };
-        let strip =
-            |strip: &CompiledChannelStrip| vst3(&strip.pre_fader) || vst3(&strip.post_fader);
-        if self.processing_scopes.values().any(|scope| vst3(&scope.rack))
-            || self.track_channels.values().any(|track| strip(&track.strip))
-            || self.buses.values().any(strip)
-            || strip(self.output)
-        {
-            return Err(crate::AudioCompileError::Vst3MusicalTransportNotSupported);
-        }
         Ok(())
     }
 }

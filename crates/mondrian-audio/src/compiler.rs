@@ -886,9 +886,6 @@ fn topological_bus_order(
 /// Author validation, dependency, or lowering failure.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AudioCompileError {
-    /// VST3 has no adapter for the authored Sequence musical reference yet.
-    #[error("VST3 musical transport is not supported by this audio adapter")]
-    Vst3MusicalTransportNotSupported,
     /// A raw output cannot be fabricated by host bypass.
     #[error("routed processor {0} is bypassed")]
     BypassedProcessorOutput(mondrian_core::AudioProcessorInstanceId),

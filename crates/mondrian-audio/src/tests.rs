@@ -4475,41 +4475,45 @@ fn prepared_closure_rejects_stale_root_and_descendant_music_before_media_binding
 }
 
 #[test]
-fn selected_vst3_music_refuses_before_media_and_direct_plan_factory() {
+fn selected_vst3_music_reaches_sole_prepare_with_exact_reference_and_no_note() {
+    use mondrian_core::{AudioNoteId, AudioNoteLaneId, AuthoringList, MusicalTimeReference};
+    use mondrian_timeline::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    struct NeverFactory(AtomicUsize);
-    impl AudioProcessorResolver for NeverFactory {
+
+    struct ObservingResolver {
+        calls: AtomicUsize,
+        occurrence: AudioProcessorOccurrence,
+        definition: mondrian_timeline::AudioProcessorDefinitionRef,
+        reference: Option<MusicalTimeReference>,
+        render: AudioRenderContract,
+    }
+    impl AudioProcessorResolver for ObservingResolver {
         fn prepare(
             &self,
-            _: AudioProcessorPrepareRequest<'_>,
+            request: AudioProcessorPrepareRequest<'_>,
         ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            panic!("pure VST clock refusal must precede factory")
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.occurrence(), self.occurrence);
+            assert_eq!(request.definition(), &self.definition);
+            assert_eq!(request.musical_time_reference(), self.reference);
+            assert_eq!(request.render_contract(), self.render);
+            assert!(request.parameters().is_empty());
+            assert_eq!(request.opaque_state(), None);
+            assert!(
+                !request.note_input_requested(),
+                "an empty author lane does not request Note admission"
+            );
+            // This existing pure test owner verifies preparation forwarding.
+            // Actual VST3 DSP/music consumption has separate Product gates.
+            Ok(Arc::new(TestDelayProcessorFactory {
+                contract: AudioProcessorExecutionContract::stateless(),
+                delay_samples: 0,
+                fail_first_state_entry: false,
+                panic_on_state_entry: false,
+                panic_on_process: false,
+            }))
         }
     }
-    let mut sequence = sequence_with_audio_clip();
-    sequence.audio_program.musical_time_reference =
-        Some(mondrian_core::MusicalTimeReference::new(tt(-9, 7), tt(3, 4)).unwrap());
-    sequence
-        .audio_program
-        .track_channels
-        .get_mut(&sequence.audio_tracks[0].id)
-        .unwrap()
-        .strip
-        .pre_fader
-        .processors
-        .push(AudioProcessorInstance {
-            id: mondrian_core::AudioProcessorInstanceId::new(),
-            definition: mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
-                class_id: "nonexistent-musical-plugin".into(),
-                vendor: None,
-                schema_version: 1,
-                binary_sha256: Some([7; 32]),
-            },
-            bypassed: false,
-            parameters: Default::default(),
-            opaque_state: None,
-        });
     let contract = AudioRenderContract {
         sample_rate: 2,
         channel_layout: AudioChannelLayout::Mono,
@@ -4519,84 +4523,186 @@ fn selected_vst3_music_refuses_before_media_and_direct_plan_factory() {
         public_output_lookahead_budget_frames: 1024,
         compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
-    let media = RecordingResolver::default();
-    let factory = NeverFactory(AtomicUsize::new(0));
-    let compiled = Arc::new(
-        compile_audio_program(
-            &sequence,
-            AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
-        )
-        .unwrap(),
-    );
-    assert!(matches!(
-        PreparedAudioPlan::prepare_with_processor_resolver(
-            compiled,
-            contract,
-            AudioKernelBackend::ScalarReference,
-            &factory
-        ),
-        Err(AudioCompileError::Vst3MusicalTransportNotSupported)
-    ));
-    assert!(matches!(
-        AudioProgramRuntime::build_with_processor_resolver(
-            &sequence,
-            &[],
-            &media,
-            &factory,
-            contract,
-            None
-        ),
-        Err(AudioRuntimeBuildError::Compile(
-            AudioCompileError::Vst3MusicalTransportNotSupported
-        ))
-    ));
-    let range = TimelineTimeRange::new(tt(0, 1), tt(1, 1)).unwrap();
-    let closure = compile_audio_dependency_closure(&sequence, &[], None, range).unwrap();
-    assert!(matches!(AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
-        &sequence, &[], &media, &factory, contract, None, range, &closure,
-        AudioRuntimeResourceGrant::new(usize::MAX,usize::MAX,usize::MAX)),
-        Err(AudioRuntimeBuildError::Compile(AudioCompileError::Vst3MusicalTransportNotSupported))));
-    assert!(media.resolved_assets.lock().unwrap().is_empty());
-    assert_eq!(factory.0.load(Ordering::SeqCst), 0);
-    sequence
-        .audio_program
-        .track_channels
-        .get_mut(&sequence.audio_tracks[0].id)
-        .unwrap()
-        .strip
-        .pre_fader
-        .processors[0]
-        .bypassed = true;
-    let bypassed = AudioProgramRuntime::build(&sequence, &[], &media, contract, None);
-    assert!(
-        bypassed.is_ok(),
-        "bypassed VST definition is not a selected processor"
-    );
-    assert_eq!(media.resolved_assets.lock().unwrap().len(), 1);
-    let other_track = sequence.add_audio_track();
-    let mut unselected = sequence.audio_program.track_channels[&sequence.audio_tracks[0].id]
-        .strip
-        .pre_fader
-        .processors[0]
-        .clone();
-    unselected.id = mondrian_core::AudioProcessorInstanceId::new();
-    unselected.bypassed = false;
-    sequence
-        .audio_program
-        .track_channels
-        .get_mut(&other_track)
-        .unwrap()
-        .strip
-        .pre_fader
-        .processors
-        .push(unselected);
-    sequence.audio_program.routes.retain(|route| {
-        !matches!(route.source,
-        AudioRouteSource::Track { track_id, .. } if track_id == other_track)
-    });
-    assert!(
-        AudioProgramRuntime::build(&sequence, &[], &media, contract, None).is_ok(),
-        "unrouted VST is not a selected processor"
-    );
-    assert_eq!(media.resolved_assets.lock().unwrap().len(), 2);
+    for reference in [
+        None,
+        Some(MusicalTimeReference::new(tt(-9, 7), tt(3, 4)).unwrap()),
+    ] {
+        let mut sequence = sequence_with_audio_clip();
+        sequence.audio_program.musical_time_reference = reference;
+        let track_id = sequence.audio_tracks[0].id;
+        let processor = AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+                class_id: "test-musical-effect-forwarding".into(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: Some([7; 32]),
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: None,
+        };
+        let occurrence = AudioProcessorOccurrence {
+            instance_id: processor.id,
+            owner: AudioProcessorOccurrenceOwner::Track(track_id),
+            insertion: AudioProcessorInsertionPoint::PreFader,
+        };
+        let definition = processor.definition.clone();
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(processor);
+        sequence.audio_program.note_lanes.push(AudioNoteLane {
+            schema_version: 1,
+            id: AudioNoteLaneId::new(),
+            target: AudioNoteTarget {
+                track_id,
+                processor_id: occurrence.instance_id,
+                input_port_key: "test.empty-note-input".into(),
+            },
+            notes: AuthoringList::default(),
+        });
+        let resolver = || ObservingResolver {
+            calls: AtomicUsize::new(0),
+            occurrence,
+            definition: definition.clone(),
+            reference,
+            render: contract,
+        };
+        let compiled = Arc::new(
+            compile_audio_program(
+                &sequence,
+                AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+            )
+            .unwrap(),
+        );
+        assert_eq!(sequence.audio_program.note_lanes.len(), 1);
+        assert!(sequence.audio_program.note_lanes[0].notes.is_empty());
+        // The sole compiler materializes only nonempty selected Note lanes.
+        assert!(compiled.note_lanes.is_empty());
+        let range = TimelineTimeRange::new(tt(0, 1), tt(1, 1)).unwrap();
+        let closure = compile_audio_dependency_closure(&sequence, &[], None, range).unwrap();
+        // Each public preparation entry has a fresh observer, so exactly one
+        // complete request must be forwarded independently for None and Some.
+        for entry in 0..3 {
+            let factory = resolver();
+            let media = RecordingResolver::default();
+            match entry {
+                0 => assert!(PreparedAudioPlan::prepare_with_processor_resolver(
+                    Arc::clone(&compiled), contract, AudioKernelBackend::ScalarReference, &factory,
+                ).is_ok()),
+                1 => assert!(AudioProgramRuntime::build_with_processor_resolver(
+                    &sequence, &[], &media, &factory, contract, None,
+                ).is_ok()),
+                2 => assert!(AudioProgramRuntime::build_from_precompiled_closure_for_range_with_processor_resolver_and_resource_grant(
+                    &sequence, &[], &media, &factory, contract, None, range, &closure,
+                    AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+                ).is_ok()),
+                _ => unreachable!(),
+            }
+            assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                media.resolved_assets.lock().unwrap().len(),
+                usize::from(entry != 0)
+            );
+        }
+
+        sequence.audio_program.note_lanes[0].notes.push(AudioNote {
+            id: AudioNoteId::new(),
+            start: tt(0, 1),
+            end: tt(1, 1),
+            channel: 0,
+            key: 60,
+            on_velocity: 0.5,
+            off_velocity: 0.5,
+        });
+        let nonempty = Arc::new(
+            compile_audio_program(
+                &sequence,
+                AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+            )
+            .unwrap(),
+        );
+        let factory = resolver();
+        assert_eq!(
+            PreparedAudioPlan::prepare_with_processor_resolver(
+                nonempty,
+                contract,
+                AudioKernelBackend::ScalarReference,
+                &factory,
+            )
+            .unwrap_err(),
+            AudioCompileError::NoteExecutionNotSupported {
+                lane_id: sequence.audio_program.note_lanes[0].id,
+                processor_id: occurrence.instance_id,
+            }
+        );
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 0);
+        sequence.audio_program.note_lanes[0].notes.clear();
+
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&track_id)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors[0]
+            .bypassed = true;
+        let factory = resolver();
+        let media = RecordingResolver::default();
+        assert!(
+            AudioProgramRuntime::build_with_processor_resolver(
+                &sequence,
+                &[],
+                &media,
+                &factory,
+                contract,
+                None,
+            )
+            .is_ok(),
+            "bypassed VST is not a selected processor"
+        );
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(media.resolved_assets.lock().unwrap().len(), 1);
+
+        let other_track = sequence.add_audio_track();
+        let mut unselected =
+            sequence.audio_program.track_channels[&track_id].strip.pre_fader.processors[0].clone();
+        unselected.id = mondrian_core::AudioProcessorInstanceId::new();
+        unselected.bypassed = false;
+        sequence
+            .audio_program
+            .track_channels
+            .get_mut(&other_track)
+            .unwrap()
+            .strip
+            .pre_fader
+            .processors
+            .push(unselected);
+        sequence.audio_program.routes.retain(|route| {
+            !matches!(route.source, AudioRouteSource::Track { track_id, .. } if track_id == other_track)
+        });
+        let factory = resolver();
+        let media = RecordingResolver::default();
+        assert!(
+            AudioProgramRuntime::build_with_processor_resolver(
+                &sequence,
+                &[],
+                &media,
+                &factory,
+                contract,
+                None,
+            )
+            .is_ok(),
+            "unrouted VST is not a selected processor"
+        );
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(media.resolved_assets.lock().unwrap().len(), 1);
+    }
 }

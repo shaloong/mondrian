@@ -331,13 +331,29 @@ fn observe_pcm(
 use crate::{AudioContinuityEpoch, AudioRuntimeResourceGrant, AudioStateEntry};
 use mondrian_core::{
     AudioOwnerInstallationSource, AutomationSegmentInterpolation, ExactAutomationKeyframe,
-    TimelineTime,
+    MusicalTimeReference, TimelineTime,
 };
 use mondrian_timeline::{Clip, Sequence};
 
 #[test]
 #[ignore = "pinned external Effects case, current Product and frozen outer native Job required"]
 fn external_vst3_effect_runtime_restore_pcm_observations() {
+    runtime_restore_pcm_observations(None);
+}
+
+#[test]
+#[ignore = "pinned Surge Effects case and fresh normal Product; canonical Some musical pure audio, not a tempo-algorithm or shutdown fix"]
+fn external_vst3_effect_musical_reference_runtime_restore_pcm_observations() {
+    runtime_restore_pcm_observations(Some(
+        MusicalTimeReference::new(
+            TimelineTime::new(-19, 7).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap(),
+    ));
+}
+
+fn runtime_restore_pcm_observations(musical_time_reference: Option<MusicalTimeReference>) {
     let path = PathBuf::from(std::env::var_os(CASE_ENV).expect("external case path"));
     let mut case_lease = Lease::open(
         &Binding {
@@ -458,7 +474,7 @@ fn external_vst3_effect_runtime_restore_pcm_observations() {
         &state,
         period.clone(),
         &facts,
-        false,
+        RuntimeObservationConfiguration { musical_time_reference, native_bypass: false },
         "restore-a",
         &case.evidence_directory,
     );
@@ -467,7 +483,7 @@ fn external_vst3_effect_runtime_restore_pcm_observations() {
         &state,
         period.clone(),
         &facts,
-        false,
+        RuntimeObservationConfiguration { musical_time_reference, native_bypass: false },
         "restore-b",
         &case.evidence_directory,
     );
@@ -476,7 +492,7 @@ fn external_vst3_effect_runtime_restore_pcm_observations() {
         &state,
         period,
         &facts,
-        true,
+        RuntimeObservationConfiguration { musical_time_reference, native_bypass: true },
         "native-bypass",
         &case.evidence_directory,
     );
@@ -512,15 +528,22 @@ fn external_vst3_effect_runtime_restore_pcm_observations() {
     ));
 }
 
+// Immutable inputs for this one canonical Runtime observation.
+struct RuntimeObservationConfiguration {
+    musical_time_reference: Option<MusicalTimeReference>,
+    native_bypass: bool,
+}
+
 fn observe_runtime_pcm(
     catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
     state: &[u8],
     period: Arc<[f32]>,
     facts: &Facts,
-    native_bypass: bool,
+    configuration: RuntimeObservationConfiguration,
     label: &str,
     directory: &Path,
 ) -> Vec<f32> {
+    let RuntimeObservationConfiguration { musical_time_reference, native_bypass } = configuration;
     let render = AudioRenderContract {
         sample_rate: 48_000,
         channel_layout: AudioChannelLayout::Stereo,
@@ -566,6 +589,7 @@ fn observe_runtime_pcm(
     let instance_id = restored.id;
     let mut sequence = Sequence::new("Surge original-state PCM through canonical Runtime");
     sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence.audio_program.musical_time_reference = musical_time_reference;
     sequence
         .add_media_audio_clip(
             sequence.audio_tracks[0].id,
@@ -589,6 +613,16 @@ fn observe_runtime_pcm(
         grant,
     )
     .expect("canonical compiler/Output rack/native Session obey the real root resource grant");
+    assert_eq!(
+        runtime
+            .find_resource_session(runtime.resource_root_identity())
+            .expect("the actual prepared root Session exists")
+            .resource_plan()
+            .program()
+            .musical_time_reference(),
+        musical_time_reference,
+        "the prepared canonical program keeps the exact authored reference"
+    );
     let footprint = runtime.resource_footprint();
     assert_eq!(footprint.runtime_occurrences, 1);
     assert!(footprint.fixed_resident_bytes <= grant.max_fixed_resident_bytes);

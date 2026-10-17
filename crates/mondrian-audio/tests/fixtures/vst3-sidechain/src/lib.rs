@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 7).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 8).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -171,6 +171,110 @@ fn musical_context_tag(data: &ProcessData, prepared_rate: u64) -> Option<f32> {
     // Exactly 80 BPM.
     {
         Some(tag)
+    } else {
+        None
+    }
+}
+
+// Independent canonical Scope oracle for zero=-19/7 seconds and duration=3/4.
+// Literal bits were generated with Python Fraction, then one binary64 conversion:
+// struct.unpack(">Q", struct.pack(">d", float((Fraction(s, r) + Fraction(19, 7))
+//                                           / Fraction(3, 4))))[0].
+// The admitted pairs are a finite domain, not an invocation-order/count audit.
+fn canonical_musical_context(data: &ProcessData, prepared_rate: u64) -> Option<(i64, f32)> {
+    if data.processContext.is_null() {
+        return None;
+    }
+    // SAFETY: the caller owns this live context for this native callback only.
+    let context = unsafe { &*data.processContext };
+    let rate = if prepared_rate == 44_100_f64.to_bits() {
+        0
+    } else if prepared_rate == 48_000_f64.to_bits() {
+        1
+    } else {
+        return None;
+    };
+    let row = match (context.projectTimeSamples, data.numSamples) {
+        (-3, 4) => 0,
+        (0, 4) => 1,
+        (1, 2) => 2,
+        (3, 4) => 3,
+        (4, 2) => 4,
+        (6, 4) => 5,
+        (7, 1) => 6,
+        (9, 4) => 7,
+        (10, 1) | (10, 2) => 8,
+        (12, 4) => 9,
+        (13, 2) => 10,
+        (15, 4) => 11,
+        (16, 1) => 12,
+        (19, 1) => 13,
+        _ => return None,
+    };
+    if context.sampleRate.to_bits() != prepared_rate
+        || context.systemTime != 0
+        || context.continousTimeSamples != 0
+        || context.barPositionMusic.to_bits() != 0
+        || context.cycleStartMusic.to_bits() != 0
+        || context.cycleEndMusic.to_bits() != 0
+        || context.timeSigNumerator != 0
+        || context.timeSigDenominator != 0
+        || context.chord.keyNote != 0
+        || context.chord.rootNote != 0
+        || context.chord.chordMask != 0
+        || context.smpteOffsetSubframes != 0
+        || context.frameRate.framesPerSecond != 0
+        || context.frameRate.flags != 0
+        || context.samplesToNextClock != 0
+        || context.projectTimeSamples.checked_add(i64::from(data.numSamples)).is_none()
+    {
+        return None;
+    }
+    // Sorted starts: -3, 0, 1, 3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 19.
+    const QUARTER_NOTES: [[u64; 14]; 2] = [
+        [
+            0x400c_f39f_af02_4099,
+            0x400c_f3cf_3cf3_cf3d,
+            0x400c_f3df_16ee_fec9,
+            0x400c_f3fe_cae5_5de1,
+            0x400c_f40e_a4e0_8d6d,
+            0x400c_f42e_58d6_ec85,
+            0x400c_f43e_32d2_1c11,
+            0x400c_f45d_e6c8_7b29,
+            0x400c_f46d_c0c3_aab5,
+            0x400c_f48d_74ba_09cc,
+            0x400c_f49d_4eb5_3958,
+            0x400c_f4bd_02ab_9870,
+            0x400c_f4cc_dca6_c7fc,
+            0x400c_f4fc_6a98_56a0,
+        ],
+        [
+            0x400c_f3a3_8c24_4763,
+            0x400c_f3cf_3cf3_cf3d,
+            0x400c_f3dd_cd38_fc86,
+            0x400c_f3fa_edc3_5717,
+            0x400c_f409_7e08_845f,
+            0x400c_f426_9e92_def0,
+            0x400c_f435_2ed8_0c39,
+            0x400c_f452_4f62_66ca,
+            0x400c_f460_dfa7_9413,
+            0x400c_f47e_0031_eea4,
+            0x400c_f48c_9077_1bed,
+            0x400c_f4a9_b101_767e,
+            0x400c_f4b8_4146_a3c6,
+            0x400c_f4e3_f216_2ba0,
+        ],
+    ];
+    if context.state == 0 && context.projectTimeMusic.to_bits() == 0 && context.tempo.to_bits() == 0
+    {
+        Some((context.projectTimeSamples, 0.0))
+    } else if context.state
+        == (ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid
+            | ProcessContext_::StatesAndFlags_::kTempoValid) as u32
+        && context.projectTimeMusic.to_bits() == QUARTER_NOTES[rate][row]
+        && context.tempo.to_bits() == 0x4054_0000_0000_0000
+    {
+        Some((context.projectTimeSamples, 80.0_f32 / 1024.0))
     } else {
         None
     }
@@ -496,6 +600,19 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         let data = &*data;
         let mode = self.mode.load(Ordering::Relaxed);
+        let canonical_music = if mode == 8 {
+            if self.configured_latency.load(Ordering::Relaxed) != 3 {
+                return kInvalidArgument;
+            }
+            let Some(context) =
+                canonical_musical_context(data, self.sample_rate.load(Ordering::Relaxed))
+            else {
+                return kInvalidArgument;
+            };
+            Some(context)
+        } else {
+            None
+        };
         let musical_tag = if mode == 7 {
             // A VST3 processor instance is not processed concurrently with itself.
             // Count attempts before any context/parameter/PCM validation, without
@@ -524,7 +641,7 @@ impl IAudioProcessorTrait for GainProcessor {
                 || context.projectTimeSamples.checked_add(i64::from(data.numSamples)).is_none()
             { return kInvalidArgument; }
             Some(context.projectTimeSamples)
-        } else { None };
+        } else { canonical_music.map(|(start, _)| start) };
         let mask = ((1 << count) - 1) | (1 << 8);
         if data.numSamples < 0
             || data.numSamples > 65536
@@ -573,6 +690,7 @@ impl IAudioProcessorTrait for GainProcessor {
                     self.delay[slot].swap({
                     let tag = timeline_start.map_or(0.0, |start| ((start + frame as i64) % 251) as f32 / 1024.0);
                     let gain = if timeline_start.is_some() { gain as f32 + tag } else { gain as f32 };
+                    let gain = if let Some((_, tempo)) = canonical_music { gain + tempo } else { gain };
                     (gain * value).to_bits()
                 }, Ordering::Relaxed),
                 );
