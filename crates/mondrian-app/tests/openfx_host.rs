@@ -222,10 +222,20 @@ fn product_worker_queries_canonical_sparse_curves_across_seeks() {
 #[test]
 #[ignore = "requires SessionProbe mode curve_lifecycle and current product"]
 fn product_worker_preserves_curve_source_lifecycle_at_equal_current_values() {
+    curve_source_lifecycle("curve_lifecycle");
+}
+
+#[test]
+#[ignore = "requires SessionProbe mode curve_animation_state and current product"]
+fn product_worker_reports_parameter_animation_state_from_source_bindings() {
+    curve_source_lifecycle("curve_animation_state");
+}
+
+fn curve_source_lifecycle(expected_mode: &str) {
     use mondrian_core::{InterpolationType, TimeScale};
     assert_eq!(
         std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode"),
-        "curve_lifecycle"
+        expected_mode
     );
     let binary =
         PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("probe"));

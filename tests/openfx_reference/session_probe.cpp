@@ -927,6 +927,12 @@ bool staticQueries(const void* handle, OfxPropertySetHandle in, bool stringChoic
 
 // A deterministic sequence replaces the source while the published current
 // value remains exactly 1. SDK notifications and queries must see one snapshot.
+bool isCurveLifecycleMode(const std::string& selected) {
+  return selected == "curve_lifecycle" || selected == "curve_animation_state";
+}
+void describeActionReceipt(const char* action, const char* point,
+                           unsigned attempted, unsigned accepted, int status) noexcept;
+
 bool curveSourceLifecycle(const std::string& operation, const void* handle, OfxPropertySetHandle in) {
   const bool creating = operation == kOfxActionCreateInstance;
   auto found = actions.find(handle);
@@ -949,6 +955,20 @@ bool curveSourceLifecycle(const std::string& operation, const void* handle, OfxP
       gParamHost->paramGetValue(scale, &current) != kOfxStatOK || current != 1.0) { return false; }
   const bool sampled = phase == 6 || phase == 7;
   const bool constant = phase == 4 || phase == 5;
+  if (mode() == "curve_animation_state") {
+    OfxPropertySetHandle properties = nullptr;
+    int animating = -1;
+    if (gParamHost->paramGetPropertySet(scale, &properties) != kOfxStatOK || !properties) { return false; }
+    const auto status = gPropHost->propGetInt(properties, kOfxParamPropIsAnimating, 0, &animating);
+    const unsigned expected = constant ? 0 : 1;
+    if (status != kOfxStatOK || animating != static_cast<int>(expected)) {
+      // Only a mismatch adds a row: keep the ordinary lifecycle action receipt
+      // bounded while identifying a real property error rather than a timeout.
+      describeActionReceipt(operation.c_str(), "is-animating", expected,
+                            static_cast<unsigned>(animating), status);
+      return false;
+    }
+  }
   const double endpoint = phase == 2 || phase == 3 ? 3.0 : constant || sampled ? 1.0 : 2.0;
   double value = -999;
   unsigned int count = 999;
@@ -1070,7 +1090,7 @@ bool lifecycleOutput(const void* handle, OfxPropertySetHandle in) {
   double gain = -999;
   if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
       gParamHost->paramGetHandle(params, "scale", &scale, nullptr) != kOfxStatOK ||
-      gParamHost->paramGetValueAtTime(scale, isAuthorHistoryMode(mode()) ? 3.0 : mode() == "curve_lifecycle" && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
+      gParamHost->paramGetValueAtTime(scale, isAuthorHistoryMode(mode()) ? 3.0 : isCurveLifecycleMode(mode()) && (phase == 6 || phase == 7) ? 0.0 : 24.0, &gain) != kOfxStatOK) { return false; }
   OfxImageClipHandle clip = nullptr;
   OfxPropertySetHandle image = nullptr;
   double time = 0;
@@ -2168,7 +2188,7 @@ OfxStatus probeAction(const char* action, const void* handle,
           selected == "curve_group_interpolation_authoring" ? AuthorHistoryEdit::Interpolation :
           selected == "curve_reset_authoring" ? AuthorHistoryEdit::Reset :
           AuthorHistoryEdit::Time)) { return kOfxStatFailed; }
-  if (selected == "curve_lifecycle" &&
+  if (isCurveLifecycleMode(selected) &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
@@ -2272,7 +2292,7 @@ OfxStatus probeAction(const char* action, const void* handle,
         gParamHost->paramGetNumKeys(scalar, &keyCount) != kOfxStatOK) { return kOfxStatFailed; }
     // Canonical curves reject SDK author writes. A reset constant retains the
     // existing instance-local initialization contract; it does not edit Project.
-    const bool authorCurve = (selected == "canonical_curves" || selected == "curve_lifecycle" ||
+    const bool authorCurve = (selected == "canonical_curves" || isCurveLifecycleMode(selected) ||
                               selected == "curve_authoring" || isAuthorHistoryMode(selected)) &&
                              !(selected == "curve_reset_authoring" && keyCount == 0);
     if (gParamHost->paramSetValue(scalar, scale) != (authorCurve ? kOfxStatErrUnsupported : kOfxStatOK) ||
@@ -2411,7 +2431,7 @@ OfxStatus probeAction(const char* action, const void* handle,
       (!imageAnalysisOutput(handle, in) || (selected == "image_uid_persisted" && !saveImageAnalysis()))) { return kOfxStatFailed; }
   if (selected == "canonical_progressive" && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
-  if ((selected == "curve_lifecycle" || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
+  if ((isCurveLifecycleMode(selected) || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
