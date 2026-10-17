@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 12).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 13).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -835,6 +835,14 @@ impl IEditControllerTrait for GainController {
             return kInvalidArgument;
         }
         self.gain.set(value);
+        if self.armed.get() && self.mode.get() == 13 {
+            let Some(handler) = self.handler.borrow().clone() else {
+                return kResultFalse;
+            };
+            // A real control-thread setter reached by deferred mirror service.
+            // Preserve the callback's actual status; do not synthesize an Ack.
+            return handler.restartComponent(4);
+        }
         kResultOk
     }
 
