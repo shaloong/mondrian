@@ -533,6 +533,12 @@ struct MondrianOpenFxSession {
     }
     if (status != kOfxStatOK) { return 4; }
     frame.parameterSources = std::move(sources);
+    // Instance animation state follows the same temporal source authority as
+    // numeric queries, including a current-frame source without a full curve.
+    for (const auto& update : updates) {
+      update.parameter->getProperties().setIntProperty(kOfxParamPropIsAnimating,
+          frame.constantParameter(update.parameter->getName()) ? 0 : 1);
+    }
     if (bracket && !accepted(instance->beginInstanceChangedAction(reason))) { return 4; }
     const OfxPointD scale{1.0, 1.0};
     if (bracket && status == kOfxStatOK) {
