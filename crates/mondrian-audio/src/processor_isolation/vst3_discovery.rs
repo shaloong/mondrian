@@ -253,6 +253,9 @@ fn decode_probe_inputs(
     input_names: &[AudioProcessorInputName],
     layout: AudioChannelLayout,
 ) -> Result<AudioProcessorAuxiliaryInputContract, AudioProcessorHostError> {
+    if auxiliary_buses.len() > 31 {
+        return Err(invalid("VST3 probe returned excessive auxiliary ports"));
+    }
     let auxiliary_inputs = auxiliary_from_wire(auxiliary_buses);
     auxiliary_inputs.validate(layout)?;
     AudioProcessorInputName::validate_all(input_names, &auxiliary_inputs)?;
@@ -812,6 +815,26 @@ mod version_tests {
             expected
         );
         assert_eq!(serde_json::to_value(&names).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn probe_input_metadata_accepts_31_auxiliary_ports_and_refuses_32_before_conversion() {
+        let buses = |count| {
+            (1..=count)
+                .map(|index| AuxiliaryBusWire {
+                    bus_key: format!("vst3.audio-input.{index}"),
+                    channel_layout: AudioChannelLayout::Stereo,
+                })
+                .collect()
+        };
+        let contract = decode_probe_inputs(buses(31), &[], AudioChannelLayout::Stereo)
+            .expect("31 admitted auxiliary ports");
+        assert_eq!(contract.buses.len(), 31);
+        assert!(matches!(
+            decode_probe_inputs(buses(32), &[], AudioChannelLayout::Stereo),
+            Err(AudioProcessorHostError::InvalidContract(detail))
+                if detail == "VST3 probe returned excessive auxiliary ports"
+        ));
     }
 
     #[test]
