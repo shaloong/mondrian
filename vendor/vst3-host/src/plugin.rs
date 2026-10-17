@@ -1132,6 +1132,56 @@ impl<'a> PluginEditorControl<'a> {
     }
 }
 
+/// Pure refusal of a pending zero-offset parameter-only operation.
+/// No native call or input consumption occurred for these outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingParameterFlushRefusal {
+    /// The backend has no local pending-input operation; no RPC is inferred.
+    Unsupported,
+    /// The same native component is not active and processing.
+    NotProcessing,
+    /// The retained native processing context is not the prepared owner.
+    InvalidContext,
+    /// Legacy, chunk or checked Note input already has another obligation.
+    PendingEvents,
+    /// The complete pending batch has an invalid value, extent or nonzero offset.
+    InvalidBatch,
+    /// This operation accepts only stable, unexhausted raw zero or exact-4
+    /// cohorts. Other requests still require their original control service.
+    RestartRequired,
+    /// The original callback cohort changed while the owning locks were checked.
+    /// No input was published; the newer request remains an independent duty.
+    SourceChanged,
+    /// The ordered author source is incomplete or malformed.
+    InvalidSource,
+    /// Unconsumed author Value callbacks cannot be combined with queued host input.
+    SourceValuesPending,
+    /// Real editor-to-DSP feedback must not be merged into this operation.
+    DspFeedbackPending,
+    /// The existing input COM owner already exposes a different batch.
+    ExistingInput,
+    /// Uncollected native output cannot be replaced by this operation.
+    ExistingOutput,
+    /// An original owner is borrowed; the operation did not wait for its mutex.
+    StorageBusy,
+    /// An original owning mutex is poisoned; its failure was not discarded.
+    StoragePoisoned,
+    /// Bounded temporary native input storage could not be prepared.
+    StorageCapacity,
+}
+
+/// Operation facts from the same processor's pending parameter input.
+/// Neither success nor an empty queue grants author/install or DSP permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingParameterFlushOutcome {
+    /// The original pending Vec is empty after the pure processing/ingress checks.
+    NoPending,
+    /// One native zero-sample call consumed the validated original pending batch.
+    Flushed,
+    /// Pure preflight refused without consuming the pending batch.
+    Refused(PendingParameterFlushRefusal),
+}
+
 /// Disjoint processing storage for the same component as a scoped editor role.
 /// This role cannot reach IEditController, IPlugView or component lifecycle calls.
 pub struct PluginAudioProcessing<'a> {
@@ -1168,6 +1218,18 @@ impl PluginAudioProcessing<'_> {
     /// Controller presentation is deferred to the main role; this never calls it.
     pub fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
         self.internal.queue_parameter_at(id, value, sample_offset)
+    }
+
+    /// Flush the complete original pending host-parameter batch at offset zero.
+    ///
+    /// This is one native zero-sample call with no audio or input events. It
+    /// preserves signal context, source callbacks, controller synchronization
+    /// and Note owners. Nonzero offsets and mixed editor/COM input are refused
+    /// without clamping or replay. Once native code is called, input is consumed
+    /// on both success and failure; a later error is never a pure refusal.
+    /// Temporary COM projection storage is cold allocation, not an RT guarantee.
+    pub fn flush_pending_parameter_changes(&mut self) -> Result<PendingParameterFlushOutcome> {
+        self.internal.flush_pending_parameter_changes()
     }
 
     /// Replay values from the same unconsumed ordered editor source into the
@@ -1227,6 +1289,11 @@ pub(crate) trait PluginProcessingRole: Send {
         ))
     }
     fn queue_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()>;
+    fn flush_pending_parameter_changes(&mut self) -> Result<PendingParameterFlushOutcome> {
+        Ok(PendingParameterFlushOutcome::Refused(
+            PendingParameterFlushRefusal::Unsupported,
+        ))
+    }
     fn queue_unconsumed_editor_values(&mut self) -> Result<bool>;
     fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()>;
     fn process_bus_audio_with_note_events(

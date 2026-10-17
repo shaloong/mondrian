@@ -2189,6 +2189,46 @@ impl super::IsolatedAudioProcessorProcessingRole for VstDspRole<'_> {
     fn flush_native_author_parameters(
         &mut self,
     ) -> Result<crate::NativeAudioAuthorParameterFlushOutcome, AudioProcessorHostError> {
+        use vst3_host::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        match self
+            .native
+            .flush_pending_parameter_changes()
+            .map_err(|error| unavailable(format!("VST3 pending parameter flush failed: {error}")))?
+        {
+            Outcome::Flushed => return Ok(crate::NativeAudioAuthorParameterFlushOutcome::Flushed),
+            Outcome::Refused(reason) => {
+                let reason = match reason {
+                    Refusal::Unsupported
+                    | Refusal::NotProcessing
+                    | Refusal::InvalidContext
+                    | Refusal::RestartRequired => {
+                        crate::NativeAudioAuthorRefusal::UnsupportedAdapter
+                    }
+                    Refusal::InvalidBatch => crate::NativeAudioAuthorRefusal::InvalidValue,
+                    Refusal::DspFeedbackPending => {
+                        crate::NativeAudioAuthorRefusal::DspFeedbackPending
+                    }
+                    Refusal::StorageBusy | Refusal::SourceChanged => {
+                        crate::NativeAudioAuthorRefusal::SourceChanged
+                    }
+                    Refusal::StorageCapacity => crate::NativeAudioAuthorRefusal::ResourceLimit,
+                    Refusal::PendingEvents
+                    | Refusal::InvalidSource
+                    | Refusal::SourceValuesPending
+                    | Refusal::ExistingInput
+                    | Refusal::ExistingOutput
+                    | Refusal::StoragePoisoned => crate::NativeAudioAuthorRefusal::InvalidSource,
+                };
+                return Ok(crate::NativeAudioAuthorParameterFlushOutcome::Refused(
+                    reason,
+                ));
+            }
+            // Empty host input is not permission to skip the original Source
+            // replay path's real flush and validation.
+            Outcome::NoPending => {}
+        }
         if !self.native.queue_unconsumed_editor_values().map_err(|error| {
             unavailable(format!("VST3 same-source parameter replay failed: {error}"))
         })? {

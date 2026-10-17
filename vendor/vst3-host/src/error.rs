@@ -11,6 +11,19 @@ pub enum EditorDetachStage {
     FrameClear,
 }
 
+/// An actual native output owner must be collected before another process call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeOutputError {
+    /// The original COM queues or event list still expose uncollected output.
+    Pending,
+    /// An output owner is borrowed; no blocking wait occurred.
+    StorageBusy,
+    /// An output owning mutex is poisoned.
+    StoragePoisoned,
+    /// The output owner's active extent is inconsistent with its retained pool.
+    InvalidOwner,
+}
+
 /// Fixed, allocation-free refusals for the bounded native event API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeEventError {
@@ -216,6 +229,10 @@ pub enum Error {
     /// Structured refusal from the bounded same-instance event API.
     #[error("native event operation failed: {0:?}")]
     NativeEvent(NativeEventError),
+
+    /// An uncollected native output owner cannot be silently overwritten.
+    #[error("native output operation failed: {0:?}")]
+    NativeOutput(NativeOutputError),
 
     /// Other errors
     #[error("{0}")]

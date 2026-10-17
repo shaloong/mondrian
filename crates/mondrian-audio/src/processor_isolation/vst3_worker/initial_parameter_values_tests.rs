@@ -1203,3 +1203,174 @@ fn native_late_rescan_existing_feedback_and_failure_refuse_before_deferred_servi
         assert_eq!(after.observed.to_bits(), 0.375_f64.to_bits());
     }
 }
+
+#[test]
+#[ignore = "requires rebuilt owned mode13 SDK fixture under native Job runner"]
+fn native_pending_zero_offset_flush_uses_same_worker_and_preserves_source() {
+    fn flush(worker: &mut Vst3Worker) -> crate::NativeAudioAuthorParameterFlushOutcome {
+        let mut roles = worker.split_native_processing().unwrap();
+        std::thread::scope(|scope| {
+            let processing = &mut roles.processing;
+            scope
+                .spawn(move || processing.flush_native_author_parameters())
+                .join()
+                .unwrap()
+                .unwrap()
+        })
+        // No finish_processing_scope: do not service or reclassify callbacks.
+    }
+    let (mut worker, binding) = entered_rescan_worker();
+    let object = worker.native_audio_object_observation().unwrap();
+    let seed = worker.payload.state.clone();
+    let cursor = worker.last_end;
+    let before = audit(&worker); // Before the real host parameter enqueue only.
+    worker.plugin.as_mut().unwrap().set_parameter_at(0, 0.875, 0).unwrap();
+    let source = rescan_source_snapshot(&worker);
+    assert_eq!(source.1.len(), 1);
+    assert_eq!(source.2.unwrap().flags().bits(), 4);
+    assert!(matches!(
+        worker.plugin.as_ref().unwrap().save_state(),
+        Err(vst3_host::Error::PendingParameterDelivery)
+    ));
+    let buffer_extent = worker.buffers.block_size;
+    assert_eq!(
+        flush(&mut worker),
+        crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+    );
+    assert_eq!(worker.buffers.block_size, buffer_extent);
+    assert_eq!(worker.last_end, cursor);
+    assert_eq!(rescan_source_snapshot(&worker), source);
+    let after = audit(&worker);
+    assert_eq!(after.process, before.process + 1);
+    assert_eq!(after.setters, before.setters + 1);
+    assert_eq!(
+        (after.metadata, after.values, after.wrong_thread),
+        (before.metadata, before.values, 0)
+    );
+    assert_eq!(worker.payload.state, seed);
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+    assert_eq!(worker.native_binding.unwrap().binding(), binding.binding);
+    assert!(!worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap());
+    // This local retained DSP control does not grant parent Runtime permission:
+    // the raw Source/cohort remain held. No parameters are replayed in this call.
+    let render = worker.render;
+    let ids = [worker.payload.parameters[0].parameter_id().unwrap()];
+    let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+    let mut pcm = vec![1.0; 8];
+    {
+        let mut roles = worker.split_native_processing().unwrap();
+        std::thread::scope(|scope| {
+            let processing = &mut roles.processing;
+            let pcm = &mut pcm;
+            let auxiliary = &auxiliary;
+            let ids = &ids;
+            scope
+                .spawn(move || {
+                    processing.process(IsolatedAudioProcessorWorkerBlock::new(
+                        cursor.unwrap(),
+                        4,
+                        render,
+                        pcm,
+                        auxiliary,
+                        &[],
+                        ids,
+                        &[],
+                    ))
+                })
+                .join()
+                .unwrap()
+                .unwrap();
+        });
+    }
+    assert_eq!(pcm, [0.875; 8]);
+    assert_eq!(worker.last_end, cursor.map(|s| s + 4));
+    assert_eq!(rescan_source_snapshot(&worker), source);
+    let later = audit(&worker);
+    assert_eq!(later.process, after.process + 1);
+    assert_eq!(
+        (
+            later.setters,
+            later.metadata,
+            later.values,
+            later.wrong_thread
+        ),
+        (after.setters, after.metadata, after.values, 0)
+    );
+    // An empty host Vec still runs the old Source replay path's native flush;
+    // NoPending must not be mistaken for completion of the whole consumer.
+    let later_cursor = worker.last_end;
+    assert_eq!(
+        flush(&mut worker),
+        crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+    );
+    assert_eq!(audit(&worker).process, later.process + 1);
+    assert_eq!(worker.last_end, later_cursor);
+    assert_eq!(rescan_source_snapshot(&worker), source);
+
+    // Normal GUI Source/feedback with an empty host Vec must still take the
+    // old same-Source replay route, rather than being rejected by the new API.
+    {
+        let (mut replay, _) = entered_rescan_worker();
+        replay.plugin.as_mut().unwrap().load_state(&state(0.625, 9)).unwrap();
+        let editor = replay.plugin.as_mut().unwrap().borrow_editor_control().unwrap();
+        assert_eq!(editor.parameter(0).unwrap(), 0.625);
+        drop(editor);
+        let plugin = replay.plugin.as_ref().unwrap();
+        assert!(!plugin.pending_processor_parameter_input().unwrap());
+        let mut events = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
+        let mut feedback = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
+        let source = plugin
+            .observe_editor_source_bounded(
+                crate::NATIVE_AUDIO_AUTHOR_EVENTS,
+                &mut events,
+                &mut feedback,
+            )
+            .unwrap();
+        assert_eq!(feedback, [(0, 0.875)]);
+        let raw = plugin.pending_restart_cohort();
+        let before = audit(&replay);
+        let cursor = replay.last_end;
+        let object = replay.native_audio_object_observation().unwrap();
+        assert_eq!(
+            flush(&mut replay),
+            crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+        );
+        let after = audit(&replay);
+        assert_eq!(after.process, before.process + 1);
+        assert_eq!(
+            (after.setters, after.metadata, after.values),
+            (before.setters, before.metadata, before.values)
+        );
+        let retained = rescan_source_snapshot(&replay);
+        assert_eq!(retained.0.revision(), source.revision());
+        assert_eq!(retained.1, events);
+        assert_eq!(retained.2, raw);
+        assert_eq!(retained.0.pending_dsp_feedback_values(), 0);
+        assert_eq!(replay.last_end, cursor);
+        assert_eq!(replay.native_audio_object_observation().unwrap(), object);
+    }
+
+    for offset in [-1, 1] {
+        let (mut worker, binding) = entered_rescan_worker();
+        let cursor = worker.last_end;
+        let object = worker.native_audio_object_observation().unwrap();
+        worker.plugin.as_mut().unwrap().set_parameter_at(0, 0.875, offset).unwrap();
+        let source = rescan_source_snapshot(&worker);
+        assert_eq!(
+            flush(&mut worker),
+            crate::NativeAudioAuthorParameterFlushOutcome::Refused(
+                crate::NativeAudioAuthorRefusal::InvalidValue
+            )
+        );
+        assert!(matches!(
+            worker.plugin.as_ref().unwrap().save_state(),
+            Err(vst3_host::Error::PendingParameterDelivery)
+        ));
+        assert_eq!(rescan_source_snapshot(&worker), source);
+        assert_eq!(worker.last_end, cursor);
+        assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+        assert_eq!(worker.native_binding.unwrap().binding(), binding.binding);
+        // No counter audit is available while this original point is pending;
+        // the SDK real-COM controls independently assert native call count zero.
+    }
+}

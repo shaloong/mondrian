@@ -29,8 +29,8 @@ use super::{
         create_event_list, create_host_application_with_interfaces, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
         create_state_restore_stream, ActiveNoteEventList, ComponentHandler, ConnectionPair,
-        HostApplication, HostEventList, HostPlugFrame, ParameterChanges, StreamStateType,
-        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
+        HostApplication, HostEventList, HostPlugFrame, ParameterChanges,
+        PendingParameterProjection, StreamStateType, MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
     },
     editor_attachment::EditorAttachment,
     module_loader::{load_module, VstModule},
@@ -6626,7 +6626,204 @@ impl PluginImpl {
     }
 }
 
+fn pending_flush_event_refusal(
+    error: NativeEventError,
+) -> crate::plugin::PendingParameterFlushRefusal {
+    use crate::plugin::PendingParameterFlushRefusal as Failure;
+    match error {
+        NativeEventError::StorageBusy => Failure::StorageBusy,
+        NativeEventError::StoragePoisoned => Failure::StoragePoisoned,
+        _ => Failure::PendingEvents,
+    }
+}
+fn pending_flush_output_refusal(
+    error: crate::error::NativeOutputError,
+) -> crate::plugin::PendingParameterFlushRefusal {
+    use crate::error::NativeOutputError as Error;
+    use crate::plugin::PendingParameterFlushRefusal as Failure;
+    match error {
+        Error::Pending => Failure::ExistingOutput,
+        Error::StorageBusy => Failure::StorageBusy,
+        Error::StoragePoisoned => Failure::StoragePoisoned,
+        Error::InvalidOwner => Failure::InvalidSource,
+    }
+}
+
+/// The sole FFI invocation used by both ordinary and parameter-only calls.
+/// Caller-owned preparation and restoration keep their existing order.
+fn invoke_native_process(processor: &ComPtr<IAudioProcessor>, data: &mut ProcessData) -> tresult {
+    // SAFETY: both callers supply their validated same-owner ProcessData and
+    // keep every referenced COM/context/storage owner alive for this call.
+    unsafe { processor.process(data) }
+}
+
+fn collect_process_output(
+    parameters: &ParameterChanges,
+    events: &HostEventList,
+    feedback: &ArrayQueue<(u32, f64)>,
+    emitted: &ArrayQueue<PluginEvent>,
+) -> Result<()> {
+    // Attempt both independent output collections. On error, unread owners
+    // remain visible to the common processing entrance's fail-closed guard.
+    let parameters = parameters.collect_process_output(feedback);
+    let events = events.collect_process_output(emitted);
+    parameters.map_err(Error::NativeOutput)?;
+    events.map_err(Error::NativeOutput)
+}
+
 impl PluginProcessFields<'_> {
+    fn flush_pending_parameter_input(
+        &mut self,
+    ) -> Result<crate::plugin::PendingParameterFlushOutcome> {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Failure,
+        };
+        let preflight = (|| {
+            if !self.is_active || !self.is_processing {
+                return Err(Failure::NotProcessing);
+            }
+            let Some(data) = self.process_data.as_ref() else {
+                return Err(Failure::InvalidContext);
+            };
+            let context = &data.process_context;
+            if self.block_size == 0
+                || !self.sample_rate.is_finite()
+                || self.sample_rate <= 0.0
+                || context.sampleRate != self.sample_rate
+                || data.process_data.processContext != ptr::from_ref(context).cast_mut()
+                || !matches!(data.process_data.symbolicSampleSize,
+                    value if value == SymbolicSampleSizes_::kSample32 as i32
+                        || value == SymbolicSampleSizes_::kSample64 as i32)
+                || data.process_data.inputParameterChanges
+                    != data
+                        .input_param_changes
+                        .as_com_ref::<IParameterChanges>()
+                        .unwrap()
+                        .as_ptr()
+                || data.process_data.outputParameterChanges
+                    != data
+                        .output_param_changes
+                        .as_com_ref::<IParameterChanges>()
+                        .unwrap()
+                        .as_ptr()
+                || data.process_data.outputEvents
+                    != self
+                        .output_events
+                        .as_com_ref::<IEventList>()
+                        .unwrap()
+                        .as_ptr()
+                || (context.state & ProcessContext_::StatesAndFlags_::kTempoValid as u32 != 0
+                    && (!context.tempo.is_finite() || context.tempo <= 0.0))
+                || (context.state & ProcessContext_::StatesAndFlags_::kProjectTimeMusicValid as u32
+                    != 0
+                    && !context.projectTimeMusic.is_finite())
+            {
+                return Err(Failure::InvalidContext);
+            }
+            self.input_events
+                .require_empty_anchored_ingress(self.chunk_events)
+                .map_err(pending_flush_event_refusal)?;
+            data.active_note_events
+                .require_empty_for_parameter_flush()
+                .map_err(pending_flush_event_refusal)?;
+            data.output_param_changes
+                .require_collected_output()
+                .map_err(pending_flush_output_refusal)?;
+            self.output_events
+                .require_collected_output()
+                .map_err(pending_flush_output_refusal)?;
+            data.input_param_changes
+                .require_empty_pending_flush_input(self.component_handler.as_deref())?;
+            if self.pending_param_changes.is_empty() {
+                return Ok(false);
+            }
+            if self.pending_param_changes.len() > MAX_PENDING_PARAM_CHANGES
+                || self.pending_param_changes.capacity() > MAX_PENDING_PARAM_CHANGES
+                || self.pending_param_changes.iter().any(|change| {
+                    change.sample_offset != 0
+                        || !change.value.is_finite()
+                        || !(0.0..=1.0).contains(&change.value)
+                })
+            {
+                return Err(Failure::InvalidBatch);
+            }
+            data.input_param_changes
+                .pending_flush_input(self.component_handler.as_deref(), None)?;
+            Ok(true)
+        })();
+        match preflight {
+            Ok(false) => return Ok(Outcome::NoPending),
+            Err(reason) => return Ok(Outcome::Refused(reason)),
+            Ok(true) => {}
+        }
+        let mut candidate = match PendingParameterProjection::prepare(
+            self.pending_param_changes,
+            MAX_PENDING_PARAM_CHANGES,
+        ) {
+            Ok(candidate) => candidate,
+            Err(reason) => return Ok(Outcome::Refused(reason)),
+        };
+        // Allocation may have allowed a later producer to arrive. Nothing has
+        // been published: recheck actual ingress and the original owners.
+        let data = self.process_data.as_mut().unwrap();
+        let ready = self
+            .input_events
+            .require_empty_anchored_ingress(self.chunk_events)
+            .and_then(|()| data.active_note_events.require_empty_for_parameter_flush())
+            .map_err(pending_flush_event_refusal)
+            .and_then(|()| {
+                data.output_param_changes
+                    .require_collected_output()
+                    .map_err(pending_flush_output_refusal)
+            })
+            .and_then(|()| {
+                self.output_events
+                    .require_collected_output()
+                    .map_err(pending_flush_output_refusal)
+            });
+        if let Err(reason) = ready {
+            return Ok(Outcome::Refused(reason));
+        }
+        let saved_data = data.process_data;
+        let saved_context = data.process_context;
+        if let Err(reason) = data
+            .input_param_changes
+            .pending_flush_input(self.component_handler.as_deref(), Some(&mut candidate))
+        {
+            return Ok(Outcome::Refused(reason));
+        }
+        // Publication is followed only by infallible assignments and one FFI.
+        // No generic chunk/GUI/event routing or transport advancement is used.
+        data.process_data.numSamples = 0;
+        data.process_data.numInputs = 0;
+        data.process_data.numOutputs = 0;
+        data.process_data.inputs = ptr::null_mut();
+        data.process_data.outputs = ptr::null_mut();
+        data.process_data.inputEvents = ptr::null_mut();
+        self.host_app.enter_data_exchange_process();
+        // SAFETY: the same stable ProcessData, context and COM owners remain
+        // alive; all batch validation preceded the sole publication above.
+        let native_result = invoke_native_process(self.processor, &mut data.process_data);
+        data.process_data = saved_data;
+        data.process_context = saved_context;
+        self.host_app.leave_data_exchange_process();
+        // Native saw this batch, even on failure. Restore every pointer/context
+        // and consume input once before any fallible output collection.
+        self.pending_param_changes.clear();
+        data.input_param_changes.clear_all();
+        let output_result = collect_process_output(
+            &data.output_param_changes,
+            self.output_events,
+            self.output_param_feedback,
+            self.output_events_owned,
+        );
+        if native_result != kResultOk {
+            return Err(Error::ProcessFailed(native_result));
+        }
+        output_result?;
+        Ok(Outcome::Flushed)
+    }
+
     fn process_chunk(
         &mut self,
         buffers: &mut CallerAudioBuffers<'_>,
@@ -6752,7 +6949,7 @@ impl PluginProcessFields<'_> {
                 if active_notes {
                     data.active_note_events.open();
                 }
-                let process_result = self.processor.process(&mut data.process_data);
+                let process_result = invoke_native_process(self.processor, &mut data.process_data);
                 // Close exposure before pointer restoration/cleanup. Retained
                 // references remain live COM owners but see no stale window.
                 data.active_note_events.close();
@@ -6792,32 +6989,19 @@ impl PluginProcessFields<'_> {
                 // re-stick on the next block.
                 data.input_param_changes.clear_all();
 
-                // Processor-originated automation belongs to this block. Copy it into a
-                // bounded lock-free feedback queue, then clear it on both success and failure
-                // so stale points can never be re-reported.
-                let feedback = &self.output_param_feedback;
-                data.output_param_changes
-                    .for_each_active_point(|id, _offset, value| {
-                        feedback.force_push((id, value));
-                    });
-                data.output_param_changes.clear_all();
-
-                // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
-                // Drain the event list in place (no `mem::take`) and push each converted event
-                // into the lock-free output queue with `force_push`, which drops the oldest event
-                // when full. No lock and no allocation on the audio thread even while MIDI flows.
-                if !self.output_events.is_empty() {
-                    let out = &self.output_events_owned;
-                    self.output_events.drain_each(|event| {
-                        out.force_push(event);
-                    });
-                }
+                let output_result = collect_process_output(
+                    &data.output_param_changes,
+                    self.output_events,
+                    self.output_param_feedback,
+                    self.output_events_owned,
+                );
 
                 if process_result != kResultOk {
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
                 } else {
+                    output_result?;
                     // The entire window was checked before consumption. Still
                     // fail cleanly if native code changed a context counter;
                     // all input/feedback cleanup above must run first, and the
@@ -6954,6 +7138,14 @@ impl PluginProcessFields<'_> {
             .process_data
             .as_ref()
             .ok_or_else(|| Error::Other("Process data not initialized".to_owned()))?;
+        // Uncollected native output remains an obligation after a failed
+        // cleanup, including on a later switch to ordinary audio processing.
+        data.output_param_changes
+            .require_collected_output()
+            .map_err(Error::NativeOutput)?;
+        self.output_events
+            .require_collected_output()
+            .map_err(Error::NativeOutput)?;
         checked_process_sample_end(&data.process_context, total)?;
         preflight_musical_window(
             &data.process_context,
@@ -7590,6 +7782,12 @@ impl crate::plugin::PluginProcessingRole for PluginProcessFields<'_> {
         self.deferred_controller_sync.force_push((id, value));
         Ok(())
     }
+    fn flush_pending_parameter_changes(
+        &mut self,
+    ) -> Result<crate::plugin::PendingParameterFlushOutcome> {
+        self.flush_pending_parameter_input()
+    }
+
     fn queue_unconsumed_editor_values(&mut self) -> Result<bool> {
         if !self.pending_param_changes.is_empty() {
             return Err(Error::Other(
@@ -7876,6 +8074,18 @@ mod editor_detach_failure_tests {
         fn process_bus_audio(&mut self, _buffers: &mut BusAudioBuffers) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn processing_role_without_local_pending_flush_refuses_instead_of_faking_empty() {
+        let mut role = UnusedProcessingRole;
+        assert_eq!(
+            crate::plugin::PluginProcessingRole::flush_pending_parameter_changes(&mut role)
+                .unwrap(),
+            crate::plugin::PendingParameterFlushOutcome::Refused(
+                crate::plugin::PendingParameterFlushRefusal::Unsupported
+            )
+        );
     }
 
     #[test]
@@ -8502,6 +8712,8 @@ mod checked_native_note_tests {
         positions: Vec<(i64, i64, u32)>,
         musical: Vec<[u64; 5]>,
         event_ppq: Vec<Vec<u64>>,
+        parameters: Vec<Vec<(u32, i32, u64)>>,
+        native_io: Vec<(i32, i32, bool, bool, bool)>,
     }
     struct Processor {
         observed: Arc<Mutex<Observations>>,
@@ -8511,6 +8723,9 @@ mod checked_native_note_tests {
         original_ingress: ComPtr<IEventList>,
         active_notes: ComWrapper<ActiveNoteEventList>,
         active_busy: Arc<AtomicBool>,
+        flush_fault: Arc<AtomicUsize>,
+        output_owner: ComWrapper<ParameterChanges>,
+        output_event_owner: ComWrapper<HostEventList>,
     }
     impl Class for Processor {
         type Interfaces = (IAudioProcessor,);
@@ -8595,12 +8810,40 @@ mod checked_native_note_tests {
                     velocity.to_bits(),
                 ));
             }
+            let mut parameters = Vec::new();
+            if let Some(changes) = unsafe { ComRef::from_raw(data.inputParameterChanges) } {
+                for index in 0..unsafe { changes.getParameterCount() } {
+                    let queue =
+                        unsafe { ComRef::from_raw(changes.getParameterData(index)) }.unwrap();
+                    for point in 0..unsafe { queue.getPointCount() } {
+                        let mut offset = -1;
+                        let mut value = f64::NAN;
+                        assert_eq!(
+                            unsafe { queue.getPoint(point, &mut offset, &mut value) },
+                            kResultOk
+                        );
+                        parameters.push((
+                            unsafe { queue.getParameterId() },
+                            offset,
+                            value.to_bits(),
+                        ));
+                    }
+                }
+            }
             let mut observed = self.observed.lock().unwrap();
             observed.calls += 1;
             let call = observed.calls;
             observed.received.push(received);
             observed.event_ppq.push(event_ppq);
             observed.frames.push(data.numSamples);
+            observed.parameters.push(parameters);
+            observed.native_io.push((
+                data.numInputs,
+                data.numOutputs,
+                data.inputs.is_null(),
+                data.outputs.is_null(),
+                data.inputEvents.is_null(),
+            ));
             let context = unsafe { &*data.processContext };
             observed.positions.push((
                 context.projectTimeSamples,
@@ -8635,6 +8878,54 @@ mod checked_native_note_tests {
                 };
                 samples.fill(call as f32 * 0.25);
             }
+            let fault = self.flush_fault.load(Ordering::Relaxed);
+            if matches!(fault, 1..=3) {
+                let changes = unsafe { ComRef::from_raw(data.outputParameterChanges) }.unwrap();
+                let id = 77;
+                let mut index = -1;
+                let queue =
+                    unsafe { ComRef::from_raw(changes.addParameterData(&id, &mut index)) }.unwrap();
+                assert_eq!(
+                    unsafe { queue.addPoint(0, call as f64 / 4.0, &mut index) },
+                    kResultOk
+                );
+                let mut event: Event = unsafe { std::mem::zeroed() };
+                event.r#type = kNoteOnEvent as u16;
+                event.__field0.noteOn = NoteOnEvent {
+                    channel: 0,
+                    pitch: 60,
+                    tuning: 0.0,
+                    velocity: 0.5,
+                    length: 0,
+                    noteId: 500 + call as i32,
+                };
+                let events = unsafe { ComRef::from_raw(data.outputEvents) }.unwrap();
+                assert_eq!(unsafe { events.addEvent(&mut event) }, kResultOk);
+            }
+            if fault == 2 {
+                assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = self.output_owner.queues.lock().unwrap();
+                    panic!("controlled output COM owner poison after native input");
+                }))
+                .is_err());
+            } else if fault == 3 {
+                assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = self.output_event_owner.events.lock().unwrap();
+                    panic!("controlled output event owner poison after native input");
+                }))
+                .is_err());
+            } else if fault == 4 {
+                data.numSamples = 123;
+                data.numInputs = 55;
+                data.numOutputs = 56;
+                data.inputs = ptr::null_mut();
+                data.outputs = ptr::null_mut();
+                data.inputEvents = ptr::null_mut();
+                data.outputEvents = ptr::null_mut();
+                data.inputParameterChanges = ptr::null_mut();
+                data.outputParameterChanges = ptr::null_mut();
+                data.processContext = ptr::null_mut();
+            }
             if self.fail_call.load(Ordering::Relaxed) == call {
                 kResultFalse
             } else {
@@ -8650,6 +8941,7 @@ mod checked_native_note_tests {
         context_fault: Arc<AtomicUsize>,
         inject_legacy: Arc<AtomicBool>,
         active_busy: Arc<AtomicBool>,
+        flush_fault: Arc<AtomicUsize>,
         data: Option<Box<HostProcessData>>,
         activation: BusActivationState,
         handler: Option<ComWrapper<ComponentHandler>>,
@@ -8672,6 +8964,9 @@ mod checked_native_note_tests {
             let input = create_event_list();
             let active_notes = ComWrapper::new(ActiveNoteEventList::new());
             let active_busy = Arc::new(AtomicBool::new(false));
+            let flush_fault = Arc::new(AtomicUsize::new(0));
+            let output_parameters = ComWrapper::new(ParameterChanges::default());
+            let output = create_event_list();
             let processor = ComWrapper::new(Processor {
                 observed: Arc::clone(&observed),
                 fail_call: Arc::clone(&fail_call),
@@ -8680,10 +8975,12 @@ mod checked_native_note_tests {
                 original_ingress: input.to_com_ptr::<IEventList>().unwrap(),
                 active_notes: active_notes.clone(),
                 active_busy: Arc::clone(&active_busy),
+                flush_fault: Arc::clone(&flush_fault),
+                output_owner: output_parameters.clone(),
+                output_event_owner: output.clone(),
             })
             .to_com_ptr::<IAudioProcessor>()
             .unwrap();
-            let output = create_event_list();
             let mut native_output: AudioBusBuffers = unsafe { std::mem::zeroed() };
             native_output.numChannels = 1;
             let mut native_outputs = vec![native_output];
@@ -8702,7 +8999,7 @@ mod checked_native_note_tests {
                 musical_reference: None,
                 active_note_events: active_notes,
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
-                output_param_changes: ComWrapper::new(ParameterChanges::default()),
+                output_param_changes: output_parameters,
             });
             data.process_context.sampleRate = 48_000.0;
             data.process_data.numOutputs = 1;
@@ -8728,6 +9025,7 @@ mod checked_native_note_tests {
                 context_fault,
                 inject_legacy,
                 active_busy,
+                flush_fault,
                 data: Some(data),
                 activation: BusActivationState {
                     audio_outputs: vec![true],
@@ -10728,6 +11026,578 @@ mod checked_native_note_tests {
             assert_eq!(observed.received[1].len(), 1);
             assert_eq!(observed.received[1][0].2, 999);
             assert!(fixture.input.events.lock().unwrap().is_empty());
+        }
+    }
+    type PendingFlushSnapshot = ([usize; 12], [u64; 9], Vec<(u32, i32, u64)>);
+    fn pending_flush_snapshot(f: &Fixture) -> PendingFlushSnapshot {
+        let data = f.data.as_ref().unwrap();
+        let p = &data.process_data;
+        let c = &data.process_context;
+        (
+            [
+                p.processMode as usize,
+                p.symbolicSampleSize as usize,
+                p.numSamples as usize,
+                p.numInputs as usize,
+                p.numOutputs as usize,
+                p.inputs as usize,
+                p.outputs as usize,
+                p.inputParameterChanges as usize,
+                p.outputParameterChanges as usize,
+                p.inputEvents as usize,
+                p.outputEvents as usize,
+                p.processContext as usize,
+            ],
+            [
+                c.state as u64,
+                c.sampleRate.to_bits(),
+                c.projectTimeSamples as u64,
+                c.continousTimeSamples as u64,
+                c.systemTime as u64,
+                c.projectTimeMusic.to_bits(),
+                c.tempo.to_bits(),
+                c.barPositionMusic.to_bits(),
+                c.cycleStartMusic.to_bits(),
+            ],
+            f.parameters
+                .iter()
+                .map(|p| (p.id, p.sample_offset, p.value.to_bits()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn pending_parameter_flush_preserves_context_and_retained_com_queues() {
+        use crate::plugin::PendingParameterFlushOutcome as Outcome;
+        for recycled in [false, true] {
+            let mut f = Fixture::new();
+            assert_eq!(
+                f.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::NoPending
+            );
+            assert_eq!(f.observed.lock().unwrap().calls, 0);
+            let data = f.data.as_mut().unwrap();
+            data.process_context.projectTimeSamples = -73;
+            data.process_context.continousTimeSamples = 81;
+            data.process_context.systemTime = 92;
+            data.process_context.projectTimeMusic = -1.25;
+            data.process_context.tempo = 80.0;
+            let retained = if recycled {
+                data.input_param_changes.enqueue(99, 2, 0.125);
+                let queues = data.input_param_changes.queues.lock().unwrap();
+                let retained = queues[0].to_com_ptr::<IParamValueQueue>().unwrap();
+                data.input_param_changes.clear_all();
+                Some(retained)
+            } else {
+                None
+            };
+            f.parameters.extend([
+                ParameterChange {
+                    id: 9,
+                    sample_offset: 0,
+                    value: 0.5,
+                },
+                ParameterChange {
+                    id: 3,
+                    sample_offset: 0,
+                    value: 0.75,
+                },
+                ParameterChange {
+                    id: 9,
+                    sample_offset: 0,
+                    value: 0.25,
+                },
+            ]);
+            let before = pending_flush_snapshot(&f);
+            f.context_fault.store(3, Ordering::Relaxed);
+            f.flush_fault.store(4, Ordering::Relaxed);
+            assert_eq!(
+                f.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::Flushed
+            );
+            let after = pending_flush_snapshot(&f);
+            assert_eq!((after.0, after.1), (before.0, before.1));
+            assert!(f.parameters.is_empty());
+            assert!(!f
+                .data
+                .as_ref()
+                .unwrap()
+                .input_param_changes
+                .has_active_points()
+                .unwrap());
+            let observed = f.observed.lock().unwrap();
+            assert_eq!(observed.frames, [0]);
+            assert_eq!(observed.native_io, [(0, 0, true, true, true)]);
+            assert_eq!(
+                observed.parameters,
+                [vec![(9, 0, 0.25_f64.to_bits()), (3, 0, 0.75_f64.to_bits())]]
+            );
+            drop(observed);
+            if let Some(retained) = retained {
+                let (mut offset, mut value) = (0, 0.0);
+                assert_eq!(unsafe { retained.getParameterId() }, 99);
+                assert_eq!(unsafe { retained.getPointCount() }, 1);
+                assert_eq!(
+                    unsafe { retained.getPoint(0, &mut offset, &mut value) },
+                    kResultOk
+                );
+                assert_eq!((offset, value), (2, 0.125));
+                drop(retained); // Genuine AddRef kept the displaced old queue alive.
+            }
+            assert_eq!(
+                f.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::NoPending
+            );
+            assert_eq!(f.observed.lock().unwrap().calls, 1);
+        }
+    }
+
+    #[test]
+    fn pending_parameter_flush_rejects_bad_whole_batches_and_foreign_input_before_native() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        for case in [
+            "nan",
+            "infinite",
+            "range",
+            "late",
+            "negative",
+            "capacity",
+            "legacy",
+            "chunk",
+            "active_com",
+            "empty_used_com",
+            "not_processing",
+            "context",
+        ] {
+            let mut f = Fixture::new();
+            f.data
+                .as_ref()
+                .unwrap()
+                .input_param_changes
+                .enqueue(99, 2, 0.125);
+            f.data.as_ref().unwrap().input_param_changes.clear_all();
+            f.parameters.push(ParameterChange {
+                id: 7,
+                sample_offset: 0,
+                value: 0.5,
+            });
+            let mut expected = Refusal::InvalidBatch;
+            match case {
+                "nan" | "infinite" | "range" | "late" | "negative" => {
+                    f.parameters.push(ParameterChange {
+                        id: 8,
+                        value: match case {
+                            "nan" => f64::NAN,
+                            "infinite" => f64::INFINITY,
+                            "range" => 1.25,
+                            _ => 0.75,
+                        },
+                        sample_offset: match case {
+                            "late" => 1,
+                            "negative" => -1,
+                            _ => 0,
+                        },
+                    })
+                }
+                "capacity" => f.parameters.resize(
+                    MAX_PENDING_PARAM_CHANGES + 1,
+                    ParameterChange {
+                        id: 7,
+                        sample_offset: 0,
+                        value: 0.5,
+                    },
+                ),
+                "legacy" => {
+                    f.input.add_event(on(0, 20));
+                    expected = Refusal::PendingEvents;
+                }
+                "chunk" => {
+                    f.chunks.push(Some(on(0, 20)));
+                    expected = Refusal::PendingEvents;
+                }
+                "active_com" | "empty_used_com" => {
+                    f.data
+                        .as_ref()
+                        .unwrap()
+                        .input_param_changes
+                        .enqueue(8, 0, 0.75);
+                    if case == "empty_used_com" {
+                        f.parameters.clear();
+                        f.data
+                            .as_ref()
+                            .unwrap()
+                            .input_param_changes
+                            .queues
+                            .lock()
+                            .unwrap()[0]
+                            .points
+                            .lock()
+                            .unwrap()
+                            .clear();
+                    }
+                    expected = Refusal::ExistingInput;
+                }
+                "not_processing" => expected = Refusal::NotProcessing,
+                "context" => {
+                    f.data.as_mut().unwrap().process_context.sampleRate = 44_100.0;
+                    expected = Refusal::InvalidContext;
+                }
+                _ => unreachable!(),
+            }
+            let before = pending_flush_snapshot(&f);
+            let input = f.data.as_ref().unwrap().input_param_changes.clone();
+            let queues = input
+                .queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|q| {
+                    (
+                        q.as_com_ref::<IParamValueQueue>().unwrap().as_ptr() as usize,
+                        q.param_id(),
+                        q.points
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|(o, v)| (*o, v.to_bits()))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut fields = f.fields();
+            if case == "not_processing" {
+                fields.is_processing = false;
+            }
+            assert_eq!(
+                fields.flush_pending_parameter_changes().unwrap(),
+                Outcome::Refused(expected),
+                "case={case}"
+            );
+            assert_eq!(pending_flush_snapshot(&f), before, "case={case}");
+            let after = input
+                .queues
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|q| {
+                    (
+                        q.as_com_ref::<IParamValueQueue>().unwrap().as_ptr() as usize,
+                        q.param_id(),
+                        q.points
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .map(|(o, v)| (*o, v.to_bits()))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(after, queues, "case={case}");
+            assert_eq!(f.observed.lock().unwrap().calls, 0);
+        }
+    }
+
+    #[test]
+    fn pending_parameter_flush_busy_poison_and_mixed_source_do_not_publish() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        for case in [
+            "busy",
+            "poison",
+            "source_value",
+            "feedback",
+            "source_failure",
+            "output_busy",
+        ] {
+            let mut f = Fixture::new();
+            f.parameters.push(ParameterChange {
+                id: 7,
+                sample_offset: 0,
+                value: 0.5,
+            });
+            let handler = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+            f.handler = Some(handler.clone());
+            let input = f.data.as_ref().unwrap().input_param_changes.clone();
+            let output = f.data.as_ref().unwrap().output_param_changes.clone();
+            let expected = match case {
+                "busy" | "output_busy" => Refusal::StorageBusy,
+                "poison" => Refusal::StoragePoisoned,
+                "source_value" => {
+                    assert_eq!(unsafe { handler.performEdit(0, 0.75) }, kResultOk);
+                    Refusal::SourceValuesPending
+                }
+                "feedback" => {
+                    assert_eq!(unsafe { handler.performEdit(0, 0.75) }, kResultOk);
+                    assert!(matches!(
+                        handler.take_editor_events(),
+                        crate::plugin::NativeEditorEventDrain::Complete { .. }
+                    ));
+                    Refusal::DspFeedbackPending
+                }
+                "source_failure" => {
+                    assert_eq!(unsafe { handler.endEdit(0) }, kResultFalse);
+                    Refusal::InvalidSource
+                }
+                _ => unreachable!(),
+            };
+            if matches!(case, "busy" | "poison" | "source_failure" | "output_busy") {
+                f.parameters.clear();
+            }
+            if case == "poison" {
+                assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _guard = input.queues.lock().unwrap();
+                    panic!("controlled input poison");
+                }))
+                .is_err());
+            }
+            let before = pending_flush_snapshot(&f);
+            let source = handler.editor_event_source_status();
+            let cohort = handler.pending_restart_cohort();
+            let feedback = handler.parameter_changes.lock().unwrap().clone();
+            let guard = if case == "busy" {
+                Some(input.queues.lock().unwrap())
+            } else if case == "output_busy" {
+                Some(output.queues.lock().unwrap())
+            } else {
+                None
+            };
+            assert_eq!(
+                f.fields().flush_pending_parameter_changes().unwrap(),
+                Outcome::Refused(expected),
+                "case={case}"
+            );
+            drop(guard);
+            assert_eq!(pending_flush_snapshot(&f), before);
+            assert_eq!(handler.editor_event_source_status(), source);
+            assert_eq!(handler.pending_restart_cohort(), cohort);
+            assert_eq!(*handler.parameter_changes.lock().unwrap(), feedback);
+            assert_eq!(f.observed.lock().unwrap().calls, 0);
+        }
+    }
+
+    #[test]
+    fn pending_parameter_flush_collects_fresh_output_across_normal_successive_calls() {
+        use crate::plugin::PendingParameterFlushOutcome as Outcome;
+        let mut f = Fixture::new();
+        f.flush_fault.store(1, Ordering::Relaxed);
+        f.parameters.push(ParameterChange {
+            id: 7,
+            sample_offset: 0,
+            value: 0.5,
+        });
+        assert_eq!(
+            f.fields().flush_pending_parameter_changes().unwrap(),
+            Outcome::Flushed
+        );
+        assert_eq!(f.feedback.pop(), Some((77, 0.25)));
+        assert!(f.feedback.is_empty());
+        assert!(f.emitted.pop().is_some());
+        assert!(f.emitted.is_empty());
+        let mut pcm = buffers(4);
+        f.fields().process_bus_audio(&mut pcm).unwrap();
+        assert_eq!(pcm.outputs[0].channels[0], [0.5; 4]);
+        assert_eq!(f.feedback.pop(), Some((77, 0.5)));
+        assert!(f.feedback.is_empty());
+        assert!(f.emitted.pop().is_some());
+        assert!(f.emitted.is_empty());
+        f.fields().process_bus_audio(&mut pcm).unwrap();
+        assert_eq!(pcm.outputs[0].channels[0], [0.75; 4]);
+        assert_eq!(f.feedback.pop(), Some((77, 0.75)));
+        assert!(f.feedback.is_empty());
+        assert!(f.emitted.pop().is_some());
+        assert!(f.emitted.is_empty());
+        let observations = f.observed.lock().unwrap();
+        assert_eq!(observations.frames, [0, 4, 4]);
+        assert!(observations.parameters[1].is_empty() && observations.parameters[2].is_empty());
+    }
+
+    #[test]
+    fn pending_parameter_flush_post_failure_preserves_output_and_never_replays_input() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        for (fault, native_failure) in [(0, true), (2, false), (3, false), (2, true)] {
+            let mut f = Fixture::new();
+            f.parameters.push(ParameterChange {
+                id: 7,
+                sample_offset: 0,
+                value: 0.5,
+            });
+            f.flush_fault.store(fault, Ordering::Relaxed);
+            if native_failure {
+                f.fail_call.store(1, Ordering::Relaxed);
+            }
+            let before = pending_flush_snapshot(&f);
+            let result = f.fields().flush_pending_parameter_changes();
+            if native_failure {
+                assert!(matches!(result, Err(Error::ProcessFailed(1))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::NativeOutput(
+                        crate::error::NativeOutputError::StoragePoisoned
+                    ))
+                ));
+            }
+            assert!(f.parameters.is_empty());
+            assert!(!f
+                .data
+                .as_ref()
+                .unwrap()
+                .input_param_changes
+                .has_active_points()
+                .unwrap());
+            let after = pending_flush_snapshot(&f);
+            assert_eq!((after.0, after.1), (before.0, before.1));
+            assert_eq!(f.observed.lock().unwrap().calls, 1);
+            if fault == 0 {
+                assert_eq!(
+                    f.fields().flush_pending_parameter_changes().unwrap(),
+                    Outcome::NoPending
+                );
+                f.fail_call.store(0, Ordering::Relaxed);
+                f.fields().process_bus_audio(&mut buffers(4)).unwrap();
+                assert!(f.observed.lock().unwrap().parameters[1].is_empty());
+            } else {
+                assert_eq!(
+                    f.fields().flush_pending_parameter_changes().unwrap(),
+                    Outcome::Refused(Refusal::StoragePoisoned)
+                );
+                f.parameters.push(ParameterChange {
+                    id: 8,
+                    sample_offset: 0,
+                    value: 0.25,
+                });
+                let retained = pending_flush_snapshot(&f);
+                let mut pcm = buffers(4);
+                pcm.outputs[0].channels[0].fill(9.0);
+                assert!(matches!(
+                    f.fields().process_bus_audio(&mut pcm),
+                    Err(Error::NativeOutput(
+                        crate::error::NativeOutputError::StoragePoisoned
+                    ))
+                ));
+                assert_eq!(pcm.outputs[0].channels[0], [9.0; 4]);
+                assert!(matches!(
+                    f.fields().process_bus_audio_with_note_events(&mut pcm, &[]),
+                    Err(Error::NativeOutput(
+                        crate::error::NativeOutputError::StoragePoisoned
+                    ))
+                ));
+                assert_eq!(pcm.outputs[0].channels[0], [9.0; 4]);
+                let mut flat = AudioBuffers::new(0, 1, 4, 48_000.0);
+                flat.outputs[0].fill(9.0);
+                assert!(matches!(
+                    f.fields()
+                        .process_buffer_view(&mut CallerAudioBuffers::Flat(&mut flat)),
+                    Err(Error::NativeOutput(
+                        crate::error::NativeOutputError::StoragePoisoned
+                    ))
+                ));
+                assert_eq!(flat.outputs[0], [9.0; 4]);
+                assert_eq!(pending_flush_snapshot(&f), retained);
+                assert_eq!(f.observed.lock().unwrap().calls, 1);
+                // Recover guards only to inspect retained evidence, never to
+                // clear or resume the production output owner.
+                if fault == 2 {
+                    let queues = match f.data.as_ref().unwrap().output_param_changes.queues.lock() {
+                        Err(error) => error.into_inner(),
+                        Ok(_) => panic!("actual poison retained"),
+                    };
+                    assert_eq!(queues[0].points.lock().unwrap().len(), 1);
+                } else {
+                    let events = match f.output.events.lock() {
+                        Err(error) => error.into_inner(),
+                        Ok(_) => panic!("actual poison retained"),
+                    };
+                    assert_eq!(events.len(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_parameter_flush_preserves_legacy_arriving_inside_native_call() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        let mut f = Fixture::new();
+        f.parameters.push(ParameterChange {
+            id: 7,
+            sample_offset: 0,
+            value: 0.5,
+        });
+        f.inject_legacy.store(true, Ordering::Relaxed);
+        assert_eq!(
+            f.fields().flush_pending_parameter_changes().unwrap(),
+            Outcome::Flushed
+        );
+        assert_eq!(unsafe { f.input.getEventCount() }, 1);
+        assert_eq!(
+            f.fields().flush_pending_parameter_changes().unwrap(),
+            Outcome::Refused(Refusal::PendingEvents)
+        );
+        assert_eq!(unsafe { f.input.getEventCount() }, 1);
+        assert_eq!(f.observed.lock().unwrap().calls, 1);
+        assert!(f.parameters.is_empty());
+    }
+    #[test]
+    fn pending_parameter_flush_restart_policy_applies_before_empty_and_publication() {
+        use crate::plugin::{
+            PendingParameterFlushOutcome as Outcome, PendingParameterFlushRefusal as Refusal,
+        };
+        for empty in [false, true] {
+            for flags in [0, 4, 1, 2, 8, 16, 20, 12, 32, 1 << 30] {
+                let mut f = Fixture::new();
+                let handler =
+                    ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
+                assert_eq!(unsafe { handler.restartComponent(flags) }, kResultOk);
+                f.handler = Some(handler.clone());
+                let input = f.data.as_ref().unwrap().input_param_changes.clone();
+                input.enqueue(99, 2, 0.125);
+                input.clear_all();
+                let old = input.queues.lock().unwrap()[0]
+                    .to_com_ptr::<IParamValueQueue>()
+                    .unwrap();
+                if !empty {
+                    f.parameters.push(ParameterChange {
+                        id: 7,
+                        sample_offset: 0,
+                        value: 0.75,
+                    });
+                }
+                let before = pending_flush_snapshot(&f);
+                let source = handler.editor_event_source_status();
+                let cohort = handler.pending_restart_cohort();
+                let result = f.fields().flush_pending_parameter_changes().unwrap();
+                if matches!(flags, 0 | 4) {
+                    assert_eq!(
+                        result,
+                        if empty {
+                            Outcome::NoPending
+                        } else {
+                            Outcome::Flushed
+                        }
+                    );
+                    assert_eq!(f.observed.lock().unwrap().calls, usize::from(!empty));
+                } else {
+                    assert_eq!(result, Outcome::Refused(Refusal::RestartRequired));
+                    assert_eq!(pending_flush_snapshot(&f), before);
+                    assert_eq!(
+                        input.queues.lock().unwrap()[0]
+                            .as_com_ref::<IParamValueQueue>()
+                            .unwrap()
+                            .as_ptr(),
+                        old.as_ptr()
+                    );
+                    assert_eq!(f.observed.lock().unwrap().calls, 0);
+                }
+                assert_eq!(handler.editor_event_source_status(), source);
+                assert_eq!(handler.pending_restart_cohort(), cohort);
+            }
         }
     }
 }

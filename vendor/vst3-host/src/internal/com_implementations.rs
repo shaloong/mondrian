@@ -2936,6 +2936,34 @@ impl HostEventList {
         self.payload_bytes.store(0, Ordering::Relaxed);
     }
 
+    pub(super) fn require_collected_output(&self) -> Result<(), crate::error::NativeOutputError> {
+        use crate::error::NativeOutputError as Failure;
+        let events = self.events.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        if !events.is_empty() || self.payload_bytes.load(Ordering::Relaxed) != 0 {
+            return Err(Failure::Pending);
+        }
+        Ok(())
+    }
+
+    pub(super) fn collect_process_output(
+        &self,
+        output: &crossbeam_queue::ArrayQueue<PluginEvent>,
+    ) -> Result<(), crate::error::NativeOutputError> {
+        use crate::error::NativeOutputError as Failure;
+        let mut events = self.events.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        for event in events.drain(..) {
+            output.force_push(event);
+        }
+        self.payload_bytes.store(0, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Move queued events into reusable optional slots for allocation-free chunk routing.
     pub fn take_into_slots(&self, out: &mut Vec<Option<PluginEvent>>) {
         out.clear();
@@ -3085,6 +3113,21 @@ impl ActiveNoteEventList {
             _ => Ok(()),
         }
     }
+    pub(super) fn require_empty_for_parameter_flush(
+        &self,
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        self.require_quiescent()?;
+        let storage = self.storage.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        if !storage.events.is_empty() || storage.events.capacity() != 0 {
+            return Err(Failure::PendingEvents);
+        }
+        Ok(())
+    }
+
     pub(super) fn begin(
         &self,
         retained: &mut Vec<Option<PluginEvent>>,
@@ -3696,7 +3739,208 @@ impl Default for ParameterChanges {
     }
 }
 
+/// Unpublished native view of one original pending Vec. This is temporary
+/// cold projection storage, not a second pending-input authority or RT guarantee.
+/// ComWrapper::new retains its standard OOM-abort behavior; Vec reservations
+/// alone have typed recoverable failure.
+pub(super) struct PendingParameterProjection {
+    queues: Vec<ComWrapper<ParameterValueQueue>>,
+    used: usize,
+}
+impl PendingParameterProjection {
+    pub(super) fn prepare(
+        values: &[crate::parameters::ParameterChange],
+        limit: usize,
+    ) -> Result<Self, crate::plugin::PendingParameterFlushRefusal> {
+        use crate::plugin::PendingParameterFlushRefusal as Failure;
+        let mut queues = Vec::new();
+        queues
+            .try_reserve_exact(values.len())
+            .map_err(|_| Failure::StorageCapacity)?;
+        if queues.capacity() > limit {
+            return Err(Failure::StorageCapacity);
+        }
+        for (index, value) in values.iter().enumerate() {
+            if values[..index].iter().any(|prior| prior.id == value.id) {
+                continue;
+            }
+            // Preserve first-ID queue order and the old enqueue operation's
+            // last-value override for duplicate points at the same offset zero.
+            let value = values[index..]
+                .iter()
+                .rev()
+                .find(|last| last.id == value.id)
+                .unwrap();
+            let mut points = Vec::new();
+            points
+                .try_reserve_exact(1)
+                .map_err(|_| Failure::StorageCapacity)?;
+            if points.capacity() > 1 {
+                return Err(Failure::StorageCapacity);
+            }
+            points.push((0, value.value));
+            queues.push(ComWrapper::new(ParameterValueQueue {
+                param_id: AtomicU32::new(value.id),
+                points: Mutex::new(points),
+            }));
+        }
+        let used = queues.len();
+        Ok(Self { queues, used })
+    }
+}
+
+fn pending_flush_lock_refusal<T>(
+    error: std::sync::TryLockError<T>,
+) -> crate::plugin::PendingParameterFlushRefusal {
+    match error {
+        std::sync::TryLockError::WouldBlock => {
+            crate::plugin::PendingParameterFlushRefusal::StorageBusy
+        }
+        std::sync::TryLockError::Poisoned(_) => {
+            crate::plugin::PendingParameterFlushRefusal::StoragePoisoned
+        }
+    }
+}
+
 impl ParameterChanges {
+    /// Health-only admission also applies to an empty host Vec. Legitimate
+    /// unconsumed Source values/feedback still belong to the old replay path;
+    /// an already active COM producer never does, even with zero point count.
+    pub(super) fn require_empty_pending_flush_input(
+        &self,
+        handler: Option<&ComponentHandler>,
+    ) -> Result<(), crate::plugin::PendingParameterFlushRefusal> {
+        use crate::plugin::PendingParameterFlushRefusal as Failure;
+        let source = handler
+            .map(|handler| handler.editor_events.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let cohort = handler.map(ComponentHandler::pending_restart_cohort);
+        let _feedback = handler
+            .map(|handler| handler.parameter_changes.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let _queues = self.queues.try_lock().map_err(pending_flush_lock_refusal)?;
+        if source
+            .as_ref()
+            .is_some_and(|source| source.failure.is_some())
+        {
+            return Err(Failure::InvalidSource);
+        }
+        if self.used.load(Ordering::Relaxed) != 0 {
+            return Err(Failure::ExistingInput);
+        }
+        if handler.map(ComponentHandler::pending_restart_cohort) != cohort {
+            return Err(Failure::SourceChanged);
+        }
+        if cohort
+            .is_some_and(|cohort| cohort.exhausted() || !matches!(cohort.flags().bits(), 0 | 4))
+        {
+            return Err(Failure::RestartRequired);
+        }
+        Ok(())
+    }
+
+    /// With None, inspect only. With Some, all fallible checks finish before
+    /// the pool swap and active-count publication. The caller retains the
+    /// displaced inactive pool until every original lock below has ended.
+    pub(super) fn pending_flush_input(
+        &self,
+        handler: Option<&ComponentHandler>,
+        candidate: Option<&mut PendingParameterProjection>,
+    ) -> Result<(), crate::plugin::PendingParameterFlushRefusal> {
+        use crate::plugin::{
+            NativeEditorEvent, ParameterEditKind, PendingParameterFlushRefusal as Failure,
+        };
+        let source = handler
+            .map(|handler| handler.editor_events.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let cohort = handler.map(ComponentHandler::pending_restart_cohort);
+        let feedback = handler
+            .map(|handler| handler.parameter_changes.try_lock())
+            .transpose()
+            .map_err(pending_flush_lock_refusal)?;
+        let mut queues = self.queues.try_lock().map_err(pending_flush_lock_refusal)?;
+        if let Some(source) = &source {
+            if source.failure.is_some() {
+                return Err(Failure::InvalidSource);
+            }
+            if source.events.iter().any(|event| {
+                matches!(event,
+                NativeEditorEvent::Parameter(edit) if edit.kind == ParameterEditKind::ValueChange)
+            }) {
+                return Err(Failure::SourceValuesPending);
+            }
+        }
+        if feedback
+            .as_ref()
+            .is_some_and(|feedback| !feedback.is_empty())
+        {
+            return Err(Failure::DspFeedbackPending);
+        }
+        // Even a used queue with zero points belongs to another producer.
+        if self.used.load(Ordering::Relaxed) != 0 {
+            return Err(Failure::ExistingInput);
+        }
+        if handler.map(ComponentHandler::pending_restart_cohort) != cohort {
+            return Err(Failure::SourceChanged);
+        }
+        if cohort
+            .is_some_and(|cohort| cohort.exhausted() || !matches!(cohort.flags().bits(), 0 | 4))
+        {
+            return Err(Failure::RestartRequired);
+        }
+        if let Some(candidate) = candidate {
+            std::mem::swap(&mut *queues, &mut candidate.queues);
+            self.used.store(candidate.used, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_collected_output(&self) -> Result<(), crate::error::NativeOutputError> {
+        use crate::error::NativeOutputError as Failure;
+        let queues = self.queues.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        let used = self.used.load(Ordering::Relaxed);
+        if used > queues.len() {
+            return Err(Failure::InvalidOwner);
+        }
+        if used != 0 {
+            return Err(Failure::Pending);
+        }
+        Ok(())
+    }
+
+    pub(super) fn collect_process_output(
+        &self,
+        output: &crossbeam_queue::ArrayQueue<(u32, f64)>,
+    ) -> Result<(), crate::error::NativeOutputError> {
+        use crate::error::NativeOutputError as Failure;
+        let queues = self.queues.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+        })?;
+        let used = self.used.load(Ordering::Relaxed);
+        if used > queues.len() {
+            return Err(Failure::InvalidOwner);
+        }
+        for queue in &queues[..used] {
+            let points = queue.points.try_lock().map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+                std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+            })?;
+            for &(_offset, value) in points.iter() {
+                output.force_push((queue.param_id(), value));
+            }
+        }
+        // Failure above keeps the original active output owner visible. Every
+        // later processing entrance refuses it before it can be overwritten.
+        self.used.store(0, Ordering::Relaxed);
+        Ok(())
+    }
     pub(crate) fn has_active_points(&self) -> crate::Result<bool> {
         let queues = self.queues.lock().map_err(|_| {
             crate::Error::HostStorage(crate::host_storage::HostStorageError::PoisonedOwner)
@@ -6697,6 +6941,117 @@ mod active_note_owner_tests {
         assert!(chunks.is_empty());
         assert_eq!(owner.require_quiescent(), Err(Failure::StoragePoisoned));
         assert_eq!(unsafe { owner.getEventCount() }, 0);
+    }
+    #[test]
+    fn parameter_flush_requires_empty_healthy_checked_storage_without_latching_pure_busy() {
+        let owner = ActiveNoteEventList::new();
+        {
+            let _guard = owner.storage.lock().unwrap();
+            assert_eq!(
+                owner.require_empty_for_parameter_flush(),
+                Err(crate::error::NativeEventError::StorageBusy)
+            );
+        }
+        assert_eq!(owner.require_quiescent(), Ok(()));
+        owner.open();
+        assert_eq!(
+            owner.require_empty_for_parameter_flush(),
+            Err(crate::error::NativeEventError::PendingEvents)
+        );
+        owner.close();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = owner.storage.lock().unwrap();
+            panic!("controlled checked owner poison");
+        }))
+        .is_err());
+        assert_eq!(
+            owner.require_empty_for_parameter_flush(),
+            Err(crate::error::NativeEventError::StoragePoisoned)
+        );
+    }
+
+    #[test]
+    fn pending_flush_projection_rechecks_original_source_feedback_and_input_before_swap() {
+        use crate::plugin::PendingParameterFlushRefusal as Failure;
+        let changes = ParameterChanges::default();
+        changes.enqueue(99, 2, 0.125);
+        changes.clear_all();
+        let old = changes.queues.lock().unwrap()[0]
+            .to_com_ptr::<IParamValueQueue>()
+            .unwrap();
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let values = [crate::parameters::ParameterChange {
+            id: 7,
+            sample_offset: 0,
+            value: 0.75,
+        }];
+        assert_eq!(changes.pending_flush_input(Some(&handler), None), Ok(()));
+        let mut candidate = PendingParameterProjection::prepare(&values, 4096).unwrap();
+        {
+            let _guard = handler.editor_events.lock().unwrap();
+            assert_eq!(
+                changes.pending_flush_input(Some(&handler), Some(&mut candidate)),
+                Err(Failure::StorageBusy)
+            );
+        }
+        {
+            let _guard = handler.parameter_changes.lock().unwrap();
+            assert_eq!(
+                changes.pending_flush_input(Some(&handler), Some(&mut candidate)),
+                Err(Failure::StorageBusy)
+            );
+        }
+        // A real callback between initial check and publication must be seen.
+        assert_eq!(unsafe { handler.performEdit(7, 0.625) }, kResultOk);
+        let status = handler.editor_event_source_status();
+        assert_eq!(
+            changes.pending_flush_input(Some(&handler), Some(&mut candidate)),
+            Err(Failure::SourceValuesPending)
+        );
+        assert_eq!(handler.editor_event_source_status(), status);
+        assert_eq!(changes.used.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            changes.queues.lock().unwrap()[0]
+                .as_com_ref::<IParamValueQueue>()
+                .unwrap()
+                .as_ptr(),
+            old.as_ptr()
+        );
+        let (mut offset, mut value) = (0, 0.0);
+        assert_eq!(
+            unsafe { old.getPoint(0, &mut offset, &mut value) },
+            kResultOk
+        );
+        assert_eq!((offset, value), (2, 0.125));
+    }
+    #[test]
+    fn pending_flush_restart_exhaustion_keeps_source_and_original_input_owner() {
+        use crate::plugin::PendingParameterFlushRefusal as Failure;
+        let input = ParameterChanges::default();
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        handler
+            .restart_cohort
+            .store((u64::from(u32::MAX) << 32) | 4, Ordering::Release);
+        let before = handler.editor_event_source_status();
+        let raw = handler.pending_restart_cohort();
+        let values = [crate::parameters::ParameterChange {
+            id: 7,
+            value: 0.5,
+            sample_offset: 0,
+        }];
+        let mut candidate = PendingParameterProjection::prepare(&values, 4096).unwrap();
+        assert_eq!(
+            input.require_empty_pending_flush_input(Some(&handler)),
+            Err(Failure::RestartRequired)
+        );
+        assert_eq!(
+            input.pending_flush_input(Some(&handler), Some(&mut candidate)),
+            Err(Failure::RestartRequired)
+        );
+        assert_eq!(handler.editor_event_source_status(), before);
+        assert_eq!(handler.pending_restart_cohort(), raw);
+        assert!(input.queues.lock().unwrap().is_empty());
+        assert_eq!(input.used.load(Ordering::Relaxed), 0);
     }
 }
 
