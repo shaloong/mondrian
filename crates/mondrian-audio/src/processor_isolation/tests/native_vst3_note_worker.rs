@@ -358,6 +358,13 @@ fn u32_at(bytes: &[u8], index: usize) -> u32 {
 }
 pub(super) type NativeCall = (i32, i32, u32, u32);
 pub(super) fn audit(bytes: &[u8], pid: u32) -> (u64, Vec<NativeCall>, Vec<[u8; 48]>) {
+    audit_with_mode(bytes, pid, 4)
+}
+pub(super) fn audit_with_mode(
+    bytes: &[u8],
+    pid: u32,
+    expected_mode: u32,
+) -> (u64, Vec<NativeCall>, Vec<[u8; 48]>) {
     assert!(bytes.len() >= 80 && bytes.len() <= AUDIT_BOUND);
     assert_eq!(&bytes[..4], b"MNA4");
     assert_eq!(u32_at(bytes, 4), 4);
@@ -366,12 +373,20 @@ pub(super) fn audit(bytes: &[u8], pid: u32) -> (u64, Vec<NativeCall>, Vec<[u8; 4
         bytes.len(),
         "exactly one complete physical component lifetime"
     );
-    assert_eq!(u32_at(bytes, 12), 4);
+    match expected_mode {
+        4 => assert_eq!(u32_at(bytes, 12), 4),
+        6 => assert_eq!(u32_at(bytes, 12), 6),
+        _ => panic!("unsupported owned audit mode"),
+    }
     assert_eq!(u32_at(bytes, 16), pid);
     assert_eq!(u32_at(bytes, 20), 1);
     assert_ne!(u64::from_le_bytes(bytes[24..32].try_into().unwrap()), 0);
     assert_eq!(u32_at(bytes, 32), 1);
-    assert_eq!(u32_at(bytes, 36), 7);
+    match expected_mode {
+        4 => assert_eq!(u32_at(bytes, 36), 7),
+        6 => assert_eq!(u32_at(bytes, 36), 6),
+        _ => unreachable!(),
+    }
     assert_eq!(u32_at(bytes, 48), BLOCK as u32);
     let (calls, events) = (u32_at(bytes, 52) as usize, u32_at(bytes, 56) as usize);
     assert_eq!((u32_at(bytes, 60), u32_at(bytes, 64)), (1024, 8192));
