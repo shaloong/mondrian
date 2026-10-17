@@ -238,7 +238,7 @@ fn run_blocks(
     mut process: impl for<'b> FnMut(
         IsolatedAudioProcessorWorkerBlock<'b>,
     ) -> Result<(), AudioProcessorHostError>,
-) {
+) -> [f32; 14] {
     assert_eq!(
         blocks.iter().map(|count| *count as usize).sum::<usize>(),
         case.expected_pcm.len()
@@ -345,6 +345,7 @@ fn run_blocks(
         case.expected_pcm,
         "literal independently reviewed dyadic PCM, never Gate/lowering output"
     );
+    actual_pcm
 }
 
 #[derive(Clone, Copy)]
@@ -356,7 +357,9 @@ enum Route {
 fn run_partition(case: &Case<'_>, blocks: &[u32], route: Route) {
     let mut worker = prepare_gate();
     match route {
-        Route::Inline => run_blocks(case, blocks, |block| worker.process(block)),
+        Route::Inline => {
+            run_blocks(case, blocks, |block| worker.process(block));
+        }
         Route::BorrowedDspRole => {
             assert!(worker.uses_native_processing_split());
             let split = worker.split_native_processing().expect("same native object roles");
@@ -394,7 +397,7 @@ fn run_partition(case: &Case<'_>, blocks: &[u32], route: Route) {
     pinned_dll();
 }
 
-fn matrix(route: Route) {
+fn normal_case() -> ([Declared; 5], [f32; 14], [(u32, AudioNoteEndEvent); 2]) {
     let normal = [
         on(2, 0, 0, 60, 10, 0.0),
         on(2, 1, 0, 60, 11, 1.0),
@@ -418,6 +421,15 @@ fn matrix(route: Route) {
         1.0 / 64.0,
         0.0,
     ];
+    (
+        normal,
+        normal_pcm,
+        [(8, end(10, 0, 0, 60)), (12, end(11, 1, 0, 60))],
+    )
+}
+
+fn matrix(route: Route) {
+    let (normal, normal_pcm, normal_ends) = normal_case();
     let same_key = [
         on(0, 0, 0, 60, 20, 0.0),
         on(0, 0, 0, 60, 21, 1.0),
@@ -463,7 +475,7 @@ fn matrix(route: Route) {
         Case {
             declared: &normal,
             expected_pcm: &normal_pcm,
-            expected_ends: &[(8, end(10, 0, 0, 60)), (12, end(11, 1, 0, 60))],
+            expected_ends: &normal_ends,
             split: &[3, 2, 4, 5],
         },
         Case {
@@ -496,6 +508,143 @@ fn owned_windows_dynamic_note_gate_inline_literal_pcm_matrix() {
 #[ignore = "BLOCKED: production Note capability; direct borrowed DSP role is adapter-only, not IPC/scope qualification"]
 fn owned_windows_dynamic_note_gate_borrowed_dsp_literal_pcm_matrix() {
     matrix(Route::BorrowedDspRole);
+}
+
+/// Real B239 callbacks qualify the native predicate and retained receipt here.
+/// The separate TCP/sole-slot control qualifies dispatch. Independent CLAP idle
+/// service remains legal; this test makes no global zero-callback assertion.
+#[test]
+#[ignore = "requires the explicit fixed owned B239 DLL; same-object adapter control, not Product IPC or Runtime handoff"]
+fn native_clap_held_author_receipt_blocks_only_the_command_flush() {
+    use crate::{
+        NativeAudioAuthorAcknowledgement, NativeAudioAuthorDeliveryState as Delivery,
+        NativeAudioAuthorEvent, NativeAudioAuthorParameterPhase, NativeAudioObjectBindOutcome,
+        NativeAudioObjectBindRequest, NativeAudioObservationConsumption as Consumption,
+    };
+
+    fn eligible(
+        worker: &mut dyn IsolatedAudioProcessorWorker,
+        binding: NativeAudioObjectBindRequest,
+    ) -> bool {
+        let roles = worker.split_native_processing().expect("same actual CLAP roles");
+        roles
+            .main
+            .native_author_binding_matches(binding)
+            .expect("actual main-role predicate")
+    }
+
+    let mut worker = prepare_gate();
+    let object = worker.native_audio_object_observation().unwrap().unwrap();
+    let binding = NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: object,
+    };
+    assert!(matches!(worker.bind_native_audio_object(binding).unwrap(),
+        NativeAudioObjectBindOutcome::Bound(receipt)
+            if receipt.binding() == binding.binding && receipt.object() == object));
+    assert!(eligible(worker.as_mut(), binding));
+    let (declared, expected_pcm, expected_ends) = normal_case();
+    let case = Case {
+        declared: &declared,
+        expected_pcm: &expected_pcm,
+        expected_ends: &expected_ends,
+        split: &[3, 2, 4, 5],
+    };
+    let pcm = run_blocks(&case, case.split, |block| worker.process(block));
+    assert_eq!(pcm, expected_pcm);
+    let before = worker.poll_native_observations(Consumption::Preserve).unwrap();
+    assert_eq!(before.object, Some(object));
+    let source = before.author.unwrap().source;
+    assert_eq!(source.revision(), 4);
+    assert_eq!(source.pending_events(), 4);
+    assert_eq!(source.failure(), None);
+    assert!(!source.publishing());
+    assert!(source.boundaries_closed());
+    assert_eq!(source.pending_dsp_feedback_values(), 0);
+    assert!(!source.parameter_flush_pending());
+
+    let first = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    assert_eq!(first.object, Some(object));
+    let author = first.author.unwrap();
+    assert_eq!(author.source, source);
+    let Delivery::Delivered(delivery) = author.delivery else {
+        panic!(
+            "real B239 Gain callbacks must yield one retained A: {:?}",
+            author.delivery
+        );
+    };
+    assert_eq!(delivery.binding(), binding);
+    assert_eq!(delivery.revision(), 4);
+    assert_eq!(delivery.request_cohort(), None);
+    assert_eq!(delivery.events().len(), 4);
+    for (event, position) in delivery.events().iter().zip([8, 8, 12, 12]) {
+        let NativeAudioAuthorEvent::ParameterAtExecution {
+            parameter,
+            sample_position,
+            sample_rate,
+        } = event
+        else {
+            panic!("expected the actual Process-origin Gain callback: {event:?}");
+        };
+        assert_eq!(
+            parameter.parameter(),
+            &ParameterId::new_static("clap.param.17")
+        );
+        assert_eq!(parameter.phase(), NativeAudioAuthorParameterPhase::Value);
+        assert_eq!(
+            parameter.value().unwrap().value().to_bits(),
+            0.5_f64.to_bits()
+        );
+        assert_eq!(*sample_position, position);
+        assert_eq!(*sample_rate, 48_000);
+    }
+    assert!(!eligible(worker.as_mut(), binding));
+    let repeated = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    assert_eq!(repeated.object, Some(object));
+    assert_eq!(
+        repeated.author.unwrap(),
+        crate::NativeAudioAuthorObservation {
+            source,
+            delivery: Delivery::AwaitingAcknowledgement {
+                binding,
+                revision: 4,
+                request_cohort: None,
+            },
+        }
+    );
+    assert!(!eligible(worker.as_mut(), binding));
+
+    // This exercises the adapter's exact receipt retirement only. It does not
+    // manufacture Session/Plan acceptance or claim canonical Runtime handoff.
+    let ack = NativeAudioAuthorAcknowledgement {
+        source_binding: binding,
+        installed_binding: binding,
+        revision: delivery.revision(),
+    };
+    let accepted = worker.poll_native_observations(Consumption::AcknowledgeAuthor(ack)).unwrap();
+    assert_eq!(accepted.object, Some(object));
+    let accepted = accepted.author.unwrap();
+    assert_eq!(
+        accepted.delivery,
+        Delivery::Acknowledged { acknowledgement: ack, request_cohort: None }
+    );
+    assert_eq!(accepted.source.revision(), 4);
+    assert!(accepted.source.closed_empty());
+    assert!(eligible(worker.as_mut(), binding));
+    let wrong = NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        ..binding
+    };
+    assert!(!eligible(worker.as_mut(), wrong));
+    let after = worker.poll_native_observations(Consumption::Preserve).unwrap();
+    assert_eq!(after.object, Some(object));
+    assert_eq!(after.author.unwrap().source, accepted.source);
+    assert_eq!(
+        pcm, expected_pcm,
+        "control-only inspection retains the literal PCM"
+    );
+    drop(worker);
+    pinned_dll();
 }
 
 #[test]
