@@ -2780,6 +2780,89 @@ fn product_worker_admits_disconnected_optional_temporal_clip() {
 }
 
 #[test]
+#[ignore = "requires current Product, SessionProbe optional_unmapped and an empty action-receipt directory"]
+fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() {
+    use std::io::Read;
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("new empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).unwrap().next().is_none());
+    let inspection = cpu_contract_probe("optional_unmapped");
+    assert_eq!(inspection.plugins.len(), 1);
+    let input = cpu_contract_input();
+    let original_input = input.clone();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        input.width(),
+        input.height(),
+        input.format(),
+        &mut || Ok(()),
+    )
+    .expect("actual native session with an unconnected optional clip");
+    let pid = session.worker_process_id();
+    let parameters = constant_parameters([("scale".to_owned(), OpenFxParameterValue::Double(0.5))]);
+    let rendered = session.render(&cpu_contract_timing(2.0), &parameters, &input, &mut || {
+        Ok(())
+    });
+    // Read the actual resident's checks before asserting render success: a RED
+    // must identify the raw metadata mismatch rather than merely native failure.
+    let mut bytes = Vec::new();
+    std::fs::File::open(directory.join(format!("actions-{pid}.txt")))
+        .expect("same-child native action checks")
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert!(!bytes.is_empty() && bytes.len() <= 4096 && bytes.is_ascii());
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(text.ends_with('\n') && text.lines().count() < 32);
+    let mut checks = Vec::new();
+    for (index, row) in text.lines().enumerate() {
+        let fields: Vec<_> = row.split_whitespace().collect();
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0].parse::<usize>().unwrap(), index + 1);
+        assert_eq!(
+            &fields[1..3],
+            ["D=0", "I=0"],
+            "resident PID, not discovery/Describe"
+        );
+        assert_eq!(fields[8], "complete=1");
+        if fields[3] == "optional-unmapped" {
+            checks.push(fields[3..].join(" "));
+        }
+    }
+    assert_eq!(
+        checks,
+        [
+            "optional-unmapped connected-zero attempted=1 accepted=1 status=0 complete=1",
+            "optional-unmapped unmapped-depth-none attempted=1 accepted=1 status=0 complete=1",
+            "optional-unmapped unmapped-components-none attempted=1 accepted=1 status=0 complete=1",
+            "optional-unmapped image-unavailable attempted=1 accepted=1 status=1 complete=1",
+            "optional-unmapped Source attempted=1 accepted=1 status=0 complete=1",
+            "optional-unmapped Output attempted=1 accepted=1 status=0 complete=1",
+        ],
+        "unconnected raw format is None while connected mapped/unmapped formats remain Float RGBA"
+    );
+    let output = rendered.expect("ordinary Basic rendering survives correct optional metadata");
+    assert_eq!(session.worker_process_id(), pid);
+    assert_eq!(output.format(), input.format());
+    assert_eq!(output.pixels().len(), input.pixels().len());
+    for (actual, source) in output.pixels().iter().zip(input.pixels()) {
+        for (&actual, &source) in actual.iter().zip(source) {
+            assert_eq!(actual.to_bits(), (source * 0.5).to_bits());
+        }
+    }
+    assert_eq!(
+        input, original_input,
+        "unconnected clip does not alter supplied Source"
+    );
+    session.shutdown().expect("original bounded shutdown of the same resident");
+}
+
+#[test]
 #[ignore = "requires current product and SessionProbe mode cpu_unsupported_descriptor"]
 fn product_worker_refuses_gpu_only_descriptor_before_registration() {
     let inspection = cpu_contract_probe("cpu_unsupported_descriptor");

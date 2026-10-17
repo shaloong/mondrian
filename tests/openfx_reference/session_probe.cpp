@@ -1588,6 +1588,53 @@ void describeActionReceipt(const char* action, const char* point,
   } catch (...) { incomplete = true; }
 }
 
+// The disconnected clip has no actual source format. Observe through the real
+// Property/Image suites during Render, after the ordinary clip-preference action.
+bool optionalUnmappedFormat(const void* handle, OfxPropertySetHandle in) {
+  OfxImageClipHandle optional = nullptr;
+  OfxPropertySetHandle properties = nullptr;
+  double time = 0.0;
+  if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, "DisconnectedOptional", &optional,
+                                &properties) != kOfxStatOK || !optional || !properties ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK) { return false; }
+  const auto stringIs = [](OfxPropertySetHandle set, const char* name, const char* expected) {
+    char* value = nullptr;
+    int dimension = 0;
+    return gPropHost->propGetDimension(set, name, &dimension) == kOfxStatOK && dimension == 1 &&
+        gPropHost->propGetString(set, name, 0, &value) == kOfxStatOK && value &&
+        std::strcmp(value, expected) == 0;
+  };
+  const auto record = [](const char* point, bool valid, OfxStatus status = kOfxStatOK) {
+    describeActionReceipt("optional-unmapped", point, 1, valid ? 1 : 0, status);
+    return valid;
+  };
+  int connected = -1;
+  bool valid = record("connected-zero",
+      gPropHost->propGetInt(properties, kOfxImageClipPropConnected, 0, &connected) == kOfxStatOK && connected == 0);
+  valid = record("unmapped-depth-none",
+      stringIs(properties, kOfxImageClipPropUnmappedPixelDepth, kOfxBitDepthNone)) && valid;
+  valid = record("unmapped-components-none",
+      stringIs(properties, kOfxImageClipPropUnmappedComponents, kOfxImageComponentNone)) && valid;
+  OfxPropertySetHandle image = nullptr;
+  const auto fetched = gEffectHost->clipGetImage(optional, time, nullptr, &image);
+  valid = record("image-unavailable", fetched == kOfxStatFailed && !image, fetched) && valid;
+  if (fetched == kOfxStatOK && image && gEffectHost->clipReleaseImage(image) != kOfxStatOK) { return false; }
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+    OfxImageClipHandle clip = nullptr;
+    properties = nullptr;
+    connected = -1;
+    const bool format = gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip,
+                                                  &properties) == kOfxStatOK && clip && properties &&
+        gPropHost->propGetInt(properties, kOfxImageClipPropConnected, 0, &connected) == kOfxStatOK && connected == 1 &&
+        stringIs(properties, kOfxImageEffectPropPixelDepth, kOfxBitDepthFloat) &&
+        stringIs(properties, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) &&
+        stringIs(properties, kOfxImageClipPropUnmappedPixelDepth, kOfxBitDepthFloat) &&
+        stringIs(properties, kOfxImageClipPropUnmappedComponents, kOfxImageComponentRGBA);
+    valid = record(name, format) && valid;
+  }
+  return valid;
+}
+
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -2258,9 +2305,17 @@ OfxStatus probeAction(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxImageEffectActionRender ||
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
+  if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
+      !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
       ? fixedCanvasPartialOutput(handle, in) : pluginMain(action, handle, in, out);
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
+    if (selected == "optional_unmapped" && operation == kOfxImageEffectActionDescribeInContext) {
+      OfxPropertySetHandle clip = nullptr;
+      if (gEffectHost->clipDefine((OfxImageEffectHandle)handle, "DisconnectedOptional", &clip) != kOfxStatOK || !clip ||
+          gPropHost->propSetString(clip, kOfxImageEffectPropSupportedComponents, 0, kOfxImageComponentRGBA) != kOfxStatOK ||
+          gPropHost->propSetInt(clip, kOfxImageClipPropOptional, 0, 1) != kOfxStatOK) { return kOfxStatFailed; }
+    }
     if (selected == "host_properties_readonly" &&
         ((operation == kOfxActionDescribe && !writablePluginLabels(handle, false)) ||
          (operation == kOfxImageEffectActionDescribeInContext && !writablePluginLabels(handle, true)))) { return kOfxStatFailed; }
@@ -2530,6 +2585,9 @@ OfxStatus probe(const char* action, const void* handle,
   if (temporalClipAdmissionMode(mode()) && std::strcmp(action, kOfxActionCreateInstance) == 0) {
     observed = kOfxActionCreateInstance;
   }
+  if (mode() == "optional_unmapped" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
   const bool observing = directory && *directory;
   static std::atomic<const void*> describedBase{nullptr}, describedContext{nullptr};
