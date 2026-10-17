@@ -1539,7 +1539,9 @@ impl VstSignalFields<'_> {
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
         if let Some(request) = self.configuration_phase.blocked_request() {
-            return Err(AudioProcessorHostError::ReprepareRequired(request));
+            return Err(AudioProcessorHostError::ReprepareRequired(
+                crate::NativeObservedRequest::RequestOnly(request),
+            ));
         }
         self.payload
             .main_audio_input

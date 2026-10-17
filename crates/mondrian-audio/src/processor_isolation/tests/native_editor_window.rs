@@ -713,7 +713,7 @@ fn native_author_product_preserve_and_wrong_ack_cannot_erase_a_delivered_real_na
             .poll_native_observations(consumption)
             .expect("same sole observation stream");
         assert!(
-            matches!(observed.author,Some(crate::NativeAudioAuthorObservation{delivery:crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement{binding,revision},..}) if binding==fixture.binding && revision==delivery.revision())
+            matches!(observed.author,Some(crate::NativeAudioAuthorObservation{delivery:crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement{binding,revision,request_cohort},..}) if binding==fixture.binding && revision==delivery.revision() && request_cohort==delivery.request_cohort())
         );
     }
     let bad = crate::NativeAudioAuthorAcknowledgement {

@@ -279,6 +279,9 @@ fn assert_public_canceled_preflight(nested: bool, has_pending: bool) {
         pending: Arc::clone(&pending),
         calls: Arc::clone(&calls),
         queries: Arc::clone(&queries),
+        observed: crate::NativeObservedRequest::RequestOnly(
+            mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+        ),
     };
     let contract = prepared(&sequence_with_audio_clip(), 16).contract();
     let mut runtime =

@@ -82,7 +82,9 @@ impl ClapSignalFields<'_> {
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
     ) -> Result<(), AudioProcessorHostError> {
         if let Some(request) = self.configuration_phase.blocked_request() {
-            return Err(AudioProcessorHostError::ReprepareRequired(request));
+            return Err(AudioProcessorHostError::ReprepareRequired(
+                crate::NativeObservedRequest::RequestOnly(request),
+            ));
         }
         let frames = block.frames();
         let end_sample = block.start_sample().checked_add(frames as i64).ok_or_else(|| {

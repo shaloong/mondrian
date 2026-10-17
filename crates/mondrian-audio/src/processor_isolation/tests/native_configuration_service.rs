@@ -679,7 +679,7 @@ fn qualify_same_child_seed(
     );
     assert_eq!(
         processor.preflight_reprepare().expect("still retained"),
-        Some(old)
+        Some(crate::NativeObservedRequest::RequestOnly(old))
     );
     let result = processor
         .stage_native_configuration_seed(NativeConfigurationSeedRequest {
