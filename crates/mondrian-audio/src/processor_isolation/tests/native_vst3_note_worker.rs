@@ -356,8 +356,8 @@ fn observe_exit(handle: &OwnedHandle, success: bool) {
 fn u32_at(bytes: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(bytes[index..index + 4].try_into().unwrap())
 }
-type NativeCall = (i32, i32, u32, u32);
-fn audit(bytes: &[u8], pid: u32) -> (u64, Vec<NativeCall>, Vec<[u8; 48]>) {
+pub(super) type NativeCall = (i32, i32, u32, u32);
+pub(super) fn audit(bytes: &[u8], pid: u32) -> (u64, Vec<NativeCall>, Vec<[u8; 48]>) {
     assert!(bytes.len() >= 80 && bytes.len() <= AUDIT_BOUND);
     assert_eq!(&bytes[..4], b"MNA4");
     assert_eq!(u32_at(bytes, 4), 4);
