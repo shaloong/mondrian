@@ -50,6 +50,13 @@ resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner �
 返回，父侧约101.07ms仍无 OS 退出观察。4097 拒绝用例另有 libtest 通过但
 Job 首次计数非零的失败，未记录关联进程身份。两项根因仍开放，原预算与断言保留。
 
+2026-10-18：退出观测现按原绝对期限检查查询前后时刻，迟到的真实退出仍结算
+唯一 Child，但不能算 graceful；五个生产 helper 时钟/查询控制通过。新正常
+Product 的首个 readonly 原生门在至少一轮五帧像素等断言后 shutdown 超时，Graph 未到，
+余七门未执行。单次默认关闭观测的三会话通过，inner 返回约3.5–4.3ms、父侧
+OS退出观察约66.7–75.8ms（相对 ParentBegin QPC）；未复现或解释首失败，不能
+分摊 DLL/CRT/OS/调度成本。原十一项与本次失败仍开放，预算和断言不变。
+
 Describe 请求/响应必须 schema2；保留原隐藏入口以使旧 worker 明确拒绝新请求。
 通知属于已核验 binary/请求 class 的整次元数据请求，不冒充发出通知的 class 或 Render invocation。
 单请求最多32条，文本4096/id256 UTF-8字节；丢失、Fatal 均拒定义并保留可信前缀。
