@@ -758,6 +758,7 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
     let mut energy = 0.0_f64;
     let mut resumed_pressed_energy = 0.0_f64;
     let mut quiet_frames = 0;
+    let mut previous_pcm = None;
     // Exactly 64 admitted requests, each at most one Source service and one
     // execution after a proved non-consuming refusal. No native failure retry.
     for start in (0..TOTAL).step_by(BLOCK) {
@@ -800,7 +801,19 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
                 handoffs += 1;
                 unchanged_transactions += usize::from(!changed);
                 if start as i64 > ON && (start as i64) < OFF {
-                    assert!(energy > 0.0, "real audible On prefix preceded this handoff");
+                    assert!(
+                        energy > 0.0,
+                        "real audible On prefix preceded this handoff: start={start}, handoffs={handoffs}, previous_pcm(start,cumulative_energy,nonzero,first_nonzero_interleaved,peak)={previous_pcm:?}, probe_latency={}, lookahead={}, public_cursor={:?}, signal_cursor={:?}, captured_values={:?}, canonical_values={:?}",
+                        captured.registration.execution_contract.algorithmic_latency_frames(),
+                        runtime.public_output_lookahead_frames(),
+                        before.sessions[0].state,
+                        before.processors[0].state,
+                        captured.current_values.iter().take(32).collect::<Vec<_>>(),
+                        sequence.audio_program.track_channels[&track].strip.pre_fader.processors[0]
+                            .parameters.iter().take(32)
+                            .map(|(id, parameter)| (id, parameter.automation.as_ref().unwrap().default_value))
+                            .collect::<Vec<_>>(),
+                    );
                     held_between_on_off += 1;
                 }
                 // The exact same unconsumed request, not seek/re-entry or a
@@ -829,6 +842,13 @@ fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
                 }
             }
         }
+        previous_pcm = Some((
+            start,
+            energy,
+            pcm.iter().filter(|sample| **sample != 0.0).count(),
+            pcm.iter().position(|sample| *sample != 0.0),
+            pcm.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+        ));
         assert_eq!(media.load(Ordering::SeqCst), 0);
         assert_eq!(
             runtime.observe_native_owner_object(owner(&runtime)).unwrap(),
