@@ -2680,7 +2680,7 @@ mod bus_contract_tests {
                 let mut a = arrangements.clone();
                 match wrong {
                     0 => n.inputs.push(n.outputs[0].clone()),
-                    1 => l.inputs.push(l.outputs[0].clone()),
+                    1 => l.inputs.push(l.outputs[0]),
                     2 => a.inputs.push(speakers),
                     3 => {
                         n.outputs.clear();
@@ -2690,7 +2690,7 @@ mod bus_contract_tests {
                     4 => n.outputs[0].role = AudioBusRole::Auxiliary,
                     _ => {
                         n.outputs.push(n.outputs[0].clone());
-                        l.outputs.push(l.outputs[0].clone());
+                        l.outputs.push(l.outputs[0]);
                         a.outputs.push(speakers);
                     }
                 }
@@ -2702,7 +2702,7 @@ mod bus_contract_tests {
                 channel_count: channels,
                 default_active: true,
             });
-            layout.inputs.push(layout.outputs[0].clone());
+            layout.inputs.push(layout.outputs[0]);
             arrangements.inputs.push(speakers);
             assert!(
                 audio_inputs_from_metadata(&native, &layout, &arrangements, channel_layout)
