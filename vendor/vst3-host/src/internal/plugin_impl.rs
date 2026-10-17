@@ -1918,6 +1918,11 @@ impl PluginImpl {
     /// Set up processing with the current configuration. VST3 requires the component to be
     /// **inactive**; every caller either runs before the first activation or deactivates first.
     fn setup_processing(&mut self) -> Result<()> {
+        // Existing undelivered parameter input takes precedence over lifecycle
+        // refusal. Both checks are pure and must leave its owner/setup untouched.
+        if self.pending_processor_parameter_input()? {
+            return Err(Error::PendingParameterDelivery);
+        }
         if self.is_active || self.is_processing {
             return Err(Error::Other(
                 "processing setup requires an inactive, stopped component".to_string(),
@@ -1927,9 +1932,6 @@ impl PluginImpl {
         // The old ProcessData may remain owned, but is unusable until a complete retry.
         self.applied_setup = None;
         self.bus_activation.event_readiness = None;
-        if self.pending_processor_parameter_input()? {
-            return Err(Error::PendingParameterDelivery);
-        }
         reconcile_audio_bus_activation(&self.component, &mut self.bus_activation)?;
 
         unsafe {
@@ -10700,7 +10702,7 @@ mod checked_native_note_tests {
 #[allow(clippy::unnecessary_cast)]
 mod restored_audio_activation_tests {
     use super::*;
-    use vst3::Class;
+    use vst3::{Class, ComRef};
 
     struct Probe {
         inputs: Vec<bool>,
@@ -11275,6 +11277,72 @@ mod restored_audio_activation_tests {
                     f.plugin.bus_activation.event_readiness.is_none(),
                     "failed apply does not grant checked readiness"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_setup_pending_input_precedes_hot_and_cold_guards_without_mutation() {
+        for hot in [false, true] {
+            for com_points in [false, true] {
+                let mut f = Fixture::new(vec![true], vec![true]);
+                if hot {
+                    f.plugin.start_processing().unwrap();
+                }
+                if com_points {
+                    let changes = &f.plugin.process_data.as_ref().unwrap().input_param_changes;
+                    let mut index = -1;
+                    // SAFETY: the same retained COM queue owns the SDK input point.
+                    let queue = unsafe { changes.addParameterData(&7, &mut index) };
+                    let queue = unsafe { ComRef::<IParamValueQueue>::from_raw(queue) }.unwrap();
+                    assert_eq!(unsafe { queue.addPoint(0, 0.5, &mut index) }, kResultOk);
+                } else {
+                    f.plugin.pending_param_changes.push(ParameterChange {
+                        id: 7,
+                        value: 0.5,
+                        sample_offset: 0,
+                    });
+                }
+                let snapshot = |f: &Fixture| {
+                    let p = f.probe.lock().unwrap();
+                    (
+                        f.plugin.is_active,
+                        f.plugin.is_processing,
+                        f.plugin.applied_setup,
+                        f.plugin.bus_activation.event_readiness,
+                        &**f.plugin.process_data.as_ref().unwrap() as *const HostProcessData,
+                        p.setups,
+                        p.bus_calls.clone(),
+                        p.dsp_calls,
+                    )
+                };
+                let before = snapshot(&f);
+                assert!(matches!(
+                    f.plugin.setup_processing(),
+                    Err(Error::PendingParameterDelivery)
+                ));
+                assert_eq!(snapshot(&f), before);
+                assert!(f.plugin.pending_processor_parameter_input().unwrap());
+                if com_points {
+                    assert!(f.plugin.pending_param_changes.is_empty());
+                    let changes = &f.plugin.process_data.as_ref().unwrap().input_param_changes;
+                    let queue = unsafe { changes.getParameterData(0) };
+                    let queue = unsafe { ComRef::<IParamValueQueue>::from_raw(queue) }.unwrap();
+                    assert_eq!(unsafe { queue.getPointCount() }, 1);
+                    let (mut offset, mut value) = (-1, -1.0);
+                    assert_eq!(
+                        unsafe { queue.getPoint(0, &mut offset, &mut value) },
+                        kResultOk
+                    );
+                    assert_eq!((offset, value.to_bits()), (0, 0.5_f64.to_bits()));
+                } else {
+                    assert_eq!(f.plugin.pending_param_changes.len(), 1);
+                    let value = &f.plugin.pending_param_changes[0];
+                    assert_eq!(
+                        (value.id, value.sample_offset, value.value.to_bits()),
+                        (7, 0, 0.5_f64.to_bits())
+                    );
+                }
             }
         }
     }

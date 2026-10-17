@@ -44,7 +44,16 @@ fn configuration(fail: u32) -> Vec<u8> {
 }
 fn open(host: &mut Vst3Host, fail: u32) -> Plugin {
     let mut plugin = host.load_plugin_class(fixture(), CLASS).expect("owned independent class");
+    // Host loading records the requested config; prepare it natively before
+    // comparing the complete setup/audit across the same-object state restore.
+    plugin.reconfigure(RATE, BLOCK).expect("real requested setup before audit");
     let before = audit(&plugin);
+    assert_eq!(before.sample_rate_bits, RATE.to_bits());
+    assert_eq!(before.max_frames, BLOCK as u32);
+    assert!(
+        before.calls.is_empty() && before.events.is_empty(),
+        "cold preparation is not DSP"
+    );
     plugin
         .load_state(&configuration(fail))
         .expect("same-object configuration restore");
