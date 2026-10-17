@@ -93,18 +93,20 @@ namespace MondrianOpenFx {
 
   FilterClipInstance::~FilterClipInstance() = default;
 
-  /// Float32 is the only admitted image depth.
+  /// Connected clips admit Float32; disconnected clips have no source depth.
   const std::string &FilterClipInstance::getUnmappedBitDepth() const
   {
-    static const std::string v(kOfxBitDepthFloat);
-    return v;
+    static const std::string connected(kOfxBitDepthFloat);
+    static const std::string disconnected(kOfxBitDepthNone);
+    return getConnected() ? connected : disconnected;
   }
 
-  /// RGBA is the only admitted component layout.
+  /// Connected clips admit RGBA; disconnected clips have no source components.
   const std::string &FilterClipInstance::getUnmappedComponents() const
   {
-    static const std::string v(kOfxImageComponentRGBA);
-    return v;
+    static const std::string connected(kOfxImageComponentRGBA);
+    static const std::string disconnected(kOfxImageComponentNone);
+    return getConnected() ? connected : disconnected;
   }
 
   // PreMultiplication -
