@@ -538,6 +538,8 @@ fn generic_note_expressions() -> [PluginEvent; 3] {
 #[test]
 #[ignore = "owned SDK fixture/native Job required; no Process"]
 fn native_cache_policy_disabled_refuses_consumers_without_optional_queries_or_mutation() {
+    use crate::plugin::{NativeEditorEvent, ParameterEdit, ParameterEditKind};
+
     let mut p = Probe::new(PluginInterfaceSupport::none());
     assert_eq!(p.calls.snapshot(), [0; 9]);
     // Nonempty real callback/cohort obligations cannot be erased by policy.
@@ -548,11 +550,40 @@ fn native_cache_policy_disabled_refuses_consumers_without_optional_queries_or_mu
         assert_eq!(handler.endEdit(5), kResultOk);
         assert_eq!(handler.restartComponent(20), kResultOk);
     }
-    let source = p.native.editor_event_source_status().unwrap();
+    let mut source_events = Vec::with_capacity(4);
+    let mut source_feedback = Vec::with_capacity(1);
+    let source = handler
+        .observe_editor_source_bounded(4, &mut source_events, &mut source_feedback)
+        .unwrap();
     let cohort = p.native.pending_restart_cohort();
-    assert_eq!(source.pending_events(), 3);
+    assert_eq!(source.pending_events(), 4);
     assert_eq!(source.pending_dsp_feedback_values(), 1);
     assert_eq!(cohort.unwrap().flags().bits(), 20);
+    assert_eq!(
+        source_events,
+        [
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 5,
+                kind: ParameterEditKind::BeginGesture,
+                value: None,
+            }),
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 5,
+                kind: ParameterEditKind::ValueChange,
+                value: Some(0.25),
+            }),
+            NativeEditorEvent::Parameter(ParameterEdit {
+                id: 5,
+                kind: ParameterEditKind::EndGesture,
+                value: None,
+            }),
+            NativeEditorEvent::ParameterRescanRequested {
+                flags: 20,
+                cohort: cohort.unwrap(),
+            },
+        ]
+    );
+    assert_eq!(source_feedback, [(5, 0.25)]);
     p.native.dirty_caches = DirtyCaches {
         midi_mapping: true,
         program_change: true,
@@ -614,6 +645,19 @@ fn native_cache_policy_disabled_refuses_consumers_without_optional_queries_or_mu
     assert!(p.native.pending_param_changes.is_empty());
     assert_eq!(p.native.editor_event_source_status().unwrap(), source);
     assert_eq!(p.native.pending_restart_cohort(), cohort);
+    let mut retained_events = Vec::with_capacity(4);
+    let mut retained_feedback = Vec::with_capacity(1);
+    assert_eq!(
+        p.native
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .observe_editor_source_bounded(4, &mut retained_events, &mut retained_feedback)
+            .unwrap(),
+        source
+    );
+    assert_eq!(retained_events, source_events);
+    assert_eq!(retained_feedback, source_feedback);
     // Generic SysEx is a core event and remains independent of expression policy.
     p.native
         .send_plugin_event(PluginEvent::sysex(vec![0xf0, 0x7d, 0xf7]))
