@@ -442,10 +442,10 @@ fn installed_vst3_zero_input_factory_rejects_actual_ready_shape_drift() {
     };
     assert!(
         matches!(
-            error, AudioProcessorHostError::WorkerFailed { operation: "startup handshake", detail }
+            &error, AudioProcessorHostError::WorkerFailed { operation: "startup", detail }
                 if detail == "invalid audio processor execution contract: VST3 main audio input changed since probe"
         ),
-        "only the actual create/startup failure is this gate's evidence"
+        "only the actual create/startup failure is this gate's evidence; actual={error:?}"
     );
     assert_eq!(
         original.native_audio_object_observation().unwrap(),
