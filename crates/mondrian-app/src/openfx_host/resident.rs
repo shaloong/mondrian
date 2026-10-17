@@ -190,6 +190,16 @@ struct ProcessOwner {
     child: Child,
     state: ProcessState,
     close_trace: close_observation::Trace,
+    #[cfg(test)]
+    cleanup_hooks: Option<CleanupHooks>,
+}
+
+// Per-owner OS refusal only; the real Child and transports remain unchanged.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct CleanupHooks {
+    observations: std::cell::Cell<usize>,
+    kills: std::cell::Cell<usize>,
 }
 
 /// Admission is revoked before cleanup. Only observed exit establishes settlement.
@@ -240,6 +250,22 @@ impl ProcessOwner {
         }
     }
     fn terminate(&mut self) -> Result<(), OpenFxHostError> {
+        #[cfg(test)]
+        if let Some(hooks) = self.cleanup_hooks.take() {
+            let result = self.terminate_with(
+                |_| {
+                    hooks.observations.set(hooks.observations.get() + 1);
+                    Err(io::Error::from_raw_os_error(87))
+                },
+                |_| {
+                    hooks.kills.set(hooks.kills.get() + 1);
+                    Err(io::Error::from_raw_os_error(5))
+                },
+                |_| panic!("a refused kill must not wait"),
+            );
+            self.cleanup_hooks = Some(hooks);
+            return result;
+        }
         self.terminate_with(Child::try_wait, Child::kill, Child::wait)
     }
 
@@ -559,6 +585,8 @@ impl OpenFxFilterSession {
             child: command.spawn().map_err(control_error)?,
             state: ProcessState::Running,
             close_trace,
+            #[cfg(test)]
+            cleanup_hooks: None,
         };
         process.close_trace.set_child(&process.child);
         let deadline = Instant::now() + DEADLINE;
@@ -3203,6 +3231,7 @@ mod process_retirement_tests {
             child,
             state: ProcessState::Running,
             close_trace: close_observation::Trace::default(),
+            cleanup_hooks: None,
         };
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -3448,6 +3477,196 @@ mod process_retirement_tests {
             .expect("real actual child kill and reap");
         assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
         assert_settled_idempotent(&mut owner);
+    }
+
+    // Real shutdown transport/mapping and an actual retained Child. This does
+    // not claim native OFX Ready/Render for the controlled TCP session.
+    fn shutdown_primary_after_cleanup_refusal(wrong_response: bool) {
+        let (process, _directory) = sleeping_owner();
+        let pid = process.child.id();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("exclusive shutdown endpoint");
+        let control = TcpStream::connect(listener.local_addr().expect("endpoint"))
+            .expect("real shutdown control");
+        let (mut peer, _) = listener.accept().expect("real shutdown peer");
+        configure(&control, POLL).expect("bounded session control");
+        configure(&peer, POLL).expect("bounded peer control");
+        let file = tempfile::NamedTempFile::new().expect("retained frame file");
+        file.as_file().set_len(32).expect("one input and output pixel");
+        // SAFETY: this same exact-sized file remains owned by the session.
+        let mut shared = unsafe { MmapOptions::new().len(32).map_mut(file.as_file()) }
+            .expect("real shared mapping");
+        shared.fill(0xa5);
+        let mut session = OpenFxFilterSession {
+            process,
+            control,
+            shared,
+            _file: file,
+            inspection: OpenFxBinaryInspection {
+                binary_path: PathBuf::new(),
+                binary_sha256: String::new(),
+                plugins: Vec::new(),
+            },
+            width: 1,
+            height: 1,
+            frame_bytes: 16,
+            sequence: 0,
+            input_format: mondrian_effects::EffectValueFormat::new(
+                mondrian_effects::EffectWorkingPrecision::Float32,
+                mondrian_effects::EffectColorDomain::SceneLinearRgb,
+                mondrian_core::ColorFrameAlpha::StraightFloat,
+            ),
+            owner: mondrian_core::EffectProcessorOwnerId::new(),
+            process_id: std::num::NonZeroU32::new(pid).expect("actual child PID"),
+            native_owner: None,
+            last_invocation: 0,
+            persistent_revision: 0,
+            progress_generation: 0,
+            feedback: None,
+            response_reader: pump::PacketReader::acquire().expect("original response reader"),
+            request_writer: pump::PacketWriter::acquire().expect("original request writer"),
+        };
+        if wrong_response {
+            write_packet(
+                &mut peer,
+                &Response::Connected { version: VERSION, nonce: "not-closed".to_owned() },
+                &mut || Ok(()),
+            )
+            .expect("real wrong response packet");
+        }
+        session.process.cleanup_hooks = Some(CleanupHooks::default());
+        let result = session.shutdown();
+        let hooks = session.process.cleanup_hooks.take().expect("cleanup refusal installed");
+        let state_after_failure = session.process.state;
+        let pid_after_failure = session.process.child.id();
+        let live_after_failure = session.process.child.try_wait().expect("observe exact child");
+        let refused_readmission = session.process.check_liveness();
+        // Before the intentional baseline assertion, reap this same original
+        // owner for real. A target RED must not create a second Job/outlive RED.
+        session.process.terminate().expect("same owner actual kill/reap retry");
+        assert_settled_idempotent(&mut session.process);
+        let read_deadline = Instant::now() + Duration::from_secs(5);
+        let request: Request = read_packet(&mut peer, &mut || {
+            check_owner(&mut || Ok(()), read_deadline)
+        })
+        .expect("original Shutdown actually crossed TCP");
+        assert!(matches!(request, Request::Shutdown {}));
+        assert_eq!(state_after_failure, ProcessState::Retiring);
+        assert_eq!(pid_after_failure, pid);
+        assert!(
+            live_after_failure.is_none(),
+            "refusal retained the same live child"
+        );
+        assert!(matches!(
+            refused_readmission,
+            Err(OpenFxHostError::Unavailable(_))
+        ));
+        assert_eq!(hooks.observations.get(), 2);
+        assert_eq!(hooks.kills.get(), 1);
+        assert_eq!(session.sequence, 0);
+        assert_eq!(session.native_owner, None);
+        assert_eq!(session.last_invocation, 0);
+        assert!(session.shared.iter().all(|byte| *byte == 0xa5));
+        if wrong_response {
+            assert!(
+                matches!(result, Err(OpenFxHostError::Unavailable(ref detail))
+                    if detail == "native session did not close"),
+                "OFX shutdown primary response detail must survive cleanup refusal: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(OpenFxHostError::DeadlineExceeded)),
+                "OFX shutdown primary DeadlineExceeded must survive cleanup refusal: {result:?}"
+            );
+        }
+        session.shutdown().expect("settled shutdown remains idempotent");
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; real TCP shutdown deadline plus OS cleanup refusal"]
+    fn resident_shutdown_deadline_preserves_primary_after_cleanup_refusal() {
+        shutdown_primary_after_cleanup_refusal(false);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; real wrong shutdown response plus OS cleanup refusal"]
+    fn resident_shutdown_wrong_response_preserves_primary_after_cleanup_refusal() {
+        shutdown_primary_after_cleanup_refusal(true);
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job, pinned product worker and official Basic"]
+    fn resident_render_cancel_preserves_primary_after_cleanup_refusal() {
+        require_actual_job();
+        let helper =
+            PathBuf::from(std::env::var_os("MONDRIAN_OPENFX_TEST_HELPER").expect("pinned product"));
+        let binary = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_REFERENCE_BINARY").expect("official Basic"),
+        );
+        let inspection = crate::openfx_adapter::inspect_openfx_binary(&helper, &binary)
+            .expect("actual inspection");
+        let format = mondrian_effects::EffectValueFormat::new(
+            mondrian_effects::EffectWorkingPrecision::Float32,
+            mondrian_effects::EffectColorDomain::SceneLinearRgb,
+            mondrian_core::ColorFrameAlpha::StraightFloat,
+        );
+        let input = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(1, 1),
+            format,
+            vec![[0.25, 0.5, 0.75, 0.5]],
+        )
+        .expect("authored frame");
+        let mut session = OpenFxFilterSession::prepare(
+            &helper,
+            &inspection,
+            "uk.co.thefoundry.BasicGainPlugin",
+            1,
+            1,
+            format,
+            &mut || Ok(()),
+        )
+        .expect("actual native Ready");
+        let pid = session.process.child.id();
+        session.shared.fill(0xa5);
+        session.process.cleanup_hooks = Some(CleanupHooks::default());
+        let result = session.render(
+            &OpenFxRenderTiming {
+                frame: 0.0,
+                frame_rate: 24.0,
+                first_frame: 0.0,
+                last_frame: 24.0,
+                pixel_aspect_ratio: 1.0,
+            },
+            &BTreeMap::new(),
+            &input,
+            &mut || Err(OpenFxHostError::Canceled),
+        );
+        let hooks = session.process.cleanup_hooks.take().expect("cleanup refusal installed");
+        let state_after_failure = session.process.state;
+        let pid_after_failure = session.process.child.id();
+        let live_after_failure = session.process.child.try_wait().expect("observe exact child");
+        let refused_readmission = session.process.check_liveness();
+        session.process.terminate().expect("same owner actual native kill/reap retry");
+        assert_settled_idempotent(&mut session.process);
+        assert_eq!(state_after_failure, ProcessState::Retiring);
+        assert_eq!(pid_after_failure, pid);
+        assert!(live_after_failure.is_none());
+        assert!(matches!(
+            refused_readmission,
+            Err(OpenFxHostError::Unavailable(_))
+        ));
+        assert_eq!(hooks.observations.get(), 2);
+        assert_eq!(hooks.kills.get(), 1);
+        assert_eq!(session.sequence, 0);
+        assert_eq!(session.native_owner, None);
+        assert_eq!(session.last_invocation, 0);
+        assert!(session.shared.iter().all(|byte| *byte == 0xa5));
+        assert_eq!(input.pixels(), &[[0.25, 0.5, 0.75, 0.5]]);
+        assert!(
+            matches!(result, Err(OpenFxHostError::Canceled)),
+            "OFX render admission primary Canceled must survive cleanup refusal: {result:?}"
+        );
+        session.shutdown().expect("settled shutdown remains idempotent");
     }
 
     #[test]
