@@ -20,9 +20,10 @@ pub struct ProcessTimelineContext {
 /// This SDK copy contains no playhead, transport state, tempo curve or time
 /// signature. It projects absolute signal samples to quarter notes with one
 /// correctly rounded binary64 conversion, including signed PDC positions.
-/// Installing it currently admits pure audio only: queued/staged events and
-/// nonempty explicit checked batches are refused before processing. This value
-/// does not assign Event.ppqPosition or enable canonical Note routing.
+/// Checked Note batches project Event.ppqPosition from this same reference and
+/// immutable call start plus each original event offset. Legacy queued/staged
+/// events remain unsupported while anchored; late ingress is kept for the next
+/// call. This SDK capability does not enable canonical Note routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessMusicalReference {
     zero_numerator: i64,

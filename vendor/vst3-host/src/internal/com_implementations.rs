@@ -2839,6 +2839,256 @@ impl HostEventList {
     }
 }
 
+/// A persistent, genuinely ref-counted read-only view of one checked call.
+/// Its only event backing is transferred from the original chunk owner; no
+/// guard crosses native code and no operation waits for this mutex.
+pub(super) struct ActiveNoteEventList {
+    storage: Mutex<ActiveNoteEvents>,
+    exposed: AtomicBool,
+    first_fault: AtomicU32,
+}
+struct ActiveNoteEvents {
+    events: Vec<Option<PluginEvent>>,
+    first: usize,
+    end: usize,
+    chunk_start: i32,
+}
+impl ActiveNoteEventList {
+    pub(super) fn new() -> Self {
+        Self {
+            storage: Mutex::new(ActiveNoteEvents {
+                events: Vec::new(),
+                first: 0,
+                end: 0,
+                chunk_start: 0,
+            }),
+            exposed: AtomicBool::new(false),
+            first_fault: AtomicU32::new(0),
+        }
+    }
+    fn latch(&self, fault: crate::error::NativeEventError) {
+        let code = if fault == crate::error::NativeEventError::StorageBusy {
+            1
+        } else {
+            2
+        };
+        let _ = self
+            .first_fault
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+    }
+    pub(super) fn require_quiescent(&self) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        match self.first_fault.load(Ordering::Acquire) {
+            1 => Err(Failure::StorageBusy),
+            2 => Err(Failure::StoragePoisoned),
+            _ if self.exposed.load(Ordering::Acquire) => Err(Failure::PendingEvents),
+            _ => Ok(()),
+        }
+    }
+    pub(super) fn begin(
+        &self,
+        retained: &mut Vec<Option<PluginEvent>>,
+        batch: &[PluginEvent],
+        reference: crate::audio::ProcessMusicalReference,
+        call_start: i64,
+        rate: u32,
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        self.require_quiescent()?;
+        // A busy admission before consumption is recoverable; it does not latch.
+        let mut storage = self.storage.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+            std::sync::TryLockError::Poisoned(_) => {
+                self.latch(Failure::StoragePoisoned);
+                Failure::StoragePoisoned
+            }
+        })?;
+        if !storage.events.is_empty() || storage.events.capacity() != 0 {
+            return Err(Failure::PendingEvents);
+        }
+        if batch.len() > MAX_QUEUED_EVENTS || batch.len() > retained.capacity() {
+            return Err(Failure::Capacity);
+        }
+        // Whole-window/scalar validation precedes this method. Check every
+        // absolute projection before mutating either original event owner.
+        for (index, event) in batch.iter().enumerate() {
+            let sample = call_start
+                .checked_add(i64::from(event.sample_offset))
+                .ok_or(Failure::InvalidEvent { index })?;
+            reference
+                .quarter_notes_at(sample, rate)
+                .map_err(|_| Failure::InvalidEvent { index })?;
+        }
+        retained.clear(); // Only empty slots passed ingress admission.
+        for event in batch {
+            let mut projected = event.clone(); // Admitted scalar Note only.
+            projected.ppq_position = reference
+                .quarter_notes_at(call_start + i64::from(event.sample_offset), rate)
+                .expect("the same immutable absolute event projection passed preflight");
+            retained.push(Some(projected));
+        }
+        std::mem::swap(retained, &mut storage.events);
+        Ok(())
+    }
+    pub(super) fn expose_chunk(
+        &self,
+        start: usize,
+        frames: usize,
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        self.require_quiescent()?;
+        let end = start.checked_add(frames).ok_or(Failure::InvalidFrames)?;
+        let mut storage = self.storage.try_lock().map_err(|error| {
+            let fault = match error {
+                std::sync::TryLockError::WouldBlock => Failure::StorageBusy,
+                std::sync::TryLockError::Poisoned(_) => Failure::StoragePoisoned,
+            };
+            self.latch(fault);
+            fault
+        })?;
+        storage.first = storage.events.partition_point(|event| {
+            event
+                .as_ref()
+                .is_some_and(|event| (event.sample_offset as usize) < start)
+        });
+        storage.end = storage.events.partition_point(|event| {
+            event
+                .as_ref()
+                .is_some_and(|event| (event.sample_offset as usize) < end)
+        });
+        storage.chunk_start = i32::try_from(start).map_err(|_| Failure::InvalidFrames)?;
+        Ok(())
+    }
+    pub(super) fn open(&self) {
+        self.exposed.store(true, Ordering::Release);
+    }
+    pub(super) fn close(&self) {
+        self.exposed.store(false, Ordering::Release);
+    }
+    pub(super) fn finish(
+        &self,
+        retained: &mut Vec<Option<PluginEvent>>,
+    ) -> Result<(), crate::error::NativeEventError> {
+        use crate::error::NativeEventError as Failure;
+        self.close();
+        let (mut storage, poison) = match self.storage.try_lock() {
+            Ok(storage) => (storage, false),
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                self.latch(Failure::StoragePoisoned);
+                (error.into_inner(), true)
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // The closed COM owner retains the real backing. All future
+                // processing, including None, fails closed without replay or
+                // allocating another chunk buffer around the retained owner.
+                self.latch(Failure::StorageBusy);
+                return Err(Failure::StorageBusy);
+            }
+        };
+        storage.events.clear();
+        storage.first = 0;
+        storage.end = 0;
+        std::mem::swap(retained, &mut storage.events);
+        if poison {
+            Err(Failure::StoragePoisoned)
+        } else {
+            self.require_quiescent()
+        }
+    }
+    #[cfg(test)]
+    pub(super) fn test_finish_while_busy(
+        &self,
+        retained: &mut Vec<Option<PluginEvent>>,
+    ) -> Result<(), crate::error::NativeEventError> {
+        let _guard = self.storage.try_lock().unwrap();
+        self.finish(retained)
+    }
+    #[cfg(test)]
+    pub(super) fn test_busy_query(&self) {
+        let _guard = self.storage.try_lock().unwrap();
+        assert_eq!(unsafe { self.getEventCount() }, 0);
+    }
+    pub(super) fn visit_owned_storage(
+        &self,
+        visitor: &mut dyn crate::host_storage::HostStorageVisitor,
+    ) -> Result<(), crate::host_storage::HostStorageError> {
+        use crate::host_storage::{HostStorageError, HostStorageRef};
+        let storage = self.storage.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => HostStorageError::NonExclusiveSharedOwner,
+            std::sync::TryLockError::Poisoned(_) => HostStorageError::PoisonedOwner,
+        })?;
+        visitor.visit(HostStorageRef::vector(&storage.events)?)
+    }
+}
+impl Class for ActiveNoteEventList {
+    type Interfaces = (IEventList,);
+}
+impl IEventListTrait for ActiveNoteEventList {
+    unsafe fn getEventCount(&self) -> i32 {
+        if !self.exposed.load(Ordering::Acquire) || self.first_fault.load(Ordering::Acquire) != 0 {
+            return 0;
+        }
+        match self.storage.try_lock() {
+            Ok(storage) if self.exposed.load(Ordering::Acquire) => {
+                (storage.end - storage.first) as i32
+            }
+            Ok(_) => 0,
+            Err(error) => {
+                self.latch(match error {
+                    std::sync::TryLockError::WouldBlock => {
+                        crate::error::NativeEventError::StorageBusy
+                    }
+                    std::sync::TryLockError::Poisoned(_) => {
+                        crate::error::NativeEventError::StoragePoisoned
+                    }
+                });
+                0
+            }
+        }
+    }
+    unsafe fn getEvent(&self, index: i32, event: *mut Event) -> i32 {
+        if event.is_null()
+            || index < 0
+            || !self.exposed.load(Ordering::Acquire)
+            || self.first_fault.load(Ordering::Acquire) != 0
+        {
+            return kResultFalse;
+        }
+        let storage = match self.storage.try_lock() {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.latch(match error {
+                    std::sync::TryLockError::WouldBlock => {
+                        crate::error::NativeEventError::StorageBusy
+                    }
+                    std::sync::TryLockError::Poisoned(_) => {
+                        crate::error::NativeEventError::StoragePoisoned
+                    }
+                });
+                return kResultFalse;
+            }
+        };
+        if !self.exposed.load(Ordering::Acquire) || index as usize >= storage.end - storage.first {
+            return kResultFalse;
+        }
+        let Some(source) = storage.events[storage.first + index as usize].as_ref() else {
+            return kResultFalse;
+        };
+        let Ok(mut raw) = plugin_event_to_raw(source) else {
+            return kResultFalse;
+        };
+        raw.sampleOffset -= storage.chunk_start;
+        // SAFETY: the SDK caller supplied a non-null writable Event destination.
+        unsafe {
+            *event = raw;
+        }
+        kResultOk
+    }
+    unsafe fn addEvent(&self, _: *mut Event) -> i32 {
+        kResultFalse
+    }
+}
+
 impl Default for HostEventList {
     fn default() -> Self {
         Self::new()
@@ -3901,11 +4151,11 @@ mod component_handler_tests {
                 HostNotification::UnitSelectionChanged { unit_id: 7 },
                 HostNotification::ProgramListChanged {
                     list_id: 11,
-                    program_index: Some(3),
+                    program_index: Some(3)
                 },
                 HostNotification::ProgramListChanged {
                     list_id: 11,
-                    program_index: None,
+                    program_index: None
                 },
                 HostNotification::UnitByBusChanged,
             ]
@@ -6008,5 +6258,139 @@ mod checked_note_input_tests {
         );
         assert!(chunks.is_empty());
         assert!(list.events.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod active_note_owner_tests {
+    use super::*;
+    use crate::audio::ProcessMusicalReference;
+    use crate::error::NativeEventError as Failure;
+
+    fn note(offset: i32) -> PluginEvent {
+        PluginEvent {
+            bus_index: 0,
+            sample_offset: offset,
+            ppq_position: -3.5,
+            flags: 0,
+            data: PluginEventData::NoteOn {
+                channel: 0,
+                pitch: 60,
+                tuning: 0.0,
+                velocity: 0.5,
+                length: 0,
+                note_id: offset,
+            },
+        }
+    }
+    fn reference() -> ProcessMusicalReference {
+        ProcessMusicalReference::new(-19, 7, 3, 4).unwrap()
+    }
+
+    #[test]
+    fn active_checked_owner_transfers_one_backing_and_retained_com_is_empty_after_close() {
+        use crate::host_storage::{HostStorageError, HostStorageRef, HostStorageVisitor};
+        struct Actual(Vec<(usize, std::alloc::Layout)>);
+        impl HostStorageVisitor for Actual {
+            fn visit(&mut self, storage: HostStorageRef<'_>) -> Result<(), HostStorageError> {
+                self.0.push((storage.address(), storage.layout()));
+                Ok(())
+            }
+        }
+        let owner = ComWrapper::new(ActiveNoteEventList::new());
+        let retained_com = owner.to_com_ptr::<IEventList>().unwrap();
+        let payload = HostStorageRef::com(&owner);
+        assert_eq!(
+            payload.kind(),
+            crate::host_storage::HostStorageKind::ArcPayload
+        );
+        assert_eq!(payload.layout(), owner.payload_storage().layout());
+        let mut chunks = Vec::with_capacity(4096);
+        let original = (chunks.as_ptr() as usize, chunks.capacity());
+        owner
+            .begin(&mut chunks, &[note(0), note(4)], reference(), -17, 48_000)
+            .unwrap();
+        assert_eq!(chunks.capacity(), 0);
+        let mut actual = Actual(Vec::new());
+        owner.visit_owned_storage(&mut actual).unwrap();
+        assert_eq!(
+            actual.0,
+            [(
+                original.0,
+                std::alloc::Layout::array::<Option<PluginEvent>>(original.1).unwrap()
+            )]
+        );
+        owner.expose_chunk(4, 1).unwrap();
+        owner.open();
+        assert_eq!(unsafe { retained_com.getEventCount() }, 1);
+        let mut raw: Event = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { retained_com.getEvent(0, &mut raw) }, kResultOk);
+        assert_eq!(raw.sampleOffset, 0);
+        assert_eq!(raw.ppqPosition.to_bits(), 0x400cf311e970828d);
+        owner.close();
+        assert_eq!(unsafe { retained_com.getEventCount() }, 0);
+        assert_eq!(unsafe { retained_com.getEvent(0, &mut raw) }, kResultFalse);
+        owner.finish(&mut chunks).unwrap();
+        assert_eq!((chunks.as_ptr() as usize, chunks.capacity()), original);
+        assert!(chunks.is_empty());
+        drop(owner);
+        assert_eq!(
+            unsafe { retained_com.getEventCount() },
+            0,
+            "a real retained COM reference outlives the original wrapper"
+        );
+    }
+
+    #[test]
+    fn active_checked_owner_preflight_busy_recovers_but_cleanup_busy_retains_closed_backing() {
+        let owner = ActiveNoteEventList::new();
+        let mut chunks = Vec::with_capacity(4096);
+        let original = (chunks.as_ptr(), chunks.capacity());
+        let guard = owner.storage.try_lock().unwrap();
+        assert_eq!(
+            owner.begin(&mut chunks, &[note(0)], reference(), -17, 48_000),
+            Err(Failure::StorageBusy)
+        );
+        assert_eq!(owner.require_quiescent(), Ok(()));
+        assert_eq!((chunks.as_ptr(), chunks.capacity()), original);
+        drop(guard);
+        owner
+            .begin(&mut chunks, &[note(0)], reference(), -17, 48_000)
+            .unwrap();
+        owner.expose_chunk(0, 1).unwrap();
+        owner.open();
+        assert_eq!(
+            owner.test_finish_while_busy(&mut chunks),
+            Err(Failure::StorageBusy)
+        );
+        assert_eq!(chunks.capacity(), 0);
+        assert_eq!(owner.require_quiescent(), Err(Failure::StorageBusy));
+        assert_eq!(unsafe { owner.getEventCount() }, 0);
+        let storage = owner.storage.try_lock().unwrap();
+        assert_eq!(
+            (storage.events.as_ptr(), storage.events.capacity()),
+            original
+        );
+        assert_eq!(storage.events.len(), 1);
+    }
+
+    #[test]
+    fn active_checked_owner_poison_cleanup_returns_same_backing_and_stays_failed() {
+        let owner = ActiveNoteEventList::new();
+        let mut chunks = Vec::with_capacity(4096);
+        let original = (chunks.as_ptr(), chunks.capacity());
+        owner
+            .begin(&mut chunks, &[note(0)], reference(), -17, 48_000)
+            .unwrap();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = owner.storage.try_lock().unwrap();
+            panic!("owned mutex poison control");
+        }));
+        assert!(poisoned.is_err());
+        assert_eq!(owner.finish(&mut chunks), Err(Failure::StoragePoisoned));
+        assert_eq!((chunks.as_ptr(), chunks.capacity()), original);
+        assert!(chunks.is_empty());
+        assert_eq!(owner.require_quiescent(), Err(Failure::StoragePoisoned));
+        assert_eq!(unsafe { owner.getEventCount() }, 0);
     }
 }

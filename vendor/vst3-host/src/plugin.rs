@@ -1071,9 +1071,9 @@ impl PluginAudioProcessing<'_> {
     }
     /// Atomically install absolute signal time and an exact constant musical reference.
     /// This supplies quarter notes and tempo only, not meter or playing state.
-    /// Anchored processing currently admits pure audio only. Queued/staged input,
-    /// a busy/poisoned event owner, or a nonempty explicit checked event batch is
-    /// refused before consumption. It does not project Event.ppqPosition.
+    /// Checked Notes project Event.ppqPosition from this reference, the immutable
+    /// call start and each original offset. Queued/staged legacy input or a busy/
+    /// poisoned owner is refused before consumption; late ingress is preserved.
     pub fn set_process_musical_timeline_context(
         &mut self,
         context: crate::audio::ProcessTimelineContext,
@@ -2132,10 +2132,10 @@ impl Plugin {
     /// supplied quarter-note and tempo facts are advertised through the original
     /// requirements filter. Explicit meter/playing setters remain independent.
     /// The legacy position-only setter clears this reference on success.
-    /// While present, this first capability admits pure audio only: queued or
-    /// staged events and nonempty checked batches are refused before processing;
-    /// busy/poisoned event owners are also explicit refusals. Late queued events
-    /// remain for the next call. Event.ppqPosition is not projected here.
+    /// Checked Notes project Event.ppqPosition from the same reference, immutable
+    /// call start and original offsets. Queued/staged legacy events and busy/
+    /// poisoned owners are refused before processing. Late ingress remains for
+    /// the next call; no canonical Note route is enabled by this SDK method.
     pub fn set_process_musical_timeline_context(
         &mut self,
         context: crate::audio::ProcessTimelineContext,

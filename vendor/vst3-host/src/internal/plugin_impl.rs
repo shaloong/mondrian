@@ -28,9 +28,9 @@ use super::{
     com_implementations::{
         create_event_list, create_host_application_with_interfaces, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
-        create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
-        HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
-        MAX_QUEUED_EVENTS,
+        create_state_restore_stream, ActiveNoteEventList, ComponentHandler, ConnectionPair,
+        HostApplication, HostEventList, HostPlugFrame, ParameterChanges, StreamStateType,
+        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
     },
     editor_attachment::EditorAttachment,
     module_loader::{load_module, VstModule},
@@ -285,6 +285,7 @@ struct HostProcessData {
     process_context_requirements: Option<u32>,
     transport_tempo: f64,
     musical_reference: Option<crate::audio::ProcessMusicalReference>,
+    active_note_events: ComWrapper<ActiveNoteEventList>,
     input_param_changes: ComWrapper<ParameterChanges>,
     output_param_changes: ComWrapper<ParameterChanges>,
     // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
@@ -333,7 +334,9 @@ impl HostProcessData {
         visitor.visit(HostStorageRef::com(&self.input_param_changes))?;
         self.input_param_changes.visit_owned_storage(visitor)?;
         visitor.visit(HostStorageRef::com(&self.output_param_changes))?;
-        self.output_param_changes.visit_owned_storage(visitor)
+        self.output_param_changes.visit_owned_storage(visitor)?;
+        visitor.visit(HostStorageRef::com(&self.active_note_events))?;
+        self.active_note_events.visit_owned_storage(visitor)
     }
 }
 
@@ -1976,6 +1979,7 @@ impl PluginImpl {
                 process_context_requirements: self.process_context_requirements,
                 transport_tempo: self.tempo,
                 musical_reference: None,
+                active_note_events: ComWrapper::new(ActiveNoteEventList::new()),
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
             });
@@ -6530,7 +6534,8 @@ impl PluginProcessFields<'_> {
         frame_offset: usize,
         frames: usize,
         is_last: bool,
-        pure_audio: bool,
+        anchored: bool,
+        active_notes: bool,
     ) -> Result<()> {
         let result = if let Some(data) = self.process_data.as_mut() {
             unsafe {
@@ -6630,15 +6635,28 @@ impl PluginProcessFields<'_> {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
-                // ProcessData.inputEvents is optional. Some admits pure audio
-                // only: do not expose late ingress through the original list.
-                // No Rust owner or queue is replaced; this pointer is restored
-                // immediately after native returns, before any fallible advance.
-                let saved_input_events = pure_audio.then(|| {
-                    std::mem::replace(&mut data.process_data.inputEvents, ptr::null_mut())
+                // Some never exposes legacy ingress. Checked input uses a real
+                // retained COM owner, not a borrowed stack/slice masquerading as
+                // FUnknown. Empty checked and pure-audio input use optional null.
+                let saved_input_events = anchored.then(|| {
+                    let pointer = if active_notes {
+                        data.active_note_events
+                            .as_com_ref::<IEventList>()
+                            .unwrap()
+                            .as_ptr()
+                    } else {
+                        ptr::null_mut()
+                    };
+                    std::mem::replace(&mut data.process_data.inputEvents, pointer)
                 });
                 self.host_app.enter_data_exchange_process();
+                if active_notes {
+                    data.active_note_events.open();
+                }
                 let process_result = self.processor.process(&mut data.process_data);
+                // Close exposure before pointer restoration/cleanup. Retained
+                // references remain live COM owners but see no stale window.
+                data.active_note_events.close();
                 if let Some(input_events) = saved_input_events {
                     data.process_data.inputEvents = input_events;
                 }
@@ -6668,7 +6686,7 @@ impl PluginProcessFields<'_> {
 
                 // Clear the staged input events AFTER processing, so the plugin got to see them
                 // and the next chunk starts from an empty list.
-                if !pure_audio {
+                if !anchored {
                     self.input_events.clear();
                 }
                 // Clear the input parameter queue too, so this block's values don't
@@ -6705,6 +6723,9 @@ impl PluginProcessFields<'_> {
                     // fail cleanly if native code changed a context counter;
                     // all input/feedback cleanup above must run first, and the
                     // original native failure retains priority when both fail.
+                    data.active_note_events
+                        .require_quiescent()
+                        .map_err(Error::NativeEvent)?;
                     advance_result?;
                     data.sample_buffers.update_output_silence_flags(
                         &mut data.output_bus_buffers,
@@ -6744,7 +6765,8 @@ impl PluginProcessFields<'_> {
         buffers: &mut CallerAudioBuffers<'_>,
         total: usize,
         checked_notes: bool,
-        pure_audio: bool,
+        anchored: bool,
+        active_notes: bool,
     ) -> Result<()> {
         // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
         // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
@@ -6754,7 +6776,14 @@ impl PluginProcessFields<'_> {
         while offset < total {
             let frames = (total - offset).min(step);
             let is_last = offset + frames >= total;
-            if !pure_audio {
+            if active_notes {
+                self.process_data
+                    .as_ref()
+                    .unwrap()
+                    .active_note_events
+                    .expose_chunk(offset, frames)
+                    .map_err(Error::NativeEvent)?;
+            } else if !anchored {
                 if checked_notes {
                     self.input_events
                         .stage_checked_note_chunk(self.chunk_events, offset, frames)
@@ -6769,7 +6798,7 @@ impl PluginProcessFields<'_> {
                     );
                 }
             }
-            self.process_chunk(buffers, offset, frames, is_last, pure_audio)?;
+            self.process_chunk(buffers, offset, frames, is_last, anchored, active_notes)?;
             offset += frames;
         }
         Ok(())
@@ -6834,17 +6863,31 @@ impl PluginProcessFields<'_> {
             total,
             self.block_size,
         )?;
-        let pure_audio = data.musical_reference.is_some();
-        if pure_audio {
-            if notes.is_some_and(|events| !events.is_empty()) {
-                return Err(Error::MusicalTime(MusicalTimeError::EventInputUnsupported));
-            }
+        // A consumed fault also blocks later None calls, which must not
+        // allocate/replay around a still-retained active owner.
+        data.active_note_events
+            .require_quiescent()
+            .map_err(Error::NativeEvent)?;
+        let anchored = data.musical_reference.is_some();
+        let active_notes = anchored && notes.is_some_and(|events| !events.is_empty());
+        if let Some(reference) = data.musical_reference {
             self.input_events
                 .require_empty_anchored_ingress(self.chunk_events)
                 .map_err(Error::NativeEvent)?;
+            if active_notes {
+                data.active_note_events
+                    .begin(
+                        self.chunk_events,
+                        notes.unwrap(),
+                        reference,
+                        data.process_context.projectTimeSamples,
+                        self.sample_rate as u32,
+                    )
+                    .map_err(Error::NativeEvent)?;
+            }
         }
         let _denormal = crate::internal::denormal::DenormalGuard::new();
-        if !pure_audio {
+        if !anchored {
             if let Some(notes) = notes {
                 // All fallible scalar/layout checks finished. This admission checks
                 // both original capacities and absence of legacy input before mutation.
@@ -6857,15 +6900,24 @@ impl PluginProcessFields<'_> {
         }
 
         let result = if total == 0 {
-            if !pure_audio {
+            if !anchored {
                 stage_chunk_events(self.chunk_events, self.input_events, 0, 0, true);
             }
-            self.process_chunk(buffers, 0, 0, true, pure_audio)
+            self.process_chunk(buffers, 0, 0, true, anchored, active_notes)
         } else {
-            self.process_chunks(buffers, total, notes.is_some(), pure_audio)
+            self.process_chunks(buffers, total, notes.is_some(), anchored, active_notes)
         };
-
-        if !pure_audio {
+        let cleanup = if active_notes {
+            self.process_data
+                .as_ref()
+                .unwrap()
+                .active_note_events
+                .finish(self.chunk_events)
+                .map_err(Error::NativeEvent)
+        } else {
+            Ok(())
+        };
+        if !anchored {
             if notes.is_some() {
                 // Consumption has begun; no future call may replay remaining chunks,
                 // including when the second native call or input-list staging failed.
@@ -6874,7 +6926,8 @@ impl PluginProcessFields<'_> {
             self.chunk_events.clear();
         }
         self.pending_param_changes.clear();
-        result
+        // Cleanup ran even after failure; the original native/advance error wins.
+        result.and(cleanup)
     }
 
     fn set_signal_timeline_context(
@@ -8349,6 +8402,7 @@ mod checked_native_note_tests {
         frames: Vec<i32>,
         positions: Vec<(i64, i64, u32)>,
         musical: Vec<[u64; 5]>,
+        event_ppq: Vec<Vec<u64>>,
     }
     struct Processor {
         observed: Arc<Mutex<Observations>>,
@@ -8356,6 +8410,8 @@ mod checked_native_note_tests {
         context_fault: Arc<AtomicUsize>,
         inject_legacy: Arc<AtomicBool>,
         original_ingress: ComPtr<IEventList>,
+        active_notes: ComWrapper<ActiveNoteEventList>,
+        active_busy: Arc<AtomicBool>,
     }
     impl Class for Processor {
         type Interfaces = (IAudioProcessor,);
@@ -8407,6 +8463,10 @@ mod checked_native_note_tests {
                 );
             }
             let mut received = Vec::new();
+            let mut event_ppq = Vec::new();
+            if self.active_busy.swap(false, Ordering::Relaxed) {
+                self.active_notes.test_busy_query();
+            }
             let events = unsafe { ComRef::from_raw(data.inputEvents) };
             for index in 0..events
                 .as_ref()
@@ -8415,6 +8475,7 @@ mod checked_native_note_tests {
                 let events = events.as_ref().unwrap();
                 let mut event: Event = unsafe { std::mem::zeroed() };
                 assert_eq!(unsafe { events.getEvent(index, &mut event) }, kResultOk);
+                event_ppq.push(event.ppqPosition.to_bits());
                 let (id, channel, pitch, velocity) = match event.r#type as u32 {
                     value if value == kNoteOnEvent as u32 => {
                         let note = unsafe { event.__field0.noteOn };
@@ -8439,6 +8500,7 @@ mod checked_native_note_tests {
             observed.calls += 1;
             let call = observed.calls;
             observed.received.push(received);
+            observed.event_ppq.push(event_ppq);
             observed.frames.push(data.numSamples);
             let context = unsafe { &*data.processContext };
             observed.positions.push((
@@ -8488,6 +8550,7 @@ mod checked_native_note_tests {
         fail_call: Arc<AtomicUsize>,
         context_fault: Arc<AtomicUsize>,
         inject_legacy: Arc<AtomicBool>,
+        active_busy: Arc<AtomicBool>,
         data: Option<Box<HostProcessData>>,
         activation: BusActivationState,
         handler: Option<ComWrapper<ComponentHandler>>,
@@ -8508,12 +8571,16 @@ mod checked_native_note_tests {
             let context_fault = Arc::new(AtomicUsize::new(0));
             let inject_legacy = Arc::new(AtomicBool::new(false));
             let input = create_event_list();
+            let active_notes = ComWrapper::new(ActiveNoteEventList::new());
+            let active_busy = Arc::new(AtomicBool::new(false));
             let processor = ComWrapper::new(Processor {
                 observed: Arc::clone(&observed),
                 fail_call: Arc::clone(&fail_call),
                 context_fault: Arc::clone(&context_fault),
                 inject_legacy: Arc::clone(&inject_legacy),
                 original_ingress: input.to_com_ptr::<IEventList>().unwrap(),
+                active_notes: active_notes.clone(),
+                active_busy: Arc::clone(&active_busy),
             })
             .to_com_ptr::<IAudioProcessor>()
             .unwrap();
@@ -8534,6 +8601,7 @@ mod checked_native_note_tests {
                 process_context_requirements: None,
                 transport_tempo: 120.0,
                 musical_reference: None,
+                active_note_events: active_notes,
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
             });
@@ -8560,6 +8628,7 @@ mod checked_native_note_tests {
                 fail_call,
                 context_fault,
                 inject_legacy,
+                active_busy,
                 data: Some(data),
                 activation: BusActivationState {
                     audio_outputs: vec![true],
@@ -10028,7 +10097,7 @@ mod checked_native_note_tests {
         }
     }
     #[test]
-    fn anchored_musical_explicit_checked_events_refuse_before_consumption() {
+    fn anchored_musical_checked_events_validate_complete_batch_before_consumption() {
         use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
         let mut fixture = Fixture::new();
         fixture
@@ -10051,13 +10120,14 @@ mod checked_native_note_tests {
         let mut pcm = buffers(4);
         pcm.outputs[0].channels[0].fill(93.0);
         let context = context_facts(&fixture.data.as_ref().unwrap().process_context);
-        assert!(
-            matches!(
-                fixture.run(&mut pcm, &[caller.clone()]),
-                Err(Error::MusicalTime(MusicalTimeError::EventInputUnsupported))
-            ),
-            "this first anchored capability is pure audio"
-        );
+        let mut invalid = on(3, 72);
+        invalid.ppq_position = f64::NAN;
+        assert!(matches!(
+            fixture.run(&mut pcm, &[caller.clone(), invalid]),
+            Err(Error::NativeEvent(NativeEventError::InvalidEvent {
+                index: 1
+            }))
+        ));
         assert_eq!(fixture.observed.lock().unwrap().calls, 0);
         assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
         assert_eq!(fixture.parameters.len(), 1);
@@ -10315,5 +10385,244 @@ mod checked_native_note_tests {
         assert!(process.musical_reference.is_some());
         // This is the original visitor primitive's complete Box observation,
         // not an Audio grant or a complete native/plugin heap qualification.
+    }
+
+    #[test]
+    fn anchored_checked_ppq_uses_immutable_call_start_and_preserves_late_ingress() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        let mut fixture = Fixture::new();
+        fixture
+            .fields()
+            .set_process_musical_timeline_context(
+                ProcessTimelineContext {
+                    sample_position: -17,
+                    sample_rate: 48_000,
+                },
+                ProcessMusicalReference::new(-19, 7, 3, 4).unwrap(),
+            )
+            .unwrap();
+        fixture.inject_legacy.store(true, Ordering::Relaxed);
+        let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+        let backing = (fixture.chunks.as_ptr(), fixture.chunks.capacity());
+        let events = [on(0, 71), off(3, 71), on(4, 72), off(8, 72)];
+        fixture.run(&mut buffers(9), &events).unwrap();
+        assert_eq!(
+            (fixture.chunks.as_ptr(), fixture.chunks.capacity()),
+            backing
+        );
+        assert!(fixture.chunks.is_empty());
+        assert_eq!(
+            fixture.data.as_ref().unwrap().process_data.inputEvents,
+            pointer
+        );
+        let observed = fixture.observed.lock().unwrap();
+        assert_eq!(observed.frames, [4, 4, 1]);
+        assert_eq!(
+            observed.event_ppq,
+            [
+                vec![0x400cf2d7a85bcd6b, 0x400cf303592b5545],
+                vec![0x400cf311e970828d],
+                vec![0x400cf34c2a8537b0],
+            ]
+        );
+        drop(observed);
+        let pending = fixture.input.events.lock().unwrap().clone();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            fixture.run(&mut buffers(1), &[]),
+            Err(Error::NativeEvent(NativeEventError::PendingEvents))
+        ));
+        assert_eq!(*fixture.input.events.lock().unwrap(), pending);
+    }
+
+    #[test]
+    fn anchored_checked_getter_busy_latches_failure_before_pcm_and_restores_pointer() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for native_failure in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: 0,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
+                )
+                .unwrap();
+            fixture.active_busy.store(true, Ordering::Relaxed);
+            if native_failure {
+                fixture.fail_call.store(1, Ordering::Relaxed);
+            }
+            fixture.parameters.push(ParameterChange {
+                id: 7,
+                value: 0.75,
+                sample_offset: 0,
+            });
+            let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+            let mut pcm = buffers(4);
+            pcm.outputs[0].channels[0].fill(93.0);
+            let result = fixture.run(&mut pcm, &[on(0, 71)]);
+            if native_failure {
+                assert!(matches!(result, Err(Error::ProcessFailed(kResultFalse))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::NativeEvent(NativeEventError::StorageBusy))
+                ));
+            }
+            assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+            assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
+            assert_eq!(
+                fixture.data.as_ref().unwrap().process_data.inputEvents,
+                pointer
+            );
+            assert!(fixture.parameters.is_empty());
+            assert!(fixture.chunks.is_empty());
+            for anchored in [true, false] {
+                if !anchored {
+                    fixture
+                        .fields()
+                        .set_process_timeline_context(ProcessTimelineContext {
+                            sample_position: 4,
+                            sample_rate: 48_000,
+                        })
+                        .unwrap();
+                }
+                assert!(matches!(
+                    fixture.run(&mut pcm, &[]),
+                    Err(Error::NativeEvent(NativeEventError::StorageBusy))
+                ));
+                assert!(matches!(
+                    fixture.fields().process_bus_audio(&mut pcm),
+                    Err(Error::NativeEvent(NativeEventError::StorageBusy))
+                ));
+                assert_eq!(fixture.observed.lock().unwrap().calls, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn anchored_checked_cleanup_busy_blocks_some_and_none_without_replacement_storage() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        let mut fixture = Fixture::new();
+        let active = fixture.data.as_ref().unwrap().active_note_events.clone();
+        let backing = (fixture.chunks.as_ptr(), fixture.chunks.capacity());
+        active
+            .begin(
+                &mut fixture.chunks,
+                &[on(0, 71)],
+                ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
+                0,
+                48_000,
+            )
+            .unwrap();
+        assert_eq!(
+            active.test_finish_while_busy(&mut fixture.chunks),
+            Err(NativeEventError::StorageBusy)
+        );
+        assert_eq!(fixture.chunks.capacity(), 0);
+        for anchored in [true, false] {
+            let context = ProcessTimelineContext {
+                sample_position: 0,
+                sample_rate: 48_000,
+            };
+            if anchored {
+                fixture
+                    .fields()
+                    .set_process_musical_timeline_context(
+                        context,
+                        ProcessMusicalReference::new(0, 1, 1, 2).unwrap(),
+                    )
+                    .unwrap();
+            } else {
+                fixture
+                    .fields()
+                    .set_process_timeline_context(context)
+                    .unwrap();
+            }
+            let mut pcm = buffers(4);
+            pcm.outputs[0].channels[0].fill(93.0);
+            assert!(matches!(
+                fixture.run(&mut pcm, &[]),
+                Err(Error::NativeEvent(NativeEventError::StorageBusy))
+            ));
+            assert!(matches!(
+                fixture.fields().process_bus_audio(&mut pcm),
+                Err(Error::NativeEvent(NativeEventError::StorageBusy))
+            ));
+            assert_eq!(fixture.chunks.capacity(), 0);
+            assert_eq!(pcm.outputs[0].channels[0], [93.0; 4]);
+            assert_eq!(fixture.observed.lock().unwrap().calls, 0);
+        }
+        assert_ne!(backing.1, 0); // Original allocation remains owned by closed COM.
+    }
+
+    #[test]
+    fn anchored_checked_late_ingress_survives_native_and_advance_failures() {
+        use crate::audio::{ProcessMusicalReference, ProcessTimelineContext};
+        for native_failure in [true, false] {
+            let mut fixture = Fixture::new();
+            fixture
+                .fields()
+                .set_process_musical_timeline_context(
+                    ProcessTimelineContext {
+                        sample_position: -17,
+                        sample_rate: 48_000,
+                    },
+                    ProcessMusicalReference::new(-19, 7, 3, 4).unwrap(),
+                )
+                .unwrap();
+            fixture.inject_legacy.store(true, Ordering::Relaxed);
+            if native_failure {
+                fixture.fail_call.store(1, Ordering::Relaxed);
+            } else {
+                fixture.context_fault.store(1, Ordering::Relaxed);
+            }
+            let pointer = fixture.data.as_ref().unwrap().process_data.inputEvents;
+            let backing = (fixture.chunks.as_ptr(), fixture.chunks.capacity());
+            let mut pcm = buffers(9);
+            pcm.outputs[0].channels[0].fill(93.0);
+            let result = fixture.run(&mut pcm, &[on(0, 71), off(8, 71)]);
+            if native_failure {
+                assert!(matches!(result, Err(Error::ProcessFailed(kResultFalse))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::NativeEvent(NativeEventError::InvalidFrames))
+                ));
+            }
+            assert_eq!(
+                fixture.data.as_ref().unwrap().process_data.inputEvents,
+                pointer
+            );
+            assert_eq!(
+                (fixture.chunks.as_ptr(), fixture.chunks.capacity()),
+                backing
+            );
+            assert!(fixture.chunks.is_empty());
+            assert_eq!(pcm.outputs[0].channels[0], [93.0; 9]);
+            let pending = fixture.input.events.lock().unwrap().clone();
+            assert_eq!(pending.len(), 1);
+            fixture.context_fault.store(0, Ordering::Relaxed);
+            fixture
+                .fields()
+                .set_process_timeline_context(ProcessTimelineContext {
+                    sample_position: 100,
+                    sample_rate: 48_000,
+                })
+                .unwrap();
+            fixture
+                .run(&mut buffers(1), &[])
+                .expect_err("None checked cannot consume another producer");
+            assert_eq!(*fixture.input.events.lock().unwrap(), pending);
+            fixture.fields().process_bus_audio(&mut buffers(1)).unwrap();
+            let observed = fixture.observed.lock().unwrap();
+            assert_eq!(observed.calls, 2);
+            assert_eq!(observed.received[0].len(), 1);
+            assert_eq!(observed.received[1].len(), 1);
+            assert_eq!(observed.received[1][0].2, 999);
+            assert!(fixture.input.events.lock().unwrap().is_empty());
+        }
     }
 }
