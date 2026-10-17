@@ -561,6 +561,144 @@ fn scope_repeat_value_from_fair_cycle(
     panic!("actual selected callback was not delivered within one finite fair cycle of {source_count} sources");
 }
 
+/// Exactly one fair cycle of this actual two-producer Root, for the coherent
+/// prefix used below. An empty peer is not a delivery and cannot consume A.
+fn scope_coherent_prefix_from_fair_cycle(
+    fixture: &mut PreflightFixture,
+    cohort: crate::NativeRequestCohort,
+    original: Option<&mondrian_core::NativeAudioAuthorProposal>,
+) -> mondrian_core::NativeAudioAuthorProposal {
+    let root = fixture.inner.runtime.resource_root_identity();
+    let source_count = fixture
+        .inner
+        .runtime
+        .find_resource_session(root)
+        .unwrap()
+        .native_observation_sources();
+    assert_eq!(
+        source_count, 2,
+        "actual Root observation producers bound this cycle"
+    );
+    let queued = scope_repeat_poll_probe_snapshots(fixture);
+    assert_eq!(queued.len(), source_count);
+    assert_eq!(queued.iter().filter(|probe| probe.selected).count(), 1);
+    let selected = queued.iter().find(|probe| probe.selected).unwrap();
+    let binding = selected.binding.unwrap();
+    assert_eq!(binding.binding, fixture.inner.target.binding);
+    assert_eq!(selected.open, 0);
+    assert_eq!(
+        fixture.inner.probe.lock().unwrap().request_cohort,
+        Some(cohort)
+    );
+    if original.is_some() {
+        assert!(selected.pending.is_empty());
+        assert_eq!(
+            selected.retained,
+            Some((binding, selected.revision, Some(cohort)))
+        );
+    } else {
+        assert_eq!(
+            selected.pending.len(),
+            3,
+            "actual Begin/Value/End prefix remains queued"
+        );
+        assert!(selected.retained.is_none());
+    }
+    let cursors = preflight_cursors(&fixture.inner.runtime);
+    let footprint = fixture.inner.runtime.resource_footprint();
+    let grant = fixture.inner.runtime.resource_grant();
+    let claim = fixture.inner.source.current_claim().unwrap().unwrap().generation();
+    for _ in 0..source_count {
+        let calls = fixture.registry.calls.snapshot();
+        let batch = fixture
+            .inner
+            .runtime
+            .poll_native_observations(&ExecutionCancellationToken::new())
+            .expect("a real producer error cannot become an empty peer");
+        assert_eq!(
+            fixture.registry.calls.snapshot(),
+            [calls[0].checked_add(1).unwrap(), calls[1], calls[2]],
+            "one actual producer per fair poll, without Bind or create"
+        );
+        assert_eq!(fixture.inner.runtime.resource_root_identity(), root);
+        assert_eq!(fixture.inner.runtime.resource_footprint(), footprint);
+        assert_eq!(fixture.inner.runtime.resource_grant(), grant);
+        assert_eq!(
+            fixture.inner.source.current_claim().unwrap().unwrap().generation(),
+            claim
+        );
+        let now = preflight_cursors(&fixture.inner.runtime);
+        assert_eq!(now.sessions, cursors.sessions);
+        assert_eq!(now.processors, cursors.processors);
+        let after = scope_repeat_poll_probe_snapshots(fixture);
+        let Some(batch) = batch else {
+            assert_eq!(
+                after, queued,
+                "empty peer completion leaves selected and peer queued/retained facts intact"
+            );
+            continue;
+        };
+        assert!(batch.diagnostics.is_none());
+        assert!(batch.parameters.is_none());
+        assert!(
+            batch.attachment.is_none(),
+            "no binding changed in this refusal-only control"
+        );
+        let proposal = batch.author.expect("the actual completion must contain selected A");
+        assert_eq!(proposal.target(), fixture.inner.target);
+        assert_eq!(proposal.sequence(), fixture.inner.sequence.id);
+        assert_eq!(proposal.revision(), selected.revision);
+        assert!(proposal.terminal());
+        assert_eq!(
+            proposal.completion(),
+            mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+        );
+        assert_eq!(proposal.open_parameter_edits(), 0);
+        assert_eq!(proposal.group_depth(), 0);
+        assert_eq!(
+            proposal.state().map(|state| state.as_slice()),
+            Some(0.75_f64.to_le_bytes().as_slice())
+        );
+        use mondrian_core::{
+            NativeAudioAuthorCallback as Callback, NativeAudioParameterCallbackPhase as Phase,
+        };
+        assert_eq!(
+            proposal.callbacks(),
+            &[
+                Callback::Parameter {
+                    parameter: ParameterId::new_static("native.gain"),
+                    phase: Phase::Begin,
+                    value_bits: None
+                },
+                Callback::Parameter {
+                    parameter: ParameterId::new_static("native.gain"),
+                    phase: Phase::Value,
+                    value_bits: Some(0.75_f64.to_bits())
+                },
+                Callback::Parameter {
+                    parameter: ParameterId::new_static("native.gain"),
+                    phase: Phase::End,
+                    value_bits: None
+                },
+            ]
+        );
+        let mut expected = queued.clone();
+        let selected = expected.iter_mut().find(|probe| probe.selected).unwrap();
+        selected.pending.clear();
+        selected.retained = Some((binding, selected.revision, Some(cohort)));
+        assert_eq!(after, expected,
+            "only selected A transfers queued callbacks; both objects and every peer fact stay intact");
+        if let Some(original) = original {
+            assert!(
+                proposal.same_retained_proposal(original),
+                "the final read must retain the original complete receipt"
+            );
+        }
+        return proposal;
+    }
+    panic!("selected coherent A was not delivered in one actual fair cycle of {source_count} producers");
+}
+
 #[test]
 fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_preparation() {
     let a = crate::NativeRequestCohort::new(
@@ -587,7 +725,7 @@ fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_prepa
         ));
         probe.configuration = Some(0.75_f64.to_le_bytes().to_vec());
     }
-    let proposal = fixture.inner.drain();
+    let proposal = scope_coherent_prefix_from_fair_cycle(&mut fixture, a, None);
     assert!(
         fixture.inner.runtime.native_author_state_entry_required(&proposal).unwrap(),
         "coherent Scope state must reach the existing whole-tree state-entry branch"
@@ -653,5 +791,8 @@ fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_prepa
         );
     }
     fixture.inner.probe.lock().unwrap().reported_request_cohort = None;
-    assert!(fixture.inner.drain().same_retained_proposal(&proposal));
+    assert!(
+        scope_coherent_prefix_from_fair_cycle(&mut fixture, a, Some(&proposal))
+            .same_retained_proposal(&proposal)
+    );
 }
