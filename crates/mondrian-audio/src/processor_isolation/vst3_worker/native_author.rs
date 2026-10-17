@@ -122,6 +122,10 @@ fn project(
                     .transpose()?;
                 Event::Parameter(NativeAudioAuthorParameterEvent::admit(id, phase, value)?)
             }
+            // Initial service does not authorize an active rescan consumer.
+            NativeEditorEvent::ParameterRescanRequested { .. } => {
+                return Err(Refusal::UnsupportedAdapter);
+            }
             NativeEditorEvent::DirtyChanged(value) => Event::DirtyChanged(*value),
             NativeEditorEvent::GroupEditStarted => Event::GroupStarted,
             NativeEditorEvent::GroupEditFinished => Event::GroupFinished,

@@ -419,6 +419,10 @@ pub struct ParameterEdit {
 pub enum NativeEditorEvent {
     /// One parameter's Begin/Value/End callback.
     Parameter(ParameterEdit),
+    /// Re-read parameters after this raw callback. The cohort is the complete
+    /// post-callback raw restart state, not its acknowledgement. JSON helpers
+    /// must be paired with a decoder that knows this variant.
+    ParameterRescanRequested { flags: i32, cohort: RestartCohort },
     /// The plugin changed whether its authored configuration needs saving.
     DirtyChanged(bool),
 
@@ -690,7 +694,8 @@ impl HostNotification {
 ///
 /// Every nonempty callback advances the serial, including an already pending bit.
 /// The maximum serial is sticky exhaustion and cannot be acknowledged or wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct RestartCohort(u64);
 
 impl RestartCohort {
@@ -3048,7 +3053,10 @@ impl Plugin {
             .pending_processor_parameter_input()
     }
 
-    /// Move a proved initial-only Value prefix into the existing input COM queue.
+    /// Move an intact initial-only Value/rescan prefix into the input COM queue.
+    /// Markers are consumed with their exact cohort, without making points from
+    /// queried current values. A previously drained source is conservatively
+    /// refused; public raw retirement and author drains remain independent.
     ///
     /// The caller must hold this incarnation's one-shot initial lifecycle right
     /// and have completed bounded metadata/current-value validation. This method

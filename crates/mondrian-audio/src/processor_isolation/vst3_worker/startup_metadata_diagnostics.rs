@@ -109,6 +109,9 @@ impl SourceObservation {
                         edit.value.map(f64::to_bits),
                         None,
                     ),
+                    Event::ParameterRescanRequested { .. } => {
+                        ("parameter_rescan", None, None, None)
+                    }
                     Event::DirtyChanged(value) => ("dirty", None, None, Some(value)),
                     Event::GroupEditStarted => ("group_begin", None, None, None),
                     Event::GroupEditFinished => ("group_end", None, None, None),

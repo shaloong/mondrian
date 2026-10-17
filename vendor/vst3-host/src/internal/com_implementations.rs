@@ -2015,7 +2015,8 @@ impl EditorEventBuffer {
                 };
                 self.group_depth = depth;
             }
-            NativeEditorEvent::DirtyChanged(_) => {}
+            NativeEditorEvent::DirtyChanged(_)
+            | NativeEditorEvent::ParameterRescanRequested { .. } => {}
         }
         self.revision = next_revision;
         self.events.push(event);
@@ -2156,9 +2157,9 @@ impl ComponentHandler {
         current.flags()
     }
 
-    fn record_restart_flags(&self, flags: u32) {
+    fn record_restart_flags(&self, flags: u32) -> crate::plugin::RestartCohort {
         if flags == 0 {
-            return;
+            return self.pending_restart_cohort();
         }
         let mut previous = self.restart_cohort.load(Ordering::Acquire);
         loop {
@@ -2171,7 +2172,7 @@ impl ComponentHandler {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return,
+                Ok(_) => return crate::plugin::RestartCohort::from_word(next),
                 Err(observed) => previous = observed,
             }
         }
@@ -2469,10 +2470,23 @@ impl IComponentHandlerTrait for ComponentHandler {
             return kResultFalse;
         }
         log::debug!("Host: Restart component requested with flags: {flags:#x}");
-        // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
-        // host decides what a restart means for it. See `RestartFlags` for which flags this
-        // library handles on the host's behalf (none, currently) and which need host action.
-        self.record_restart_flags(flags as u32);
+        // Parameter rescans join the original ordered source. All nonzero raw
+        // callbacks still advance the full cohort, even if marker publication
+        // fails. Raw service/retirement never drains author events.
+        if flags & (4 | 16) != 0 {
+            let mut events = self
+                .editor_events
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let cohort = self.record_restart_flags(flags as u32);
+            if !events
+                .push(crate::plugin::NativeEditorEvent::ParameterRescanRequested { flags, cohort })
+            {
+                return kResultFalse;
+            }
+        } else {
+            self.record_restart_flags(flags as u32);
+        }
         kResultOk
     }
 }
@@ -5609,6 +5623,107 @@ mod restart_cohort_tests {
     }
 
     #[test]
+    fn parameter_restart_marker_survives_raw_retirement_and_independent_author_drain() {
+        use crate::plugin::{NativeEditorEvent as Event, NativeEditorEventDrain};
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            assert_eq!(handler.restartComponent(8), kResultOk);
+        }
+        let latency = handler.pending_restart_cohort();
+        assert!(handler.retire_restart_cohort(latency));
+        assert!(handler.editor_event_source_status().closed_empty());
+        unsafe {
+            assert_eq!(handler.beginEdit(7), kResultOk);
+            assert_eq!(handler.restartComponent(4), kResultOk);
+            assert_eq!(handler.endEdit(7), kResultOk);
+        }
+        let cohort = handler.pending_restart_cohort();
+        let source = handler.editor_event_source_status();
+        assert_eq!(source.pending_events(), 3);
+        assert_eq!(cohort.serial(), 2);
+        assert_eq!(handler.take_restart_flags().bits(), 4);
+        assert_eq!(handler.editor_event_source_status(), source);
+        assert!(handler.claim_retired_restart_serial(cohort.serial()));
+        assert_eq!(handler.editor_event_source_status(), source);
+        let NativeEditorEventDrain::Complete { events } = handler.take_editor_events() else {
+            panic!("complete independently drained source")
+        };
+        assert!(matches!(&events[0], Event::Parameter(edit) if edit.id == 7));
+        assert_eq!(
+            events[1],
+            Event::ParameterRescanRequested { flags: 4, cohort }
+        );
+        assert!(matches!(&events[2], Event::Parameter(edit) if edit.id == 7));
+        assert!(handler.editor_event_source_status().closed_empty());
+        assert_eq!(
+            handler.editor_event_source_status().revision(),
+            source.revision()
+        );
+        assert!(!handler.pending_restart_cohort().pending());
+    }
+
+    #[test]
+    fn parameter_restart_marker_preserves_mixed_unknown_bits_and_raw_exhaustion() {
+        use crate::plugin::{NativeEditorEvent as Event, NativeEditorEventDrain};
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            for flags in [0, 8, 2, i32::MIN] {
+                assert_eq!(handler.restartComponent(flags), kResultOk);
+            }
+        }
+        assert!(handler.editor_event_source_status().closed_empty());
+        let flags = 4 | i32::MIN;
+        unsafe {
+            assert_eq!(handler.restartComponent(flags), kResultOk);
+        }
+        let cohort = handler.pending_restart_cohort();
+        assert_eq!(cohort.serial(), 4);
+        assert_eq!(cohort.flags().bits(), 8 | 2 | flags);
+        assert_eq!(
+            handler.take_editor_events(),
+            NativeEditorEventDrain::Complete {
+                events: vec![Event::ParameterRescanRequested { flags, cohort }],
+            }
+        );
+        handler
+            .restart_cohort
+            .store(u64::from(u32::MAX - 1) << 32, Ordering::Release);
+        unsafe {
+            assert_eq!(handler.restartComponent(20), kResultOk);
+        }
+        let exhausted = handler.pending_restart_cohort();
+        assert!(exhausted.exhausted());
+        let source = handler.editor_event_source_status();
+        assert!(!handler.retire_restart_cohort(exhausted));
+        assert_eq!(handler.take_restart_flags().bits(), 20);
+        assert_eq!(handler.editor_event_source_status(), source);
+    }
+
+    #[test]
+    fn parameter_restart_marker_overflow_keeps_raw_obligation_and_sticky_loss() {
+        use crate::plugin::NativeEditorEventFailure;
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            for _ in 0..MAX_EDITOR_FEEDBACK {
+                assert_eq!(handler.setDirty(0), kResultOk);
+            }
+            assert_eq!(handler.restartComponent(4), kResultFalse);
+        }
+        let source = handler.editor_event_source_status();
+        assert_eq!(source.failure(), Some(NativeEditorEventFailure::Overflow));
+        assert_eq!(source.pending_events(), MAX_EDITOR_FEEDBACK);
+        let cohort = handler.pending_restart_cohort();
+        assert_eq!(cohort.serial(), 1);
+        assert_eq!(cohort.flags().bits(), 4);
+        let _ = handler.take_editor_events();
+        assert_eq!(
+            handler.editor_event_source_status().failure(),
+            source.failure()
+        );
+        assert_eq!(handler.pending_restart_cohort(), cohort);
+    }
+
+    #[test]
     fn native_vst3_restart_cohort_exhaustion_never_wraps_or_drains() {
         let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         handler
@@ -5690,7 +5805,7 @@ mod native_source_observation_contracts {
                     .unwrap(),
                 before
             );
-            assert_eq!(events.len(), 7);
+            assert_eq!(events.len(), 8);
             assert_eq!(feedback.len(), 2);
             assert_eq!(feedback[0].0, 3);
             assert_eq!(feedback[0].1.to_bits(), (-0.0_f64).to_bits());
@@ -5725,6 +5840,10 @@ mod native_source_observation_contracts {
                 })
             ));
             assert!(matches!(&events[6], NativeEditorEvent::GroupEditFinished));
+            assert_eq!(
+                events[7],
+                NativeEditorEvent::ParameterRescanRequested { flags: 20, cohort }
+            );
             assert_eq!(handler.editor_event_source_status(), before);
             assert_eq!(handler.pending_restart_cohort(), cohort);
         }

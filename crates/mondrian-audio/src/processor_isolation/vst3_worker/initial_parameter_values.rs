@@ -1,8 +1,9 @@
 //! One initial-only handoff; never a runtime GUI-author consumer.
 use super::*;
 use vst3_host::controller_parameters::ControllerParameterQueryFrame;
+use vst3_host::initial_parameter_input::InitialParameterStorage;
 #[cfg(target_os = "windows")]
-use vst3_host::initial_parameter_input::{InitialParameterStorage, InitialParameterValue};
+use vst3_host::initial_parameter_input::InitialParameterValue;
 
 /// Fixed bounded metadata observation scratch; charged as main inline storage.
 #[cfg(target_os = "windows")]
@@ -54,7 +55,6 @@ impl Vst3Worker {
         if source.failure().is_some()
             || source.open_parameter_edits() != 0
             || source.group_depth() != 0
-            || source.pending_events() != source.pending_dsp_feedback_values()
         {
             return false;
         }
@@ -131,7 +131,11 @@ impl Vst3Worker {
         let Ok(source) = plugin.editor_event_source_status() else {
             return true;
         };
-        if !source.closed_empty() || source.pending_dsp_feedback_values() != 0 {
+        if source.failure().is_some()
+            || source.open_parameter_edits() != 0
+            || source.group_depth() != 0
+            || source.pending_dsp_feedback_values() != 0
+        {
             return true;
         }
         let admitted = &self.payload.parameters;
@@ -165,13 +169,19 @@ impl Vst3Worker {
             return true;
         }
         // Reentrant edits and repeated same-bit callbacks are later obligations.
-        // No source is drained and no newer callback is retired by this consumer.
+        // The SDK consumes only a proved intact marker-only initial prefix,
+        // with zero input storage under the same source/feedback/input locks.
         if !matches!(plugin.editor_event_source_status(), Ok(after) if after == source)
             || plugin.pending_restart_cohort() != Some(cohort)
         {
             return true;
         }
-        let _ = plugin.retire_restart_cohort(cohort);
+        let _ = plugin.handoff_initial_parameter_input(
+            cohort,
+            source,
+            &[],
+            InitialParameterStorage::default(),
+        );
         true
     }
 }

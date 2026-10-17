@@ -466,9 +466,28 @@ fn native_initial_paused_bind_cannot_reclassify_later_native_callbacks_as_startu
     worker.plugin.as_mut().unwrap().load_state(&state(0.625, 9)).unwrap();
     worker.plugin.as_ref().unwrap().get_parameter(0).unwrap();
     let source = worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap();
-    assert_eq!(source.pending_events(), 3);
+    assert_eq!(source.pending_events(), 4);
     assert_eq!(source.pending_dsp_feedback_values(), 1);
     let cohort = worker.plugin.as_ref().unwrap().pending_restart_cohort();
+    let mut events = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
+    let mut feedback = Vec::with_capacity(crate::NATIVE_AUDIO_AUTHOR_EVENTS);
+    assert_eq!(
+        worker
+            .plugin
+            .as_ref()
+            .unwrap()
+            .observe_editor_source_bounded(
+                crate::NATIVE_AUDIO_AUTHOR_EVENTS,
+                &mut events,
+                &mut feedback,
+            )
+            .unwrap(),
+        source
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        vst3_host::plugin::NativeEditorEvent::ParameterRescanRequested { flags: 4, cohort: observed }
+            if Some(*observed) == cohort
+    )));
     let before = audit(&worker);
     assert!(matches!(
         worker.enter_state(73),
@@ -528,7 +547,7 @@ fn native_initial_paused_bind_cannot_reclassify_later_native_callbacks_as_startu
             .editor_event_source_status()
             .unwrap()
             .pending_events(),
-        3
+        4
     );
     assert_eq!(
         worker.plugin.as_ref().unwrap().pending_restart_cohort(),

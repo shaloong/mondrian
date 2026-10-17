@@ -168,7 +168,7 @@ impl ComponentHandler {
             }
         }
         validate_values(current_values)?;
-        let prepared_values = if expected_source.pending_events() == 0 {
+        let prepared_values = if expected_source.pending_dsp_feedback_values() == 0 {
             &[][..]
         } else {
             current_values
@@ -192,23 +192,61 @@ impl ComponentHandler {
                 || source.failure().is_some()
                 || source.open_parameter_edits() != 0
                 || source.group_depth() != 0
-                || events.events.len() != feedback.len()
+                // Revision does not reset on drain. This proves an intact
+                // source history, not an unretired raw callback history.
+                || usize::try_from(source.revision()).ok() != Some(events.events.len())
             {
                 return Err(Failure::SourceChanged);
             }
             if input.used.load(Ordering::Relaxed) != 0 || old_pool.capacity() != 0 {
                 return Err(Failure::InputPending);
             }
-            for (event, &(feedback_id, feedback_value)) in events.events.iter().zip(feedback.iter())
+            let mut last_marker: Option<RestartCohort> = None;
+            let mut value_count = 0;
+            // Validate every kind and marker before staging. This conservative
+            // initial subset permits public raw retirements between markers.
+            for event in &events.events {
+                match event {
+                    NativeEditorEvent::Parameter(edit)
+                        if edit.kind == ParameterEditKind::ValueChange && edit.value.is_some() =>
+                    {
+                        value_count += 1;
+                    }
+                    NativeEditorEvent::ParameterRescanRequested {
+                        flags,
+                        cohort: marker,
+                    } => {
+                        let post = marker.flags().bits();
+                        if !matches!(*flags, 4 | 16 | 20)
+                            || !matches!(post, 4 | 16 | 20)
+                            || post & *flags != *flags
+                            || marker.serial() == 0
+                            || marker.exhausted()
+                            || last_marker.is_some_and(|last| last.serial() >= marker.serial())
+                        {
+                            return Err(Failure::SourceChanged);
+                        }
+                        last_marker = Some(*marker);
+                    }
+                    _ => return Err(Failure::SourceChanged),
+                }
+            }
+            if value_count != feedback.len()
+                || match cohort.flags().bits() {
+                    0 => last_marker.is_some(),
+                    4 | 20 => last_marker != Some(cohort),
+                    _ => true,
+                }
             {
-                let NativeEditorEvent::Parameter(edit) = event else {
-                    return Err(Failure::SourceChanged);
-                };
-                let Some(value) = edit.value else {
-                    return Err(Failure::SourceChanged);
-                };
-                if edit.kind != ParameterEditKind::ValueChange
-                    || edit.id != feedback_id
+                return Err(Failure::SourceChanged);
+            }
+            let values = events.events.iter().filter_map(|event| match event {
+                NativeEditorEvent::Parameter(edit) => Some(edit),
+                _ => None,
+            });
+            for (edit, &(feedback_id, feedback_value)) in values.zip(feedback.iter()) {
+                let value = edit.value.ok_or(Failure::SourceChanged)?;
+                if edit.id != feedback_id
                     || value.to_bits() != feedback_value.to_bits()
                     || !current_values.iter().any(|current| {
                         current.id == edit.id && current.normalized.to_bits() == value.to_bits()
@@ -307,6 +345,12 @@ mod tests {
         assert_eq!(handler.pending_restart_cohort().serial(), cohort.serial());
         assert!(!handler.pending_restart_cohort().pending());
         assert!(input.has_active_points().unwrap());
+        assert_eq!(input.used.load(Ordering::Relaxed), 1);
+        {
+            let queues = input.queues.lock().unwrap();
+            assert_eq!(*queues[0].points.lock().unwrap(), vec![(0, 0.25)]);
+            assert!(queues[1].points.lock().unwrap().is_empty());
+        }
         input.enqueue(7, 0, 0.75);
         input.enqueue(7, 3, 0.9);
         let queues = input.queues.lock().unwrap();
@@ -495,5 +539,248 @@ mod tests {
             PreparedInput::new(&[value(7, 0.5), value(7, 0.5)], storage_request(2).unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn initial_handoff_marker_only_or_zero_work_does_not_replay_current_values() {
+        for flags in [0, 4, 20] {
+            let handler = handler();
+            unsafe {
+                assert_eq!(handler.restartComponent(flags), kResultOk);
+            }
+            let input = ParameterChanges::default();
+            let source = handler.editor_event_source_status();
+            let cohort = handler.pending_restart_cohort();
+            assert_eq!(source.pending_dsp_feedback_values(), 0);
+            handler
+                .handoff_initial_parameters(
+                    &input,
+                    cohort,
+                    source,
+                    &[value(7, 0.5), value(9, 0.75)],
+                    Storage::default(),
+                )
+                .unwrap();
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+            assert_eq!(input.used.load(Ordering::Relaxed), 0);
+            assert!(handler.editor_event_source_status().closed_empty());
+            assert_eq!(
+                handler.editor_event_source_status().revision(),
+                source.revision()
+            );
+            assert_eq!(handler.pending_restart_cohort().serial(), cohort.serial());
+            assert!(!handler.pending_restart_cohort().pending());
+        }
+    }
+
+    #[test]
+    fn initial_handoff_accepts_intact_parameter_history_across_legal_raw_retirements() {
+        for prefix in [8, 16] {
+            let handler = handler();
+            unsafe {
+                assert_eq!(handler.restartComponent(prefix), kResultOk);
+            }
+            assert_eq!(handler.take_restart_flags().bits(), prefix);
+            // A non-parameter callback can advance the raw serial without an
+            // author event. Retiring it does not make a parameter source gap.
+            unsafe {
+                assert_eq!(handler.restartComponent(8), kResultOk);
+            }
+            assert_eq!(handler.take_restart_flags().bits(), 8);
+            unsafe {
+                assert_eq!(handler.restartComponent(4), kResultOk);
+            }
+            let source = handler.editor_event_source_status();
+            let cohort = handler.pending_restart_cohort();
+            assert_eq!(cohort.serial(), 3);
+            assert_eq!(source.pending_events(), if prefix == 16 { 2 } else { 1 });
+            let input = ParameterChanges::default();
+            handler
+                .handoff_initial_parameters(
+                    &input,
+                    cohort,
+                    source,
+                    &[value(7, 0.5)],
+                    Storage::default(),
+                )
+                .unwrap();
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+            assert!(handler.editor_event_source_status().closed_empty());
+            assert!(!handler.pending_restart_cohort().pending());
+        }
+    }
+
+    #[test]
+    fn initial_handoff_refuses_drained_or_previously_consumed_history_without_mutation() {
+        for consume in [false, true] {
+            let handler = handler();
+            let input = ParameterChanges::default();
+            unsafe {
+                assert_eq!(handler.restartComponent(4), kResultOk);
+            }
+            if consume {
+                handler
+                    .handoff_initial_parameters(
+                        &input,
+                        handler.pending_restart_cohort(),
+                        handler.editor_event_source_status(),
+                        &[],
+                        Storage::default(),
+                    )
+                    .unwrap();
+            } else {
+                assert!(matches!(handler.take_editor_events(),
+                    crate::plugin::NativeEditorEventDrain::Complete { events } if events.len() == 1));
+            }
+            unsafe {
+                assert_eq!(handler.restartComponent(4), kResultOk);
+            }
+            let before = source_snapshot(&handler);
+            let cohort = handler.pending_restart_cohort();
+            assert_eq!(
+                handler.handoff_initial_parameters(
+                    &input,
+                    cohort,
+                    before.0,
+                    &[],
+                    Storage::default()
+                ),
+                Err(Failure::SourceChanged)
+            );
+            assert_eq!(source_snapshot(&handler), before);
+            assert_eq!(handler.pending_restart_cohort(), cohort);
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn initial_handoff_reentrant_same_bit_restart_preserves_every_owner() {
+        let handler = handler();
+        let input = ParameterChanges::default();
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let source = handler.editor_event_source_status();
+        let cohort = handler.pending_restart_cohort();
+        // Models a native callback during the caller's real metadata query.
+        unsafe {
+            assert_eq!(handler.restartComponent(4), kResultOk);
+        }
+        let before = source_snapshot(&handler);
+        let current = handler.pending_restart_cohort();
+        assert_eq!(
+            handler.handoff_initial_parameters(&input, cohort, source, &[], Storage::default()),
+            Err(Failure::SourceChanged)
+        );
+        assert_eq!(source_snapshot(&handler), before);
+        assert_eq!(handler.pending_restart_cohort(), current);
+        assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+    }
+
+    #[test]
+    fn initial_handoff_rejects_unsupported_kinds_and_incomplete_marker_prefix_before_staging() {
+        for case in 0..7 {
+            let handler = handler();
+            seed(&handler);
+            match case {
+                0 => unsafe {
+                    assert_eq!(handler.setDirty(0), kResultOk);
+                },
+                1 => {
+                    handler.editor_events.lock().unwrap().events.pop();
+                }
+                2 => {
+                    let mut source = handler.editor_events.lock().unwrap();
+                    let NativeEditorEvent::ParameterRescanRequested { flags, .. } =
+                        &mut source.events[1]
+                    else {
+                        panic!("real marker")
+                    };
+                    *flags = 8;
+                }
+                3 => {
+                    let mut source = handler.editor_events.lock().unwrap();
+                    let NativeEditorEvent::ParameterRescanRequested { cohort, .. } =
+                        &mut source.events[1]
+                    else {
+                        panic!("real marker")
+                    };
+                    *cohort = RestartCohort::from_word(20);
+                }
+                4 => {
+                    unsafe {
+                        assert_eq!(handler.restartComponent(4), kResultOk);
+                    }
+                    handler.editor_events.lock().unwrap().events.swap(1, 2);
+                }
+                5 => {
+                    assert_eq!(handler.take_restart_flags().bits(), 20);
+                }
+                6 => {
+                    handler.parameter_changes.lock().unwrap()[0].1 = 0.5;
+                }
+                _ => unreachable!(),
+            }
+            let before = source_snapshot(&handler);
+            let cohort = handler.pending_restart_cohort();
+            let input = ParameterChanges::default();
+            assert_eq!(
+                handler.handoff_initial_parameters(
+                    &input,
+                    cohort,
+                    before.0,
+                    &[value(7, 0.25)],
+                    storage_request(1).unwrap()
+                ),
+                Err(Failure::SourceChanged)
+            );
+            assert_eq!(source_snapshot(&handler), before);
+            assert_eq!(handler.pending_restart_cohort(), cohort);
+            assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn initial_handoff_zero_flags_transfers_only_real_feedback_once() {
+        let handler = handler();
+        unsafe {
+            assert_eq!(handler.performEdit(7, 0.25), kResultOk);
+        }
+        let input = ParameterChanges::default();
+        let source = handler.editor_event_source_status();
+        let cohort = handler.pending_restart_cohort();
+        assert_eq!(cohort.flags().bits(), 0);
+        handler
+            .handoff_initial_parameters(
+                &input,
+                cohort,
+                source,
+                &[value(7, 0.25), value(9, 0.5)],
+                storage_request(2).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(input.used.load(Ordering::Relaxed), 1);
+        {
+            let queues = input.queues.lock().unwrap();
+            assert_eq!(queues.len(), 2);
+            assert_eq!(queues[0].param_id(), 7);
+            assert_eq!(*queues[0].points.lock().unwrap(), [(0, 0.25)]);
+            assert!(queues[1].points.lock().unwrap().is_empty());
+        }
+        let after = source_snapshot(&handler);
+        assert!(after.0.closed_empty());
+        assert_eq!(after.0.pending_dsp_feedback_values(), 0);
+        assert_eq!(
+            handler.handoff_initial_parameters(
+                &input,
+                cohort,
+                after.0,
+                &[value(7, 0.25)],
+                storage_request(1).unwrap()
+            ),
+            Err(Failure::InputPending)
+        );
+        assert_eq!(source_snapshot(&handler), after);
+        assert_eq!(input.used.load(Ordering::Relaxed), 1);
     }
 }

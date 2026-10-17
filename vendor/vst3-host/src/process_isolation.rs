@@ -2896,4 +2896,99 @@ mod canonical_timeline_wire_tests {
             );
         }
     }
+
+    #[test]
+    fn editor_rescan_wire_preserves_raw_callback_and_complete_post_cohort() {
+        use crate::plugin::{NativeEditorEvent as Event, NativeEditorEventDrain, RestartCohort};
+        let flags = i32::MIN | 20;
+        let word = (17_u64 << 32) | u64::from((flags | 8) as u32);
+        let event = Event::ParameterRescanRequested {
+            flags,
+            cohort: RestartCohort::from_word(word),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({
+                "ParameterRescanRequested": { "flags": flags, "cohort": word }
+            })
+        );
+        let expected = NativeEditorEventDrain::Complete {
+            events: vec![event],
+        };
+        let response = HostResponse::EditorEvents {
+            drain: expected.clone(),
+        };
+        let wire = serde_json::to_vec(&response).unwrap();
+        assert!(
+            matches!(serde_json::from_slice::<HostResponse>(&wire).unwrap(),
+            HostResponse::EditorEvents { drain } if drain == expected)
+        );
+        // The transparent value does not impose parameter-admission policy on
+        // unknown raw bits or exhaustion. Those are consumer decisions.
+        let maximum: RestartCohort = serde_json::from_str(&u64::MAX.to_string()).unwrap();
+        assert_eq!(
+            serde_json::to_value(maximum).unwrap(),
+            serde_json::json!(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn editor_rescan_wire_requires_new_paired_decoder_and_explicit_fields() {
+        use crate::plugin::{NativeEditorEvent as Event, ParameterEdit, ParameterEditKind};
+        // The earlier event vocabulary fails on the new variant rather than
+        // silently filtering it from an otherwise successful helper response.
+        #[derive(serde::Deserialize)]
+        enum LegacyEvent {
+            Parameter(ParameterEdit),
+            DirtyChanged(bool),
+            GroupEditStarted,
+            GroupEditFinished,
+        }
+        for event in [
+            Event::Parameter(ParameterEdit {
+                id: 7,
+                kind: ParameterEditKind::ValueChange,
+                value: Some(0.5),
+            }),
+            Event::DirtyChanged(true),
+            Event::GroupEditStarted,
+            Event::GroupEditFinished,
+        ] {
+            let wire = serde_json::to_vec(&event).unwrap();
+            match serde_json::from_slice::<LegacyEvent>(&wire).unwrap() {
+                LegacyEvent::Parameter(edit) => assert_eq!(edit.id, 7),
+                LegacyEvent::DirtyChanged(value) => assert!(value),
+                LegacyEvent::GroupEditStarted | LegacyEvent::GroupEditFinished => {}
+            }
+        }
+        let event = serde_json::json!({ "ParameterRescanRequested": {
+            "flags": 4, "cohort": (1_u64 << 32) | 4
+        }});
+        assert!(serde_json::from_value::<LegacyEvent>(event).is_err());
+        // Use the actual serializer's response shape for the unknown-variant
+        // negative, without constructing a second RPC envelope implementation.
+        let known = HostResponse::EditorEvents {
+            drain: crate::plugin::NativeEditorEventDrain::Complete {
+                events: vec![Event::ParameterRescanRequested {
+                    flags: 4,
+                    cohort: crate::plugin::RestartCohort::from_word((1_u64 << 32) | 4),
+                }],
+            },
+        };
+        let wire = serde_json::to_string(&known).unwrap();
+        assert!(serde_json::from_str::<HostResponse>(
+            &wire.replace("ParameterRescanRequested", "UnknownParameterRescan")
+        )
+        .is_err());
+        for field in ["flags", "cohort"] {
+            let mut missing = serde_json::json!({ "ParameterRescanRequested": {
+                "flags": 4, "cohort": (1_u64 << 32) | 4
+            }});
+            missing["ParameterRescanRequested"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(serde_json::from_value::<Event>(missing).is_err());
+        }
+    }
 }
