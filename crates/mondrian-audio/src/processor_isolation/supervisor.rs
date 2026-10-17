@@ -42,7 +42,15 @@ pub(super) struct SupervisedAudioWorker {
     operation_timeout: Duration,
     state_entry_timeout: Duration,
     configured_control_timeout: Option<Duration>,
+    #[cfg(test)]
+    before_drop_test_hook: Option<BeforeDropTestHook>,
 }
+
+#[cfg(test)]
+type BeforeDropTestHook = Box<dyn FnOnce(&mut SupervisedAudioWorker) + Send + Sync>;
+
+#[cfg(all(test, windows))]
+mod native_playback_closure_tests;
 
 // This is private OS ownership, not a second processor/domain lifecycle.
 // Retiring revokes submissions without claiming that the retained Child exited.
@@ -448,6 +456,8 @@ impl SupervisedAudioWorker {
                 operation_timeout: spec.operation_timeout,
                 state_entry_timeout: spec.state_entry_timeout,
                 configured_control_timeout: Some(spec.operation_timeout),
+                #[cfg(test)]
+                before_drop_test_hook: None,
             },
             input_names,
         ))
@@ -1131,6 +1141,10 @@ impl SupervisedAudioWorker {
 
 impl Drop for SupervisedAudioWorker {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(hook) = self.before_drop_test_hook.take() {
+            hook(self);
+        }
         let _ = self.shutdown();
     }
 }
@@ -1733,6 +1747,7 @@ mod control_timeout_worker_lifecycle {
             operation_timeout: operation,
             state_entry_timeout: Duration::from_secs(30),
             configured_control_timeout: None,
+            before_drop_test_hook: None,
         })
     }
 

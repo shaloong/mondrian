@@ -1811,6 +1811,7 @@ pub(super) fn pure_seed_factory(
         spec,
         execution_contract,
         layout,
+        retained_create_test_hook: None,
     }
 }
 

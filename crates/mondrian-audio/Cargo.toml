@@ -36,4 +36,6 @@ clack-host = { workspace = true, features = ["clack-plugin"] }
 clack-extensions = { workspace = true, features = ["clack-plugin", "note-ports", "gui", "log", "timer"] }
 
 [target.'cfg(windows)'.dev-dependencies]
+# Joint native-owner closure tests use the real Media retirement worker.
+mondrian-media.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_JobObjects", "Win32_System_Threading"] }

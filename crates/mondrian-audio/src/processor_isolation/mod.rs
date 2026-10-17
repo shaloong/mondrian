@@ -369,12 +369,23 @@ pub trait IsolatedAudioProcessorSpecResolver: Send + Sync {
 /// One resolver that keeps built-ins local and forces VST3/CLAP through isolation.
 pub struct IsolatedAudioProcessorResolver {
     external: Arc<dyn IsolatedAudioProcessorSpecResolver>,
+    #[cfg(test)]
+    retained_create_test_hook: Option<RetainedCreateTestHook>,
 }
+
+// Applied only after actual retained Ready, never to the validation owner.
+#[cfg(test)]
+type RetainedCreateTestHook =
+    Arc<dyn Fn(&mut SupervisedAudioWorker) -> Result<(), AudioProcessorHostError> + Send + Sync>;
 
 impl IsolatedAudioProcessorResolver {
     /// Bind one concrete native discovery/ABI Adapter.
     pub fn new(external: Arc<dyn IsolatedAudioProcessorSpecResolver>) -> Self {
-        Self { external }
+        Self {
+            external,
+            #[cfg(test)]
+            retained_create_test_hook: None,
+        }
     }
 }
 
@@ -407,8 +418,16 @@ impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
                 "external adapter does not admit requested Note input",
             ));
         }
-        IsolatedAudioProcessorFactory::prepare(spec)
-            .map(|factory| factory as Arc<dyn AudioProcessorFactory>)
+        let factory = IsolatedAudioProcessorFactory::prepare(spec)?;
+        #[cfg(test)]
+        let factory = {
+            let mut factory = factory;
+            Arc::get_mut(&mut factory)
+                .expect("new test Factory has one owner")
+                .retained_create_test_hook = self.retained_create_test_hook.clone();
+            factory
+        };
+        Ok(factory as Arc<dyn AudioProcessorFactory>)
     }
 }
 
@@ -424,6 +443,8 @@ pub struct IsolatedAudioProcessorFactory {
     spec: IsolatedAudioProcessorWorkerSpec,
     execution_contract: AudioProcessorExecutionContract,
     layout: SharedBlockLayout,
+    #[cfg(test)]
+    retained_create_test_hook: Option<RetainedCreateTestHook>,
 }
 
 impl IsolatedAudioProcessorFactory {
@@ -474,6 +495,8 @@ impl IsolatedAudioProcessorFactory {
             spec,
             execution_contract: self.execution_contract,
             layout: self.layout,
+            #[cfg(test)]
+            retained_create_test_hook: self.retained_create_test_hook.clone(),
         })
     }
 
@@ -514,6 +537,8 @@ impl IsolatedAudioProcessorFactory {
             execution_contract,
             layout,
             input_names,
+            #[cfg(test)]
+            retained_create_test_hook: None,
         }))
     }
 
@@ -622,6 +647,14 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
             self.layout,
             Some(&self.input_names),
         )?;
+        #[cfg(test)]
+        let worker = {
+            let mut worker = worker;
+            if let Some(hook) = &self.retained_create_test_hook {
+                hook(&mut worker)?;
+            }
+            worker
+        };
         Ok(Box::new(IsolatedAudioProcessor {
             musical_time_reference: self.spec.musical_time_reference,
             worker,
@@ -2072,6 +2105,7 @@ mod note_spec_contracts {
             execution_contract: spec.plugin_execution_contract,
             spec,
             layout,
+            retained_create_test_hook: None,
         };
         assert_eq!(factory.note_input_contract(), contract());
         let mut visited = Vec::new();
