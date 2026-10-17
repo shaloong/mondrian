@@ -1,6 +1,6 @@
-//! Actual Product IPC for VST3 initial input and a retained parameter-rescan prefix.
-//! Child Ack is not a Source installation or Session recovery. Completed may precede
-//! the deferred main callback; one normal Preserve and an explicit preflight retain A.
+//! Actual Product IPC and a finite canonical Runtime parameter-rescan handoff.
+//! The original worker-only gates do not prove Session recovery. The Runtime gate
+//! below uses actual canonical transactions and the installed Source/owner chain.
 use super::*;
 use crate::{
     AudioProcessorFactory, NativeAudioAuthorAcknowledgement, NativeAudioAuthorDeliveryState,
@@ -494,4 +494,511 @@ fn installed_vst3_initial_input_crosses_product_poll_without_authored_lanes() {
     );
     assert_eq!(exit, 0);
     // Same-child OS Exit0 within 2s is not a new 100ms graceful-exit proof.
+}
+
+#[test]
+#[ignore = "current normal Product IPC18 and owned initial-values mode13 DLL; finite direct-root audio handoff, no Note/ticket/100ms/RT qualification"]
+fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
+    use crate::{
+        compile_audio_program, AudioCompileRequest, AudioContinuityEpoch,
+        AudioContinuityEvidenceVisitor, AudioDecodedSource, AudioExecutionError,
+        AudioMediaResolver, AudioNativeProcessorAddress, AudioNativeProcessorOwnerLease,
+        AudioProcessorCursorEvidence, AudioProcessorCursorState, AudioProgramRuntime,
+        AudioRuntimeResourceGrant, AudioSessionCursorEvidence, AudioStateEntry,
+        NativeAudioAuthorAdmissionError, NativeAudioAuthorHoldReason, NativeAudioAuthorProgram,
+        NativeAudioParameterHandoffContinuity, ResolvedAudioSource,
+    };
+    use mondrian_core::{
+        AssetId, AudioOwnerInstallationError, AudioOwnerInstallationSource, AudioSourceComponentId,
+        ExactAutomationCurve, ExecutionCancellationToken, NativeAudioAuthorCallback,
+        NativeAudioAuthorCompletion, NativeAudioParameterRescanKind, TimelineTime,
+    };
+    use mondrian_timeline::audio::AudioChannelStripOwner;
+    use mondrian_timeline::{
+        apply_audio_processor_rack_edit, AudioChannelStripRack, AudioProcessorRackAddress,
+        AudioProcessorRackEdit, AudioProcessorRackEditRequest, Clip, NativeAudioAuthorUpdate,
+        NativeAudioParameterWrite, NativeAudioParameterWriteMode, Sequence,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Independent dyadic PCM, consumed by the actual bound media Source.
+    const INPUT: [[f32; 2]; 8] = [
+        [1.0, -0.5],
+        [0.25, 0.75],
+        [-1.0, 0.5],
+        [2.0, -0.25],
+        [0.5, 1.0],
+        [-0.75, 0.25],
+        [1.5, -1.0],
+        [-0.5, 2.0],
+    ];
+    struct IndexedPcm(Arc<AtomicUsize>);
+    impl AudioDecodedSource for IndexedPcm {
+        fn read_interleaved(
+            &self,
+            start: i64,
+            frames: usize,
+            output: &mut [f32],
+            cancellation: &ExecutionCancellationToken,
+        ) -> Result<(), String> {
+            if cancellation.is_canceled() || output.len() != frames * 2 {
+                return Err("cancelled or invalid owned stereo extent".into());
+            }
+            self.0.fetch_add(1, Ordering::Relaxed);
+            for (offset, pair) in output.chunks_exact_mut(2).enumerate() {
+                let sample = start
+                    .checked_add(i64::try_from(offset).map_err(|_| "offset")?)
+                    .ok_or("owned source sample overflow")?;
+                let value = usize::try_from(sample)
+                    .ok()
+                    .and_then(|i| INPUT.get(i))
+                    .copied()
+                    .unwrap_or([0.0; 2]);
+                pair.copy_from_slice(&value);
+            }
+            Ok(())
+        }
+    }
+    struct Media {
+        resolves: AtomicUsize,
+        reads: Arc<AtomicUsize>,
+    }
+    impl AudioMediaResolver for Media {
+        fn resolve(
+            &self,
+            _: AssetId,
+            _: AudioSourceComponentId,
+            rate: u32,
+        ) -> Result<ResolvedAudioSource, String> {
+            if rate != 48_000 {
+                return Err("owned source rate".into());
+            }
+            self.resolves.fetch_add(1, Ordering::Relaxed);
+            Ok(ResolvedAudioSource::new(
+                AudioChannelLayout::Stereo,
+                Arc::new(IndexedPcm(Arc::clone(&self.reads))),
+            ))
+        }
+    }
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Cursors {
+        sessions: Vec<AudioSessionCursorEvidence>,
+        processors: Vec<AudioProcessorCursorEvidence>,
+    }
+    impl AudioContinuityEvidenceVisitor for Cursors {
+        fn session(
+            &mut self,
+            value: AudioSessionCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.sessions.push(value);
+            Ok(())
+        }
+        fn processor(
+            &mut self,
+            value: AudioProcessorCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.processors.push(value);
+            Ok(())
+        }
+    }
+    fn cursors(runtime: &AudioProgramRuntime) -> Cursors {
+        let mut value = Cursors::default();
+        runtime.visit_continuity_evidence(&mut value).unwrap();
+        assert_eq!((value.sessions.len(), value.processors.len()), (1, 1));
+        value
+    }
+    fn owner(runtime: &AudioProgramRuntime) -> AudioNativeProcessorOwnerLease {
+        let value = cursors(runtime);
+        let processor = value.processors[0];
+        let epoch = match processor.state {
+            AudioProcessorCursorState::Unentered => None,
+            AudioProcessorCursorState::WaitingForFirstSignal { epoch }
+            | AudioProcessorCursorState::Active { epoch, .. } => Some(epoch),
+            other => panic!("exact owned Runtime is not cold/active: {other:?}"),
+        };
+        runtime
+            .native_owner_lease(AudioNativeProcessorAddress {
+                root: value.sessions[0].identity,
+                local: processor.identity,
+                occurrence: processor.occurrence,
+                epoch,
+            })
+            .unwrap()
+    }
+    fn same_progress(before: &Cursors, after: &Cursors) {
+        assert_eq!(
+            after.sessions[0].identity.session_id,
+            before.sessions[0].identity.session_id
+        );
+        assert_eq!(after.sessions[0].state, before.sessions[0].state);
+        assert_eq!(
+            after.sessions[0].public_output_lookahead_frames,
+            before.sessions[0].public_output_lookahead_frames
+        );
+        assert_eq!(
+            after.processors[0].identity.session_id,
+            before.processors[0].identity.session_id
+        );
+        assert_eq!(
+            after.processors[0].occurrence,
+            before.processors[0].occurrence
+        );
+        assert_eq!(after.processors[0].state, before.processors[0].state);
+    }
+    fn pcm(runtime: &mut AudioProgramRuntime, start: usize) {
+        let mut output = [93.0; 8];
+        runtime
+            .render_into(
+                AudioRenderRequest { start_sample: start as i64, frames: 4 },
+                &mut output,
+            )
+            .expect("actual contiguous Runtime PCM after exact Source/Ack admission");
+        let expected: Vec<_> = INPUT[start..start + 4]
+            .iter()
+            .flatten()
+            .map(|sample| sample * 0.75_f32)
+            .collect();
+        assert_eq!(output.as_slice(), expected.as_slice());
+    }
+
+    let material = |name| {
+        let path = PathBuf::from(std::env::var_os(name).expect("explicit current native material"));
+        assert!(path.is_absolute() && path.is_file(), "{name}");
+        path
+    };
+    let helper = material("MONDRIAN_VST3_TEST_HELPER");
+    let binary = material("MONDRIAN_VST3_INITIAL_VALUES_TEST_PLUGIN");
+    let catalog = Arc::new(
+        DiscoveredVst3AudioProcessorSpecResolver::discover(helper, [binary])
+            .expect("actual current Product discovery"),
+    );
+    let render = AudioRenderContract {
+        sample_rate: 48_000,
+        max_block_frames: 4,
+        processing_mode: AudioProcessingMode::Offline,
+        // Finite single-owner fixture allowance; not a budget-edge/whole-heap qualification.
+        processor_session_scratch_budget_bytes: 32 * 1024 * 1024,
+        ..test_render_contract()
+    };
+    let state = fixture_state(0.375, 13);
+    let mut author = catalog
+        .create_instance(
+            "61921CF43A2B4A68AE5AE08241D85E22",
+            render,
+            Some(state.clone()),
+        )
+        .expect("actual restored-mode13 author and parameter schema");
+    assert_eq!(author.parameters.len(), 1);
+    assert!(!author.bypassed);
+    assert_eq!(
+        author.opaque_state.as_deref().map(|bytes| bytes.as_slice()),
+        Some(state.as_slice())
+    );
+    let gain = author.parameters.keys().next().unwrap().clone();
+    assert_eq!(gain, ParameterId::new_static("vst3.param.0"));
+    author
+        .set_parameter_automation(ExactAutomationCurve::new(gain.clone(), 0.75).unwrap())
+        .unwrap();
+    let instance = author.id;
+    let mut sequence = Sequence::new("actual VST3 Runtime retained rescan and canonical handoff");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+    sequence
+        .add_media_audio_clip(
+            sequence.audio_tracks[0].id,
+            Clip::new(AssetId::new(), TimelineTime::ZERO, TimelineTime::ONE).unwrap(),
+            AudioSourceComponentId::primary(),
+        )
+        .unwrap();
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(author);
+    let resolver = IsolatedAudioProcessorResolver::new(catalog);
+    let media = Media {
+        resolves: AtomicUsize::new(0),
+        reads: Arc::new(AtomicUsize::new(0)),
+    };
+    let cancel = ExecutionCancellationToken::new();
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &media,
+        &resolver,
+        render,
+        None,
+        AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 32 * 1024 * 1024),
+    )
+    .expect("actual canonical Output effect, media and retained native owner");
+    assert_eq!(media.resolves.load(Ordering::Relaxed), 1);
+    let source = AudioOwnerInstallationSource::new();
+    let (registration, verifier) = source.register().unwrap();
+    runtime.bind_native_owner_installation(verifier).unwrap();
+    let initial_claim = source
+        .reserve_install(&registration, None)
+        .and_then(|reservation| source.begin_commit(reservation))
+        .unwrap()
+        .commit()
+        .unwrap();
+    runtime.install_native_owner_bindings(&initial_claim, &cancel).unwrap();
+    runtime.validate_native_author_source_closed(&cancel).unwrap();
+    let cold = owner(&runtime);
+    assert_eq!(cold.editor_target().instance, instance);
+    let object = runtime.observe_native_owner_object(cold).unwrap();
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(613),
+            start_sample: 0,
+        })
+        .expect("one initial public Enter, no later re-entry/rebuild");
+    let first = owner(&runtime);
+    assert_eq!(first.editor_target().continuity_epoch, Some(613));
+    assert_eq!(runtime.observe_native_owner_object(first).unwrap(), object);
+    assert_ne!(object.process_id().get(), std::process::id());
+    // SAFETY: this is the real authenticated native owner, observed before any
+    // handoff. The query/synchronize-only handle never owns reaping/termination.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, object.process_id().get()) };
+    assert!(!raw.is_null());
+    let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
+        258
+    );
+    pcm(&mut runtime, 0);
+    let mut previous = None;
+    // Two fixed real prefixes: A from the first successful PCM block, then the
+    // natural B from the resumed block's same-value setter. This is no Poll loop.
+    for next in [4, 8] {
+        let old = owner(&runtime);
+        let old_root = runtime.resource_root_identity();
+        let before = cursors(&runtime);
+        let reads = media.reads.load(Ordering::Relaxed);
+        let old_claim = source.current_claim().unwrap().unwrap();
+        let old_verifier = runtime.native_owner_installation_verifier().unwrap();
+        let mut sentinel = [93.0; 8];
+        let error = runtime
+            .render_into(
+                AudioRenderRequest { start_sample: next, frames: 4 },
+                &mut sentinel,
+            )
+            .expect_err("ordered real rescan Source must hold before any next PCM");
+        let AudioExecutionError::NativeAuthorPending(held) = error else {
+            panic!("expected Source-first hold, actual={error:?}");
+        };
+        assert_eq!(held.target, old.editor_target());
+        assert_eq!(held.reason, NativeAudioAuthorHoldReason::PendingCallbacks);
+        assert_eq!(sentinel, [93.0; 8]);
+        assert_eq!(cursors(&runtime), before);
+        assert_eq!(media.reads.load(Ordering::Relaxed), reads);
+        assert_eq!(owner(&runtime), old);
+        assert_eq!(runtime.observe_native_owner_object(old).unwrap(), object);
+        old_verifier.validate(&source.current_claim().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            old_claim.generation()
+        );
+
+        // One ordinary real DrainAuthor round trip, including its existing
+        // possible zero-sample parameter bridge. No exact native call count.
+        let proposal = runtime
+            .poll_native_observations(&cancel)
+            .unwrap()
+            .expect("single actual source completes its retained rescan")
+            .author
+            .expect("actual native rescan author prefix, never a synthetic proposal");
+        assert_eq!(proposal.sequence(), sequence.id);
+        assert_eq!(proposal.target(), old.editor_target());
+        assert!(proposal.terminal());
+        assert_eq!(
+            proposal.completion(),
+            NativeAudioAuthorCompletion::CoherentConfiguration
+        );
+        assert_eq!(
+            (proposal.open_parameter_edits(), proposal.group_depth()),
+            (0, 0)
+        );
+        let [NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values }] =
+            proposal.callbacks()
+        else {
+            panic!("one actual ordered typed rescan");
+        };
+        assert_eq!(*kind, NativeAudioParameterRescanKind::Values);
+        assert_eq!(values.as_slice(), [(gain.clone(), 0.75_f64.to_bits())]);
+        assert_captured_mode13(proposal.state().unwrap().as_slice());
+        let a = runtime
+            .find_resource_session(old_root)
+            .unwrap()
+            .continuing_rescan_cohort(&proposal, old_root, old_claim.generation())
+            .unwrap()
+            .expect("authentic retained prefix's Some cohort, not a later live lookup");
+        assert_eq!(
+            a.request,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+        );
+        assert!(a.serial != 0 && a.serial != u32::MAX);
+        if let Some(prior) = previous {
+            assert!(a.serial > prior);
+        }
+        previous = Some(a.serial);
+        assert_eq!(cursors(&runtime), before);
+        let pending = runtime.validate_native_author_source_closed(&cancel).unwrap_err();
+        assert!(
+            matches!(
+                pending,
+                NativeAudioAuthorAdmissionError::Pending {
+                    reason: NativeAudioAuthorHoldReason::OutstandingDelivery,
+                    ..
+                }
+            ),
+            "actual={pending:?}"
+        );
+
+        let current = &sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
+        assert_eq!(current.id, proposal.target().instance);
+        let request = AudioProcessorRackEditRequest {
+            address: AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::ProgramOutput {
+                    output_id: sequence.audio_program.outputs[0].id,
+                },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            edit: AudioProcessorRackEdit::SetNativeAuthorState {
+                processor_id: current.id,
+                expected_definition: current.definition.clone(),
+                update: NativeAudioAuthorUpdate {
+                    parameters: vec![NativeAudioParameterWrite {
+                        schema: Box::new(current.parameters.get(&gain).unwrap().schema.clone()),
+                        value: f64::from_bits(values[0].1),
+                        mode: NativeAudioParameterWriteMode::Unkeyed,
+                    }
+                    .into()],
+                    opaque_state: proposal.state().cloned(),
+                },
+            },
+        };
+        let transaction = apply_audio_processor_rack_edit(&mut sequence, &request).expect(
+            "real atomic canonical author transaction accepts only the observed schema/state",
+        );
+        assert!(transaction.changed);
+        assert_eq!(
+            sequence.audio_program.outputs[0].strip.pre_fader.processors[0]
+                .opaque_state
+                .as_ref(),
+            proposal.state()
+        );
+        let programs = [NativeAudioAuthorProgram {
+            sequence: sequence.id,
+            program: Arc::new(
+                compile_audio_program(
+                    &sequence,
+                    AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+                )
+                .expect(
+                    "compile the accepted canonical model, not a second hand-built author graph",
+                ),
+            ),
+        }];
+        let (registration, destination) = source.register().unwrap();
+        let reservation = source.reserve_install(&registration, Some(&old_claim)).unwrap();
+        let mut authorization = source.authorize_runtime_installation(reservation).unwrap();
+        let mut prepared = runtime
+            .prepare_native_author_parameter_handoff(&programs, &proposal, destination, &cancel)
+            .expect("authentic SomeA direct-root continuing permission");
+        old_verifier.validate(&source.current_claim().unwrap().unwrap()).unwrap();
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            old_claim.generation()
+        );
+        assert_eq!(cursors(&runtime), before);
+        assert_eq!(owner(&runtime), old);
+        assert_eq!(runtime.observe_native_owner_object(old).unwrap(), object);
+        let installed = runtime
+            .install_native_author_parameter_handoff(&mut prepared, &mut authorization, &cancel)
+            .expect("actual Source-authorized same-owner plan publication");
+        assert_eq!(
+            installed.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        let lease = owner(&runtime);
+        assert_eq!(lease.editor_target(), installed.target);
+        assert_ne!(lease.binding(), old.binding());
+        assert_eq!(
+            installed.target.local_session,
+            old.editor_target().local_session
+        );
+        assert_eq!(installed.target.continuity_epoch, Some(613));
+        assert_eq!(
+            installed.target.installed_generation,
+            installed.claim.generation()
+        );
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            installed.claim.generation()
+        );
+        let verifier = runtime.native_owner_installation_verifier().unwrap();
+        verifier.validate(&installed.claim).unwrap();
+        assert!(matches!(
+            authorization.begin_commit(&verifier),
+            Err(AudioOwnerInstallationError::ConsumedAuthorization)
+        ));
+        assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+        let after = cursors(&runtime);
+        same_progress(&before, &after);
+        assert_ne!(
+            runtime.resource_root_identity().prepared_plan_id,
+            old_root.prepared_plan_id
+        );
+        assert_eq!(
+            runtime.resource_root_identity().session_id,
+            old_root.session_id
+        );
+        assert_eq!(media.resolves.load(Ordering::Relaxed), 1);
+        assert_eq!(media.reads.load(Ordering::Relaxed), reads);
+        drop(prepared); // Retired plans are outside the Source guard before Ack.
+        let acknowledged =
+            runtime.acknowledge_native_author_parameter_handoff(&proposal, &cancel).expect(
+                "exact authentic SomeA Ack only after canonical transaction and Source install",
+            );
+        assert_eq!(acknowledged.target, installed.target);
+        assert_eq!(
+            acknowledged.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_eq!(
+            acknowledged.claim.generation(),
+            installed.claim.generation()
+        );
+        verifier.validate(&acknowledged.claim).unwrap();
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            installed.claim.generation()
+        );
+        assert_eq!(cursors(&runtime), after);
+        assert_eq!(owner(&runtime), lease);
+        assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+        assert_eq!(media.reads.load(Ordering::Relaxed), reads);
+        runtime
+            .validate_native_author_source_closed(&cancel)
+            .expect("real child source and parent outstanding are closed after exact Ack");
+        assert!(runtime
+            .find_resource_session(runtime.resource_root_identity())
+            .unwrap()
+            .pending_reprepare_ticket()
+            .is_none());
+        if next == 4 {
+            pcm(&mut runtime, 4);
+        }
+    }
+    assert!(media.reads.load(Ordering::Relaxed) > 0);
+    assert_eq!(media.resolves.load(Ordering::Relaxed), 1);
+    // Main-input effect only; no Note ledger, live suffix arriving during Ack,
+    // native callback count, ReleasePending, physical GUI or RT qualification.
+    drop(runtime);
+    assert_eq!(
+        unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2_000) },
+        0
+    );
+    let mut exit = u32::MAX;
+    assert_ne!(
+        unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) },
+        0
+    );
+    assert_eq!(exit, 0);
+    // Same observed child's OS Exit0 within 2s does not prove 100ms graceful exit.
 }
