@@ -99,7 +99,7 @@ The table describes implementation boundaries. Qualification below states the te
 | --- | --- | --- |
 | Shared processor outputs | Shared-slice baseline: 5,343 ordinary tests across eight libraries passed, including 16 new controls; 269 ignored tests excluded. Three strict groups and the normal Product build passed. | Track/Bus shared DAG qualification; native adapters have their separate conditions below. Product output selection, realtime/performance and other platforms remain open. |
 | Owned zero-input CLAP | Six fresh mono/offline Runtime cases at 44.1/48 kHz passed literal 14-frame PCM, NoMedia, Source/author/install/Ack and same-object/Drop-exit checks. | Owned fixture, not general third-party instrument support. |
-| Latest Audio/CLAP baseline | The CLAP/probe-reuse baseline passes 669 ordinary Audio tests; 114 native controls were precisely excluded. Full Audio Strict and eight resource tests pass. Its matching normal IPC15/Discovery3/CLAP Probe4 test-profile Product builds with the original ten App library warnings. Twelve owned/real-plugin native gates and the SDK Gain probe pass under the original budgets. | The newer checked-Note SDK below awaits matched Audio/Product regression. Not whole-workspace or App test-suite regression. Earlier TestWorker and Unprobed CLAP retained-configuration post-ACK exit failures remain open. The new fresh-probe retained path passes without closing those failures. Overall integration remains HOLD; no budget or retry workaround changed. |
+| Latest matched SDK consumer regression | The checked-Note SDK and matching normal Product pass Audio Strict, 669 ordinary Audio tests, eight resource tests and seven native gates: VST3 retained/sidechain Ready, canonical musical time, AGain, both Surge Effects cases and normal CLAP retained configuration. The 114 native ordinary-suite exclusions are precise. Product builds with the original ten App library warnings; IPC15/Discovery3/normal CLAP Probe4 are unchanged. | The public zero-input CLAP Note gate fails during its third 44.1 kHz partition's Factory validation shutdown; its first two partitions pass. The 48 kHz cases are not reached. Not whole-workspace or App test-suite regression. Earlier shutdown failures remain open; overall integration stays HOLD without a budget or retry workaround. |
 | Native-probe Factory preparation | Fresh discovered VST3 and normal CLAP probes move their bounded input-name snapshot into the existing Factory; actual create still validates restored native contracts and names in the original same-child Ready scope. Ten new ordinary controls pass, including 0+1 versus 1+1 launches, keyed name equality/drift cleanup, storage/seed ownership, strict Discovery3/normal Probe4 and the 31-port boundary. Both native sidechain negatives require the exact restored-port error from actual create; original PCM/state controls pass. CLAP seed, overflow and retained controls pass. | Manual/generic and CLAP Note-offer specs retain real validation launch plus strict shutdown. Probe is not proof of start/split/Ready; a name change is explicit unsupported presentation drift. Root-grant coverage of cold probes, complete native heaps, realtime safety and timed overhead improvement are not established. |
 | CLAP authored constant Tempo | One exact native gate passed four rate × None/Some Runtime cases at 44.1/48 kHz: two epochs, different partitions, literal PCM, Scope-local gain automation, 3/2 source retiming and six-frame PDC. The same actual native objects survived re-entry and their retained OS handles observed Drop exit0. | Owned stereo/offline fixture; 32 MiB local scratch and explicitly unbounded aggregate grant, not a budget-edge test. No beat/bar/meter/playing, tempo map, selected nested musical execution, third-party, realtime/performance or other-platform qualification. The separate 2s Drop observation does not prove the 100ms graceful budget. |
 | Candidate VST3 anchored musical audio | The bounded Worker gate now passes all eight 44.1/48 kHz × None/Some × signed-start cases. The canonical gate again passes Scope-local automation, 3/2 source retiming, two three-frame delays, six-frame PDC and two epochs with independent Q/Tempo bits and PCM. Continuous objects and host-serial seek rebuilds pass. | The previous failing temporary Factory validation instance is removed from the fresh discovered VST3 path; this does not establish a 100ms teardown fix. Canonical control uses 32 MiB session scratch and an unbounded aggregate grant. No full callback-count/order, Note/Event PPQ, realtime/performance or other-platform qualification; overall integration remains HOLD. |
@@ -208,7 +208,7 @@ an outer cleanup failure can leave a written prefix, without event replay.
 New Main-only MNE4 controls verify ten complete actual-PID records against
 independent PPQ bits and PCM at both rates, scoped/local roles and signed anchors.
 MNE5 tests actual retained COM references, closed views, cold release and its
-44-byte state round trip without restoring observation counters.
+44-byte component-state round trip without restoring observation counters.
 The SDK storage observer reports the complete process Box, concrete COM payload
 and unique vector capacity separately. This does not qualify the complete Arc
 allocation or nested native owners against the Audio Root grant.
@@ -258,6 +258,11 @@ instruments, other platforms, realtime and performance remain unqualified.
 - The report's `exit_loop` timer describes the whole exit
   loop plus its last existing result. It is not the timestamp/duration of the
   final `try_wait`, nor a native Drop duration.
+- The matched SDK consumer run's public CLAP Note gate passes the first two
+  44.1 kHz Track-rack partitions, then fails Factory validation for `[1;14]`:
+  ACK at 0.325ms, still running at 108.703ms, and late Exit0 after kill/reap.
+  It has no child-phase observation or evidence attributing the delay to the
+  SDK change. Later partitions and all 48 kHz cases remain untested in this run.
 - CLAP native multi-output and the real Surge Main Runtime have the finite
   offline qualification above. Broader instruments, auxiliary sound, product
   output selection and realtime remain open.
@@ -268,7 +273,11 @@ instruments, other platforms, realtime and performance remain unqualified.
   Source, then fails that original shutdown deadline despite native Unload0.
   Five separate temporal-admission/CPU/PAR resident-and-Graph regressions pass.
   This is finite correctness evidence, not a passing lifecycle gate or an
-  identified exit root cause; the failed gate has not been retried.
+  identified exit root cause. One existing schema2 diagnostic with the newer
+  matched Product also fails: native Drop, pump join and inner return finish by
+  39.01ms, while OS exit remains unobserved at the 100.47ms deadline. This narrows
+  that sample to the tail after inner return; it identifies neither main/CRT/TLS
+  nor the old build's failed phase. The original unobserved failure is retained.
 - Process operation, shutdown control and graceful exit currently share budget
   policy. The final kill/reap wait has no separate timeout, so the existing
   100ms values do not describe a strict total shutdown limit. Budget changes
