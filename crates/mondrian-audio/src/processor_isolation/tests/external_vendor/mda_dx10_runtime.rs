@@ -1114,8 +1114,8 @@ fn external_mda_dx10_vst3_sdk_note_on_offsets() {
                 note_id: 0,
             },
         }];
-        let split = plugin.split_editor_processing().unwrap();
-        let mut processor = split.processor;
+        let vst3_host::plugin::PluginEditorProcessingSplit { editor, mut processor } =
+            plugin.split_editor_processing().unwrap();
         let pcm = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -1157,7 +1157,7 @@ fn external_mda_dx10_vst3_sdk_note_on_offsets() {
                 .expect("joined same-owner SDK processing role")
         });
         drop(processor);
-        drop(split.editor);
+        drop(editor);
         // All post-On observations below are copied PCM only. The final ordinary
         // Plugin Drop happens after both fixed requests; it is not an intervening
         // stop/resume, state capture or a callback service to obtain sound.
