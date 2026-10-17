@@ -45,6 +45,11 @@ struct HandoffProbe {
     catchup_pending: Option<u32>,
     catchup_polls: usize,
     source_failure: Option<crate::NativeAudioAuthorSourceFailure>,
+    // Independent portable VST ABI controls; the default remains the original
+    // CLAP test ABI and has no live request or Ack-side mutation.
+    vst_rescan_abi: bool,
+    live_request: Option<crate::NativeObservedRequest>,
+    live_after_ack: Option<Option<crate::NativeObservedRequest>>,
 }
 struct HandoffResolver(Arc<Mutex<HandoffProbe>>);
 struct HandoffFactory {
@@ -62,6 +67,8 @@ impl AudioProcessorResolver for HandoffResolver {
     ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
         if matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
             if plugin_id == "test.mondrian.handoff")
+            || matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { class_id, .. }
+                if class_id == "portable.actual.rescan")
         {
             Ok(Arc::new(HandoffFactory {
                 probe: Arc::clone(&self.0),
@@ -96,8 +103,12 @@ impl AudioProcessorFactory for HandoffFactory {
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
         assert_eq!(
             format,
-            NativeConfigurationFormat::ClapState,
-            "explicit portable test ABI"
+            if self.probe.lock().unwrap().vst_rescan_abi {
+                NativeConfigurationFormat::Vst3ComponentAndController
+            } else {
+                NativeConfigurationFormat::ClapState
+            },
+            "explicit portable test ABI, not a native SDK state codec"
         );
         assert_eq!(configuration.len(), 8, "independent scalar state extent");
         Ok(Some(Arc::new(Self {
@@ -204,6 +215,14 @@ impl AudioProcessor for HandoffProcessor {
                             probe.accepted_seed = Some(configuration);
                         }
                         probe.accepted_acks += 1;
+                        if probe.vst_rescan_abi {
+                            probe.live_request = probe.live_after_ack.take().unwrap_or_else(|| {
+                                probe.live_request.filter(|live| {
+                                    Some(*live)
+                                        != original.map(crate::NativeObservedRequest::Cohort)
+                                })
+                            });
+                        }
                         if let Some(cancellation) = probe.cancel_on_accepted_ack.take() {
                             cancellation.cancel();
                         }
@@ -242,6 +261,7 @@ impl AudioProcessor for HandoffProcessor {
         };
         Ok(NativeAudioObservations {
             object: Some(object),
+            pending_reprepare: probe.live_request,
             author: Some(NativeAudioAuthorObservation { source, delivery }),
             ..Default::default()
         })
@@ -315,17 +335,26 @@ struct HandoffFixture {
 }
 impl HandoffFixture {
     fn new() -> Self {
+        Self::with_definition(mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+            plugin_id: "test.mondrian.handoff".into(),
+            schema_version: 1,
+            binary_sha256: None,
+        })
+    }
+    fn with_definition(definition: mondrian_timeline::AudioProcessorDefinitionRef) -> Self {
         use mondrian_core::automation::{ParameterSchema, PropertyValue};
-        let probe = Arc::new(Mutex::new(HandoffProbe::default()));
+        let probe = Arc::new(Mutex::new(HandoffProbe {
+            vst_rescan_abi: matches!(
+                definition,
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+            ),
+            ..Default::default()
+        }));
         let mut sequence = sequence_with_audio_clip();
         let parameter = ParameterId::new_static("native.gain");
         let mut processor = AudioProcessorInstance {
             id: mondrian_core::AudioProcessorInstanceId::new(),
-            definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
-                plugin_id: "test.mondrian.handoff".into(),
-                schema_version: 1,
-                binary_sha256: None,
-            },
+            definition,
             bypassed: false,
             parameters: Default::default(),
             opaque_state: None,
@@ -1971,5 +2000,610 @@ fn native_author_prefix_cohort_drift_never_replaces_or_discards_hosted_outstandi
             "a confirmed receipt cannot be acknowledged twice"
         );
         fixture.block(1, 0.75);
+    }
+}
+
+// Portable actual Runtime/Source/Session ownership, not DLL/SDK Note evidence.
+mod continuing_rescan_controls {
+    use super::*;
+
+    fn cohort(serial: u32, flags: u32) -> crate::NativeRequestCohort {
+        crate::NativeRequestCohort::new(
+            serial,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags },
+        )
+        .unwrap()
+    }
+    fn observed(cohort: crate::NativeRequestCohort) -> crate::NativeObservedRequest {
+        crate::NativeObservedRequest::Cohort(cohort)
+    }
+    fn fixture() -> HandoffFixture {
+        HandoffFixture::with_definition(mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+            class_id: "portable.actual.rescan".into(),
+            vendor: None,
+            schema_version: 1,
+            binary_sha256: None,
+        })
+    }
+    pub(super) fn rescan(
+        fixture: &mut HandoffFixture,
+        a: crate::NativeRequestCohort,
+    ) -> mondrian_core::NativeAudioAuthorProposal {
+        let mut probe = fixture.probe.lock().unwrap();
+        assert_eq!(probe.open, 0);
+        probe.request_cohort = Some(a);
+        probe.revision += 1;
+        probe.configuration = Some(0.75_f64.to_le_bytes().to_vec());
+        probe.pending.push(NativeAudioAuthorEvent::ParameterValuesRescanned {
+            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
+            values: vec![NativeAudioAuthorParameterEvent::admit(
+                ParameterId::new_static("native.gain"),
+                NativeAudioAuthorParameterPhase::Value,
+                Some(NativeAudioAuthorScalar::admit(0.75).unwrap()),
+            )
+            .unwrap()],
+        });
+        drop(probe);
+        let proposal = fixture.drain();
+        assert_eq!(
+            proposal.completion(),
+            mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+        );
+        assert_eq!(
+            proposal.state().unwrap().as_slice(),
+            &0.75_f64.to_le_bytes()
+        );
+        proposal
+    }
+    fn ticket(fixture: &HandoffFixture) -> Option<AudioProcessorReprepareTicket> {
+        fixture
+            .runtime
+            .find_resource_session(fixture.runtime.resource_root_identity())
+            .unwrap()
+            .pending_reprepare_ticket()
+    }
+    pub(super) fn hold(fixture: &mut HandoffFixture) -> AudioProcessorReprepareTicket {
+        let mut pcm = [93.0];
+        let result = fixture
+            .runtime
+            .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm);
+        let Err(AudioExecutionError::ReprepareRequired(ticket)) = result else {
+            panic!("expected the real Session ticket, actual={result:?}");
+        };
+        assert_eq!(pcm, [93.0]);
+        assert_eq!(self::ticket(fixture), Some(ticket));
+        ticket
+    }
+    pub(super) fn programs(
+        fixture: &mut HandoffFixture,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+    ) -> [NativeAudioAuthorProgram; 1] {
+        let strip = match fixture.target.owner {
+            mondrian_core::NativeAudioEditorOccurrenceOwner::Output(_) => {
+                &mut fixture.sequence.audio_program.outputs[0].strip
+            }
+            mondrian_core::NativeAudioEditorOccurrenceOwner::Track(track) => {
+                &mut fixture.sequence.audio_program.track_channels.get_mut(&track).unwrap().strip
+            }
+            other => panic!("unsupported portable test placement: {other:?}"),
+        };
+        let rack = match fixture.target.insertion {
+            mondrian_core::NativeAudioEditorInsertion::PreFader => &mut strip.pre_fader,
+            mondrian_core::NativeAudioEditorInsertion::PostFader => &mut strip.post_fader,
+            other => panic!("unsupported portable test insertion: {other:?}"),
+        };
+        let processor = rack
+            .processors
+            .iter_mut()
+            .find(|processor| processor.id == fixture.target.instance)
+            .unwrap();
+        processor.opaque_state = proposal.state().cloned();
+        processor
+            .set_parameter_automation(
+                ExactAutomationCurve::new(ParameterId::new_static("native.gain"), 0.75).unwrap(),
+            )
+            .unwrap();
+        [NativeAudioAuthorProgram {
+            sequence: fixture.sequence.id,
+            program: Arc::new(
+                compile_audio_program(
+                    &fixture.sequence,
+                    AudioCompileRequest::program(fixture.sequence.audio_program.outputs[0].id),
+                )
+                .unwrap(),
+            ),
+        }]
+    }
+    pub(super) fn prepare(
+        fixture: &mut HandoffFixture,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+    ) -> (
+        PreparedNativeAudioParameterHandoff,
+        mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+    ) {
+        let programs = programs(fixture, proposal);
+        let (registration, destination) = fixture.source.register().unwrap();
+        let claim = fixture.source.current_claim().unwrap().unwrap();
+        let reservation = fixture.source.reserve_install(&registration, Some(&claim)).unwrap();
+        let authorization = fixture.source.authorize_runtime_installation(reservation).unwrap();
+        let prepared = fixture
+            .runtime
+            .prepare_native_author_parameter_handoff(
+                &programs,
+                proposal,
+                destination,
+                &ExecutionCancellationToken::new(),
+            )
+            .unwrap();
+        (prepared, authorization)
+    }
+    pub(super) fn install(
+        fixture: &mut HandoffFixture,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        prepared: &mut PreparedNativeAudioParameterHandoff,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+    ) {
+        let old = fixture.target;
+        let receipt = fixture
+            .runtime
+            .install_native_author_parameter_handoff(
+                prepared,
+                authorization,
+                &ExecutionCancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.continuity,
+            NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_ne!(receipt.target.binding, old.binding);
+        assert_eq!(receipt.target.local_session, old.local_session);
+        assert_eq!(receipt.target.continuity_epoch, old.continuity_epoch);
+        assert_eq!(proposal.target(), old);
+        fixture.target = receipt.target;
+    }
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Cursors {
+        sessions: Vec<AudioSessionCursorEvidence>,
+        processors: Vec<AudioProcessorCursorEvidence>,
+    }
+    impl AudioContinuityEvidenceVisitor for Cursors {
+        fn session(&mut self, e: AudioSessionCursorEvidence) -> Result<(), AudioExecutionError> {
+            self.sessions.push(e);
+            Ok(())
+        }
+        fn processor(
+            &mut self,
+            e: AudioProcessorCursorEvidence,
+        ) -> Result<(), AudioExecutionError> {
+            self.processors.push(e);
+            Ok(())
+        }
+    }
+    fn cursors(fixture: &HandoffFixture) -> Cursors {
+        let mut value = Cursors::default();
+        fixture.runtime.visit_continuity_evidence(&mut value).unwrap();
+        value
+    }
+    fn counts(fixture: &HandoffFixture) -> (usize, usize, usize, usize, usize, usize) {
+        let p = fixture.probe.lock().unwrap();
+        (
+            p.creates,
+            p.binds,
+            p.entries,
+            p.processed.len(),
+            p.ack_attempts,
+            p.accepted_acks,
+        )
+    }
+
+    #[test]
+    fn authentic_vst_rescan_install_preserves_later_request_at_all_four_boundaries() {
+        let a = cohort(41, 4);
+        let b = cohort(42, 4);
+        for arrival in 0..4 {
+            let mut f = fixture();
+            f.block(0, 0.5);
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            let old_ticket = hold(&mut f);
+            let old_cursors = cursors(&f);
+            let proposal = rescan(&mut f, a);
+            if arrival == 0 {
+                f.probe.lock().unwrap().live_request = Some(observed(b));
+            }
+            let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
+            if arrival == 1 {
+                f.probe.lock().unwrap().live_request = Some(observed(b));
+            }
+            let before_claim = f.source.current_claim().unwrap().unwrap();
+            install(&mut f, &proposal, &mut prepared, &mut authorization);
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation().get(),
+                before_claim.generation().get() + 1
+            );
+            let moved = ticket(&f).unwrap();
+            assert_eq!(
+                moved,
+                AudioProcessorReprepareTicket {
+                    prepared_plan_id: f.runtime.resource_root_identity().prepared_plan_id,
+                    ..old_ticket
+                }
+            );
+            let installed = cursors(&f);
+            assert_eq!(old_cursors.sessions[0].state, installed.sessions[0].state);
+            assert_eq!(
+                old_cursors.processors[0].state,
+                installed.processors[0].state
+            );
+            if arrival == 2 {
+                f.probe.lock().unwrap().live_request = Some(observed(b));
+            }
+            if arrival == 3 {
+                f.probe.lock().unwrap().live_after_ack = Some(Some(observed(b)));
+            }
+            let before = counts(&f);
+            f.ack(&proposal);
+            assert_eq!(
+                ticket(&f).unwrap(),
+                AudioProcessorReprepareTicket { request: observed(b), ..moved }
+            );
+            assert_eq!(cursors(&f), installed);
+            let after = counts(&f);
+            assert_eq!(
+                (after.0, after.1, after.2, after.3),
+                (before.0, before.1, before.2, before.3)
+            );
+            assert_eq!((after.4, after.5), (1, 1));
+            assert_eq!(f.probe.lock().unwrap().retained, None);
+            assert_eq!(hold(&mut f).request, observed(b));
+            assert_eq!(counts(&f), after);
+            assert_eq!(cursors(&f), installed);
+            drop(prepared);
+            let suffix = rescan(&mut f, b);
+            assert!(suffix.revision() > proposal.revision());
+            let (mut suffix_prepared, mut suffix_authorization) = prepare(&mut f, &suffix);
+            install(
+                &mut f,
+                &suffix,
+                &mut suffix_prepared,
+                &mut suffix_authorization,
+            );
+            f.ack(&suffix);
+            assert_eq!(ticket(&f), None);
+            assert_eq!(counts(&f).2, 1);
+            assert_eq!(counts(&f).3, 1, "neither transaction may perform DSP");
+            f.block(1, 0.75);
+            drop(suffix_prepared);
+        }
+    }
+
+    #[test]
+    fn authentic_vst_rescan_ack_clears_only_a_and_keeps_non_a_or_unknown_live_hold() {
+        let a = cohort(71, 4);
+        let b = cohort(72, 4);
+        for existing_b in [false, true] {
+            for live in [
+                Some(observed(b)),
+                Some(crate::NativeObservedRequest::RequestOnly(
+                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 0x4000 },
+                )),
+                None,
+            ] {
+                let mut f = fixture();
+                f.block(0, 0.5);
+                f.probe.lock().unwrap().live_request =
+                    Some(observed(if existing_b { b } else { a }));
+                let old = hold(&mut f);
+                let proposal = rescan(&mut f, a);
+                let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
+                install(&mut f, &proposal, &mut prepared, &mut authorization);
+                let installed = ticket(&f).unwrap();
+                assert_eq!(installed.request, old.request);
+                let cancellation = ExecutionCancellationToken::new();
+                {
+                    let mut p = f.probe.lock().unwrap();
+                    p.live_after_ack = Some(live);
+                    p.cancel_on_accepted_ack = Some(cancellation.clone());
+                }
+                let before = counts(&f);
+                let before_cursors = cursors(&f);
+                let receipt = f
+                    .runtime
+                    .acknowledge_native_author_parameter_handoff(&proposal, &cancellation)
+                    .unwrap();
+                assert!(cancellation.is_canceled());
+                assert_eq!(receipt.target, f.target);
+                assert_eq!(cursors(&f), before_cursors);
+                let expected = if existing_b {
+                    Some(installed)
+                } else {
+                    live.map(|request| AudioProcessorReprepareTicket { request, ..installed })
+                };
+                assert_eq!(ticket(&f), expected);
+                let after = counts(&f);
+                assert_eq!(
+                    (after.0, after.1, after.2, after.3),
+                    (before.0, before.1, before.2, before.3)
+                );
+                if let Some(expected) = expected {
+                    assert_eq!(hold(&mut f), expected);
+                } else {
+                    f.block(1, 0.75);
+                }
+                assert!(f
+                    .runtime
+                    .acknowledge_native_author_parameter_handoff(
+                        &proposal,
+                        &ExecutionCancellationToken::new()
+                    )
+                    .is_err());
+                assert_eq!(counts(&f).4, 1);
+                drop(prepared);
+            }
+        }
+    }
+
+    #[test]
+    fn authentic_vst_rescan_external_retire_conflict_retries_only_original_ack() {
+        let a = cohort(91, 4);
+        let mut f = fixture();
+        f.block(0, 0.5);
+        f.probe.lock().unwrap().live_request = Some(observed(a));
+        hold(&mut f);
+        let proposal = rescan(&mut f, a);
+        let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
+        install(&mut f, &proposal, &mut prepared, &mut authorization);
+        let before = cursors(&f);
+        let target = f.target;
+        let claim = f.source.current_claim().unwrap().unwrap();
+        let c = counts(&f);
+        // Portable model of SDK settle conflict, not a claim of actual SDK
+        // external-retirement coverage. The old receipt remains authoritative.
+        {
+            let mut p = f.probe.lock().unwrap();
+            p.reject_ack = true;
+            p.live_request = None;
+        }
+        assert!(matches!(
+            f.runtime.acknowledge_native_author_parameter_handoff(
+                &proposal,
+                &ExecutionCancellationToken::new()
+            ),
+            Err(NativeAudioParameterHandoffError::Admission(
+                NativeAudioAuthorAdmissionError::Pending {
+                    reason: NativeAudioAuthorHoldReason::OutstandingDelivery,
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(f.target, target);
+        assert_eq!(cursors(&f), before);
+        assert_eq!(
+            f.source.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+        assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(a));
+        assert_eq!(hold(&mut f).request, observed(a));
+        {
+            let mut p = f.probe.lock().unwrap();
+            p.reject_ack = false;
+        }
+        f.ack(&proposal);
+        assert_eq!(ticket(&f), None);
+        assert_eq!(cursors(&f), before);
+        let after = counts(&f);
+        assert_eq!((after.0, after.1, after.2, after.3), (c.0, c.1, c.2, c.3));
+        assert_eq!((after.4, after.5), (2, 1));
+        f.block(1, 0.75);
+        drop(prepared);
+    }
+
+    #[test]
+    fn authentic_vst_rescan_pending_permission_refuses_raw_mixed_exhausted_and_backwards_identity()
+    {
+        let a = cohort(101, 4);
+        for live in [
+            crate::NativeObservedRequest::RequestOnly(a.request),
+            observed(cohort(100, 4)),
+            observed(cohort(102, 20)),
+            observed(cohort(u32::MAX, 4)),
+        ] {
+            let mut f = fixture();
+            f.block(0, 0.5);
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            hold(&mut f);
+            let proposal = rescan(&mut f, a);
+            f.probe.lock().unwrap().live_request = Some(live);
+            let before = cursors(&f);
+            let c = counts(&f);
+            let root = f.runtime.resource_root_identity();
+            let claim = f.source.current_claim().unwrap().unwrap();
+            let programs = programs(&mut f, &proposal);
+            let (_, destination) = f.source.register().unwrap();
+            let result = f.runtime.prepare_native_author_parameter_handoff(
+                &programs,
+                &proposal,
+                destination,
+                &ExecutionCancellationToken::new(),
+            );
+            assert!(matches!(
+                result,
+                Err(NativeAudioParameterHandoffError::Admission(
+                    NativeAudioAuthorAdmissionError::Pending {
+                        reason: NativeAudioAuthorHoldReason::PendingCallbacks,
+                        ..
+                    }
+                ))
+            ));
+            assert_eq!(counts(&f), c);
+            assert_eq!(f.runtime.resource_root_identity(), root);
+            assert_eq!(cursors(&f), before);
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(a));
+        }
+    }
+
+    #[test]
+    fn pending_rescan_permission_requires_coherent_vst_exact_four_prefix() {
+        let a = cohort(141, 4);
+        for case in 0..5 {
+            let mut f = if case == 0 {
+                HandoffFixture::new()
+            } else {
+                fixture()
+            };
+            f.block(0, 0.5);
+            let original = match case {
+                1 => cohort(142, 20),
+                2 => cohort(u32::MAX, 4),
+                _ => a,
+            };
+            f.probe.lock().unwrap().live_request = Some(observed(original));
+            let proposal = if case >= 3 {
+                {
+                    let mut p = f.probe.lock().unwrap();
+                    p.request_cohort = Some(original);
+                    p.parameter_only = case == 4;
+                }
+                f.queue_value(0.75);
+                if case == 4 {
+                    let mut p = f.probe.lock().unwrap();
+                    p.open = 0;
+                    p.revision += 1;
+                    p.pending.push(NativeAudioAuthorEvent::Parameter(
+                        NativeAudioAuthorParameterEvent::admit(
+                            ParameterId::new_static("native.gain"),
+                            NativeAudioAuthorParameterPhase::End,
+                            None,
+                        )
+                        .unwrap(),
+                    ));
+                }
+                f.drain()
+            } else {
+                rescan(&mut f, original)
+            };
+            let before = cursors(&f);
+            let c = counts(&f);
+            let root = f.runtime.resource_root_identity();
+            let claim = f.source.current_claim().unwrap().unwrap();
+            let programs = programs(&mut f, &proposal);
+            let (_, destination) = f.source.register().unwrap();
+            let error = f
+                .runtime
+                .prepare_native_author_parameter_handoff(
+                    &programs,
+                    &proposal,
+                    destination,
+                    &ExecutionCancellationToken::new(),
+                )
+                .err()
+                .expect("invalid Some must never fall back to ordinary permission");
+            assert!(
+                matches!(
+                    error,
+                    NativeAudioParameterHandoffError::Admission(
+                        NativeAudioAuthorAdmissionError::Pending {
+                            reason: NativeAudioAuthorHoldReason::OutstandingDelivery,
+                            ..
+                        }
+                    )
+                ),
+                "case={case}, actual={error:?}"
+            );
+            assert_eq!(cursors(&f), before);
+            assert_eq!(counts(&f), c);
+            assert_eq!(f.runtime.resource_root_identity(), root);
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(original));
+        }
+    }
+
+    #[test]
+    fn authentic_vst_rescan_final_commit_rechecks_live_request_against_prior_lease() {
+        let a = cohort(111, 4);
+        for live in [
+            None,
+            Some(crate::NativeObservedRequest::RequestOnly(a.request)),
+            Some(observed(cohort(110, 4))),
+            Some(observed(cohort(112, 20))),
+            Some(observed(cohort(u32::MAX, 4))),
+        ] {
+            let mut f = fixture();
+            f.block(0, 0.5);
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            let original = hold(&mut f);
+            let proposal = rescan(&mut f, a);
+            let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
+            let before = cursors(&f);
+            let c = counts(&f);
+            let claim = f.source.current_claim().unwrap().unwrap();
+            f.probe.lock().unwrap().live_request = live;
+            let error = f
+                .runtime
+                .install_native_author_parameter_handoff(
+                    &mut prepared,
+                    &mut authorization,
+                    &ExecutionCancellationToken::new(),
+                )
+                .err()
+                .expect("final native fact must be rechecked");
+            assert!(
+                matches!(
+                    error,
+                    NativeAudioParameterHandoffError::Admission(
+                        NativeAudioAuthorAdmissionError::Pending {
+                            reason: NativeAudioAuthorHoldReason::PendingCallbacks,
+                            ..
+                        }
+                    )
+                ),
+                "actual={error:?}"
+            );
+            assert_eq!(cursors(&f), before);
+            assert_eq!(counts(&f), c);
+            assert_eq!(ticket(&f), Some(original));
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(a));
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            install(&mut f, &proposal, &mut prepared, &mut authorization);
+            f.ack(&proposal);
+            f.block(1, 0.75);
+        }
+    }
+
+    #[test]
+    fn uninstalled_session_ticket_survives_empty_child_pending_without_rebinding_or_pcm() {
+        let a = cohort(121, 4);
+        let mut f = fixture();
+        f.block(0, 0.5);
+        f.probe.lock().unwrap().live_request = Some(observed(a));
+        let original = hold(&mut f);
+        let before = cursors(&f);
+        let c = counts(&f);
+        let claim = f.source.current_claim().unwrap().unwrap();
+        let target = f.target;
+        // This changes only the same portable native owner's live fact, not
+        // the real Session's ticket or the author/Source installation. The
+        // Product gate separately proves actual adapter Ack-A settlement.
+        f.probe.lock().unwrap().live_request = None;
+        assert_eq!(hold(&mut f), original);
+        assert_eq!(cursors(&f), before);
+        assert_eq!(counts(&f), c);
+        assert_eq!(f.target, target);
+        assert_eq!(
+            f.source.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+        assert!(f.probe.lock().unwrap().retained.is_none());
     }
 }

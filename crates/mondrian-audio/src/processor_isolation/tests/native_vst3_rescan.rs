@@ -325,36 +325,19 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
         Delivery::Refused(NativeAudioAuthorRefusal::StaleDelivery)
     );
 
-    // Poll does not merge or clear the parent's old sticky request. A successful
-    // child Ack alone is not an installed Runtime/Session replacement.
-    assert_eq!(processor.preflight_reprepare().unwrap(), Some(pending));
-    let context = block_context(77);
-    let mut unpublished = TestAudioIo { main: vec![99.0; 8], auxiliary: Vec::new() };
-    let next_events = [AudioParameterEvent { sample_offset: 0, value: 0.125 }];
-    let next_range = 0..1;
-    assert_eq!(
-        processor.process(
-            context,
-            &mut unpublished,
-            AudioParameterEventBatch::new(77, 4, &ids, &[next_range], &next_events)
-        ),
-        Err(AudioProcessorHostError::ReprepareRequired(pending))
-    );
-    assert_eq!(unpublished.main, [99.0; 8]);
-    assert_eq!(context.request().start_sample, 77);
-    assert_eq!(context.request().frames, 4);
-    assert_eq!(
-        (next_events[0].sample_offset, next_events[0].value.to_bits()),
-        (0, 0.125_f64.to_bits())
-    );
+    // Exact matching SomeA Ack now settles only that adapter-cache cohort.
+    // The separate portable actual-Session control proves a previously issued
+    // ticket still holds until a real Source/Plan handoff, even with live None.
+    assert_eq!(processor.preflight_reprepare().unwrap(), None);
     let held = processor.poll_native_observations(Consumption::Preserve).unwrap();
     assert_eq!(held.object, Some(object));
     assert!(held.pending_reprepare.is_none());
     let held = held.author.unwrap();
     assert_eq!(held.source, author.source);
     assert_eq!(held.delivery, Delivery::Preserved);
-    // The pure parent refusal and unchanged source/PCM are observed here. The
-    // fixture exposes no terminal process counter over IPC; do not claim one.
+    // No additional process command was sent after Ack. This is adapter-cache
+    // settlement plus unchanged native Source, not Runtime/Session recovery or
+    // a zero native-callback count (DrainAuthor can process a zero-sample bridge).
     drop(processor);
     assert_eq!(
         unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2_000) },

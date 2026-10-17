@@ -68,6 +68,9 @@ pub(crate) struct PreparedParameterNativeBinding {
 }
 
 impl PreparedParameterNativeBinding {
+    pub(crate) fn prior_root(self) -> AudioSessionCursorIdentity {
+        self.prior_lease.address().root
+    }
     pub(crate) fn editor_target(
         self,
         serial: NonZeroU64,
@@ -104,6 +107,75 @@ fn pending(
     reason: crate::NativeAudioAuthorHoldReason,
 ) -> NativeAudioAuthorAdmissionError {
     NativeAudioAuthorAdmissionError::Pending { target: Box::new(lease.editor_target()), reason }
+}
+
+/// Only the authentic, coherent VST3 value-rescan prefix may continue while a
+/// later request remains held. This reads the original Hosted receipt, never a
+/// later live request as a substitute for that prefix's identity.
+fn continuing_rescan_cohort(
+    instance: &HostedProcessorInstance,
+    lease: crate::AudioNativeProcessorOwnerLease,
+    object: crate::NativeAudioObjectObservation,
+    proposal: &NativeAudioAuthorProposal,
+    program: &crate::CompiledAudioProgram,
+) -> Result<Option<crate::NativeRequestCohort>, NativeAudioAuthorAdmissionError> {
+    use crate::NativeAudioAuthorHoldReason as Reason;
+    let retained = instance
+        .native_author_outstanding
+        .as_ref()
+        .filter(|retained| retained.same_retained_proposal(proposal))
+        .ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
+    let Some(cohort) = retained.request_cohort else {
+        return Ok(None);
+    };
+    let address = lease.address();
+    if cohort.serial == 0
+        || cohort.exhausted()
+        || cohort.request != (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
+        || retained.installed.is_some()
+        || retained.reentered.is_some()
+        || lease.editor_target() != proposal.target()
+        || address.root != address.local
+        || address.occurrence != instance.occurrence
+        || !matches!(instance.continuity, HostedProcessorContinuity::Active { epoch, .. }
+            if Some(epoch) == address.epoch)
+        || proposal.completion()
+            != mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+        || proposal.state().is_none()
+        || proposal.open_parameter_edits() != 0
+        || proposal.group_depth() != 0
+        || address.occurrence.insertion == crate::AudioProcessorInsertionPoint::Scope
+        || !matches!(instance.native_binding, NativeHostedBinding::Installed { lease: actual, object: actual_object }
+            if actual == lease && actual_object == object)
+        || !crate::schedule::processor(program, address.occurrence).is_ok_and(|processor| {
+            matches!(
+                processor.definition,
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+            )
+        })
+    {
+        return Err(pending(lease, Reason::OutstandingDelivery));
+    }
+    Ok(Some(cohort))
+}
+
+fn admit_rescan_live_request(
+    lease: crate::AudioNativeProcessorOwnerLease,
+    original: crate::NativeRequestCohort,
+    observed: Option<crate::NativeObservedRequest>,
+) -> Result<(), NativeAudioAuthorAdmissionError> {
+    // A missing live request may mean an external raw retirement. Only the
+    // SDK's eventual exact Ack can settle A, never a missing observation here.
+    if !matches!(observed, Some(crate::NativeObservedRequest::Cohort(live))
+        if live.serial >= original.serial && !live.exhausted()
+            && live.request == original.request)
+    {
+        return Err(pending(
+            lease,
+            crate::NativeAudioAuthorHoldReason::PendingCallbacks,
+        ));
+    }
+    Ok(())
 }
 
 /// Read-only exact handoff facts, not an installed lease or issuer.
@@ -148,6 +220,31 @@ impl PreparedProcessorHost {
         }
     }
 
+    pub(crate) fn continuing_rescan_cohort(
+        &self,
+        proposal: &NativeAudioAuthorProposal,
+        root: AudioSessionCursorIdentity,
+        local: AudioSessionCursorIdentity,
+        serial: NonZeroU64,
+        program: &crate::CompiledAudioProgram,
+    ) -> Result<Option<crate::NativeRequestCohort>, NativeAudioAuthorAdmissionError> {
+        self.retains_native_author_proposal(proposal, root, local, serial)?;
+        let instance = self
+            .instances
+            .iter()
+            .find(|instance| {
+                instance
+                    .native_author_outstanding
+                    .as_ref()
+                    .is_some_and(|retained| retained.same_retained_proposal(proposal))
+            })
+            .ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
+        let NativeHostedBinding::Installed { lease, object } = instance.native_binding else {
+            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+        };
+        continuing_rescan_cohort(instance, lease, object, proposal, program)
+    }
+
     pub(crate) fn allocate_parameter_native_bindings(
         &self,
         local: AudioSessionCursorIdentity,
@@ -162,6 +259,7 @@ impl PreparedProcessorHost {
         &mut self,
         prepared: &mut PreparedParameterNativeBindings,
         context: ParameterNativeBindingContext<'_>,
+        program: &crate::CompiledAudioProgram,
     ) -> Result<(), NativeAudioAuthorAdmissionError> {
         let ParameterNativeBindingContext {
             current_root,
@@ -230,8 +328,17 @@ impl PreparedProcessorHost {
             if observation.object != Some(object) {
                 return Err(AudioNativeOwnerError::OwnerUnavailable.into());
             }
-            if observation.editor_cleanup.is_some() || observation.pending_reprepare.is_some() {
+            if observation.editor_cleanup.is_some() {
                 return Err(pending(lease, Reason::PendingCallbacks));
+            }
+            if observation.pending_reprepare.is_some() {
+                let original = if selected {
+                    continuing_rescan_cohort(instance, lease, object, proposal, program)?
+                } else {
+                    None
+                }
+                .ok_or_else(|| pending(lease, Reason::PendingCallbacks))?;
+                admit_rescan_live_request(lease, original, observation.pending_reprepare)?;
             }
             let author = observation
                 .author
@@ -336,24 +443,110 @@ impl PreparedProcessorHost {
     }
 
     pub(crate) fn validate_parameter_native_bindings(
-        &self,
+        &mut self,
         prepared: &PreparedParameterNativeBindings,
         current: AudioSessionCursorIdentity,
-    ) -> Result<(), AudioNativeOwnerError> {
+        proposal: &NativeAudioAuthorProposal,
+        program: &crate::CompiledAudioProgram,
+        ticket: Option<crate::AudioProcessorReprepareTicket>,
+    ) -> Result<(), NativeAudioAuthorAdmissionError> {
         if prepared.current != current {
-            return Err(AudioNativeOwnerError::OwnerUnavailable);
+            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
         for record in &prepared.records {
             let instance = self
                 .instances
-                .get(record.index)
+                .get_mut(record.index)
                 .ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
             if !matches!(instance.native_binding, NativeHostedBinding::Installed { lease, object }
                 if lease == record.prior_lease && object == record.object)
                 || instance.occurrence != record.address.occurrence
                 || instance.continuity.native_epoch()? != record.address.epoch
             {
-                return Err(AudioNativeOwnerError::OwnerUnavailable);
+                return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+            }
+            if record.prior_lease.editor_target() == proposal.target()
+                && (ticket.is_some()
+                    || instance.native_author_outstanding.as_ref().is_some_and(|retained| {
+                        retained.request_cohort.is_some_and(|cohort| {
+                            cohort.request
+                                == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                                    flags: 4,
+                                })
+                        })
+                    }))
+            {
+                // The new permission is rechecked after Bind against the old
+                // Hosted lease plus the prepared receipt. Old CLAP/no-pending
+                // paths do not acquire this additional source query or gate.
+                let observation =
+                    isolate_adapter_call("parameter handoff final rescan admission", || {
+                        instance.processor.preflight_native_observations(record.object)
+                    })?;
+                if record.receipt.object() != record.object
+                    || record.address.root.session_id
+                        != record.prior_lease.address().root.session_id
+                    || record.address.local.session_id
+                        != record.prior_lease.address().local.session_id
+                    || record.address.epoch != record.prior_lease.address().epoch
+                    || observation.object != Some(record.object)
+                    || observation.editor_cleanup.is_some()
+                {
+                    return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+                }
+                let author = observation.author.as_ref().ok_or_else(|| {
+                    pending(
+                        record.prior_lease,
+                        crate::NativeAudioAuthorHoldReason::UnsupportedSource,
+                    )
+                })?;
+                author.source.validate().map_err(|reason| {
+                    pending(
+                        record.prior_lease,
+                        crate::NativeAudioAuthorHoldReason::DeliveryRefused(reason),
+                    )
+                })?;
+                if let Some(failure) = author.source.failure() {
+                    return Err(pending(
+                        record.prior_lease,
+                        crate::NativeAudioAuthorHoldReason::SourceFailure(failure),
+                    ));
+                }
+                if author.source.publishing()
+                    || author.source.parameter_flush_pending()
+                    || author.source.revision() < proposal.revision()
+                    || !matches!(author.delivery,
+                        crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement{binding,revision,request_cohort}
+                        if binding==(crate::NativeAudioObjectBindRequest{
+                            binding:record.prior_lease.binding(),expected_object:record.object,
+                        }) && revision==proposal.revision() && instance.native_author_outstanding.as_ref()
+                            .is_some_and(|retained|retained.request_cohort==request_cohort))
+                {
+                    return Err(pending(
+                        record.prior_lease,
+                        crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
+                    ));
+                }
+                if observation.pending_reprepare.is_some() || ticket.is_some() {
+                    let original = continuing_rescan_cohort(
+                        instance,
+                        record.prior_lease,
+                        record.object,
+                        proposal,
+                        program,
+                    )?
+                    .ok_or_else(|| {
+                        pending(
+                            record.prior_lease,
+                            crate::NativeAudioAuthorHoldReason::PendingCallbacks,
+                        )
+                    })?;
+                    admit_rescan_live_request(
+                        record.prior_lease,
+                        original,
+                        observation.pending_reprepare,
+                    )?;
+                }
             }
             if let Some(notes) = &instance.notes {
                 notes
@@ -411,12 +604,52 @@ impl PreparedProcessorHost {
         }
     }
 
+    pub(crate) fn parameter_author_request_cohort(
+        &self,
+        proposal: &NativeAudioAuthorProposal,
+        serial: NonZeroU64,
+    ) -> Result<Option<crate::NativeRequestCohort>, NativeAudioAuthorAdmissionError> {
+        let instance = self
+            .instances
+            .iter()
+            .find(|instance| {
+                instance
+                    .native_author_outstanding
+                    .as_ref()
+                    .is_some_and(|retained| retained.same_retained_proposal(proposal))
+            })
+            .ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
+        let NativeHostedBinding::Installed { lease, .. } = instance.native_binding else {
+            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+        };
+        let retained = instance
+            .native_author_outstanding
+            .as_ref()
+            .ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
+        if lease.installed_root_serial() != serial {
+            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+        }
+        if retained.installed != Some(lease.editor_target()) {
+            return Err(pending(
+                lease,
+                crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
+            ));
+        }
+        Ok(retained.request_cohort)
+    }
+
     pub(crate) fn acknowledge_parameter_native_author(
         &mut self,
         proposal: &NativeAudioAuthorProposal,
         serial: NonZeroU64,
         cancellation: &ExecutionCancellationToken,
-    ) -> Result<mondrian_core::NativeAudioEditorTarget, NativeAudioAuthorAdmissionError> {
+    ) -> Result<
+        (
+            mondrian_core::NativeAudioEditorTarget,
+            crate::NativeAudioObservations,
+        ),
+        NativeAudioAuthorAdmissionError,
+    > {
         for instance in &mut self.instances {
             if !instance
                 .native_author_outstanding
@@ -484,7 +717,7 @@ impl PreparedProcessorHost {
                     ));
                 }
                 instance.native_author_outstanding = None;
-                return Ok(lease.editor_target());
+                return Ok((lease.editor_target(), observed));
             }
             let ack = crate::NativeAudioAuthorAcknowledgement {
                 source_binding: crate::NativeAudioObjectBindRequest {
@@ -517,7 +750,7 @@ impl PreparedProcessorHost {
             // Receipt is discarded ONLY after the same native object confirms
             // old-source/new-installed bindings and exact retained revision.
             instance.native_author_outstanding = None;
-            return Ok(lease.editor_target());
+            return Ok((lease.editor_target(), observation));
         }
         Err(AudioNativeOwnerError::OwnerUnavailable.into())
     }

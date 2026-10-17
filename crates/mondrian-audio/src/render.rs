@@ -717,6 +717,21 @@ impl AudioRenderSession {
         )
     }
 
+    pub(crate) fn continuing_rescan_cohort(
+        &self,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        root: crate::AudioSessionCursorIdentity,
+        serial: std::num::NonZeroU64,
+    ) -> Result<Option<crate::NativeRequestCohort>, crate::NativeAudioAuthorAdmissionError> {
+        self.processor_host.continuing_rescan_cohort(
+            proposal,
+            root,
+            self.native_owner_identity(),
+            serial,
+            self.plan.program(),
+        )
+    }
+
     pub(crate) fn allocate_parameter_native_bindings(
         &self,
     ) -> crate::processor_host::native_author::PreparedParameterNativeBindings {
@@ -732,15 +747,26 @@ impl AudioRenderSession {
         if context.current_local != self.native_owner_identity() {
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable.into());
         }
-        self.processor_host.prepare_parameter_native_bindings(prepared, context)
+        self.processor_host.prepare_parameter_native_bindings(
+            prepared,
+            context,
+            self.plan.program(),
+        )
     }
 
     pub(crate) fn validate_parameter_native_bindings(
-        &self,
+        &mut self,
         prepared: &crate::processor_host::native_author::PreparedParameterNativeBindings,
-    ) -> Result<(), crate::AudioNativeOwnerError> {
-        self.processor_host
-            .validate_parameter_native_bindings(prepared, self.native_owner_identity())
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        let current = self.native_owner_identity();
+        self.processor_host.validate_parameter_native_bindings(
+            prepared,
+            current,
+            proposal,
+            self.plan.program(),
+            self.pending_reprepare_ticket,
+        )
     }
 
     pub(crate) fn publish_parameter_native_bindings(
@@ -758,20 +784,92 @@ impl AudioRenderSession {
         cancellation: &ExecutionCancellationToken,
     ) -> Result<mondrian_core::NativeAudioEditorTarget, crate::NativeAudioAuthorAdmissionError>
     {
-        self.processor_host
-            .acknowledge_parameter_native_author(proposal, serial, cancellation)
+        // All fallible identity checks precede the irreversible native Ack.
+        let original = self.processor_host.parameter_author_request_cohort(proposal, serial)?;
+        let (target, observations) = self.processor_host.acknowledge_parameter_native_author(
+            proposal,
+            serial,
+            cancellation,
+        )?;
+        if let Some(original) = original
+            && original.serial != 0
+            && !original.exhausted()
+            && original.request
+                == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
+        {
+            let occurrence = crate::native_runtime_owner::editor_target_address(target).occurrence;
+            let epoch = match self.continuity {
+                SessionContinuity::Unentered => None,
+                SessionContinuity::Active { epoch, .. } | SessionContinuity::Poisoned { epoch } => {
+                    Some(epoch)
+                }
+            };
+            let exact = crate::NativeObservedRequest::Cohort(original);
+            if self.pending_reprepare_ticket.is_none_or(|ticket| {
+                ticket.request == exact
+                    && ticket.prepared_plan_id == self.plan.preparation_id()
+                    && ticket.session_id == self.session_id
+                    && ticket.occurrence == occurrence
+                    && ticket.continuity_epoch == epoch
+            }) {
+                // A successful native Ack may observe a newer or unknown live
+                // request. Copy that fact into HOLD without validation, query,
+                // cancellation or any other fallible post-Ack operation.
+                self.pending_reprepare_ticket = observations.pending_reprepare.map(|request| {
+                    crate::AudioProcessorReprepareTicket {
+                        prepared_plan_id: self.plan.preparation_id(),
+                        session_id: self.session_id,
+                        occurrence: crate::native_runtime_owner::editor_target_address(target)
+                            .occurrence,
+                        continuity_epoch: match self.continuity {
+                            SessionContinuity::Unentered => None,
+                            SessionContinuity::Active { epoch, .. }
+                            | SessionContinuity::Poisoned { epoch } => Some(epoch),
+                        },
+                        request,
+                    }
+                });
+            }
+        }
+        Ok(target)
     }
 
     pub(crate) fn validate_parameter_plan_swap(
         &self,
         next: &PreparedNativeAudioParameterPlan,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        bindings: &crate::processor_host::native_author::PreparedParameterNativeBindings,
     ) -> Result<(), crate::AudioExecutionError> {
         if self.native_owner_identity() != next.current
             || self.plan.contract() != next.next_plan.contract()
             || matches!(self.continuity, SessionContinuity::Poisoned { .. })
-            || self.pending_reprepare_ticket.is_some()
         {
             return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
+        }
+        if let Some(ticket) = self.pending_reprepare_ticket {
+            let prior = bindings
+                .selected_record(proposal)
+                .ok_or(crate::AudioExecutionError::InvalidPreparedSchedule)?;
+            let original = self
+                .continuing_rescan_cohort(
+                    proposal,
+                    prior.prior_root(),
+                    proposal.target().installed_generation,
+                )
+                .map_err(|_| crate::AudioExecutionError::InvalidPreparedSchedule)?
+                .ok_or(crate::AudioExecutionError::InvalidPreparedSchedule)?;
+            let occurrence =
+                crate::native_runtime_owner::editor_target_address(proposal.target()).occurrence;
+            if ticket.prepared_plan_id != self.plan.preparation_id()
+                || ticket.session_id != self.session_id
+                || ticket.occurrence != occurrence
+                || !matches!(self.continuity, SessionContinuity::Active { epoch, .. }
+                    if ticket.continuity_epoch == Some(epoch))
+                || !matches!(ticket.request, crate::NativeObservedRequest::Cohort(live)
+                    if live.serial >= original.serial && !live.exhausted() && live.request == original.request)
+            {
+                return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
+            }
         }
         Ok(())
     }
@@ -792,6 +890,11 @@ impl AudioRenderSession {
         self.capacity.maximum_processor_parameter_lanes = maximum_lanes;
         self.capacity.parameter_event_capacity = event_capacity;
         std::mem::swap(&mut self.plan, &mut prepared.next_plan);
+        if let Some(ticket) = &mut self.pending_reprepare_ticket {
+            // Existing request identity/epoch/occurrence survives the single
+            // Source publication. Only its immutable plan address moves.
+            ticket.prepared_plan_id = self.plan.preparation_id();
+        }
         std::mem::swap(
             &mut self.parameter_event_charge_bytes,
             &mut prepared.next_parameter_event_charge_bytes,

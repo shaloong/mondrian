@@ -457,7 +457,7 @@ impl AudioProgramRuntime {
             return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
         let mut cursor = 0;
-        self.validate_parameter_swap(&prepared.locals, &mut cursor)?;
+        self.validate_parameter_swap(&prepared.locals, &mut cursor, &prepared.proposal)?;
         if cursor != prepared.locals.len() {
             return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
@@ -479,6 +479,9 @@ impl AudioProgramRuntime {
         let fee_retirement =
             self.prepare_native_plan_fee_retirement(&prepared.logical_fee, footprint)?;
         let next_verifier = prepared.destination.clone();
+        if cancellation.is_canceled() {
+            return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
+        }
         let commit = authorization.begin_commit(&prepared.destination)?;
         // The same actual tree and exclusive borrow were fully validated above.
         // These operations retain retired Plan/scratch owners in prepared slots;
@@ -506,22 +509,23 @@ impl AudioProgramRuntime {
     }
 
     fn validate_parameter_swap(
-        &self,
+        &mut self,
         locals: &[LocalReplacement],
         cursor: &mut usize,
+        proposal: &NativeAudioAuthorProposal,
     ) -> Result<(), NativeAudioParameterHandoffError> {
         let local = locals.get(*cursor).ok_or(AudioNativeOwnerError::OwnerUnavailable)?;
         if local.current != self.session.native_owner_identity() {
             return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
         if let Some(plan) = &local.plan {
-            self.session.validate_parameter_plan_swap(plan)?;
+            self.session.validate_parameter_plan_swap(plan, proposal, &local.bindings)?;
         }
-        self.session.validate_parameter_native_bindings(&local.bindings)?;
+        self.session.validate_parameter_native_bindings(&local.bindings, proposal)?;
         *cursor += 1;
-        for source in self.sources.entries.values() {
+        for source in self.sources.entries.values_mut() {
             if let RuntimeSource::Nested(nested) = source {
-                nested.runtime.validate_parameter_swap(locals, cursor)?;
+                nested.runtime.validate_parameter_swap(locals, cursor, proposal)?;
             }
         }
         Ok(())

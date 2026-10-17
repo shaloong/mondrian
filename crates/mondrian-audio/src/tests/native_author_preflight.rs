@@ -27,7 +27,7 @@ struct PreflightRegistry {
     calls: PreflightCalls,
 }
 struct PreflightResolver(Arc<PreflightRegistry>);
-struct PreflightFactory(Arc<PreflightRegistry>, Option<Vec<u8>>);
+struct PreflightFactory(Arc<PreflightRegistry>, Option<Vec<u8>>, bool);
 struct PreflightProcessor {
     inner: HandoffProcessor,
     registry: Arc<PreflightRegistry>,
@@ -39,8 +39,17 @@ impl AudioProcessorResolver for PreflightResolver {
     ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
         if matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
             if plugin_id == "test.mondrian.handoff")
+            || matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { class_id, .. }
+                if class_id == "portable.actual.rescan")
         {
-            Ok(Arc::new(PreflightFactory(Arc::clone(&self.0), None)))
+            Ok(Arc::new(PreflightFactory(
+                Arc::clone(&self.0),
+                None,
+                matches!(
+                    request.definition(),
+                    mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+                ),
+            )))
         } else {
             BuiltInAudioProcessorResolver.prepare(request)
         }
@@ -71,16 +80,27 @@ impl AudioProcessorFactory for PreflightFactory {
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
         // Same portable cold-seed contract as HandoffFactory: retain the exact
         // scalar bytes and report their actual owner, without live state mutation.
-        assert_eq!(format, NativeConfigurationFormat::ClapState);
+        assert_eq!(
+            format,
+            if self.2 {
+                NativeConfigurationFormat::Vst3ComponentAndController
+            } else {
+                NativeConfigurationFormat::ClapState
+            }
+        );
         assert_eq!(configuration.len(), 8);
         Ok(Some(Arc::new(Self(
             Arc::clone(&self.0),
             Some(configuration.to_vec()),
+            self.2,
         ))))
     }
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let ordinal = self.0.calls.creates.fetch_add(1, Ordering::Relaxed);
-        let probe = Arc::new(Mutex::new(HandoffProbe::default()));
+        let probe = Arc::new(Mutex::new(HandoffProbe {
+            vst_rescan_abi: self.2,
+            ..Default::default()
+        }));
         self.0.probes.lock().expect("fixture registry").push(Arc::clone(&probe));
         Ok(Box::new(PreflightProcessor {
             inner: HandoffProcessor {
@@ -253,7 +273,7 @@ fn preflight_contract() -> AudioRenderContract {
             AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
     }
 }
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 struct PreflightCursorSet {
     sessions: Vec<AudioSessionCursorEvidence>,
     processors: Vec<AudioProcessorCursorEvidence>,
@@ -281,6 +301,21 @@ struct PreflightFixture {
     registry: Arc<PreflightRegistry>,
 }
 fn preflight_build(spec: &PreflightSpec, logical: usize) -> PreflightFixture {
+    preflight_build_with_pcm(
+        spec,
+        logical,
+        if matches!(spec.placement, PreflightPlacement::Output) {
+            0.5
+        } else {
+            1.0
+        },
+    )
+}
+fn preflight_build_with_pcm(
+    spec: &PreflightSpec,
+    logical: usize,
+    expected_pcm: f32,
+) -> PreflightFixture {
     let registry = Arc::new(PreflightRegistry::default());
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
         &spec.root,
@@ -302,14 +337,7 @@ fn preflight_build(spec: &PreflightSpec, logical: usize) -> PreflightFixture {
     runtime
         .render_into(AudioRenderRequest { start_sample: 0, frames: 1 }, &mut pcm)
         .expect("each actual occurrence entered once");
-    assert_eq!(
-        pcm,
-        [if matches!(spec.placement, PreflightPlacement::Output) {
-            0.5
-        } else {
-            1.0
-        }]
-    );
+    assert_eq!(pcm, [expected_pcm]);
     let source = mondrian_core::AudioOwnerInstallationSource::new();
     let (registration, verifier) = source.register().expect("actual registration");
     runtime
@@ -829,3 +857,103 @@ mod scope_repeat_controls;
 
 #[path = "native_author_held_fee_public.rs"]
 mod held_fee_public_controls;
+
+#[test]
+fn vst_rescan_selected_singleton_preserves_all_native_peer_admission_guards() {
+    use super::continuing_rescan_controls::{hold, install, prepare, rescan};
+    let mut spec = preflight_spec(PreflightPlacement::Output);
+    let rack = &mut spec.canonical.audio_program.outputs[0].strip.pre_fader;
+    rack.processors[0].definition = mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+        class_id: "portable.actual.rescan".into(),
+        vendor: None,
+        schema_version: 1,
+        binary_sha256: None,
+    };
+    let mut peer = rack.processors[0].clone();
+    peer.id = mondrian_core::AudioProcessorInstanceId::new();
+    rack.processors.insert(0, peer);
+    spec.root = spec.canonical.clone();
+    let mut f = preflight_build_with_pcm(&spec, 64 * 1024 * 1024, 0.25);
+    let selected = Arc::clone(&f.inner.probe);
+    let peer = f
+        .registry
+        .probes
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|probe| !Arc::ptr_eq(probe, &selected))
+        .unwrap()
+        .clone();
+    let a = crate::NativeRequestCohort::new(
+        161,
+        mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+    )
+    .unwrap();
+    selected.lock().unwrap().live_request = Some(crate::NativeObservedRequest::Cohort(a));
+    hold(&mut f.inner);
+    let proposal = rescan(&mut f.inner, a);
+    let programs = super::continuing_rescan_controls::programs(&mut f.inner, &proposal);
+    let before = preflight_cursors(&f.inner.runtime);
+    let binds = f.registry.calls.binds.load(Ordering::Relaxed);
+    let creates = f.registry.calls.creates.load(Ordering::Relaxed);
+    for source_failure in [true, false] {
+        {
+            let mut p = peer.lock().unwrap();
+            p.source_failure =
+                source_failure.then_some(crate::NativeAudioAuthorSourceFailure::InvalidSource);
+            p.live_request =
+                (!source_failure).then_some(crate::NativeObservedRequest::RequestOnly(
+                    mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                ));
+        }
+        let (_, destination) = f.inner.source.register().unwrap();
+        let error = f
+            .inner
+            .runtime
+            .prepare_native_author_parameter_handoff(
+                &programs,
+                &proposal,
+                destination,
+                &ExecutionCancellationToken::new(),
+            )
+            .err()
+            .expect("peer hold must not be borrowed from selected A");
+        let expected = if source_failure {
+            NativeAudioAuthorHoldReason::SourceFailure(
+                crate::NativeAudioAuthorSourceFailure::InvalidSource,
+            )
+        } else {
+            NativeAudioAuthorHoldReason::PendingCallbacks
+        };
+        assert!(
+            matches!(error,NativeAudioParameterHandoffError::Admission(NativeAudioAuthorAdmissionError::Pending{reason,..}) if reason==expected),
+            "actual={error:?}"
+        );
+        assert_eq!(f.registry.calls.binds.load(Ordering::Relaxed), binds);
+        assert_eq!(f.registry.calls.creates.load(Ordering::Relaxed), creates);
+        assert_eq!(preflight_cursors(&f.inner.runtime), before);
+    }
+    {
+        let mut p = peer.lock().unwrap();
+        p.source_failure = None;
+        p.live_request = None;
+    }
+    let (mut prepared, mut authorization) = prepare(&mut f.inner, &proposal);
+    install(&mut f.inner, &proposal, &mut prepared, &mut authorization);
+    f.inner.ack(&proposal);
+    let mut pcm = [91.0];
+    f.inner
+        .runtime
+        .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm)
+        .unwrap();
+    assert_eq!(
+        pcm,
+        [0.75],
+        "same two processors, selected new .75 and unchanged peer .5"
+    );
+    assert_eq!(f.registry.calls.creates.load(Ordering::Relaxed), creates);
+    assert_eq!(f.registry.calls.binds.load(Ordering::Relaxed), binds + 2);
+    assert_eq!(selected.lock().unwrap().entries, 1);
+    assert_eq!(peer.lock().unwrap().entries, 1);
+    drop(prepared);
+}

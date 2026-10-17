@@ -827,7 +827,33 @@ impl AudioProcessor for IsolatedAudioProcessor {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
         match self.worker.poll_native_observations(consumption) {
-            Ok(observations) => Ok(observations),
+            Ok(mut observations) => {
+                if let crate::NativeAudioObservationConsumption::AcknowledgeAuthor(expected) =
+                    consumption
+                    && observations.object == Some(expected.installed_binding.expected_object)
+                    && expected.source_binding.expected_object
+                        == expected.installed_binding.expected_object
+                    && let Some(crate::NativeAudioAuthorDeliveryState::Acknowledged {
+                        acknowledgement,
+                        request_cohort: Some(original),
+                    }) = observations.author.as_ref().map(|author| &author.delivery)
+                    && *acknowledgement == expected
+                    && original.serial != 0
+                    && !original.exhausted()
+                    && original.request
+                        == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
+                {
+                    // Only this exact successful Ack retires its original A
+                    // from the adapter cache. A later/unknown fact stays held;
+                    // ordinary Poll/None cannot establish retirement.
+                    self.pending_reprepare =
+                        observations.pending_reprepare.or(self.pending_reprepare.filter(
+                            |request| *request != crate::NativeObservedRequest::Cohort(*original),
+                        ));
+                    observations.pending_reprepare = self.pending_reprepare;
+                }
+                Ok(observations)
+            }
             Err(error) => {
                 self.failed = true;
                 Err(error)

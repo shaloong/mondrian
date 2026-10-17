@@ -6,6 +6,7 @@ use mondrian_timeline::audio::{AudioNote, AudioNoteLane, AudioNoteTarget};
 
 #[derive(Default)]
 struct NoteCalls {
+    creates: usize,
     binds: usize,
     processes: usize,
     notes: [Option<AudioNoteEvent>; 8],
@@ -92,6 +93,8 @@ impl AudioProcessorResolver for NoteModelResolver {
     ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
         if matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Clap { plugin_id, .. }
             if plugin_id == "test.mondrian.handoff")
+            || matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { class_id, .. }
+                if class_id == "portable.actual.rescan")
         {
             Ok(Arc::new(NoteModelFactory {
                 inner: HandoffFactory { probe: Arc::clone(&self.probe), seed: None },
@@ -110,6 +113,9 @@ impl AudioProcessorFactory for NoteModelFactory {
     }
     fn note_input_contract(&self) -> AudioProcessorNoteInputContract {
         let mut contract = offered_model_notes();
+        if self.inner.probe.lock().unwrap().vst_rescan_abi {
+            contract.ports[0].port_key = "vst3.note-input.0".to_owned();
+        }
         contract.completion = self.completion;
         if self.completion == AudioNoteCompletionPolicy::SuccessfulOffBlock {
             contract.limits.output_ends = 0;
@@ -127,7 +133,34 @@ impl AudioProcessorFactory for NoteModelFactory {
         self.inner.visit_host_owned_storage(visitor)?;
         visitor(AudioProcessorFactoryStorageBorrow::arc_payload(&self.calls))
     }
+    fn with_native_configuration_seed(
+        &self,
+        format: NativeConfigurationFormat,
+        configuration: &[u8],
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        // Same bounded owned scalar ABI as the original model factory. The
+        // cold seed remains a future configuration, never loaded into this DSP.
+        assert_eq!(
+            format,
+            if self.inner.probe.lock().unwrap().vst_rescan_abi {
+                NativeConfigurationFormat::Vst3ComponentAndController
+            } else {
+                NativeConfigurationFormat::ClapState
+            }
+        );
+        assert_eq!(configuration.len(), 8);
+        Ok(Some(Arc::new(Self {
+            inner: HandoffFactory {
+                probe: Arc::clone(&self.inner.probe),
+                seed: Some(configuration.to_vec()),
+            },
+            calls: Arc::clone(&self.calls),
+            completion: self.completion,
+            off_result: self.off_result,
+        })))
+    }
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        self.calls.lock().unwrap().creates += 1;
         Ok(Box::new(NoteModelProcessor {
             inner: HandoffProcessor {
                 probe: Arc::clone(&self.inner.probe),
@@ -438,17 +471,46 @@ fn installed_off_model(
     AudioNativeProcessorAddress,
     Arc<Mutex<NoteCalls>>,
 ) {
+    let (fixture, address, calls) = installed_note_fixture(result, false);
+    (fixture.runtime, fixture.source, address, calls)
+}
+
+fn installed_note_fixture(
+    result: NoteModelReturn,
+    vst_rescan: bool,
+) -> (
+    HandoffFixture,
+    AudioNativeProcessorAddress,
+    Arc<Mutex<NoteCalls>>,
+) {
     use mondrian_core::automation::{ParameterSchema, PropertyValue};
     let calls = Arc::new(Mutex::new(NoteCalls::default()));
     let mut sequence = sequence_with_audio_clip();
+    let probe = Arc::new(Mutex::new(HandoffProbe {
+        vst_rescan_abi: vst_rescan,
+        ..Default::default()
+    }));
+    if vst_rescan {
+        sequence.audio_program.musical_time_reference =
+            Some(mondrian_core::MusicalTimeReference::new(tt(0, 1), tt(1, 1)).unwrap());
+    }
     let track = sequence.audio_tracks[0].id;
     let parameter = ParameterId::new_static("native.gain");
     let mut processor = AudioProcessorInstance {
         id: mondrian_core::AudioProcessorInstanceId::new(),
-        definition: mondrian_timeline::AudioProcessorDefinitionRef::Clap {
-            plugin_id: "test.mondrian.handoff".to_owned(),
-            schema_version: 1,
-            binary_sha256: None,
+        definition: if vst_rescan {
+            mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+                class_id: "portable.actual.rescan".to_owned(),
+                vendor: None,
+                schema_version: 1,
+                binary_sha256: None,
+            }
+        } else {
+            mondrian_timeline::AudioProcessorDefinitionRef::Clap {
+                plugin_id: "test.mondrian.handoff".to_owned(),
+                schema_version: 1,
+                binary_sha256: None,
+            }
         },
         bypassed: false,
         parameters: Default::default(),
@@ -489,7 +551,7 @@ fn installed_off_model(
         &[],
         &RampResolver,
         &NoteModelResolver {
-            probe: Arc::new(Mutex::new(HandoffProbe::default())),
+            probe: Arc::clone(&probe),
             calls: Arc::clone(&calls),
             completion: AudioNoteCompletionPolicy::SuccessfulOffBlock,
             off_result: result,
@@ -505,7 +567,12 @@ fn installed_off_model(
         target: AudioNoteTarget {
             track_id: track,
             processor_id,
-            input_port_key: "clap.note-input.0".to_owned(),
+            input_port_key: if vst_rescan {
+                "vst3.note-input.0"
+            } else {
+                "clap.note-input.0"
+            }
+            .to_owned(),
         },
         notes: AuthoringList::from(
             (0..3)
@@ -551,7 +618,19 @@ fn installed_off_model(
             insertion: AudioProcessorInsertionPoint::PreFader,
         },
     };
-    (runtime, source, address, calls)
+    let target = runtime.native_owner_lease(address).unwrap().editor_target();
+    (
+        HandoffFixture {
+            sequence,
+            runtime,
+            source,
+            probe,
+            target,
+            attachment: target,
+        },
+        address,
+        calls,
+    )
 }
 
 #[test]
@@ -629,4 +708,98 @@ fn owned_installed_successful_off_retires_only_after_success_and_never_replays_f
         }
         runtime.native_owner_installation_verifier().unwrap().validate(&claim).unwrap();
     }
+}
+
+#[test]
+fn owned_vst_rescan_handoff_moves_ledger_origin_once_and_keeps_on_off_ids() {
+    // This is the retained owned Note model. It is not a Note-capable DLL with
+    // restart4 callbacks, and gives no additional native VST3 qualification.
+    use super::continuing_rescan_controls::{hold, install, prepare, rescan};
+    let (mut f, old_address, calls) = installed_note_fixture(NoteModelReturn::Success, true);
+    let lease = f.runtime.native_owner_lease(old_address).unwrap();
+    let mut pcm = [91.0];
+    f.runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 1 }, &mut pcm)
+        .unwrap();
+    assert_eq!(pcm, [0.5]);
+    let on = calls.lock().unwrap().notes[0].unwrap();
+    assert_eq!(on.kind, AudioNoteEventKind::On);
+    assert_eq!(on.native_note_id, 0);
+    let before_cursors = cursors(&f.runtime);
+    let before_entries = f.probe.lock().unwrap().entries;
+    let before_binds = calls.lock().unwrap().binds;
+    let before_creates = calls.lock().unwrap().creates;
+    let a = crate::NativeRequestCohort::new(
+        151,
+        mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+    )
+    .unwrap();
+    f.probe.lock().unwrap().live_request = Some(crate::NativeObservedRequest::Cohort(a));
+    hold(&mut f);
+    let proposal = rescan(&mut f, a);
+    let (mut prepared, mut authorization) = prepare(&mut f, &proposal);
+    let claim = f.source.current_claim().unwrap().unwrap();
+    install(&mut f, &proposal, &mut prepared, &mut authorization);
+    let next_address = AudioNativeProcessorAddress {
+        root: f.runtime.resource_root_identity(),
+        local: f.runtime.resource_root_identity(),
+        ..old_address
+    };
+    let next_lease = f.runtime.native_owner_lease(next_address).unwrap();
+    assert_ne!(next_lease, lease);
+    assert_eq!(next_lease.binding(), f.target.binding);
+    assert_eq!(
+        f.source.current_claim().unwrap().unwrap().generation().get(),
+        claim.generation().get() + 1
+    );
+    let installed = cursors(&f.runtime);
+    assert_eq!(
+        installed.sessions[0].unwrap().state,
+        before_cursors.sessions[0].unwrap().state
+    );
+    assert_eq!(
+        installed.processors[0].unwrap().state,
+        before_cursors.processors[0].unwrap().state
+    );
+    f.ack(&proposal);
+    assert_eq!(cursors(&f.runtime), installed);
+    assert!(f
+        .runtime
+        .acknowledge_native_author_parameter_handoff(&proposal, &ExecutionCancellationToken::new())
+        .is_err());
+    assert_eq!(calls.lock().unwrap().binds, before_binds + 1);
+    assert_eq!(calls.lock().unwrap().creates, before_creates);
+    assert_eq!(f.probe.lock().unwrap().entries, before_entries);
+    {
+        let p = f.probe.lock().unwrap();
+        assert_eq!((p.ack_attempts, p.accepted_acks), (1, 1));
+    }
+    // Off must be validated with the moved origin while retaining the original
+    // Pressed record/ID. SuccessfulOffBlock retires only this actual success.
+    f.runtime
+        .render_into(AudioRenderRequest { start_sample: 1, frames: 1 }, &mut pcm)
+        .unwrap();
+    assert_eq!(pcm, [1.5]);
+    f.runtime
+        .render_into(AudioRenderRequest { start_sample: 2, frames: 1 }, &mut pcm)
+        .unwrap();
+    assert_eq!(pcm, [2.25]);
+    let c = calls.lock().unwrap();
+    assert_eq!((c.processes, c.note_count, c.ends), (3, 3, 0));
+    let off = c.notes[1].unwrap();
+    let next = c.notes[2].unwrap();
+    assert_eq!(off.kind, AudioNoteEventKind::Off);
+    assert_eq!(
+        (off.native_note_id, off.port_index, off.channel, off.key),
+        (on.native_note_id, on.port_index, on.channel, on.key)
+    );
+    assert_eq!(off.velocity.to_bits(), 0.5_f64.to_bits());
+    assert_eq!(next.kind, AudioNoteEventKind::On);
+    assert_eq!(next.native_note_id, 1);
+    assert_eq!(
+        f.runtime.native_owner_lease(next_address).unwrap(),
+        next_lease
+    );
+    assert_eq!(f.probe.lock().unwrap().entries, before_entries);
+    drop(prepared);
 }
