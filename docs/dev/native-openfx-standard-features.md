@@ -143,7 +143,7 @@ NEXT；页脚显示 1.5.1 并不证明所有后续符号已发布。
 | A15 | GetOutputColourspace，colour 条件必需 1.5 | 未接入，未 expose Colour style/config、clip preferred/actual colourspaces | `render.cpp`; host/descriptor/property tables | [Colour](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxColour.h) |
 | A16 | GPUContextAttached/Detached，GPU 条件必需 | 未接入，所有原生 GPU API disabled；wgpu 本身不是 OFX 外部 queue/texture capability | product native host + `app/build.rs` | [GPU](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxGPURender.h) |
 | A17 | Dialog action / interact separate main lifecycle，条件必需 | 未接入；built-in Viewer anchor/ROI 操作不能证明插件 interactor接通 | product无交互owner；upstream Interact wrappers | [Interact actions](https://openfx.readthedocs.io/en/main/Reference/ofxInteracts.html) |
-| A18 | action error/default/abort/memory policy，必需 | 部分：支持合法 ReplyDefault 的部分动作、Render必须OK；native失效/cancel/deadline retire/reap无stale publish。abort恒0；ErrMemory purge/retry、GPU-specific retry未接入 | `accepted`; `render`; `resident ProcessOwner`; `vendor Instance::abort` | [Status/core](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxCore.h) |
+| A18 | action error/default/abort/memory policy，必需 | 部分：支持合法 ReplyDefault 的部分动作、Render必须OK；native失效/cancel/deadline retire/reap无stale publish。abort已接实例取消回调，完整 action 级取消闭环未独立验收；ErrMemory purge/retry、GPU-specific retry未接入 | `accepted`; `render`; `resident ProcessOwner`; `vendor Instance::abort` | [Status/core](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxCore.h) |
 
 ## 4. 六个 contexts 与完整 CPU image contract
 
