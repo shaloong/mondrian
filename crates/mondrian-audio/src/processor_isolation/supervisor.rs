@@ -465,7 +465,7 @@ impl SupervisedAudioWorker {
         &mut self,
         operation: &'static str,
         command: WorkerCommand,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         self.request(operation, command, false).map(|(pending, _)| pending)
     }
 
@@ -473,13 +473,7 @@ impl SupervisedAudioWorker {
         &mut self,
         operation: &'static str,
         command: WorkerCommand,
-    ) -> Result<
-        (
-            Option<mondrian_core::NativeAudioReprepareRequest>,
-            Option<u32>,
-        ),
-        AudioProcessorHostError,
-    > {
+    ) -> Result<(Option<crate::NativeObservedRequest>, Option<u32>), AudioProcessorHostError> {
         if command.kind != super::protocol::CommandKind::Process {
             return Err(invalid_contract(
                 "only Process may receive Note completion observations",
@@ -493,13 +487,7 @@ impl SupervisedAudioWorker {
         operation: &'static str,
         command: WorkerCommand,
         notes_response: bool,
-    ) -> Result<
-        (
-            Option<mondrian_core::NativeAudioReprepareRequest>,
-            Option<u32>,
-        ),
-        AudioProcessorHostError,
-    > {
+    ) -> Result<(Option<crate::NativeObservedRequest>, Option<u32>), AudioProcessorHostError> {
         if self.process.state != ProcessState::Running {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }

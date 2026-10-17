@@ -850,7 +850,7 @@ fn clap_paused_native_prefix_retry_keeps_new_suffix_and_exact_ack_object() {
         .poll_native_observations(Consumption::DrainAuthor(binding))
         .expect("retry");
     assert!(matches!(repeated.author.expect("same source").delivery,
-        Delivery::AwaitingAcknowledgement { binding: same, revision: 3 } if same == binding));
+        Delivery::AwaitingAcknowledgement { binding: same, revision: 3, request_cohort: None } if same == binding));
     exchange_another_paused_gui_value(worker.as_mut());
     assert_eq!(ACCEPTED_EVENTS.load(AuditOrdering::SeqCst), 6);
     let installed =
@@ -880,7 +880,9 @@ fn clap_paused_native_prefix_retry_keeps_new_suffix_and_exact_ack_object() {
         3,
         "only the selected prefix retires"
     );
-    assert!(matches!(author.delivery, Delivery::Acknowledged(actual) if actual == ack));
+    assert!(
+        matches!(author.delivery, Delivery::Acknowledged { acknowledgement: actual, request_cohort: None } if actual == ack)
+    );
     let suffix = worker
         .poll_native_observations(Consumption::DrainAuthor(installed))
         .expect("next independent prefix");
@@ -1039,7 +1041,7 @@ fn clap_paused_without_state_delivers_canonical_parameters_and_keeps_exact_ack()
         .poll_native_observations(Consumption::DrainAuthor(binding))
         .expect("same retained prefix");
     assert!(matches!(retry.author.expect("owner").delivery,
-        Delivery::AwaitingAcknowledgement { binding: actual, revision: 3 } if actual == binding));
+        Delivery::AwaitingAcknowledgement { binding: actual, revision: 3, request_cohort: None } if actual == binding));
     exchange_another_paused_gui_value(worker.as_mut());
     let installed =
         crate::NativeAudioObjectBindRequest { binding: AudioProcessorBindingId::new(), ..binding };
@@ -1056,7 +1058,7 @@ fn clap_paused_without_state_delivers_canonical_parameters_and_keeps_exact_ack()
         .poll_native_observations(Consumption::AcknowledgeAuthor(ack))
         .expect("exact selected Ack");
     assert!(
-        matches!(acknowledged.author.expect("owner").delivery, Delivery::Acknowledged(actual) if actual == ack)
+        matches!(acknowledged.author.expect("owner").delivery, Delivery::Acknowledged { acknowledgement: actual, request_cohort: None } if actual == ack)
     );
     let suffix = worker
         .poll_native_observations(Consumption::DrainAuthor(installed))
@@ -1276,7 +1278,7 @@ fn clap_stateless_clear_values_rescan_retains_order_and_exact_ack_old_api() {
         ))
         .expect("exact accepted prefix Ack");
     assert!(
-        matches!(acknowledged.author.expect("same source").delivery, Delivery::Acknowledged(actual) if actual.revision == 2)
+        matches!(acknowledged.author.expect("same source").delivery, Delivery::Acknowledged { acknowledgement: actual, request_cohort: None } if actual.revision == 2)
     );
     let closed = worker
         .poll_native_observations(Consumption::Preserve)

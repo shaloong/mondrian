@@ -16,6 +16,7 @@ pub(super) enum PendingDelivery {
         binding: crate::NativeAudioObjectBindRequest,
         revision: u64,
         configuration: Option<NativeAudioAuthorConfiguration>,
+        request_cohort: Option<crate::NativeRequestCohort>,
     },
     Rejected {
         binding: crate::NativeAudioObjectBindRequest,
@@ -50,8 +51,12 @@ impl PendingDelivery {
 
 pub(super) fn pending_projection(pending: Option<&PendingDelivery>) -> Delivery {
     match pending {
-        Some(PendingDelivery::Delivered { binding, revision, .. }) => {
-            Delivery::AwaitingAcknowledgement { binding: *binding, revision: *revision }
+        Some(PendingDelivery::Delivered { binding, revision, request_cohort, .. }) => {
+            Delivery::AwaitingAcknowledgement {
+                binding: *binding,
+                revision: *revision,
+                request_cohort: *request_cohort,
+            }
         }
         Some(PendingDelivery::Rejected { reason, .. }) => Delivery::Refused(*reason),
         None => Delivery::Preserved,
@@ -197,8 +202,12 @@ impl Vst3Worker {
                 }));
             }
             let delivery = match pending {
-                PendingDelivery::Delivered { binding, revision, .. } => {
-                    Delivery::AwaitingAcknowledgement { binding: *binding, revision: *revision }
+                PendingDelivery::Delivered { binding, revision, request_cohort, .. } => {
+                    Delivery::AwaitingAcknowledgement {
+                        binding: *binding,
+                        revision: *revision,
+                        request_cohort: *request_cohort,
+                    }
                 }
                 PendingDelivery::Rejected { reason, .. } => Delivery::Refused(*reason),
             };
@@ -351,6 +360,7 @@ impl Vst3Worker {
         let delivery = NativeAudioAuthorDelivery {
             binding,
             revision: source.revision,
+            request_cohort: None,
             events: projected,
             completion: if configuration.is_some() {
                 mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
@@ -371,8 +381,12 @@ impl Vst3Worker {
                 delivery: Delivery::Refused(reason),
             }));
         }
-        self.native_author_delivery =
-            Some(PendingDelivery::Delivered { binding, revision: source.revision, configuration });
+        self.native_author_delivery = Some(PendingDelivery::Delivered {
+            binding,
+            revision: source.revision,
+            configuration,
+            request_cohort: None,
+        });
         Ok(Some(NativeAudioAuthorObservation {
             source: after,
             delivery: Delivery::Delivered(delivery),
@@ -393,7 +407,7 @@ impl Vst3Worker {
                 delivery: Delivery::Refused(Refusal::StaleDelivery),
             });
         }
-        let Some(PendingDelivery::Delivered { configuration, .. }) =
+        let Some(PendingDelivery::Delivered { configuration, request_cohort, .. }) =
             self.native_author_delivery.take()
         else {
             return Err(invalid(
@@ -405,6 +419,9 @@ impl Vst3Worker {
             // call, state recapture or author change occurs at this receipt.
             self.payload.state = Some(configuration.into_bytes());
         }
-        Ok(NativeAudioAuthorObservation { source, delivery: Delivery::Acknowledged(ack) })
+        Ok(NativeAudioAuthorObservation {
+            source,
+            delivery: Delivery::Acknowledged { acknowledgement: ack, request_cohort },
+        })
     }
 }

@@ -189,6 +189,34 @@ fn parameter_storage(
         .ok_or_else(|| invalid("native author storage overflow"))
 }
 
+fn write_prefix_cohort(
+    writer: &mut impl Write,
+    cohort: Option<crate::NativeRequestCohort>,
+) -> io::Result<()> {
+    super::native_configuration_wire::write_observed_request(
+        writer,
+        cohort.map(crate::NativeObservedRequest::Cohort),
+    )
+}
+
+fn read_prefix_cohort(reader: &mut impl Read) -> io::Result<Option<crate::NativeRequestCohort>> {
+    match super::native_configuration_wire::read_observed_request(reader)? {
+        None => Ok(None),
+        Some(crate::NativeObservedRequest::Cohort(cohort)) => Ok(Some(cohort)),
+        Some(crate::NativeObservedRequest::RequestOnly(_)) => {
+            Err(invalid("author prefix requires original cohort identity"))
+        }
+    }
+}
+
+fn validate_prefix_cohort(cohort: Option<crate::NativeRequestCohort>) -> io::Result<()> {
+    if let Some(cohort) = cohort {
+        crate::NativeRequestCohort::new(cohort.serial, cohort.request)
+            .map_err(|_| invalid("invalid author prefix cohort"))?;
+    }
+    Ok(())
+}
+
 fn validate(
     observation: &NativeAudioAuthorObservation,
     object: Option<NativeAudioObjectObservation>,
@@ -261,13 +289,19 @@ fn validate(
                 return Err(invalid("native author complete payload exceeds grant"));
             }
         }
-        NativeAudioAuthorDeliveryState::AwaitingAcknowledgement { binding, revision } => {
+        NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+            binding,
+            revision,
+            request_cohort,
+        } => {
             validate_binding(*binding, object)?;
+            validate_prefix_cohort(*request_cohort)?;
             if *revision == 0 || *revision > observation.source.revision {
                 return Err(invalid("native author outstanding revision"));
             }
         }
-        NativeAudioAuthorDeliveryState::Acknowledged(ack) => {
+        NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: ack, request_cohort } => {
+            validate_prefix_cohort(*request_cohort)?;
             validate_binding(ack.source_binding, object)?;
             validate_binding(ack.installed_binding, object)?;
             if ack.revision == 0 || ack.revision > observation.source.revision {
@@ -322,7 +356,7 @@ pub(super) fn write_author(
         NativeAudioAuthorDeliveryState::Delivered(_) => 1,
         NativeAudioAuthorDeliveryState::AwaitingAcknowledgement { .. } => 2,
         NativeAudioAuthorDeliveryState::Refused(_) => 3,
-        NativeAudioAuthorDeliveryState::Acknowledged(_) => 4,
+        NativeAudioAuthorDeliveryState::Acknowledged { .. } => 4,
         NativeAudioAuthorDeliveryState::ReenteredAcknowledged(_) => 5,
     };
     writer.write_all(&tag.to_le_bytes())?;
@@ -330,6 +364,7 @@ pub(super) fn write_author(
         NativeAudioAuthorDeliveryState::Delivered(delivery) => {
             super::native_audio_object_wire::write_bind_request(writer, delivery.binding)?;
             writer.write_all(&delivery.revision.to_le_bytes())?;
+            write_prefix_cohort(writer, delivery.request_cohort)?;
             writer.write_all(
                 &u32::try_from(delivery.events.len())
                     .map_err(|_| invalid("native author event count"))?
@@ -401,14 +436,20 @@ pub(super) fn write_author(
                 writer.write_all(state.bytes())?;
             }
         }
-        NativeAudioAuthorDeliveryState::AwaitingAcknowledgement { binding, revision } => {
+        NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+            binding,
+            revision,
+            request_cohort,
+        } => {
             super::native_audio_object_wire::write_bind_request(writer, *binding)?;
             writer.write_all(&revision.to_le_bytes())?;
+            write_prefix_cohort(writer, *request_cohort)?;
         }
-        NativeAudioAuthorDeliveryState::Acknowledged(ack) => {
+        NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: ack, request_cohort } => {
             super::native_audio_object_wire::write_bind_request(writer, ack.source_binding)?;
             super::native_audio_object_wire::write_bind_request(writer, ack.installed_binding)?;
             writer.write_all(&ack.revision.to_le_bytes())?;
+            write_prefix_cohort(writer, *request_cohort)?;
         }
         NativeAudioAuthorDeliveryState::Refused(reason) => {
             writer.write_all(&refusal_tag(*reason).to_le_bytes())?
@@ -451,6 +492,7 @@ pub(super) fn read_author(
             let binding = super::native_audio_object_wire::read_bind_request(reader)?;
             validate_binding(binding, object)?;
             let revision = u64_read(reader)?;
+            let request_cohort = read_prefix_cohort(reader)?;
             let count = usize::try_from(u32_read(reader)?)
                 .map_err(|_| invalid("native author count extent"))?;
             if count == 0
@@ -592,6 +634,7 @@ pub(super) fn read_author(
             NativeAudioAuthorDeliveryState::Delivered(NativeAudioAuthorDelivery {
                 binding,
                 revision,
+                request_cohort,
                 events,
                 configuration,
                 completion,
@@ -600,13 +643,17 @@ pub(super) fn read_author(
         2 => NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
             binding: super::native_audio_object_wire::read_bind_request(reader)?,
             revision: u64_read(reader)?,
+            request_cohort: read_prefix_cohort(reader)?,
         },
         3 => NativeAudioAuthorDeliveryState::Refused(refusal(u32_read(reader)?)?),
-        4 => NativeAudioAuthorDeliveryState::Acknowledged(NativeAudioAuthorAcknowledgement {
-            source_binding: super::native_audio_object_wire::read_bind_request(reader)?,
-            installed_binding: super::native_audio_object_wire::read_bind_request(reader)?,
-            revision: u64_read(reader)?,
-        }),
+        4 => NativeAudioAuthorDeliveryState::Acknowledged {
+            acknowledgement: NativeAudioAuthorAcknowledgement {
+                source_binding: super::native_audio_object_wire::read_bind_request(reader)?,
+                installed_binding: super::native_audio_object_wire::read_bind_request(reader)?,
+                revision: u64_read(reader)?,
+            },
+            request_cohort: read_prefix_cohort(reader)?,
+        },
         5 => NativeAudioAuthorDeliveryState::ReenteredAcknowledged(
             crate::NativeAudioReenteredAuthorAcknowledgement {
                 preparation: super::native_audio_author_state_entry_wire::read_receipt(reader)?,
@@ -657,6 +704,7 @@ mod native_author_wire_contracts {
             delivery: NativeAudioAuthorDeliveryState::Delivered(NativeAudioAuthorDelivery {
                 binding: binding(),
                 revision: 7,
+                request_cohort: None,
                 events: vec![
                     NativeAudioAuthorEvent::GroupStarted,
                     NativeAudioAuthorEvent::Parameter(
@@ -805,6 +853,7 @@ mod native_author_wire_contracts {
             delivery: NativeAudioAuthorDeliveryState::Delivered(NativeAudioAuthorDelivery {
                 binding: binding(),
                 revision: 1,
+                request_cohort: None,
                 events: vec![NativeAudioAuthorEvent::Parameter(
                     NativeAudioAuthorParameterEvent::admit(
                         mondrian_core::ParameterId::new("clap.17").expect("stable ID"),
@@ -831,6 +880,7 @@ mod native_author_wire_contracts {
         expected.extend_from_slice(&97_u32.to_le_bytes());
         expected.extend_from_slice(&3_u64.to_le_bytes());
         expected.extend_from_slice(&1_u64.to_le_bytes());
+        expected.extend_from_slice(&[0; 16]); // no prefix request cohort, independently encoded
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
@@ -867,9 +917,9 @@ mod native_author_wire_contracts {
             owner_process_id: 97,
             object: Some(object()),
             editor_cleanup: Some(crate::NativeAudioEditorCloseStage::ClearHostFrame),
-            pending_reprepare: Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
-                flags: 0x8000_0010,
-            }),
+            pending_reprepare: Some(crate::NativeObservedRequest::RequestOnly(
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0010 },
+            )),
             author: Some(expected),
             ..Default::default()
         };
@@ -899,13 +949,20 @@ mod native_author_wire_contracts {
         let binding = binding();
         for delivery in [
             NativeAudioAuthorDeliveryState::Preserved,
-            NativeAudioAuthorDeliveryState::AwaitingAcknowledgement { binding, revision: 7 },
-            NativeAudioAuthorDeliveryState::Refused(NativeAudioAuthorRefusal::InvalidSource),
-            NativeAudioAuthorDeliveryState::Acknowledged(NativeAudioAuthorAcknowledgement {
-                source_binding: binding,
-                installed_binding: binding,
+            NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+                binding,
                 revision: 7,
-            }),
+                request_cohort: None,
+            },
+            NativeAudioAuthorDeliveryState::Refused(NativeAudioAuthorRefusal::InvalidSource),
+            NativeAudioAuthorDeliveryState::Acknowledged {
+                acknowledgement: NativeAudioAuthorAcknowledgement {
+                    source_binding: binding,
+                    installed_binding: binding,
+                    revision: 7,
+                },
+                request_cohort: None,
+            },
         ] {
             let expected = NativeAudioAuthorObservation { source: closed_source(), delivery };
             assert_eq!(roundtrip(&expected), expected);
@@ -1019,6 +1076,137 @@ mod native_author_wire_contracts {
             read_author(&mut Cursor::new([2_u8]), Some(object())).is_err(),
             "unknown presence cannot become an empty source"
         );
+    }
+
+    fn prefix_receipt_cases(
+        request_cohort: Option<crate::NativeRequestCohort>,
+    ) -> [(NativeAudioAuthorObservation, usize); 3] {
+        let mut delivered = complete();
+        let NativeAudioAuthorDeliveryState::Delivered(delivery) = &mut delivered.delivery else {
+            panic!("complete delivery fixture");
+        };
+        delivery.request_cohort = request_cohort;
+        [
+            (delivered, 75),
+            (
+                NativeAudioAuthorObservation {
+                    source: closed_source(),
+                    delivery: NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+                        binding: binding(),
+                        revision: 7,
+                        request_cohort,
+                    },
+                },
+                75,
+            ),
+            (
+                NativeAudioAuthorObservation {
+                    source: closed_source(),
+                    delivery: NativeAudioAuthorDeliveryState::Acknowledged {
+                        acknowledgement: NativeAudioAuthorAcknowledgement {
+                            source_binding: binding(),
+                            installed_binding: binding(),
+                            revision: 7,
+                        },
+                        request_cohort,
+                    },
+                },
+                103,
+            ),
+        ]
+    }
+
+    #[test]
+    fn native_author_prefix_cohort_stays_with_delivery_while_live_pending_is_newer() {
+        let a = crate::NativeRequestCohort::new(
+            41,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+        )
+        .unwrap();
+        let b = crate::NativeRequestCohort::new(42, a.request).unwrap();
+        for prefix in [None, Some(a)] {
+            for (author, offset) in prefix_receipt_cases(prefix) {
+                let mut bytes = Vec::new();
+                write_author(&mut bytes, Some(&author), Some(object())).unwrap();
+                let expected = if prefix.is_some() {
+                    [2, 0, 0, 0, 41, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0]
+                } else {
+                    [0; 16]
+                };
+                assert_eq!(
+                    &bytes[offset..offset + 16],
+                    &expected,
+                    "prefix identity has an independent fixed byte oracle"
+                );
+                assert_eq!(roundtrip(&author), author);
+                let observations = crate::NativeAudioObservations {
+                    owner_process_id: 97,
+                    object: Some(object()),
+                    pending_reprepare: Some(crate::NativeObservedRequest::Cohort(b)),
+                    author: Some(author),
+                    ..Default::default()
+                };
+                let mut bytes = Vec::new();
+                super::super::native_audio_object_wire::write_reply(
+                    &mut bytes,
+                    super::super::native_audio_object_wire::ObjectReply::Observation(&observations),
+                )
+                .unwrap();
+                let actual = super::super::native_audio_object_wire::read_observation_reply(
+                    &mut Cursor::new(bytes),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual, observations,
+                    "live B never supplies or replaces an original prefix A/None"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_author_prefix_wire_rejects_raw_only_and_noncanonical_cohorts() {
+        let a = crate::NativeRequestCohort::new(
+            u32::MAX,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0004 },
+        )
+        .unwrap();
+        for (author, offset) in prefix_receipt_cases(Some(a)) {
+            assert_eq!(
+                roundtrip(&author),
+                author,
+                "unknown bits and exhausted serial remain observations, not permission"
+            );
+            let mut bytes = Vec::new();
+            write_author(&mut bytes, Some(&author), Some(object())).unwrap();
+            for words in [
+                [1_u32, 0, 1, 4], // RequestOnly is not prefix identity.
+                [0, 0, 0, 4],
+                [0, 1, 0, 0],
+                [2, 0, 1, 4],
+                [2, 41, 1, 0],
+                [2, 41, 2, 4],
+                [3, 41, 1, 4],
+            ] {
+                let mut invalid = bytes.clone();
+                for (index, word) in words.into_iter().enumerate() {
+                    invalid[offset + index * 4..offset + index * 4 + 4]
+                        .copy_from_slice(&word.to_le_bytes());
+                }
+                assert!(read_author(&mut Cursor::new(invalid), Some(object())).is_err());
+            }
+            for cut in 0..16 {
+                assert!(
+                    read_author(&mut Cursor::new(&bytes[..offset + cut]), Some(object())).is_err()
+                );
+            }
+        }
+        for (author, _) in prefix_receipt_cases(Some(crate::NativeRequestCohort {
+            serial: 0,
+            request: a.request,
+        })) {
+            assert!(write_author(&mut Vec::new(), Some(&author), Some(object())).is_err());
+        }
     }
 
     #[test]

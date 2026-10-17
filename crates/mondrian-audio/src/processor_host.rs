@@ -510,6 +510,7 @@ impl PreparedProcessorHost {
                                     "native author delivery binding changed".to_owned(),
                                 ));
                             }
+                            let request_cohort = delivery.request_cohort();
                             let (_, revision, events, configuration, completion) =
                                 delivery.into_parts();
                             let mut callbacks = Vec::with_capacity(events.len());
@@ -591,16 +592,21 @@ impl PreparedProcessorHost {
                                 crate::AudioProcessorHostError::InvalidContract(error.to_string())
                             })?;
                             instance.native_author_outstanding =
-                                Some(native_author::NativeHostedAuthorDelivery::new(proposal));
+                                Some(native_author::NativeHostedAuthorDelivery::new(
+                                    proposal,
+                                    request_cohort,
+                                ));
                         }
                         crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
                             binding,
                             revision,
+                            request_cohort,
                         } if instance.native_author_outstanding.as_ref().is_some_and(
                             |retained| {
                                 retained.matches_source_and_current(
                                     binding,
                                     revision,
+                                    request_cohort,
                                     lease.editor_target(),
                                     object,
                                 )
@@ -1312,13 +1318,8 @@ impl PreparedProcessorHost {
 
     pub(crate) fn preflight_native_control(
         &mut self,
-    ) -> Result<
-        Option<(
-            AudioProcessorOccurrence,
-            mondrian_core::NativeAudioReprepareRequest,
-        )>,
-        AudioExecutionError,
-    > {
+    ) -> Result<Option<(AudioProcessorOccurrence, crate::NativeObservedRequest)>, AudioExecutionError>
+    {
         for instance in &mut self.instances {
             if let crate::native_runtime_owner::NativeHostedBinding::Installed { lease, object } =
                 instance.native_binding

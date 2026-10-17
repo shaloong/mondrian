@@ -126,6 +126,7 @@ impl AudioProcessor for OwnerProbeProcessor {
                                     crate::NativeAudioAuthorDelivery {
                                         binding: request,
                                         revision: 1,
+                                        request_cohort: None,
                                         events: vec![crate::NativeAudioAuthorEvent::ParameterAtExecution {
                                             parameter: crate::NativeAudioAuthorParameterEvent::admit(
                                                 ParameterId::new("clap.param.1").expect("stable native ID"),
@@ -161,13 +162,15 @@ impl AudioProcessor for OwnerProbeProcessor {
     }
     fn preflight_reprepare(
         &mut self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         self.state.pending_queries.fetch_add(1, Ordering::AcqRel);
-        Ok(self
-            .state
-            .pending_restart
-            .load(Ordering::Acquire)
-            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart))
+        Ok(
+            self.state.pending_restart.load(Ordering::Acquire).then_some(
+                crate::NativeObservedRequest::RequestOnly(
+                    mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                ),
+            ),
+        )
     }
     fn preflight_native_observations(
         &mut self,
@@ -176,11 +179,12 @@ impl AudioProcessor for OwnerProbeProcessor {
         self.state.snapshot_calls.fetch_add(1, Ordering::AcqRel);
         let mut observations =
             self.poll_native_observations(NativeAudioObservationConsumption::Preserve)?;
-        observations.pending_reprepare = self
-            .state
-            .pending_restart
-            .load(Ordering::Acquire)
-            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart);
+        observations.pending_reprepare =
+            self.state.pending_restart.load(Ordering::Acquire).then_some(
+                crate::NativeObservedRequest::RequestOnly(
+                    mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                ),
+            );
         Ok(observations)
     }
     fn open_native_audio_editor(
@@ -1088,6 +1092,7 @@ fn native_author_closed_source_runtime_missing_producer_and_delivered_empty_sour
     author.delivery = crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
         binding: NativeAudioObjectBindRequest { binding: lease.binding(), expected_object: object },
         revision: 8,
+        request_cohort: None,
     };
     assert!(
         author.source.closed_empty(),
@@ -1681,6 +1686,7 @@ fn native_observation_entry_gap_contribution_has_current_ui_binding_without_sign
                 expected_object: object,
             },
             revision: 8,
+            request_cohort: None,
             events: vec![crate::NativeAudioAuthorEvent::Parameter(
                 crate::NativeAudioAuthorParameterEvent::admit(
                     ParameterId::new("clap.param.1").expect("id"),
@@ -2140,6 +2146,7 @@ fn publish_native_rescan_probe(
                 expected_object: object,
             },
             revision: 8,
+            request_cohort: None,
             events,
             configuration: None,
             completion: mondrian_core::NativeAudioAuthorCompletion::ParametersOnly,

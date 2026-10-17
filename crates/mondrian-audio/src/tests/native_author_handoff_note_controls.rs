@@ -200,7 +200,9 @@ impl AudioProcessor for NoteModelProcessor {
                 }
                 NoteModelReturn::Deferred => {
                     return Err(AudioProcessorHostError::ReprepareRequired(
-                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        crate::NativeObservedRequest::RequestOnly(
+                            mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        ),
                     ))
                 }
             }
@@ -602,7 +604,9 @@ fn owned_installed_successful_off_retires_only_after_success_and_never_replays_f
                         AudioProcessorHostError::Process("owned Off refusal".to_owned())
                     }
                     NoteModelReturn::Deferred => AudioProcessorHostError::ReprepareRequired(
-                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        crate::NativeObservedRequest::RequestOnly(
+                            mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        ),
                     ),
                     NoteModelReturn::Success => unreachable!(),
                 };

@@ -315,6 +315,7 @@ impl NativeAudioAuthorConfiguration {
 pub struct NativeAudioAuthorDelivery {
     pub(crate) binding: NativeAudioObjectBindRequest,
     pub(crate) revision: u64,
+    pub(crate) request_cohort: Option<crate::NativeRequestCohort>,
     pub(crate) events: Vec<NativeAudioAuthorEvent>,
     pub(crate) configuration: Option<NativeAudioAuthorConfiguration>,
     pub(crate) completion: mondrian_core::NativeAudioAuthorCompletion,
@@ -328,6 +329,11 @@ impl NativeAudioAuthorDelivery {
     /// Terminal revision of every callback in this complete ordered delivery.
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+    /// Original native request attached to this exact prefix, if its producer supplied one.
+    /// This is independent of any newer live pending request and grants no service permission.
+    pub const fn request_cohort(&self) -> Option<crate::NativeRequestCohort> {
+        self.request_cohort
     }
     /// Complete callback sequence, without synthetic End or truncated prefix.
     pub fn events(&self) -> &[NativeAudioAuthorEvent] {
@@ -347,7 +353,10 @@ impl NativeAudioAuthorDelivery {
         source: NativeAudioAuthorSourceStatus,
     ) -> Result<(), NativeAudioAuthorRefusal> {
         source.validate()?;
-        if self.events.is_empty()
+        if self.request_cohort.is_some_and(|cohort| {
+            crate::NativeRequestCohort::new(cohort.serial, cohort.request).is_err()
+        })
+            || self.events.is_empty()
             || self.events.len() > NATIVE_AUDIO_AUTHOR_EVENTS
             || self.events.capacity() > NATIVE_AUDIO_AUTHOR_EVENTS
             || self.revision == 0
@@ -416,10 +425,17 @@ pub enum NativeAudioAuthorDeliveryState {
         binding: NativeAudioObjectBindRequest,
         /// Exact retained source revision, never a later empty snapshot.
         revision: u64,
+        /// Original request of the retained prefix, never a later live snapshot.
+        request_cohort: Option<crate::NativeRequestCohort>,
     },
     /// The exact retained delivery was confirmed; future source events remain
     /// pending and are never erased by this acknowledgement.
-    Acknowledged(NativeAudioAuthorAcknowledgement),
+    Acknowledged {
+        /// Existing exact binding/revision acknowledgement; no new command authority.
+        acknowledgement: NativeAudioAuthorAcknowledgement,
+        /// Original request of the acknowledged prefix.
+        request_cohort: Option<crate::NativeRequestCohort>,
+    },
     /// Actual child confirmed the private prior/fresh preparation and original prefix.
     ReenteredAcknowledged(crate::NativeAudioReenteredAuthorAcknowledgement),
     /// Typed refusal supplies no successful/truncated author prefix.

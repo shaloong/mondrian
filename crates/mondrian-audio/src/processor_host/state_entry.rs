@@ -243,10 +243,15 @@ impl PreparedProcessorHost {
                 crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
                     binding,
                     revision,
+                    request_cohort,
                 } if selected
                     && binding.binding == lease.binding()
                     && binding.expected_object == object
-                    && *revision == context.proposal.revision() => {}
+                    && *revision == context.proposal.revision()
+                    && instance
+                        .native_author_outstanding
+                        .as_ref()
+                        .is_some_and(|retained| retained.request_cohort == *request_cohort) => {}
                 crate::NativeAudioAuthorDeliveryState::Preserved if !selected => {}
                 _ => return Err(pending(lease, Reason::OutstandingDelivery)),
             }

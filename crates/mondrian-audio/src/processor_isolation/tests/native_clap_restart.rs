@@ -79,7 +79,7 @@ fn installed_clap_process_restart_preserves_completed_trigger_window() {
             );
         };
         assert_eq!(
-            request,
+            request.request(),
             mondrian_core::NativeAudioReprepareRequest::ClapRestart
         );
         assert_eq!(

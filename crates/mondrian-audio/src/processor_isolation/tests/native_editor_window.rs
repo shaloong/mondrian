@@ -342,7 +342,7 @@ fn request_fixture_main_restart(fixture: &mut NativeEditorProductFixture, parent
             .preflight_native_observations(fixture.binding.expected_object)
             .expect("one actual process-deadline Preserve9 snapshot");
         assert_eq!(snapshot.object, Some(fixture.binding.expected_object));
-        if snapshot.pending_reprepare
+        if snapshot.pending_reprepare.map(crate::NativeObservedRequest::request)
             == Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 })
         {
             return;
@@ -372,7 +372,10 @@ fn native_preflight_snapshot_product_legal_main_request_is_nonconsuming_and_same
             .processor
             .preflight_native_observations(fixture.binding.expected_object)
             .expect("single Preserve9");
-        assert_eq!(snapshot.pending_reprepare, Some(cohort.request));
+        assert_eq!(
+            snapshot.pending_reprepare.map(crate::NativeObservedRequest::request),
+            Some(cohort.request)
+        );
         assert_eq!(snapshot.object, Some(fixture.binding.expected_object));
         assert_eq!(snapshot.editor_cleanup, None);
     }
@@ -422,7 +425,10 @@ fn native_preflight_snapshot_product_new_same_bit_ui_request_preserves_new_cohor
             .preflight_native_observations(fixture.binding.expected_object)
             .expect("same main snapshot after queued R");
         assert_eq!(snapshot.object, Some(fixture.binding.expected_object));
-        assert_eq!(snapshot.pending_reprepare, Some(first.request));
+        assert_eq!(
+            snapshot.pending_reprepare.map(crate::NativeObservedRequest::request),
+            Some(first.request)
+        );
         let cohort = fixture
             .processor
             .native_configuration_cohort()
@@ -469,7 +475,7 @@ fn native_preflight_snapshot_product_frame_clear_and_pending_share_one_reply_wit
             .expect("same actual source while control-only");
         assert_eq!(snapshot.object, Some(fixture.binding.expected_object));
         assert_eq!(
-            snapshot.pending_reprepare,
+            snapshot.pending_reprepare.map(crate::NativeObservedRequest::request),
             Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 })
         );
         if snapshot.editor_cleanup == Some(NativeAudioEditorCloseStage::ClearHostFrame) {
@@ -493,7 +499,7 @@ fn native_preflight_snapshot_product_frame_clear_and_pending_share_one_reply_wit
     assert_eq!(snapshot.object, Some(fixture.binding.expected_object));
     assert_eq!(snapshot.editor_cleanup, None);
     assert_eq!(
-        snapshot.pending_reprepare,
+        snapshot.pending_reprepare.map(crate::NativeObservedRequest::request),
         Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }),
         "closing a view is not configuration installation"
     );
@@ -626,7 +632,7 @@ fn native_author_product_idle_capture_then_explicit_first_entry_uses_accepted_se
         .poll_native_observations(NativeAudioObservationConsumption::AcknowledgeAuthor(ack))
         .expect("same native delivery receipt");
     assert!(
-        matches!(observed.author,Some(crate::NativeAudioAuthorObservation{delivery:crate::NativeAudioAuthorDeliveryState::Acknowledged(actual),..}) if actual==ack)
+        matches!(observed.author,Some(crate::NativeAudioAuthorObservation{delivery:crate::NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: actual, request_cohort: None },..}) if actual==ack)
     );
     let before = fixture
         .processor
@@ -764,7 +770,7 @@ fn native_author_product_terminal_ack_seeds_real_future_entry_on_same_child() {
         .poll_native_observations(NativeAudioObservationConsumption::AcknowledgeAuthor(ack))
         .expect("one exact accepted actual state receipt");
     assert!(matches!(observed.author,
-        Some(crate::NativeAudioAuthorObservation { delivery: crate::NativeAudioAuthorDeliveryState::Acknowledged(actual), .. })
+        Some(crate::NativeAudioAuthorObservation { delivery: crate::NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: actual, request_cohort: None }, .. })
         if actual == ack));
     assert_eq!(
         fixture.block(4).expect("no Enter/Stop during actual accepted group"),
@@ -842,7 +848,7 @@ fn native_entry_binding_product_first_signal_retains_accepted_native_state_and_s
     };
     assert!(
         matches!(fixture.processor.poll_native_observations(NativeAudioObservationConsumption::AcknowledgeAuthor(ack)).expect("accepted canonical seed receipt").author,
-        Some(crate::NativeAudioAuthorObservation {delivery:crate::NativeAudioAuthorDeliveryState::Acknowledged(actual),..}) if actual==ack)
+        Some(crate::NativeAudioAuthorObservation {delivery:crate::NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: actual, request_cohort: None },..}) if actual==ack)
     );
     fixture
         .processor

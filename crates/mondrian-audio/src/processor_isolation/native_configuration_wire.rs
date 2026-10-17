@@ -46,28 +46,90 @@ fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
-fn put_cohort(bytes: &mut [u8], offset: usize, cohort: NativeRequestCohort) -> io::Result<()> {
-    let (kind, flags) = match cohort.request {
+fn put_request(
+    bytes: &mut [u8],
+    offset: usize,
+    request: NativeAudioReprepareRequest,
+) -> io::Result<()> {
+    let (kind, flags) = match request {
         NativeAudioReprepareRequest::Vst3Restart { flags } if flags != 0 => (1, flags),
         NativeAudioReprepareRequest::ClapRestart => (2, 0),
         _ => return Err(invalid("empty VST3 cohort")),
     };
+    put_u32(bytes, offset, kind);
+    put_u32(bytes, offset + 4, flags);
+    Ok(())
+}
+
+fn get_request(bytes: &[u8], offset: usize) -> io::Result<NativeAudioReprepareRequest> {
+    match (u32_at(bytes, offset)?, u32_at(bytes, offset + 4)?) {
+        (1, flags) if flags != 0 => Ok(NativeAudioReprepareRequest::Vst3Restart { flags }),
+        (2, 0) => Ok(NativeAudioReprepareRequest::ClapRestart),
+        _ => Err(invalid("invalid native cohort ABI/flags")),
+    }
+}
+
+fn put_cohort(bytes: &mut [u8], offset: usize, cohort: NativeRequestCohort) -> io::Result<()> {
     if cohort.serial == 0 {
         return Err(invalid("empty native cohort serial"));
     }
     put_u32(bytes, offset, cohort.serial);
-    put_u32(bytes, offset + 4, kind);
-    put_u32(bytes, offset + 8, flags);
-    Ok(())
+    put_request(bytes, offset + 4, cohort.request)
 }
+
 fn get_cohort(bytes: &[u8], offset: usize) -> io::Result<NativeRequestCohort> {
-    let serial = u32_at(bytes, offset)?;
-    let request = match (u32_at(bytes, offset + 4)?, u32_at(bytes, offset + 8)?) {
-        (1, flags) if flags != 0 => NativeAudioReprepareRequest::Vst3Restart { flags },
-        (2, 0) => NativeAudioReprepareRequest::ClapRestart,
-        _ => return Err(invalid("invalid native cohort ABI/flags")),
-    };
-    NativeRequestCohort::new(serial, request).map_err(|_| invalid("invalid native cohort serial"))
+    NativeRequestCohort::new(u32_at(bytes, offset)?, get_request(bytes, offset + 4)?)
+        .map_err(|_| invalid("invalid native cohort serial"))
+}
+
+pub(super) const OBSERVED_REQUEST_BYTES: usize = 16;
+
+/// Fixed nullable carrier: form, then the existing serial/request representation.
+/// RequestOnly has a zero reserved serial, not a fabricated NativeRequestCohort.
+pub(super) fn encode_observed_request(
+    request: Option<NativeObservedRequest>,
+) -> io::Result<[u8; OBSERVED_REQUEST_BYTES]> {
+    let mut bytes = [0; OBSERVED_REQUEST_BYTES];
+    match request {
+        None => {}
+        Some(NativeObservedRequest::RequestOnly(request)) => {
+            put_u32(&mut bytes, 0, 1);
+            put_request(&mut bytes, 8, request)?;
+        }
+        Some(NativeObservedRequest::Cohort(cohort)) => {
+            put_u32(&mut bytes, 0, 2);
+            put_cohort(&mut bytes, 4, cohort)?;
+        }
+    }
+    Ok(bytes)
+}
+
+pub(super) fn decode_observed_request(
+    bytes: &[u8; OBSERVED_REQUEST_BYTES],
+) -> io::Result<Option<NativeObservedRequest>> {
+    match u32_at(bytes, 0)? {
+        0 if bytes.iter().all(|byte| *byte == 0) => Ok(None),
+        1 if u32_at(bytes, 4)? == 0 => {
+            get_request(bytes, 8).map(|request| Some(NativeObservedRequest::RequestOnly(request)))
+        }
+        2 => get_cohort(bytes, 4).map(|cohort| Some(NativeObservedRequest::Cohort(cohort))),
+        _ => Err(invalid("invalid observed request form/serial")),
+    }
+}
+
+pub(super) fn write_observed_request(
+    writer: &mut impl Write,
+    request: Option<NativeObservedRequest>,
+) -> io::Result<()> {
+    writer.write_all(&encode_observed_request(request)?)
+}
+
+pub(super) fn read_observed_request(
+    reader: &mut impl Read,
+) -> io::Result<Option<NativeObservedRequest>> {
+    let mut bytes = [0; OBSERVED_REQUEST_BYTES];
+    reader.read_exact(&mut bytes)?;
+    decode_observed_request(&bytes)
 }
 
 fn write_header(writer: &mut impl Write, status: u32, extent: usize) -> io::Result<()> {
@@ -569,5 +631,73 @@ mod tests {
             read_reply(&mut bytes.as_slice(), &request).is_err(),
             "another service token must not install"
         );
+    }
+}
+
+#[cfg(test)]
+mod observed_request_contracts {
+    use super::*;
+
+    #[test]
+    fn observed_request_wire_separates_raw_identity_and_rejects_noncanonical_fields() {
+        let raw = NativeObservedRequest::RequestOnly(NativeAudioReprepareRequest::Vst3Restart {
+            flags: 4,
+        });
+        let cohort =
+            NativeObservedRequest::Cohort(NativeRequestCohort::new(41, raw.request()).unwrap());
+        assert_ne!(raw, cohort, "bare flags never establish callback identity");
+        assert_eq!(
+            encode_observed_request(Some(raw)).unwrap(),
+            [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_observed_request(Some(cohort)).unwrap(),
+            [2, 0, 0, 0, 41, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0]
+        );
+        for words in [
+            [0_u32, 0, 0, 4],
+            [0, 1, 0, 0],
+            [1, 1, 1, 4],
+            [2, 0, 1, 4],
+            [3, 0, 1, 4],
+            [1, 0, 0, 0],
+            [1, 0, 1, 0],
+            [1, 0, 2, 4],
+            [2, 1, 9, 4],
+        ] {
+            let mut bytes = [0; 16];
+            for (index, word) in words.into_iter().enumerate() {
+                bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            assert!(
+                decode_observed_request(&bytes).is_err(),
+                "noncanonical nullable/tag/serial/request evidence: {words:?}"
+            );
+        }
+        assert!(encode_observed_request(Some(NativeObservedRequest::Cohort(
+            NativeRequestCohort { serial: 0, request: raw.request() }
+        )))
+        .is_err());
+        for size in 0..16 {
+            assert!(read_observed_request(&mut &([0_u8; 16][..size])).is_err());
+        }
+    }
+
+    #[test]
+    fn observed_request_wire_keeps_unknown_bits_and_exhausted_serial_as_unmodified_facts() {
+        let cohort = NativeRequestCohort::new(
+            u32::MAX,
+            NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0004 },
+        )
+        .unwrap();
+        assert!(cohort.exhausted());
+        let observed = Some(NativeObservedRequest::Cohort(cohort));
+        let bytes = encode_observed_request(observed).unwrap();
+        assert_eq!(
+            bytes,
+            [2, 0, 0, 0, 255, 255, 255, 255, 1, 0, 0, 0, 4, 0, 0, 128]
+        );
+        assert_eq!(decode_observed_request(&bytes).unwrap(), observed);
+        assert_eq!(decode_observed_request(&[0; 16]).unwrap(), None);
     }
 }

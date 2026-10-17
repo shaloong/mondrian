@@ -736,9 +736,12 @@ fn installed_vst3_retained_event_metadata_refuses_unannounced_default_drift() {
         };
         // A candidate is not an installation; both retained outcomes keep old
         // PCM blocked. This does not exercise the not-yet-admitted Note path.
-        assert_eq!(subject.preflight_reprepare().unwrap(), Some(cohort.request));
+        assert_eq!(
+            subject.preflight_reprepare().unwrap(),
+            Some(mondrian_audio::NativeObservedRequest::Cohort(cohort))
+        );
         assert!(
-            matches!(subject.enter_state(0), Err(AudioProcessorHostError::ReprepareRequired(request)) if request == cohort.request)
+            matches!(subject.enter_state(0), Err(AudioProcessorHostError::ReprepareRequired(request)) if request == mondrian_audio::NativeObservedRequest::Cohort(cohort))
         );
         drop(subject);
         assert_child_exit(handle);

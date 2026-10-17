@@ -12,13 +12,22 @@ use std::num::NonZeroU64;
 /// replaying the author transaction, Plan allocation or Source publication.
 pub(super) struct NativeHostedAuthorDelivery {
     pub(super) proposal: NativeAudioAuthorProposal,
+    pub(super) request_cohort: Option<crate::NativeRequestCohort>,
     installed: Option<mondrian_core::NativeAudioEditorTarget>,
     reentered: Option<crate::NativeAudioAuthorStateEntryReceipt>,
 }
 
 impl NativeHostedAuthorDelivery {
-    pub(super) fn new(proposal: NativeAudioAuthorProposal) -> Self {
-        Self { proposal, installed: None, reentered: None }
+    pub(super) fn new(
+        proposal: NativeAudioAuthorProposal,
+        request_cohort: Option<crate::NativeRequestCohort>,
+    ) -> Self {
+        Self {
+            proposal,
+            request_cohort,
+            installed: None,
+            reentered: None,
+        }
     }
     pub(super) fn install_state_entry(
         &mut self,
@@ -35,10 +44,12 @@ impl NativeHostedAuthorDelivery {
         &self,
         binding: crate::NativeAudioObjectBindRequest,
         revision: u64,
+        request_cohort: Option<crate::NativeRequestCohort>,
         current: mondrian_core::NativeAudioEditorTarget,
         object: crate::NativeAudioObjectObservation,
     ) -> bool {
-        self.proposal.revision() == revision
+        self.request_cohort == request_cohort
+            && self.proposal.revision() == revision
             && binding.binding == self.proposal.target().binding
             && binding.expected_object == object
             && self.installed.map_or(self.proposal.target() == current, |installed| {
@@ -258,13 +269,16 @@ impl PreparedProcessorHost {
                 crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
                     binding,
                     revision,
+                    request_cohort,
                 } if selected
                     && *binding
                         == (crate::NativeAudioObjectBindRequest {
                             binding: lease.binding(),
                             expected_object: object,
                         })
-                    && *revision == proposal.revision() => {}
+                    && *revision == proposal.revision()
+                    && retained
+                        .is_some_and(|retained| retained.request_cohort == *request_cohort) => {}
                 crate::NativeAudioAuthorDeliveryState::Preserved if !selected => {}
                 _ => return Err(pending(lease, Reason::OutstandingDelivery)),
             }
@@ -429,11 +443,21 @@ impl PreparedProcessorHost {
                     crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
                 ));
             }
+            let request_cohort = instance
+                .native_author_outstanding
+                .as_ref()
+                .and_then(|retained| retained.request_cohort);
             if let Some(preparation) = instance
                 .native_author_outstanding
                 .as_ref()
                 .and_then(|retained| retained.reentered)
             {
+                if request_cohort.is_some() {
+                    return Err(pending(
+                        lease,
+                        crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
+                    ));
+                }
                 let ack = crate::NativeAudioReenteredAuthorAcknowledgement {
                     preparation,
                     installed_binding: crate::NativeAudioObjectBindRequest {
@@ -476,7 +500,7 @@ impl PreparedProcessorHost {
             })?;
             if observation.object != Some(object)
                 || !matches!(observation.author.as_ref().map(|author| &author.delivery),
-                    Some(crate::NativeAudioAuthorDeliveryState::Acknowledged(actual)) if *actual == ack)
+                    Some(crate::NativeAudioAuthorDeliveryState::Acknowledged { acknowledgement: actual, request_cohort: actual_cohort }) if *actual == ack && *actual_cohort == request_cohort)
             {
                 return Err(pending(
                     lease,

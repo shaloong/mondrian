@@ -52,6 +52,7 @@ impl Vst3Worker {
                         Some(native_author::PendingDelivery::Delivered {
                             binding, revision: retained_revision,
                             configuration: Some(configuration),
+                            ..
                         }) if *binding == request.binding
                             && *retained_revision == revision.get()
                             && configuration.bytes() == request.configuration)

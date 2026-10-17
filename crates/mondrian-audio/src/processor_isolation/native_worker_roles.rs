@@ -41,7 +41,7 @@ pub trait IsolatedAudioProcessorMainRole {
     /// Observe pending source data; sole Runtime chooses next root-window hold.
     fn pending_reprepare(
         &self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError>;
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError>;
 
     /// Observe only source facts through the same native-main role.
     /// Preserve performs no controller/component state capture or author drain;

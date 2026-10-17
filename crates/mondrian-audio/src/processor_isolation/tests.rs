@@ -16,6 +16,7 @@ enum TestBehavior {
     Abort,
     Hang,
     ContractDrift,
+    ObservedPending,
 }
 
 impl TestBehavior {
@@ -25,6 +26,7 @@ impl TestBehavior {
             Self::Abort => 1,
             Self::Hang => 2,
             Self::ContractDrift => 3,
+            Self::ObservedPending => 5,
         }]
     }
 
@@ -34,6 +36,7 @@ impl TestBehavior {
             [1] => Ok(Self::Abort),
             [2] => Ok(Self::Hang),
             [3] => Ok(Self::ContractDrift),
+            [5] => Ok(Self::ObservedPending),
             _ => Err(AudioProcessorHostError::InstanceCreation(
                 "unknown isolated test behavior".to_owned(),
             )),
@@ -103,6 +106,7 @@ impl IsolatedAudioProcessorWorkerFactory for TestWorkerFactory {
             input_names,
             musical_time_reference: request.musical_time_reference(),
             entered: false,
+            pending_reads: std::cell::Cell::new(0),
         }))
     }
 }
@@ -114,6 +118,7 @@ struct TestWorker {
     input_names: Vec<crate::AudioProcessorInputName>,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
     entered: bool,
+    pending_reads: std::cell::Cell<u32>,
 }
 
 impl IsolatedAudioProcessorWorker for TestWorker {
@@ -134,6 +139,22 @@ impl IsolatedAudioProcessorWorker for TestWorker {
         Ok(())
     }
 
+    fn pending_reprepare(&self) -> Option<crate::NativeObservedRequest> {
+        if self.behavior != TestBehavior::ObservedPending || self.pending_reads.get() == 0 {
+            return None;
+        }
+        let step = self.pending_reads.get();
+        self.pending_reads.set(step + 1);
+        let request = mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 };
+        match step {
+            1 | 2 => Some(crate::NativeObservedRequest::Cohort(
+                NativeRequestCohort::new(100 + step, request).unwrap(),
+            )),
+            4 => Some(crate::NativeObservedRequest::RequestOnly(request)),
+            _ => None,
+        }
+    }
+
     fn process(
         &mut self,
         mut block: IsolatedAudioProcessorWorkerBlock<'_>,
@@ -143,7 +164,7 @@ impl IsolatedAudioProcessorWorker for TestWorker {
             TestBehavior::Hang => loop {
                 std::thread::sleep(Duration::from_secs(1));
             },
-            TestBehavior::Normal | TestBehavior::ContractDrift => {}
+            TestBehavior::Normal | TestBehavior::ContractDrift | TestBehavior::ObservedPending => {}
         }
         if self.contract.requires_state_entry() && !self.entered {
             return Err(AudioProcessorHostError::StateEntry(
@@ -167,6 +188,9 @@ impl IsolatedAudioProcessorWorker for TestWorker {
             for sample in block.main_interleaved() {
                 *sample *= gain;
             }
+        }
+        if self.behavior == TestBehavior::ObservedPending && self.pending_reads.get() == 0 {
+            self.pending_reads.set(1);
         }
         Ok(())
     }
@@ -2181,5 +2205,97 @@ fn isolated_music_context_mismatch_preserves_shared_pcm_parameters_and_live_chil
     assert!(
         processor.worker.shutdown(),
         "original bounded shutdown must still succeed"
+    );
+}
+
+#[test]
+fn isolated_observed_request_completed_then_poll_retains_each_original_identity_and_none_hold() {
+    let parameter = ParameterId::new_static("test.gain");
+    let spec = test_spec(
+        TestBehavior::ObservedPending,
+        AudioProcessorExecutionContract::stateless(),
+        AudioProcessorAuxiliaryInputContract::default(),
+        vec![parameter.clone()],
+        Duration::from_secs(2),
+    );
+    let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+    let (worker, _) = SupervisedAudioWorker::launch(
+        &factory.spec,
+        factory.spec.render_contract,
+        factory.layout,
+        Some(&factory.input_names),
+    )
+    .unwrap();
+    let mut processor = IsolatedAudioProcessor {
+        musical_time_reference: factory.spec.musical_time_reference,
+        worker,
+        parameter_ids: factory.spec.parameter_ids.clone(),
+        auxiliary_inputs: factory.spec.auxiliary_inputs.clone(),
+        auxiliary_outputs: factory.spec.auxiliary_outputs.clone(),
+        note_input_contract: factory.spec.note_input_contract.clone(),
+        render_contract: factory.spec.render_contract,
+        failed: false,
+        pending_reprepare: None,
+        staged_configuration_seed: None,
+        native_plugin_contract: factory.spec.plugin_execution_contract,
+    };
+    let raw = mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 };
+    let a = crate::NativeObservedRequest::Cohort(NativeRequestCohort::new(101, raw).unwrap());
+    let b = crate::NativeObservedRequest::Cohort(NativeRequestCohort::new(102, raw).unwrap());
+    let ids = [parameter];
+    let events = [AudioParameterEvent { sample_offset: 0, value: 3.0 }];
+    let event_range = 0..1;
+    let ranges = [event_range];
+    let mut io = TestAudioIo { main: vec![2.0; 8], auxiliary: Vec::new() };
+    processor
+        .process(
+            test_context(0),
+            &mut io,
+            AudioParameterEventBatch::new(0, 4, &ids, &ranges, &events),
+        )
+        .unwrap();
+    assert_eq!(
+        io.main,
+        vec![6.0; 8],
+        "CompletedWithPending is the already completed DSP, not Deferred"
+    );
+    assert_eq!(
+        processor.pending_reprepare,
+        Some(a),
+        "first reply keeps its original serial before any later query"
+    );
+    assert_eq!(processor.preflight_reprepare().unwrap(), Some(b));
+    assert_ne!(
+        a, b,
+        "equal raw bits do not identify the same callback generation"
+    );
+    assert_eq!(
+        processor.preflight_reprepare().unwrap(),
+        Some(b),
+        "None retains the original old hold"
+    );
+    let request_only = crate::NativeObservedRequest::RequestOnly(raw);
+    assert_eq!(processor.preflight_reprepare().unwrap(), Some(request_only));
+    assert_ne!(
+        request_only, b,
+        "a raw-only observation cannot borrow the preceding serial"
+    );
+    assert_eq!(processor.preflight_reprepare().unwrap(), Some(request_only));
+    let shared_before = processor.worker.shared_mut().to_vec();
+    io.main.fill(73.0);
+    assert_eq!(
+        processor.process(
+            test_context(4),
+            &mut io,
+            AudioParameterEventBatch::new(4, 4, &ids, &ranges, &events)
+        ),
+        Err(AudioProcessorHostError::ReprepareRequired(request_only))
+    );
+    assert_eq!(io.main, vec![73.0; 8]);
+    assert_eq!(processor.worker.shared_mut(), shared_before.as_slice());
+    assert!(!processor.failed);
+    assert!(
+        processor.worker.shutdown(),
+        "retain the original bounded child shutdown assertion"
     );
 }

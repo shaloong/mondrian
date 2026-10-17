@@ -170,46 +170,9 @@ fn validate_log(record: &crate::NativeAudioLogRecord) -> io::Result<()> {
     Ok(())
 }
 
-// Fixed eight-byte field; native VST flag bits are retained verbatim. Zero
-// VST flags, unknown tags or nonzero reserved payloads are malformed evidence.
-fn write_pending_request(
-    writer: &mut impl Write,
-    request: Option<mondrian_core::NativeAudioReprepareRequest>,
-) -> io::Result<()> {
-    use mondrian_core::NativeAudioReprepareRequest;
-    let (tag, flags): (u32, u32) = match request {
-        None => (0, 0),
-        Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0 }) => {
-            return Err(invalid("native VST pending flags are zero"))
-        }
-        Some(NativeAudioReprepareRequest::Vst3Restart { flags }) => (1, flags),
-        Some(NativeAudioReprepareRequest::ClapRestart) => (2, 0),
-    };
-    let mut bytes = [0_u8; 8];
-    bytes[..4].copy_from_slice(&tag.to_le_bytes());
-    bytes[4..].copy_from_slice(&flags.to_le_bytes());
-    writer.write_all(&bytes)
-}
-
-fn read_pending_request(
-    reader: &mut impl Read,
-) -> io::Result<Option<mondrian_core::NativeAudioReprepareRequest>> {
-    use mondrian_core::NativeAudioReprepareRequest;
-    let mut bytes = [0_u8; 8];
-    reader.read_exact(&mut bytes)?;
-    let tag = u32::from_le_bytes(
-        bytes[..4].try_into().map_err(|_| invalid("native pending tag extent"))?,
-    );
-    let flags = u32::from_le_bytes(
-        bytes[4..].try_into().map_err(|_| invalid("native pending flags extent"))?,
-    );
-    match (tag, flags) {
-        (0, 0) => Ok(None),
-        (1, flags) if flags != 0 => Ok(Some(NativeAudioReprepareRequest::Vst3Restart { flags })),
-        (2, 0) => Ok(Some(NativeAudioReprepareRequest::ClapRestart)),
-        _ => Err(invalid("native pending request contract")),
-    }
-}
+use super::native_configuration_wire::{
+    read_observed_request as read_pending_request, write_observed_request as write_pending_request,
+};
 
 fn write_observations(
     writer: &mut impl Write,
@@ -619,15 +582,15 @@ mod native_object_wire_contracts {
         )
         .expect("correlated acknowledgement");
         assert_eq!(bytes.len(), 40);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(read_bind_reply(&mut Cursor::new(old), request).is_err());
         }
         assert_eq!(
             &bytes[..12],
-            &[77, 65, 79, 66, 17, 0, 0, 0, 3, 0, 0, 0],
-            "single current V17 schema"
+            &[77, 65, 79, 66, 18, 0, 0, 0, 3, 0, 0, 0],
+            "single current V18 schema"
         );
         assert_eq!(
             read_bind_reply(&mut Cursor::new(bytes.clone()), request).expect("same binding/object"),
@@ -708,8 +671,8 @@ mod native_object_wire_contracts {
         };
         let mut bytes = Vec::new();
         command.write_to(&mut bytes).expect("current header");
-        assert_eq!(&bytes[4..12], &[17, 0, 0, 0, 9, 0, 0, 0]);
-        for version in [5_u32, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
+        assert_eq!(&bytes[4..12], &[18, 0, 0, 0, 9, 0, 0, 0]);
+        for version in [5_u32, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(
@@ -791,22 +754,22 @@ mod native_log_wire_contracts {
         let mut bytes = Vec::new();
         write_reply(&mut bytes, ObjectReply::Observation(&expected))
             .expect("one bounded current response");
-        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 17, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&bytes[..12], &[77, 65, 79, 66, 18, 0, 0, 0, 1, 0, 0, 0]);
         assert_eq!(
-            &bytes[17..29],
-            &[0; 12],
+            &bytes[17..37],
+            &[0; 20],
             "no cleanup stage or pending cohort"
         );
-        assert_eq!(bytes[29], 0, "no author source");
-        assert_eq!(&bytes[30..42], &[0; 12], "no parameter revision or facts");
+        assert_eq!(bytes[37], 0, "no author source");
+        assert_eq!(&bytes[38..50], &[0; 12], "no parameter revision or facts");
         assert_eq!(
-            &bytes[42..46],
+            &bytes[50..54],
             &2_u32.to_le_bytes(),
             "actual log count field"
         );
         assert_eq!(
             bytes.len(),
-            12 + 4 + 1 + 4 + 8 + 1 + 8 + 4 + 8 + (18 + 1) + (18 + 512),
+            12 + 4 + 1 + 4 + 16 + 1 + 8 + 4 + 8 + (18 + 1) + (18 + 512),
             "fields only; no Rust padding or stale version reader"
         );
         let observed =
@@ -895,18 +858,18 @@ mod native_preflight_snapshot_existing_wire_contracts {
         // Independent byte oracle, not the decoder or a mirrored field helper.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MAOB");
-        expected.extend_from_slice(&17_u32.to_le_bytes());
+        expected.extend_from_slice(&18_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&127_u32.to_le_bytes());
         expected.push(0);
         expected.extend_from_slice(&0_u32.to_le_bytes()); // no editor cleanup
-        expected.extend_from_slice(&[0_u8; 8]); // pending tag None + zero flags
+        expected.extend_from_slice(&[0_u8; 16]); // canonical absent observed request
         expected.push(0); // V8 explicitly unavailable author source
         expected.extend_from_slice(&[0_u8; 12]); // absent parameter revision/count
         expected.extend_from_slice(&[0_u8; 8]); // empty logs + no sticky loss
         assert_eq!(
             expected.len(),
-            50,
+            58,
             "no Rust padding or variable pending payload"
         );
         assert_eq!(
@@ -922,10 +885,31 @@ mod native_preflight_snapshot_wire_contracts {
     use mondrian_core::NativeAudioReprepareRequest;
     #[test]
     fn native_preflight_snapshot_wire_preserves_unknown_vst_bits_and_clap_request_exactly() {
-        for request in [
-            None,
-            Some(NativeAudioReprepareRequest::ClapRestart),
-            Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0010 }),
+        use crate::{NativeObservedRequest as Observed, NativeRequestCohort};
+        for (request, words) in [
+            (None, [0_u32, 0, 0, 0]),
+            (
+                Some(Observed::RequestOnly(
+                    NativeAudioReprepareRequest::ClapRestart,
+                )),
+                [1, 0, 2, 0],
+            ),
+            (
+                Some(Observed::RequestOnly(
+                    NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0010 },
+                )),
+                [1, 0, 1, 0x8000_0010],
+            ),
+            (
+                Some(Observed::Cohort(
+                    NativeRequestCohort::new(
+                        41,
+                        NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0010 },
+                    )
+                    .unwrap(),
+                )),
+                [2, 41, 1, 0x8000_0010],
+            ),
         ] {
             let observations = crate::NativeAudioObservations {
                 owner_process_id: 127,
@@ -933,23 +917,25 @@ mod native_preflight_snapshot_wire_contracts {
                 ..Default::default()
             };
             let mut bytes = Vec::new();
-            write_reply(&mut bytes, ObjectReply::Observation(&observations))
-                .expect("bounded snapshot");
-            let (tag, flags) = match request {
-                None => (0_u32, 0_u32),
-                Some(NativeAudioReprepareRequest::ClapRestart) => (2, 0),
-                Some(NativeAudioReprepareRequest::Vst3Restart { flags }) => (1, flags),
-            };
-            assert_eq!(&bytes[21..25], &tag.to_le_bytes());
-            assert_eq!(&bytes[25..29], &flags.to_le_bytes());
-            let decoded = read_observation_reply(&mut std::io::Cursor::new(bytes))
-                .expect("same single decoder");
+            write_reply(&mut bytes, ObjectReply::Observation(&observations)).unwrap();
+            for (index, word) in words.into_iter().enumerate() {
+                assert_eq!(&bytes[21 + 4 * index..25 + 4 * index], &word.to_le_bytes());
+            }
+            let decoded = read_observation_reply(&mut std::io::Cursor::new(bytes)).unwrap();
             assert_eq!(decoded.pending_reprepare, request);
         }
     }
     #[test]
     fn native_preflight_snapshot_wire_rejects_malformed_tag_zero_flags_and_reserved_payload() {
-        for (tag, flags) in [(1_u32, 0_u32), (3, 0), (0, 1), (2, 1)] {
+        use crate::NativeObservedRequest::RequestOnly;
+        for words in [
+            [1_u32, 0, 1, 0],
+            [3, 0, 0, 0],
+            [0, 0, 0, 1],
+            [1, 0, 2, 1],
+            [1, 7, 2, 0],
+            [2, 0, 2, 0],
+        ] {
             let mut bytes = Vec::new();
             write_reply(
                 &mut bytes,
@@ -958,20 +944,22 @@ mod native_preflight_snapshot_wire_contracts {
                     ..Default::default()
                 }),
             )
-            .expect("valid baseline");
-            bytes[21..25].copy_from_slice(&tag.to_le_bytes());
-            bytes[25..29].copy_from_slice(&flags.to_le_bytes());
+            .unwrap();
+            for (index, word) in words.into_iter().enumerate() {
+                bytes[21 + 4 * index..25 + 4 * index].copy_from_slice(&word.to_le_bytes());
+            }
             assert!(
                 read_observation_reply(&mut std::io::Cursor::new(bytes)).is_err(),
                 "malformed native evidence must not reach root admission"
             );
         }
-        let mut bytes = Vec::new();
         assert!(write_reply(
-            &mut bytes,
+            &mut Vec::new(),
             ObjectReply::Observation(&crate::NativeAudioObservations {
                 owner_process_id: 127,
-                pending_reprepare: Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0 }),
+                pending_reprepare: Some(RequestOnly(NativeAudioReprepareRequest::Vst3Restart {
+                    flags: 0
+                })),
                 ..Default::default()
             })
         )
@@ -987,7 +975,9 @@ mod native_preflight_snapshot_wire_contracts {
             owner_process_id: 127,
             object: Some(object),
             editor_cleanup: Some(crate::NativeAudioEditorCloseStage::ClearHostFrame),
-            pending_reprepare: Some(NativeAudioReprepareRequest::Vst3Restart { flags: 16 }),
+            pending_reprepare: Some(crate::NativeObservedRequest::RequestOnly(
+                NativeAudioReprepareRequest::Vst3Restart { flags: 16 },
+            )),
             ..Default::default()
         };
         let mut bytes = Vec::new();

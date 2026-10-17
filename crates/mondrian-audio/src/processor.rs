@@ -184,8 +184,8 @@ pub enum AudioProcessorHostError {
         detail: String,
     },
     /// A legal native request is retained; the next independent window is deferred.
-    #[error("native audio processor requires owner reprepare: {0:?}")]
-    ReprepareRequired(mondrian_core::NativeAudioReprepareRequest),
+    #[error("native audio processor requires owner reprepare: {request:?}", request = .0.request())]
+    ReprepareRequired(crate::NativeObservedRequest),
     /// A prior failure left an exclusive instance in unknown mutable state.
     #[error("audio processor instance is poisoned and must be recreated")]
     PoisonedInstance,
@@ -248,7 +248,7 @@ pub struct AudioProcessorReprepareTicket {
     /// Continuity identity observed at the deferred boundary, when entered.
     pub continuity_epoch: Option<crate::AudioContinuityEpoch>,
     /// Actual standard request retained by the live native child.
-    pub request: mondrian_core::NativeAudioReprepareRequest,
+    pub request: crate::NativeObservedRequest,
 }
 
 impl AudioProcessorReprepareTicket {
@@ -256,7 +256,7 @@ impl AudioProcessorReprepareTicket {
     pub const fn product_notice(self) -> mondrian_core::NativeAudioReprepareNotice {
         mondrian_core::NativeAudioReprepareNotice {
             instance_id: self.occurrence.instance_id,
-            request: self.request,
+            request: self.request.request(),
         }
     }
 }
@@ -622,7 +622,7 @@ pub trait AudioProcessor: Send {
     /// A successful notice retains the instance and is distinct from a fault.
     fn preflight_reprepare(
         &mut self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         Ok(None)
     }
 

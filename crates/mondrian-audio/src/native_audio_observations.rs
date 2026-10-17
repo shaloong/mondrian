@@ -210,7 +210,7 @@ pub struct NativeAudioObservations {
     /// Non-consuming lifecycle request read on the same actual native main
     /// thread as object/cleanup facts. This is evidence for root preflight, not
     /// an installed contract, cohort retirement or permission to run old DSP.
-    pub pending_reprepare: Option<mondrian_core::NativeAudioReprepareRequest>,
+    pub pending_reprepare: Option<crate::NativeObservedRequest>,
     /// Actual ordered author source from this same main-thread snapshot.
     /// None means unsupported/unavailable, never a synthetic closed-empty proof.
     pub author: Option<crate::NativeAudioAuthorObservation>,

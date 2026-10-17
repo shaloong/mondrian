@@ -17,7 +17,14 @@ struct HandoffProbe {
     open: u32,
     parameter_only: bool,
     pending: Vec<NativeAudioAuthorEvent>,
-    retained: Option<(NativeAudioObjectBindRequest, u64)>,
+    retained: Option<(
+        NativeAudioObjectBindRequest,
+        u64,
+        Option<crate::NativeRequestCohort>,
+    )>,
+    request_cohort: Option<crate::NativeRequestCohort>,
+    // Deliberate corrupt-reply control, not another source identity.
+    reported_request_cohort: Option<Option<crate::NativeRequestCohort>>,
     binding: Option<NativeAudioObjectBindRequest>,
     reject_ack: bool,
     configuration: Option<Vec<u8>>,
@@ -149,12 +156,13 @@ impl AudioProcessor for HandoffProcessor {
             {
                 let events = std::mem::take(&mut probe.pending);
                 let revision = probe.revision;
-                probe.retained = Some((binding, revision));
+                probe.retained = Some((binding, revision, probe.request_cohort));
                 let configuration = probe.configuration.take();
                 probe.retained_configuration = configuration.clone();
                 NativeAudioAuthorDeliveryState::Delivered(NativeAudioAuthorDelivery {
                     binding,
                     revision,
+                    request_cohort: probe.request_cohort,
                     events,
                     completion: if configuration.is_some() {
                         mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
@@ -170,24 +178,36 @@ impl AudioProcessor for HandoffProcessor {
             }
             NativeAudioObservationConsumption::AcknowledgeAuthor(ack) => {
                 if !probe.reject_ack
-                    && probe.retained == Some((ack.source_binding, ack.revision))
+                    && probe.retained.is_some_and(|(binding, revision, _)| {
+                        binding == ack.source_binding && revision == ack.revision
+                    })
                     && probe.binding == Some(ack.installed_binding)
                     && ack.source_binding.expected_object == object
                 {
-                    probe.retained = None;
-                    if let Some(configuration) = probe.retained_configuration.take() {
-                        probe.accepted_seed = Some(configuration);
+                    let original = probe.retained.expect("checked retained prefix").2;
+                    let reported = probe.reported_request_cohort.unwrap_or(original);
+                    if reported == original {
+                        probe.retained = None;
+                        if let Some(configuration) = probe.retained_configuration.take() {
+                            probe.accepted_seed = Some(configuration);
+                        }
                     }
-                    NativeAudioAuthorDeliveryState::Acknowledged(ack)
+                    NativeAudioAuthorDeliveryState::Acknowledged {
+                        acknowledgement: ack,
+                        request_cohort: reported,
+                    }
                 } else {
                     NativeAudioAuthorDeliveryState::Refused(NativeAudioAuthorRefusal::StaleDelivery)
                 }
             }
             _ => probe.retained.map_or(
                 NativeAudioAuthorDeliveryState::Preserved,
-                |(binding, revision)| NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
-                    binding,
-                    revision,
+                |(binding, revision, request_cohort)| {
+                    NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+                        binding,
+                        revision,
+                        request_cohort: probe.reported_request_cohort.unwrap_or(request_cohort),
+                    }
                 },
             ),
         };
@@ -1698,7 +1718,11 @@ fn native_author_transient_dsp_feedback_cannot_hide_an_outstanding_hosted_prefix
     let probe = fixture.probe.lock().expect("actual native prefix");
     assert_eq!(
         probe.retained,
-        Some((probe.binding.expect("actual binding"), original.revision()))
+        Some((
+            probe.binding.expect("actual binding"),
+            original.revision(),
+            None
+        ))
     );
 }
 
@@ -1803,3 +1827,85 @@ fn native_scope_foreign_source_refused_before_native_binding_or_plan_mutation() 
 
 #[path = "native_author_preflight.rs"]
 mod native_author_preflight_tests;
+
+#[test]
+fn native_author_prefix_cohort_drift_never_replaces_or_discards_hosted_outstanding_receipt() {
+    let a = crate::NativeRequestCohort::new(
+        41,
+        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+    )
+    .unwrap();
+    let b = crate::NativeRequestCohort::new(42, a.request).unwrap();
+    for original in [None, Some(a)] {
+        let mut fixture = HandoffFixture::new();
+        fixture.block(0, 0.5);
+        fixture.probe.lock().unwrap().request_cohort = original;
+        let proposal = fixture.value(0.75);
+        let bad = if original.is_some() {
+            [None, Some(b)]
+        } else {
+            [Some(a), Some(b)]
+        };
+        for reported in bad {
+            fixture.probe.lock().unwrap().reported_request_cohort = Some(reported);
+            let error = match fixture
+                .runtime
+                .poll_native_observations(&ExecutionCancellationToken::new())
+            {
+                Err(error) => error,
+                Ok(_) => panic!("cohort drift must be a typed refusal"),
+            };
+            assert!(
+                matches!(&error, AudioProcessorHostError::InvalidContract(detail)
+                if detail == "native author outstanding receipt mismatch"),
+                "actual={error:?}"
+            );
+            assert_eq!(fixture.probe.lock().unwrap().retained.unwrap().2, original);
+        }
+        fixture.probe.lock().unwrap().reported_request_cohort = None;
+        assert!(
+            fixture.drain().same_retained_proposal(&proposal),
+            "repairing an invalid observation must expose the original outstanding prefix"
+        );
+        fixture.install(&proposal, 0.75);
+        let root = fixture.runtime.resource_root_identity();
+        for reported in bad {
+            fixture.probe.lock().unwrap().reported_request_cohort = Some(reported);
+            let error = match fixture.runtime.acknowledge_native_author_parameter_handoff(
+                &proposal,
+                &ExecutionCancellationToken::new(),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("Ack cohort drift must preserve the outstanding prefix"),
+            };
+            assert!(
+                matches!(
+                    &error,
+                    NativeAudioParameterHandoffError::Admission(
+                        crate::NativeAudioAuthorAdmissionError::Pending {
+                            reason: crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
+                            ..
+                        }
+                    )
+                ),
+                "actual={error:?}"
+            );
+            assert_eq!(fixture.probe.lock().unwrap().retained.unwrap().2, original);
+            assert_eq!(fixture.runtime.resource_root_identity(), root);
+        }
+        fixture.probe.lock().unwrap().reported_request_cohort = None;
+        fixture.ack(&proposal);
+        assert_eq!(fixture.probe.lock().unwrap().retained, None);
+        assert!(
+            fixture
+                .runtime
+                .acknowledge_native_author_parameter_handoff(
+                    &proposal,
+                    &ExecutionCancellationToken::new()
+                )
+                .is_err(),
+            "a confirmed receipt cannot be acknowledged twice"
+        );
+        fixture.block(1, 0.75);
+    }
+}

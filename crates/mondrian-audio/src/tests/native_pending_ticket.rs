@@ -6,16 +6,19 @@ struct OncePendingResolver {
     pending: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
     queries: Arc<AtomicUsize>,
+    observed: crate::NativeObservedRequest,
 }
 struct OncePendingFactory {
     pending: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
     queries: Arc<AtomicUsize>,
+    observed: crate::NativeObservedRequest,
 }
 struct OncePendingProcessor {
     pending: Arc<AtomicBool>,
     calls: Arc<AtomicUsize>,
     queries: Arc<AtomicUsize>,
+    observed: crate::NativeObservedRequest,
 }
 impl AudioProcessorResolver for OncePendingResolver {
     fn prepare(
@@ -26,6 +29,7 @@ impl AudioProcessorResolver for OncePendingResolver {
             pending: Arc::clone(&self.pending),
             calls: Arc::clone(&self.calls),
             queries: Arc::clone(&self.queries),
+            observed: self.observed,
         }))
     }
 }
@@ -39,6 +43,7 @@ impl AudioProcessorFactory for OncePendingFactory {
             pending: Arc::clone(&self.pending),
             calls: Arc::clone(&self.calls),
             queries: Arc::clone(&self.queries),
+            observed: self.observed,
         }))
     }
 }
@@ -48,12 +53,9 @@ impl AudioProcessor for OncePendingProcessor {
     }
     fn preflight_reprepare(
         &mut self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         self.queries.fetch_add(1, Ordering::SeqCst);
-        Ok(self
-            .pending
-            .swap(false, Ordering::SeqCst)
-            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart))
+        Ok(self.pending.swap(false, Ordering::SeqCst).then_some(self.observed))
     }
     fn process(
         &mut self,
@@ -67,6 +69,20 @@ impl AudioProcessor for OncePendingProcessor {
 }
 
 fn fixture() -> (
+    AudioRenderSession,
+    Arc<PreparedAudioPlan>,
+    Arc<AtomicBool>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    fixture_with_request(crate::NativeObservedRequest::RequestOnly(
+        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+    ))
+}
+
+fn fixture_with_request(
+    observed: crate::NativeObservedRequest,
+) -> (
     AudioRenderSession,
     Arc<PreparedAudioPlan>,
     Arc<AtomicBool>,
@@ -88,6 +104,7 @@ fn fixture() -> (
         pending: Arc::clone(&pending),
         calls: Arc::clone(&calls),
         queries: Arc::clone(&queries),
+        observed,
     };
     let contract = prepared(&sequence_with_audio_clip(), 16).contract();
     let plan = Arc::new(
@@ -316,4 +333,40 @@ fn native_preflight_canceled_nested_with_pending() {
 #[test]
 fn native_preflight_canceled_nested_without_pending() {
     assert_public_canceled_preflight(true, false);
+}
+
+#[test]
+fn native_pending_ticket_preserves_first_cohort_without_querying_a_later_identity() {
+    let observed = crate::NativeObservedRequest::Cohort(
+        crate::NativeRequestCohort::new(
+            37,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+        )
+        .unwrap(),
+    );
+    let (mut session, _plan, _pending, calls, queries) = fixture_with_request(observed);
+    let mut source = RampSource::default();
+    let request = AudioRenderRequest { start_sample: 0, frames: 8 };
+    let mut output = vec![61.0; 8];
+    let first = match session.render_into(&mut source, request, &mut output) {
+        Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
+        other => panic!("expected exact observed request ticket: {other:?}"),
+    };
+    assert_eq!(first.request, observed);
+    assert_eq!(
+        first.product_notice().request,
+        observed.request(),
+        "notice is only a raw diagnostic projection"
+    );
+    assert!(
+        matches!(session.render_into(&mut source, request, &mut output), Err(AudioExecutionError::ReprepareRequired(ticket)) if ticket == first)
+    );
+    assert_eq!(
+        queries.load(Ordering::SeqCst),
+        1,
+        "stored ticket cannot acquire a serial from a later snapshot"
+    );
+    assert_eq!(source.block_reads, 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(output, vec![61.0; 8]);
 }

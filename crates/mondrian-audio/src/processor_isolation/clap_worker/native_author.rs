@@ -39,6 +39,7 @@ impl PendingDelivery {
         Delivery::AwaitingAcknowledgement {
             binding: self.binding,
             revision: self.prefix.key.revision,
+            request_cohort: None,
         }
     }
     pub(super) fn retained_bytes(&self) -> Result<usize, Refusal> {
@@ -411,6 +412,7 @@ impl ClapWorker {
             let delivery = NativeAudioAuthorDelivery {
                 binding,
                 revision: prefix.key.revision,
+                request_cohort: None,
                 events,
                 configuration: returned_configuration,
                 completion,
@@ -470,7 +472,7 @@ impl ClapWorker {
                 }
                 NativeAudioAuthorObservation {
                     source: self.author_source_status(),
-                    delivery: Delivery::Acknowledged(ack),
+                    delivery: Delivery::Acknowledged { acknowledgement: ack, request_cohort: None },
                 }
             }
             Err(prefix) => {

@@ -115,7 +115,7 @@ fn installed_vst3_latency_restart_invalidates_prepared_contract() {
             panic!("expected retained typed native pending, not crash/string failure: {mode:?}, {outcome:?}");
         };
         assert_eq!(
-            request,
+            request.request(),
             mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }
         );
         assert_eq!(
@@ -409,7 +409,7 @@ fn installed_vst3_latency_restart_finishes_nested_root_window_before_reprepare()
                 crate::AudioProcessorOccurrenceOwner::Output(child_output)
             );
             assert_eq!(
-                ticket.request,
+                ticket.request.request(),
                 mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }
             );
             assert_eq!(ticket.continuity_epoch, Some(AudioContinuityEpoch::new(1)));

@@ -1987,11 +1987,13 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         Ok(super::NativeConfigurationSeedOutcome::Accepted(receipt))
     }
 
-    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
-        self.shared
-            .restart_requested()
-            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart)
-            .or(self.configuration_phase.blocked_request())
+    fn pending_reprepare(&self) -> Option<crate::NativeObservedRequest> {
+        clap_native_cohort(&self.shared)
+            .map(crate::NativeObservedRequest::Cohort)
+            .or(self
+                .configuration_phase
+                .blocked_request()
+                .map(crate::NativeObservedRequest::RequestOnly))
     }
 
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
@@ -3299,12 +3301,18 @@ mod tests {
                         .expect("stopped refused owner retains its real main role");
                     main.service_native_main_thread().unwrap();
                     assert_eq!(main.native_configuration_cohort().unwrap(), Some(cohort));
-                    assert_eq!(main.pending_reprepare().unwrap(), Some(cohort.request));
+                    assert_eq!(
+                        main.pending_reprepare().unwrap(),
+                        Some(crate::NativeObservedRequest::Cohort(cohort))
+                    );
                     assert_eq!(main.preserve_native_observations().unwrap().object, object);
                 }
                 assert_eq!(worker.native_audio_object_observation().unwrap(), object);
                 assert_eq!(worker.native_configuration_cohort(), Some(cohort));
-                assert_eq!(worker.pending_reprepare(), Some(cohort.request));
+                assert_eq!(
+                    worker.pending_reprepare(),
+                    Some(crate::NativeObservedRequest::Cohort(cohort))
+                );
             }
             assert_eq!(
                 LIFECYCLE_AUDITS[case].activations.load(TestOrdering::SeqCst),
@@ -5306,12 +5314,10 @@ impl super::IsolatedAudioProcessorMainRole for ClapMainRole<'_> {
 
     fn pending_reprepare(
         &self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
-        Ok(self
-            .shared
-            .restart_requested()
-            .then_some(mondrian_core::NativeAudioReprepareRequest::ClapRestart)
-            .or(self.phase.blocked_request()))
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
+        Ok(clap_native_cohort(self.shared)
+            .map(crate::NativeObservedRequest::Cohort)
+            .or(self.phase.blocked_request().map(crate::NativeObservedRequest::RequestOnly)))
     }
 
     fn preserve_native_observations(

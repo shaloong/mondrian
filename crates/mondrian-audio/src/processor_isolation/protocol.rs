@@ -9,7 +9,7 @@ use mondrian_core::{AudioChannelLayout, ParameterId};
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 
-pub(super) const PROTOCOL_VERSION: u32 = 17;
+pub(super) const PROTOCOL_VERSION: u32 = 18;
 pub(super) const MAX_CONTROL_FRAME_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_PREPARATION_PAYLOAD_BYTES: usize = MAX_CONTROL_FRAME_BYTES / 2;
 
@@ -357,12 +357,12 @@ impl WorkerCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkerResponse {
     Completed,
-    CompletedWithPending(mondrian_core::NativeAudioReprepareRequest),
+    CompletedWithPending(crate::NativeObservedRequest),
     NotesCompleted {
         note_end_count: u32,
-        pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+        pending: Option<crate::NativeObservedRequest>,
     },
-    DeferredForConfiguration(mondrian_core::NativeAudioReprepareRequest),
+    DeferredForConfiguration(crate::NativeObservedRequest),
     Failed(String),
 }
 
@@ -372,30 +372,17 @@ impl WorkerResponse {
             Self::Completed => (0_u32, None),
             Self::Failed(_) => (1, None),
             Self::CompletedWithPending(request) | Self::DeferredForConfiguration(request) => {
-                let (kind, flags) = match request {
-                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags }
-                        if *flags != 0 =>
-                    {
-                        (1_u32, *flags)
-                    }
-                    mondrian_core::NativeAudioReprepareRequest::ClapRestart => (2, 0),
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid pending VST3 flags",
-                        ))
-                    }
-                };
-                let mut bytes = [0_u8; 12];
-                bytes[..4].copy_from_slice(&kind.to_le_bytes());
-                bytes[4..8].copy_from_slice(&flags.to_le_bytes());
+                let mut bytes = [0_u8; 20];
+                bytes[..16].copy_from_slice(
+                    &super::native_configuration_wire::encode_observed_request(Some(*request))?,
+                );
                 (
                     if matches!(self, Self::DeferredForConfiguration(_)) {
                         3
                     } else {
                         2
                     },
-                    Some((bytes, 8)),
+                    Some((bytes, 16)),
                 )
             }
             Self::NotesCompleted { note_end_count, pending } => {
@@ -405,26 +392,12 @@ impl WorkerResponse {
                         "Note End count exceeds protocol bound",
                     ));
                 }
-                let (kind, flags) = match pending {
-                    None => (0_u32, 0_u32),
-                    Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
-                        if *flags != 0 =>
-                    {
-                        (1, *flags)
-                    }
-                    Some(mondrian_core::NativeAudioReprepareRequest::ClapRestart) => (2, 0),
-                    _ => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid pending Note response flags",
-                        ))
-                    }
-                };
-                let mut bytes = [0_u8; 12];
+                let mut bytes = [0_u8; 20];
                 bytes[..4].copy_from_slice(&note_end_count.to_le_bytes());
-                bytes[4..8].copy_from_slice(&kind.to_le_bytes());
-                bytes[8..12].copy_from_slice(&flags.to_le_bytes());
-                (4, Some((bytes, 12)))
+                bytes[4..].copy_from_slice(
+                    &super::native_configuration_wire::encode_observed_request(*pending)?,
+                );
+                (4, Some((bytes, 20)))
             }
         };
         let detail = match self {
@@ -476,61 +449,38 @@ impl WorkerResponse {
             ));
         }
         if status == 4 {
-            if detail_len != 12 {
+            if detail_len != 20 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid Note response extent",
                 ));
             }
-            let mut bytes = [0_u8; 12];
-            reader.read_exact(&mut bytes)?;
-            let count = u32::from_le_bytes(bytes[..4].try_into().map_err(invalid_slice)?);
-            let kind = u32::from_le_bytes(bytes[4..8].try_into().map_err(invalid_slice)?);
-            let flags = u32::from_le_bytes(bytes[8..12].try_into().map_err(invalid_slice)?);
+            let mut count = [0_u8; 4];
+            reader.read_exact(&mut count)?;
+            let count = u32::from_le_bytes(count);
             if (count as usize) > AUDIO_NOTE_ENDS_PER_BLOCK {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Note End count exceeds protocol bound",
                 ));
             }
-            let pending = match (kind, flags) {
-                (0, 0) => None,
-                (1, flags) if flags != 0 => {
-                    Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
-                }
-                (2, 0) => Some(mondrian_core::NativeAudioReprepareRequest::ClapRestart),
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid pending Note response kind/flags",
-                    ))
-                }
-            };
+            let pending = super::native_configuration_wire::read_observed_request(reader)?;
             return Ok(Self::NotesCompleted { note_end_count: count, pending });
         }
         if status == 2 || status == 3 {
-            if detail_len != 8 {
+            if detail_len != 16 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid pending response extent",
                 ));
             }
-            let mut bytes = [0_u8; 8];
-            reader.read_exact(&mut bytes)?;
-            let kind = u32::from_le_bytes(bytes[..4].try_into().map_err(invalid_slice)?);
-            let flags = u32::from_le_bytes(bytes[4..].try_into().map_err(invalid_slice)?);
-            let request = match (kind, flags) {
-                (1, flags) if flags != 0 => {
-                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags }
-                }
-                (2, 0) => mondrian_core::NativeAudioReprepareRequest::ClapRestart,
-                _ => {
-                    return Err(io::Error::new(
+            let request = super::native_configuration_wire::read_observed_request(reader)?
+                .ok_or_else(|| {
+                    io::Error::new(
                         io::ErrorKind::InvalidData,
-                        "invalid pending response kind/flags",
-                    ))
-                }
-            };
+                        "pending response has no request",
+                    )
+                })?;
             return Ok(if status == 3 {
                 Self::DeferredForConfiguration(request)
             } else {
@@ -928,15 +878,15 @@ mod response_write_qualification {
         }
     }
 
-    // Independent protocol-v17 wire bytes: MAPR, version=17, success=0, detail=0.
-    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    // Independent protocol-v18 wire bytes: MAPR, version=18, success=0, detail=0.
+    const COMPLETED_WIRE: [u8; 16] = [77, 65, 80, 82, 18, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
     #[test]
     fn native_response_wire_completed_has_one_nonempty_header_write() -> io::Result<()> {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Completed.write_to(&mut writer)?;
         assert_eq!(writer.written(), COMPLETED_WIRE);
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19] {
             let mut old = COMPLETED_WIRE;
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut old.as_slice()).is_err());
@@ -955,7 +905,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(usize::MAX);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 17, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 18, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 2);
@@ -972,7 +922,7 @@ mod response_write_qualification {
         let mut writer = RecordedWriter::new(3);
         WorkerResponse::Failed("bad-λ".to_owned()).write_to(&mut writer)?;
         let expected = [
-            77, 65, 80, 82, 17, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
+            77, 65, 80, 82, 18, 0, 0, 0, 1, 0, 0, 0, 6, 0, 0, 0, 98, 97, 100, 45, 206, 187,
         ];
         assert_eq!(writer.written(), expected);
         assert_eq!(writer.nonempty_writes, 8);
@@ -1043,20 +993,66 @@ mod pending_tests {
 
     #[test]
     fn native_pending_wire_round_trips_fixed_payload() {
-        for request in [
-            NativeAudioReprepareRequest::ClapRestart,
-            NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0008 },
+        use crate::{NativeObservedRequest as Observed, NativeRequestCohort};
+        for (request, words) in [
+            (
+                Observed::RequestOnly(NativeAudioReprepareRequest::ClapRestart),
+                [1_u32, 0, 2, 0],
+            ),
+            (
+                Observed::RequestOnly(NativeAudioReprepareRequest::Vst3Restart {
+                    flags: 0x8000_0008,
+                }),
+                [1, 0, 1, 0x8000_0008],
+            ),
+            (
+                Observed::Cohort(
+                    NativeRequestCohort::new(
+                        7,
+                        NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                    )
+                    .unwrap(),
+                ),
+                [2, 7, 1, 4],
+            ),
+            (
+                Observed::Cohort(
+                    NativeRequestCohort::new(u32::MAX, NativeAudioReprepareRequest::ClapRestart)
+                        .unwrap(),
+                ),
+                [2, u32::MAX, 2, 0],
+            ),
         ] {
-            let response = WorkerResponse::CompletedWithPending(request);
-            let mut encoded = Vec::new();
-            response.clone().write_to(&mut encoded).expect("encode native notice");
-            assert_eq!(encoded.len(), 24, "fixed header + fixed eight-byte notice");
-            assert_eq!(&encoded[8..12], &2_u32.to_le_bytes());
-            assert_eq!(&encoded[12..16], &8_u32.to_le_bytes());
-            assert_eq!(
-                WorkerResponse::read_from(&mut encoded.as_slice()).expect("decode notice"),
-                response
-            );
+            for response in [
+                WorkerResponse::CompletedWithPending(request),
+                WorkerResponse::DeferredForConfiguration(request),
+            ] {
+                let mut encoded = Vec::new();
+                response.clone().write_to(&mut encoded).expect("encode original pending fact");
+                assert_eq!(
+                    encoded.len(),
+                    32,
+                    "fixed header plus exact sixteen-byte carrier"
+                );
+                assert_eq!(&encoded[..8], &[77, 65, 80, 82, 18, 0, 0, 0]);
+                let status = if matches!(response, WorkerResponse::DeferredForConfiguration(_)) {
+                    3_u32
+                } else {
+                    2
+                };
+                assert_eq!(&encoded[8..12], &status.to_le_bytes());
+                assert_eq!(&encoded[12..16], &16_u32.to_le_bytes());
+                for (index, word) in words.into_iter().enumerate() {
+                    assert_eq!(
+                        &encoded[16 + 4 * index..20 + 4 * index],
+                        &word.to_le_bytes()
+                    );
+                }
+                assert_eq!(
+                    WorkerResponse::read_from(&mut encoded.as_slice()).unwrap(),
+                    response
+                );
+            }
         }
         let mut encoded = Vec::new();
         let query = WorkerCommand {
@@ -1066,9 +1062,9 @@ mod pending_tests {
             event_count: 0,
             note_count: 0,
         };
-        query.write_to(&mut encoded).expect("encode query");
+        query.write_to(&mut encoded).unwrap();
         assert_eq!(
-            WorkerCommand::read_from(&mut encoded.as_slice()).expect("decode query"),
+            WorkerCommand::read_from(&mut encoded.as_slice()).unwrap(),
             query
         );
         encoded[12..16].copy_from_slice(&1_u32.to_le_bytes());
@@ -1080,22 +1076,29 @@ mod pending_tests {
 
     #[test]
     fn native_pending_wire_refuses_invalid_extent_kind_and_zero_vst_flags() {
+        use crate::NativeObservedRequest::RequestOnly;
         let mut canonical = Vec::new();
-        WorkerResponse::CompletedWithPending(NativeAudioReprepareRequest::ClapRestart)
+        WorkerResponse::CompletedWithPending(RequestOnly(NativeAudioReprepareRequest::ClapRestart))
             .write_to(&mut canonical)
-            .expect("canonical notice");
-        for (offset, value) in [(12, 0_u32), (16, 9), (20, 1)] {
+            .unwrap();
+        for (offset, value) in [
+            (12, 0_u32),
+            (16, 9),
+            (20, 1),
+            (24, 9),
+            (28, 1),
+            (4, 17),
+            (4, 19),
+        ] {
             let mut invalid = canonical.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
         }
-        assert!(
-            WorkerResponse::CompletedWithPending(NativeAudioReprepareRequest::Vst3Restart {
-                flags: 0
-            })
-            .write_to(&mut Vec::new())
-            .is_err()
-        );
+        assert!(WorkerResponse::CompletedWithPending(RequestOnly(
+            NativeAudioReprepareRequest::Vst3Restart { flags: 0 }
+        ))
+        .write_to(&mut Vec::new())
+        .is_err());
     }
 }
 
@@ -1204,7 +1207,7 @@ mod note_protocol_tests {
             WorkerCommand::read_from(&mut bytes.as_slice()).unwrap(),
             command
         );
-        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 18] {
+        for version in [8_u32, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19] {
             let mut old = bytes.clone();
             old[4..8].copy_from_slice(&version.to_le_bytes());
             assert!(WorkerCommand::read_from(&mut old.as_slice()).is_err());
@@ -1226,26 +1229,51 @@ mod note_protocol_tests {
 
     #[test]
     fn notes_completed_fixed_bytes_preserve_none_clap_and_raw_vst_pending() {
-        for (pending, kind, flags) in [
-            (None, 0_u32, 0_u32),
-            (Some(NativeAudioReprepareRequest::ClapRestart), 2, 0),
+        use crate::{NativeObservedRequest as Observed, NativeRequestCohort};
+        for (pending, words) in [
+            (None, [0_u32, 0, 0, 0]),
             (
-                Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0008 }),
-                1,
-                0x8000_0008,
+                Some(Observed::RequestOnly(
+                    NativeAudioReprepareRequest::ClapRestart,
+                )),
+                [1, 0, 2, 0],
+            ),
+            (
+                Some(Observed::RequestOnly(
+                    NativeAudioReprepareRequest::Vst3Restart { flags: 0x8000_0008 },
+                )),
+                [1, 0, 1, 0x8000_0008],
+            ),
+            (
+                Some(Observed::Cohort(
+                    NativeRequestCohort::new(
+                        11,
+                        NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                    )
+                    .unwrap(),
+                )),
+                [2, 11, 1, 4],
+            ),
+            (
+                Some(Observed::Cohort(
+                    NativeRequestCohort::new(u32::MAX, NativeAudioReprepareRequest::ClapRestart)
+                        .unwrap(),
+                )),
+                [2, u32::MAX, 2, 0],
             ),
         ] {
             let response = WorkerResponse::NotesCompleted { note_end_count: 4096, pending };
             let mut bytes = Vec::new();
             response.clone().write_to(&mut bytes).unwrap();
-            assert_eq!(bytes.len(), 28);
+            assert_eq!(bytes.len(), 36);
             assert_eq!(
                 &bytes[..16],
-                &[77, 65, 80, 82, 17, 0, 0, 0, 4, 0, 0, 0, 12, 0, 0, 0]
+                &[77, 65, 80, 82, 18, 0, 0, 0, 4, 0, 0, 0, 20, 0, 0, 0]
             );
             assert_eq!(&bytes[16..20], &4096_u32.to_le_bytes());
-            assert_eq!(&bytes[20..24], &kind.to_le_bytes());
-            assert_eq!(&bytes[24..28], &flags.to_le_bytes());
+            for (index, word) in words.into_iter().enumerate() {
+                assert_eq!(&bytes[20 + 4 * index..24 + 4 * index], &word.to_le_bytes());
+            }
             assert_eq!(
                 WorkerResponse::read_from(&mut bytes.as_slice()).unwrap(),
                 response
@@ -1262,6 +1290,7 @@ mod note_protocol_tests {
 
     #[test]
     fn notes_completed_rejects_count_extent_old_version_and_noncanonical_pending() {
+        use crate::NativeObservedRequest::RequestOnly;
         let mut bytes = Vec::new();
         WorkerResponse::NotesCompleted { note_end_count: 1, pending: None }
             .write_to(&mut bytes)
@@ -1271,10 +1300,14 @@ mod note_protocol_tests {
             (4, 9),
             (4, 10),
             (4, 11),
-            (12, 8),
+            (4, 17),
+            (4, 19),
+            (12, 12),
             (16, 4097),
             (20, 3),
             (24, 1),
+            (28, 1),
+            (32, 1),
         ] {
             let mut invalid = bytes.clone();
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -1282,8 +1315,9 @@ mod note_protocol_tests {
         }
         for (kind, flags) in [(1_u32, 0_u32), (2, 1), (0, 9)] {
             let mut invalid = bytes.clone();
-            invalid[20..24].copy_from_slice(&kind.to_le_bytes());
-            invalid[24..28].copy_from_slice(&flags.to_le_bytes());
+            invalid[20..24].copy_from_slice(&1_u32.to_le_bytes());
+            invalid[28..32].copy_from_slice(&kind.to_le_bytes());
+            invalid[32..36].copy_from_slice(&flags.to_le_bytes());
             assert!(WorkerResponse::read_from(&mut invalid.as_slice()).is_err());
         }
         assert!(
@@ -1292,8 +1326,10 @@ mod note_protocol_tests {
                 .is_err()
         );
         assert!(WorkerResponse::NotesCompleted {
-            note_end_count: 1,
-            pending: Some(NativeAudioReprepareRequest::Vst3Restart { flags: 0 })
+            note_end_count: 0,
+            pending: Some(RequestOnly(NativeAudioReprepareRequest::Vst3Restart {
+                flags: 0
+            }))
         }
         .write_to(&mut Vec::new())
         .is_err());
@@ -1364,7 +1400,7 @@ mod note_protocol_tests {
     #[test]
     fn current_protocol_note_contract_is_mandatory_in_prepare_and_ready_json() {
         let ready = ReadyWire {
-            schema_version: 17,
+            schema_version: 18,
             result: ReadyResultWire::Ready {
                 musical_time_reference: None,
                 auxiliary_outputs: Vec::new(),
@@ -1398,7 +1434,7 @@ mod note_protocol_tests {
         let prepare = PrepareWire {
             musical_time_reference: None,
             auxiliary_outputs: Vec::new(),
-            schema_version: 17,
+            schema_version: 18,
             native_lane: super::super::native_worker_lane_wire::NativeWorkerLaneWire::capture(None)
                 .unwrap(),
             nonce: "typed-only-test".to_owned(),

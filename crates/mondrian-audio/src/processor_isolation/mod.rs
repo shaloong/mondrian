@@ -78,7 +78,7 @@ pub use native_configuration_seed::{
 pub use native_configuration_control::{
     NativeConfigurationCandidate, NativeConfigurationControlOutcome,
     NativeConfigurationControlRequest, NativeConfigurationFormat, NativeConfigurationRefusal,
-    NativeControlBufferReceipt, NativeRequestCohort,
+    NativeControlBufferReceipt, NativeObservedRequest, NativeRequestCohort,
 };
 
 pub use clap_discovery::{
@@ -762,7 +762,7 @@ struct IsolatedAudioProcessor {
     note_input_contract: crate::AudioProcessorNoteInputContract,
     render_contract: AudioRenderContract,
     failed: bool,
-    pending_reprepare: Option<mondrian_core::NativeAudioReprepareRequest>,
+    pending_reprepare: Option<crate::NativeObservedRequest>,
     staged_configuration_seed: Option<NativeConfigurationSeedReceipt>,
     native_plugin_contract: AudioProcessorExecutionContract,
 }
@@ -918,7 +918,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
         let outcome = self.worker.service_native_configuration(request);
         match outcome {
             Ok(outcome) => {
-                self.pending_reprepare = Some(expected);
+                self.pending_reprepare = Some(crate::NativeObservedRequest::RequestOnly(expected));
                 Ok(outcome)
             }
             Err(AudioProcessorHostError::InvalidContract(detail)) => {
@@ -985,7 +985,7 @@ impl AudioProcessor for IsolatedAudioProcessor {
 
     fn preflight_reprepare(
         &mut self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         if self.failed {
             return Err(AudioProcessorHostError::PoisonedInstance);
         }
@@ -1636,7 +1636,7 @@ pub trait IsolatedAudioProcessorWorker {
     }
 
     /// Pure observation of recorded callbacks; never service control or metadata.
-    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
+    fn pending_reprepare(&self) -> Option<crate::NativeObservedRequest> {
         None
     }
 

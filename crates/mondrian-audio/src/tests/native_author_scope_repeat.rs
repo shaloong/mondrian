@@ -353,7 +353,11 @@ fn native_author_scope_repeated_preserved_prepare_retains_both_occurrences() {
 struct ScopeRepeatPollProbeSnapshot {
     selected: bool,
     binding: Option<NativeAudioObjectBindRequest>,
-    retained: Option<(NativeAudioObjectBindRequest, u64)>,
+    retained: Option<(
+        NativeAudioObjectBindRequest,
+        u64,
+        Option<crate::NativeRequestCohort>,
+    )>,
     revision: u64,
     open: u32,
     pending: Vec<NativeAudioAuthorEvent>,
@@ -537,7 +541,7 @@ fn scope_repeat_value_from_fair_cycle(
         assert!(!fixture.inner.runtime.native_author_state_entry_required(&proposal).unwrap());
         let selected = probes.iter().find(|probe| probe.selected).unwrap();
         assert!(selected.pending.is_empty());
-        assert_eq!(selected.retained, Some((selected_queued.binding.unwrap(), selected_queued.revision)),
+        assert_eq!(selected.retained, Some((selected_queued.binding.unwrap(), selected_queued.revision, None)),
             "only the real selected producer transfers its exact queued prefix into retained delivery");
         assert_eq!(selected.binding, selected_queued.binding);
         assert_eq!(selected.revision, selected_queued.revision);
@@ -555,4 +559,93 @@ fn scope_repeat_value_from_fair_cycle(
         return proposal;
     }
     panic!("actual selected callback was not delivered within one finite fair cycle of {source_count} sources");
+}
+
+#[test]
+fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_preparation() {
+    let a = crate::NativeRequestCohort::new(
+        41,
+        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+    )
+    .unwrap();
+    let b = crate::NativeRequestCohort::new(42, a.request).unwrap();
+    let spec = preflight_spec(PreflightPlacement::ScopeTwoContributions);
+    let mut fixture = preflight_build(&spec, usize::MAX);
+    fixture.inner.probe.lock().unwrap().request_cohort = Some(a);
+    fixture.inner.queue_value(0.75);
+    {
+        let mut probe = fixture.inner.probe.lock().unwrap();
+        probe.open = 0;
+        probe.revision += 1;
+        probe.pending.push(NativeAudioAuthorEvent::Parameter(
+            NativeAudioAuthorParameterEvent::admit(
+                ParameterId::new_static("native.gain"),
+                NativeAudioAuthorParameterPhase::End,
+                None,
+            )
+            .unwrap(),
+        ));
+        probe.configuration = Some(0.75_f64.to_le_bytes().to_vec());
+    }
+    let proposal = fixture.inner.drain();
+    assert!(
+        fixture.inner.runtime.native_author_state_entry_required(&proposal).unwrap(),
+        "coherent Scope state must reach the existing whole-tree state-entry branch"
+    );
+    let scope_id = match fixture.inner.target.owner {
+        mondrian_core::NativeAudioEditorOccurrenceOwner::Contribution { scope_id, .. } => scope_id,
+        other => panic!("expected actual Scope owner: {other:?}"),
+    };
+    let scope = fixture
+        .inner
+        .sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .unwrap();
+    scope.processors.processors[0].opaque_state = proposal.state().cloned();
+    let programs = preflight_programs(&mut fixture, 0.75);
+    let root = fixture.inner.runtime.resource_root_identity();
+    let owners = scope_repeat_poll_probe_snapshots(&fixture);
+    let counts = fixture.registry.calls.snapshot();
+    for reported in [None, Some(b)] {
+        fixture.inner.probe.lock().unwrap().reported_request_cohort = Some(reported);
+        let (_, destination) = fixture.inner.source.register().unwrap();
+        let error = match fixture.inner.runtime.prepare_native_author_parameter_handoff(
+            &programs,
+            &proposal,
+            destination,
+            &ExecutionCancellationToken::new(),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("state-entry prefix identity drift must be refused"),
+        };
+        assert!(
+            matches!(
+                &error,
+                NativeAudioParameterHandoffError::Admission(
+                    NativeAudioAuthorAdmissionError::Pending {
+                        reason: NativeAudioAuthorHoldReason::OutstandingDelivery,
+                        ..
+                    }
+                )
+            ),
+            "actual={error:?}"
+        );
+        assert_eq!(fixture.inner.runtime.resource_root_identity(), root);
+        assert_eq!(
+            scope_repeat_poll_probe_snapshots(&fixture),
+            owners,
+            "no retained prefix, binding, native object or DSP history may move"
+        );
+        let after = fixture.registry.calls.snapshot();
+        assert_eq!(
+            &after[1..],
+            &counts[1..],
+            "no Bind or factory/create before refusal"
+        );
+    }
+    fixture.inner.probe.lock().unwrap().reported_request_cohort = None;
+    assert!(fixture.inner.drain().same_retained_proposal(&proposal));
 }

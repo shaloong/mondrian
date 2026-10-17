@@ -41,6 +41,27 @@ impl NativeRequestCohort {
     }
 }
 
+/// One pending fact from its original owner; a bare request has no cohort identity.
+///
+/// This is observation only, never permission to service, retire or resume DSP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeObservedRequest {
+    /// A generic adapter or retained phase exposes no actual callback serial.
+    RequestOnly(NativeAudioReprepareRequest),
+    /// Exact callback generation observed on the same native owner.
+    Cohort(NativeRequestCohort),
+}
+
+impl NativeObservedRequest {
+    /// Diagnostic/product-notice projection; it does not establish cohort equality.
+    pub const fn request(self) -> NativeAudioReprepareRequest {
+        match self {
+            Self::RequestOnly(request) => request,
+            Self::Cohort(cohort) => cohort.request,
+        }
+    }
+}
+
 /// Borrowed non-RT command for the exact retained processor object.
 ///
 /// The caller must quiesce admitted DSP/output before servicing. Constant values

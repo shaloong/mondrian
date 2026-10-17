@@ -378,7 +378,9 @@ fn trigger_vst3_configuration(
             match result {
                 Ok(()) => assert_constant_delay(&audio.main, start as usize, 3),
                 Err(error) => {
-                    assert_eq!(error, AudioProcessorHostError::ReprepareRequired(restart));
+                    assert!(
+                        matches!(error, AudioProcessorHostError::ReprepareRequired(observed) if observed.request() == restart)
+                    );
                     assert_configuration_audio_unchanged(&audio, &original_main, &original_inputs);
                 }
             }
@@ -396,7 +398,7 @@ fn trigger_vst3_configuration(
     assert_eq!(cohort.request, restart);
     assert_eq!(
         processor.preflight_reprepare().expect("pending preflight"),
-        Some(restart)
+        Some(crate::NativeObservedRequest::Cohort(cohort))
     );
     let mut audio = configuration_audio(keys);
     let original_main = audio.main.clone();
@@ -413,7 +415,9 @@ fn trigger_vst3_configuration(
                 &[AudioParameterEvent { sample_offset: 0, value: 0.5 }],
             ),
         ),
-        Err(AudioProcessorHostError::ReprepareRequired(restart))
+        Err(AudioProcessorHostError::ReprepareRequired(
+            crate::NativeObservedRequest::Cohort(cohort)
+        ))
     );
     assert_configuration_audio_unchanged(&audio, &original_main, &original_inputs);
     assert_eq!(

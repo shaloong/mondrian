@@ -29,8 +29,8 @@ impl super::super::IsolatedAudioProcessorMainRole for Main {
     }
     fn pending_reprepare(
         &self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
-        Ok(self.cohort.map(|cohort| cohort.request))
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
+        Ok(self.cohort.map(crate::NativeObservedRequest::Cohort))
     }
     fn native_author_binding_matches(
         &self,
@@ -110,11 +110,18 @@ fn control_only_main_keeps_servicing_and_preserves_pending_without_dsp() {
             command(CommandKind::Process, 4).write_to(&mut parent).unwrap();
             let result = WorkerResponse::read_from(&mut parent).unwrap();
             if pending.is_some() {
-                assert_eq!(result, WorkerResponse::DeferredForConfiguration(request));
+                assert_eq!(
+                    result,
+                    WorkerResponse::DeferredForConfiguration(crate::NativeObservedRequest::Cohort(
+                        cohort
+                    ))
+                );
                 command(CommandKind::PollPending, 0).write_to(&mut parent).unwrap();
                 assert_eq!(
                     WorkerResponse::read_from(&mut parent).unwrap(),
-                    WorkerResponse::CompletedWithPending(request)
+                    WorkerResponse::CompletedWithPending(crate::NativeObservedRequest::Cohort(
+                        cohort
+                    ))
                 );
                 command(CommandKind::PollConfigurationCohort, 0).write_to(&mut parent).unwrap();
                 assert_eq!(read_cohort_reply(&mut parent).unwrap(), pending);

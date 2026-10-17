@@ -1337,11 +1337,13 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         Ok(super::NativeConfigurationSeedOutcome::Accepted(receipt))
     }
 
-    fn pending_reprepare(&self) -> Option<mondrian_core::NativeAudioReprepareRequest> {
-        let flags = self.plugin.as_ref()?.pending_restart_flags().bits() as u32;
-        (flags != 0)
-            .then_some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
-            .or(self.configuration_phase.blocked_request())
+    fn pending_reprepare(&self) -> Option<crate::NativeObservedRequest> {
+        self.native_configuration_cohort()
+            .map(crate::NativeObservedRequest::Cohort)
+            .or(self
+                .configuration_phase
+                .blocked_request()
+                .map(crate::NativeObservedRequest::RequestOnly))
     }
 
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
@@ -2085,11 +2087,12 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
 
     fn pending_reprepare(
         &self,
-    ) -> Result<Option<mondrian_core::NativeAudioReprepareRequest>, AudioProcessorHostError> {
+    ) -> Result<Option<crate::NativeObservedRequest>, AudioProcessorHostError> {
         let cohort = self.native_configuration_cohort()?;
-        Ok(cohort
-            .map(|cohort| cohort.request)
-            .or(self.configuration_phase.blocked_request()))
+        Ok(cohort.map(crate::NativeObservedRequest::Cohort).or(self
+            .configuration_phase
+            .blocked_request()
+            .map(crate::NativeObservedRequest::RequestOnly)))
     }
 
     fn preserve_native_observations(

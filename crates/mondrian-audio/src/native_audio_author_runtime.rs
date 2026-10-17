@@ -73,7 +73,7 @@ pub(crate) fn closed_source(
         Delivery::Refused(reason) => return Err(Reason::DeliveryRefused(reason)),
         Delivery::Delivered(_)
         | Delivery::AwaitingAcknowledgement { .. }
-        | Delivery::Acknowledged(_)
+        | Delivery::Acknowledged { .. }
         | Delivery::ReenteredAcknowledged(_) => {
             return Err(Reason::OutstandingDelivery);
         }
@@ -136,7 +136,7 @@ pub(crate) fn author_pcm_source(
         Delivery::Refused(reason) => return Err(Reason::DeliveryRefused(*reason)),
         Delivery::Delivered(_)
         | Delivery::AwaitingAcknowledgement { .. }
-        | Delivery::Acknowledged(_)
+        | Delivery::Acknowledged { .. }
         | Delivery::ReenteredAcknowledged(_) => return Err(Reason::OutstandingDelivery),
     }
     if author.source.pending_events() != 0 {

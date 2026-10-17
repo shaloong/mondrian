@@ -420,7 +420,7 @@ impl WorkerProcessContext<'_> {
 fn write_process_operation_result(
     control: &mut TcpStream,
     result: Result<WorkerProcessCompletion, AudioProcessorHostError>,
-    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+    pending: Option<crate::NativeObservedRequest>,
 ) -> Result<bool, AudioProcessorHostError> {
     let response = match result {
         Ok(WorkerProcessCompletion { note_end_count: Some(note_end_count) }) => {
@@ -443,7 +443,7 @@ fn write_process_operation_result(
 fn write_operation_result(
     control: &mut TcpStream,
     result: Result<Result<(), AudioProcessorHostError>, Box<dyn std::any::Any + Send>>,
-    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+    pending: Option<crate::NativeObservedRequest>,
 ) -> Result<bool, AudioProcessorHostError> {
     let response = match result {
         Ok(Ok(())) => pending.map_or(
@@ -762,7 +762,7 @@ fn write_native_observation_reply(
     control: &mut TcpStream,
     kind: CommandKind,
     cohort: Option<super::NativeRequestCohort>,
-    pending: Option<mondrian_core::NativeAudioReprepareRequest>,
+    pending: Option<crate::NativeObservedRequest>,
 ) -> Result<bool, AudioProcessorHostError> {
     match kind {
         CommandKind::PollConfigurationCohort => {
@@ -1700,7 +1700,9 @@ mod note_process_contracts {
                     );
                     assert!(!block.try_push_note_end(end));
                     Err(AudioProcessorHostError::ReprepareRequired(
-                        mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        crate::NativeObservedRequest::RequestOnly(
+                            mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+                        ),
                     ))
                 },
                 shared,

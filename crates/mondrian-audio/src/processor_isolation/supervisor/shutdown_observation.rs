@@ -265,8 +265,18 @@ mod tests {
         for (response, expected) in [
             (WorkerResponse::Completed, 0),
             (WorkerResponse::Failed("private".repeat(4096)), 1),
-            (WorkerResponse::CompletedWithPending(ClapRestart), 2),
-            (WorkerResponse::DeferredForConfiguration(ClapRestart), 3),
+            (
+                WorkerResponse::CompletedWithPending(crate::NativeObservedRequest::RequestOnly(
+                    ClapRestart,
+                )),
+                2,
+            ),
+            (
+                WorkerResponse::DeferredForConfiguration(
+                    crate::NativeObservedRequest::RequestOnly(ClapRestart),
+                ),
+                3,
+            ),
             (
                 WorkerResponse::NotesCompleted { note_end_count: 0, pending: None },
                 4,

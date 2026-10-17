@@ -138,7 +138,7 @@ fn process(worker: &mut Vst3Worker, start: i64) -> Vec<f32> {
 
 fn pending(worker: &Vst3Worker, flags: u32) {
     assert_eq!(
-        worker.pending_reprepare(),
+        worker.pending_reprepare().map(crate::NativeObservedRequest::request),
         Some(mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
     );
     assert!(worker.last_parameter_values.iter().all(Option::is_none));
@@ -159,7 +159,10 @@ fn native_initial_values_reads_controller_without_setter_or_synthetic_process() 
         assert_eq!(worker.native_audio_object_observation().unwrap(), object);
         assert_eq!(worker.payload.state, payload);
         assert!(worker.last_parameter_values.iter().all(Option::is_none));
-        assert_eq!(worker.pending_reprepare(), None);
+        assert_eq!(
+            worker.pending_reprepare().map(crate::NativeObservedRequest::request),
+            None
+        );
         let retired = worker.plugin.as_ref().unwrap().pending_restart_cohort().unwrap();
         assert_eq!(retired.serial(), cohort.serial());
         assert!(!retired.pending());
@@ -203,8 +206,7 @@ fn native_initial_values_refuses_mixed_schema_invalid_reentrant_and_count_contro
         let payload = worker.payload.state.clone();
         let before = audit(&worker);
         assert!(
-            matches!(worker.enter_state(73), Err(AudioProcessorHostError::ReprepareRequired(
-            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: actual })) if actual == flags)
+            matches!(worker.enter_state(73), Err(AudioProcessorHostError::ReprepareRequired(observed)) if observed.request() == mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags })
         );
         pending(&worker, flags);
         let after = audit(&worker);
@@ -292,7 +294,10 @@ fn native_initial_values_runtime_reset_cannot_reenter_initial_phase() {
     assert!(matches!(
         worker.enter_state(100),
         Err(AudioProcessorHostError::ReprepareRequired(
-            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+            crate::NativeObservedRequest::Cohort(crate::NativeRequestCohort {
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                ..
+            })
         ))
     ));
     let after = audit(&worker);
@@ -318,7 +323,10 @@ fn native_initial_values_fresh_reload_uses_new_object_without_dsp_checkpoint() {
     assert_eq!(fresh.process_id(), old.process_id());
     assert!(fresh.object_serial() > old.object_serial());
     assert_eq!(worker.payload.state, payload);
-    assert_eq!(worker.pending_reprepare(), None);
+    assert_eq!(
+        worker.pending_reprepare().map(crate::NativeObservedRequest::request),
+        None
+    );
     assert!(worker.last_parameter_values.iter().all(Option::is_none));
     let actual = audit(&worker);
     assert_eq!(actual.process, 0);
@@ -348,7 +356,10 @@ fn native_initial_values_retains_preexisting_author_source_without_querying() {
     assert!(matches!(
         worker.enter_state(73),
         Err(AudioProcessorHostError::ReprepareRequired(
-            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+            crate::NativeObservedRequest::Cohort(crate::NativeRequestCohort {
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                ..
+            })
         ))
     ));
     let after = audit(&worker);
@@ -426,7 +437,10 @@ fn native_initial_paused_bind_closes_window_and_first_enter_keeps_same_object() 
         InitialSignalPhase::AwaitingFirstSignal
     );
     assert_eq!(worker.last_end, None);
-    assert_eq!(worker.pending_reprepare(), None);
+    assert_eq!(
+        worker.pending_reprepare().map(crate::NativeObservedRequest::request),
+        None
+    );
     let bound = audit(&worker);
     assert_eq!(bound.metadata, before.metadata + 1);
     assert_eq!(bound.values, before.values + 1);
@@ -492,7 +506,10 @@ fn native_initial_paused_bind_cannot_reclassify_later_native_callbacks_as_startu
     assert!(matches!(
         worker.enter_state(73),
         Err(AudioProcessorHostError::ReprepareRequired(
-            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+            crate::NativeObservedRequest::Cohort(crate::NativeRequestCohort {
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                ..
+            })
         ))
     ));
     let after = audit(&worker);
