@@ -15,6 +15,7 @@ pub(super) enum NativeWorkerLaneWire {
         owners: [(u64, u64); 8],
         control: [(u64, u64); 3],
         processor_input_storage: [u64; 2],
+        adapter_note_input_storage: (u64, u64),
     },
 }
 
@@ -55,6 +56,7 @@ impl NativeWorkerLaneWire {
         let control = profile.control_overlap();
         let (vectors, com_payloads) = profile.processor_input_storage();
         Ok(Self::Scoped {
+            adapter_note_input_storage: capture_layouts([profile.adapter_note_input_storage()])?[0],
             processor_input_storage: [
                 u64::try_from(vectors).map_err(|_| invalid())?,
                 u64::try_from(com_payloads).map_err(|_| invalid())?,
@@ -79,7 +81,13 @@ impl NativeWorkerLaneWire {
     pub(super) fn realize(
         self,
     ) -> Result<Option<NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
-        let Self::Scoped { owners, control, processor_input_storage } = self else {
+        let Self::Scoped {
+            owners,
+            control,
+            processor_input_storage,
+            adapter_note_input_storage,
+        } = self
+        else {
             return Ok(None);
         };
         let [adapter_resident, reader_slots, processing_slots, main_inline, runtime_main_role, runtime_dsp_role, sdk_main_role, sdk_dsp_role] =
@@ -99,6 +107,7 @@ impl NativeWorkerLaneWire {
                 },
                 NativeWorkerControlOverlapLayout { decoded_input, reply_storage, staged_seed },
             )?
+            .with_adapter_note_input_storage(realize_layouts([adapter_note_input_storage])?[0])?
             .with_processor_input_storage(
                 usize::try_from(processor_input_storage[0]).map_err(|_| invalid())?,
                 usize::try_from(processor_input_storage[1]).map_err(|_| invalid())?,
@@ -123,6 +132,7 @@ mod tests {
             owners: [(0, 1); 8],
             control: [(0, 1); 3],
             processor_input_storage: [24, 64],
+            adapter_note_input_storage: (0, 1),
         };
         let profile = wire.clone().realize().unwrap().unwrap();
         assert_eq!(profile.processor_input_storage(), (24, 64));
@@ -135,6 +145,7 @@ mod tests {
             owners: [(0, 1); 8],
             control: [(0, 1); 3],
             processor_input_storage: [u64::MAX, 1],
+            adapter_note_input_storage: (0, 1),
         }
         .realize()
         .is_err());
@@ -167,6 +178,7 @@ mod tests {
             owners,
             control: [(0, 1); 3],
             processor_input_storage: [0, 0],
+            adapter_note_input_storage: (0, 1),
         };
         let profile = wire.clone().realize().unwrap().unwrap();
         assert_eq!(
@@ -203,5 +215,51 @@ mod tests {
             unknown[name] = value;
             assert!(serde_json::from_value::<NativeWorkerLaneWire>(unknown).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod note_backing_tests {
+    use super::*;
+
+    #[test]
+    fn native_lane_note_backing_requires_new_shape_and_retains_typed_zero_alignment() {
+        let alignment = std::mem::align_of::<vst3_host::PluginEvent>() as u64;
+        let wire = NativeWorkerLaneWire::Scoped {
+            owners: [(0, 1); 8],
+            control: [(0, 1); 3],
+            processor_input_storage: [0, 0],
+            adapter_note_input_storage: (0, alignment),
+        };
+        let profile = wire.clone().realize().unwrap().unwrap();
+        assert_eq!(
+            profile.adapter_note_input_storage(),
+            NativeHostBufferLayout { bytes: 0, alignment: alignment as usize }
+        );
+        assert_eq!(profile.known_storage_limit_bytes(), 0);
+        assert_eq!(NativeWorkerLaneWire::capture(Some(profile)).unwrap(), wire);
+        let current = serde_json::to_value(&wire).unwrap();
+        let mut legacy = current.clone();
+        legacy.as_object_mut().unwrap().remove("adapter_note_input_storage");
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(legacy.clone()).is_err());
+
+        #[derive(Serialize, Deserialize)]
+        #[serde(tag = "kind", deny_unknown_fields)]
+        enum V15 {
+            Scoped {
+                owners: [(u64, u64); 8],
+                control: [(u64, u64); 3],
+                processor_input_storage: [u64; 2],
+            },
+        }
+        assert!(serde_json::from_value::<V15>(legacy).is_ok());
+        assert!(serde_json::from_value::<V15>(current).is_err());
+        let invalid = NativeWorkerLaneWire::Scoped {
+            owners: [(0, 1); 8],
+            control: [(0, 1); 3],
+            processor_input_storage: [0, 0],
+            adapter_note_input_storage: (0, 0),
+        };
+        assert!(invalid.realize().is_err());
     }
 }

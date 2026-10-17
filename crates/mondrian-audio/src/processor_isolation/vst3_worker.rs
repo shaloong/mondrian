@@ -37,7 +37,7 @@ use vst3_host::audio::{
     NativeAudioBusInfoSet, SpeakerArrangement,
 };
 use vst3_host::plugin::{Plugin, ProcessMode};
-use vst3_host::Vst3Host;
+use vst3_host::{PluginEvent, PluginEventData, Vst3Host};
 
 /// Hidden application mode dedicated to the VST3 ABI.
 pub const VST3_AUDIO_WORKER_ARGUMENT: &str = "--internal-vst3-audio-worker-v1";
@@ -229,11 +229,6 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
                 "only VST3 definitions are handled by this resolver",
             ));
         };
-        if request.note_input_requested() {
-            return Err(unavailable(
-                "VST3 Note input is not supported by this adapter",
-            ));
-        }
         if *schema_version != 1 {
             return Err(unavailable("VST3 definition schema version is unsupported"));
         }
@@ -247,6 +242,18 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             ));
         }
         plugin.auxiliary_inputs.validate(request.render_contract().channel_layout)?;
+        let note_input_contract = derived_note_input_contract(
+            &plugin.event_bus_contract,
+            request.musical_time_reference(),
+            request.note_input_requested(),
+        )?;
+        let native_lane =
+            native_worker_lane_profile_for_notes(&plugin.parameters, &note_input_contract)?;
+        if !note_input_contract.ports.is_empty() && native_lane.is_none() {
+            return Err(unavailable(
+                "VST3 Note input requires the scoped native lane",
+            ));
+        }
         let mut parameter_ids = Vec::with_capacity(request.parameters().len());
         let mut vst3_ids = Vec::with_capacity(request.parameters().len());
         for (id, parameter) in request.parameters() {
@@ -288,9 +295,8 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
             request.render_contract(),
         )?
         .with_musical_time_reference(request.musical_time_reference())?
-        .with_native_worker_lane_resources(native_worker_lane_profile_for_parameters(
-            &plugin.parameters,
-        )?)
+        .with_note_input_contract(note_input_contract)?
+        .with_native_worker_lane_resources(native_lane)
         .with_dispatch_argument(Some(OsString::from(VST3_AUDIO_WORKER_ARGUMENT)))
         .with_deadlines(
             std::time::Duration::from_secs(15),
@@ -398,7 +404,8 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
         request: &IsolatedAudioProcessorWorkerPrepareRequest,
     ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
         let payload = validated_preparation_payload(request)?;
-        native_worker_lane_profile_for_parameters(&payload.parameters)
+        validate_note_preparation(request, &payload)?;
+        native_worker_lane_profile_for_notes(&payload.parameters, request.note_input_contract())
     }
     fn prepare(
         &self,
@@ -419,18 +426,31 @@ impl Vst3AudioProcessorWorkerFactory {
                 "VST3 auxiliary outputs are not supported by this adapter",
             ));
         }
-        if !request.note_input_contract().ports.is_empty() {
-            return Err(unavailable(
-                "VST3 Note input is not supported by this adapter",
-            ));
-        }
         let payload = validated_preparation_payload(&request)?;
+        validate_note_preparation(&request, &payload)?;
         if request.native_worker_lane_resources()
-            != native_worker_lane_profile_for_parameters(&payload.parameters)?
+            != native_worker_lane_profile_for_notes(
+                &payload.parameters,
+                request.note_input_contract(),
+            )?
         {
             return Err(invalid(
                 "VST3 input storage request differs from prepared metadata",
             ));
+        }
+        // Reserve once before native load; charge actual capacity before Ready.
+        let mut note_events = Vec::new();
+        note_events
+            .try_reserve_exact(request.note_input_contract().limits.input_events)
+            .map_err(|_| unavailable("VST3 Note conversion allocation failed"))?;
+        if let Some(profile) = request.native_worker_lane_resources() {
+            profile
+                .admit_adapter_note_input_storage(
+                    crate::NativeHostBufferLayout::for_vector(&note_events).map_err(|error| {
+                        invalid(format!("VST3 Note conversion layout failed: {error}"))
+                    })?,
+                )
+                .map_err(AudioProcessorHostError::from)?;
         }
         let registration = Vst3PluginRegistration {
             class_id: payload.class_id.clone(),
@@ -519,6 +539,7 @@ impl Vst3AudioProcessorWorkerFactory {
         );
         Ok(Vst3Worker {
             native_lane: request.native_worker_lane_resources(),
+            note_events,
             last_parameter_values: vec![None; payload.parameter_ids.len()],
             configuration_phase:
                 super::native_configuration_control::NativeConfigurationPhase::Admitted,
@@ -539,8 +560,149 @@ impl Vst3AudioProcessorWorkerFactory {
             prepared_author_entry: None,
             #[cfg(target_os = "windows")]
             native_main,
+            note_input_contract: request.note_input_contract,
         })
     }
+}
+
+fn derived_note_input_contract(
+    raw: &Vst3EventBusContractV1,
+    reference: Option<mondrian_core::MusicalTimeReference>,
+    requested: bool,
+) -> Result<crate::AudioProcessorNoteInputContract, AudioProcessorHostError> {
+    if !requested {
+        return Ok(crate::AudioProcessorNoteInputContract::default());
+    }
+    if reference.is_none() {
+        return Err(unavailable(
+            "VST3 Note input requires a musical time reference",
+        ));
+    }
+    raw.validate()?;
+    let main = raw
+        .inputs
+        .as_slice()
+        .first()
+        .filter(|row| {
+            row.native_index == 0
+                && row.role == super::vst3_processing_metadata::Vst3EventBusRole::Main
+                && row.host_active
+                && row.channel_count > 0
+        })
+        .filter(|_| raw.outputs.is_empty())
+        .ok_or_else(|| {
+            unavailable("VST3 Note input requires active Main event bus zero and no event outputs")
+        })?;
+    Ok(crate::AudioProcessorNoteInputContract {
+        completion: crate::AudioNoteCompletionPolicy::SuccessfulOffBlock,
+        ports: vec![crate::AudioProcessorNoteInputPort {
+            port_key: "vst3.note-input.0".to_owned(),
+            native_id: 0,
+            native_index: 0,
+            channel_count: main.channel_count.min(16) as u8,
+        }],
+        limits: crate::AudioNoteExecutionLimits {
+            input_events: crate::AUDIO_NOTE_EVENTS_PER_BLOCK,
+            output_ends: 0,
+            retained_records: crate::AUDIO_NOTE_RECORDS,
+            live_voices: 0,
+        },
+    })
+}
+
+fn validate_note_preparation(
+    request: &IsolatedAudioProcessorWorkerPrepareRequest,
+    payload: &Vst3Payload,
+) -> Result<(), AudioProcessorHostError> {
+    let enabled = !request.note_input_contract().ports.is_empty();
+    let expected = derived_note_input_contract(
+        &payload.event_bus_contract,
+        request.musical_time_reference(),
+        enabled,
+    )?;
+    if request.note_input_contract() != &expected {
+        return Err(invalid(
+            "VST3 Note input contract differs from prepared metadata",
+        ));
+    }
+    if enabled && request.native_worker_lane_resources().is_none() {
+        return Err(unavailable(
+            "VST3 Note input requires the scoped native lane",
+        ));
+    }
+    Ok(())
+}
+
+fn note_storage_layout(
+    count: usize,
+) -> Result<crate::NativeHostBufferLayout, AudioProcessorHostError> {
+    let layout = std::alloc::Layout::array::<PluginEvent>(count)
+        .map_err(|_| invalid("VST3 Note conversion extent overflowed"))?;
+    Ok(crate::NativeHostBufferLayout { bytes: layout.size(), alignment: layout.align() })
+}
+
+fn prepare_note_events(
+    converted: &mut Vec<PluginEvent>,
+    expected: &crate::AudioProcessorNoteInputContract,
+    block: &IsolatedAudioProcessorWorkerBlock<'_>,
+) -> Result<(), AudioProcessorHostError> {
+    if block.note_input_contract() != expected {
+        return Err(invalid("VST3 block Note contract changed"));
+    }
+    let enabled = !expected.ports.is_empty();
+    if enabled && block.musical_time_reference().is_none() {
+        return Err(unavailable(
+            "VST3 Note input requires a musical time reference",
+        ));
+    }
+    let mut previous = 0;
+    for (count, event) in block.note_events().enumerate() {
+        if !enabled
+            || count >= expected.limits.input_events
+            || count >= converted.capacity()
+            || !expected.accepts_event(event, block.frames())
+            || i32::try_from(event.sample_offset).is_err()
+            || event.sample_offset < previous
+        {
+            return Err(invalid(
+                "VST3 Note batch exceeds the admitted scalar contract",
+            ));
+        }
+        previous = event.sample_offset;
+    }
+    converted.clear();
+    for event in block.note_events() {
+        let channel = i16::from(event.channel);
+        let pitch = i16::from(event.key);
+        let velocity = event.velocity as f32;
+        let data = match event.kind {
+            crate::AudioNoteEventKind::On => PluginEventData::NoteOn {
+                channel,
+                pitch,
+                tuning: 0.0,
+                velocity,
+                length: 0,
+                note_id: event.native_note_id,
+            },
+            crate::AudioNoteEventKind::Off => PluginEventData::NoteOff {
+                channel,
+                pitch,
+                velocity,
+                note_id: event.native_note_id,
+                tuning: 0.0,
+            },
+        };
+        converted.push(PluginEvent {
+            bus_index: 0,
+            sample_offset: event.sample_offset as i32,
+            // The checked SDK replaces this local scalar with same-reference
+            // absolute Note PPQ before exposure. No second projection is cached.
+            ppq_position: 0.0,
+            flags: 0,
+            data,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,6 +714,8 @@ enum InitialSignalPhase {
 
 struct Vst3Worker {
     native_lane: Option<crate::NativeWorkerLaneResourceProfile>,
+    note_events: Vec<PluginEvent>,
+    note_input_contract: crate::AudioProcessorNoteInputContract,
     last_parameter_values: Vec<Option<f64>>,
     configuration_phase: super::native_configuration_control::NativeConfigurationPhase,
     #[cfg(target_os = "windows")]
@@ -607,6 +771,9 @@ fn classify_editor_close_error(
 }
 
 impl IsolatedAudioProcessorWorker for Vst3Worker {
+    fn note_input_contract(&self) -> crate::AudioProcessorNoteInputContract {
+        self.note_input_contract.clone()
+    }
     fn native_worker_lane_resources(&self) -> Option<crate::NativeWorkerLaneResourceProfile> {
         self.native_lane
     }
@@ -674,6 +841,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             buffers: &mut self.buffers,
             auxiliary_inputs: &self.auxiliary_inputs,
             last_end: &mut self.last_end,
+            note_input_contract: &self.note_input_contract,
+            note_events: &mut self.note_events,
         };
         Ok(super::IsolatedAudioProcessorWorkerSplit {
             main: Box::new(VstMainRole {
@@ -1133,10 +1302,22 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         &mut self,
         request: crate::NativeAudioAuthorStateEntryRequest<'_>,
     ) -> Result<crate::NativeAudioAuthorStateEntryOutcome, AudioProcessorHostError> {
+        if !self.note_input_contract.ports.is_empty() {
+            return Ok(crate::NativeAudioAuthorStateEntryOutcome::Refused(
+                crate::NativeAudioAuthorStateEntryRefusal::UnsupportedAdapter,
+            ));
+        }
         self.prepare_author_state_entry(request)
     }
 
     fn enter_state(&mut self, start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        if !self.note_input_contract.ports.is_empty()
+            && self.initial_signal_phase == InitialSignalPhase::Entered
+        {
+            return Err(AudioProcessorHostError::StateEntry(
+                "VST3 Note input supports only initial state entry".to_owned(),
+            ));
+        }
         if self.enter_prepared_author_state(start_sample)? {
             self.native_binding = None;
             return Ok(());
@@ -1187,6 +1368,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             buffers: &mut self.buffers,
             auxiliary_inputs: &self.auxiliary_inputs,
             last_end: &mut self.last_end,
+            note_input_contract: &self.note_input_contract,
+            note_events: &mut self.note_events,
         }
         .process(native, block)
     }
@@ -1203,6 +1386,8 @@ struct VstSignalFields<'a> {
     buffers: &'a mut BusAudioBuffers,
     auxiliary_inputs: &'a AudioProcessorAuxiliaryInputContract,
     last_end: &'a mut Option<i64>,
+    note_input_contract: &'a crate::AudioProcessorNoteInputContract,
+    note_events: &'a mut Vec<PluginEvent>,
 }
 
 trait VstNativeSignal {
@@ -1218,6 +1403,11 @@ trait VstNativeSignal {
         reference: Option<vst3_host::audio::ProcessMusicalReference>,
     ) -> vst3_host::error::Result<()>;
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()>;
+    fn process_note_buses(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> vst3_host::error::Result<()>;
 }
 
 impl VstNativeSignal for Plugin {
@@ -1242,6 +1432,13 @@ impl VstNativeSignal for Plugin {
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
     }
+    fn process_note_buses(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> vst3_host::error::Result<()> {
+        self.process_bus_audio_with_note_events(buffers, events)
+    }
 }
 
 impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
@@ -1265,6 +1462,13 @@ impl VstNativeSignal for vst3_host::plugin::PluginAudioProcessing<'_> {
     }
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> vst3_host::error::Result<()> {
         self.process_bus_audio(buffers)
+    }
+    fn process_note_buses(
+        &mut self,
+        buffers: &mut BusAudioBuffers,
+        events: &[PluginEvent],
+    ) -> vst3_host::error::Result<()> {
+        self.process_bus_audio_with_note_events(buffers, events)
     }
 }
 
@@ -1318,6 +1522,7 @@ impl VstSignalFields<'_> {
                     "VST3 musical reference delivery failed: {error:?}"
                 ))
             })?;
+        prepare_note_events(self.note_events, self.note_input_contract, &block)?;
         native
             .deliver_timeline(
                 vst3_host::audio::ProcessTimelineContext {
@@ -1396,7 +1601,14 @@ impl VstSignalFields<'_> {
             }
         }
         self.buffers.block_size = frames;
-        native.process_buses(self.buffers).map_err(|error| {
+        let result = if self.note_input_contract.ports.is_empty() {
+            native.process_buses(self.buffers)
+        } else {
+            // Empty Note batches also use the checked API with the same reference.
+            native.process_note_buses(self.buffers, self.note_events)
+        };
+        self.note_events.clear(); // A failed batch is never retained for replay.
+        result.map_err(|error| {
             AudioProcessorHostError::Process(format!("VST3 processing failed: {error}"))
         })?;
         for (frame, samples) in block.main_interleaved().chunks_exact_mut(channels).enumerate() {
@@ -1941,6 +2153,20 @@ pub(super) fn native_worker_lane_profile_for_parameters(
         .transpose()
 }
 
+fn native_worker_lane_profile_for_notes(
+    parameters: &[Vst3ParameterDescriptor],
+    notes: &crate::AudioProcessorNoteInputContract,
+) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+    let layout = note_storage_layout(notes.limits.input_events)?;
+    native_worker_lane_profile_for_parameters(parameters)?
+        .map(|profile| {
+            profile
+                .with_adapter_note_input_storage(layout)
+                .map_err(AudioProcessorHostError::from)
+        })
+        .transpose()
+}
+
 pub(super) fn native_worker_lane_profile(
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
     #[cfg(target_os = "windows")]
@@ -1984,6 +2210,8 @@ pub(super) fn native_worker_lane_profile(
         };
         Ok(Some(
             crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(owners, control)
+                .map_err(AudioProcessorHostError::from)?
+                .with_adapter_note_input_storage(note_storage_layout(0)?)
                 .map_err(AudioProcessorHostError::from)?,
         ))
     }
@@ -2412,6 +2640,8 @@ mod musical_effect_tests {
         calls: Vec<&'static str>,
         timeline: Option<(ProcessTimelineContext, Option<ProcessMusicalReference>)>,
         reject_timeline: bool,
+        reject_notes: bool,
+        notes: Vec<PluginEvent>,
     }
 
     impl VstNativeSignal for Native {
@@ -2442,6 +2672,367 @@ mod musical_effect_tests {
             }
             Ok(())
         }
+        fn process_note_buses(
+            &mut self,
+            buffers: &mut BusAudioBuffers,
+            events: &[PluginEvent],
+        ) -> vst3_host::error::Result<()> {
+            self.notes.extend_from_slice(events);
+            if self.reject_notes {
+                self.calls.push("notes");
+                return Err(vst3_host::error::Error::ProcessFailed(-123));
+            }
+            self.process_buses(buffers)?;
+            self.calls.pop();
+            self.calls.push("notes");
+            Ok(())
+        }
+    }
+
+    fn note_reference() -> MusicalTimeReference {
+        MusicalTimeReference::new(
+            TimelineTime::new(-19, 7).unwrap(),
+            TimelineTime::new(3, 4).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn note_metadata(channels: u32) -> Vst3EventBusContractV1 {
+        use super::super::vst3_processing_metadata::{
+            Vst3EventBusContractRow, Vst3EventBusContractRows, Vst3EventBusRole,
+        };
+        Vst3EventBusContractV1 {
+            schema_version: 1,
+            inputs: Vst3EventBusContractRows::try_from_slice(&[Vst3EventBusContractRow {
+                native_index: 0,
+                role: Vst3EventBusRole::Main,
+                channel_count: channels,
+                default_active: true,
+                host_active: true,
+            }])
+            .unwrap(),
+            outputs: Vst3EventBusContractRows::try_from_slice(&[]).unwrap(),
+        }
+    }
+
+    #[test]
+    fn vst3_note_contract_requires_some_active_main_zero_and_preserves_raw_metadata() {
+        let raw = note_metadata(32);
+        let snapshot = raw;
+        let contract = derived_note_input_contract(&raw, Some(note_reference()), true).unwrap();
+        contract.validate().unwrap();
+        assert_eq!(raw, snapshot);
+        assert_eq!(
+            contract.completion,
+            crate::AudioNoteCompletionPolicy::SuccessfulOffBlock
+        );
+        assert_eq!(
+            contract.ports,
+            [crate::AudioProcessorNoteInputPort {
+                port_key: "vst3.note-input.0".to_owned(),
+                native_id: 0,
+                native_index: 0,
+                channel_count: 16,
+            }]
+        );
+        assert_eq!(
+            contract.limits,
+            crate::AudioNoteExecutionLimits {
+                input_events: 4096,
+                output_ends: 0,
+                retained_records: 1024,
+                live_voices: 0,
+            }
+        );
+        assert_eq!(
+            derived_note_input_contract(&note_metadata(2), Some(note_reference()), true)
+                .unwrap()
+                .ports[0]
+                .channel_count,
+            2
+        );
+        assert_eq!(
+            derived_note_input_contract(&raw, None, true).unwrap_err(),
+            unavailable("VST3 Note input requires a musical time reference")
+        );
+        assert_eq!(
+            derived_note_input_contract(&raw, None, false).unwrap(),
+            crate::AudioProcessorNoteInputContract::default()
+        );
+        for variant in 0..4 {
+            let mut bad = note_metadata(16);
+            match variant {
+                0 => bad.inputs.as_mut_slice()[0].host_active = false,
+                1 => bad.inputs.as_mut_slice()[0].channel_count = 0,
+                2 => {
+                    bad.inputs.as_mut_slice()[0].role =
+                        super::super::vst3_processing_metadata::Vst3EventBusRole::Auxiliary
+                }
+                _ => bad.outputs = bad.inputs,
+            }
+            assert!(derived_note_input_contract(&bad, Some(note_reference()), true).is_err());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vst3_note_alignment_mismatch_refuses_before_allocation_or_native_binary_access() {
+        let mut payload = payload();
+        payload.event_bus_contract = note_metadata(16);
+        let note_input_contract =
+            derived_note_input_contract(&payload.event_bus_contract, Some(note_reference()), true)
+                .unwrap();
+        let expected =
+            native_worker_lane_profile_for_notes(&payload.parameters, &note_input_contract)
+                .unwrap()
+                .unwrap();
+        let storage = expected.adapter_note_input_storage();
+        let wrong = expected
+            .with_adapter_note_input_storage(crate::NativeHostBufferLayout {
+                alignment: storage.alignment * 2,
+                ..storage
+            })
+            .unwrap();
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: Some(note_reference()),
+            native_lane: Some(wrong),
+            payload: serde_json::to_vec(&payload).unwrap(),
+            plugin_execution_contract: AudioProcessorExecutionContract::new(
+                0,
+                AudioProcessorTail::None,
+                true,
+                true,
+                true,
+                0,
+            )
+            .unwrap(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            note_input_contract,
+            parameter_ids: vec![payload.parameters[0].parameter_id().unwrap()],
+            render_contract: render(),
+        };
+        assert_eq!(
+            Vst3AudioProcessorWorkerFactory
+                .native_worker_lane_resources_for_preparation(&request)
+                .unwrap(),
+            Some(expected)
+        );
+        // The payload points to an unopened, unavailable binary. A later
+        // fingerprint/load/init error cannot satisfy this exact metadata guard.
+        let error = match Vst3AudioProcessorWorkerFactory.prepare_native(request) {
+            Ok(_) => panic!("a different prepared backing alignment was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            invalid("VST3 input storage request differs from prepared metadata")
+        );
+    }
+
+    #[test]
+    fn vst3_note_signal_uses_checked_empty_or_scalar_batch_and_never_replays_failure() {
+        use super::super::protocol::SharedNoteEvent;
+        use std::cell::Cell;
+        let payload = payload();
+        let ids = [payload.parameters[0].parameter_id().unwrap()];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let contract =
+            derived_note_input_contract(&note_metadata(2), Some(note_reference()), true).unwrap();
+        let notes = [
+            SharedNoteEvent {
+                sample_offset: 0,
+                native_id: 73,
+                port_index: 0,
+                channel: 1,
+                key: 61,
+                kind: 1,
+                velocity: 0.75,
+            },
+            SharedNoteEvent {
+                sample_offset: 3,
+                native_id: 73,
+                port_index: 0,
+                channel: 1,
+                key: 61,
+                kind: 0,
+                velocity: 0.25,
+            },
+        ];
+        let parameters = [SharedParameterEvent { lane: 0, sample_offset: 0, value: 0.25 }];
+        for empty in [false, true] {
+            for reject in [false, true] {
+                let mut native = Native { reject_notes: reject, ..Default::default() };
+                let mut pcm = [11.0; 8];
+                let mut scratch = buffers();
+                let mut values = vec![None];
+                let mut last_end = Some(-3);
+                let mut converted = Vec::with_capacity(contract.limits.input_events);
+                let capacity = converted.capacity();
+                let count = Cell::new(0);
+                let refused = Cell::new(false);
+                let result = VstSignalFields {
+                    last_parameter_values: &mut values,
+                    configuration_phase: &NativeConfigurationPhase::Admitted,
+                    payload: &payload,
+                    render: render(),
+                    buffers: &mut scratch,
+                    auxiliary_inputs: &auxiliary,
+                    last_end: &mut last_end,
+                    note_input_contract: &contract,
+                    note_events: &mut converted,
+                }
+                .process(
+                    &mut native,
+                    IsolatedAudioProcessorWorkerBlock::new(
+                        -3,
+                        4,
+                        render(),
+                        &mut pcm,
+                        &auxiliary,
+                        &[],
+                        &ids,
+                        &parameters,
+                    )
+                    .with_musical_time_reference(Some(note_reference()))
+                    .with_note_regions(
+                        &contract,
+                        if empty { &[] } else { &notes },
+                        &mut [],
+                        &count,
+                        &refused,
+                    ),
+                );
+                assert_eq!(native.calls, ["timeline", "parameter", "notes"]);
+                assert_eq!(converted.capacity(), capacity);
+                assert!(
+                    converted.is_empty(),
+                    "no successful or failed batch retained for replay"
+                );
+                assert_eq!(native.notes.len(), if empty { 0 } else { 2 });
+                assert_eq!(
+                    count.get(),
+                    0,
+                    "SuccessfulOffBlock emits no fabricated native Ends"
+                );
+                if !empty {
+                    assert_eq!(native.notes[0].bus_index, 0);
+                    assert_eq!(native.notes[0].sample_offset, 0);
+                    assert_eq!(native.notes[0].flags, 0);
+                    assert_eq!(
+                        native.notes[0].data,
+                        PluginEventData::NoteOn {
+                            channel: 1,
+                            pitch: 61,
+                            tuning: 0.0,
+                            velocity: 0.75,
+                            length: 0,
+                            note_id: 73,
+                        }
+                    );
+                    assert_eq!(native.notes[1].sample_offset, 3);
+                    assert_eq!(
+                        native.notes[1].data,
+                        PluginEventData::NoteOff {
+                            channel: 1,
+                            pitch: 61,
+                            velocity: 0.25,
+                            note_id: 73,
+                            tuning: 0.0,
+                        }
+                    );
+                }
+                if reject {
+                    assert!(matches!(result, Err(AudioProcessorHostError::Process(_))));
+                    assert_eq!(values, [None]);
+                    assert_eq!(last_end, Some(-3));
+                } else {
+                    result.unwrap();
+                    assert_eq!(values, [Some(0.25)]);
+                    assert_eq!(last_end, Some(1));
+                }
+                assert_eq!(pcm, [11.0; 8]);
+            }
+        }
+    }
+
+    #[test]
+    fn vst3_note_late_invalid_channel_refuses_before_timeline_parameters_or_pcm() {
+        use super::super::protocol::SharedNoteEvent;
+        use std::cell::Cell;
+        let payload = payload();
+        let ids = [payload.parameters[0].parameter_id().unwrap()];
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let contract =
+            derived_note_input_contract(&note_metadata(2), Some(note_reference()), true).unwrap();
+        let notes = [
+            SharedNoteEvent {
+                sample_offset: 0,
+                native_id: 73,
+                port_index: 0,
+                channel: 1,
+                key: 61,
+                kind: 1,
+                velocity: 0.75,
+            },
+            SharedNoteEvent {
+                sample_offset: 3,
+                native_id: 73,
+                port_index: 0,
+                channel: 2,
+                key: 61,
+                kind: 0,
+                velocity: 0.25,
+            },
+        ];
+        let mut native = Native::default();
+        let mut pcm = [11.0; 8];
+        let mut scratch = buffers();
+        let mut values = vec![None];
+        let mut last_end = Some(-3);
+        let mut converted = Vec::with_capacity(contract.limits.input_events);
+        let result = VstSignalFields {
+            last_parameter_values: &mut values,
+            configuration_phase: &NativeConfigurationPhase::Admitted,
+            payload: &payload,
+            render: render(),
+            buffers: &mut scratch,
+            auxiliary_inputs: &auxiliary,
+            last_end: &mut last_end,
+            note_input_contract: &contract,
+            note_events: &mut converted,
+        }
+        .process(
+            &mut native,
+            IsolatedAudioProcessorWorkerBlock::new(
+                -3,
+                4,
+                render(),
+                &mut pcm,
+                &auxiliary,
+                &[],
+                &ids,
+                &[],
+            )
+            .with_musical_time_reference(Some(note_reference()))
+            .with_note_regions(
+                &contract,
+                &notes,
+                &mut [],
+                &Cell::new(0),
+                &Cell::new(false),
+            ),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            invalid("VST3 Note batch exceeds the admitted scalar contract")
+        );
+        assert!(native.calls.is_empty());
+        assert!(converted.is_empty());
+        assert_eq!(pcm, [11.0; 8]);
+        assert_eq!(scratch.inputs[0].channels[0], [7.0; 4]);
+        assert_eq!(values, [None]);
+        assert_eq!(last_end, Some(-3));
     }
 
     #[test]
@@ -2514,7 +3105,11 @@ mod musical_effect_tests {
             );
             assert_eq!(
                 resolver.resolve(request().with_note_input_requested(true)).unwrap_err(),
-                unavailable("VST3 Note input is not supported by this adapter")
+                unavailable(if reference.is_none() {
+                    "VST3 Note input requires a musical time reference"
+                } else {
+                    "VST3 Note input requires active Main event bus zero and no event outputs"
+                })
             );
         }
     }
@@ -2550,6 +3145,8 @@ mod musical_effect_tests {
                         buffers: &mut scratch,
                         auxiliary_inputs: &auxiliary,
                         last_end: &mut last_end,
+                        note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
+                        note_events: &mut Vec::new(),
                     }
                     .process(
                         &mut native,
@@ -2641,6 +3238,8 @@ mod musical_effect_tests {
                 buffers: &mut scratch,
                 auxiliary_inputs: &auxiliary,
                 last_end: &mut last_end,
+                note_input_contract: &crate::AudioProcessorNoteInputContract::default(),
+                note_events: &mut Vec::new(),
             }
             .process(
                 &mut native,

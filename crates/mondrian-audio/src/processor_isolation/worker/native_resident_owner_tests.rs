@@ -306,3 +306,70 @@ fn resident_header_fee_enters_sole_root_fixed_grant_before_session_factory_creat
     assert_eq!(exact.resource_footprint(), footprint);
     assert_eq!(creates.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn adapter_note_backing_fee_enters_sole_root_grant_once_before_factory_create() {
+    // Synthetic storage-fee control through the real canonical Root admission;
+    // this is not a canonical VST Note processing or complete heap qualification.
+    let mut sequence = Sequence::new("known adapter Note backing");
+    sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
+    sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+        AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
+    );
+    let creates = Arc::new(AtomicUsize::new(0));
+    let baseline = profile(measured(Layout::new::<ResidentWorker>()));
+    let backing = measured(Layout::array::<vst3_host::PluginEvent>(4096).unwrap());
+    let resolver = ChargedResolver {
+        profile: baseline.with_adapter_note_input_storage(backing).unwrap(),
+        creates: Arc::clone(&creates),
+    };
+    let build = |resolver: &ChargedResolver, grant| {
+        AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+            &sequence,
+            &[],
+            &NoMedia,
+            resolver,
+            render(),
+            None,
+            grant,
+        )
+    };
+    let unlimited = AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX);
+    let runtime = build(&resolver, unlimited).unwrap();
+    let footprint = runtime.resource_footprint();
+    drop(runtime);
+    let no_backing = ChargedResolver { profile: baseline, creates: Arc::clone(&creates) };
+    let uncharged = build(&no_backing, unlimited).unwrap();
+    assert_eq!(
+        footprint.fixed_resident_bytes - uncharged.resource_footprint().fixed_resident_bytes,
+        backing.bytes
+    );
+    drop(uncharged);
+    creates.store(0, Ordering::SeqCst);
+    assert!(matches!(
+        build(
+            &resolver,
+            AudioRuntimeResourceGrant::new(
+                footprint.runtime_occurrences,
+                footprint.fixed_resident_bytes - 1,
+                footprint.prepared_logical_bytes,
+            )
+        ),
+        Err(AudioRuntimeBuildError::ResourceGrantExceeded {
+            category: AudioRuntimeResourceCategory::FixedResidentBytes,
+            ..
+        })
+    ));
+    assert_eq!(creates.load(Ordering::SeqCst), 0);
+    let exact = build(
+        &resolver,
+        AudioRuntimeResourceGrant::new(
+            footprint.runtime_occurrences,
+            footprint.fixed_resident_bytes,
+            footprint.prepared_logical_bytes,
+        ),
+    )
+    .unwrap();
+    assert_eq!(exact.resource_footprint(), footprint);
+    assert_eq!(creates.load(Ordering::SeqCst), 1);
+}

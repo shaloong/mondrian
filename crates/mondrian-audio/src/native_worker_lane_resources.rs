@@ -18,6 +18,8 @@ pub const SCOPED_NATIVE_DSP_STACK_BYTES: usize = 8 * 1024 * 1024;
 pub enum NativeWorkerLaneStorageKind {
     /// The complete retained concrete Adapter Worker Box allocation.
     AdapterResident,
+    /// Persistent scalar Note conversion element storage, separate from its header.
+    AdapterNoteInput,
     /// Main-owned command and reply acknowledgement slots.
     ReaderSlots,
     /// Main-owned job, completion and readiness slots.
@@ -138,6 +140,7 @@ pub enum NativeWorkerLaneResourceError {
 pub struct NativeWorkerLaneResourceProfile {
     owners: NativeWorkerLaneOwnedLayouts,
     control: NativeWorkerControlOverlapLayout,
+    adapter_note_input_storage: NativeHostBufferLayout,
     processor_input_vector_bytes: usize,
     processor_input_com_payload_bytes: usize,
     known_storage_limit_bytes: usize,
@@ -174,11 +177,60 @@ impl NativeWorkerLaneResourceProfile {
         Ok(Self {
             owners,
             control,
+            adapter_note_input_storage: NativeHostBufferLayout { bytes: 0, alignment: 1 },
             processor_input_vector_bytes: 0,
             processor_input_com_payload_bytes: 0,
             known_storage_limit_bytes: bytes,
             additional_session_reservation_bytes,
         })
+    }
+
+    /// Reserve one adapter-owned Note conversion backing. The Vec header is
+    /// already part of AdapterResident; SDK event/COM storage is not covered.
+    /// A zero-byte layout retains its real element alignment.
+    pub fn with_adapter_note_input_storage(
+        mut self,
+        layout: NativeHostBufferLayout,
+    ) -> Result<Self, NativeWorkerLaneResourceError> {
+        validate_layout(NativeWorkerLaneStorageKind::AdapterNoteInput, layout)?;
+        let known = self
+            .known_storage_limit_bytes
+            .checked_sub(self.adapter_note_input_storage.bytes)
+            .and_then(|bytes| bytes.checked_add(layout.bytes))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        let reserved = self
+            .additional_session_reservation_bytes
+            .checked_sub(self.adapter_note_input_storage.bytes)
+            .and_then(|bytes| bytes.checked_add(layout.bytes))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        self.known_storage_limit_bytes = known;
+        self.additional_session_reservation_bytes = reserved;
+        self.adapter_note_input_storage = layout;
+        Ok(self)
+    }
+
+    /// Prepared element layout, not a ninth fixed owner or complete SDK heap.
+    pub const fn adapter_note_input_storage(self) -> NativeHostBufferLayout {
+        self.adapter_note_input_storage
+    }
+
+    /// Compare the actual retained Vec capacity before Ready. Do not replace
+    /// its capacity with its length, or treat zero bytes as alignment one.
+    pub fn admit_adapter_note_input_storage(
+        self,
+        observed: NativeHostBufferLayout,
+    ) -> Result<(), NativeWorkerLaneResourceError> {
+        let owner = NativeWorkerLaneStorageKind::AdapterNoteInput;
+        validate_layout(owner, observed)?;
+        let prepared = self.adapter_note_input_storage;
+        if observed != prepared {
+            return Err(NativeWorkerLaneResourceError::FixedOwnerChanged {
+                owner,
+                prepared,
+                observed,
+            });
+        }
+        Ok(())
     }
 
     /// Add an independently identified persistent processor-input request.
@@ -354,4 +406,93 @@ fn control_layouts(
         (ReplyStorage, control.reply_storage),
         (StagedSeed, control.staged_seed),
     ]
+}
+
+#[cfg(test)]
+mod note_backing_tests {
+    use super::*;
+
+    fn profile() -> NativeWorkerLaneResourceProfile {
+        let zero = NativeHostBufferLayout { bytes: 0, alignment: 1 };
+        NativeWorkerLaneResourceProfile::scoped_main_dsp(
+            NativeWorkerLaneOwnedLayouts {
+                adapter_resident: zero,
+                reader_slots: zero,
+                processing_slots: zero,
+                main_inline: zero,
+                runtime_main_role: zero,
+                runtime_dsp_role: zero,
+                sdk_main_role: zero,
+                sdk_dsp_role: zero,
+            },
+            NativeWorkerControlOverlapLayout {
+                decoded_input: zero,
+                reply_storage: zero,
+                staged_seed: zero,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn adapter_note_backing_charges_capacity_once_and_keeps_zero_alignment_exact() {
+        let baseline = profile();
+        let empty: Vec<vst3_host::PluginEvent> = Vec::new();
+        let zero = NativeHostBufferLayout::for_vector(&empty).unwrap();
+        assert_eq!(zero.bytes, 0);
+        assert_eq!(
+            zero.alignment,
+            std::mem::align_of::<vst3_host::PluginEvent>()
+        );
+        let prepared = baseline.with_adapter_note_input_storage(zero).unwrap();
+        assert_eq!(
+            prepared.additional_session_reservation_bytes(),
+            baseline.additional_session_reservation_bytes()
+        );
+        prepared.admit_adapter_note_input_storage(zero).unwrap();
+        assert!(prepared
+            .admit_adapter_note_input_storage(NativeHostBufferLayout { bytes: 0, alignment: 1 })
+            .is_err());
+
+        let mut events = Vec::<vst3_host::PluginEvent>::new();
+        events.try_reserve_exact(crate::AUDIO_NOTE_EVENTS_PER_BLOCK).unwrap();
+        let actual = NativeHostBufferLayout::for_vector(&events).unwrap();
+        let prepared = prepared.with_adapter_note_input_storage(actual).unwrap();
+        assert_eq!(
+            prepared.additional_session_reservation_bytes()
+                - baseline.additional_session_reservation_bytes(),
+            actual.bytes
+        );
+        assert_eq!(prepared.known_storage_limit_bytes(), actual.bytes);
+        assert_eq!(
+            prepared.with_adapter_note_input_storage(actual).unwrap(),
+            prepared
+        );
+        prepared.admit_adapter_note_input_storage(actual).unwrap();
+        assert!(prepared.admit_adapter_note_input_storage(zero).is_err());
+        assert!(prepared
+            .admit_adapter_note_input_storage(NativeHostBufferLayout {
+                alignment: actual.alignment * 2,
+                ..actual
+            })
+            .is_err());
+        assert_eq!(prepared.owning_layouts(), baseline.owning_layouts());
+        assert_eq!(prepared.processor_input_storage(), (0, 0));
+        assert_eq!(prepared.control_overlap(), baseline.control_overlap());
+    }
+
+    #[test]
+    fn adapter_note_backing_rejects_invalid_layout_and_reservation_overflow() {
+        assert!(profile()
+            .with_adapter_note_input_storage(NativeHostBufferLayout { bytes: 0, alignment: 0 })
+            .is_err());
+        let large = profile().with_processor_input_storage(isize::MAX as usize, 0).unwrap();
+        assert!(matches!(
+            large.with_adapter_note_input_storage(NativeHostBufferLayout {
+                bytes: isize::MAX as usize,
+                alignment: 1
+            }),
+            Err(NativeWorkerLaneResourceError::ExtentOverflow)
+        ));
+    }
 }
