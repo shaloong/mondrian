@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "bounded cold preparation DTO keeps fixed layouts inline without another heap owner"
+)]
 pub(super) enum NativeWorkerLaneWire {
     Inline {},
     Scoped {
