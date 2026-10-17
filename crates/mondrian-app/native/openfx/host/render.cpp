@@ -241,10 +241,32 @@ static bool accepted(OfxStatus status)
   return status == kOfxStatOK || status == kOfxStatReplyDefault;
 }
 
-static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect)
+static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Base& effect,
+                                    const OFX::Host::ImageEffect::ClipBase* source,
+                                    const OFX::Host::ImageEffect::ClipBase* output)
 {
   const int sequential = effect.getProps().getIntProperty(kOfxImageEffectInstancePropSequentialRender);
-  return !effect.temporalAccess() && (sequential == 0 || sequential == 2);
+  return !effect.temporalAccess() && (sequential == 0 || sequential == 2) &&
+         source && output && !source->temporalAccess() && !output->temporalAccess();
+}
+
+static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Descriptor& effect)
+{
+  // Filter admission runs after DescribeInContext, when both required clips exist.
+  // Other optional clips remain disconnected and do not supply images.
+  const auto& clips = effect.getClips();
+  const auto source = clips.find(kOfxImageEffectSimpleSourceClipName);
+  const auto output = clips.find(kOfxImageEffectOutputClipName);
+  return admitsIndependentFrames(effect,
+      source == clips.end() ? nullptr : source->second,
+      output == clips.end() ? nullptr : output->second);
+}
+
+static bool admitsIndependentFrames(const OFX::Host::ImageEffect::Instance& effect)
+{
+  return admitsIndependentFrames(effect,
+      effect.getClip(kOfxImageEffectSimpleSourceClipName),
+      effect.getClip(kOfxImageEffectOutputClipName));
 }
 
 static int loadFrame(MondrianOpenFx::FrameState& state, const void* input,
