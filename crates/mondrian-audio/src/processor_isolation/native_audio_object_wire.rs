@@ -895,7 +895,7 @@ mod native_preflight_snapshot_existing_wire_contracts {
         // Independent byte oracle, not the decoder or a mirrored field helper.
         let mut expected = Vec::new();
         expected.extend_from_slice(b"MAOB");
-        expected.extend_from_slice(&15_u32.to_le_bytes());
+        expected.extend_from_slice(&16_u32.to_le_bytes());
         expected.extend_from_slice(&1_u32.to_le_bytes());
         expected.extend_from_slice(&127_u32.to_le_bytes());
         expected.push(0);
