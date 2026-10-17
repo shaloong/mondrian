@@ -1918,10 +1918,19 @@ impl PluginImpl {
     /// Set up processing with the current configuration. VST3 requires the component to be
     /// **inactive**; every caller either runs before the first activation or deactivates first.
     fn setup_processing(&mut self) -> Result<()> {
+        if self.is_active || self.is_processing {
+            return Err(Error::Other(
+                "processing setup requires an inactive, stopped component".to_string(),
+            ));
+        }
+        // A failed cold preparation must not retain the old start_processing fast path.
+        // The old ProcessData may remain owned, but is unusable until a complete retry.
+        self.applied_setup = None;
         self.bus_activation.event_readiness = None;
         if self.pending_processor_parameter_input()? {
             return Err(Error::PendingParameterDelivery);
         }
+        reconcile_audio_bus_activation(&self.component, &mut self.bus_activation)?;
 
         unsafe {
             // Set up processing
@@ -4555,6 +4564,11 @@ impl PluginInternal for PluginImpl {
             })();
 
             let restore_result = (|| -> Result<()> {
+                // setState can change audio buses even at an unchanged rate/block size.
+                // Reconcile and rebuild while inactive, including after a failed native
+                // apply that may already have changed the component. Never resume after
+                // preparation failure; keep the original apply error primary below.
+                self.setup_processing()?;
                 if was_active {
                     self.activate()?;
                 }
@@ -4828,6 +4842,55 @@ impl PluginImpl {
             Ok(None) // Not an error - single components don't need connection
         }
     }
+}
+
+/// Re-acknowledge this owner's index-scoped audio activation policy after a cold
+/// configuration change. New indices use their current native default; removed
+/// indices receive no callback. This is host ACK state, not an independent active query.
+/// The two local vectors replace the resident inventory only after both sides succeed.
+fn reconcile_audio_bus_activation(
+    component: &ComPtr<IComponent>,
+    activation: &mut BusActivationState,
+) -> Result<()> {
+    let side = |direction: i32, retained: &[bool]| -> Result<Vec<bool>> {
+        // SAFETY: caller owns the live component and enforces inactive/stopped setup.
+        let native_count = unsafe { component.getBusCount(kAudio as i32, direction) };
+        let count = usize::try_from(native_count)
+            .map_err(|_| Error::InterfaceError("negative native audio-bus count".to_string()))?;
+        let mut states = Vec::new();
+        states.try_reserve_exact(count).map_err(|_| {
+            Error::InterfaceError("could not reserve audio-bus activation state".to_string())
+        })?;
+        for index in 0..native_count {
+            let active = if let Some(&active) = retained.get(index as usize) {
+                active
+            } else {
+                // Keep the original default-bus policy for a newly observed index:
+                // unreadable BusInfo means inactive. Channel/arrangement validation
+                // remains with its existing consumers, including prepare_buffers' fallback.
+                let mut info: BusInfo = unsafe { std::mem::zeroed() };
+                (unsafe { component.getBusInfo(kAudio as i32, direction, index, &mut info) })
+                    == kResultOk
+                    && info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0
+            };
+            // Both true and false policies need a fresh ACK: restoring state may
+            // have changed native activation. Never infer an ACK by resizing.
+            let result =
+                unsafe { component.activateBus(kAudio as i32, direction, index, u8::from(active)) };
+            if result != kResultOk {
+                return Err(Error::InterfaceError(format!(
+                    "activateBus failed while preparing audio bus ({direction}, {index}): {result:#x}"
+                )));
+            }
+            states.push(active);
+        }
+        Ok(states)
+    };
+    let inputs = side(kInput as i32, &activation.audio_inputs)?;
+    let outputs = side(kOutput as i32, &activation.audio_outputs)?;
+    activation.audio_inputs = inputs;
+    activation.audio_outputs = outputs;
+    Ok(())
 }
 
 // Both consumers traverse the same live component and retained activation rows.
@@ -10630,5 +10693,603 @@ mod checked_native_note_tests {
             assert_eq!(observed.received[1][0].2, 999);
             assert!(fixture.input.events.lock().unwrap().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unnecessary_cast)]
+mod restored_audio_activation_tests {
+    use super::*;
+    use vst3::Class;
+
+    struct Probe {
+        inputs: Vec<bool>,
+        outputs: Vec<bool>,
+        restored: Option<(Vec<bool>, Vec<bool>)>,
+        bus_calls: Vec<(i32, i32, bool)>,
+        fail_bus: Option<(i32, i32)>,
+        apply_result: tresult,
+        setup_result: tresult,
+        audio_info_failure: bool,
+        audio_channels: i32,
+        arrangement_queries: usize,
+        setups: usize,
+        dsp_calls: usize,
+        active: bool,
+        processing: bool,
+    }
+    struct Component(Arc<Mutex<Probe>>);
+    impl Class for Component {
+        type Interfaces = (IComponent, IAudioProcessor);
+    }
+    impl IPluginBaseTrait for Component {
+        unsafe fn initialize(&self, _: *mut FUnknown) -> tresult {
+            kResultOk
+        }
+        unsafe fn terminate(&self) -> tresult {
+            kResultOk
+        }
+    }
+    impl IComponentTrait for Component {
+        unsafe fn getControllerClassId(&self, _: *mut TUID) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn setIoMode(&self, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getBusCount(&self, media: i32, direction: i32) -> i32 {
+            let p = self.0.lock().unwrap();
+            if media == kEvent as i32 {
+                return i32::from(direction == kInput as i32);
+            }
+            assert_eq!(media, kAudio as i32);
+            if direction == kInput as i32 {
+                p.inputs.len() as i32
+            } else {
+                p.outputs.len() as i32
+            }
+        }
+        unsafe fn getBusInfo(
+            &self,
+            media: i32,
+            direction: i32,
+            index: i32,
+            info: *mut BusInfo,
+        ) -> tresult {
+            let p = self.0.lock().unwrap();
+            if media == kAudio as i32 && p.audio_info_failure {
+                return kResultFalse;
+            }
+            let defaults = if direction == kInput as i32 {
+                &p.inputs
+            } else {
+                &p.outputs
+            };
+            let default_active = if media == kEvent as i32 {
+                if direction != kInput as i32 || index != 0 {
+                    return kResultFalse;
+                }
+                false
+            } else {
+                let Some(&value) = usize::try_from(index).ok().and_then(|i| defaults.get(i)) else {
+                    return kResultFalse;
+                };
+                value
+            };
+            // SAFETY: caller supplies initialized SDK output storage for this COM call.
+            let info = unsafe { &mut *info };
+            *info = unsafe { std::mem::zeroed() };
+            info.mediaType = media;
+            info.direction = direction;
+            info.channelCount = if media == kAudio as i32 {
+                p.audio_channels
+            } else {
+                16
+            };
+            info.busType = if index == 0 {
+                BusTypes_::kMain as i32
+            } else {
+                BusTypes_::kAux as i32
+            };
+            info.flags = if default_active {
+                BusInfo_::BusFlags_::kDefaultActive as u32
+            } else {
+                0
+            };
+            kResultOk
+        }
+        unsafe fn getRoutingInfo(&self, _: *mut RoutingInfo, _: *mut RoutingInfo) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn activateBus(
+            &self,
+            media: i32,
+            direction: i32,
+            index: i32,
+            active: u8,
+        ) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            assert_eq!(
+                media, kAudio as i32,
+                "reconciliation must not reset Event policy"
+            );
+            assert!(
+                !p.active && !p.processing,
+                "activation belongs to cold setup"
+            );
+            let count = if direction == kInput as i32 {
+                p.inputs.len()
+            } else {
+                p.outputs.len()
+            };
+            assert!(
+                index >= 0 && (index as usize) < count,
+                "removed buses receive no native call"
+            );
+            p.bus_calls.push((direction, index, active != 0));
+            if p.fail_bus == Some((direction, index)) {
+                kResultFalse
+            } else {
+                kResultOk
+            }
+        }
+        unsafe fn setActive(&self, active: u8) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            assert!(!p.processing, "stop DSP before changing component activity");
+            p.active = active != 0;
+            kResultOk
+        }
+        unsafe fn setState(&self, _: *mut IBStream) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            assert!(!p.active && !p.processing);
+            if let Some((inputs, outputs)) = p.restored.take() {
+                p.inputs = inputs;
+                p.outputs = outputs;
+            }
+            p.apply_result
+        }
+        unsafe fn getState(&self, _: *mut IBStream) -> tresult {
+            kNotImplemented
+        }
+    }
+    impl IAudioProcessorTrait for Component {
+        unsafe fn setBusArrangements(&self, _: *mut u64, _: i32, _: *mut u64, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getBusArrangement(&self, _: i32, _: i32, arrangement: *mut u64) -> tresult {
+            self.0.lock().unwrap().arrangement_queries += 1;
+            unsafe {
+                *arrangement = 3;
+            }
+            kResultOk
+        }
+        unsafe fn canProcessSampleSize(&self, _: i32) -> tresult {
+            kResultOk
+        }
+        unsafe fn getLatencySamples(&self) -> u32 {
+            0
+        }
+        unsafe fn setupProcessing(&self, _: *mut ProcessSetup) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            assert!(!p.active && !p.processing);
+            p.setups += 1;
+            p.setup_result
+        }
+        unsafe fn setProcessing(&self, processing: u8) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            if processing != 0 {
+                assert!(p.active);
+            }
+            p.processing = processing != 0;
+            kResultOk
+        }
+        unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+            let mut p = self.0.lock().unwrap();
+            assert!(p.active && p.processing);
+            let data = unsafe { &*data };
+            assert_eq!(data.numInputs as usize, p.inputs.len());
+            if p.inputs.is_empty() {
+                assert!(data.inputs.is_null());
+            }
+            p.dsp_calls += 1;
+            kResultOk
+        }
+        unsafe fn getTailSamples(&self) -> u32 {
+            0
+        }
+    }
+
+    // No module is loaded by these controls. Only the real COM-backed PluginImpl
+    // lifecycle is exercised; this wrapper contributes no fake factory or DSP.
+    struct NoModule;
+    impl VstModule for NoModule {
+        fn visit_owned_storage(
+            &self,
+            _: &mut dyn crate::host_storage::HostStorageVisitor,
+        ) -> std::result::Result<(), crate::host_storage::HostStorageError> {
+            Ok(())
+        }
+        fn get_factory(&self) -> Result<*mut IPluginFactory> {
+            panic!("no module factory in COM lifecycle control")
+        }
+        fn path(&self) -> &std::path::Path {
+            std::path::Path::new("COM lifecycle control")
+        }
+    }
+    struct Fixture {
+        plugin: PluginImpl,
+        probe: Arc<Mutex<Probe>>,
+    }
+    impl Fixture {
+        fn new(inputs: Vec<bool>, outputs: Vec<bool>) -> Self {
+            let activation = BusActivationState {
+                audio_inputs: inputs.clone(),
+                audio_outputs: outputs.clone(),
+                event_inputs: vec![EventBusActivation {
+                    role: crate::audio::NativeEventBusRole::Main,
+                    channel_count: 16,
+                    active: true,
+                }],
+                ..BusActivationState::default()
+            };
+            let probe = Arc::new(Mutex::new(Probe {
+                inputs,
+                outputs,
+                restored: None,
+                bus_calls: vec![],
+                fail_bus: None,
+                apply_result: kResultOk,
+                setup_result: kResultOk,
+                audio_info_failure: false,
+                audio_channels: 2,
+                arrangement_queries: 0,
+                setups: 0,
+                dsp_calls: 0,
+                active: false,
+                processing: false,
+            }));
+            let component = ComWrapper::new(Component(Arc::clone(&probe)));
+            let resize = Arc::new(Mutex::new(None));
+            #[cfg(target_os = "linux")]
+            let run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            #[cfg(target_os = "linux")]
+            let frame = create_host_plug_frame(Arc::clone(&resize), Arc::clone(&run_loop));
+            #[cfg(not(target_os = "linux"))]
+            let frame = create_host_plug_frame(Arc::clone(&resize));
+            let mut plugin = PluginImpl {
+                component: component.to_com_ptr::<IComponent>().unwrap(),
+                processor: component.to_com_ptr::<IAudioProcessor>().unwrap(),
+                controller: None,
+                single_component: true,
+                info: PluginInfo {
+                    path: "COM lifecycle control".into(),
+                    name: "control".into(),
+                    vendor: "owned".into(),
+                    version: "1".into(),
+                    category: "Fx".into(),
+                    uid: "control".into(),
+                    audio_inputs: 0,
+                    audio_outputs: 1,
+                    has_midi_input: true,
+                    has_midi_output: false,
+                    has_gui: false,
+                },
+                compatibility: vec![],
+                is_active: false,
+                is_processing: false,
+                sample_rate: 48_000.0,
+                block_size: 4,
+                applied_setup: None,
+                tempo: 120.0,
+                time_sig_numerator: 4,
+                time_sig_denominator: 4,
+                playing: true,
+                process_mode: crate::plugin::ProcessMode::Offline,
+                process_context_requirements: None,
+                prefetchable_support: None,
+                sample_size: ProcessingSampleSize::F32,
+                bus_activation: activation,
+                next_note_id: 1,
+                active_notes: Vec::new(),
+                ordinary_note_counts: [0; MIDI_CHANNEL_COUNT * 128],
+                midi_mapping_cache: MidiMappingCache::default(),
+                program_change_cache: vec![],
+                dirty_caches: DirtyCaches::default(),
+                unit_cache: Mutex::new(None),
+                process_data: None,
+                component_handler: None,
+                connection: None,
+                pending_param_changes: Vec::new(),
+                dropped_param_changes: 0,
+                gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
+                output_param_feedback: Arc::new(ArrayQueue::new(4)),
+                deferred_controller_sync: ArrayQueue::new(4),
+                input_events: create_event_list(),
+                output_events: create_event_list(),
+                chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
+                output_events_owned: Arc::new(ArrayQueue::new(4)),
+                native_editor_owner: crate::plugin::NativeEditorAttachmentOwner::issue().unwrap(),
+                plugin_view: EditorAttachment::Empty,
+                editor_scale_factor: 1.0,
+                plug_frame: frame,
+                editor_resize: resize,
+                #[cfg(target_os = "linux")]
+                run_loop,
+                _module: Box::new(NoModule),
+                _host_app: super::super::com_implementations::create_host_application(),
+                control_thread: thread::current().id(),
+            };
+            plugin.setup_processing().unwrap();
+            Self { plugin, probe }
+        }
+        fn restore(&mut self, inputs: Vec<bool>, outputs: Vec<bool>) -> Result<()> {
+            {
+                let mut p = self.probe.lock().unwrap();
+                p.restored = Some((inputs, outputs));
+                p.bus_calls.clear();
+            }
+            let state = encode_state_snapshot(&StateSnapshot {
+                component: vec![1],
+                controller: None,
+            })
+            .unwrap();
+            self.plugin
+                .load_state_with_context(&state, &StateContext::Project)
+        }
+        fn buffers(&self) -> BusAudioBuffers {
+            BusAudioBuffers::new(&self.plugin.audio_bus_layout().unwrap(), 4, 48_000.0)
+        }
+        fn checked_process(&mut self) -> Result<()> {
+            let mut buffers = self.buffers();
+            self.plugin
+                .process_bus_audio_with_note_events(&mut buffers, &[])
+        }
+        fn assert_unready(&mut self) {
+            assert!(!self.plugin.is_active && !self.plugin.is_processing);
+            assert!(self.plugin.applied_setup.is_none());
+            assert!(self.plugin.bus_activation.event_readiness.is_none());
+            let mut buffers = self.buffers();
+            assert!(matches!(
+                self.plugin.process_buses(&mut buffers),
+                Err(Error::NotProcessing)
+            ));
+            assert!(matches!(
+                self.plugin
+                    .process_bus_audio_with_note_events(&mut buffers, &[]),
+                Err(Error::NotProcessing)
+            ));
+            assert_eq!(self.probe.lock().unwrap().dsp_calls, 0);
+        }
+    }
+
+    #[test]
+    fn audio_restore_keeps_large_zero_channel_and_arrangement_fallback_layouts() {
+        for info_fails in [false, true] {
+            let mut f = Fixture::new(vec![], vec![true]);
+            {
+                let mut p = f.probe.lock().unwrap();
+                p.audio_info_failure = info_fails;
+                p.audio_channels = 0;
+            }
+            f.restore(vec![false; 33], vec![false]).unwrap();
+            assert_eq!(f.plugin.bus_activation.audio_inputs, vec![false; 33]);
+            assert_eq!(f.plugin.bus_activation.audio_outputs, [true]);
+            let data = f.plugin.process_data.as_ref().unwrap();
+            assert_eq!(data.input_bus_buffers.len(), 33);
+            assert_eq!(data.process_data.numInputs, 33);
+            for bus in data
+                .input_bus_buffers
+                .iter()
+                .chain(&data.output_bus_buffers)
+            {
+                assert_eq!(bus.numChannels, if info_fails { 2 } else { 0 });
+            }
+            assert_eq!(
+                f.probe.lock().unwrap().arrangement_queries,
+                if info_fails { 34 } else { 0 }
+            );
+            f.plugin.start_processing().unwrap();
+            f.checked_process().unwrap();
+            assert_eq!(f.probe.lock().unwrap().dsp_calls, 1);
+        }
+    }
+
+    #[test]
+    fn audio_restore_preserves_explicit_activation_and_new_bus_defaults() {
+        let mut f = Fixture::new(vec![true, false], vec![true]);
+        f.plugin
+            .set_bus_active(
+                crate::audio::MediaType::Audio,
+                crate::audio::BusDirection::Input,
+                0,
+                false,
+            )
+            .unwrap();
+        f.plugin
+            .set_bus_active(
+                crate::audio::MediaType::Audio,
+                crate::audio::BusDirection::Input,
+                1,
+                true,
+            )
+            .unwrap();
+        f.plugin.start_processing().unwrap();
+        let event_rows = f.plugin.bus_activation.event_inputs.clone();
+        let setups = f.probe.lock().unwrap().setups;
+        f.restore(vec![false, false, true], vec![false]).unwrap();
+        assert_eq!(f.plugin.bus_activation.audio_inputs, [false, true, true]);
+        assert_eq!(f.plugin.bus_activation.audio_outputs, [true]);
+        assert_eq!(f.plugin.bus_activation.event_inputs, event_rows);
+        let p = f.probe.lock().unwrap();
+        assert_eq!(
+            p.bus_calls,
+            [
+                (kInput as i32, 0, false),
+                (kInput as i32, 1, true),
+                (kInput as i32, 2, true),
+                (kOutput as i32, 0, true)
+            ]
+        );
+        assert_eq!(
+            p.setups,
+            setups + 1,
+            "same rate/block restore still prepares anew"
+        );
+        assert!(p.active && p.processing);
+        drop(p);
+        f.checked_process().unwrap();
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 1);
+    }
+
+    #[test]
+    fn audio_restore_removes_inputs_and_reacknowledges_new_indices() {
+        let mut f = Fixture::new(vec![true, false], vec![true]);
+        f.plugin.start_processing().unwrap();
+        f.restore(vec![], vec![true]).unwrap();
+        assert!(f.plugin.bus_activation.audio_inputs.is_empty());
+        assert_eq!(
+            f.probe.lock().unwrap().bus_calls,
+            [(kOutput as i32, 0, true)]
+        );
+        let data = f.plugin.process_data.as_ref().unwrap();
+        assert_eq!(data.process_data.numInputs, 0);
+        assert!(data.process_data.inputs.is_null());
+        f.checked_process().unwrap();
+        f.restore(vec![false, true], vec![false]).unwrap();
+        assert_eq!(f.plugin.bus_activation.audio_inputs, [false, true]);
+        assert_eq!(
+            f.probe.lock().unwrap().bus_calls,
+            [
+                (kInput as i32, 0, false),
+                (kInput as i32, 1, true),
+                (kOutput as i32, 0, true)
+            ]
+        );
+        f.checked_process().unwrap();
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 2);
+    }
+
+    #[test]
+    fn audio_restore_late_activation_failure_requires_complete_retry() {
+        let mut f = Fixture::new(vec![true, false], vec![true, false]);
+        f.plugin.start_processing().unwrap();
+        let setups = f.probe.lock().unwrap().setups;
+        f.probe.lock().unwrap().fail_bus = Some((kOutput as i32, 1));
+        let error = f
+            .restore(vec![false, true, true], vec![false, true])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("activateBus failed while preparing audio bus"));
+        assert_eq!(
+            f.plugin.bus_activation.audio_inputs,
+            [true, false],
+            "do not publish input prefix after output failure"
+        );
+        assert_eq!(f.plugin.bus_activation.audio_outputs, [true, false]);
+        f.assert_unready();
+        let first_calls = f.probe.lock().unwrap().bus_calls.clone();
+        assert_eq!(first_calls.len(), 5);
+        f.probe.lock().unwrap().bus_calls.clear();
+        assert!(f.plugin.start_processing().is_err());
+        assert_eq!(
+            f.probe.lock().unwrap().bus_calls,
+            first_calls,
+            "retry must repeat every native ACK"
+        );
+        f.assert_unready();
+        {
+            let mut p = f.probe.lock().unwrap();
+            p.fail_bus = None;
+            p.bus_calls.clear();
+        }
+        f.plugin.start_processing().unwrap();
+        assert_eq!(f.probe.lock().unwrap().bus_calls, first_calls);
+        assert_eq!(f.probe.lock().unwrap().setups, setups + 1);
+        assert_eq!(f.plugin.bus_activation.audio_inputs, [true, false, true]);
+        f.checked_process().unwrap();
+    }
+
+    #[test]
+    fn audio_restore_setup_failure_cannot_reuse_old_process_data() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        f.plugin.start_processing().unwrap();
+        let old_data = &**f.plugin.process_data.as_ref().unwrap() as *const HostProcessData;
+        f.probe.lock().unwrap().setup_result = kResultFalse;
+        let error = f.restore(vec![], vec![true]).unwrap_err();
+        assert!(error.to_string().contains("Failed to setup processing"));
+        assert_eq!(
+            &**f.plugin.process_data.as_ref().unwrap() as *const HostProcessData,
+            old_data
+        );
+        f.assert_unready();
+        assert!(
+            f.plugin.start_processing().is_err(),
+            "must not resume via the old applied_setup"
+        );
+        f.assert_unready();
+        let setups = f.probe.lock().unwrap().setups;
+        f.probe.lock().unwrap().setup_result = kResultOk;
+        f.plugin.start_processing().unwrap();
+        assert_eq!(f.probe.lock().unwrap().setups, setups + 1);
+        assert_eq!(
+            f.plugin
+                .process_data
+                .as_ref()
+                .unwrap()
+                .process_data
+                .numInputs,
+            0
+        );
+        f.checked_process().unwrap();
+    }
+
+    #[test]
+    fn audio_restore_preserves_apply_error_before_preparation_error() {
+        for activation_fails in [false, true] {
+            let mut f = Fixture::new(vec![true], vec![true]);
+            f.plugin.start_processing().unwrap();
+            {
+                let mut p = f.probe.lock().unwrap();
+                p.apply_result = kResultFalse;
+                p.fail_bus = activation_fails.then_some((kOutput as i32, 0));
+            }
+            let error = f.restore(vec![], vec![true]).unwrap_err().to_string();
+            assert!(error.starts_with("Failed to restore component state (setState:"));
+            if activation_fails {
+                assert!(error.contains("; additionally failed to restore plugin lifecycle: VST3 interface error: activateBus failed"));
+                f.assert_unready();
+            } else {
+                assert!(!error.contains("additionally"));
+                assert!(f.plugin.is_active && f.plugin.is_processing);
+                assert_eq!(
+                    f.plugin
+                        .process_data
+                        .as_ref()
+                        .unwrap()
+                        .process_data
+                        .numInputs,
+                    0
+                );
+                assert!(
+                    f.plugin.bus_activation.event_readiness.is_none(),
+                    "failed apply does not grant checked readiness"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_setup_requires_an_inactive_stopped_component() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        f.plugin.activate().unwrap();
+        f.probe.lock().unwrap().bus_calls.clear();
+        assert!(f.plugin.setup_processing().is_err());
+        assert!(f.plugin.applied_setup.is_some());
+        assert!(f.probe.lock().unwrap().bus_calls.is_empty());
+        f.plugin.start_processing().unwrap();
+        assert!(f.plugin.setup_processing().is_err());
+        assert!(f.plugin.is_active && f.plugin.is_processing);
+        assert!(f.probe.lock().unwrap().bus_calls.is_empty());
     }
 }
