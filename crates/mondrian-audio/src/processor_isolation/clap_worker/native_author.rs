@@ -585,7 +585,9 @@ mod observation_closure_contracts {
             );
             let events = project(&prefix, &[descriptor(false)], &facts).unwrap();
             assert_eq!(events.len(), 1);
-            let Event::ParameterValuesRescanned { kind, values } = &events[0] else {
+            let crate::NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values } =
+                &events[0]
+            else {
                 panic!("original rescan order");
             };
             assert_eq!(*kind, expected);
