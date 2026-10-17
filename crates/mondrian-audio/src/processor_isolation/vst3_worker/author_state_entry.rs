@@ -23,7 +23,23 @@ impl PreparedAuthorEntry {
 }
 
 impl Vst3Worker {
-    fn author_entry_source_closed(
+    pub(super) fn selected_terminal_delivery_matches(&self, request: &Request<'_>) -> bool {
+        let Source::SelectedTerminal { revision } = request.source else {
+            return false;
+        };
+        request.format == super::super::NativeConfigurationFormat::Vst3ComponentAndController
+            && matches!(&self.native_author_delivery,
+                Some(native_author::PendingDelivery::Delivered {
+                    binding, revision: retained_revision,
+                    configuration: Some(configuration),
+                    request_cohort: None,
+                    rescan_witness: None,
+                }) if *binding == request.binding
+                    && *retained_revision == revision.get()
+                    && configuration.bytes() == request.configuration)
+    }
+
+    pub(super) fn author_entry_source_closed(
         &self,
         request: &Request<'_>,
     ) -> Result<bool, AudioProcessorHostError> {
@@ -48,14 +64,7 @@ impl Vst3Worker {
         Ok(match request.source {
             Source::SelectedTerminal { revision } => {
                 source.revision() == revision.get()
-                    && matches!(&self.native_author_delivery,
-                        Some(native_author::PendingDelivery::Delivered {
-                            binding, revision: retained_revision,
-                            configuration: Some(configuration),
-                            ..
-                        }) if *binding == request.binding
-                            && *retained_revision == revision.get()
-                            && configuration.bytes() == request.configuration)
+                    && self.selected_terminal_delivery_matches(request)
             }
             Source::CanonicalPeer { revision } => {
                 source.revision() == revision && self.native_author_delivery.is_none()
@@ -158,13 +167,9 @@ impl Vst3Worker {
         if !self.author_entry_source_closed(&request)? {
             return Ok(Outcome::Refused(Refusal::SourcePending));
         }
-        self.native_binding = None;
-        self.last_end = None;
-        let retired_seed = self.payload.state.replace(accepted);
-        // This is the SAME ordinary real state-entry loader, after DSP join.
-        // Old component/controller/module are retired before fresh construction.
-        self.rebuild_native_state()?;
-        drop(retired_seed);
+        // Move the one admitted owner into the ordinary loader. It rechecks
+        // the old receipt/source before changing even the cold seed or lease.
+        self.rebuild_native_state(Some((&request, accepted)))?;
         let object = self
             .native_audio_object_observation()?
             .ok_or_else(|| unavailable("real prepared native object has no incarnation"))?;

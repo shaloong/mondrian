@@ -1405,7 +1405,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         self.native_binding = None;
         self.close_native_editor_owner()?;
         self.prepared_author_entry = None;
-        self.rebuild_native_state()?;
+        self.rebuild_native_state(None)?;
         if let Some(request) = self.pending_reprepare() {
             return Err(AudioProcessorHostError::ReprepareRequired(request));
         }
@@ -2367,10 +2367,32 @@ impl Vst3Worker {
     }
 
     /// Sole native reload used by ordinary Enter and explicit author preparation.
-    fn rebuild_native_state(&mut self) -> Result<(), AudioProcessorHostError> {
+    fn rebuild_native_state(
+        &mut self,
+        author_entry: Option<(&crate::NativeAudioAuthorStateEntryRequest<'_>, Vec<u8>)>,
+    ) -> Result<(), AudioProcessorHostError> {
         self.require_delivered_parameter_input()?;
-        // Pure refusal above preserves the author lease. Native retirement
-        // starts here, so even a subsequent partial failure cannot retain it.
+        let (author_request, retired_seed) = match author_entry {
+            Some((request, accepted)) => {
+                // This is the last old-owner check, before changing the seed,
+                // binding, cursor or native incarnation. A borrowed request
+                // cannot bypass the actual retained receipt and Source.
+                if accepted.as_slice() != request.configuration
+                    || self.prepared_author_entry.is_some()
+                    || !self.author_binding_current(request.binding)?
+                    || !self.author_entry_source_closed(request)?
+                {
+                    return Err(AudioProcessorHostError::StateEntry(
+                        "VST3 author state-entry source changed before retirement".to_owned(),
+                    ));
+                }
+                self.last_end = None;
+                (Some(request), self.payload.state.replace(accepted))
+            }
+            None => (None, None),
+        };
+        // Pure refusal above preserves the author lease and cold seed. Native
+        // retirement starts here; subsequent partial failure is terminal.
         self.native_binding = None;
         self.initial_signal_phase = InitialSignalPhase::Entered;
         self.last_parameter_values.fill(None);
@@ -2436,14 +2458,34 @@ impl Vst3Worker {
         // Install before inspecting callbacks. Refused fresh source/cohorts stay
         // on this actual object rather than being dropped/reloaded to erase them.
         self.plugin = Some(fresh);
-        if matches!((previous_owner, fresh_owner), (Some(old), Some(new))
-            if new.serial() > old.serial())
-            && !self.service_fresh_parameter_values()
+        if let Some(request) = author_request {
+            let object = self.native_audio_object_observation()?.ok_or_else(|| {
+                AudioProcessorHostError::StateEntry(
+                    "VST3 author state-entry has no fresh native incarnation".to_owned(),
+                )
+            })?;
+            if object.process_id() != request.binding.expected_object.process_id()
+                || object.object_serial() <= request.binding.expected_object.object_serial()
+                || !matches!((previous_owner, fresh_owner), (Some(old), Some(new))
+                    if old.serial() == request.binding.expected_object.object_serial()
+                        && new.serial() == object.object_serial())
+            {
+                return Err(AudioProcessorHostError::StateEntry(
+                    "VST3 author state-entry did not create a fresh same-child incarnation"
+                        .to_owned(),
+                ));
+            }
+        }
+        if (author_request.is_some()
+            || matches!((previous_owner, fresh_owner), (Some(old), Some(new))
+                if new.serial() > old.serial()))
+            && !self.service_fresh_parameter_values(author_request)
         {
             return Err(AudioProcessorHostError::StateEntry(
                 "VST3 fresh initial parameter source was refused".to_owned(),
             ));
         }
+        drop(retired_seed);
         Ok(())
     }
 }

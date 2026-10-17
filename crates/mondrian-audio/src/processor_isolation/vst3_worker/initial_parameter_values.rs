@@ -21,7 +21,7 @@ impl Vst3Worker {
         {
             return false;
         }
-        if !self.service_fresh_parameter_values() {
+        if !self.service_fresh_parameter_values(None) {
             return false;
         }
         // Also closes a zero-work initial window before native GUI is authorized.
@@ -31,11 +31,27 @@ impl Vst3Worker {
 
     /// Fresh loader calls only after proving a strictly new native incarnation.
     #[cfg(target_os = "windows")]
-    pub(super) fn service_fresh_parameter_values(&mut self) -> bool {
+    pub(super) fn service_fresh_parameter_values(
+        &mut self,
+        author_entry: Option<&crate::NativeAudioAuthorStateEntryRequest<'_>>,
+    ) -> bool {
+        // The only retained delivery exception belongs to the OLD incarnation.
+        // Its original request is not permission by itself: match the full
+        // None-prefix receipt and the installed actual fresh object again.
+        let retained_old_entry = author_entry.is_some_and(|request| {
+            self.selected_terminal_delivery_matches(request)
+                && self.payload.state.as_deref() == Some(request.configuration)
+                && request.binding.expected_object.process_id().get() == std::process::id()
+                && self.plugin.as_ref().is_some_and(|plugin| {
+                    plugin.native_editor_attachment_owner().is_some_and(|owner| {
+                        owner.serial() > request.binding.expected_object.object_serial()
+                    })
+                })
+        });
         if !matches!(
             self.configuration_phase,
             super::super::native_configuration_control::NativeConfigurationPhase::Admitted
-        ) || self.native_author_delivery.is_some()
+        ) || (self.native_author_delivery.is_some() && !retained_old_entry)
             || self.last_parameter_values.iter().any(Option::is_some)
         {
             return false;
@@ -97,7 +113,10 @@ impl Vst3Worker {
     // Inline platforms retain their existing flags4-only consumer. No scoped
     // storage grant or newly supported baseline transfer is invented here.
     #[cfg(not(target_os = "windows"))]
-    pub(super) fn service_fresh_parameter_values(&mut self) -> bool {
+    pub(super) fn service_fresh_parameter_values(
+        &mut self,
+        _author_entry: Option<&crate::NativeAudioAuthorStateEntryRequest<'_>>,
+    ) -> bool {
         if !matches!(
             self.configuration_phase,
             super::super::native_configuration_control::NativeConfigurationPhase::Admitted

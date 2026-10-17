@@ -1711,3 +1711,387 @@ fn native_canonical_peer_prepared_entry_keeps_author_flush_eligible() {
     // CanonicalPeer is a real non-awaiting Some entry, not a simulated or
     // dynamically qualified SelectedTerminal -> reentered-Ack sequence.
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct SelectedEntryDeliverySnapshot {
+    binding: crate::NativeAudioObjectBindRequest,
+    revision: u64,
+    cohort: Option<crate::NativeRequestCohort>,
+    witness: Option<vst3_host::plugin::RestartSourceWitness>,
+    configuration: Vec<u8>,
+    address: usize,
+    capacity: usize,
+}
+fn selected_entry_delivery_snapshot(worker: &Vst3Worker) -> SelectedEntryDeliverySnapshot {
+    let Some(super::native_author::PendingDelivery::Delivered {
+        binding,
+        revision,
+        request_cohort,
+        rescan_witness,
+        configuration: Some(configuration),
+    }) = &worker.native_author_delivery
+    else {
+        panic!("the original actual coherent delivery must remain owned");
+    };
+    SelectedEntryDeliverySnapshot {
+        binding: *binding,
+        revision: *revision,
+        cohort: *request_cohort,
+        witness: *rescan_witness,
+        configuration: configuration.bytes().to_vec(),
+        address: configuration.bytes().as_ptr() as usize,
+        capacity: configuration.retained_capacity(),
+    }
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode14 SDK fixture under native Job runner"]
+fn native_selected_terminal_keeps_old_delivery_through_fresh_initial_input_and_reentered_ack() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorStateEntryOutcome as Outcome,
+        NativeAudioAuthorStateEntryRequest as Request, NativeAudioAuthorStateEntrySource as Source,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    let mut worker = prepare(0.375, 0);
+    worker.enter_state(73).unwrap();
+    let old = worker.native_audio_object_observation().unwrap().unwrap();
+    let binding = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: old,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(binding).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    // Legitimate late restore-time Value-only callback, not getter reentry or
+    // a fabricated delivery. Apply its real feedback on the original DSP role.
+    worker.plugin.as_mut().unwrap().load_state(&state(0.375, 14)).unwrap();
+    {
+        let mut roles = worker.split_native_processing().unwrap();
+        std::thread::scope(|scope| {
+            let processing = &mut roles.processing;
+            assert_eq!(
+                scope
+                    .spawn(move || processing.flush_native_author_parameters())
+                    .join()
+                    .unwrap()
+                    .unwrap(),
+                crate::NativeAudioAuthorParameterFlushOutcome::Flushed
+            );
+        });
+    }
+    let actual = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    let Delivery::Delivered(delivery) = actual.author.unwrap().delivery else {
+        panic!("real closed Value-only Source must produce a coherent delivery");
+    };
+    assert_eq!(delivery.request_cohort(), None);
+    assert_eq!(
+        delivery.completion(),
+        mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+    );
+    assert_eq!(delivery.events().len(), 1);
+    let retained = selected_entry_delivery_snapshot(&worker);
+    assert_eq!(retained.cohort, None);
+    assert_eq!(retained.witness, None);
+    let configuration = delivery.configuration().unwrap();
+    assert_eq!(configuration.len(), 96);
+    let revision = std::num::NonZeroU64::new(delivery.revision()).unwrap();
+    let seed = worker.payload.state.clone();
+    let cursor = worker.last_end;
+    let source = rescan_source_snapshot(&worker);
+    assert!(source.0.closed_empty());
+    assert_eq!(source.0.revision(), revision.get());
+    assert!(!source.2.unwrap().pending());
+    assert!(
+        !worker.service_fresh_parameter_values(None),
+        "ordinary admission cannot ignore A"
+    );
+    let before = audit(&worker); // Old input is already genuinely delivered.
+                                 // Exercise the loader's own final proof directly: none of these requests
+                                 // may replace even the cold seed before rejecting the old-owner mismatch.
+    for case in ["binding", "revision", "configuration", "accepted"] {
+        let mut changed = configuration.to_vec();
+        changed[36] ^= 1;
+        let accepted = if matches!(case, "configuration" | "accepted") {
+            changed.clone()
+        } else {
+            configuration.to_vec()
+        };
+        let request = Request {
+            binding: if case == "binding" {
+                crate::NativeAudioObjectBindRequest {
+                    binding: mondrian_core::AudioProcessorBindingId::new(),
+                    ..binding
+                }
+            } else {
+                binding
+            },
+            source: Source::SelectedTerminal {
+                revision: if case == "revision" {
+                    std::num::NonZeroU64::new(revision.get().checked_add(1).unwrap()).unwrap()
+                } else {
+                    revision
+                },
+            },
+            format: super::super::NativeConfigurationFormat::Vst3ComponentAndController,
+            configuration: if case == "configuration" {
+                &changed
+            } else {
+                configuration
+            },
+        };
+        assert!(
+            matches!(worker.rebuild_native_state(Some((&request, accepted))),
+            Err(AudioProcessorHostError::StateEntry(detail))
+                if detail == "VST3 author state-entry source changed before retirement"),
+            "case={case}"
+        );
+        assert_eq!(worker.payload.state, seed, "case={case}");
+        assert_eq!(worker.last_end, cursor, "case={case}");
+        assert_eq!(
+            worker.native_binding.unwrap().binding(),
+            binding.binding,
+            "case={case}"
+        );
+        assert_eq!(
+            worker.native_audio_object_observation().unwrap(),
+            Some(old),
+            "case={case}"
+        );
+        assert_eq!(rescan_source_snapshot(&worker), source, "case={case}");
+        assert_eq!(
+            selected_entry_delivery_snapshot(&worker),
+            retained,
+            "case={case}"
+        );
+    }
+    let unchanged = audit(&worker);
+    assert_eq!(
+        (
+            unchanged.process,
+            unchanged.metadata,
+            unchanged.values,
+            unchanged.setters,
+            unchanged.wrong_thread
+        ),
+        (
+            before.process,
+            before.metadata,
+            before.values,
+            before.setters,
+            0
+        )
+    );
+    let request = Request {
+        binding,
+        source: Source::SelectedTerminal { revision },
+        format: super::super::NativeConfigurationFormat::Vst3ComponentAndController,
+        configuration,
+    };
+    let Outcome::Prepared(receipt) = worker.prepare_native_author_state_entry(request).unwrap()
+    else {
+        panic!("a real retained None-prefix must prepare its new incarnation");
+    };
+    let fresh = worker.native_audio_object_observation().unwrap().unwrap();
+    assert_eq!(fresh, receipt.object());
+    assert_eq!(fresh.process_id(), old.process_id());
+    assert!(fresh.object_serial() > old.object_serial());
+    assert_eq!(selected_entry_delivery_snapshot(&worker), retained);
+    assert_eq!(worker.payload.state.as_deref(), Some(configuration));
+    assert_eq!(worker.last_end, None);
+    let fresh_source = rescan_source_snapshot(&worker);
+    assert!(fresh_source.0.closed_empty());
+    assert!(!fresh_source.2.unwrap().pending());
+    let assert_input_held = |worker: &Vst3Worker| {
+        assert!(worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap());
+        assert!(matches!(
+            worker.plugin.as_ref().unwrap().save_state(),
+            Err(vst3_host::Error::PendingParameterDelivery)
+        ));
+    };
+    assert_input_held(&worker); // No state audit while the actual initial COM point is pending.
+    let installed = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: fresh,
+    };
+    assert!(matches!(
+        worker.bind_native_audio_object(installed).unwrap(),
+        crate::NativeAudioObjectBindOutcome::Bound(_)
+    ));
+    assert!(!author_flush_eligible(&mut worker, installed));
+    assert_input_held(&worker);
+    let ack = crate::NativeAudioReenteredAuthorAcknowledgement {
+        preparation: receipt,
+        installed_binding: installed,
+    };
+    let mut wrong_receipt = receipt;
+    wrong_receipt.configuration_sha256[0] ^= 1;
+    for wrong in [
+        crate::NativeAudioReenteredAuthorAcknowledgement { preparation: wrong_receipt, ..ack },
+        crate::NativeAudioReenteredAuthorAcknowledgement { installed_binding: binding, ..ack },
+    ] {
+        let refused = worker
+            .poll_native_observations(Consumption::AcknowledgeReenteredAuthor(wrong))
+            .unwrap();
+        assert!(matches!(
+            refused.author.unwrap().delivery,
+            Delivery::Refused(crate::NativeAudioAuthorRefusal::StaleDelivery)
+        ));
+        assert_eq!(selected_entry_delivery_snapshot(&worker), retained);
+        assert_eq!(rescan_source_snapshot(&worker), fresh_source);
+        assert!(worker.prepared_author_entry.as_ref().unwrap().awaiting_ack());
+        assert_input_held(&worker);
+    }
+    let accepted = worker
+        .poll_native_observations(Consumption::AcknowledgeReenteredAuthor(ack))
+        .unwrap();
+    assert_eq!(accepted.object, Some(fresh));
+    assert_eq!(
+        accepted.author.unwrap().delivery,
+        Delivery::ReenteredAcknowledged(ack)
+    );
+    assert!(worker.native_author_delivery.is_none());
+    assert!(!worker.prepared_author_entry.as_ref().unwrap().awaiting_ack());
+    assert!(author_flush_eligible(&mut worker, installed));
+    assert_input_held(&worker);
+    let repeated = worker
+        .poll_native_observations(Consumption::AcknowledgeReenteredAuthor(ack))
+        .unwrap();
+    assert!(matches!(
+        repeated.author.unwrap().delivery,
+        Delivery::Refused(crate::NativeAudioAuthorRefusal::StaleDelivery)
+    ));
+    assert_eq!(rescan_source_snapshot(&worker), fresh_source);
+    assert_input_held(&worker);
+    worker.enter_state(73).unwrap();
+    assert_input_held(&worker);
+    assert_eq!(
+        worker.native_audio_object_observation().unwrap(),
+        Some(fresh)
+    );
+    let render = worker.render;
+    let ids = [worker.payload.parameters[0].parameter_id().unwrap()];
+    let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+    let mut pcm = [1.0; 8];
+    {
+        let mut roles = worker.split_native_processing().unwrap();
+        std::thread::scope(|scope| {
+            let processing = &mut roles.processing;
+            let pcm = &mut pcm;
+            let auxiliary = &auxiliary;
+            let ids = &ids;
+            scope
+                .spawn(move || {
+                    processing.process(IsolatedAudioProcessorWorkerBlock::new(
+                        73,
+                        4,
+                        render,
+                        pcm,
+                        auxiliary,
+                        &[],
+                        ids,
+                        &[],
+                    ))
+                })
+                .join()
+                .unwrap()
+                .unwrap();
+        });
+    }
+    assert_eq!(pcm, [0.75; 8]);
+    assert_eq!(worker.last_end, Some(77));
+    assert!(!worker.plugin.as_ref().unwrap().pending_processor_parameter_input().unwrap());
+    let after = audit(&worker); // First legal audit of this actual fresh object.
+    assert_eq!((after.process, after.wrong_thread), (1, 0));
+    // The fixed ABI exposes Process count, not a per-point counter. The pending
+    // input transition and SDK initial-COM controls do not become a new point audit.
+    assert_eq!(
+        worker.native_audio_object_observation().unwrap(),
+        Some(fresh)
+    );
+    assert_eq!(worker.payload.state.as_deref(), Some(configuration));
+    assert_eq!(rescan_source_snapshot(&worker), fresh_source);
+}
+
+#[test]
+#[ignore = "requires rebuilt owned mode13 SDK fixture under native Job runner"]
+fn native_externally_retired_rescan_cannot_enter_selected_terminal_rebuild() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioAuthorStateEntryOutcome as Outcome,
+        NativeAudioAuthorStateEntryRefusal as Refusal,
+        NativeAudioAuthorStateEntryRequest as Request, NativeAudioAuthorStateEntrySource as Source,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    let (mut worker, binding) = entered_rescan_worker();
+    let _ = late_rescan_dsp(&mut worker, &[(2, 0.75)]);
+    let collected = worker.poll_native_observations(Consumption::DrainAuthor(binding)).unwrap();
+    let Delivery::Delivered(delivery) = collected.author.unwrap().delivery else {
+        panic!("a real exact-4 source must retain its witness");
+    };
+    let retained = selected_entry_delivery_snapshot(&worker);
+    let witness = retained.witness.unwrap();
+    assert_eq!(delivery.request_cohort(), retained.cohort);
+    assert!(retained.cohort.is_some());
+    assert!(worker.plugin.as_mut().unwrap().retire_restart_cohort(witness.cohort()).unwrap());
+    let source = rescan_source_snapshot(&worker);
+    assert!(source.0.closed_empty());
+    assert!(!source.2.unwrap().pending());
+    assert!(worker.pending_reprepare().is_none());
+    let seed = worker.payload.state.clone();
+    let cursor = worker.last_end;
+    let phase = worker.initial_signal_phase;
+    let values = worker.last_parameter_values.clone();
+    let object = worker.native_audio_object_observation().unwrap();
+    let before = audit(&worker); // Real DSP/controller delivery completed before capture.
+    let request = Request {
+        binding,
+        source: Source::SelectedTerminal {
+            revision: std::num::NonZeroU64::new(delivery.revision()).unwrap(),
+        },
+        format: super::super::NativeConfigurationFormat::Vst3ComponentAndController,
+        configuration: delivery.configuration().unwrap(),
+    };
+    assert!(matches!(
+        worker.prepare_native_author_state_entry(request).unwrap(),
+        Outcome::Refused(Refusal::SourcePending)
+    ));
+    let request = Request {
+        binding,
+        source: Source::SelectedTerminal {
+            revision: std::num::NonZeroU64::new(delivery.revision()).unwrap(),
+        },
+        format: super::super::NativeConfigurationFormat::Vst3ComponentAndController,
+        configuration: delivery.configuration().unwrap(),
+    };
+    assert!(
+        matches!(worker.rebuild_native_state(Some((&request, request.configuration.to_vec()))),
+        Err(AudioProcessorHostError::StateEntry(detail))
+            if detail == "VST3 author state-entry source changed before retirement")
+    );
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+    assert_eq!(worker.native_binding.unwrap().binding(), binding.binding);
+    assert_eq!(worker.payload.state, seed);
+    assert_eq!(worker.last_end, cursor);
+    assert_eq!(worker.initial_signal_phase, phase);
+    assert_eq!(worker.last_parameter_values, values);
+    assert!(worker.prepared_author_entry.is_none());
+    assert_eq!(selected_entry_delivery_snapshot(&worker), retained);
+    assert_eq!(rescan_source_snapshot(&worker), source);
+    let after = audit(&worker);
+    assert_eq!(
+        (
+            after.process,
+            after.metadata,
+            after.values,
+            after.setters,
+            after.wrong_thread
+        ),
+        (
+            before.process,
+            before.metadata,
+            before.values,
+            before.setters,
+            0
+        )
+    );
+}
