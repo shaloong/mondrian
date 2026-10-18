@@ -1139,6 +1139,8 @@ struct RenderQueueState {
 
 struct RenderWorkQueue {
     state: Mutex<RenderQueueState>,
+    #[cfg(test)]
+    completion_publications: std::sync::atomic::AtomicUsize,
     scheduling: Mutex<AudioPlaybackProducerScheduling>,
     wake: Condvar,
     pcm_capacity: usize,
@@ -1157,6 +1159,8 @@ impl RenderWorkQueue {
                 pending: VecDeque::with_capacity(pcm_capacity + MAX_PENDING_NATIVE_WORK),
                 stopped: false,
             }),
+            #[cfg(test)]
+            completion_publications: std::sync::atomic::AtomicUsize::new(0),
             wake: Condvar::new(),
             scheduling: Mutex::new(AudioPlaybackProducerScheduling::Unregistered),
             pcm_capacity,
@@ -4815,6 +4819,8 @@ fn run_render_worker(
                 {
                     break;
                 }
+                #[cfg(test)]
+                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeEditor(work) => {
@@ -4901,6 +4907,8 @@ fn run_render_worker(
                 {
                     break;
                 }
+                #[cfg(test)]
+                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeObservations(work) => {
@@ -4976,6 +4984,8 @@ fn run_render_worker(
                 {
                     break;
                 }
+                #[cfg(test)]
+                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeOwnerBindings(work) => {
@@ -5065,6 +5075,8 @@ fn run_render_worker(
                 {
                     break;
                 }
+                #[cfg(test)]
+                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
         };
@@ -5114,6 +5126,8 @@ fn run_render_worker(
         {
             break;
         }
+        #[cfg(test)]
+        worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
     }
     RENDER_WORKER_TERMINAL_NORMAL
 }
@@ -10404,6 +10418,19 @@ mod tests {
             apply_entered: AtomicBool,
             apply_release: AtomicBool,
             gated: bool,
+            policy_queries: AtomicUsize,
+            policy_gated: AtomicBool,
+            output_shutdown_started: Arc<AtomicBool>,
+            dropped_on: Arc<Mutex<Option<(thread::ThreadId, bool)>>>,
+            request_drops: Arc<Mutex<Vec<thread::ThreadId>>>,
+        }
+        impl Drop for Renderer {
+            fn drop(&mut self) {
+                *self.dropped_on.lock() = Some((
+                    thread::current().id(),
+                    !self.output_shutdown_started.load(Ordering::Acquire),
+                ));
+            }
         }
         impl Renderer {
             fn new(gated: bool) -> Arc<Self> {
@@ -10422,6 +10449,11 @@ mod tests {
                     apply_entered: AtomicBool::new(false),
                     apply_release: AtomicBool::new(false),
                     gated,
+                    policy_queries: AtomicUsize::new(0),
+                    policy_gated: AtomicBool::new(false),
+                    output_shutdown_started: Arc::new(AtomicBool::new(false)),
+                    dropped_on: Arc::new(Mutex::new(None)),
+                    request_drops: Arc::new(Mutex::new(Vec::new())),
                 })
             }
             fn address(&self) -> Target {
@@ -10572,12 +10604,26 @@ mod tests {
             target: Target,
             retry: bool,
         }
+        impl Drop for Request {
+            fn drop(&mut self) {
+                self.renderer.request_drops.lock().push(thread::current().id());
+            }
+        }
         impl AudioPcmNativeAuthorHandoff for Request {
             fn continuity_policy(
                 &self,
                 _: &ExecutionCancellationToken,
             ) -> Result<AudioPcmNativeAuthorHandoffContinuity, AudioPcmNativeAuthorHandoffRefusal>
             {
+                self.renderer.policy_queries.fetch_add(1, Ordering::AcqRel);
+                if self.renderer.policy_gated.load(Ordering::Acquire) {
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while !self.renderer.apply_release.load(Ordering::Acquire)
+                        && Instant::now() < deadline
+                    {
+                        thread::yield_now();
+                    }
+                }
                 Ok(if self.renderer.state_entry.load(Ordering::Acquire) {
                     AudioPcmNativeAuthorHandoffContinuity::StateEntryRequired
                 } else {
@@ -10715,6 +10761,214 @@ mod tests {
             poll_until_settled(&mut playback, sample_position(0));
             assert_eq!(renderer.enters.load(Ordering::Acquire), 1);
             (playback, output, renderer, target)
+        }
+
+        // Actual Media producer/retirement threads and Core installation with
+        // the portable adapter above; no SDK/plugin or native voice qualification.
+        fn completion_owner_shutdown(closed_receiver: bool) {
+            let renderer = Renderer::new(false);
+            let (output, _) = fake_output_with_control(FakeOutputControl {
+                shutdown_started: Some(Arc::clone(&renderer.output_shutdown_started)),
+                ..Default::default()
+            });
+            let mut playback =
+                AudioPlayback::with_output(test_config(), output).expect("actual Media workers");
+            playback
+                .prepare(
+                    sample_position(0),
+                    renderer.clone(),
+                    AudioPcmContinuityModel::GenerationState,
+                )
+                .expect("actual retained renderer");
+            settle_native_installation(&mut playback);
+            let target = renderer.address();
+            poll_until_settled(&mut playback, sample_position(0));
+            let retirement_thread = playback
+                .render_retirement_worker
+                .as_ref()
+                .expect("original retirement worker")
+                .thread()
+                .id();
+            let caller_thread = thread::current().id();
+            let dropped_on = Arc::clone(&renderer.dropped_on);
+            let request_drops = Arc::clone(&renderer.request_drops);
+            let weak = Arc::downgrade(&renderer);
+            if closed_receiver {
+                let (sender, receiver) = mpsc::channel();
+                drop(sender);
+                // Close the actual producer's receiver. No extra sender is
+                // retained, so the existing send path must handle SendError.
+                drop(std::mem::replace(&mut playback.completion_rx, receiver));
+            }
+            renderer.state_entry.store(true, Ordering::Release);
+            renderer.pending.store(true, Ordering::Release);
+            let published_before =
+                playback.render_queue.completion_publications.load(Ordering::Acquire);
+            assert!(playback
+                .request_native_author_handoff(renderer.request(target, 19, false))
+                .expect("actual request admission"));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while renderer.policy_queries.load(Ordering::Acquire) == 0 && Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            assert_eq!(
+                renderer.policy_queries.load(Ordering::Acquire),
+                1,
+                "actual producer reached the state-entry policy"
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            if closed_receiver {
+                while !playback.render_worker.as_ref().expect("actual producer").is_finished()
+                    && Instant::now() < deadline
+                {
+                    thread::yield_now();
+                }
+                assert!(
+                    playback.render_worker.as_ref().expect("actual producer").is_finished(),
+                    "SendError must finish the producer before shutdown stops publication"
+                );
+                assert_eq!(
+                    playback.render_queue.completion_publications.load(Ordering::Acquire),
+                    published_before
+                );
+            } else {
+                while playback.render_queue.completion_publications.load(Ordering::Acquire)
+                    == published_before
+                    && Instant::now() < deadline
+                {
+                    thread::yield_now();
+                }
+                assert_eq!(
+                    playback.render_queue.completion_publications.load(Ordering::Acquire),
+                    published_before + 1,
+                    "actual completion published while receiver remains unconsumed"
+                );
+            }
+            // Join only after actual send success/SendError is established.
+            // Neither branch polls or removes a queued completion.
+            playback.stop_render_worker();
+            assert_eq!(renderer.installs.load(Ordering::Acquire), 0);
+            assert_eq!(renderer.acks.load(Ordering::Acquire), 0);
+            assert!(!renderer.output_shutdown_started.load(Ordering::Acquire));
+            if !closed_receiver {
+                assert!(
+                    request_drops.lock().is_empty(),
+                    "unconsumed Work is still held"
+                );
+                assert!(playback.native_author_handoff_in_flight.is_some());
+            }
+            drop(renderer);
+            let evidence = playback.shutdown_and_wait();
+            assert!(evidence.all_workers_terminated(), "{evidence:?}");
+            assert!(
+                weak.upgrade().is_none(),
+                "last renderer owner was actually released"
+            );
+            let request_threads = request_drops.lock().clone();
+            assert_eq!(request_threads.len(), 1, "request retired exactly once");
+            assert_eq!(
+                request_threads[0],
+                retirement_thread,
+                "completion owner must retire on original retirement thread; closed_receiver={closed_receiver}"
+            );
+            let (renderer_thread, before_output_shutdown) =
+                dropped_on.lock().expect("actual last renderer Drop");
+            assert_eq!(renderer_thread, retirement_thread);
+            assert_ne!(renderer_thread, caller_thread);
+            assert!(
+                before_output_shutdown,
+                "completion owner must retire before output shutdown and receipt construction"
+            );
+        }
+
+        #[test]
+        fn unconsumed_awaiting_completion_retires_before_shutdown_receipt() {
+            completion_owner_shutdown(false);
+        }
+
+        #[test]
+        fn failed_completion_send_retires_owner_on_original_retirement_worker() {
+            completion_owner_shutdown(true);
+        }
+
+        fn stopped_completion_publication(retirement_stopped: bool) {
+            let (mut playback, _, renderer, target) = setup(false);
+            let retirement_thread = playback
+                .render_retirement_worker
+                .as_ref()
+                .expect("original retirement worker")
+                .thread()
+                .id();
+            let requests = Arc::clone(&renderer.request_drops);
+            let weak = Arc::downgrade(&renderer);
+            let published_before =
+                playback.render_queue.completion_publications.load(Ordering::Acquire);
+            renderer.state_entry.store(true, Ordering::Release);
+            renderer.pending.store(true, Ordering::Release);
+            renderer.policy_gated.store(true, Ordering::Release);
+            assert!(playback
+                .request_native_author_handoff(renderer.request(target, 19, false))
+                .expect("actual held request"));
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while renderer.policy_queries.load(Ordering::Acquire) == 0 && Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            assert_eq!(renderer.policy_queries.load(Ordering::Acquire), 1);
+            assert_eq!(
+                playback.render_queue.completion_publications.load(Ordering::Acquire),
+                published_before,
+                "actual producer remains inside the policy latch"
+            );
+            playback.begin_shutdown();
+            if retirement_stopped {
+                playback.render_retirement_queue.stop();
+            }
+            renderer.apply_release.store(true, Ordering::Release);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !playback.render_worker.as_ref().expect("actual producer").is_finished()
+                && Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            assert!(playback.render_worker.as_ref().expect("actual producer").is_finished());
+            playback.stop_render_worker();
+            let published_after =
+                playback.render_queue.completion_publications.load(Ordering::Acquire);
+            drop(renderer);
+            let evidence = playback.shutdown_and_wait();
+            assert_eq!(
+                published_after, published_before,
+                "stopped producer must not publish a late completion"
+            );
+            if retirement_stopped {
+                assert!(evidence.foreign_owner_abandonments > 0, "{evidence:?}");
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(
+                    requests.lock().is_empty(),
+                    "stopped queue must not caller-drop Work"
+                );
+                assert!(
+                    weak.upgrade().is_some(),
+                    "abandonment retains the unresolved owner"
+                );
+            } else {
+                assert!(evidence.all_workers_terminated(), "{evidence:?}");
+                assert_eq!(*requests.lock(), [retirement_thread]);
+                assert!(weak.upgrade().is_none());
+            }
+        }
+
+        #[test]
+        fn stopped_publication_retires_late_completion_on_original_worker() {
+            stopped_completion_publication(false);
+        }
+
+        #[test]
+        fn stopped_retirement_abandons_late_completion_without_caller_drop() {
+            stopped_completion_publication(true);
         }
 
         #[test]
