@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 const RATE: u32 = 48_000;
 const SOURCE_FRAMES: usize = RATE as usize * 40;
 const CHUNK: usize = 256;
+const INACTIVE_CALLBACK_FRAMES: usize = CHUNK;
 const WATERMARK: usize = 8_192;
 const CONSUMED: usize = 137;
 const CAPTURE_WINDOWS: usize = 80;
@@ -103,24 +104,39 @@ impl CaptureState {
         }
     }
 
-    // There is no background callback owner. A complete synchronous callback
-    // removes real queued frames under the same mutex as deactivate/clear.
-    // Its explicit test-clock cadence is not hardware timestamp evidence.
-    fn consume(&mut self, frames: usize, observed_at: Instant) -> Vec<[f32; 2]> {
-        assert!(self.snapshot.active);
-        assert!(frames <= self.queue.len());
-        let consumed = self.queue.drain(..frames).collect();
+    // Like audio.rs render_f32_output_block, an inactive callback returns
+    // silence without draining PCM, but still records stream-wide frames and
+    // latest-callback facts. Only an active block advances its active interval.
+    // This is a synchronous software callback, not hardware timestamp evidence.
+    fn callback(&mut self, frames: usize, observed_at: Instant) -> Vec<[f32; 2]> {
+        assert!(frames > 0 && frames <= CHUNK);
+        let active_block = self.snapshot.active;
+        let output = if active_block {
+            assert!(frames <= self.queue.len());
+            self.queue.drain(..frames).collect()
+        } else {
+            vec![[0.0; 2]; frames]
+        };
         self.snapshot.callback_consumed_frames += frames as u64;
-        self.snapshot.active_callback_consumed_frames += frames as u64;
+        if active_block {
+            self.snapshot.active_callback_consumed_frames += frames as u64;
+            self.snapshot.active_duration = Some(Duration::from_nanos(
+                self.snapshot.active_callback_consumed_frames * 1_000_000_000 / u64::from(RATE),
+            ));
+        }
         self.snapshot.callback_count += 1;
         self.snapshot.last_callback_frames = frames as u32;
-        self.snapshot.active_duration = Some(Duration::from_nanos(
-            self.snapshot.active_callback_consumed_frames * 1_000_000_000 / u64::from(RATE),
-        ));
         self.snapshot.last_callback_age = Some(Duration::ZERO);
         self.snapshot.captured_at = observed_at;
         self.snapshot.buffered_frames = self.queue.len();
-        consumed
+        output
+    }
+
+    // There is no background callback owner; the same mutex serializes this
+    // actual FIFO drain with deactivate/clear until the whole callback returns.
+    fn consume(&mut self, frames: usize, observed_at: Instant) -> Vec<[f32; 2]> {
+        assert!(self.snapshot.active);
+        self.callback(frames, observed_at)
     }
 }
 
@@ -260,8 +276,8 @@ impl AudioOutputAdapter for CaptureOutput {
         state.snapshot.buffered_frames = state.queue.len();
         state.snapshot.active_callback_consumed_frames = 0;
         state.snapshot.active_duration = Some(Duration::ZERO);
-        state.snapshot.last_callback_frames = 0;
-        state.snapshot.last_callback_age = None;
+        // Activation resets only the active interval, preserving the stream's
+        // most recent callback metadata until a real next callback updates it.
         state.snapshot.active = true;
         Ok(())
     }
@@ -359,6 +375,12 @@ fn fill_to_watermark(state: &mut AppState, generation: u64) -> AudioPlaybackSnap
             .expect("original deterministic App/Media poll");
         assert_healthy(snapshot, generation);
         if snapshot.in_flight == 0 && snapshot.output.unwrap().buffered_frames == WATERMARK {
+            assert!(
+                snapshot.activation_preroll_satisfied
+                    && snapshot.output.unwrap().active
+                    && snapshot.media_anchor.is_some(),
+                "full PCM queue requires actual software activation and anchor: {snapshot:?}"
+            );
             return snapshot;
         }
         assert!(
@@ -478,6 +500,35 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             state.playback_engine.snapshot().state,
             mondrian_playback::TransportState::Playing
         );
+        {
+            let mut capture = output.lock();
+            assert!(!capture.snapshot.active);
+            let queued_before = capture.queue.len();
+            let silent = capture.callback(
+                INACTIVE_CALLBACK_FRAMES,
+                state.playback_observation_instant_anchor,
+            );
+            assert_eq!(silent, vec![[0.0; 2]; INACTIVE_CALLBACK_FRAMES]);
+            assert_eq!(capture.queue.len(), queued_before);
+            assert_eq!(capture.snapshot.buffered_frames, queued_before);
+            assert_eq!(
+                capture.snapshot.callback_consumed_frames,
+                INACTIVE_CALLBACK_FRAMES as u64
+            );
+            assert_eq!(capture.snapshot.active_callback_consumed_frames, 0);
+            assert_eq!(capture.snapshot.active_duration, None);
+            assert_eq!(capture.snapshot.callback_count, 1);
+            assert_eq!(
+                capture.snapshot.last_callback_frames,
+                INACTIVE_CALLBACK_FRAMES as u32
+            );
+            assert_eq!(capture.snapshot.last_callback_age, Some(Duration::ZERO));
+            assert_eq!(
+                capture.snapshot.captured_at,
+                state.playback_observation_instant_anchor
+            );
+            assert!(!capture.snapshot.active);
+        }
         let generation = state.audio_playback_snapshot().generation;
         let warmed = fill_to_watermark(&mut state, generation);
         assert_eq!(warmed.media_anchor.unwrap().sample(), 0);
@@ -499,6 +550,14 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         let consumed_snapshot = poll_audio_playback_at_for_test(&mut state, observed_at, true)
             .expect("original App clock converter observes the synchronous software callback");
         assert_healthy(consumed_snapshot, generation);
+        assert_eq!(
+            consumed_snapshot.output.unwrap().active_callback_consumed_frames,
+            CONSUMED as u64
+        );
+        assert_eq!(
+            consumed_snapshot.output.unwrap().callback_consumed_frames,
+            (INACTIVE_CALLBACK_FRAMES + CONSUMED) as u64
+        );
         // 8055 queued + the next indivisible 256-frame admission exceeds
         // watermark8192. This partial callback cannot trigger a refill.
         assert_eq!(consumed_snapshot.in_flight, 0);
@@ -615,7 +674,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         assert_eq!(output.lock().snapshot.active_callback_consumed_frames, 0);
         assert_eq!(
             output.lock().snapshot.callback_consumed_frames,
-            CONSUMED as u64
+            (INACTIVE_CALLBACK_FRAMES + CONSUMED) as u64
         );
         assert_eq!(output.lock().activation_discarded, 0);
         // Identity change is an observation, not an exact create/Enter counter
