@@ -3470,8 +3470,9 @@ mod tests {
             audible_generation + 1,
             "one transaction must not rotate PCM twice through per-action refreshes"
         );
-        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        // The test's old renderer alias also retains its native settlement scope.
         drop(renderer);
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
