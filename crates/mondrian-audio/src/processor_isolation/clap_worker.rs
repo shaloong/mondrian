@@ -1663,6 +1663,10 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
     ) -> Result<crate::NativeAudioObjectBindOutcome, AudioProcessorHostError> {
         match crate::NativeAudioObjectBindReceipt::acknowledge(request, self.native_object) {
             Ok(receipt) => {
+                if self.native_binding != Some(receipt) {
+                    // A new target needs one real query even when Source did not change.
+                    self.parameter_observation_revision = None;
+                }
                 self.native_binding = Some(receipt);
                 Ok(crate::NativeAudioObjectBindOutcome::Bound(receipt))
             }
