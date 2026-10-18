@@ -5551,6 +5551,189 @@ mod tests {
 
     struct NativeHoldPlatformOutput(Arc<parking_lot::Mutex<NativeHoldPlatformState>>);
 
+    #[cfg(windows)]
+    mod cold_native_joint_controls {
+        use super::*;
+
+        const GAIN_CLASS: &str = "AE4C8B1910234F819CA26D315F8702A1";
+
+        fn observe_app_cold_native_retirement(retain_external: bool) {
+            let helper = std::path::PathBuf::from(
+                std::env::var_os("MONDRIAN_VST3_TEST_HELPER")
+                    .expect("set the current normal Product helper"),
+            );
+            let plugin = std::path::PathBuf::from(
+                std::env::var_os("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN")
+                    .expect("set the existing owned Stateful Gain DLL"),
+            );
+            assert!(helper.is_absolute() && helper.is_file());
+            assert!(plugin.is_absolute() && plugin.is_file());
+            let clap = Arc::new(
+                mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone())
+                    .expect("actual empty installed CLAP catalog"),
+            );
+            let vst3 = Arc::new(
+                mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper)
+                    .expect("actual installed VST3 catalog"),
+            );
+            // These original standalone installation/author-capture probes
+            // precede Playback observation and are not custody evidence here.
+            let descriptors = vst3.install_plugin(plugin).expect("install owned native binary");
+            assert!(descriptors.iter().any(|descriptor| {
+                descriptor.class_id == GAIN_CLASS
+                    && descriptor.name == "Mondrian Stateful Gain Fixture"
+            }));
+            let config = mondrian_media::AudioPlaybackConfig {
+                chunk_frames: 4,
+                preroll_frames: 4,
+                high_watermark_frames: 8,
+                max_in_flight: 1,
+                ..mondrian_media::AudioPlaybackConfig::product_default()
+            };
+            let instance = vst3
+                .create_instance(
+                    GAIN_CLASS,
+                    mondrian_audio::AudioRenderContract {
+                        sample_rate: config.sample_rate,
+                        channel_layout: config.channel_layout,
+                        max_block_frames: config.chunk_frames,
+                        processing_mode: mondrian_audio::AudioProcessingMode::Realtime,
+                        processor_session_scratch_budget_bytes:
+                            mondrian_audio::AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                        public_output_lookahead_budget_frames:
+                            mondrian_audio::AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                        compensation_delay_scratch_budget_bytes:
+                            mondrian_audio::AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+                    },
+                    None,
+                )
+                .expect("original catalog captures actual native author state");
+            assert!(matches!(
+                &instance.definition,
+                mondrian_timeline::audio::AudioProcessorDefinitionRef::Vst3 {
+                    class_id, binary_sha256: Some(_), ..
+                } if class_id == GAIN_CLASS
+            ));
+            assert_eq!(instance.parameters.len(), 1);
+            assert_eq!(
+                instance.opaque_state.as_ref().map(|state| state.len()),
+                Some(60)
+            );
+
+            let mut state = AppState::with_native_audio_catalogs(clap, vst3);
+            // App construction leaves the default device manager dormant.
+            // Never poll it; close the original workers before replacing output.
+            assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+            let mut snapshot = audio_snapshot();
+            snapshot.active = false;
+            snapshot.buffered_frames = 0;
+            let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+                snapshot,
+                revision: 0,
+                acknowledged: 0,
+                auto_acknowledge: true,
+                queued: 0,
+            }));
+            state.audio_playback = AppAudioPlayback::Available(Box::new(
+                AudioPlayback::with_output(
+                    config,
+                    Box::new(NativeHoldPlatformOutput(output.clone())),
+                )
+                .expect("original Media workers with no-device software output"),
+            ));
+            let directory = tempfile::tempdir().expect("actual Project Asset Library");
+            let library = AssetLibrary::open(directory.path().join("library")).unwrap();
+            let mut sequence = Sequence::new("App cold owned VST3 closure");
+            assert_eq!(
+                sequence.settings.audio_channel_layout,
+                config.channel_layout
+            );
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+            state.test_set_sequence(Some(sequence));
+            state.test_set_asset_library(Some(library));
+
+            // Exactly one original App -> Timeline/Delivery/Runtime construction,
+            // with its actual installed composite resolver and Playback registrar.
+            let source = state
+                .audio_playback_renderer("cold native joint control")
+                .expect("actual App cold constructor")
+                .expect("the selected native processor requires execution");
+            assert!(source.renderer.native_observations_supported());
+            let weak = Arc::downgrade(&source.renderer);
+            let external = retain_external.then(|| source.renderer.clone());
+            state
+                .commit_audio_playback("cold native joint control", audio_anchor(0), Some(source))
+                .expect("one original App commit and Media prepare");
+            assert!(state
+                .native_audio_renderer
+                .as_ref()
+                .is_some_and(|installed| { std::sync::Weak::ptr_eq(installed, &weak) }));
+            let verifier = weak
+                .upgrade()
+                .expect("original Media source retains the actual Timeline")
+                .owner_installation_verifier()
+                .expect("original Media Source registration reached the real Runtime");
+            let claim = verifier.current_claim().expect("actual installed Source claim");
+            assert!(verifier.validate(&claim).is_ok());
+            // prepare queues owner binding, not PCM. No poll/Enter/render loop
+            // is added to force a lifecycle result or change native processing.
+            let prepared = state.audio_playback_snapshot();
+            assert_eq!(prepared.in_flight, 0);
+            assert_eq!(prepared.next_start_sample, 0);
+            assert_eq!(output.lock().queued, 0);
+
+            let evidence = state.shutdown_audio_playback_and_wait();
+            assert_eq!(evidence.render_workers_started, 1);
+            assert_eq!(evidence.render_workers_terminated, 1);
+            assert_eq!(evidence.render_retirement_workers_started, 1);
+            assert_eq!(evidence.render_retirement_workers_terminated, 1);
+            assert_eq!(evidence.foreign_owner_panics, 0);
+            assert_eq!(evidence.foreign_owner_abandonments, 0);
+            assert!(matches!(
+                verifier.current_claim(),
+                Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+            ));
+            if retain_external {
+                assert!(!evidence.all_workers_terminated(), "{evidence:?}");
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(weak.upgrade().is_some());
+                let prior_receipt = evidence;
+                drop(external);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "release the actual final renderer alias"
+                );
+                assert_eq!(
+                    evidence, prior_receipt,
+                    "late release cannot rewrite the receipt"
+                );
+                assert!(!evidence.all_workers_terminated());
+            } else {
+                assert!(evidence.all_workers_terminated(), "{evidence:?}");
+                assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(weak.upgrade().is_none());
+            }
+            assert_eq!(output.lock().queued, 0);
+            // Receipt flags qualify this actual App success/alias boundary, not
+            // each fresh-probe registration, OS graceful100ms or all App workers.
+            drop(state);
+        }
+
+        #[test]
+        #[ignore = "current normal Product and owned Stateful Gain DLL; actual App cold closure, no device/PCM"]
+        fn app_owned_vst3_cold_retirement_closes_after_all_aliases_release() {
+            observe_app_cold_native_retirement(false);
+        }
+
+        #[test]
+        #[ignore = "current normal Product and owned Stateful Gain DLL; actual App external alias boundary"]
+        fn app_owned_vst3_cold_external_alias_keeps_shutdown_unresolved() {
+            observe_app_cold_native_retirement(true);
+        }
+    }
+
     mod native_settlement_queue_controls {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
