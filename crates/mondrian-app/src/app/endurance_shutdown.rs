@@ -994,22 +994,29 @@ impl AppState {
         })
     }
 
-    /// Close admission and broadcast cooperative cancellation to every App-owned
-    /// domain that can be signaled without consuming its terminal receipt.
+    /// Signal independent owners now. Audio and persistence stay live until
+    /// Project close finishes its Audio admission and queues persistence's pause.
     pub(crate) fn begin_endurance_shutdown(&mut self) {
+        if let Some(reason) = self.signal_endurance_shutdown() {
+            tracing::warn!(%reason, "failed to begin Project close during endurance signal phase");
+        }
+    }
+
+    fn signal_endurance_shutdown(&mut self) -> Option<String> {
+        let mut failure = None;
         if (self.authoring.is_some() || self.pending_project_open.is_some())
             && self.pending_project_close.is_none()
             && self.project_close_fault.is_none()
             && let Err(error) = self.begin_project_close()
         {
-            // The consuming phase retries and retains this failure in the
-            // Project receipt. Signaling every other owner must still proceed.
-            tracing::warn!(%error, "failed to begin Project close during endurance signal phase");
+            failure = Some(error.to_string());
         }
-        self.project_persistence.begin_endurance_shutdown();
+        if !self.project_close_awaiting_audio() {
+            self.project_persistence.begin_endurance_shutdown();
+            self.begin_audio_playback_endurance_shutdown();
+        }
         self.render_queue.begin_shutdown();
         self.reference_output.begin_endurance_shutdown();
-        self.begin_audio_playback_endurance_shutdown();
         self.audio_source_cache.begin_shutdown();
         self.audio_idle_warmup.begin_endurance_shutdown();
         self.media_import.begin_endurance_shutdown();
@@ -1017,6 +1024,7 @@ impl AppState {
         self.visual_tracking.begin_endurance_shutdown();
         self.proxy_generation.begin_endurance_shutdown();
         self.execution_resources.begin_endurance_shutdown();
+        failure
     }
 
     /// Consume AppState and synchronously collect every embedded owner receipt.
@@ -1024,34 +1032,32 @@ impl AppState {
         mut self,
         deadline: Instant,
     ) -> AppEnduranceShutdownEvidence {
-        self.begin_endurance_shutdown();
+        let mut lifecycle_failure = self.signal_endurance_shutdown();
 
         let reference_output = self.reference_output.finish_endurance_shutdown(deadline);
         let session_was_open = self.authoring.is_some();
         let pending_close_was_active = self.pending_project_close.is_some();
         let pending_open_was_active = self.pending_project_open.is_some();
-        let mut lifecycle_failure = None;
-        if (session_was_open || self.pending_project_open.is_some())
-            && self.pending_project_close.is_none()
-        {
-            if self.project_close_fault.is_some() {
-                lifecycle_failure = Some(
-                    "Project close entered endurance shutdown with poisoned persistence authority"
-                        .to_owned(),
-                );
-            } else if let Err(error) = self.begin_project_close() {
-                lifecycle_failure = Some(error.to_string());
-            }
+        if lifecycle_failure.is_none() && self.project_close_fault.is_some() {
+            lifecycle_failure = Some(
+                "Project close entered endurance shutdown with poisoned persistence authority"
+                    .to_owned(),
+            );
         }
         while lifecycle_failure.is_none()
             && (self.pending_project_close.is_some() || self.pending_project_open.is_some())
         {
             match self.poll_project_close() {
                 ProjectClosePoll::Pending => {
+                    if !self.project_close_awaiting_audio() {
+                        // Source detach has finished and the persistence
+                        // pause-ticket is already ahead of Shutdown in its FIFO.
+                        self.project_persistence.begin_endurance_shutdown();
+                        self.begin_audio_playback_endurance_shutdown();
+                    }
                     if Instant::now() >= deadline {
                         lifecycle_failure = Some(
-                            "Project persistence handoff exceeded the shared App shutdown deadline"
-                                .to_owned(),
+                            "Project handoff exceeded the shared App shutdown deadline".to_owned(),
                         );
                     } else {
                         std::thread::sleep(Duration::from_millis(1));
@@ -1067,7 +1073,8 @@ impl AppState {
                     }
                     break;
                 }
-                ProjectClosePoll::SaveRejected(reason)
+                ProjectClosePoll::AudioRejected(reason)
+                | ProjectClosePoll::SaveRejected(reason)
                 | ProjectClosePoll::Faulted(reason)
                 | ProjectClosePoll::ClosedWithTeardownFailure(reason) => {
                     lifecycle_failure = Some(reason);
@@ -1075,6 +1082,10 @@ impl AppState {
             }
         }
 
+        // Refusal or deadline failure must still settle the original resource
+        // owners. Their receipts cannot upgrade the retained Project's failure.
+        self.project_persistence.begin_endurance_shutdown();
+        self.begin_audio_playback_endurance_shutdown();
         let audio = self.shutdown_audio_playback_until(deadline);
         let export = self.render_queue.shutdown_until(deadline);
         let export_terminal_snapshot = self.render_queue.endurance_snapshot(0);

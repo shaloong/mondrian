@@ -194,10 +194,52 @@ impl AppAudioPlayback {
         }
     }
 
-    fn matches_source(&self, renderer: &Arc<dyn AudioPcmRenderer>) -> bool {
+    fn matches_source_weak(&self, renderer: &std::sync::Weak<dyn AudioPcmRenderer>) -> bool {
         match self {
-            Self::Available(playback) => playback.matches_source(renderer),
+            Self::Available(playback) => playback.matches_source_weak(renderer),
             Self::Unavailable { .. } => false,
+        }
+    }
+
+    fn request_source_close(
+        &mut self,
+        expected: &Arc<dyn AudioPcmRenderer>,
+        anchor: AudioSamplePosition,
+    ) -> Result<mondrian_media::AudioPcmSourceCloseTicket, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.request_source_close(expected, anchor),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    pub(super) fn source_close_status<'a>(
+        &'a self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> Result<mondrian_media::AudioPcmSourceCloseStatus<'a>, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.source_close_status(ticket),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    fn finish_source_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+        anchor: AudioSamplePosition,
+    ) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.finish_source_close(ticket, anchor),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
+        }
+    }
+
+    pub(super) fn cancel_source_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> Result<(), AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.cancel_source_close(ticket),
+            Self::Unavailable { .. } => Err(AudioPlaybackError::ExecutionUnavailable),
         }
     }
 
@@ -815,6 +857,138 @@ impl AppState {
         Ok(())
     }
 
+    /// Submit one close validation behind earlier work on Media's serial queue.
+    /// Keep the actual Source installed until that queue proves Closed.
+    pub(super) fn begin_project_audio_close(
+        &mut self,
+    ) -> mondrian_core::Result<Option<mondrian_media::AudioPcmSourceCloseTicket>> {
+        self.validate_project_audio_handoff_admission()?;
+        if !self.audio_playback.native_editor_source_available() {
+            self.prepare_project_audio_handoff()?;
+            return Ok(None);
+        }
+        let renderer = self.project_audio_handoff_renderer()?;
+        let observed_at = Instant::now();
+        self.synchronize_playback_observation_clock(observed_at);
+        let playback_now = self.playback_engine.monotonic_high_water();
+        let mut engine = self.playback_engine.clone();
+        engine
+            .stop(playback_now)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        let anchor =
+            self.authoritative_audio_anchor(&engine, playback_now, "project_audio_handoff")?;
+        // request_source_close owns the one Suspend. Calling stop() here would
+        // cancel that request's generation a second time.
+        let ticket = self
+            .audio_playback
+            .request_source_close(&renderer, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        drop(renderer);
+        self.playback_engine = engine;
+        self.audio_idle_warmup.set_automatic_policy_enabled(false);
+        self.audio_idle_warmup.set_dispatch_enabled(false);
+        self.settle_preview_access_source();
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        self.refresh_internal_execution_resource_decision();
+        Ok(Some(ticket))
+    }
+
+    pub(super) fn project_audio_source_is_current(&self) -> bool {
+        self.native_audio_renderer.as_ref().is_some_and(|renderer| {
+            let erased: std::sync::Weak<dyn AudioPcmRenderer> = renderer.clone();
+            self.audio_playback.matches_source_weak(&erased)
+        })
+    }
+
+    fn project_audio_handoff_renderer(&self) -> mondrian_core::Result<Arc<dyn AudioPcmRenderer>> {
+        if self.active_sequence().is_none() {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "installed audio Source has no active Sequence",
+            ));
+        }
+        let renderer = self
+            .native_audio_renderer
+            .as_ref()
+            .filter(|renderer| renderer.strong_count() != 0)
+            .ok_or_else(|| {
+                transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no current Timeline Runtime",
+                )
+            })?;
+        let erased: std::sync::Weak<dyn AudioPcmRenderer> = renderer.clone();
+        if !self.audio_playback.matches_source_weak(&erased) {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "Timeline Runtime is not the installed audio Source",
+            ));
+        }
+        // The actual Media slot now proves a strong owner of this exact weak
+        // allocation. A stale alias is never upgraded on the caller, where it
+        // could race the retirement worker and become the final native owner.
+        renderer
+            .upgrade()
+            .map(|renderer| renderer as Arc<dyn AudioPcmRenderer>)
+            .ok_or_else(|| {
+                transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no current Timeline Runtime",
+                )
+            })
+    }
+
+    /// Deliver original completions, without admitting another Idle warmup or
+    /// committing a device clock. Media gates new work while this ticket lives.
+    pub(super) fn poll_project_audio_close_queue(&mut self) -> mondrian_core::Result<()> {
+        let anchor = self.authoritative_audio_anchor(
+            &self.playback_engine,
+            self.playback_engine.monotonic_high_water(),
+            "project_audio_handoff",
+        )?;
+        let poll = self
+            .audio_playback
+            .poll(AudioPlaybackMode::Idle, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        for event in poll.events {
+            if matches!(
+                event,
+                AudioPlaybackEvent::NativeAuthorProposalObserved { .. }
+            ) {
+                // The original Runtime retains this proposal for redelivery.
+                // Close must observe its refusal, never install/Ack the prefix
+                // as a side effect of draining a preceding completion.
+                continue;
+            }
+            self.handle_audio_playback_event(event, Instant::now())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_project_audio_close(
+        &mut self,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+    ) -> mondrian_core::Result<()> {
+        self.validate_project_audio_handoff_admission()?;
+        // Recheck the current Timeline alias as well as Media's full claim.
+        // Do not retain this temporary Arc across the original retirement.
+        drop(self.project_audio_handoff_renderer()?);
+        let anchor = self.authoritative_audio_anchor(
+            &self.playback_engine,
+            self.playback_engine.monotonic_high_water(),
+            "project_audio_handoff",
+        )?;
+        self.audio_playback
+            .finish_source_close(ticket, anchor)
+            .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+        self.native_audio_renderer = None;
+        self.audio_playback_author_binding = None;
+        self.audio_monitoring.clear_meter();
+        self.native_audio_editor = None;
+        Ok(())
+    }
+
     /// Terminate the current Project's audio domain before persistence admission
     /// retires. Known author/editor obligations refuse before transport changes.
     /// The original Media clear revokes old claims and retires owners on its own
@@ -823,30 +997,10 @@ impl AppState {
         self.validate_project_audio_handoff_admission()?;
         let has_source = self.audio_playback.native_editor_source_available();
         if has_source {
-            if self.active_sequence().is_none() {
-                return Err(transport_action_error(
-                    "project_audio_handoff",
-                    "installed audio Source has no active Sequence",
-                ));
-            }
-            let renderer = self
-                .native_audio_renderer
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade)
-                .ok_or_else(|| {
-                transport_action_error(
-                    "project_audio_handoff",
-                    "installed audio Source has no current Timeline Runtime",
-                )
-            })?;
-            let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
-            if !self.audio_playback.matches_source(&erased) {
-                return Err(transport_action_error(
-                    "project_audio_handoff",
-                    "Timeline Runtime is not the installed audio Source",
-                ));
-            }
-            renderer.validate_native_author_source_closed()?;
+            let renderer = self.project_audio_handoff_renderer()?;
+            renderer.validate_native_author_source_closed(
+                &mondrian_core::ExecutionCancellationToken::new(),
+            )?;
         }
         // Cancelled cold Open has no old Sequence or Source. A real Project,
         // including video-only/AudioUnavailable, still uses the original stop.
@@ -5653,6 +5807,7 @@ mod tests {
     mod cold_native_joint_controls;
 
     mod project_close_audio_contracts;
+    mod source_close_admission_contracts;
 
     mod native_settlement_queue_controls {
         use super::*;

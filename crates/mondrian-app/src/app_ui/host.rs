@@ -1602,8 +1602,8 @@ impl AppUiHost {
                 self.mark_dirty();
                 (true, false)
             }
-            ProjectClosePoll::SaveRejected(reason) => {
-                tracing::warn!(%reason, "save-before-close was rejected; Project remains open");
+            ProjectClosePoll::SaveRejected(reason) | ProjectClosePoll::AudioRejected(reason) => {
+                tracing::warn!(%reason, "Project close admission was rejected; Project remains open");
                 self.quiescing_close_action = None;
                 self.waveform_service
                     .set_library(self.app_state.borrow().asset_library_handle());

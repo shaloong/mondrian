@@ -559,9 +559,7 @@ impl AppState {
         if self.active_sequence().is_none() {
             self.stop()?;
         }
-        self.prepare_project_session_close()?;
-        self.finalize_project_close_state()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        self.close_project_until(Instant::now() + Duration::from_secs(300))
     }
 
     /// Remove the already-quiesced Authoring Session and invalidate every

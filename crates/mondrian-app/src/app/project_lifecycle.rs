@@ -155,11 +155,16 @@ enum ProjectOpenPoll {
     Faulted(String),
 }
 
-/// App-owned pending close operation over one exact persistence generation.
+/// One exact Session's close, ordered through Audio before persistence.
 pub(super) struct PendingProjectClose {
     session_id: AuthoringSessionId,
-    ticket: ProjectPersistencePauseTicket,
+    phase: PendingProjectClosePhase,
     required_manual_save: Option<ProjectPersistenceRequestId>,
+}
+
+enum PendingProjectClosePhase {
+    AwaitingAudio(mondrian_media::AudioPcmSourceCloseTicket),
+    Quiescing(ProjectPersistencePauseTicket),
 }
 
 /// Retained fail-closed authority after Project Session Handoff failure.
@@ -173,12 +178,15 @@ pub(super) struct ProjectCloseFault {
 pub(crate) enum ProjectClosePoll {
     /// No asynchronous close operation exists.
     Inactive,
-    /// Earlier persistence work still owns the FIFO barrier.
+    /// Earlier Audio or persistence work still owns its serial barrier.
     Pending,
     /// The exact Session was quiesced, retired, and removed from AppState.
     Closed,
     /// The Project was closed but Reference Output release was not proven.
     ClosedWithTeardownFailure(String),
+    /// Native author obligations remain. The Source and editable Session stay
+    /// installed; no persistence pause has been admitted.
+    AudioRejected(String),
     /// A required manual save was not durable, so admission was resumed and
     /// the still-open Project may be corrected or retried.
     SaveRejected(String),
@@ -228,16 +236,7 @@ impl AppState {
         session_id: AuthoringSessionId,
     ) -> anyhow::Result<ProjectPersistencePauseTicket> {
         self.prepare_project_audio_handoff()?;
-        match self.project_persistence.begin_pause_and_quiesce(session_id) {
-            Ok(ticket) => Ok(ticket),
-            Err(reason) => {
-                // Even failed queue admission can poison persistence authority.
-                // The old Session remains readable, but only explicit fault
-                // discard may detach it; another author action cannot bypass it.
-                self.retain_project_close_fault(session_id, reason.clone());
-                Err(anyhow::Error::msg(reason))
-            }
-        }
+        self.begin_project_persistence_pause(session_id)
     }
 
     fn submit_project_open_preparation(
@@ -674,16 +673,6 @@ impl AppState {
         }
     }
 
-    pub(super) fn prepare_project_session_close(&mut self) -> anyhow::Result<()> {
-        // Do not permanently retire persistence until native/audio admission
-        // succeeds; a refusal must retain an editable original Session.
-        self.prepare_project_audio_handoff()?;
-        let mut handoff = self.begin_project_session_handoff()?;
-        self.retire_project_session_handoff(&mut handoff).map_err(anyhow::Error::msg)?;
-        self.retain_current_project_library_generation();
-        Ok(())
-    }
-
     /// Start closing the current Project without waiting for durable work on
     /// the caller's thread.
     ///
@@ -714,7 +703,7 @@ impl AppState {
             );
         }
         if self.pending_project_close.is_some() {
-            anyhow::bail!("Project close is already waiting for persistence quiescence");
+            anyhow::bail!("Project close is already waiting for lifecycle quiescence");
         }
         if let Some(pending) = &mut self.pending_project_open {
             if required_manual_save.is_some() {
@@ -730,11 +719,93 @@ impl AppState {
         let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
             return Ok(false);
         };
-        let ticket = self.begin_project_lifecycle_pause(session_id)?;
+        let phase = match self.begin_project_audio_close()? {
+            Some(ticket) => PendingProjectClosePhase::AwaitingAudio(ticket),
+            None => PendingProjectClosePhase::Quiescing(
+                self.begin_project_persistence_pause(session_id)?,
+            ),
+        };
         self.pending_project_close =
-            Some(PendingProjectClose { session_id, ticket, required_manual_save });
+            Some(PendingProjectClose { session_id, phase, required_manual_save });
         self.set_status_hint(AppMessage::new("status-closing"), false);
         Ok(true)
+    }
+
+    fn begin_project_persistence_pause(
+        &mut self,
+        session_id: AuthoringSessionId,
+    ) -> anyhow::Result<ProjectPersistencePauseTicket> {
+        self.project_persistence.begin_pause_and_quiesce(session_id).map_err(|reason| {
+            self.retain_project_close_fault(session_id, reason.clone());
+            anyhow::Error::msg(reason)
+        })
+    }
+
+    pub(super) fn project_close_awaiting_audio(&self) -> bool {
+        self.pending_project_close.as_ref().is_some_and(|pending| {
+            matches!(pending.phase, PendingProjectClosePhase::AwaitingAudio(_))
+        })
+    }
+
+    fn reject_project_audio_close(
+        &mut self,
+        session_id: AuthoringSessionId,
+        ticket: &mondrian_media::AudioPcmSourceCloseTicket,
+        reason: String,
+    ) -> ProjectClosePoll {
+        if let Err(error) = self.audio_playback.cancel_source_close(ticket) {
+            let reason = format!("{reason}; failed to cancel audio close admission: {error}");
+            self.retain_project_close_fault(session_id, reason.clone());
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectClosePoll::Faulted(reason);
+        }
+        if !self.project_audio_source_is_current() {
+            let reason = format!(
+                "{reason}; original audio Source ownership was lost during close admission"
+            );
+            self.retain_project_close_fault(session_id, reason.clone());
+            self.set_status_hint(
+                AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+                true,
+            );
+            return ProjectClosePoll::Faulted(reason);
+        }
+        self.set_status_hint(
+            AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
+            true,
+        );
+        ProjectClosePoll::AudioRejected(reason)
+    }
+
+    /// Synchronous callers drive the same admitted operation and one absolute
+    /// deadline, rather than starting a second persistence wait after Audio.
+    pub(super) fn close_project_until(&mut self, deadline: Instant) -> anyhow::Result<()> {
+        if !self.begin_project_close()? {
+            anyhow::bail!("no Project was open for close");
+        }
+        loop {
+            match self.poll_project_close() {
+                ProjectClosePoll::Pending if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                ProjectClosePoll::Pending => {
+                    // Preserve the admitted ticket/Session for bounded cleanup;
+                    // a caller timeout never certifies ownership retirement.
+                    anyhow::bail!("Project close exceeded its shared handoff deadline");
+                }
+                ProjectClosePoll::Closed => return Ok(()),
+                ProjectClosePoll::Inactive => {
+                    anyhow::bail!("Project close became inactive before completion")
+                }
+                ProjectClosePoll::AudioRejected(reason)
+                | ProjectClosePoll::SaveRejected(reason)
+                | ProjectClosePoll::Faulted(reason)
+                | ProjectClosePoll::ClosedWithTeardownFailure(reason) => anyhow::bail!(reason),
+            }
+        }
     }
 
     /// Whether the current Project is frozen behind an Open/Close handoff
@@ -797,13 +868,24 @@ impl AppState {
                 ProjectOpenPoll::Rejected(reason) => ProjectClosePoll::SaveRejected(reason),
             };
         }
-        let Some(pending) = self.pending_project_close.take() else {
+        let Some(mut pending) = self.pending_project_close.take() else {
             return ProjectClosePoll::Inactive;
         };
         if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(pending.session_id) {
-            self.project_persistence.poison_pause_ticket(&pending.ticket);
-            let reason =
+            let mut reason =
                 "active Authoring Session changed while Project close was quiescing".to_owned();
+            match &pending.phase {
+                PendingProjectClosePhase::Quiescing(ticket) => {
+                    self.project_persistence.poison_pause_ticket(ticket)
+                }
+                PendingProjectClosePhase::AwaitingAudio(ticket) => {
+                    if let Err(error) = self.audio_playback.cancel_source_close(ticket) {
+                        reason.push_str(&format!(
+                            "; failed to cancel old audio close admission: {error}"
+                        ));
+                    }
+                }
+            }
             self.retain_project_close_fault(pending.session_id, reason.clone());
             self.set_status_hint(
                 AppMessage::new("status-close-failed").with_text("reason", reason.clone()),
@@ -812,7 +894,49 @@ impl AppState {
             return ProjectClosePoll::Faulted(reason);
         }
 
-        match self.project_persistence.poll_pause_and_quiesce(&pending.ticket) {
+        if let PendingProjectClosePhase::AwaitingAudio(ticket) = &pending.phase {
+            if let Err(error) = self.poll_project_audio_close_queue() {
+                return self.reject_project_audio_close(
+                    pending.session_id,
+                    ticket,
+                    error.to_string(),
+                );
+            }
+            match self.audio_playback.source_close_status(ticket) {
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Pending) => {
+                    self.pending_project_close = Some(pending);
+                    return ProjectClosePoll::Pending;
+                }
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Refused(error)) => {
+                    let reason = error.to_string();
+                    return self.reject_project_audio_close(pending.session_id, ticket, reason);
+                }
+                Ok(mondrian_media::AudioPcmSourceCloseStatus::Closed) => {}
+                Err(error) => {
+                    return self.reject_project_audio_close(
+                        pending.session_id,
+                        ticket,
+                        error.to_string(),
+                    );
+                }
+            }
+            if let Err(error) = self.finish_project_audio_close(ticket) {
+                return self.reject_project_audio_close(
+                    pending.session_id,
+                    ticket,
+                    error.to_string(),
+                );
+            }
+            let ticket = match self.begin_project_persistence_pause(pending.session_id) {
+                Ok(ticket) => ticket,
+                Err(error) => return ProjectClosePoll::Faulted(error.to_string()),
+            };
+            pending.phase = PendingProjectClosePhase::Quiescing(ticket);
+        }
+        let PendingProjectClosePhase::Quiescing(ticket) = &pending.phase else {
+            unreachable!("audio close completed before persistence admission")
+        };
+        match self.project_persistence.poll_pause_and_quiesce(ticket) {
             Ok(None) => {
                 self.pending_project_close = Some(pending);
                 ProjectClosePoll::Pending
