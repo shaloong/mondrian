@@ -2170,6 +2170,7 @@ impl AudioPlayback {
     pub fn shutdown_and_wait(mut self) -> AudioPlaybackShutdownEvidence {
         self.begin_shutdown();
         self.stop_render_worker();
+        self.retire_pending_render_completions();
         self.flush_shutdown_pending_render_work();
         if let Some(renderer) = self.renderer.take() {
             self.handoff_retired_render_owners(VecDeque::new(), Some(renderer.owner));
@@ -2300,6 +2301,19 @@ impl AudioPlayback {
         }
         if let Some(signal) = &self.output_shutdown_signal {
             signal.store(true, AtomicOrdering::Release);
+        }
+    }
+
+    fn retire_pending_render_completions(&mut self) {
+        // Stop serializes with final publication. Joined shutdown has no
+        // producer; ordinary Drop admits no later successful publication.
+        // Move one carrier at a time through the existing combined 256 cap.
+        while let Ok(completion) = self.completion_rx.try_recv() {
+            retire_render_completion(
+                completion,
+                &self.render_retirement_queue,
+                &self.foreign_owner_retirements,
+            );
         }
     }
 
@@ -4605,6 +4619,7 @@ impl AudioPlayback {
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
         let render_worker_detached = self.stop_render_worker_without_waiting();
+        self.retire_pending_render_completions();
         self.flush_shutdown_pending_render_work();
         let retirement_worker_detached = self.stop_render_retirement_worker_without_waiting();
         if let Some(output) = self.output.take() {
@@ -4781,6 +4796,169 @@ fn supervise_render_worker(terminal: &AtomicU8, work: impl FnOnce()) {
     terminal.store(terminal_outcome, AtomicOrdering::Release);
 }
 
+fn retire_render_completion(
+    completion: RenderCompletion,
+    queue: &RenderOwnerRetirementQueue,
+    tracker: &ForeignOwnerRetirementTracker,
+) {
+    // Exhaustively separate actual foreign Work from host-owned completion
+    // data. New variants or local payload fields require this boundary review.
+    // Pure PCM/DTO storage must not consume foreign retirement capacity.
+    let work = match completion {
+        RenderCompletion::NativeAuthorHandoff(completion) => {
+            completion.into_retired_work().map(RenderWork::NativeAuthorHandoff)
+        }
+        RenderCompletion::Pcm(PcmRenderCompletion {
+            generation,
+            renderer_id,
+            request,
+            allow_window_silence,
+            result,
+        }) => {
+            match result {
+                RenderCompletionResult::Rendered(AudioBuffer {
+                    samples,
+                    sample_rate,
+                    channel_layout,
+                }) => drop((
+                    generation,
+                    renderer_id,
+                    request,
+                    allow_window_silence,
+                    samples,
+                    sample_rate,
+                    channel_layout,
+                )),
+                RenderCompletionResult::DeferredForNativeAuthor(target) => drop((
+                    generation,
+                    renderer_id,
+                    request,
+                    allow_window_silence,
+                    target,
+                )),
+                RenderCompletionResult::DeferredForReprepare(notice) => drop((
+                    generation,
+                    renderer_id,
+                    request,
+                    allow_window_silence,
+                    RenderCompletionResult::DeferredForReprepare(notice),
+                )),
+                RenderCompletionResult::DeferredForEditorCleanup(target) => drop((
+                    generation,
+                    renderer_id,
+                    request,
+                    allow_window_silence,
+                    RenderCompletionResult::DeferredForEditorCleanup(target),
+                )),
+                RenderCompletionResult::Failed(detail) => drop((
+                    generation,
+                    renderer_id,
+                    request,
+                    allow_window_silence,
+                    detail,
+                )),
+            }
+            None
+        }
+        RenderCompletion::NativeEditor(completion) => {
+            let NativeEditorCompletion {
+                renderer_id,
+                cancellation,
+                installed_generation,
+                intent,
+                outcome,
+            } = *completion;
+            drop((
+                renderer_id,
+                cancellation,
+                installed_generation,
+                intent,
+                outcome,
+            ));
+            None
+        }
+        RenderCompletion::NativeObservations {
+            generation,
+            renderer_id,
+            installation_generation,
+            result,
+        } => {
+            match result {
+                NativeObservationCompletion::Observed(batch) => {
+                    drop((generation, renderer_id, installation_generation, batch));
+                }
+                NativeObservationCompletion::Refused(refusal) => drop((
+                    generation,
+                    renderer_id,
+                    installation_generation,
+                    NativeObservationCompletion::Refused(refusal),
+                )),
+            }
+            None
+        }
+        RenderCompletion::NativeOwnerBindings {
+            generation,
+            renderer_id,
+            installation_generation,
+            status,
+        } => {
+            drop(RenderCompletion::NativeOwnerBindings {
+                generation,
+                renderer_id,
+                installation_generation,
+                status,
+            });
+            None
+        }
+    };
+    if let Some(work) = work {
+        enqueue_retired_render_owners(
+            queue,
+            tracker,
+            RetiredRenderOwners {
+                pending: VecDeque::from([work]),
+                renderers: VecDeque::new(),
+                errors: VecDeque::new(),
+            },
+        );
+    }
+}
+
+fn publish_render_completion(
+    sender: &mpsc::Sender<RenderCompletion>,
+    completion: RenderCompletion,
+    queue: &RenderWorkQueue,
+) -> bool {
+    // Use stop's original lock. A successful send is entirely before stop;
+    // no late producer can refill the receiver after shutdown's drain.
+    // No payload is destroyed or provider code invoked under this guard.
+    let retired = {
+        let state = queue.state.lock();
+        if state.stopped {
+            Some(completion)
+        } else {
+            match sender.send(completion) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
+                    None
+                }
+                Err(error) => Some(error.0),
+            }
+        }
+    };
+    if let Some(completion) = retired {
+        retire_render_completion(
+            completion,
+            &queue.retirement_queue,
+            &queue.retirement_tracker,
+        );
+        false
+    } else {
+        true
+    }
+}
+
 fn run_render_worker(
     worker_queue: &RenderWorkQueue,
     completion_tx: &mpsc::Sender<RenderCompletion>,
@@ -4813,14 +4991,13 @@ fn run_render_worker(
                         };
                     }
                 };
-                if completion_tx
-                    .send(RenderCompletion::NativeAuthorHandoff(Box::new(completion)))
-                    .is_err()
-                {
+                if !publish_render_completion(
+                    completion_tx,
+                    RenderCompletion::NativeAuthorHandoff(Box::new(completion)),
+                    worker_queue,
+                ) {
                     break;
                 }
-                #[cfg(test)]
-                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeEditor(work) => {
@@ -4893,22 +5070,19 @@ fn run_render_worker(
                         errors: VecDeque::new(),
                     },
                 );
-                if completion_tx
-                    .send(RenderCompletion::NativeEditor(Box::new(
-                        NativeEditorCompletion {
-                            renderer_id,
-                            cancellation,
-                            installed_generation,
-                            intent,
-                            outcome,
-                        },
-                    )))
-                    .is_err()
-                {
+                if !publish_render_completion(
+                    completion_tx,
+                    RenderCompletion::NativeEditor(Box::new(NativeEditorCompletion {
+                        renderer_id,
+                        cancellation,
+                        installed_generation,
+                        intent,
+                        outcome,
+                    })),
+                    worker_queue,
+                ) {
                     break;
                 }
-                #[cfg(test)]
-                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeObservations(work) => {
@@ -4973,19 +5147,18 @@ fn run_render_worker(
                         errors: VecDeque::new(),
                     },
                 );
-                if completion_tx
-                    .send(RenderCompletion::NativeObservations {
+                if !publish_render_completion(
+                    completion_tx,
+                    RenderCompletion::NativeObservations {
                         generation,
                         renderer_id,
                         installation_generation,
                         result,
-                    })
-                    .is_err()
-                {
+                    },
+                    worker_queue,
+                ) {
                     break;
                 }
-                #[cfg(test)]
-                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
             RenderWork::NativeOwnerBindings(work) => {
@@ -5064,19 +5237,18 @@ fn run_render_worker(
                         errors: VecDeque::new(),
                     },
                 );
-                if completion_tx
-                    .send(RenderCompletion::NativeOwnerBindings {
+                if !publish_render_completion(
+                    completion_tx,
+                    RenderCompletion::NativeOwnerBindings {
                         generation,
                         renderer_id,
                         installation_generation: claim.generation(),
                         status,
-                    })
-                    .is_err()
-                {
+                    },
+                    worker_queue,
+                ) {
                     break;
                 }
-                #[cfg(test)]
-                worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
                 continue;
             }
         };
@@ -5114,20 +5286,19 @@ fn run_render_worker(
                 };
             }
         };
-        if completion_tx
-            .send(RenderCompletion::Pcm(PcmRenderCompletion {
+        if !publish_render_completion(
+            completion_tx,
+            RenderCompletion::Pcm(PcmRenderCompletion {
                 generation,
                 renderer_id,
                 request,
                 allow_window_silence,
                 result,
-            }))
-            .is_err()
-        {
+            }),
+            worker_queue,
+        ) {
             break;
         }
-        #[cfg(test)]
-        worker_queue.completion_publications.fetch_add(1, AtomicOrdering::Release);
     }
     RENDER_WORKER_TERMINAL_NORMAL
 }
@@ -6555,6 +6726,129 @@ mod tests {
             tracker.snapshot(),
             ForeignOwnerRetirementEvidence::default()
         );
+    }
+
+    #[test]
+    fn host_pcm_completions_preserve_foreign_retirement_capacity() {
+        let mut config = test_config();
+        config.max_in_flight = 250;
+        assert_eq!(validate_config(config), Ok(()));
+        assert_eq!(
+            config.max_in_flight,
+            MAX_RETIRED_RENDER_OWNERS - MAX_PENDING_NATIVE_WORK - 1
+        );
+        let faulted = Arc::new(AtomicBool::new(false));
+        let queue = Arc::new(RenderOwnerRetirementQueue::new(Arc::clone(&faulted)));
+        let tracker = Arc::new(ForeignOwnerRetirementTracker::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let renderers = (0..config.max_in_flight)
+            .map(|_| {
+                Arc::new(DropTrackingRenderer { dropped: Arc::clone(&dropped) })
+                    as Arc<dyn AudioPcmRenderer>
+            })
+            .collect();
+        assert!(queue
+            .push(RetiredRenderOwners {
+                pending: VecDeque::new(),
+                renderers,
+                errors: VecDeque::new(),
+            })
+            .is_ok());
+        for _ in 0..config.max_in_flight {
+            retire_render_completion(
+                RenderCompletion::Pcm(PcmRenderCompletion {
+                    generation: 1,
+                    renderer_id: mondrian_core::AudioPcmRendererMaterializationId::new(),
+                    request: AudioPcmRenderRequest {
+                        start_sample: 0,
+                        frame_count: 1,
+                        sample_rate: 1_000,
+                        channel_layout: AudioChannelLayout::Stereo,
+                        continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(1)),
+                    },
+                    allow_window_silence: true,
+                    result: RenderCompletionResult::Rendered(AudioBuffer {
+                        samples: vec![0.5, -0.5],
+                        sample_rate: 1_000,
+                        channel_layout: AudioChannelLayout::Stereo,
+                    }),
+                }),
+                &queue,
+                &tracker,
+            );
+        }
+        assert_eq!(
+            queue.state.lock().pending.front().expect("original batch").owner_units(),
+            250,
+            "host PCM completions do not duplicate already-retired renderer units"
+        );
+        assert!(!faulted.load(Ordering::Acquire));
+        assert_eq!(
+            tracker.snapshot(),
+            ForeignOwnerRetirementEvidence::default()
+        );
+        enqueue_retired_render_owners(
+            &queue,
+            &tracker,
+            RetiredRenderOwners {
+                pending: VecDeque::new(),
+                renderers: (250..MAX_RETIRED_RENDER_OWNERS)
+                    .map(|_| {
+                        Arc::new(DropTrackingRenderer { dropped: Arc::clone(&dropped) })
+                            as Arc<dyn AudioPcmRenderer>
+                    })
+                    .collect(),
+                errors: VecDeque::new(),
+            },
+        );
+        assert_eq!(
+            queue.state.lock().pending.front().expect("original batch").owner_units(),
+            256,
+            "the original foreign-owner capacity is unchanged"
+        );
+        assert!(!faulted.load(Ordering::Acquire));
+        let rejected_dropped = Arc::new(AtomicBool::new(false));
+        enqueue_retired_render_owners(
+            &queue,
+            &tracker,
+            RetiredRenderOwners {
+                pending: VecDeque::new(),
+                renderers: VecDeque::from([Arc::new(DropTrackingRenderer {
+                    dropped: Arc::clone(&rejected_dropped),
+                }) as Arc<dyn AudioPcmRenderer>]),
+                errors: VecDeque::new(),
+            },
+        );
+        assert!(
+            faulted.load(Ordering::Acquire),
+            "257th foreign owner must fail closed"
+        );
+        assert_eq!(tracker.snapshot().owner_abandonments, 1);
+        assert!(
+            !dropped.load(Ordering::Acquire),
+            "accepted owners remain queued"
+        );
+        assert!(
+            !rejected_dropped.load(Ordering::Acquire),
+            "rejected owner is abandoned"
+        );
+        let terminal = Arc::new(AtomicU8::new(RENDER_WORKER_TERMINAL_UNKNOWN));
+        let worker = spawn_render_owner_retirement_worker(
+            Arc::clone(&queue),
+            Arc::clone(&tracker),
+            Arc::clone(&terminal),
+        )
+        .expect("original retirement worker");
+        queue.stop();
+        worker.join().expect("original worker drains the accepted batch");
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!rejected_dropped.load(Ordering::Acquire));
+        assert_eq!(
+            terminal.load(Ordering::Acquire),
+            RENDER_WORKER_TERMINAL_NORMAL
+        );
+        assert_eq!(tracker.snapshot().panics, 0);
+        assert_eq!(tracker.snapshot().owner_abandonments, 1);
     }
 
     #[test]
@@ -10423,6 +10717,7 @@ mod tests {
             output_shutdown_started: Arc<AtomicBool>,
             dropped_on: Arc<Mutex<Option<(thread::ThreadId, bool)>>>,
             request_drops: Arc<Mutex<Vec<thread::ThreadId>>>,
+            request_drop_panics: AtomicBool,
         }
         impl Drop for Renderer {
             fn drop(&mut self) {
@@ -10454,6 +10749,7 @@ mod tests {
                     output_shutdown_started: Arc::new(AtomicBool::new(false)),
                     dropped_on: Arc::new(Mutex::new(None)),
                     request_drops: Arc::new(Mutex::new(Vec::new())),
+                    request_drop_panics: AtomicBool::new(false),
                 })
             }
             fn address(&self) -> Target {
@@ -10607,6 +10903,10 @@ mod tests {
         impl Drop for Request {
             fn drop(&mut self) {
                 self.renderer.request_drops.lock().push(thread::current().id());
+                assert!(
+                    !self.renderer.request_drop_panics.load(Ordering::Acquire),
+                    "controlled completion foreign owner Drop panic"
+                );
             }
         }
         impl AudioPcmNativeAuthorHandoff for Request {
@@ -10765,8 +11065,9 @@ mod tests {
 
         // Actual Media producer/retirement threads and Core installation with
         // the portable adapter above; no SDK/plugin or native voice qualification.
-        fn completion_owner_shutdown(closed_receiver: bool) {
+        fn completion_owner_shutdown(closed_receiver: bool, panic_on_drop: bool) {
             let renderer = Renderer::new(false);
+            renderer.request_drop_panics.store(panic_on_drop, Ordering::Release);
             let (output, _) = fake_output_with_control(FakeOutputControl {
                 shutdown_started: Some(Arc::clone(&renderer.output_shutdown_started)),
                 ..Default::default()
@@ -10860,7 +11161,15 @@ mod tests {
             }
             drop(renderer);
             let evidence = playback.shutdown_and_wait();
-            assert!(evidence.all_workers_terminated(), "{evidence:?}");
+            if panic_on_drop {
+                assert_eq!(evidence.foreign_owner_panics, 1, "{evidence:?}");
+                assert_eq!(evidence.foreign_owner_abandonments, 0);
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(!evidence.all_workers_terminated());
+            } else {
+                assert!(evidence.all_workers_terminated(), "{evidence:?}");
+            }
             assert!(
                 weak.upgrade().is_none(),
                 "last renderer owner was actually released"
@@ -10884,12 +11193,17 @@ mod tests {
 
         #[test]
         fn unconsumed_awaiting_completion_retires_before_shutdown_receipt() {
-            completion_owner_shutdown(false);
+            completion_owner_shutdown(false, false);
         }
 
         #[test]
         fn failed_completion_send_retires_owner_on_original_retirement_worker() {
-            completion_owner_shutdown(true);
+            completion_owner_shutdown(true, false);
+        }
+
+        #[test]
+        fn completion_drop_panic_is_accounted_before_shutdown_receipt() {
+            completion_owner_shutdown(false, true);
         }
 
         fn stopped_completion_publication(retirement_stopped: bool) {

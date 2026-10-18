@@ -153,6 +153,22 @@ pub(super) enum NativeAuthorHandoffExecution {
     AwaitingOutputQuiescence,
 }
 
+impl NativeAuthorHandoffCompletion {
+    pub(super) fn into_retired_work(self) -> Option<Box<NativeAuthorHandoffWork>> {
+        let Self { generation, renderer_id, proposal, result } = self;
+        // These are Core-owned facts. Only Awaiting retains the actual request
+        // provider and its original installation Source; never invoke it here.
+        drop((generation, renderer_id, proposal));
+        match result {
+            NativeAuthorHandoffCompletionResult::Finished(outcome) => {
+                drop(outcome);
+                None
+            }
+            NativeAuthorHandoffCompletionResult::AwaitingOutputQuiescence(work) => Some(work),
+        }
+    }
+}
+
 impl AudioPlayback {
     pub(super) fn begin_native_author_hold(
         &mut self,
