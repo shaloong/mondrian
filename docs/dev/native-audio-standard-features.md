@@ -91,72 +91,51 @@ method/thread/lifetime obligations become binding when exposed or consumed.
 
 ## Shared playback shutdown
 
-Media stops completion publication under the original queue lock, then drains
-completed work before joining its existing retirement worker. Only completion
-payloads that retain foreign Work enter that worker; PCM and closed Core values
-consume no additional foreign-owner units. The original 256-unit limit remains.
-Four exact regressions remain covered by 108 current ordinary Playback controls
-on Windows (default plus validation features); one
-ignored actual MMCSS case is excluded. See the [qualification conditions](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
+Explicit Media shutdown seals completion publication under the original queue
+lock, joins its render producer, drains completed work and joins the existing
+retirement worker. Foreign Work extracted from completions shares the original
+aggregate 256-unit limit with pending Work, renderers and errors; PCM and closed
+Core values add no foreign-owner units.
+Ordinary Drop does not wait for worker completion and is not an explicit
+clean-close receipt.
 
-Native-child observation now uses that same tracker. Once bound, counted, non-clonable
-registrars cover the Timeline renderer, current/nested Sessions and held scope
-candidates; factories retain no observation domain. A result producer belongs
-to the original ProcessOwner and reports only its final Settled/Unconfirmed
-state. Missing, foreign or failed registration makes evidence unavailable;
-observation never grants DSP or Source permission. Session and parent producer
-slots use the existing resource ledger; App/tracker payloads and Arc blocks
-remain outside complete Root heap accounting.
+Native-child observation uses that same tracker. The root, Timeline renderer,
+current/nested Sessions and held candidates retain counted, non-clonable scopes.
+Session forks precede population; the original ProcessOwner registers after
+spawn and alone reports its child's final Settled/Unconfirmed result. Factories
+and catalogs retain no observation domain. Observation grants no DSP, Source or
+native author-handoff permission.
 
-The earlier Windows baseline passes Core509, Audio719, Playback105 and App74, plus
-two separate actual OS-owner controls. The App set includes real queued typed
-refusals and both retired/external renderer-alias lifetimes; it does not prove
-legal native handoff. An old mute-test alias is now released before its original
-complete-closure assertion. The owned-VST3 Runtime-to-Media pair also passes with
-its matching normal Product: an unconfirmed Retiring child now yields incomplete
-facts and unresolved ownership, while a Settled child yields complete facts and
-resolved ownership. Both gates verify actual Runtime forwarding and the original
-child's producer, with the original180s/2s Job limits. Test-only same-HANDLE
-cleanup happens after receipt capture and cannot upgrade the original owner's
-result. This closes the earlier false-healthy projection, not its cleanup failure.
+Missing/foreign/failed registration and unconfirmed, panicking or abandoned
+owners remain sticky failures in the original evidence. External renderer
+aliases can keep closure unresolved; late alias release or test-only HANDLE
+cleanup cannot rewrite an already captured receipt. Cold observation failure
+does not change the original constructor result or execution admission.
+After the retirement worker joins, the tracker seals: healthy closure requires
+zero scopes/children and no unavailable flag, AND the original worker/panic/
+abandonment evidence. Counting cannot override those failures.
 
-Cold Playback construction now acquires a counted root from that same Media
-tracker before the original Timeline/Runtime builder. A short borrow reaches
-fresh VST3 and CLAP probes, factory validation and retained creation; each Session
-forks before population and each original ProcessOwner registers immediately
-after spawn. Observation failure stays sticky without changing the original
-constructor result or DSP/Source admission. Factories and catalogs retain no domain.
+Finite Windows owned probe, Runtime-to-Media and App preparation controls cover
+released/retained aliases and actual Ready/NoEditor delivery. Their current
+conditions and counts belong to the [qualification table](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
+Zero PCM does not mean zero native/control work. Independent installation and
+create_instance, input inspection, Idle Warmup and precompiled Export still
+have unobserved construction boundaries.
 
-Current Windows controls pass Audio725, Playback108 and App76 (909 ordinary),
-including ten new controls; Core509 retains its earlier baseline. Four actual
-owned-plugin gates pass one VST3 fresh probe, CLAP normal probe, Note Offer and
-rejected child registration. The last preserves exact successful probe metadata
-without a settlement report. Two additional actual App owned-VST3 controls now
-pass installed-catalog construction through the original Timeline/Runtime and
-Media prepare. Releasing all renderer aliases yields complete closure; an
-external alias retains unresolved
-ownership, and its late release cannot rewrite the captured receipt. Both verify
-the original Source claim is removed at shutdown. A third App control passes
-actual binding Ready delivery through the original Media Idle poll/App handler,
-then one original editor action returns NoEditor, clears the queued request and
-leaves no outstanding author work, without changing author state or the installed
-Source. All three gates and App76 pass after their shared test setup was extracted.
-Idle can service
-diagnostics/native controls; the tests use no device and dispatch no PCM.
-Independent installation/author capture remains unobserved. This does not
-prove each cold probe's registration or legal native handoff. The normal Product
-and additional integration type check pass; existing App warnings remain,
-without strict zero-warning GO.
+The current ProjectClose candidate prechecks known native obligations, matches
+the concrete Runtime against Media's actual Source Arc, then revokes the Source
+through the original retirement queue before persistence permanently retires.
+Playback remains reusable. Its actual candidate qualification is pending.
+SourceClosed observes the current prefix; it does not atomically seal future
+callbacks or prove final OS exit. Other synchronous recovery/import handoffs
+retain their separate contracts.
 
 New counting does not run in physical callbacks, native DSP or steady PCM blocks.
-Cold handoff control on the MMCSS producer does take the tracker mutex; that
-existing branch also allocates and uses synchronous IPC. Neither its lock wait
-nor whole-producer realtime behavior is qualified. Independent catalog discovery
-and create_instance, input inspection, Idle Warmup and precompiled Export still
-have unobserved construction. Residual Child custody, whole-shutdown100ms and
-other platforms remain separate unfinished work. The post-ACK OS-exit observation
-window, capped at 100ms, is a host cleanup policy, separate from the audio
-processing deadline; its observed failures have not identified the slow teardown stage.
+Cold control can still lock, allocate and use synchronous IPC on the MMCSS
+producer; lock wait, whole-producer realtime safety and complete Root heap
+accounting are unqualified. The post-ACK OS-exit window capped at 100ms is a
+cleanup policy, separate from DSP and total shutdown duration. Old exit failures,
+error/ordinary-Drop custody and other platforms remain open.
 
 ## VST3 workflow matrix
 
