@@ -86,3 +86,58 @@ impl<'a> ControllerParameterRef<'a> {
             .eq(expected.chars())
     }
 }
+
+/// Separate fixed scratch for optional presentation queries. The original rescan
+/// query frame and its metadata/value-only call sequence remain unchanged.
+pub struct ControllerParameterPresentationFrame {
+    pub(crate) parameter: ControllerParameterQueryFrame,
+    pub(crate) plain: f64,
+    pub(crate) display: [u16; 128],
+    pub(crate) display_available: bool,
+}
+
+impl Default for ControllerParameterPresentationFrame {
+    fn default() -> Self {
+        Self {
+            parameter: ControllerParameterQueryFrame::default(),
+            plain: f64::NAN,
+            display: [0; 128],
+            display_available: false,
+        }
+    }
+}
+
+impl ControllerParameterPresentationFrame {
+    pub(crate) fn observation(&self) -> ControllerParameterPresentationRef<'_> {
+        ControllerParameterPresentationRef { frame: self }
+    }
+}
+
+/// Borrowed outputs of actual native plain conversion and optional formatting.
+/// These facts are presentation only, never an author scalar or a DSP delivery.
+#[derive(Clone, Copy)]
+pub struct ControllerParameterPresentationRef<'a> {
+    frame: &'a ControllerParameterPresentationFrame,
+}
+
+impl<'a> ControllerParameterPresentationRef<'a> {
+    /// The actual metadata and normalized current-value observation.
+    pub fn parameter(self) -> ControllerParameterRef<'a> {
+        self.frame.parameter.observation()
+    }
+    /// Actual normalizedParamToPlain output, if finite; no default or clamp.
+    pub fn plain(self) -> Option<f64> {
+        self.frame.plain.is_finite().then_some(self.frame.plain)
+    }
+    /// Actual VST3 visibility flag, with no CLAP flag interpretation.
+    pub fn hidden(self) -> bool {
+        self.frame.parameter.info.flags
+            & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsHidden
+            != 0
+    }
+    /// Successful getParamStringByValue output, without lossy text conversion.
+    /// The consumer must validate bounded UTF-16 and its own text/storage limits.
+    pub fn display_utf16(self) -> Option<&'a [u16; 128]> {
+        self.frame.display_available.then_some(&self.frame.display)
+    }
+}

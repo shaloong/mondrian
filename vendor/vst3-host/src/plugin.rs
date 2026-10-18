@@ -1121,6 +1121,29 @@ impl<'a> PluginEditorControl<'a> {
     pub fn parameter(&self, id: u32) -> Result<f64> {
         self.internal.parameter(id)
     }
+    /// Query selected native parameter presentations on this actual control role.
+    ///
+    /// The maximum bounds the entire native census, not just the selected IDs.
+    /// Selection must be bounded and unique. Only selected IDs receive current
+    /// value, plain-conversion and display calls; unrelated descriptors are not
+    /// interpreted as author lanes. Visits retain native census order, so the
+    /// consumer must validate each selected identity and complete coverage. The
+    /// return value is the full native census count, not the selection length.
+    /// Deferred controller synchronization is never drained and makes the query
+    /// fail. This optional query does not consume author or restart callbacks.
+    pub fn visit_controller_parameter_presentations_bounded(
+        &self,
+        maximum: usize,
+        selected_ids: &[u32],
+        frame: &mut crate::controller_parameters::ControllerParameterPresentationFrame,
+        visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterPresentationRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        self.internal
+            .visit_controller_parameter_presentations_bounded(maximum, selected_ids, frame, visitor)
+    }
     /// Take a native IPlugFrame request for the current editor's parent size.
     pub fn take_editor_resize_request(&self) -> Result<Option<(i32, i32)>> {
         self.internal.take_editor_resize_request()
@@ -1273,6 +1296,20 @@ pub(crate) trait PluginEditorRole {
     fn take_restart_flags(&mut self) -> Result<RestartFlags>;
     fn service_controller(&mut self) -> Result<()>;
     fn parameter(&self, id: u32) -> Result<f64>;
+    fn visit_controller_parameter_presentations_bounded(
+        &self,
+        _maximum: usize,
+        _selected_ids: &[u32],
+        _frame: &mut crate::controller_parameters::ControllerParameterPresentationFrame,
+        _visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterPresentationRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        Err(Error::Other(
+            "bounded controller presentation is unsupported".to_owned(),
+        ))
+    }
     fn take_editor_resize_request(&self) -> Result<Option<(i32, i32)>>;
     fn service_run_loop(&mut self) -> Result<()>;
 }

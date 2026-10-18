@@ -7748,6 +7748,89 @@ impl crate::plugin::PluginEditorRole for PluginEditorFields<'_> {
         self.host_app.service_main_thread_data_exchange();
         Ok(())
     }
+    fn visit_controller_parameter_presentations_bounded(
+        &self,
+        maximum: usize,
+        selected_ids: &[u32],
+        frame: &mut crate::controller_parameters::ControllerParameterPresentationFrame,
+        visitor: &mut dyn FnMut(
+            usize,
+            crate::controller_parameters::ControllerParameterPresentationRef<'_>,
+        ) -> Result<()>,
+    ) -> Result<usize> {
+        self.ensure_control_thread()?;
+        if selected_ids.len() > maximum
+            || selected_ids
+                .iter()
+                .enumerate()
+                .any(|(index, id)| selected_ids[..index].contains(id))
+        {
+            return Err(Error::InvalidParameter(
+                "invalid presentation selection".to_owned(),
+            ));
+        }
+        if !self.deferred_controller_sync.is_empty() {
+            return Err(Error::Other(
+                "deferred controller synchronization is pending".to_owned(),
+            ));
+        }
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| Error::InterfaceError("No controller available".to_owned()))?;
+        // SAFETY: owner-thread verification precedes all calls. Native outputs
+        // address the caller's fixed frame; no pointer survives a single visit.
+        unsafe {
+            let raw_count = controller.getParameterCount();
+            let count = usize::try_from(raw_count).map_err(|_| {
+                Error::InvalidParameter("negative native parameter count".to_owned())
+            })?;
+            if count > maximum || count < selected_ids.len() {
+                return Err(Error::InvalidParameter(
+                    "native parameter census exceeds presentation bounds".to_owned(),
+                ));
+            }
+            let mut visited = 0;
+            for index in 0..raw_count {
+                *frame =
+                    crate::controller_parameters::ControllerParameterPresentationFrame::default();
+                if controller.getParameterInfo(index, &mut frame.parameter.info) != kResultOk {
+                    return Err(Error::InvalidParameter(
+                        "native parameter metadata query refused".to_owned(),
+                    ));
+                }
+                let id = frame.parameter.info.id;
+                if !selected_ids.contains(&id) {
+                    continue;
+                }
+                frame.parameter.value = controller.getParamNormalized(id);
+                if !frame.parameter.value.is_finite()
+                    || !(0.0..=1.0).contains(&frame.parameter.value)
+                {
+                    return Err(Error::InvalidParameter(
+                        "native normalized parameter value is invalid".to_owned(),
+                    ));
+                }
+                frame.plain = controller.normalizedParamToPlain(id, frame.parameter.value);
+                frame.display_available =
+                    controller.getParamStringByValue(id, frame.parameter.value, &mut frame.display)
+                        == kResultOk;
+                visitor(index as usize, frame.observation())?;
+                visited += 1;
+            }
+            if !self.deferred_controller_sync.is_empty() {
+                return Err(Error::Other(
+                    "controller synchronization arrived during presentation".to_owned(),
+                ));
+            }
+            if visited != selected_ids.len() {
+                return Err(Error::InvalidParameter(
+                    "selected presentation identity is missing or repeated".to_owned(),
+                ));
+            }
+            Ok(count)
+        }
+    }
     fn parameter(&self, id: u32) -> Result<f64> {
         self.ensure_control_thread()?;
         let controller = self
@@ -8714,6 +8797,9 @@ mod cache_policy_tests;
 
 #[cfg(test)]
 mod initial_parameter_input_tests;
+
+#[cfg(test)]
+mod controller_presentation_tests;
 
 #[cfg(test)]
 #[allow(clippy::unnecessary_cast)]
@@ -12584,5 +12670,10 @@ mod restored_audio_activation_tests {
         assert_eq!(after.retirement_lineage(), witness.retirement_lineage() + 2);
         assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
         assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn original_bounded_value_query_does_not_gain_presentation_calls_or_drain() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::controller_presentation_tests::assert_original_value_query_sequence(&mut f.plugin);
     }
 }

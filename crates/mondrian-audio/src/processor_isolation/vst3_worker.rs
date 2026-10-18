@@ -5,6 +5,7 @@ mod initial_parameter_values;
 #[cfg(test)]
 mod initial_parameter_values_tests;
 mod native_author;
+mod parameter_observations;
 #[cfg(all(test, target_os = "windows"))]
 mod startup_metadata_diagnostics;
 
@@ -881,6 +882,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             native_binding: &self.native_binding,
             native_author_delivery: &self.native_author_delivery,
             prepared_author_entry: &self.prepared_author_entry,
+            parameters: &self.payload.parameters,
+            parameter_ids: &self.payload.parameter_ids,
         })))
     }
 
@@ -916,6 +919,8 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                 native_binding: &self.native_binding,
                 native_author_delivery: &self.native_author_delivery,
                 prepared_author_entry: &self.prepared_author_entry,
+                parameters: &self.payload.parameters,
+                parameter_ids: &self.payload.parameter_ids,
             }),
             processing: Box::new(VstDspRole { native: processor, signal }),
         })
@@ -1078,13 +1083,31 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
     ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
         let object = self.native_audio_object_observation()?;
         let author = self.observe_native_author(consumption)?;
-        Ok(crate::NativeAudioObservations {
+        let mut observations = crate::NativeAudioObservations {
             object,
             author,
             editor_cleanup: self.native_editor_detach_stage(),
-            pending_reprepare: self.pending_reprepare(),
             ..Default::default()
-        })
+        };
+        parameter_observations::append_optional(
+            &mut observations,
+            consumption,
+            self.native_author_delivery.is_none()
+                && self.prepared_author_entry.is_none()
+                && self.configuration_phase.blocked_request().is_none(),
+            || {
+                let editor = self.plugin.as_mut()?.borrow_editor_control().ok()?;
+                parameter_observations::capture(
+                    &editor,
+                    &self.payload.parameters,
+                    &self.payload.parameter_ids,
+                )
+            },
+        );
+        // Query callbacks remain in the original source. Read their actual live
+        // request after the optional query, with no second author drain.
+        observations.pending_reprepare = self.pending_reprepare();
+        Ok(observations)
     }
 
     fn bind_native_audio_object(
@@ -2025,6 +2048,8 @@ struct VstMainRole<'a> {
     native_binding: &'a Option<crate::NativeAudioObjectBindReceipt>,
     native_author_delivery: &'a Option<native_author::PendingDelivery>,
     prepared_author_entry: &'a Option<author_state_entry::PreparedAuthorEntry>,
+    parameters: &'a [Vst3ParameterDescriptor],
+    parameter_ids: &'a [u32],
 }
 
 #[cfg(target_os = "windows")]
@@ -2136,14 +2161,23 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
         });
         // Attachment cleanup is a full-owner transition after this borrow joins.
         // Live role service never closes/replaces the canonical native object.
-        Ok(crate::NativeAudioObservations {
+        let mut observations = crate::NativeAudioObservations {
             object: Some(crate::NativeAudioObjectObservation::new(
                 pid,
                 owner.serial(),
             )),
             author,
             ..Default::default()
-        })
+        };
+        parameter_observations::append_optional(
+            &mut observations,
+            crate::NativeAudioObservationConsumption::Preserve,
+            self.native_author_delivery.is_none()
+                && self.prepared_author_entry.is_none()
+                && self.configuration_phase.blocked_request().is_none(),
+            || parameter_observations::capture(&self.editor, self.parameters, self.parameter_ids),
+        );
+        Ok(observations)
     }
 
     fn native_author_binding_matches(
@@ -2322,6 +2356,7 @@ pub(super) fn native_worker_lane_profile(
                 crate::NativeAudioObservations,
                 vst3_host::controller_parameters::ControllerParameterQueryFrame,
                 initial_parameter_values::InitialParameterFrame,
+                parameter_observations::ParameterPresentationFrame,
             )>()),
             runtime_main_role: native_layout(std::alloc::Layout::new::<VstMainRole<'static>>()),
             runtime_dsp_role: native_layout(std::alloc::Layout::new::<VstDspRole<'static>>()),
