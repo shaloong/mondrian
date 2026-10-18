@@ -793,6 +793,183 @@ impl AppState {
 mod attachment_continuity_contracts {
     use super::*;
     use std::num::{NonZeroU32, NonZeroU64};
+
+    fn pending_open() -> (
+        tempfile::TempDir,
+        AppState,
+        mondrian_core::NativeAudioAuthorProposal,
+    ) {
+        let directory = tempfile::tempdir().expect("actual author Session fixture");
+        let library = mondrian_assets::AssetLibrary::open(directory.path().join("library"))
+            .expect("actual library");
+        let mut state = AppState::with_audio_processor_resolver(std::sync::Arc::new(
+            mondrian_audio::BuiltInAudioProcessorResolver,
+        ));
+        let mut sequence = mondrian_timeline::Sequence::new("Pending native editor");
+        let sequence_id = sequence.id;
+        let output = sequence.audio_program.outputs[0].id;
+        let instance = mondrian_timeline::audio::AudioProcessorInstance {
+            id: mondrian_core::AudioProcessorInstanceId::new(),
+            definition: mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                plugin_id: "owned pending-open metadata".into(),
+                schema_version: 1,
+                binary_sha256: None,
+            },
+            bypassed: false,
+            parameters: Default::default(),
+            opaque_state: Some(vec![1, 2, 3, 4].into()),
+        };
+        let processor_id = instance.id;
+        let definition = instance.definition.clone();
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+        state.test_set_sequence(Some(sequence));
+        state.test_set_asset_library(Some(library));
+        let payload = AudioNativeEditorPayload {
+            session_id: state.authoring_session_id().expect("actual author Session"),
+            sequence_id,
+            address: AudioProcessorRackAddress::ChannelStrip {
+                owner: AudioChannelStripOwner::ProgramOutput { output_id: output },
+                rack: AudioChannelStripRack::PreFader,
+            },
+            occurrence: None,
+            processor_id,
+            definition,
+            sequence_time: mondrian_core::DomainTime::new(
+                AuthoringTimeDomain::Sequence(sequence_id),
+                mondrian_core::TimelineTime::ZERO,
+            ),
+            open: true,
+        };
+        let mut context = state.prepare_native_audio_editor_context(payload).unwrap();
+        context.queued = Some(Intent::ResolveAndOpen {
+            locator: context.locator,
+            title: NativeAudioEditorTitle::new("Mondrian".to_owned()).unwrap(),
+        });
+        let target = NativeAudioEditorTarget {
+            instance: context.locator.instance,
+            owner: context.locator.owner,
+            insertion: context.locator.insertion,
+            ..self::context().target.unwrap()
+        };
+        let proposal = early_proposal(target, sequence_id);
+        state.native_audio_editor = Some(context);
+        (directory, state, proposal)
+    }
+
+    fn early_proposal(
+        target: NativeAudioEditorTarget,
+        sequence: mondrian_core::SequenceId,
+    ) -> mondrian_core::NativeAudioAuthorProposal {
+        mondrian_core::NativeAudioAuthorProposal::project(
+            target,
+            sequence,
+            1,
+            mondrian_core::NativeAudioAuthorBoundaryFacts {
+                completion: mondrian_core::NativeAudioAuthorCompletion::Nonterminal,
+                open_parameter_edits: 0,
+                group_depth: 1,
+            },
+            vec![mondrian_core::NativeAudioAuthorCallback::GroupStarted],
+            None,
+        )
+        .expect("bounded proposal DTO, not an execution grant")
+    }
+
+    fn observe_early_without_authority(
+        state: &mut AppState,
+        proposal: mondrian_core::NativeAudioAuthorProposal,
+        accepted: bool,
+    ) {
+        let author = state.authoring.as_ref().unwrap();
+        let generation = author.author_generation();
+        let history = author.history().diagnostics();
+        let dirty = author.is_dirty();
+        let document = serde_json::to_value(author.document()).unwrap();
+        let queued = state.native_audio_editor.as_ref().unwrap().queued.clone();
+        assert_eq!(
+            state.observe_native_audio_author_proposal(proposal).is_ok(),
+            accepted
+        );
+        let author = state.authoring.as_ref().unwrap();
+        assert_eq!(author.author_generation(), generation);
+        assert_eq!(author.history().diagnostics(), history);
+        assert_eq!(author.is_dirty(), dirty);
+        assert_eq!(serde_json::to_value(author.document()).unwrap(), document);
+        let context = state.native_audio_editor.as_ref().unwrap();
+        assert_eq!(
+            context.queued, queued,
+            "only the real Open completion consumes this intent"
+        );
+        assert!(context.target.is_none());
+        assert!(context.attachment_target.is_none());
+        assert!(context.renderer.is_none());
+        assert!(context.gesture.is_none());
+        assert!(context.outstanding.is_none());
+        assert!(context.parameter_observation.is_none());
+        assert!(!context.state_entry_accepted);
+        assert!(state.native_audio_renderer.is_none());
+    }
+
+    #[test]
+    fn pending_open_defers_repeated_proposal_without_author_transaction_or_ack() {
+        let (_directory, mut state, proposal) = pending_open();
+        observe_early_without_authority(&mut state, proposal.clone(), true);
+        observe_early_without_authority(&mut state, proposal, true);
+    }
+
+    #[test]
+    fn pending_open_rejects_foreign_proposal_and_absent_or_foreign_open_intent() {
+        for case in 0..4 {
+            let (_directory, mut state, proposal) = pending_open();
+            let context = state.native_audio_editor.as_mut().unwrap();
+            let proposal = match case {
+                0 => early_proposal(proposal.target(), mondrian_core::SequenceId::new()),
+                1 => early_proposal(
+                    NativeAudioEditorTarget {
+                        instance: mondrian_core::AudioProcessorInstanceId::new(),
+                        ..proposal.target()
+                    },
+                    proposal.sequence(),
+                ),
+                2 => {
+                    context.queued = None; // Also the state after a refused Open.
+                    proposal
+                }
+                3 => {
+                    context.queued = Some(Intent::ResolveAndOpen {
+                        locator: NativeAudioEditorLocator {
+                            instance: mondrian_core::AudioProcessorInstanceId::new(),
+                            ..context.locator
+                        },
+                        title: NativeAudioEditorTitle::new("Mondrian".to_owned()).unwrap(),
+                    });
+                    proposal
+                }
+                _ => unreachable!(),
+            };
+            observe_early_without_authority(&mut state, proposal, false);
+        }
+    }
+
+    #[test]
+    fn pending_open_revalidates_author_session_and_processor_metadata() {
+        for stale_session in [true, false] {
+            let (_directory, mut state, proposal) = pending_open();
+            let context = state.native_audio_editor.as_mut().unwrap();
+            if stale_session {
+                context.payload.session_id = self::context().payload.session_id;
+            } else {
+                context.payload.definition =
+                    mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+                        plugin_id: "changed definition".into(),
+                        schema_version: 1,
+                        binary_sha256: None,
+                    };
+            }
+            observe_early_without_authority(&mut state, proposal, false);
+        }
+    }
+
     fn context() -> NativeAudioEditorProductContext {
         let sequence = mondrian_core::SequenceId::new();
         let bus = mondrian_core::MixBusId::new();
