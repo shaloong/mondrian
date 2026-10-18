@@ -125,7 +125,12 @@ have unobserved construction boundaries.
 The current ProjectClose candidate prechecks known native obligations, matches
 the concrete Runtime against Media's actual Source Arc, then revokes the Source
 through the original retirement queue before persistence permanently retires.
-Playback remains reusable. Its actual candidate qualification is pending.
+Playback remains reusable in the ordinary BuiltIn controls; active-GUI refusal
+also passes with the owned CLAP DLL. The native NoGUI gate remains HOLD: Runtime
+Busy refuses Close, and the subsequent whole-App receipt leaves Project custody
+unreleased despite complete Audio cleanup. Ready is not control quiescence;
+Idle polling can enqueue further observations. The original worker queue needs
+a coordinated close-admission boundary before native ProjectClose is qualified.
 SourceClosed observes the current prefix; it does not atomically seal future
 callbacks or prove final OS exit. Other synchronous recovery/import handoffs
 retain their separate contracts.
