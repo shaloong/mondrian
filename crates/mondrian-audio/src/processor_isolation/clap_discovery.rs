@@ -398,8 +398,12 @@ pub fn scan_clap_library_descriptors(
     helper_executable: &Path,
     library_path: &Path,
 ) -> Result<Vec<ClapPluginDescriptor>, AudioProcessorHostError> {
-    let (_, response) =
-        request_discovery(helper_executable, library_path, DiscoveryOperation::List)?;
+    let (_, response) = request_discovery(
+        helper_executable,
+        library_path,
+        DiscoveryOperation::List,
+        None,
+    )?;
     if response.probe.is_some() {
         return Err(invalid(
             "CLAP descriptor response unexpectedly contains a probe",
@@ -446,6 +450,7 @@ pub(super) fn probe_clap_plugin_registration_with_state(
         render_contract,
         state,
         capture_default_state,
+        None,
     )
     .map(|probe| (probe.registration, probe.captured_state))
 }
@@ -457,6 +462,7 @@ pub(super) fn probe_clap_plugin_registration_with_names(
     render_contract: AudioRenderContract,
     state: Option<&[u8]>,
     capture_default_state: bool,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<ClapProbe, AudioProcessorHostError> {
     if plugin_id.is_empty() || plugin_id.len() > 256 || plugin_id.contains('\0') {
         return Err(invalid("CLAP probe plugin ID is invalid"));
@@ -477,6 +483,7 @@ pub(super) fn probe_clap_plugin_registration_with_names(
             state: state.map(ToOwned::to_owned),
             capture_default_state,
         },
+        native_child_settlement,
     )?;
     if fingerprint_clap_binary(&library_path)? != fingerprint {
         return Err(unavailable("CLAP binary changed during contract probing"));
@@ -571,9 +578,14 @@ fn request_discovery(
     helper_executable: &Path,
     library_path: &Path,
     operation: DiscoveryOperation,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<(PathBuf, DiscoveryResponse), AudioProcessorHostError> {
-    let (library_path, bytes, _process) =
-        request_discovery_bytes(helper_executable, library_path, operation)?;
+    let (library_path, bytes, _process) = request_discovery_bytes(
+        helper_executable,
+        library_path,
+        operation,
+        native_child_settlement,
+    )?;
     let response = serde_json::from_slice(&bytes)
         .map_err(|error| invalid(format!("CLAP discovery response is invalid: {error}")))?;
     Ok((library_path, response))
@@ -609,6 +621,7 @@ pub fn probe_clap_note_input_metadata(
             plugin_id: plugin_id.to_owned(),
             state: state.map(ToOwned::to_owned),
         }),
+        None,
     )?;
     if fingerprint_clap_binary(&library_path)? != fingerprint {
         return Err(unavailable(
@@ -661,6 +674,7 @@ pub fn probe_clap_note_input_contract(
             offline: render.processing_mode == AudioProcessingMode::Offline,
             state: state.map(ToOwned::to_owned),
         },
+        None,
     )?;
     if fingerprint_clap_binary(&library_path)? != fingerprint {
         return Err(unavailable(
@@ -886,6 +900,24 @@ pub fn probe_clap_note_processing_offer(
     render: AudioRenderContract,
     state: Option<&[u8]>,
 ) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
+    probe_clap_note_processing_offer_with_native_child_settlement(
+        helper_executable,
+        library_path,
+        plugin_id,
+        render,
+        state,
+        None,
+    )
+}
+
+pub(super) fn probe_clap_note_processing_offer_with_native_child_settlement(
+    helper_executable: &Path,
+    library_path: &Path,
+    plugin_id: &str,
+    render: AudioRenderContract,
+    state: Option<&[u8]>,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+) -> Result<super::clap_note_input_contract::ClapNoteProcessingOfferV5, AudioProcessorHostError> {
     super::clap_note_input_metadata::validate_request(plugin_id, state)?;
     if !helper_executable.is_absolute()
         || !library_path.is_absolute()
@@ -911,6 +943,7 @@ pub fn probe_clap_note_processing_offer(
             offline: render.processing_mode == AudioProcessingMode::Offline,
             state: state.map(ToOwned::to_owned),
         },
+        native_child_settlement,
     )?;
     if fingerprint_clap_binary(&library_path)? != fingerprint {
         return Err(unavailable(
@@ -968,6 +1001,7 @@ fn request_discovery_bytes(
     helper_executable: &Path,
     library_path: &Path,
     operation: DiscoveryOperation,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<(PathBuf, Vec<u8>, super::supervisor::ProcessOwner), AudioProcessorHostError> {
     if !helper_executable.is_absolute() || !library_path.is_absolute() {
         return Err(invalid(
@@ -1023,6 +1057,11 @@ fn request_discovery_bytes(
         })?,
         temp,
     );
+    if let Some(registrar) = native_child_settlement {
+        // Retain observation on the same original Child/staging owner. Rejected
+        // evidence must not replace the original discovery result or cleanup.
+        let _ = process.bind_native_child_settlement(registrar);
+    }
     let outcome = wait_for_discovery_worker(&mut process, diagnostic.as_mut());
     drop(diagnostic);
     outcome?;
@@ -5149,4 +5188,278 @@ pub(super) fn deactivated_audio_port_census_for_test(
         }),
         observed.err(),
     ))
+}
+
+#[cfg(all(test, windows))]
+pub(super) mod cold_settlement_probe_controls {
+    use super::*;
+    use mondrian_core::{
+        NativeChildSettlement, NativeChildSettlementError, NativeChildSettlementRegistrar,
+        NativeChildSettlementReporter,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    // Fixed observation fields only; no Child, staging or execution authority.
+    #[derive(Default)]
+    pub(in crate::processor_isolation) struct Recorder {
+        scope_begins: AtomicU32,
+        scope_ends: AtomicU32,
+        child_begins: AtomicU32,
+        child_ends: AtomicU32,
+        settled: AtomicU32,
+        unconfirmed: AtomicU32,
+        unavailable: AtomicBool,
+        reject_child: bool,
+    }
+
+    impl Recorder {
+        pub(in crate::processor_isolation) fn registrar(
+            reject_child: bool,
+        ) -> (Arc<Self>, NativeChildSettlementRegistrar) {
+            let recorder = Arc::new(Self { reject_child, ..Self::default() });
+            let registrar = NativeChildSettlementRegistrar::try_new(recorder.clone())
+                .expect("root observation scope");
+            (recorder, registrar)
+        }
+
+        pub(in crate::processor_isolation) fn assert_finished(&self, rejected: bool) {
+            assert_eq!(self.scope_begins.load(Ordering::SeqCst), 1);
+            assert_eq!(self.scope_ends.load(Ordering::SeqCst), 1);
+            assert_eq!(self.child_begins.load(Ordering::SeqCst), 1);
+            let finishes = u32::from(!rejected);
+            assert_eq!(self.child_ends.load(Ordering::SeqCst), finishes);
+            assert_eq!(self.settled.load(Ordering::SeqCst), finishes);
+            assert_eq!(self.unconfirmed.load(Ordering::SeqCst), 0);
+            assert_eq!(self.unavailable.load(Ordering::SeqCst), rejected);
+        }
+    }
+
+    impl NativeChildSettlementReporter for Recorder {
+        fn begin_scope(&self) -> Result<(), NativeChildSettlementError> {
+            self.scope_begins.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end_scope(&self) {
+            self.scope_ends.fetch_add(1, Ordering::SeqCst);
+        }
+        fn begin_child(&self) -> Result<(), NativeChildSettlementError> {
+            self.child_begins.fetch_add(1, Ordering::SeqCst);
+            if self.reject_child {
+                Err(NativeChildSettlementError::Unavailable)
+            } else {
+                Ok(())
+            }
+        }
+        fn end_child(&self, settlement: NativeChildSettlement) {
+            self.child_ends.fetch_add(1, Ordering::SeqCst);
+            match settlement {
+                NativeChildSettlement::Settled => {
+                    self.settled.fetch_add(1, Ordering::SeqCst);
+                }
+                NativeChildSettlement::Unconfirmed => {
+                    self.unconfirmed.fetch_add(1, Ordering::SeqCst);
+                    self.unavailable();
+                }
+            }
+        }
+        fn unavailable(&self) {
+            self.unavailable.store(true, Ordering::SeqCst);
+        }
+    }
+
+    const NOTE_GATE_ID: &str = "org.mondrian.fixture.note-gate";
+
+    fn inputs() -> (PathBuf, PathBuf, AudioRenderContract, [u8; 16]) {
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("current normal Product helper"),
+        );
+        let plugin = PathBuf::from(
+            std::env::var_os("MONDRIAN_INTERNAL_NOTE_GATE_DLL")
+                .expect("original fixed B239 Note gate DLL"),
+        );
+        let accepted = Path::new("E:/codex-artifact-storage/mondrian-3349-plugin-host-sprint/clap-note-gate-build-target-r2/debug/mondrian_clap_note_gate_fixture.dll");
+        assert!(helper.is_absolute() && fs::metadata(&helper).unwrap().is_file());
+        assert_eq!(
+            plugin.canonicalize().unwrap(),
+            accepted.canonicalize().unwrap()
+        );
+        assert_eq!(fs::metadata(&plugin).unwrap().len(), 214_528);
+        let hash: String = fingerprint_clap_binary(&plugin)
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect();
+        assert_eq!(
+            hash,
+            "B239C594F9547EE3A9F3FA107622A6FE663AAF73425E11248BDB1E0A0F32AF1D"
+        );
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Mono,
+            max_block_frames: 14,
+            processing_mode: AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 4096,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let mut state = [0; 16];
+        state[..4].copy_from_slice(b"MNG1");
+        state[4..12].copy_from_slice(&0.5_f64.to_le_bytes());
+        state[12..].copy_from_slice(&2_u32.to_le_bytes());
+        (helper, plugin, render, state)
+    }
+
+    fn assert_parameters(parameters: &[super::super::ClapParameterDescriptor]) {
+        assert_eq!(
+            parameters
+                .iter()
+                .map(|parameter| (
+                    parameter.id,
+                    parameter.name.as_str(),
+                    parameter.current_value,
+                    parameter.read_only
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (17, "Gain", 0.5, false),
+                (19, "End scenario", 2.0, false),
+                (23, "Exact Off count", 0.0, true),
+            ]
+        );
+    }
+
+    fn assert_normal_probe(probe: &ClapProbe, plugin: &Path) {
+        let registration = &probe.registration;
+        assert_eq!(registration.plugin_id, NOTE_GATE_ID);
+        assert_eq!(
+            registration.binary_sha256,
+            fingerprint_clap_binary(plugin).unwrap()
+        );
+        assert_eq!(registration.main_audio_input, ClapMainAudioInput::Present);
+        assert_eq!(registration.main_audio_output_id, 0x201);
+        assert!(registration.auxiliary_inputs.buses.is_empty());
+        assert!(registration.auxiliary_outputs.buses.is_empty());
+        assert!(probe.input_names.is_empty());
+        assert!(probe.captured_state.is_none());
+        assert_parameters(&registration.parameters);
+        assert_eq!(
+            registration.execution_contract.algorithmic_latency_frames(),
+            0
+        );
+        assert_eq!(
+            registration.execution_contract.tail(),
+            AudioProcessorTail::Finite(4)
+        );
+        assert!(registration.execution_contract.requires_state_entry());
+        assert!(registration.execution_contract.offline_capable());
+    }
+
+    #[test]
+    #[ignore = "current normal Product and the original fixed B239 DLL; actual observed Probe4"]
+    fn observed_clap_normal_probe_reports_original_child_settled() {
+        let (helper, plugin, render, state) = inputs();
+        let (recorder, registrar) = Recorder::registrar(false);
+        // The real decoder requires NormalProbe4/Processing3, not a synthetic response.
+        let probe = probe_clap_plugin_registration_with_names(
+            &helper,
+            &plugin,
+            NOTE_GATE_ID,
+            render,
+            Some(&state),
+            false,
+            Some(&registrar),
+        )
+        .expect("actual observed normal probe");
+        assert_normal_probe(&probe, &plugin);
+        drop(registrar);
+        recorder.assert_finished(false);
+    }
+
+    #[test]
+    #[ignore = "current normal Product and the original fixed B239 DLL; actual observed Offer5"]
+    fn observed_clap_note_offer_reports_original_child_settled() {
+        let (helper, plugin, render, state) = inputs();
+        let (recorder, registrar) = Recorder::registrar(false);
+        let offer = probe_clap_note_processing_offer_with_native_child_settlement(
+            &helper,
+            &plugin,
+            NOTE_GATE_ID,
+            render,
+            Some(&state),
+            Some(&registrar),
+        )
+        .expect("actual observed full Note offer");
+        assert_eq!(offer.schema_version, 5);
+        assert_eq!(offer.notes.schema_version, 2);
+        assert_eq!(offer.notes.plugin_id, NOTE_GATE_ID);
+        assert_eq!(
+            offer.notes.binary_sha256,
+            fingerprint_clap_binary(&plugin).unwrap()
+        );
+        assert_eq!(
+            offer.notes.state_sha256,
+            super::super::clap_note_input_metadata::state_digest(Some(&state))
+        );
+        assert_eq!(offer.notes.sample_rate, render.sample_rate);
+        assert_eq!(offer.notes.channel_layout, render.channel_layout);
+        assert_eq!(offer.notes.max_block_frames, render.max_block_frames);
+        assert!(offer.notes.offline);
+        assert_eq!(
+            offer.notes.contract.completion,
+            crate::AudioNoteCompletionPolicy::NativeEnd
+        );
+        assert_eq!(
+            offer
+                .notes
+                .contract
+                .ports
+                .iter()
+                .map(|port| (
+                    port.native_id,
+                    port.native_index,
+                    port.port_key.as_str(),
+                    port.channel_count
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (0, 0, "clap.note-input.0", 16),
+                (0x8000_0017, 1, "clap.note-input.2147483671", 16),
+            ]
+        );
+        assert_eq!(
+            offer.notes.contract.limits,
+            super::super::clap_note_input_contract::offered_limits()
+        );
+        assert_eq!(offer.main_audio_input(), ClapMainAudioInput::Present);
+        assert_eq!(offer.main_audio_output_id(), 0x201);
+        assert_eq!(offer.auxiliary_inputs().len(), 0);
+        assert!(offer.auxiliary_outputs().buses.is_empty());
+        assert_parameters(offer.parameters());
+        assert_eq!(offer.latency_frames(), 0);
+        assert_eq!(offer.tail(), AudioProcessorTail::Finite(4));
+        assert_eq!(offer.processing_mode(), AudioProcessingMode::Offline);
+        drop(registrar);
+        recorder.assert_finished(false);
+    }
+
+    #[test]
+    #[ignore = "current normal Product and the original fixed B239 DLL; rejected observer still probes"]
+    fn rejected_child_registration_preserves_actual_clap_probe_result() {
+        let (helper, plugin, render, state) = inputs();
+        let (recorder, registrar) = Recorder::registrar(true);
+        let probe = probe_clap_plugin_registration_with_names(
+            &helper,
+            &plugin,
+            NOTE_GATE_ID,
+            render,
+            Some(&state),
+            false,
+            Some(&registrar),
+        )
+        .expect("observation refusal must not become discovery refusal");
+        assert_normal_probe(&probe, &plugin);
+        drop(registrar);
+        recorder.assert_finished(true);
+    }
 }

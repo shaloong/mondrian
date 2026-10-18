@@ -443,6 +443,12 @@ impl InstalledClapAudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for InstalledClapAudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Required
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -570,6 +576,12 @@ fn author_instance_from_probe(
 }
 
 impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Required
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -584,12 +596,13 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
             .get(plugin_id)
             .ok_or_else(|| unavailable(format!("CLAP plugin {plugin_id} is not installed")))?;
         if request.note_input_requested() {
-            let offer = super::probe_clap_note_processing_offer(
+            let offer = super::clap_discovery::probe_clap_note_processing_offer_with_native_child_settlement(
                 &self.helper_executable,
                 library_path,
                 plugin_id,
                 request.render_contract(),
                 request.opaque_state(),
+                request.native_child_settlement_registrar(),
             )?;
             if offer.notes.binary_sha256 != *fingerprint {
                 return Err(unavailable(
@@ -639,6 +652,7 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredClapAudioProcessorSpecReso
             request.render_contract(),
             request.opaque_state(),
             false,
+            request.native_child_settlement_registrar(),
         )?;
         if probe.registration.binary_sha256 != *fingerprint {
             return Err(unavailable(
@@ -691,6 +705,13 @@ impl ClapAudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for ClapAudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        // This registry only interprets already-admitted immutable metadata.
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,

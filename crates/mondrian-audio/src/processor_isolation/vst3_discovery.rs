@@ -104,7 +104,7 @@ pub fn scan_vst3_binary_descriptors(
     binary_path: &Path,
 ) -> Result<Vec<Vst3PluginDescriptor>, AudioProcessorHostError> {
     let (path, before) = canonical_binary(binary_path)?;
-    let response = request(helper_executable, &path, DiscoveryOperation::List {})?;
+    let response = request(helper_executable, &path, DiscoveryOperation::List {}, None)?;
     if fingerprint(&path)? != before {
         return Err(unavailable(
             "VST3 binary changed during descriptor discovery",
@@ -164,6 +164,26 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
     state: Option<&[u8]>,
     capture_default_state: bool,
 ) -> Result<Vst3Probe, AudioProcessorHostError> {
+    probe_vst3_plugin_registration_with_state_and_settlement(
+        helper_executable,
+        binary_path,
+        class_id,
+        render,
+        state,
+        capture_default_state,
+        None,
+    )
+}
+
+pub(super) fn probe_vst3_plugin_registration_with_state_and_settlement(
+    helper_executable: &Path,
+    binary_path: &Path,
+    class_id: &str,
+    render: AudioRenderContract,
+    state: Option<&[u8]>,
+    capture_default_state: bool,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+) -> Result<Vst3Probe, AudioProcessorHostError> {
     if class_id.len() != 32 || !class_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(invalid("VST3 class ID must be 32 hexadecimal characters"));
     }
@@ -183,6 +203,7 @@ pub(super) fn probe_vst3_plugin_registration_with_state(
             state: state.map(ToOwned::to_owned),
             capture_default_state,
         },
+        native_child_settlement,
     )?;
     if fingerprint(&path)? != before {
         return Err(unavailable("VST3 binary changed during contract probing"));
@@ -511,6 +532,7 @@ fn request(
     helper_executable: &Path,
     binary_path: &Path,
     operation: DiscoveryOperation,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<DiscoveryResponse, AudioProcessorHostError> {
     if !helper_executable.is_absolute() {
         return Err(invalid("VST3 discovery helper path must be absolute"));
@@ -530,7 +552,7 @@ fn request(
     }
     fs::write(&request_path, bytes)
         .map_err(|error| unavailable(format!("VST3 discovery request write failed: {error}")))?;
-    let process = {
+    let mut process = {
         let mut command = Command::new(helper_executable);
         command
             .arg(VST3_DISCOVERY_WORKER_ARGUMENT)
@@ -550,6 +572,11 @@ fn request(
             temp,
         )
     };
+    if let Some(registrar) = native_child_settlement {
+        // Observation failure is sticky in this domain, never a new discovery
+        // refusal. The same original owner retains Child and staging throughout.
+        let _ = process.bind_native_child_settlement(registrar);
+    }
     finish_discovery_request(process, &response_path)
 }
 
@@ -895,5 +922,86 @@ mod version_tests {
                 Err(AudioProcessorHostError::InvalidContract(_))
             ));
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod cold_settlement_probe_controls {
+    use super::super::clap_discovery::cold_settlement_probe_controls::Recorder;
+    use super::*;
+
+    #[test]
+    #[ignore = "current normal Product and the existing owned stateful VST3 Gain DLL"]
+    fn observed_vst3_fresh_probe_reports_original_child_settled() {
+        let helper = PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_TEST_HELPER").expect("current normal Product helper"),
+        );
+        let plugin = PathBuf::from(
+            std::env::var_os("MONDRIAN_VST3_STATEFUL_TEST_PLUGIN")
+                .expect("existing owned stateful VST3 Gain DLL"),
+        );
+        assert!(helper.is_absolute() && fs::metadata(&helper).unwrap().is_file());
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        let mut component = Vec::from(*b"MSG1");
+        component.extend_from_slice(&1_u32.to_le_bytes());
+        component.extend_from_slice(&0.5_f64.to_le_bytes());
+        let mut state = Vec::from(*b"VST3HOST_STATE\0\0");
+        state.extend_from_slice(&1_u32.to_le_bytes());
+        state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+        state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+        state.extend_from_slice(&component);
+        state.extend_from_slice(&component);
+        let (recorder, registrar) = Recorder::registrar(false);
+        let probe = probe_vst3_plugin_registration_with_state_and_settlement(
+            &helper,
+            &plugin,
+            "AE4C8B1910234F819CA26D315F8702A1",
+            render,
+            Some(&state),
+            true,
+            Some(&registrar),
+        )
+        .expect("actual observed Discovery4 fresh probe");
+        assert_eq!(
+            probe.registration.class_id,
+            "AE4C8B1910234F819CA26D315F8702A1"
+        );
+        assert_eq!(
+            probe.registration.binary_sha256,
+            fingerprint(&plugin).unwrap()
+        );
+        assert_eq!(
+            probe.registration.main_audio_input,
+            Vst3MainAudioInput::Present
+        );
+        assert!(probe.registration.auxiliary_inputs.buses.is_empty());
+        assert!(probe.input_names.is_empty());
+        assert_eq!(probe.captured_state.as_deref(), Some(state.as_slice()));
+        assert_eq!(probe.current_values, [(0, 0.5)]);
+        assert_eq!(probe.registration.parameters.len(), 1);
+        let parameter = &probe.registration.parameters[0];
+        assert_eq!((parameter.id, parameter.name.as_str()), (0, "Gain"));
+        assert_eq!(parameter.default_normalized, 1.0);
+        assert_eq!(parameter.step_count, 0);
+        assert!(parameter.can_automate && !parameter.read_only);
+        assert_eq!(
+            probe.registration.execution_contract.algorithmic_latency_frames(),
+            0
+        );
+        assert_eq!(
+            probe.registration.execution_contract.tail(),
+            AudioProcessorTail::None
+        );
+        assert!(probe.registration.execution_contract.realtime_capable());
+        drop(registrar);
+        recorder.assert_finished(false);
     }
 }

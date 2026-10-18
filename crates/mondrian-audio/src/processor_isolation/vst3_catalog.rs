@@ -1,6 +1,9 @@
 //! Installed VST3 catalog and exact authoring snapshots.
 
-use super::vst3_discovery::{canonical_binary, probe_vst3_plugin_registration_with_state};
+use super::vst3_discovery::{
+    canonical_binary, probe_vst3_plugin_registration_with_state,
+    probe_vst3_plugin_registration_with_state_and_settlement,
+};
 use super::vst3_worker::fingerprint;
 use super::{
     scan_vst3_binary_descriptors, IsolatedAudioProcessorSpecResolver,
@@ -134,6 +137,12 @@ impl DiscoveredVst3AudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for DiscoveredVst3AudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Required
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -147,13 +156,14 @@ impl IsolatedAudioProcessorSpecResolver for DiscoveredVst3AudioProcessorSpecReso
             .plugins
             .get(class_id)
             .ok_or_else(|| unavailable(format!("VST3 class {class_id} is not installed")))?;
-        let probe = probe_vst3_plugin_registration_with_state(
+        let probe = probe_vst3_plugin_registration_with_state_and_settlement(
             &self.helper_executable,
             path,
             class_id,
             request.render_contract(),
             request.opaque_state(),
             false,
+            request.native_child_settlement_registrar(),
         )?;
         if probe.registration.binary_sha256 != *expected_hash {
             return Err(unavailable("VST3 binary changed after discovery"));
@@ -244,6 +254,12 @@ impl InstalledVst3AudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for InstalledVst3AudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Required
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,

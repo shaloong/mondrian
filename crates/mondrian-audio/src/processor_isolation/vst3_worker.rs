@@ -263,6 +263,13 @@ impl Vst3AudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        // This registry only interprets already-admitted immutable metadata.
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
