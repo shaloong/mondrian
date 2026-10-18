@@ -5845,6 +5845,7 @@ mod tests {
     #[cfg(windows)]
     mod cold_native_joint_controls;
 
+    mod author_audio_admission_contracts;
     mod author_audio_reconciliation_contracts;
     mod project_close_audio_contracts;
     mod source_close_admission_contracts;
