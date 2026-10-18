@@ -2369,6 +2369,183 @@ pub(crate) mod shared_frame_tests {
         .is_err());
     }
     #[test]
+    #[ignore = "requires current SessionProbe identity_output_clip and a new empty action directory"]
+    fn native_identity_output_clip_refuses_without_writing_staging() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_identity_output_clip_refuses_without_writing_staging";
+        qualify_native_noncurrent_identity(TEST, "identity_output_clip");
+    }
+
+    #[test]
+    #[ignore = "requires current SessionProbe identity_other_time and a new empty action directory"]
+    fn native_identity_other_time_refuses_without_writing_staging() {
+        const TEST: &str = "openfx_host::shared_frame_tests::native_identity_other_time_refuses_without_writing_staging";
+        qualify_native_noncurrent_identity(TEST, "identity_other_time");
+    }
+
+    fn qualify_native_noncurrent_identity(test: &str, mode: &str) {
+        use std::io::Read;
+        if !qualification_child(test, &[("MONDRIAN_OPENFX_SESSION_PROBE_MODE", mode)]) {
+            return;
+        }
+        let directory = PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+                .expect("independent empty action-receipt directory"),
+        );
+        assert!(directory.is_absolute() && directory.is_dir());
+        assert!(std::fs::read_dir(&directory).expect("action directory").next().is_none());
+        let path = resolve_openfx_binary(&PathBuf::from(
+            std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY")
+                .expect("current owned fixture"),
+        ))
+        .expect("fixture binary");
+        let binary = native_string(&path).expect("native binary");
+        let bundle = native_string(&bundle_for_binary(&path).expect("native bundle"))
+            .expect("native bundle string");
+        let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+        let scale = CString::new("scale").expect("original Basic parameter");
+        let parameters = [NativeParameter {
+            name: scale.as_ptr(),
+            kind: 1,
+            value: [1.0, 0.0, 0.0, 0.0],
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+            query_mode: 0,
+            string_value: std::ptr::null(),
+            string_length: 0,
+        }];
+        let info = NativeFrameInfo {
+            source_alpha: 0,
+            width: 3,
+            height: 2,
+            frame: 0.0,
+            frame_rate: 24.0,
+            first_frame: 0.0,
+            last_frame: 2.0,
+            pixel_aspect_ratio: 2.0,
+        };
+        // Aligned, disjoint Float32 storage; signed/HDR RGB and varied straight
+        // alpha make both an accidental copy and an Output clear observable.
+        let source = [
+            [-0.5_f32, 2.0, 0.125, 0.5],
+            [3.0, -2.0, 0.25, 0.25],
+            [0.125, 8.0, -4.0, 0.0],
+            [1.5, -0.25, 4.0, 1.0],
+            [-8.0, 0.5, 2.0, 0.75],
+            [2.0, -4.0, 0.0625, 0.125],
+        ];
+        let original_source = bytemuck::cast_slice::<_, u8>(&source).to_vec();
+        let mut output = [[f32::from_bits(0xa5a5_a5a5); 4]; 6];
+        let sentinel = bytemuck::cast_slice::<_, u8>(&output).to_vec();
+        let mut session = NativeSession::create(
+            mondrian_core::EffectProcessorOwnerId::new(),
+            &binary,
+            &bundle,
+            &identifier,
+            bytemuck::cast_slice(&source),
+            &info,
+            &parameters,
+        )
+        .expect("real current-source-compatible native session");
+        let result = session.render(
+            bytemuck::cast_slice(&source),
+            bytemuck::cast_slice_mut(&mut output),
+            &info,
+            &parameters,
+        );
+        let completion = session.report.completion;
+        let output_alpha = session.report.output_alpha;
+        let feedback = session.take_feedback();
+        // Always retire the actual native session before any target assertion.
+        // This raw CABI test has no Product worker or shutdown-timing claim.
+        drop(session);
+
+        assert!(
+            matches!(result, Err(NativeRenderError::Rejected(7))),
+            "{mode}: unsupported current-raster identity must return exact CABI 7: {result:?}"
+        );
+        assert_eq!(
+            completion, 0,
+            "rejected identity keeps Render completion UNSET"
+        );
+        assert_eq!(
+            output_alpha, -1,
+            "rejected identity has no output-alpha publication"
+        );
+        assert!(
+            feedback.is_none(),
+            "rejected identity has no successful frame feedback"
+        );
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&output), sentinel);
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&source), original_source);
+
+        let entries = std::fs::read_dir(&directory)
+            .expect("actual native action directory")
+            .take(2)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("bounded directory entries");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the actual qualification process emits actions"
+        );
+        let expected_path = directory.join(format!("actions-{}.txt", std::process::id()));
+        assert_eq!(entries[0].path(), expected_path);
+        let mut bytes = Vec::new();
+        std::fs::File::open(expected_path)
+            .expect("actual native action receipt")
+            .take(4097)
+            .read_to_end(&mut bytes)
+            .expect("bounded complete action receipt");
+        assert!(!bytes.is_empty() && bytes.len() <= 4096 && bytes.is_ascii());
+        let text = std::str::from_utf8(&bytes).expect("fixed ASCII action rows");
+        assert!(text.ends_with('\n'));
+        let rows = text.lines().collect::<Vec<_>>();
+        assert!(rows.len() <= 32);
+        let mut selected = Vec::new();
+        let mut queries = 0;
+        let mut renders = 0;
+        for (index, row) in rows.into_iter().enumerate() {
+            let fields = row.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(fields.len(), 9);
+            assert_eq!(
+                fields[0].parse::<usize>().expect("action ordinal"),
+                index + 1
+            );
+            assert_eq!(&fields[1..3], ["D=0", "I=0"]);
+            assert_eq!(fields[8], "complete=1");
+            assert_ne!(fields[3], "overflow");
+            queries +=
+                usize::from(fields[3] == "OfxImageEffectActionIsIdentity" && fields[4] == "enter");
+            renders +=
+                usize::from(fields[3] == "OfxImageEffectActionRender" && fields[4] == "enter");
+            if fields[3] == "OfxImageEffectActionIsIdentity"
+                || fields[3] == "identity-current"
+                || fields[3] == mode
+            {
+                selected.push(fields[3..].join(" "));
+            }
+        }
+        assert_eq!(
+            (queries, renders),
+            (1, 0),
+            "real query without any Render fallback"
+        );
+        assert_eq!(
+            selected,
+            [
+                "OfxImageEffectActionIsIdentity enter attempted=0 accepted=0 status=0 complete=1"
+                    .to_owned(),
+                "identity-current contract attempted=1 accepted=1 status=0 complete=1".to_owned(),
+                format!("{mode} contract attempted=1 accepted=1 status=0 complete=1"),
+                "OfxImageEffectActionIsIdentity return attempted=0 accepted=0 status=0 complete=1"
+                    .to_owned(),
+            ],
+            "the original Basic OK is followed only by the actual outArgs selection change"
+        );
+    }
+
+    #[test]
     #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY to the owned output_alpha wrapper"]
     fn native_session_output_alpha_reports_negotiated_clip_and_image_metadata() {
         const TEST: &str = "openfx_host::shared_frame_tests::native_session_output_alpha_reports_negotiated_clip_and_image_metadata";

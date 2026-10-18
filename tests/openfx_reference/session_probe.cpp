@@ -2101,6 +2101,29 @@ OfxStatus currentSourceIdentity(const void* handle, OfxPropertySetHandle in,
   return valid ? result : kOfxStatFailed;
 }
 
+bool nonCurrentIdentityMode(const std::string& selected) {
+  return selected == "identity_output_clip" || selected == "identity_other_time";
+}
+
+// Identity selections outside this host's current-Source/current-time
+// optimization. Keep the original Basic decision and change only its outArgs.
+OfxStatus nonCurrentIdentity(const void* handle, OfxPropertySetHandle in,
+                             OfxPropertySetHandle out, const std::string& selected) {
+  const auto original = currentSourceIdentity(handle, in, out);
+  double time = -1.0;
+  bool valid = original == kOfxStatOK &&
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) == kOfxStatOK;
+  if (valid && selected == "identity_output_clip") {
+    valid = gPropHost->propSetString(out, kOfxPropName, 0,
+        kOfxImageEffectOutputClipName) == kOfxStatOK;
+  } else if (valid && selected == "identity_other_time") {
+    valid = gPropHost->propSetDouble(out, kOfxPropTime, 0, time + 1.0) == kOfxStatOK;
+  } else { valid = false; }
+  const auto result = valid ? kOfxStatOK : kOfxStatFailed;
+  describeActionReceipt(selected.c_str(), "contract", 1, valid ? 1 : 0, result);
+  return result;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
@@ -2108,6 +2131,7 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (operation == kOfxImageEffectActionIsIdentity) {
     // The other fixture modes test their real Render work, including pixel
     // overrides after Basic. Opt out of this optional optimization explicitly.
+    if (nonCurrentIdentityMode(selected)) { return nonCurrentIdentity(handle, in, out, selected); }
     return selected == "identity_current" ? currentSourceIdentity(handle, in, out) : kOfxStatReplyDefault;
   }
   if (temporalClipAdmissionMode(selected)) {
@@ -2656,7 +2680,8 @@ OfxStatus probe(const char* action, const void* handle,
   if (mode() == "optional_unmapped" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
-  if (mode() == "identity_current" && std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
+  if ((mode() == "identity_current" || nonCurrentIdentityMode(mode())) &&
+      std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
     observed = action;
   }
   const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
