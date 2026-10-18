@@ -2837,6 +2837,14 @@ impl AudioPlayback {
             .is_some_and(|current| Arc::ptr_eq(&current.owner, renderer))
     }
 
+    /// Compare a retained weak identity without acquiring a strong owner.
+    /// An absent or different slot is false; no renderer callback is invoked.
+    pub fn matches_source_weak(&self, expected: &std::sync::Weak<dyn AudioPcmRenderer>) -> bool {
+        self.renderer.as_ref().is_some_and(|current| {
+            std::sync::Weak::ptr_eq(&Arc::downgrade(&current.owner), expected)
+        })
+    }
+
     /// Pure current-slot availability; no native or author permission is issued.
     pub fn native_editor_source_available(&self) -> bool {
         self.renderer.is_some()
@@ -3007,7 +3015,10 @@ impl AudioPlayback {
             .renderer
             .as_ref()
             .and_then(|renderer| renderer.continuity_model.validate_fresh_entry(anchor).err());
-        if self.native_control_hold.is_some() || entry_refusal.is_some() {
+        if self.source_close_admission.is_some()
+            || self.native_control_hold.is_some()
+            || entry_refusal.is_some()
+        {
             self.suspend_prevalidated(anchor)?;
             if let Some(error) = entry_refusal {
                 tracing::warn!(%error, "PCM retired without admitting an unsupported fresh entry");
@@ -3211,6 +3222,17 @@ impl AudioPlayback {
         renderer: Option<PreparedAudioPcmRenderer>,
         pcm_policy: PcmRetirementPolicy,
     ) -> Result<(), AudioPlaybackError> {
+        // Output/device recovery cannot acquire a Runtime mutex on the caller
+        // while its serial SourceClosed/earlier job may still own that mutex.
+        // Keep the close gate, invalidate only its request, and retire PCM using
+        // the original same-Source Suspend path. Public mutations are gated;
+        // request has not published its slot yet and finish has taken it.
+        let pcm_policy = if let Some(close) = &self.source_close_admission {
+            close.cancellation.cancel();
+            PcmRetirementPolicy::Suspend
+        } else {
+            pcm_policy
+        };
         if matches!(pcm_policy, PcmRetirementPolicy::FreshContinuity)
             && let Some(candidate) = &renderer
             && let Err(error) = candidate.continuity_model.validate_fresh_entry(anchor)
@@ -4545,9 +4567,11 @@ impl AudioPlayback {
         self.underrun_baseline_frames = 0;
         self.last_underrun_frames = 0;
         self.recovery_preroll = recovery_preroll;
-        if self.renderer.as_ref().is_some_and(|renderer| {
-            renderer.continuity_model.validate_fresh_entry(authority).is_err()
-        }) {
+        if self.source_close_admission.is_some()
+            || self.renderer.as_ref().is_some_and(|renderer| {
+                renderer.continuity_model.validate_fresh_entry(authority).is_err()
+            })
+        {
             self.render_blocked = true;
             self.generation_render_anchor = None;
             self.recovery_preroll = false;

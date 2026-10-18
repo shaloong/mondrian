@@ -148,7 +148,19 @@ fn prepare_close_renderer() -> (AudioPlayback, Arc<CloseRenderer>, Arc<dyn Audio
 fn install_close_renderer(
     renderer: Arc<CloseRenderer>,
 ) -> (AudioPlayback, Arc<CloseRenderer>, Arc<dyn AudioPcmRenderer>) {
-    let (mut playback, _) = playback_with_buffered_frames(0);
+    let (playback, renderer, erased, _) = install_close_renderer_with_output(renderer);
+    (playback, renderer, erased)
+}
+
+fn install_close_renderer_with_output(
+    renderer: Arc<CloseRenderer>,
+) -> (
+    AudioPlayback,
+    Arc<CloseRenderer>,
+    Arc<dyn AudioPcmRenderer>,
+    Arc<Mutex<FakeOutputState>>,
+) {
+    let (mut playback, output) = playback_with_buffered_frames(0);
     let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
     playback
         .prepare(
@@ -158,7 +170,7 @@ fn install_close_renderer(
         )
         .unwrap();
     settle_native_installation(&mut playback);
-    (playback, renderer, erased)
+    (playback, renderer, erased, output)
 }
 
 fn wait_close(playback: &mut AudioPlayback, ticket: &AudioPcmSourceCloseTicket) {
@@ -502,5 +514,145 @@ fn source_close_cancel_closed_preserves_source_without_reenter_or_query() {
     assert_eq!(renderer.renders.load(Ordering::Acquire), 0);
     playback.clear_source(sample_position(0)).unwrap();
     drop((renderer, erased));
+    assert!(playback.shutdown_and_wait().all_workers_terminated());
+}
+
+fn output_change_cancels_close_without_getter_or_resume(lost: bool) {
+    let (mut playback, renderer, erased, output) =
+        install_close_renderer_with_output(CloseRenderer::new());
+    let (gate, entered, release) = latch();
+    *renderer.close_latch.lock() = Some(gate);
+    let claim = renderer.installed.verifier().current_claim().unwrap();
+    let control = playback.native_control_cancellation.clone();
+    let ticket = playback.request_source_close(&erased, sample_position(0)).unwrap();
+    entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    let getters = renderer.getters.load(Ordering::Acquire);
+    let generation = playback.generation;
+    let publications = playback.render_queue.completion_publications.load(Ordering::Acquire);
+    {
+        let mut output = output.lock();
+        let mut snapshot = output.snapshot.unwrap();
+        if lost {
+            output.snapshot = None;
+            output.events.push_back(RealtimeAudioOutputEvent::Lost {
+                reason: RealtimeAudioOutputLossReason::BackendFailure,
+                final_snapshot: snapshot,
+            });
+        } else {
+            snapshot.stream_generation += 1;
+            output.snapshot = Some(snapshot);
+            output.events.push_back(RealtimeAudioOutputEvent::Opened {
+                stream_generation: snapshot.stream_generation,
+                evidence: device_evidence(snapshot.contract),
+            });
+        }
+    }
+    // Preroll consumes a queued Lost even after the output snapshot disappeared.
+    // The original close gate still prevents every PCM/native admission.
+    let poll = playback.poll(AudioPlaybackMode::Preroll, sample_position(0)).unwrap();
+    assert!(poll.events.iter().any(|event| if lost {
+        matches!(event, AudioPlaybackEvent::DeviceLost { .. })
+    } else {
+        matches!(event, AudioPlaybackEvent::DeviceOpened { .. })
+    }));
+    assert_eq!(
+        renderer.getters.load(Ordering::Acquire),
+        getters,
+        "a serial Runtime-held close query cannot make poll call its getter"
+    );
+    assert!(!renderer.timed_out.load(Ordering::Acquire));
+    assert_eq!(playback.generation, generation + 1);
+    assert!(
+        playback.source_close_admission.is_some(),
+        "invalidated query retains its gate"
+    );
+    assert_eq!(
+        playback.source_close_status(&ticket).unwrap_err(),
+        AudioPlaybackError::SourceCloseSuperseded
+    );
+    assert_eq!(
+        playback.reprime(sample_position(0)),
+        Err(AudioPlaybackError::SourceClosePending)
+    );
+    assert!(playback.matches_source(&erased));
+    assert!(renderer.installed.verifier().validate(&claim).is_ok());
+    assert!(!control.is_canceled());
+    assert!(playback.render_blocked);
+    assert!(!playback.recovery_preroll);
+    assert!(playback.generation_render_anchor.is_none());
+    assert_eq!(renderer.renders.load(Ordering::Acquire), 0);
+    assert!(playback.render_queue.state.lock().pending.is_empty());
+    drop(release);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while playback.render_queue.completion_publications.load(Ordering::Acquire) == publications {
+        assert!(
+            Instant::now() < deadline,
+            "late original completion was not published"
+        );
+        thread::yield_now();
+    }
+    playback.poll(AudioPlaybackMode::Idle, sample_position(0)).unwrap();
+    assert_eq!(
+        playback.source_close_status(&ticket).unwrap_err(),
+        AudioPlaybackError::SourceCloseSuperseded
+    );
+    assert!(playback.source_close_admission.is_some());
+    assert!(playback.stale_completion_count >= 1);
+    assert!(!renderer.timed_out.load(Ordering::Acquire));
+    playback.cancel_source_close(&ticket).unwrap();
+    assert!(playback.matches_source(&erased));
+    assert!(renderer.installed.verifier().validate(&claim).is_ok());
+    assert!(
+        playback.render_blocked,
+        "cancel is not a new Enter or automatic resume"
+    );
+    playback.poll(AudioPlaybackMode::Preroll, sample_position(0)).unwrap();
+    assert_eq!(renderer.renders.load(Ordering::Acquire), 0);
+    assert_eq!(renderer.queries.lock().len(), 1);
+    assert!(!control.is_canceled());
+    playback.clear_source(sample_position(0)).unwrap();
+    drop((renderer, erased));
+    assert!(playback.shutdown_and_wait().all_workers_terminated());
+}
+
+#[test]
+fn source_close_device_opened_invalidates_query_without_a_caller_runtime_getter() {
+    output_change_cancels_close_without_getter_or_resume(false);
+}
+
+#[test]
+fn source_close_device_lost_keeps_gate_and_cancel_never_resumes_pcm() {
+    output_change_cancels_close_without_getter_or_resume(true);
+}
+
+#[test]
+fn source_close_weak_identity_reads_never_upgrade_or_query_current_stale_expired_owners() {
+    let (mut playback, renderer, erased) = prepare_close_renderer();
+    let current = Arc::downgrade(&erased);
+    let other: Arc<dyn AudioPcmRenderer> = CloseRenderer::new();
+    let foreign = Arc::downgrade(&other);
+    let expired = {
+        let transient: Arc<dyn AudioPcmRenderer> = CloseRenderer::new();
+        Arc::downgrade(&transient)
+    };
+    assert_eq!(expired.strong_count(), 0);
+    let generation = playback.generation;
+    let claim = renderer.installed.verifier().current_claim().unwrap();
+    let getters = renderer.getters.load(Ordering::Acquire);
+    assert!(playback.matches_source_weak(&current));
+    assert!(!playback.matches_source_weak(&foreign));
+    assert!(!playback.matches_source_weak(&expired));
+    assert_eq!(playback.generation, generation);
+    assert!(renderer.installed.verifier().validate(&claim).is_ok());
+    assert_eq!(renderer.getters.load(Ordering::Acquire), getters);
+    playback.clear_source(sample_position(0)).unwrap();
+    assert!(
+        !playback.matches_source_weak(&current),
+        "retained old alias is not the actual slot"
+    );
+    assert!(!playback.matches_source_weak(&foreign));
+    assert!(!playback.matches_source_weak(&expired));
+    assert_eq!(renderer.getters.load(Ordering::Acquire), getters);
+    drop((renderer, erased, other));
     assert!(playback.shutdown_and_wait().all_workers_terminated());
 }
