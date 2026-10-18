@@ -9,6 +9,8 @@ use clack_extensions::state::PluginState;
 use clack_extensions::{audio_ports::*, params::*};
 use clack_plugin::prelude::*;
 
+#[cfg(target_os = "windows")]
+mod native_gui;
 mod params;
 
 /// The type that represents our plugin in Clack.
@@ -29,6 +31,8 @@ impl Plugin for GainPlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginParams>()
             .register::<PluginState>();
+        #[cfg(target_os = "windows")]
+        builder.register::<clack_extensions::gui::PluginGui>();
     }
 }
 
@@ -48,10 +52,17 @@ impl DefaultPluginFactory for GainPlugin {
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        host: HostMainThreadHandle<'a>,
         shared: &'a Self::Shared<'a>,
     ) -> Result<Self::MainThread<'a>, PluginError> {
-        Ok(Self::MainThread { shared })
+        let host_params = host.get_extension::<HostParams>();
+        Ok(Self::MainThread {
+            shared,
+            host,
+            host_params,
+            #[cfg(target_os = "windows")]
+            gui: native_gui::NativeGui::new(host, host_params, shared),
+        })
     }
 }
 
@@ -60,6 +71,8 @@ impl DefaultPluginFactory for GainPlugin {
 /// It receives parameter events, and process a stereo audio signal by operating on the given audio
 /// buffer.
 pub struct GainPluginAudioProcessor<'a> {
+    /// The original host handle, used only to request a main-thread flush retry.
+    host: HostSharedHandle<'a>,
     /// A reference to the plugin's shared data.
     shared: &'a GainPluginShared,
 }
@@ -68,13 +81,13 @@ impl<'a> PluginAudioProcessor<'a, GainPluginShared, GainPluginMainThread<'a>>
     for GainPluginAudioProcessor<'a>
 {
     fn activate(
-        _host: HostAudioProcessorHandle<'a>,
+        host: HostAudioProcessorHandle<'a>,
         _main_thread: &GainPluginMainThread,
         shared: &'a GainPluginShared,
         _audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
         // This is where we would allocate intermediate buffers and such if we needed them.
-        Ok(Self { shared })
+        Ok(Self { shared, host: host.shared() })
     }
 
     fn process(
@@ -129,6 +142,11 @@ impl<'a> PluginAudioProcessor<'a, GainPluginShared, GainPluginMainThread<'a>>
             }
         }
 
+        // CLAP may answer request_flush with process rather than params.flush.
+        // The original sample-batch DSP above is unchanged.
+        if self.shared.params.flush_gui_events(events.output) {
+            self.host.request_callback();
+        }
         Ok(ProcessStatus::ContinueIfNotQuiet)
     }
 }
@@ -162,10 +180,32 @@ impl PluginShared<'_> for GainPluginShared {}
 
 /// The data that belongs to the main thread of our plugin.
 pub struct GainPluginMainThread<'a> {
+    /// Main-thread handle for the standard request_flush callback.
+    host: HostMainThreadHandle<'a>,
+    /// The host's optional parameter extension, queried during initialization.
+    host_params: Option<HostParams>,
+    /// Windows-only embedded GUI, destroyed before the shared borrow expires.
+    #[cfg(target_os = "windows")]
+    gui: native_gui::NativeGui<'a>,
     /// A reference to the plugin's shared data.
     shared: &'a GainPluginShared,
 }
 
-impl<'a> PluginMainThread<'a, GainPluginShared> for GainPluginMainThread<'a> {}
+impl GainPluginMainThread<'_> {
+    /// Retry remaining native GUI events from a non-audio thread only.
+    fn request_gui_flush(&self) {
+        if self.shared.params.gui_events_pending()
+            && let Some(params) = self.host_params
+        {
+            params.request_flush(self.host.as_shared());
+        }
+    }
+}
+
+impl<'a> PluginMainThread<'a, GainPluginShared> for GainPluginMainThread<'a> {
+    fn on_main_thread(&self) {
+        self.request_gui_flush();
+    }
+}
 
 clack_export_entry!(SinglePluginEntry<GainPlugin>);

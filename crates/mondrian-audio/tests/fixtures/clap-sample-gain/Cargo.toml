@@ -10,6 +10,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 clack-plugin = { path = "../../../../../vendor/clack/plugin" }
-clack-extensions = { path = "../../../../../vendor/clack/extensions", features = ["audio-ports", "params", "state", "clack-plugin"] }
+clack-extensions = { path = "../../../../../vendor/clack/extensions", features = ["audio-ports", "params", "state", "gui", "clack-plugin"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef", "libloaderapi", "processthreadsapi"] }
 
 [workspace]

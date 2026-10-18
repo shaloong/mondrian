@@ -23,3 +23,22 @@ cargo test -p mondrian-audio --lib installed_clap_sample_gain_preserves_event_ra
 
 Build the Mondrian executable first. This is a validation plugin, not a bundled
 production effect or a claim of arbitrary vendor plugin qualification.
+
+On Windows the same plugin additionally supports only a fixed 320¡Á100 Win32
+embedded GUI. The real child is titled `Mondrian CLAP Gain Editor`; its
+per-instance class begins `MondrianClapGainEditor_`. The supplied parent HWND is
+borrowed, must be on the initializing main thread, and must outlive GUI destroy.
+The fixture owns and destroys only its child and class. Floating windows,
+resizing and scaling are explicitly unsupported. Click the child to focus it;
+one non-repeated `WM_KEYDOWN G` sets the original Volume to 0.75 and calls the
+standard host parameter `request_flush`. `value_to_text` still returns `75.00 %`.
+
+Main/audio parameter flush and process output share one bounded pending
+Begin/Value/End gesture. A busy gesture ignores another G. Output capacity
+refusal retains the exact undelivered phase, including End; main requests a
+flush retry, while audio requests a main callback which then requests the flush.
+No heap or mutex is used by this transport. The existing sample-range DSP,
+parameter ID/range/default and four-byte state format are unchanged. A native
+teardown failure that would leave a live DLL callback is a fixture process
+failure, never successful cleanup. These source controls do not establish GUI,
+real-time, PCM or host integration qualification before matching native runs.
