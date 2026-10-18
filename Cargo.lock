@@ -2604,6 +2604,7 @@ dependencies = [
  "memmap2",
  "mondrian-audio-scheduling",
  "mondrian-core",
+ "mondrian-media",
  "mondrian-timeline",
  "pulp",
  "serde",
