@@ -1880,3 +1880,514 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
     // not zero native calls, acoustic/DSP, device, RT or broader GUI qualification.
     drop(state);
 }
+
+#[test]
+#[ignore = "current normal Product and retained Surge XT Effects CLAP; real Idle App GUI lifecycle, no PCM/device"]
+fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
+    use super::super::super::product_action::{
+        AudioNativeEditorPayload, AudioProductAction, ProductAction,
+    };
+    use mondrian_core::{
+        NativeAudioEditorControlIntent as Intent, NativeAudioEditorControlOutcome as Outcome,
+    };
+    use mondrian_media::{
+        AudioPcmNativeAuthorHandoffContinuity as Continuity,
+        AudioPcmNativeAuthorHandoffStatus as Status,
+    };
+
+    const PLUGIN: &str = "org.surge-synth-team.surge-xt-fx";
+    let helper = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("current normal Product"),
+    );
+    let library = std::path::PathBuf::from(
+        std::env::var_os("MONDRIAN_SURGE_XT_EFFECTS_CLAP_TEST_PLUGIN")
+            .expect("retained original Surge XT Effects CLAP material"),
+    );
+    assert!(helper.is_absolute() && helper.is_file());
+    assert!(library.is_absolute() && library.is_file());
+    let clap = Arc::new(
+        mondrian_audio::InstalledClapAudioProcessorSpecResolver::new(helper.clone()).unwrap(),
+    );
+    let vst3 =
+        Arc::new(mondrian_audio::InstalledVst3AudioProcessorSpecResolver::new(helper).unwrap());
+    // These original standalone catalog probes do not establish Playback custody.
+    let descriptors = clap.install_library(library).expect("actual retained CLAP library");
+    let descriptor = descriptors
+        .iter()
+        .find(|entry| entry.plugin_id == PLUGIN)
+        .expect("actual Surge Effects identity");
+    let descriptor_version = descriptor.version.clone();
+    let config = mondrian_media::AudioPlaybackConfig {
+        chunk_frames: 4,
+        preroll_frames: 4,
+        high_watermark_frames: 8,
+        max_in_flight: 1,
+        ..mondrian_media::AudioPlaybackConfig::product_default()
+    };
+    let instance = clap.create_instance(
+        PLUGIN,
+        mondrian_audio::AudioRenderContract {
+            sample_rate: config.sample_rate,
+            channel_layout: config.channel_layout,
+            max_block_frames: config.chunk_frames,
+            processing_mode: mondrian_audio::AudioProcessingMode::Realtime,
+            processor_session_scratch_budget_bytes:
+                mondrian_audio::AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+            public_output_lookahead_budget_frames:
+                mondrian_audio::AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+            compensation_delay_scratch_budget_bytes:
+                mondrian_audio::AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+        },
+        None,
+    ).expect("actual catalog schemas, lanes and captured opaque state");
+    assert!(matches!(&instance.definition,
+        mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
+            plugin_id, binary_sha256: Some(_), ..
+        } if plugin_id == PLUGIN));
+    assert!(
+        !instance.parameters.is_empty(),
+        "real presentation lanes, never fabricated PID facts"
+    );
+    assert!(!instance.opaque_state.as_ref().expect("actual captured state").is_empty());
+    let ColdNativeControl { mut state, _directory, output, renderer: weak } =
+        prepare_app_native_control_with_instance(clap, vst3, config, instance);
+    let sequence = state.active_sequence().unwrap();
+    assert!(sequence.audio_program.note_lanes.is_empty());
+    let native_output = &sequence.audio_program.outputs[0];
+    let original = native_output.strip.pre_fader.processors[0].clone();
+    let payload = AudioNativeEditorPayload {
+        session_id: state.authoring_session_id().unwrap(),
+        sequence_id: sequence.id,
+        address: mondrian_timeline::AudioProcessorRackAddress::ChannelStrip {
+            owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                output_id: native_output.id,
+            },
+            rack: mondrian_timeline::AudioChannelStripRack::PreFader,
+        },
+        occurrence: None,
+        processor_id: original.id,
+        definition: original.definition.clone(),
+        sequence_time: mondrian_core::DomainTime::new(
+            mondrian_core::AuthoringTimeDomain::Sequence(sequence.id),
+            TimelineTime::ZERO,
+        ),
+        open: true,
+    };
+    let engine_before = state.playback_engine.snapshot();
+    let mut verifier = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+    let mut claim = verifier.current_claim().unwrap();
+    assert!(verifier.validate(&claim).is_ok());
+    let generation = state.audio_playback_snapshot().generation;
+    let mut renderer_id = None;
+    let mut opened = None;
+    let mut current_target = None;
+    let mut closed = false;
+    let mut native_object = None;
+    let mut parameters: Option<mondrian_core::NativeAudioParameterObservation> = None;
+    let mut pending: Option<mondrian_core::NativeAudioAuthorProposal> = None;
+    let mut proposals = 0_usize;
+    let mut acknowledgements = 0_usize;
+    let mut attachment = None;
+    let mut windows = Vec::new();
+
+    // One ordinary Idle poll loop per lifecycle operation, with the same 2s
+    // bound and observe-before-handle order as poll_gui_until. Completion is
+    // checked after the WHOLE batch: Opened may precede an initialization
+    // callback in that same batch. No callback is manually acknowledged.
+    for phase in 0..3 {
+        if phase != 0 {
+            let mut request = payload.clone();
+            request.open = phase == 1;
+            if phase == 1 {
+                parameters = None; // Require actual post-Open presentation.
+            }
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::NativeEditor(request))
+                        .into_external_action(),
+                )
+                .expect("original App editor action");
+            assert_eq!(
+                state.native_audio_editor_surface_state(&payload),
+                if phase == 1 {
+                    (false, true)
+                } else {
+                    (true, true)
+                },
+                "a refused submission is not a queued operation"
+            );
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let poll = state
+                .audio_playback
+                .poll(AudioPlaybackMode::Idle, audio_anchor(0))
+                .expect("original serial Media Idle control");
+            assert_eq!(poll.snapshot.generation, generation);
+            assert_eq!(poll.snapshot.in_flight, 0);
+            assert_eq!(poll.snapshot.next_start_sample, 0);
+            assert_eq!(
+                poll.snapshot.output.expect("software output").buffered_frames,
+                0
+            );
+            for event in poll.events {
+                let mut accepted = None;
+                match &event {
+                    AudioPlaybackEvent::NativeOwnerBindingsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        status,
+                    } => {
+                        assert_eq!(phase, 0, "no replacement Playback owner");
+                        assert!(renderer_id.is_none());
+                        assert_eq!(*observed, generation);
+                        assert_eq!(
+                            *status,
+                            mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready
+                        );
+                        renderer_id = Some(*actual);
+                    }
+                    AudioPlaybackEvent::NativeEditorObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        intent,
+                        outcome,
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        match (phase, intent, outcome) {
+                            (
+                                1,
+                                Intent::ResolveAndOpen { locator, .. },
+                                Outcome::Opened { target, width, height },
+                            ) => {
+                                assert!(opened.is_none());
+                                assert!(locator.matches_target(*target));
+                                assert_eq!(locator.sequence, payload.sequence_id);
+                                assert_eq!(target.instance, original.id);
+                                assert_eq!(target.installed_generation, claim.generation());
+                                assert!(*width > 0 && *height > 0, "actual native GUI extent");
+                                opened = Some(*target);
+                                current_target = Some(*target);
+                            }
+                            (
+                                2,
+                                Intent::Close { target: requested },
+                                Outcome::Closed { target },
+                            ) => {
+                                assert!(!closed);
+                                assert_eq!(
+                                    Some(*requested),
+                                    opened,
+                                    "Close uses the original actual view attachment"
+                                );
+                                assert_eq!(Some(*target), current_target);
+                                closed = true;
+                            }
+                            _ => panic!(
+                                "real queued operation must complete, never Refused: {event:?}"
+                            ),
+                        }
+                    }
+                    AudioPlaybackEvent::NativeParameterObservationsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        observation,
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert_eq!(observation.target().instance, original.id);
+                        assert!(!observation.facts().is_empty());
+                        assert!(
+                            observation
+                                .facts()
+                                .iter()
+                                .any(|fact| original.parameters.contains_key(&fact.parameter)),
+                            "actual admitted parameter facts authenticate this object"
+                        );
+                        let object = (observation.process_id(), observation.object_serial());
+                        if let Some(previous) = native_object {
+                            assert_eq!(object, previous, "same actual native incarnation");
+                        } else {
+                            native_object = Some(object);
+                        }
+                        parameters = Some(observation.as_ref().clone());
+                    }
+                    AudioPlaybackEvent::NativeAuthorProposalObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        proposal,
+                    } => {
+                        assert_ne!(phase, 0, "pre-Open author work has no App editor consumer");
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert_eq!(Some(proposal.target()), current_target);
+                        assert_eq!(proposal.sequence(), payload.sequence_id);
+                        if let Some(previous) = &pending {
+                            assert!(previous.same_retained_proposal(proposal));
+                        } else {
+                            proposals = proposals.checked_add(1).unwrap();
+                            pending = Some(proposal.as_ref().clone());
+                        }
+                    }
+                    AudioPlaybackEvent::NativeAuthorHandoffObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        proposal,
+                        status,
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert!(pending
+                            .as_ref()
+                            .expect("actual proposal before handoff")
+                            .same_retained_proposal(proposal));
+                        let Status::Acknowledged { target, continuity } = status else {
+                            panic!("initialization prefix must install and exact Ack: {status:?}");
+                        };
+                        assert_eq!(*continuity, Continuity::Preserved);
+                        let previous = current_target.unwrap();
+                        assert_eq!(target.root_session, previous.root_session);
+                        assert_eq!(target.local_session, previous.local_session);
+                        assert_eq!(target.instance, previous.instance);
+                        assert_eq!(target.continuity_epoch, previous.continuity_epoch);
+                        current_target = Some(**target);
+                        accepted = Some((**target, proposal.state().cloned()));
+                        pending = None;
+                        acknowledgements = acknowledgements.checked_add(1).unwrap();
+                    }
+                    AudioPlaybackEvent::NativeEditorAttachmentObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        observation,
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert_eq!(Some(observation.previous), opened);
+                        assert!(observation.retained);
+                        let object = (observation.process_id, observation.object_serial);
+                        assert_eq!(Some(object), native_object);
+                        attachment = Some(observation.current);
+                    }
+                    AudioPlaybackEvent::NativeDiagnosticsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        ..
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                    }
+                    // In particular App may log PollRefused and return Ok. It
+                    // cannot count as successful initialization in this gate.
+                    other => panic!("unexpected refusal, hold, reprepare or PCM: {other:?}"),
+                }
+                state
+                    .handle_audio_playback_event(event, Instant::now())
+                    .expect("original canonical App proposal/install/Ack consumer");
+                if let Some((target, accepted_state)) = accepted {
+                    let next = weak
+                        .upgrade()
+                        .expect("same original Timeline")
+                        .owner_installation_verifier()
+                        .unwrap();
+                    assert!(verifier.same_source(&next));
+                    assert!(!verifier.same_registration(&next));
+                    assert_eq!(
+                        verifier.current_claim().unwrap_err(),
+                        mondrian_core::AudioOwnerInstallationError::Superseded
+                    );
+                    let next_claim = next.current_claim().unwrap();
+                    assert!(next.validate(&next_claim).is_ok());
+                    assert_eq!(target.installed_generation, next_claim.generation());
+                    let after = &state.active_sequence().unwrap().audio_program.outputs[0]
+                        .strip
+                        .pre_fader
+                        .processors[0];
+                    assert_eq!(after.id, original.id);
+                    assert_eq!(after.definition, original.definition);
+                    assert_eq!(after.parameters.len(), original.parameters.len());
+                    for (id, parameter) in &original.parameters {
+                        assert_eq!(after.parameters[id].schema, parameter.schema);
+                        assert_eq!(after.parameters[id].ui, parameter.ui);
+                    }
+                    if let Some(accepted_state) = accepted_state {
+                        assert_eq!(after.opaque_state.as_ref(), Some(&accepted_state));
+                    }
+                    verifier = next;
+                    claim = next_claim;
+                }
+            }
+            // The serial worker may have committed the new registration
+            // while its Ack completion is still in flight. The old verifier
+            // is not a current-claim oracle during that actual handoff.
+            if pending.is_none() {
+                assert!(verifier.validate(&claim).is_ok());
+            }
+            assert!(state
+                .native_audio_renderer
+                .as_ref()
+                .is_some_and(|actual| std::sync::Weak::ptr_eq(actual, &weak)));
+            assert_eq!(state.playback_engine.snapshot(), engine_before);
+            assert!(state.playback_engine.native_audio_control_hold_ticket().is_none());
+            assert!(state.audio_playback.native_control_hold_generation().is_none());
+            assert!(state.audio_playback.native_reprepare_pending_generation().is_none());
+            assert_eq!(output.lock().queued, 0);
+            let settled = pending.is_none()
+                && proposals == acknowledgements
+                && state.authoring.as_ref().unwrap().history().diagnostics().pending_entries == 0;
+            let complete = match phase {
+                0 => renderer_id.is_some(),
+                1 => {
+                    opened.is_some()
+                        && settled
+                        && parameters
+                            .as_ref()
+                            .is_some_and(|facts| Some(facts.target()) == current_target)
+                        && state.native_audio_editor_surface_state(&payload) == (true, false)
+                }
+                2 => {
+                    closed
+                        && settled
+                        && state.native_audio_editor_surface_state(&payload) == (false, false)
+                }
+                _ => unreachable!(),
+            };
+            if complete {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actual GUI operation or canonical initialization Ack did not settle"
+            );
+            std::thread::yield_now();
+        }
+        if phase == 1 {
+            assert!(weak.upgrade().unwrap().native_author_snapshot_current());
+            if let Some(current) = attachment {
+                assert_eq!(Some(current), current_target);
+            }
+            let process = native_object.expect("same-target real parameter facts").0;
+            // Observe the existing host parent and its entire actual native
+            // descendant tree. No plugin class/title/child count is presumed.
+            struct Search {
+                process: u32,
+                parent: *mut std::ffi::c_void,
+                parents: usize,
+                children: Vec<*mut std::ffi::c_void>,
+                valid: bool,
+            }
+            unsafe extern "system" fn child(window: *mut std::ffi::c_void, data: isize) -> i32 {
+                let search = unsafe { &mut *(data as *mut Search) };
+                let mut actual = 0;
+                // Never unwind through a Windows callback. Report every
+                // observation/allocation failure to assertions after EnumWindows.
+                if unsafe { window_process(window, &mut actual) } == 0
+                    || actual != search.process
+                    || unsafe { window_ancestor(window, 2) } != search.parent
+                    || search.children.try_reserve_exact(1).is_err()
+                {
+                    search.valid = false;
+                    return 0;
+                }
+                search.children.push(window);
+                1
+            }
+            unsafe extern "system" fn parent(window: *mut std::ffi::c_void, data: isize) -> i32 {
+                let search = unsafe { &mut *(data as *mut Search) };
+                let mut actual = 0;
+                unsafe {
+                    window_process(window, &mut actual);
+                }
+                if actual != search.process {
+                    return 1;
+                }
+                let mut class = [0_u16; 128];
+                let mut title = [0_u16; 128];
+                let class_len = unsafe { window_class(window, class.as_mut_ptr(), 128) };
+                let title_len = unsafe { window_text(window, title.as_mut_ptr(), 128) };
+                if class_len != 16
+                    || title_len != 8
+                    || !class[..16].iter().copied().eq("VST3PluginWindow".encode_utf16())
+                    || !title[..8].iter().copied().eq("Mondrian".encode_utf16())
+                {
+                    return 1;
+                }
+                search.parents = search.parents.saturating_add(1);
+                search.parent = window;
+                unsafe {
+                    enumerate_child_windows(window, child, data);
+                }
+                1
+            }
+            let mut search = Search {
+                process: process.get(),
+                parent: std::ptr::null_mut(),
+                parents: 0,
+                children: Vec::new(),
+                valid: true,
+            };
+            assert_ne!(
+                unsafe { enumerate_windows(parent, (&mut search as *mut Search) as isize) },
+                0
+            );
+            assert!(
+                search.valid,
+                "all captured descendants have the authenticated owner/root"
+            );
+            assert_eq!(search.parents, 1, "one authenticated actual host parent");
+            assert!(
+                !search.children.is_empty(),
+                "actual embedded native window tree"
+            );
+            windows.push(search.parent);
+            windows.extend(search.children);
+            for window in &windows {
+                assert_ne!(unsafe { is_window(*window) }, 0);
+            }
+        }
+    }
+    assert_eq!(
+        proposals, acknowledgements,
+        "every actual initialization receipt exact-Acked"
+    );
+    assert!(pending.is_none());
+    for window in windows {
+        assert_eq!(
+            unsafe { is_window(window) },
+            0,
+            "Closed destroys the captured actual HWNDs"
+        );
+    }
+    assert_eq!(
+        state.status_hint().map(|(message, _)| message.id),
+        Some("native-editor-closed")
+    );
+    assert!(verifier.validate(&claim).is_ok());
+    assert!(weak.upgrade().unwrap().native_author_snapshot_current());
+    let evidence = state.shutdown_audio_playback_and_wait();
+    assert_eq!(evidence.render_workers_started, 1);
+    assert_eq!(evidence.render_workers_terminated, 1);
+    assert_eq!(evidence.render_retirement_workers_started, 1);
+    assert_eq!(evidence.render_retirement_workers_terminated, 1);
+    assert_eq!(evidence.foreign_owner_panics, 0);
+    assert_eq!(evidence.foreign_owner_abandonments, 0);
+    assert!(evidence.all_workers_terminated(), "{evidence:?}");
+    assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+    assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+    assert!(matches!(
+        verifier.current_claim(),
+        Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+    ));
+    assert!(weak.upgrade().is_none());
+    println!(
+        "{}",
+        serde_json::json!({
+            "case": "app-surge-fx-editor", "descriptor_version": descriptor_version,
+            "initialization_proposals": proposals, "exact_acknowledgements": acknowledgements,
+            "opened": true, "closed": closed, "same_native_object": true,
+            "pcm_qualified": false, "device_qualified": false, "author_edit_stimulus": false,
+            "algorithm_qualified": false, "realtime_qualified": false
+        })
+    );
+    drop(state);
+}
