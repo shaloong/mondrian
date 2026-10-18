@@ -20,17 +20,21 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 const RATE: u32 = 48_000;
+const SOURCE_FRAMES: usize = RATE as usize * 40;
 const CHUNK: usize = 256;
 const WATERMARK: usize = 8_192;
 const CONSUMED: usize = 137;
 const CAPTURE_WINDOWS: usize = 80;
 const OUTPUT_CAPACITY: usize = 16_384;
 
-// Every sample in this one-second WAV has a distinct exact binary value;
-// +/-3 PDC errors and stale/repeated blocks cannot hide in a constant signal.
+// Two coprime periods have a joint period over four billion frames, so the
+// stereo pair never repeats within this finite 40-second WAV. Exact binary
+// steps keep a one-sample error larger than the unchanged 1e-6 PCM tolerance.
 fn input_sample(frame: usize) -> [f32; 2] {
-    let ramp = (frame + 1) as f32 / 65_536.0;
-    [0.125 + ramp, -0.0625 - ramp * 0.5]
+    [
+        0.125 + (frame % 65_521) as f32 / 131_072.0,
+        -0.0625 - (frame % 65_519) as f32 / 131_072.0,
+    ]
 }
 
 struct CapturedWindow {
@@ -376,7 +380,7 @@ fn assert_windows(state: &CaptureState, epoch: u64, start_sample: i64, fader_db:
         for pair in window.samples.chunks_exact(2) {
             let absolute = usize::try_from(start_sample + frames as i64).unwrap();
             assert!(
-                absolute < RATE as usize,
+                absolute < SOURCE_FRAMES,
                 "reference stays inside the real WAV"
             );
             let expected = input_sample(absolute);
@@ -425,7 +429,8 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         Some(opaque.as_slice())
     );
     let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
-    let (_directory, library, mut sequence) = native_gain_media_fixture_with_samples(input_sample);
+    let (_directory, library, mut sequence) =
+        native_gain_media_fixture_with_samples(SOURCE_FRAMES, input_sample);
     let output_id = sequence.audio_program.outputs[0].id;
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let mut state = AppState::with_audio_processor_resolver(resolver);
@@ -516,6 +521,10 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         let clears_before = output.lock().cleared.len();
         assert!(verifier.validate(&old_claim).is_ok());
 
+        // Real author actions sample Instant::now. Let wall time catch up to
+        // this already-observed callback point (at most the fixed ~3ms), then
+        // preserve any legitimate postcommit progression instead of pinning137.
+        std::thread::sleep(observed_at.saturating_duration_since(Instant::now()));
         state
             .dispatch_action(
                 ProductAction::Audio(AudioProductAction::EditChannelStrip(
@@ -538,13 +547,30 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             state.active_sequence().unwrap().audio_program.outputs[0].strip.fader_db,
             -6.0
         );
-        assert_eq!(state.playback_engine.snapshot(), before_engine);
+        let after_engine = state.playback_engine.snapshot();
+        assert_eq!(after_engine.epoch, before_engine.epoch);
+        assert_eq!(after_engine.rate, before_engine.rate);
+        assert_eq!(
+            after_engine.state,
+            mondrian_playback::TransportState::Playing
+        );
+        // The real author transaction synchronizes Engine at Instant::now.
+        // That legal phase advance is independent of the old DSP/queue head.
+        let post_authority = state
+            .authoritative_audio_anchor(
+                &state.playback_engine,
+                state.playback_engine.monotonic_high_water(),
+                "postcommit fader test",
+            )
+            .unwrap();
+        assert!(post_authority.sample() >= authority.sample());
+        assert!(post_authority.sample() + WATERMARK as i64 <= SOURCE_FRAMES as i64);
         let changed = state.audio_playback_snapshot();
         assert_healthy(changed, generation + 1);
         assert_eq!(
             changed.next_start_sample,
-            authority.sample(),
-            "fresh Source uses exact authority"
+            post_authority.sample(),
+            "fresh Source uses exact postcommit Engine authority"
         );
         assert_eq!(changed.in_flight, 0);
         assert!(verifier.validate(&old_claim).is_err());
@@ -564,22 +590,22 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         }
         let new_epoch = output.lock().epoch;
         let continued = fill_to_watermark(&mut state, generation + 1);
-        assert_eq!(continued.media_anchor, Some(authority));
+        assert_eq!(continued.media_anchor, Some(post_authority));
         assert_eq!(
             continued.next_start_sample,
-            authority.sample() + WATERMARK as i64
+            post_authority.sample() + WATERMARK as i64
         );
         let after_facts = cursor_facts(&state);
         assert_heads(
             &after_facts,
             generation + 1,
-            authority.sample() + WATERMARK as i64,
+            post_authority.sample() + WATERMARK as i64,
         );
         eprintln!(
             "mode0 compensated continuity: old={:?}; new={:?}",
             before_facts.session, after_facts.session
         );
-        assert_windows(&output.lock(), new_epoch, authority.sample(), -6.0);
+        assert_windows(&output.lock(), new_epoch, post_authority.sample(), -6.0);
         assert_eq!(output.lock().snapshot.active_callback_consumed_frames, 0);
         assert_eq!(
             output.lock().snapshot.callback_consumed_frames,

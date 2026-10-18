@@ -1548,10 +1548,11 @@ mod tests {
         drop(root);
     }
     fn native_gain_media_fixture() -> (tempfile::TempDir, Arc<AssetLibrary>, Sequence) {
-        native_gain_media_fixture_with_samples(|_| [0.25, -0.25])
+        native_gain_media_fixture_with_samples(48_000, |_| [0.25, -0.25])
     }
 
     fn native_gain_media_fixture_with_samples(
+        frames: usize,
         sample: impl Fn(usize) -> [f32; 2],
     ) -> (tempfile::TempDir, Arc<AssetLibrary>, Sequence) {
         use std::io::Write;
@@ -1562,7 +1563,6 @@ mod tests {
             .expect("native audio fixture directory");
         let source_path = root.path().join("constant-stereo.wav");
         let sample_rate = 48_000_u32;
-        let frames = sample_rate as usize;
         let data_bytes = u32::try_from(frames * 2 * 4).expect("short WAV payload");
         let mut wave = std::io::BufWriter::new(
             std::fs::File::create(&source_path).expect("create nonzero WAV source"),
@@ -1607,7 +1607,11 @@ mod tests {
                 mondrian_timeline::Clip::new(
                     asset_id,
                     mondrian_core::TimelineTime::ZERO,
-                    mondrian_core::TimelineTime::ONE,
+                    mondrian_core::TimelineTime::new(
+                        i64::try_from(frames).expect("finite WAV frames"),
+                        i64::from(sample_rate),
+                    )
+                    .expect("exact WAV Clip duration"),
                 )
                 .expect("audio Clip"),
                 mondrian_core::AudioSourceComponentId::primary(),
