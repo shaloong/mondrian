@@ -172,8 +172,16 @@ presentation is preserved only with matching actual Source and unchanged target
 witnesses. The original Media same-source control passes; an App nonempty-cache
 state-entry case remains source-reviewed only.
 Playing Host fader edits currently reconstruct Timeline/Runtime/native instances
-from authored state. Live DSP/tail continuity across that reconstruction remains
-unmeasured; Idle history and ordinary media-PCM controls do not qualify it.
+from authored state. A finite Windows owned CLAP mode0 control now passes at
+48 kHz/stereo: two complete 8192-frame PCM windows, three-frame delay/PDC,
+137 frames of actual software FIFO consumption, the public -6 dB fader action,
+8055 old frames retired, and complete two-second consuming cleanup. New PCM
+starts at the independently observed postcommit Engine anchor; the entire new
+window suffix is checked after the original quiescence acknowledgement clear.
+This deterministic software callback control does not verify the interval
+between consumption and that new anchor, physical/gapless output, the full UI
+pump or realtime scheduling. Generic DSP memory/tail continuity across the
+reconstruction remains unmeasured; mode0's finite history is PDC-recoverable.
 The current App test build retains 25 warnings; normal Product has 10. No
 strict-build qualification is granted.
 
