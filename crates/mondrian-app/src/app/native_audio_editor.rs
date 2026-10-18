@@ -429,6 +429,23 @@ impl AppState {
                 "native author delivery changed before acknowledgement",
             ));
         }
+        if context.target.is_none()
+            && context.renderer.is_none()
+            && context.attachment_target.is_none()
+            && context.gesture.is_none()
+            && matches!(
+                &context.queued,
+                Some(Intent::ResolveAndOpen { locator, .. }) if *locator == context.locator
+            )
+            && proposal.sequence() == context.payload.sequence_id
+            && context.locator.matches_target(proposal.target())
+        {
+            self.prepare_native_audio_editor_context(context.payload.clone())?;
+            // The sole Runtime retains and reoffers this proposal. Only the
+            // actual Opened receipt binds the surface; installing author state
+            // now would supersede the claim carried by that Open completion.
+            return Ok(());
+        }
         if context.target != Some(proposal.target())
             || proposal.sequence() != context.payload.sequence_id
             || !context.locator.matches_target(proposal.target())
