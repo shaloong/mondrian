@@ -236,6 +236,10 @@ impl AudioPlayback {
                     | AuthorStateEntryPhase::InstalledAwaitingAck {..},
             }) if target==request_target),
         }));
+        if self.source_close_admission.is_some() {
+            self.handoff_retired_render_owners(VecDeque::from([work]), None);
+            return Ok(false);
+        }
         match self.render_queue.push(work) {
             Ok(()) => {
                 self.native_author_handoff_in_flight = Some(identity);

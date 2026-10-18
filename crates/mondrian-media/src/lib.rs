@@ -73,11 +73,12 @@ pub use audio_playback::{
     AudioPcmNativeAuthorHandoffIntent, AudioPcmNativeAuthorHandoffOutcome,
     AudioPcmNativeAuthorHandoffRefusal, AudioPcmNativeAuthorHandoffStatus,
     AudioPcmNativeOwnerBindingRefusal, AudioPcmNativeOwnerBindingStatus, AudioPcmRenderGeneration,
-    AudioPcmRenderOutcome, AudioPcmRenderRequest, AudioPcmRenderer, AudioPlayback,
-    AudioPlaybackConfig, AudioPlaybackConfigError, AudioPlaybackCreateError, AudioPlaybackError,
-    AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll, AudioPlaybackProducerScheduling,
-    AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence, AudioPlaybackSnapshot,
-    AudioPlaybackState, AudioRenderRecoveryDisposition, AUDIO_PLAYBACK_PRODUCER_STACK_BYTES,
+    AudioPcmRenderOutcome, AudioPcmRenderRequest, AudioPcmRenderer, AudioPcmSourceCloseStatus,
+    AudioPcmSourceCloseTicket, AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError,
+    AudioPlaybackCreateError, AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode,
+    AudioPlaybackPoll, AudioPlaybackProducerScheduling, AudioPlaybackShutdownError,
+    AudioPlaybackShutdownEvidence, AudioPlaybackSnapshot, AudioPlaybackState,
+    AudioRenderRecoveryDisposition, AUDIO_PLAYBACK_PRODUCER_STACK_BYTES,
 };
 pub use audio_source::{
     AudioDecoderStartupShutdownEvidence, AudioSourceCache, AudioSourceCacheConfig,
