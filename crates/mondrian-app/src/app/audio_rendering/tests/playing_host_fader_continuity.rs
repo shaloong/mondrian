@@ -39,20 +39,21 @@ fn input_sample(frame: usize) -> [f32; 2] {
 }
 
 struct CapturedWindow {
-    epoch: u64,
+    clear_serial: u64,
     samples: Vec<f32>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Discard {
-    epoch: u64,
+    clear_serial: u64,
     frames: usize,
 }
 
 struct CaptureState {
     snapshot: RealtimeAudioOutputSnapshot,
     revision: u64,
-    epoch: u64,
+    // Output.clear grouping only; never a Media generation or AudioContinuityEpoch.
+    clear_serial: u64,
     queue: VecDeque<[f32; 2]>,
     windows: Vec<CapturedWindow>,
     cleared: Vec<Discard>,
@@ -95,7 +96,7 @@ impl CaptureState {
                 active: false,
             },
             revision: 0,
-            epoch: 0,
+            clear_serial: 0,
             queue: VecDeque::with_capacity(OUTPUT_CAPACITY),
             windows: Vec::with_capacity(CAPTURE_WINDOWS),
             cleared: Vec::with_capacity(8),
@@ -180,8 +181,10 @@ impl AudioOutputAdapter for CaptureOutput {
                 available_samples: 0,
             });
         }
-        let epoch = state.epoch;
-        state.windows.push(CapturedWindow { epoch, samples: buffer.samples.clone() });
+        let clear_serial = state.clear_serial;
+        state
+            .windows
+            .push(CapturedWindow { clear_serial, samples: buffer.samples.clone() });
         state
             .queue
             .extend(buffer.samples.chunks_exact(2).map(|pair| [pair[0], pair[1]]));
@@ -191,7 +194,10 @@ impl AudioOutputAdapter for CaptureOutput {
 
     fn clear(&mut self) {
         let mut state = self.0.lock();
-        let discard = Discard { epoch: state.epoch, frames: state.queue.len() };
+        let discard = Discard {
+            clear_serial: state.clear_serial,
+            frames: state.queue.len(),
+        };
         if state.cleared.len() == 8 {
             state.overflow = true;
         } else {
@@ -199,7 +205,7 @@ impl AudioOutputAdapter for CaptureOutput {
         }
         state.queue.clear();
         state.snapshot.buffered_frames = 0;
-        state.epoch += 1;
+        state.clear_serial += 1;
     }
 
     fn validate_deactivation(&self) -> Result<(), RealtimeAudioOutputControlError> {
@@ -391,13 +397,20 @@ fn fill_to_watermark(state: &mut AppState, generation: u64) -> AudioPlaybackSnap
     }
 }
 
-fn assert_windows(state: &CaptureState, epoch: u64, start_sample: i64, fader_db: f64) {
+fn assert_windows(
+    state: &CaptureState,
+    first_window: usize,
+    clear_serial: u64,
+    start_sample: i64,
+    fader_db: f64,
+) {
     // mode0 uses main weight2 and saved gain.5; unconnected auxiliary inputs
     // are zero. Its latency3 is compensated by public lookahead3, so expected
     // public sample n is the original WAV[n], with no extra +/-3 shift.
     let gain = 10.0_f64.powf(fader_db / 20.0);
     let mut frames = 0;
-    for window in state.windows.iter().filter(|window| window.epoch == epoch) {
+    for window in &state.windows[first_window..] {
+        assert_eq!(window.clear_serial, clear_serial);
         assert_eq!(window.samples.len(), CHUNK * 2);
         for pair in window.samples.chunks_exact(2) {
             let absolute = usize::try_from(start_sample + frames as i64).unwrap();
@@ -410,7 +423,7 @@ fn assert_windows(state: &CaptureState, epoch: u64, start_sample: i64, fader_db:
                 let expected = (f64::from(expected[channel]) * gain) as f32;
                 assert!(
                     (pair[channel] - expected).abs() <= 1e-6,
-                    "epoch{epoch} public{absolute} channel{channel}: {} != {expected}",
+                    "clear{clear_serial} public{absolute} channel{channel}: {} != {expected}",
                     pair[channel]
                 );
             }
@@ -534,8 +547,8 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         assert_eq!(warmed.media_anchor.unwrap().sample(), 0);
         assert_eq!(warmed.next_start_sample, WATERMARK as i64);
         assert_heads(&cursor_facts(&state), generation, WATERMARK as i64);
-        let old_epoch = output.lock().epoch;
-        assert_windows(&output.lock(), old_epoch, 0, 0.0);
+        let old_clear_serial = output.lock().clear_serial;
+        assert_windows(&output.lock(), 0, old_clear_serial, 0, 0.0);
 
         let observed_at = state.playback_observation_instant_anchor
             + Duration::from_nanos((CONSUMED as u64 * 1_000_000_000).div_ceil(u64::from(RATE)));
@@ -643,7 +656,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             let captured = output.lock();
             assert_eq!(captured.cleared.len(), clears_before + 1);
             let discard = captured.cleared.last().unwrap();
-            assert_eq!(discard.epoch, old_epoch);
+            assert_eq!(discard.clear_serial, old_clear_serial);
             assert_eq!(
                 discard.frames,
                 WATERMARK - CONSUMED,
@@ -653,7 +666,17 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             assert_eq!(captured.activation_discarded, 0);
             assert!(!captured.overflow);
         }
-        let new_epoch = output.lock().epoch;
+        // prepare's first clear retired the old queue. The original Media poll
+        // must acknowledge quiescence and clear racing old PCM once more before
+        // admitting the new windows; that clear is not another audio generation.
+        let (new_windows_start, pending_clear_count, pending_clear_serial) = {
+            let capture = output.lock();
+            (
+                capture.windows.len(),
+                capture.cleared.len(),
+                capture.clear_serial,
+            )
+        };
         let continued = fill_to_watermark(&mut state, generation + 1);
         assert_eq!(continued.media_anchor, Some(post_authority));
         assert_eq!(
@@ -670,7 +693,33 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             "mode0 compensated continuity: old={:?}; new={:?}",
             before_facts.session, after_facts.session
         );
-        assert_windows(&output.lock(), new_epoch, post_authority.sample(), -6.0);
+        {
+            let capture = output.lock();
+            assert_eq!(capture.cleared.len(), pending_clear_count + 1);
+            let acknowledgement_clear = capture.cleared[pending_clear_count];
+            assert_eq!(acknowledgement_clear.clear_serial, pending_clear_serial);
+            assert_eq!(
+                acknowledgement_clear.frames, 0,
+                "no new PCM may be discarded before admission"
+            );
+            assert_eq!(capture.clear_serial, pending_clear_serial + 1);
+            // Inspect the entire newly captured suffix, not a filtered latest
+            // group that could hide an earlier discarded or extra window.
+            let new_windows = &capture.windows[new_windows_start..];
+            assert_eq!(new_windows.len(), WATERMARK / CHUNK);
+            assert!(new_windows.iter().all(|window| window.clear_serial == capture.clear_serial));
+            assert_eq!(
+                new_windows.iter().map(|window| window.samples.len()).sum::<usize>(),
+                WATERMARK * 2
+            );
+            assert_windows(
+                &capture,
+                new_windows_start,
+                capture.clear_serial,
+                post_authority.sample(),
+                -6.0,
+            );
+        }
         assert_eq!(output.lock().snapshot.active_callback_consumed_frames, 0);
         assert_eq!(
             output.lock().snapshot.callback_consumed_frames,
