@@ -817,6 +817,8 @@ fn handoff_continuity(
 mod tests {
     use super::*;
 
+    mod playing_host_fader_continuity;
+
     #[derive(Debug, Default, Clone, Copy)]
     struct SettlementSnapshot {
         scopes: u32,
@@ -1546,6 +1548,12 @@ mod tests {
         drop(root);
     }
     fn native_gain_media_fixture() -> (tempfile::TempDir, Arc<AssetLibrary>, Sequence) {
+        native_gain_media_fixture_with_samples(|_| [0.25, -0.25])
+    }
+
+    fn native_gain_media_fixture_with_samples(
+        sample: impl Fn(usize) -> [f32; 2],
+    ) -> (tempfile::TempDir, Arc<AssetLibrary>, Sequence) {
         use std::io::Write;
 
         let root = tempfile::Builder::new()
@@ -1571,9 +1579,10 @@ mod tests {
         wave.write_all(&32_u16.to_le_bytes()).expect("sample bits");
         wave.write_all(b"data").expect("data");
         wave.write_all(&data_bytes.to_le_bytes()).expect("data extent");
-        for _ in 0..frames {
-            wave.write_all(&0.25_f32.to_le_bytes()).expect("left sample");
-            wave.write_all(&(-0.25_f32).to_le_bytes()).expect("right sample");
+        for frame in 0..frames {
+            let [left, right] = sample(frame);
+            wave.write_all(&left.to_le_bytes()).expect("left sample");
+            wave.write_all(&right.to_le_bytes()).expect("right sample");
         }
         wave.flush().expect("complete WAV source");
         drop(wave);

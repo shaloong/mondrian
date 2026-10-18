@@ -3386,6 +3386,35 @@ fn trace_non_ready_frame_presentation(
     }
 }
 
+// Deterministic test driver for the original App/Media processing boundary.
+// Native/UI/device scheduling policy remains in the public pump; callers must
+// separately reject holds, recovery and substituted PCM in their finite gate.
+#[cfg(test)]
+pub(super) fn poll_audio_playback_at_for_test(
+    state: &mut AppState,
+    observed_at: Instant,
+    observe_clock: bool,
+) -> mondrian_core::Result<AudioPlaybackSnapshot> {
+    let timestamp = state
+        .playback_timestamp_for_observation(observed_at)
+        .map_err(|error| transport_action_error("test_audio_poll", error))?
+        .max(state.playback_engine.monotonic_high_water());
+    let anchor =
+        state.authoritative_audio_anchor(&state.playback_engine, timestamp, "test_audio_poll")?;
+    let mode = state.audio_playback_mode();
+    let poll = state
+        .audio_playback
+        .poll(mode, anchor)
+        .map_err(|error| transport_action_error("test_audio_poll", error))?;
+    for event in poll.events {
+        state.handle_audio_playback_event(event, observed_at)?;
+    }
+    if observe_clock {
+        state.observe_audio_output_clock(poll.snapshot, observed_at)?;
+    }
+    Ok(poll.snapshot)
+}
+
 fn audio_playback_mode_for_transport(
     state: TransportState,
     rate: PlaybackRate,
