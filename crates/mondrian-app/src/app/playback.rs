@@ -6005,6 +6005,7 @@ mod tests {
             // This observes Ready and a genuine NoEditor refusal. It does not
             // directly read the private target or qualify legal author handoff,
             // PCM, GUI attachment, every probe registration or graceful100ms.
+            drop(state);
         }
     }
 
