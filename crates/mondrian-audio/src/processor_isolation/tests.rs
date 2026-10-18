@@ -1092,7 +1092,11 @@ fn assert_installed_clap_gain(
         vec![parameter_id.clone()],
         render_contract,
     )
-    .expect("CLAP worker specification");
+    .expect("CLAP worker specification")
+    .with_native_worker_lane_resources(
+        super::clap_worker::clap_native_worker_lane_profile()
+            .expect("actual CLAP native lane profile"),
+    );
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("prepare installed CLAP through child process");
     let mut processor = factory.create(None).expect("create CLAP worker instance");
