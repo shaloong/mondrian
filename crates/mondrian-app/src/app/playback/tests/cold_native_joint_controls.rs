@@ -1019,9 +1019,29 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
     assert_eq!(after.opaque_state.as_ref(), delivered.state());
     assert_editor_configuration(after.opaque_state.as_ref().unwrap().as_ref(), 0.75, 0.25, 1);
     let accepted_author_state = serde_json::to_value(after).unwrap();
-    let installed_claim =
-        verifier.current_claim().expect("same Source after legitimate installation");
-    assert!(verifier.validate(&installed_claim).is_ok());
+    // A legal Plan installation keeps the Source while replacing its Runtime
+    // registration. The old verifier must lose permission, rather than follow
+    // that replacement implicitly.
+    let installed_verifier = weak
+        .upgrade()
+        .expect("same original Timeline after legitimate installation")
+        .owner_installation_verifier()
+        .expect("actual current Runtime registration");
+    assert!(verifier.same_source(&installed_verifier));
+    assert!(!verifier.same_registration(&installed_verifier));
+    assert_eq!(
+        verifier.current_claim().unwrap_err(),
+        mondrian_core::AudioOwnerInstallationError::Superseded
+    );
+    assert_eq!(
+        verifier.validate(&original_claim),
+        Err(mondrian_core::AudioOwnerInstallationError::Superseded)
+    );
+    let installed_claim = installed_verifier
+        .current_claim()
+        .expect("current registration in the same Source");
+    assert!(installed_verifier.validate(&installed_claim).is_ok());
+    assert!(installed_claim.generation() > original_claim.generation());
     assert_eq!(
         acknowledged.installed_generation,
         installed_claim.generation()
@@ -1158,7 +1178,7 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
         state.authoring.as_ref().unwrap().history().diagnostics(),
         history_after
     );
-    assert!(verifier.validate(&installed_claim).is_ok());
+    assert!(installed_verifier.validate(&installed_claim).is_ok());
     assert_eq!(state.playback_engine.snapshot(), engine_before);
     assert!(state.playback_engine.native_audio_control_hold_ticket().is_none());
     assert!(state.audio_playback.native_control_hold_generation().is_none());
@@ -1176,6 +1196,10 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
     assert!(evidence.all_workers_terminated(), "{evidence:?}");
     assert!(evidence.shutdown_resource_facts_complete_at_deadline);
     assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+    assert!(matches!(
+        installed_verifier.current_claim(),
+        Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+    ));
     assert!(matches!(
         verifier.current_claim(),
         Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
