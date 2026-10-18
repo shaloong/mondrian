@@ -98,11 +98,33 @@ consume no additional foreign-owner units. The original 256-unit limit remains.
 Four exact regressions and 96 ordinary Playback controls pass on Windows; one
 ignored actual MMCSS case is excluded. See the [qualification conditions](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
 
-Private child settlement is still a separate open gap: an owned-plugin
-Runtime-to-Media control retains a Retiring child yet reports complete resource
-facts. Its actual Settled positive control passes. Worker joins alone therefore
-do not establish native process closure; these controls grant no App Timeline,
-whole-shutdown deadline, construction-custody or realtime qualification.
+Native-child observation now uses that same tracker. Once bound, counted, non-clonable
+registrars cover the Timeline renderer, current/nested Sessions and held scope
+candidates; factories retain no observation domain. A result producer belongs
+to the original ProcessOwner and reports only its final Settled/Unconfirmed
+state. Missing, foreign or failed registration makes evidence unavailable;
+observation never grants DSP or Source permission. Session and parent producer
+slots use the existing resource ledger; App/tracker payloads and Arc blocks
+remain outside complete Root heap accounting.
+
+Windows ordinary controls pass: Core509, Audio719, Playback105 and App74, plus
+two separate actual OS-owner controls. The App set includes real queued typed
+refusals and both retired/external renderer-alias lifetimes; it does not prove
+legal native handoff. An old mute-test alias is now released before its original
+complete-closure assertion. The owned-VST3 Runtime-to-Media pair also passes with
+the current normal Product: an unconfirmed Retiring child now yields incomplete
+facts and unresolved ownership, while a Settled child yields complete facts and
+resolved ownership. Both gates verify actual Runtime forwarding and the original
+child's producer, with the original180s/2s Job limits. Test-only same-HANDLE
+cleanup happens after receipt capture and cannot upgrade the original owner's
+result. This closes the earlier false-healthy projection, not its cleanup failure.
+
+New counting does not run in physical callbacks, native DSP or steady PCM blocks.
+Cold handoff control on the MMCSS producer does take the tracker mutex; that
+existing branch also allocates and uses synchronous IPC. Neither its lock wait
+nor whole-producer realtime behavior is qualified. Initial construction/probe
+coverage, residual Child custody, whole-shutdown100ms and other platforms remain
+separate unfinished work.
 
 ## VST3 workflow matrix
 
