@@ -24,7 +24,7 @@ cargo test -p mondrian-audio --lib installed_clap_sample_gain_preserves_event_ra
 Build the Mondrian executable first. This is a validation plugin, not a bundled
 production effect or a claim of arbitrary vendor plugin qualification.
 
-On Windows the same plugin additionally supports only a fixed 320¡Á100 Win32
+On Windows the same plugin additionally supports only a fixed 320x100 Win32
 embedded GUI. The real child is titled `Mondrian CLAP Gain Editor`; its
 per-instance class begins `MondrianClapGainEditor_`. The supplied parent HWND is
 borrowed, must be on the initializing main thread, and must outlive GUI destroy.
