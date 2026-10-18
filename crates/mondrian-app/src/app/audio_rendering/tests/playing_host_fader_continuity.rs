@@ -449,6 +449,9 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
 
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.play().expect("original App play prepares the actual native Source");
+        // The existing headless video model supplies both prerequisites of
+        // original play_ready: Ready delivery, then the matching preroll.
+        assert!(!state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready));
         let demand = state.pending_playback_frame_demand_identity().expect("original video demand");
         // Existing deterministic video-preroll seam only; this audio gate does
         // not assert actual Viewer/GPU presentation or full public UI pumping.
@@ -485,6 +488,9 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         let consumed_snapshot = poll_audio_playback_at_for_test(&mut state, observed_at, true)
             .expect("original App clock converter observes the synchronous software callback");
         assert_healthy(consumed_snapshot, generation);
+        // 8055 queued + the next indivisible 256-frame admission exceeds
+        // watermark8192. This partial callback cannot trigger a refill.
+        assert_eq!(consumed_snapshot.in_flight, 0);
         assert_eq!(
             state.playback_clock_master(),
             Some(mondrian_playback::ClockMaster::AudioDevice)
