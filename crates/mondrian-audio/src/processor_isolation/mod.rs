@@ -357,6 +357,13 @@ impl fmt::Debug for IsolatedAudioProcessorWorkerSpec {
 
 /// Non-realtime Adapter that resolves one native definition into an isolated Worker spec.
 pub trait IsolatedAudioProcessorSpecResolver: Send + Sync {
+    /// Explicit cold-probe forwarding capability; unknown is never no-Child evidence.
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Unavailable
+    }
+
     /// Resolve discovery identity, native binary, opaque state, buses, parameters,
     /// deadlines, and child preparation payload without loading plugin code in
     /// the Mondrian process.
@@ -390,6 +397,18 @@ impl IsolatedAudioProcessorResolver {
 }
 
 impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        // This outer resolver owns validation launches; it cannot wash an unknown inner probe.
+        match self.external.native_child_settlement_requirement() {
+            mondrian_core::NativeChildSettlementRequirement::Unavailable => {
+                mondrian_core::NativeChildSettlementRequirement::Unavailable
+            }
+            _ => mondrian_core::NativeChildSettlementRequirement::Required,
+        }
+    }
+
     fn prepare(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -399,6 +418,12 @@ impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
             AudioProcessorDefinitionRef::BuiltIn { .. }
         ) {
             return BuiltInAudioProcessorResolver.prepare(request);
+        }
+        let native_child_settlement = request.native_child_settlement_registrar();
+        if let Some(registrar) = native_child_settlement {
+            crate::processor_host::mark_unavailable_if_native_forwarding_unknown(registrar, || {
+                self.external.native_child_settlement_requirement()
+            });
         }
         let expected_contract = request.render_contract();
         let expected_parameter_ids = request.parameters().keys().cloned().collect::<Vec<_>>();
@@ -418,7 +443,7 @@ impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
                 "external adapter does not admit requested Note input",
             ));
         }
-        let factory = IsolatedAudioProcessorFactory::prepare(spec)?;
+        let factory = IsolatedAudioProcessorFactory::prepare_inner(spec, native_child_settlement)?;
         #[cfg(test)]
         let factory = {
             let mut factory = factory;
@@ -505,7 +530,14 @@ impl IsolatedAudioProcessorFactory {
     /// Worker; generic/manual specs retain the real validation launch and shutdown.
     /// Every actual instance still passes the complete same-owner Ready checks.
     pub fn prepare(
+        spec: IsolatedAudioProcessorWorkerSpec,
+    ) -> Result<Arc<Self>, AudioProcessorHostError> {
+        Self::prepare_inner(spec, None)
+    }
+
+    fn prepare_inner(
         mut spec: IsolatedAudioProcessorWorkerSpec,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Arc<Self>, AudioProcessorHostError> {
         spec.validate()?;
         let layout = SharedBlockLayout::new(
@@ -526,8 +558,13 @@ impl IsolatedAudioProcessorFactory {
         ) {
             PreparationEvidence::NativeProbed { input_names } => input_names,
             PreparationEvidence::Unprobed => {
-                let (mut validation, input_names) =
-                    SupervisedAudioWorker::launch(&spec, spec.render_contract, layout, None)?;
+                let (mut validation, input_names) = SupervisedAudioWorker::launch(
+                    &spec,
+                    spec.render_contract,
+                    layout,
+                    None,
+                    native_child_settlement,
+                )?;
                 validation.shutdown_observed().validation_result()?;
                 input_names
             }
@@ -636,7 +673,10 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         self.input_names.clone()
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         // This is an additional parent instance owner. Charge it through the
         // original private Session scratch contract and verify the actual clone
         // before launching foreign code. Move this exact owner into the instance.
@@ -653,6 +693,7 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
             self.spec.render_contract,
             self.layout,
             Some(&self.input_names),
+            native_child_settlement,
         )?;
         #[cfg(test)]
         let worker = {

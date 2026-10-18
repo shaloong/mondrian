@@ -1154,6 +1154,32 @@ impl AudioProgramRuntime {
         request: AudioCompileRequest,
         resource_grant: AudioRuntimeResourceGrant,
     ) -> Result<Self, AudioRuntimeBuildError> {
+        Self::build_observing_native_child_settlement(
+            root,
+            sequences,
+            resolver,
+            processor_resolver,
+            contract,
+            request,
+            resource_grant,
+            None,
+        )
+    }
+
+    /// Build through the same preparation path while observing cold native children.
+    /// Each real Session holds its existing counted branch before population.
+    /// None means unobserved, never no-Child evidence or a new DSP permission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_observing_native_child_settlement(
+        root: &Sequence,
+        sequences: &[Sequence],
+        resolver: &dyn AudioMediaResolver,
+        processor_resolver: &dyn AudioProcessorResolver,
+        contract: AudioRenderContract,
+        request: AudioCompileRequest,
+        resource_grant: AudioRuntimeResourceGrant,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Self, AudioRuntimeBuildError> {
         if contract.channel_layout != root.settings.audio_channel_layout {
             return Err(AudioRuntimeBuildError::ProgramLayoutMismatch {
                 sequence_id: root.id,
@@ -1175,6 +1201,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            native_child_settlement,
         )
     }
 
@@ -1229,6 +1256,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            None,
         )
     }
 
@@ -1269,6 +1297,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            None,
         )
     }
 
@@ -1337,6 +1366,7 @@ impl AudioProgramRuntime {
             &mut stack,
             0,
             &mut ledger,
+            None,
         )
     }
 
@@ -1352,6 +1382,7 @@ impl AudioProgramRuntime {
         stack: &mut BTreeSet<SequenceId>,
         depth: usize,
         ledger: &mut AudioRuntimeAdmissionLedger,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Self, AudioRuntimeBuildError> {
         if depth > MAX_NESTED_SEQUENCE_RENDER_DEPTH {
             return Err(AudioRuntimeBuildError::NestedDepthExceeded {
@@ -1544,6 +1575,7 @@ impl AudioProgramRuntime {
                             stack,
                             depth + 1,
                             ledger,
+                            native_child_settlement,
                         )?;
                         if runtime.requires_state_entry()
                             && contribution.source_time_map.scale.numerator() < 0
@@ -1613,6 +1645,7 @@ impl AudioProgramRuntime {
                     contract,
                     &dependencies,
                     processor_resolver,
+                    native_child_settlement,
                 )?;
                 let footprint = plan.session_resource_footprint()?;
                 (plan, footprint)
@@ -1623,6 +1656,7 @@ impl AudioProgramRuntime {
                     AudioKernelBackend::default(),
                     &dependencies,
                     processor_resolver,
+                    native_child_settlement,
                 )?);
                 let footprint = plan.session_resource_footprint()?;
                 if let Some(reservation) = prepared_reservation {
@@ -1632,7 +1666,13 @@ impl AudioProgramRuntime {
                 }
                 (plan, footprint)
             };
-            let session = AudioRenderSession::new(plan)?;
+            let mut storage = AudioRenderSession::allocate_storage(plan)?;
+            if let Some(registrar) = native_child_settlement {
+                // Scope precedes actual Factory creation; unavailable evidence
+                // leaves the original construction result untouched.
+                let _ = storage.attach_native_child_settlement(registrar);
+            }
+            let session = storage.populate()?;
             let capacity = session.capacity();
             let realized_compensation_bytes = capacity
                 .compensation_delay_samples

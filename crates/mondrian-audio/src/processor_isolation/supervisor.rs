@@ -84,7 +84,7 @@ type CleanupHooks = (
 );
 
 impl ProcessOwner {
-    fn bind_native_child_settlement(
+    pub(super) fn bind_native_child_settlement(
         &mut self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
     ) -> Result<(), mondrian_core::NativeChildSettlementError> {
@@ -318,6 +318,7 @@ impl SupervisedAudioWorker {
         contract: AudioRenderContract,
         layout: SharedBlockLayout,
         expected_input_names: Option<&[crate::AudioProcessorInputName]>,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<(Self, Vec<crate::AudioProcessorInputName>), AudioProcessorHostError> {
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))
             .map_err(|error| worker_failed("startup", error))?;
@@ -391,6 +392,11 @@ impl SupervisedAudioWorker {
         };
         let mut process =
             ProcessOwner::new(command.spawn().map_err(|error| worker_failed("startup", error))?);
+        if let Some(registrar) = native_child_settlement {
+            // Original final Drop reports every later error using the same owner.
+            // Evidence failure never replaces actual startup semantics.
+            let _ = process.bind_native_child_settlement(registrar);
+        }
         let startup_deadline = Instant::now()
             .checked_add(spec.startup_timeout)
             .ok_or_else(|| invalid_contract("Worker startup deadline overflowed"))?;
@@ -1498,6 +1504,7 @@ mod startup_preflight_tests {
             render,
             SharedBlockLayout::new(4, 2, 1, 0).unwrap(),
             None,
+            None,
         )
         .err()
         .expect("preflight must refuse without starting an executable");
@@ -1556,6 +1563,7 @@ mod control_timeout_worker_lifecycle {
             &spec,
             render,
             SharedBlockLayout::new(4, 2, 0, 0)?,
+            None,
             None,
         )?;
         assert!(names.is_empty());

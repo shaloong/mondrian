@@ -24,7 +24,7 @@ fn installed_vst3_retained_configuration_candidate_uses_actual_component_profile
         );
         let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
             .expect("profile factory")
-            .create()
+            .create(None)
             .expect("retained profile child");
         let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
         let token = NonZeroU64::new(17).expect("service token");
@@ -486,7 +486,7 @@ fn trigger_clap_configuration(
     let keys = auxiliary_keys(&spec);
     let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("CLAP profile factory")
-        .create()
+        .create(None)
         .expect("retained CLAP child");
     processor.enter_state(0).expect("old epoch");
     for start in [0, 4, 8] {
@@ -522,7 +522,7 @@ fn assert_fresh_candidate(
     let ids: Vec<_> = authored.parameters.keys().cloned().collect();
     let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("fresh observed factory")
-        .create()
+        .create(None)
         .expect("fresh seed child");
     processor.enter_state(100).expect("fresh state entry");
     for (processed, start) in [100, 104, 108].into_iter().enumerate() {
@@ -570,7 +570,7 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let keys = auxiliary_keys(&spec);
         let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
             .expect("factory")
-            .create()
+            .create(None)
             .expect("same persistent child");
         let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
         let result = processor

@@ -27,6 +27,7 @@ impl AudioRuntimeAdmissionLedger {
         contract: crate::AudioRenderContract,
         dependencies: &crate::schedule::AudioPreparationDependencies,
         processor_resolver: &dyn crate::AudioProcessorResolver,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<std::sync::Arc<crate::PreparedAudioPlan>, AudioRuntimeBuildError> {
         if reservation.output_id != program.output_id() {
             return Err(AudioRuntimeBuildError::StaleResourceAdmission);
@@ -36,6 +37,7 @@ impl AudioRuntimeAdmissionLedger {
             contract,
             dependencies,
             processor_resolver,
+            native_child_settlement,
         )?);
         self.complete_prepared_session(reservation, plan.session_resource_footprint()?)?;
         Ok(plan)

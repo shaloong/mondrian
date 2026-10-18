@@ -164,7 +164,10 @@ impl AudioProcessorFactory for TestDelayProcessorFactory {
         self.contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         Ok(Box::new(TestDelayProcessor {
             samples: vec![0.0; self.delay_samples],
             cursor: 0,
@@ -221,7 +224,10 @@ impl AudioProcessorFactory for TestSidechainFactory {
         }
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         Ok(Box::new(TestSidechainProcessor))
     }
 }
@@ -3722,7 +3728,10 @@ impl AudioProcessorFactory for WeightedAuxFactory {
     fn auxiliary_input_contract(&self) -> AudioProcessorAuxiliaryInputContract {
         TestSidechainFactory { layout: self.0 }.auxiliary_input_contract()
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         Ok(Box::new(WeightedAux))
     }
 }
@@ -4084,7 +4093,10 @@ impl AudioProcessorFactory for NativeReferenceFactory {
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         AudioProcessorExecutionContract::stateless()
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         Ok(Box::new(NativeReferenceProcessor { value: 0.75 }))
     }
 }
@@ -4819,7 +4831,10 @@ mod vst3_note_entry_controls {
         ) -> Result<(), AudioProcessorFactoryStorageError> {
             visitor(AudioProcessorFactoryStorageBorrow::arc_payload(&self.probe))
         }
-        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
             self.probe.lock().unwrap().creates += 1;
             Ok(Box::new(Processor {
                 probe: Arc::clone(&self.probe),

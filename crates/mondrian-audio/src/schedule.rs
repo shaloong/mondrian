@@ -383,6 +383,7 @@ impl PreparedAudioPlan {
             kernel_backend,
             &AudioPreparationDependencies::default(),
             processor_resolver,
+            None,
         )
     }
 
@@ -392,6 +393,7 @@ impl PreparedAudioPlan {
         kernel_backend: AudioKernelBackend,
         dependencies: &AudioPreparationDependencies,
         processor_resolver: &dyn AudioProcessorResolver,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Self, AudioCompileError> {
         contract.validate()?;
         program.graph().admit_musical_transport(program.musical_time_reference)?;
@@ -414,6 +416,7 @@ impl PreparedAudioPlan {
             dependencies,
             processor_resolver,
             requested_notes,
+            native_child_settlement,
         )?;
         Ok(Self {
             preparation_id: mondrian_core::AudioPreparedPlanId::new(),
@@ -512,6 +515,7 @@ impl PreparedAudioPlan {
         contract: AudioRenderContract,
         dependencies: &AudioPreparationDependencies,
         processor_resolver: &dyn AudioProcessorResolver,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Self, AudioCompileError> {
         Self::validate_admitted_root_note_preparation(&program, contract)?;
         let rate = AudioSampleRate::new(contract.sample_rate)
@@ -524,6 +528,7 @@ impl PreparedAudioPlan {
             dependencies,
             processor_resolver,
             requested_notes,
+            native_child_settlement,
         )?;
         Ok(Self {
             preparation_id: mondrian_core::AudioPreparedPlanId::new(),
@@ -1330,6 +1335,7 @@ impl PreparedAudioSchedule {
         dependencies: &AudioPreparationDependencies,
         processor_resolver: &dyn AudioProcessorResolver,
         requested_notes: prepared_notes::RequestedNoteScore,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<Self, AudioCompileError> {
         let sample_rate = AudioSampleRate::new(contract.sample_rate).map_err(|error| {
             AudioCompileError::InvalidPreparedGraph(format!(
@@ -1355,6 +1361,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 program.musical_time_reference,
+                native_child_settlement,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1367,6 +1374,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 program.musical_time_reference,
+                native_child_settlement,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1406,6 +1414,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 program.musical_time_reference,
+                native_child_settlement,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1418,6 +1427,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 program.musical_time_reference,
+                native_child_settlement,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -1449,6 +1459,7 @@ impl PreparedAudioSchedule {
             sample_rate,
             contract,
             program.musical_time_reference,
+            native_child_settlement,
             processor_resolver,
             &requested_notes,
             &mut processors,
@@ -1461,6 +1472,7 @@ impl PreparedAudioSchedule {
             sample_rate,
             contract,
             program.musical_time_reference,
+            native_child_settlement,
             processor_resolver,
             &requested_notes,
             &mut processors,
@@ -1625,6 +1637,7 @@ impl PreparedAudioSchedule {
                 sample_rate,
                 contract,
                 program.musical_time_reference,
+                native_child_settlement,
                 processor_resolver,
                 &requested_notes,
                 &mut processors,
@@ -2403,6 +2416,7 @@ fn prepare_rack(
     sample_rate: AudioSampleRate,
     contract: AudioRenderContract,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     processor_resolver: &dyn AudioProcessorResolver,
     requested_notes: &prepared_notes::RequestedNoteScore,
     destination: &mut Vec<PreparedProcessor>,
@@ -2422,6 +2436,7 @@ fn prepare_rack(
             contract,
             requested_notes.requests_input_for(occurrence),
             musical_time_reference,
+            native_child_settlement,
         )?;
         let processor_algorithmic_latency_frames = factory.contract().algorithmic_latency_frames();
         let mut parameter_ids = Vec::with_capacity(processor.parameters.len());
@@ -2864,7 +2879,10 @@ mod prospective_prepared_plan_parity_tests {
             }
         }
 
-        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
             self.calls.creates.fetch_add(1, Ordering::SeqCst);
             Err(AudioProcessorHostError::Unavailable(
                 "shape metadata factory must never create DSP".to_owned(),

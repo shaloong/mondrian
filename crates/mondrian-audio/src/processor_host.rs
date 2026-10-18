@@ -42,6 +42,11 @@ impl PreparedProcessorFactoryBinding {
         resolver: &dyn AudioProcessorResolver,
         request: AudioProcessorPrepareRequest<'_>,
     ) -> Result<Self, AudioProcessorHostError> {
+        if let Some(registrar) = request.native_child_settlement_registrar() {
+            mark_unavailable_if_native_forwarding_unknown(registrar, || {
+                resolver.native_child_settlement_requirement()
+            });
+        }
         let render_contract = request.render_contract();
         let mode = render_contract.processing_mode;
         let factory = isolate_adapter_call("resolution", || resolver.prepare(request))?;
@@ -199,7 +204,10 @@ impl PreparedProcessorFactoryBinding {
         })
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let current_contract = isolate_adapter_value("execution-contract revalidation", || {
             self.factory.execution_contract()
         })?;
@@ -239,7 +247,16 @@ impl PreparedProcessorFactoryBinding {
                     .to_owned(),
             ));
         }
-        isolate_adapter_call("instance creation", || self.factory.create())
+        if let Some(registrar) = native_child_settlement {
+            if self.native_child_settlement_requirement()
+                == mondrian_core::NativeChildSettlementRequirement::Unavailable
+            {
+                registrar.mark_unavailable();
+            }
+        }
+        isolate_adapter_call("instance creation", || {
+            self.factory.create(native_child_settlement)
+        })
     }
 }
 
@@ -1279,6 +1296,7 @@ impl PreparedProcessorHost {
     pub(crate) fn populate_instances(
         &mut self,
         schedule: &PreparedAudioSchedule,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
     ) -> Result<(), AudioExecutionError> {
         if !self.instances.is_empty() || self.instances.capacity() < schedule.processors.len() {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
@@ -1291,7 +1309,7 @@ impl PreparedProcessorHost {
             };
             self.instances.push(HostedProcessorInstance {
                 occurrence: processor.occurrence,
-                processor: processor.factory.create()?,
+                processor: processor.factory.create(native_child_settlement)?,
                 continuity,
                 notes: self.prepared_notes.get_mut(slot).and_then(Option::take),
                 native_binding: crate::native_runtime_owner::NativeHostedBinding::Unbound,
@@ -1816,6 +1834,19 @@ fn prepare_processor_auxiliary_buses<'a>(
     Ok(buses)
 }
 
+pub(crate) fn mark_unavailable_if_native_forwarding_unknown(
+    registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    query: impl FnOnce() -> mondrian_core::NativeChildSettlementRequirement,
+) {
+    if !matches!(
+        isolate_adapter_value("native child settlement forwarding", query),
+        Ok(mondrian_core::NativeChildSettlementRequirement::Required
+            | mondrian_core::NativeChildSettlementRequirement::NotApplicable)
+    ) {
+        registrar.mark_unavailable();
+    }
+}
+
 fn isolate_adapter_call<T>(
     operation: &'static str,
     call: impl FnOnce() -> Result<T, AudioProcessorHostError>,
@@ -1872,6 +1903,7 @@ pub(crate) fn prepare_processor_factory(
     contract: AudioRenderContract,
     note_input_requested: bool,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
+    native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
 ) -> Result<PreparedProcessorFactoryBinding, AudioProcessorHostError> {
     PreparedProcessorFactoryBinding::resolve(
         resolver,
@@ -1883,6 +1915,7 @@ pub(crate) fn prepare_processor_factory(
             contract,
         )
         .with_note_input_requested(note_input_requested)
-        .with_musical_time_reference(musical_time_reference),
+        .with_musical_time_reference(musical_time_reference)
+        .with_native_child_settlement_registrar(native_child_settlement),
     )
 }

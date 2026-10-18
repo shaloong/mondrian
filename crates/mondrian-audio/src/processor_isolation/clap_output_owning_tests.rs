@@ -156,8 +156,8 @@ fn clap_output_owning_actual_isolated_child_does_not_accept_and_discard_unsuppor
         .expect("actual isolated spec");
         let factory = super::super::IsolatedAudioProcessorFactory::prepare(spec)
             .expect("actual validation child");
-        let mut processor =
-            crate::AudioProcessorFactory::create(factory.as_ref()).expect("sole actual DSP child");
+        let mut processor = crate::AudioProcessorFactory::create(factory.as_ref(), None)
+            .expect("sole actual DSP child");
         processor.enter_state(-3).expect("exact native continuity");
         for origin in [-3, 1] {
             let context = AudioProcessorProcessContext::new(

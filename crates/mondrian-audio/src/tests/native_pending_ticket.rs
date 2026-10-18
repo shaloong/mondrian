@@ -38,7 +38,10 @@ impl AudioProcessorFactory for OncePendingFactory {
         AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, false, true, true, 0)
             .expect("actual stateless test processor")
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         Ok(Box::new(OncePendingProcessor {
             pending: Arc::clone(&self.pending),
             calls: Arc::clone(&self.calls),

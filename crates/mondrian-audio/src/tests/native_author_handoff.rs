@@ -116,7 +116,10 @@ impl AudioProcessorFactory for HandoffFactory {
             seed: Some(configuration.to_vec()),
         })))
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.probe.lock().expect("fixture owner").creates += 1;
         Ok(Box::new(HandoffProcessor {
             probe: Arc::clone(&self.probe),

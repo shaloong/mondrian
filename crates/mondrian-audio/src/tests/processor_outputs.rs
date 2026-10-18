@@ -146,7 +146,10 @@ impl AudioProcessorFactory for OutputFactory {
         next.frozen_revision = Some(if configuration == [1] { 4 } else { 0 });
         Ok(Some(Arc::new(next)))
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.resolver.creates.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(OutputProcessor {
             resolver: self.resolver.clone(),

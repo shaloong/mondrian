@@ -424,7 +424,7 @@ fn installed_vst3_zero_input_factory_rejects_actual_ready_shape_drift() {
         factory.note_input_contract().completion,
         AudioNoteCompletionPolicy::SuccessfulOffBlock
     );
-    let mut original = factory.create().expect("actual original MNE6 Ready owner");
+    let mut original = factory.create(None).expect("actual original MNE6 Ready owner");
     let object = original.native_audio_object_observation().unwrap().unwrap();
     let child = ObservedChild::new(object, &materials.directory);
     let seeded = factory
@@ -436,7 +436,7 @@ fn installed_vst3_zero_input_factory_rejects_actual_ready_shape_drift() {
         .expect("the original Factory implements its existing seed capability");
     assert_eq!(seeded.execution_contract(), factory.execution_contract());
     assert_eq!(seeded.note_input_contract(), factory.note_input_contract());
-    let error = match seeded.create() {
+    let error = match seeded.create(None) {
         Ok(_) => panic!("actual restored Present input escaped the expected Absent contract"),
         Err(error) => error,
     };

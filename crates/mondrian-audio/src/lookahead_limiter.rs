@@ -194,7 +194,10 @@ impl AudioProcessorFactory for LookaheadLimiterFactory {
         self.execution_contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let channels = self.channel_layout.channel_count();
         let delayed_samples = self.lookahead_frames.checked_mul(channels).ok_or_else(|| {
             AudioProcessorHostError::InstanceCreation(

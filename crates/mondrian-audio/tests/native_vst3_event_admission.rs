@@ -651,7 +651,7 @@ fn installed_vst3_retained_event_metadata_refuses_unannounced_default_drift() {
         )
         .expect("canonical prepare and actual Factory validation");
         let factory = observer.factory.lock().unwrap().take().expect("same returned Factory Arc");
-        let mut subject = factory.create().expect("actual retained processor, not a wrapper");
+        let mut subject = factory.create(None).expect("actual retained processor, not a wrapper");
         let before = subject.native_audio_object_observation().unwrap().unwrap();
         let handle = observe_child(before.process_id().get());
         let prefix = trace(&path);

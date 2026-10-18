@@ -75,7 +75,10 @@ impl AudioProcessorFactory for OwnerProbeFactory {
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.contract
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.state.created.fetch_add(1, Ordering::AcqRel);
         Ok(Box::new(OwnerProbeProcessor {
             state: self.state.clone(),

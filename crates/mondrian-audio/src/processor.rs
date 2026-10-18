@@ -282,6 +282,7 @@ pub struct AudioProcessorPrepareRequest<'a> {
     render_contract: AudioRenderContract,
     note_input_requested: bool,
     musical_time_reference: Option<mondrian_core::MusicalTimeReference>,
+    native_child_settlement_registrar: Option<&'a mondrian_core::NativeChildSettlementRegistrar>,
 }
 
 impl<'a> AudioProcessorPrepareRequest<'a> {
@@ -300,7 +301,23 @@ impl<'a> AudioProcessorPrepareRequest<'a> {
             render_contract,
             note_input_requested: false,
             musical_time_reference: None,
+            native_child_settlement_registrar: None,
         }
+    }
+
+    /// Cold-construction observation only; absence is not evidence of no Child.
+    pub const fn native_child_settlement_registrar(
+        &self,
+    ) -> Option<&'a mondrian_core::NativeChildSettlementRegistrar> {
+        self.native_child_settlement_registrar
+    }
+
+    pub(crate) const fn with_native_child_settlement_registrar(
+        mut self,
+        registrar: Option<&'a mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Self {
+        self.native_child_settlement_registrar = registrar;
+        self
     }
 
     /// Stable author instance being realized.
@@ -387,6 +404,13 @@ pub(crate) fn musical_tempo(
 /// isolation selection happen here. The resolver must return a factory already
 /// bound to the exact Render Contract; it is never called from `render_into`.
 pub trait AudioProcessorResolver: Send + Sync {
+    /// Explicit cold-construction forwarding capability; unknown is never no-Child evidence.
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Unavailable
+    }
+
     /// Resolve one immutable author instance for this plan.
     fn prepare(
         &self,
@@ -469,7 +493,13 @@ pub trait AudioProcessorFactory: Send + Sync {
         Ok(None)
     }
     /// Create one exclusive mutable instance before realtime execution starts.
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
+    /// Borrow the optional observation domain for this call only; an immutable
+    /// Factory or cache must not retain it. Missing evidence grants no execution
+    /// permission and must not replace the actual construction result.
+    fn create(
+        &self,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError>;
 }
 
 /// Exclusive mutable processor state owned by exactly one render Session.

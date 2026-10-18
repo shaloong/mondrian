@@ -75,7 +75,7 @@ fn installed_clap_host_log_requires_real_activation_and_unchanged_native_pcm() {
         let (spec, render) = log_fixture_native_spec(mode);
         let factory =
             IsolatedAudioProcessorFactory::prepare(spec).expect("actual host-log native factory");
-        let mut processor = factory.create().expect("exclusive actual native child");
+        let mut processor = factory.create(None).expect("exclusive actual native child");
         log_fixture_native_pcm(&mut *processor, render, -101);
     }
 }
@@ -87,7 +87,7 @@ fn installed_clap_host_log_delivers_main_background_audio_records_on_one_authent
         let (spec, render) = log_fixture_native_spec(mode);
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("native log factory");
         assert_eq!(factory.execution_contract().algorithmic_latency_frames(), 3);
-        let mut processor = factory.create().expect("same exclusive child");
+        let mut processor = factory.create(None).expect("same exclusive child");
         let object = processor
             .native_audio_object_observation()
             .expect("CLAP capability does not consume logs")

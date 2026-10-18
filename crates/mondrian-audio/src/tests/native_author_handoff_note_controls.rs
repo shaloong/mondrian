@@ -159,7 +159,10 @@ impl AudioProcessorFactory for NoteModelFactory {
             off_result: self.off_result,
         })))
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.calls.lock().unwrap().creates += 1;
         Ok(Box::new(NoteModelProcessor {
             inner: HandoffProcessor {

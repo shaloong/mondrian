@@ -839,7 +839,10 @@ mod tests {
             self.queries.fetch_add(1, Ordering::Relaxed);
             self.notes.clone()
         }
-        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
             Err(AudioProcessorHostError::Unavailable(
                 "metadata fixture cannot create/DSP".to_owned(),
             ))

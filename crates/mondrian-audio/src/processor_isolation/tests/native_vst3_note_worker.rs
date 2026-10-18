@@ -281,7 +281,7 @@ impl Subject {
         let factory = IsolatedAudioProcessorFactory::prepare(spec)
             .expect("real validation launch and original strict shutdown");
         assert_eq!(factory.note_input_contract(), expected);
-        let mut processor = factory.create().expect("actual Product Note Worker Ready");
+        let mut processor = factory.create(None).expect("actual Product Note Worker Ready");
         let object = processor.native_audio_object_observation().unwrap().unwrap();
         assert_ne!(object.process_id().get(), std::process::id());
         // SAFETY: this authenticated live supervised object supplies PID. Only

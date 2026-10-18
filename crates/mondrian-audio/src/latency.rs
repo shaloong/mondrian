@@ -327,7 +327,10 @@ mod tests {
             )
             .expect("latency metadata")
         }
-        fn create(&self) -> Result<Box<dyn crate::AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn crate::AudioProcessor>, AudioProcessorHostError> {
             panic!("latency preparation must not create DSP");
         }
     }

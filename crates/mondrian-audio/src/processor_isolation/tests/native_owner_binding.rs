@@ -40,7 +40,7 @@ fn installed_vst3_native_object_binding_changes_on_real_enter_and_retains_refuse
     let factory =
         IsolatedAudioProcessorFactory::prepare(catalog.resolve(request).expect("native spec"))
             .expect("prepare authenticated actual child");
-    let mut processor = factory.create().expect("exclusive current native processor");
+    let mut processor = factory.create(None).expect("exclusive current native processor");
     let before = processor
         .native_audio_object_observation()
         .expect("actual before-entry observation")

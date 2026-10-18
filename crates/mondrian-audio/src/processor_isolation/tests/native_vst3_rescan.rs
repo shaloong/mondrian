@@ -129,7 +129,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
     assert_eq!(ids, [expected_id]);
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("original unprobed validation launch and strict shutdown");
-    let mut processor = factory.create().expect("actual Product retained Ready owner");
+    let mut processor = factory.create(None).expect("actual Product retained Ready owner");
     let object = processor.native_audio_object_observation().unwrap().unwrap();
     assert_ne!(object.process_id().get(), std::process::id());
     // SAFETY: the authenticated supervised owner supplies this live PID. This
@@ -416,7 +416,7 @@ fn installed_vst3_initial_input_crosses_product_poll_without_authored_lanes() {
     assert!(spec.note_input_contract.ports.is_empty());
     assert!(spec.musical_time_reference.is_none());
     let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
-    let mut processor = factory.create().unwrap();
+    let mut processor = factory.create(None).unwrap();
     let object = processor.native_audio_object_observation().unwrap().unwrap();
     assert_ne!(object.process_id().get(), std::process::id());
     // SAFETY: this authenticated live child identity came from its retained

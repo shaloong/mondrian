@@ -76,7 +76,7 @@ fn installed_vst3_latency_restart_invalidates_prepared_contract() {
             spec.auxiliary_inputs.buses.iter().map(|bus| bus.bus_key.clone()).collect();
         assert_eq!(keys, ["vst3.audio-input.1", "vst3.audio-input.2"]);
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("prepared child factory");
-        let mut processor = factory.create().expect("isolated dynamic occurrence");
+        let mut processor = factory.create(None).expect("isolated dynamic occurrence");
         processor.enter_state(73).expect("enter dynamic occurrence");
         let mut initial = restart_io(&keys);
         processor

@@ -101,7 +101,7 @@ impl NativeEditorProductFixture {
             catalog.resolve(request).expect("exact authenticated native spec"),
         )
         .expect("fresh actual child preparation");
-        let mut processor = factory.create().expect("same exclusive native object");
+        let mut processor = factory.create(None).expect("same exclusive native object");
         let before = processor
             .native_audio_object_observation()
             .expect("actual prepared observation")

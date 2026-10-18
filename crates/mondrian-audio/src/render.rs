@@ -242,9 +242,10 @@ impl PreparedAudioSessionStorage {
     /// completed. A failed population drops this unpublished preparation.
     pub(crate) fn populate(mut self) -> Result<AudioRenderSession, AudioExecutionError> {
         let expected_occurrences = self.capacity().processor_occurrences;
-        if let Err(error) =
-            self.session.processor_host.populate_instances(&self.session.plan.schedule)
-        {
+        if let Err(error) = self.session.processor_host.populate_instances(
+            &self.session.plan.schedule,
+            self.session.native_child_settlement.as_ref(),
+        ) {
             self.session.mark_native_child_settlement_unavailable();
             return Err(error);
         }
@@ -274,6 +275,13 @@ impl PreparedAudioSessionStorage {
             self.session.bind_current_native_child_settlement()?;
         }
         Ok(())
+    }
+
+    pub(crate) fn attach_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.session.attach_native_child_settlement(registrar)
     }
 
     pub(crate) fn inherit_native_child_settlement(&mut self, current: &AudioRenderSession) {
@@ -359,7 +367,7 @@ impl AudioRenderSession {
         Ok(())
     }
 
-    fn attach_native_child_settlement(
+    pub(crate) fn attach_native_child_settlement(
         &mut self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
     ) -> Result<(), mondrian_core::NativeChildSettlementError> {
@@ -2335,9 +2343,14 @@ mod native_child_settlement_tests {
         scopes: AtomicUsize,
         children: AtomicUsize,
         bad: AtomicBool,
+        refuse_scopes: AtomicBool,
     }
     impl Reporter for Counts {
         fn begin_scope(&self) -> Result<(), Error> {
+            if self.refuse_scopes.load(Ordering::SeqCst) {
+                self.unavailable();
+                return Err(Error::Unavailable);
+            }
             self.scopes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -2385,12 +2398,15 @@ mod native_child_settlement_tests {
         fn native_child_settlement_requirement(&self) -> Requirement {
             self.requirement
         }
-        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
             self.creates.fetch_add(1, Ordering::SeqCst);
             if self.missing {
                 Ok(Box::new(MissingProcessor))
             } else {
-                self.inner.create()
+                self.inner.create(native_child_settlement)
             }
         }
     }
@@ -2609,5 +2625,180 @@ mod native_child_settlement_tests {
             a.bad.load(Ordering::SeqCst),
             "same-domain retry cannot erase the prior failure"
         );
+    }
+
+    struct ColdResolver {
+        counts: Arc<Counts>,
+        prepared: Arc<AtomicUsize>,
+        created: Arc<AtomicUsize>,
+        known: bool,
+        refuse: bool,
+        scope_available: bool,
+    }
+    struct ColdFactory {
+        inner: Arc<dyn AudioProcessorFactory>,
+        counts: Arc<Counts>,
+        created: Arc<AtomicUsize>,
+        scope_available: bool,
+    }
+    impl AudioProcessorResolver for ColdResolver {
+        fn native_child_settlement_requirement(&self) -> Requirement {
+            if self.known {
+                Requirement::NotApplicable
+            } else {
+                Requirement::Unavailable
+            }
+        }
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            assert!(request.native_child_settlement_registrar().is_some());
+            assert_eq!(self.counts.bad.load(Ordering::SeqCst), !self.known);
+            self.prepared.fetch_add(1, Ordering::SeqCst);
+            if self.refuse {
+                return Err(AudioProcessorHostError::Unavailable(
+                    "exact original cold resolve refusal".into(),
+                ));
+            }
+            Ok(Arc::new(ColdFactory {
+                inner: BuiltInAudioProcessorResolver.prepare(request)?,
+                counts: self.counts.clone(),
+                created: self.created.clone(),
+                scope_available: self.scope_available,
+            }))
+        }
+    }
+    impl AudioProcessorFactory for ColdFactory {
+        fn native_child_settlement_requirement(&self) -> Requirement {
+            Requirement::NotApplicable
+        }
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            self.inner.execution_contract()
+        }
+        fn create(
+            &self,
+            registrar: Option<&Registrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            assert_eq!(registrar.is_some(), self.scope_available);
+            assert_eq!(
+                self.counts.scopes.load(Ordering::SeqCst),
+                if self.scope_available { 2 } else { 1 }
+            );
+            self.created.fetch_add(1, Ordering::SeqCst);
+            self.inner.create(registrar)
+        }
+    }
+    fn cold_build(
+        resolver: &dyn AudioProcessorResolver,
+        registrar: &Registrar,
+    ) -> Result<crate::AudioProgramRuntime, crate::AudioRuntimeBuildError> {
+        use mondrian_timeline::{
+            audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
+            Sequence,
+        };
+        struct NoMedia;
+        impl crate::AudioMediaResolver for NoMedia {
+            fn resolve(
+                &self,
+                _: mondrian_core::AssetId,
+                _: mondrian_core::AudioSourceComponentId,
+                _: u32,
+            ) -> Result<crate::ResolvedAudioSource, String> {
+                panic!("this root has no media");
+            }
+        }
+        let mut sequence = Sequence::new("observed cold construction");
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
+        );
+        let contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: sequence.settings.audio_channel_layout,
+            max_block_frames: 4,
+            processing_mode: crate::AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        crate::AudioProgramRuntime::build_observing_native_child_settlement(
+            &sequence,
+            &[],
+            &NoMedia,
+            resolver,
+            contract,
+            AudioCompileRequest::program(sequence.audio_program.outputs[0].id),
+            crate::AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 64 * 1024 * 1024),
+            Some(registrar),
+        )
+    }
+    #[test]
+    fn cold_runtime_observes_prepare_and_counts_session_before_single_create() {
+        let counts = Arc::new(Counts::default());
+        let root = Registrar::try_new(counts.clone()).unwrap();
+        let prepared = Arc::new(AtomicUsize::new(0));
+        let created = Arc::new(AtomicUsize::new(0));
+        let resolver = ColdResolver {
+            counts: counts.clone(),
+            prepared: prepared.clone(),
+            created: created.clone(),
+            known: true,
+            refuse: false,
+            scope_available: true,
+        };
+        let runtime = cold_build(&resolver, &root).unwrap();
+        assert_eq!(prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(created.load(Ordering::SeqCst), 1);
+        assert!(!counts.bad.load(Ordering::SeqCst));
+        drop(runtime);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
+        assert_eq!(counts.children.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn cold_unknown_resolver_preserves_single_original_error_after_sticky_observation_failure() {
+        let counts = Arc::new(Counts::default());
+        let root = Registrar::try_new(counts.clone()).unwrap();
+        let prepared = Arc::new(AtomicUsize::new(0));
+        let created = Arc::new(AtomicUsize::new(0));
+        let resolver = ColdResolver {
+            counts: counts.clone(),
+            prepared: prepared.clone(),
+            created: created.clone(),
+            known: false,
+            refuse: true,
+            scope_available: true,
+        };
+        let error = cold_build(&resolver, &root).err().expect("original resolver refusal");
+        assert!(
+            matches!(error, crate::AudioRuntimeBuildError::Compile(crate::AudioCompileError::ProcessorPreparation(AudioProcessorHostError::Unavailable(ref detail))) if detail == "exact original cold resolve refusal")
+        );
+        assert_eq!(prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(created.load(Ordering::SeqCst), 0);
+        assert!(counts.bad.load(Ordering::SeqCst));
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn cold_registration_failure_keeps_successful_construction_and_never_becomes_not_applicable() {
+        let counts = Arc::new(Counts::default());
+        let root = Registrar::try_new(counts.clone()).unwrap();
+        counts.refuse_scopes.store(true, Ordering::SeqCst);
+        let prepared = Arc::new(AtomicUsize::new(0));
+        let created = Arc::new(AtomicUsize::new(0));
+        let resolver = ColdResolver {
+            counts: counts.clone(),
+            prepared: prepared.clone(),
+            created: created.clone(),
+            known: true,
+            refuse: false,
+            scope_available: false,
+        };
+        let runtime = cold_build(&resolver, &root)
+            .expect("evidence refusal does not refuse DSP construction");
+        assert_eq!(prepared.load(Ordering::SeqCst), 1);
+        assert_eq!(created.load(Ordering::SeqCst), 1);
+        assert!(counts.bad.load(Ordering::SeqCst));
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
+        drop(runtime);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
     }
 }

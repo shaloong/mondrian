@@ -102,7 +102,10 @@ impl AudioProcessorFactory for PreflightFactory {
             self.2,
         ))))
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let ordinal = self.0.calls.creates.fetch_add(1, Ordering::Relaxed);
         let probe = Arc::new(Mutex::new(HandoffProbe {
             vst_rescan_abi: self.2,

@@ -120,7 +120,10 @@ impl AudioProcessorFactory for InspectionFactory {
         AudioProcessorAuxiliaryInputContract { buses: self.buses.clone() }
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.creates.fetch_add(1, Ordering::SeqCst);
         Err(AudioProcessorHostError::InstanceCreation(
             "control inspection created a Session".into(),

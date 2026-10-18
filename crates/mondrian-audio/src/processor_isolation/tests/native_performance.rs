@@ -406,7 +406,7 @@ fn run_case(
             return result;
         }
     };
-    let mut processor = match factory.create() {
+    let mut processor = match factory.create(None) {
         Ok(processor) => processor,
         Err(error) => {
             result.operation_errors.push(error.to_string());

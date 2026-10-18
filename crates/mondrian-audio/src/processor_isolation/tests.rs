@@ -330,7 +330,7 @@ fn native_probe_factory_starts_one_worker_and_unprobed_keeps_validation_worker()
         let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
         let prepared = cold_prepared_pids(directory.path());
         assert_eq!(prepared.len(), usize::from(!native_probed));
-        let processor = factory.create().expect("Ready accepts equivalent keyed name order");
+        let processor = factory.create(None).expect("Ready accepts equivalent keyed name order");
         let created = cold_prepared_pids(directory.path());
         assert_eq!(created.len(), prepared.len() + 1);
         assert_eq!(
@@ -369,7 +369,7 @@ fn native_probe_ready_name_drift_preserves_startup_error_and_reaps_original_chil
         let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
         assert!(cold_prepared_pids(directory.path()).is_empty());
         std::thread::scope(|scope| {
-            let creation = scope.spawn(|| match factory.create() {
+            let creation = scope.spawn(|| match factory.create(None) {
                 Ok(_) => panic!("presentation drift must refuse before publishing an instance"),
                 Err(error) => error,
             });
@@ -474,7 +474,7 @@ fn isolated_worker_transports_state_sidechain_parameters_and_pcm() {
         Duration::from_secs(2),
     );
     assert!(factory.execution_contract().session_scratch_bytes() > 0);
-    let mut processor = factory.create().expect("create isolated processor");
+    let mut processor = factory.create(None).expect("create isolated processor");
     processor.enter_state(100).expect("enter isolated state");
     let mut audio = TestAudioIo { main: vec![1.0; 8], auxiliary: vec![0.5; 8] };
     let parameter_ids = [parameter_id];
@@ -620,7 +620,7 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                     expected_names,
                     "Restored native metadata must preserve keys and Unicode text"
                 );
-                let mut processor = factory.create().expect("create isolated instance");
+                let mut processor = factory.create(None).expect("create isolated instance");
                 processor.enter_state(100).expect("enter native continuity");
                 let mut output = Vec::new();
                 let mut offset = 0;
@@ -715,7 +715,7 @@ fn installed_clap_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 let stale = IsolatedAudioProcessorFactory::prepare(stale)
                     .expect("probe evidence permits metadata-only factory preparation");
                 let error = stale
-                    .create()
+                    .create(None)
                     .err()
                     .expect("changed native order must refuse actual instance admission");
                 assert_eq!(
@@ -855,7 +855,7 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
                     expected_names,
                     "Restored native metadata must preserve keys and Unicode text"
                 );
-                let mut processor = factory.create().expect("create isolated instance");
+                let mut processor = factory.create(None).expect("create isolated instance");
                 processor.enter_state(100).expect("enter native continuity");
                 let mut output = Vec::new();
                 let mut offset = 0;
@@ -949,7 +949,7 @@ fn installed_vst3_sidechain_preserves_native_buses_state_delay_and_partitions() 
                 let stale = IsolatedAudioProcessorFactory::prepare(stale)
                     .expect("probe evidence permits metadata-only factory preparation");
                 let error = stale
-                    .create()
+                    .create(None)
                     .err()
                     .expect("changed restored native count must refuse actual instance admission");
                 assert_eq!(
@@ -1095,7 +1095,7 @@ fn assert_installed_clap_gain(
     .expect("CLAP worker specification");
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("prepare installed CLAP through child process");
-    let mut processor = factory.create().expect("create CLAP worker instance");
+    let mut processor = factory.create(None).expect("create CLAP worker instance");
     processor.enter_state(100).expect("enter CLAP state");
     let input = vec![0.125, -0.25, 0.5, -0.75, 0.2, -0.4, 0.8, -1.0];
     let mut audio = TestAudioIo { main: input.clone(), auxiliary: Vec::new() };
@@ -1233,7 +1233,7 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
         .expect("resolve VST3 author instance");
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("prepare VST3 reference through child process");
-    let mut processor = factory.create().expect("create VST3 worker instance");
+    let mut processor = factory.create(None).expect("create VST3 worker instance");
     processor.enter_state(100).expect("enter VST3 state");
     let source = vec![0.125, -0.25, 0.5, -0.75, 0.2, -0.4, 0.8, -1.0];
     let mut audio = TestAudioIo { main: source.clone(), auxiliary: Vec::new() };
@@ -1312,7 +1312,7 @@ fn assert_installed_vst3_gain(plugin_env: &str, sample_accurate: bool) {
         .expect("resolve offline VST3 instance");
     let offline_factory =
         IsolatedAudioProcessorFactory::prepare(offline_spec).expect("prepare offline VST3 worker");
-    let mut offline = offline_factory.create().expect("create offline VST3 instance");
+    let mut offline = offline_factory.create(None).expect("create offline VST3 instance");
     offline.enter_state(100).expect("enter offline VST3 continuity");
     let mut audio = TestAudioIo {
         main: vec![0.5, -0.25, 1.0, -0.75, 0.4, -0.2, 0.8, -0.6],
@@ -1498,7 +1498,7 @@ fn stateful_vst3_snapshot_round_trips_and_restores_isolated_worker_audio() {
         ))
         .expect("prepare exact stateful revision");
     let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("prepare worker");
-    let mut worker = factory.create().expect("create isolated stateful Gain");
+    let mut worker = factory.create(None).expect("create isolated stateful Gain");
     let empty_range = [Range { start: 0, end: 0 }];
     for _ in 0..2 {
         worker.enter_state(100).expect("enter saved state");
@@ -1541,7 +1541,7 @@ fn isolated_worker_abort_poisoning_does_not_terminate_parent() {
         Vec::new(),
         Duration::from_millis(250),
     );
-    let mut processor = factory.create().expect("create crash Worker");
+    let mut processor = factory.create(None).expect("create crash Worker");
     let error = process_empty_parameter_block(processor.as_mut()).expect_err("Worker must abort");
     assert!(
         matches!(
@@ -1555,7 +1555,7 @@ fn isolated_worker_abort_poisoning_does_not_terminate_parent() {
         process_empty_parameter_block(processor.as_mut()).expect_err("instance remains poisoned"),
         AudioProcessorHostError::PoisonedInstance
     );
-    let mut replacement = factory.create().expect("create replacement Worker");
+    let mut replacement = factory.create(None).expect("create replacement Worker");
     assert!(process_empty_parameter_block(replacement.as_mut()).is_err());
 }
 
@@ -1585,7 +1585,7 @@ fn isolated_worker_hang_is_terminated_at_the_block_deadline() {
         Vec::new(),
         Duration::from_millis(50),
     );
-    let mut processor = factory.create().expect("create hanging Worker");
+    let mut processor = factory.create(None).expect("create hanging Worker");
     let started = std::time::Instant::now();
     let error =
         process_empty_parameter_block(processor.as_mut()).expect_err("Worker must time out");
@@ -2089,7 +2089,10 @@ fn native_factory_storage_missing_adapter_is_explicit_and_cannot_report_successf
             AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, true, true, 0)
                 .expect("contract")
         }
-        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+        fn create(
+            &self,
+            _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+        ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
             Err(invalid_contract(
                 "observation must never create a processor",
             ))
@@ -2159,6 +2162,7 @@ fn isolated_music_context_mismatch_preserves_shared_pcm_parameters_and_live_chil
         factory.spec.render_contract,
         factory.layout,
         Some(&factory.input_names),
+        None,
     )
     .unwrap();
     let mut processor = IsolatedAudioProcessor {
@@ -2227,6 +2231,7 @@ fn isolated_observed_request_completed_then_poll_retains_each_original_identity_
         factory.spec.render_contract,
         factory.layout,
         Some(&factory.input_names),
+        None,
     )
     .unwrap();
     let mut processor = IsolatedAudioProcessor {
@@ -2301,4 +2306,177 @@ fn isolated_observed_request_completed_then_poll_retains_each_original_identity_
         processor.worker.shutdown(),
         "retain the original bounded child shutdown assertion"
     );
+}
+
+#[derive(Default)]
+struct ColdChildCounts {
+    scopes: std::sync::atomic::AtomicUsize,
+    children: std::sync::atomic::AtomicUsize,
+    settled: std::sync::atomic::AtomicUsize,
+    bad: std::sync::atomic::AtomicBool,
+}
+impl mondrian_core::NativeChildSettlementReporter for ColdChildCounts {
+    fn begin_scope(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.scopes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn end_scope(&self) {
+        self.scopes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn begin_child(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.children.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn end_child(&self, result: mondrian_core::NativeChildSettlement) {
+        self.children.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if result == mondrian_core::NativeChildSettlement::Settled {
+            self.settled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.unavailable();
+        }
+    }
+    fn unavailable(&self) {
+        self.bad.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+#[test]
+fn cold_validation_and_retained_create_report_each_original_worker_once() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let counts = Arc::new(ColdChildCounts::default());
+    let root = mondrian_core::NativeChildSettlementRegistrar::try_new(counts.clone()).unwrap();
+    let spec = test_spec(
+        TestBehavior::Normal,
+        stateful_contract(),
+        Default::default(),
+        Vec::new(),
+        Duration::from_secs(2),
+    );
+    let factory = IsolatedAudioProcessorFactory::prepare_inner(spec, Some(&root))
+        .expect("original strict validation shutdown");
+    assert_eq!(counts.children.load(SeqCst), 0);
+    assert_eq!(
+        counts.settled.load(SeqCst),
+        1,
+        "the temporary validation ProcessOwner reported its actual final state"
+    );
+    let mut processor = factory.create(Some(&root)).expect("original retained Ready");
+    assert_eq!(
+        counts.children.load(SeqCst),
+        1,
+        "registered before instance return/late binding"
+    );
+    assert_eq!(
+        processor.bind_native_child_settlement(&root),
+        Ok(mondrian_core::NativeChildSettlementBinding::Registered)
+    );
+    assert_eq!(
+        counts.children.load(SeqCst),
+        1,
+        "same-domain binding does not register twice"
+    );
+    drop(processor);
+    assert_eq!(counts.children.load(SeqCst), 0);
+    assert_eq!(counts.settled.load(SeqCst), 2);
+    assert_eq!(
+        counts.scopes.load(SeqCst),
+        1,
+        "immutable Factory never retains a registration capability"
+    );
+    assert!(!counts.bad.load(SeqCst));
+    drop(root);
+    assert_eq!(counts.scopes.load(SeqCst), 0);
+}
+#[test]
+fn cold_ready_refusal_keeps_original_startup_error_and_reports_spawned_owner() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let counts = Arc::new(ColdChildCounts::default());
+    let root = mondrian_core::NativeChildSettlementRegistrar::try_new(counts.clone()).unwrap();
+    let spec = test_spec(
+        TestBehavior::ContractDrift,
+        stateful_contract(),
+        Default::default(),
+        Vec::new(),
+        Duration::from_millis(250),
+    );
+    let error = IsolatedAudioProcessorFactory::prepare_inner(spec, Some(&root))
+        .expect_err("actual Ready contract drift");
+    assert!(matches!(
+        error,
+        AudioProcessorHostError::WorkerFailed { operation: "startup", .. }
+    ));
+    assert_eq!(counts.children.load(SeqCst), 0);
+    assert_eq!(counts.settled.load(SeqCst), 1);
+    assert_eq!(counts.scopes.load(SeqCst), 1);
+    assert!(!counts.bad.load(SeqCst));
+}
+#[test]
+fn cold_known_outer_cannot_wash_unknown_spec_resolver_or_change_its_single_error() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    struct Unknown {
+        counts: Arc<ColdChildCounts>,
+        calls: Arc<AtomicUsize>,
+    }
+    impl IsolatedAudioProcessorSpecResolver for Unknown {
+        fn resolve(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<IsolatedAudioProcessorWorkerSpec, AudioProcessorHostError> {
+            assert!(request.native_child_settlement_registrar().is_some());
+            assert!(
+                self.counts.bad.load(SeqCst),
+                "unknown inner forwarding is recorded before the original resolve"
+            );
+            self.calls.fetch_add(1, SeqCst);
+            Err(AudioProcessorHostError::Unavailable(
+                "exact original spec refusal".into(),
+            ))
+        }
+    }
+    struct Known(IsolatedAudioProcessorResolver);
+    impl AudioProcessorResolver for Known {
+        fn native_child_settlement_requirement(
+            &self,
+        ) -> mondrian_core::NativeChildSettlementRequirement {
+            mondrian_core::NativeChildSettlementRequirement::Required
+        }
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            self.0.prepare(request)
+        }
+    }
+    let counts = Arc::new(ColdChildCounts::default());
+    let root = mondrian_core::NativeChildSettlementRegistrar::try_new(counts.clone()).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resolver = Known(IsolatedAudioProcessorResolver::new(Arc::new(Unknown {
+        counts: counts.clone(),
+        calls: calls.clone(),
+    })));
+    let definition = AudioProcessorDefinitionRef::Clap {
+        plugin_id: "owned-unknown-cold-probe".into(),
+        schema_version: 1,
+        binary_sha256: None,
+    };
+    let parameters = std::collections::BTreeMap::new();
+    let request = AudioProcessorPrepareRequest::new(
+        AudioProcessorOccurrence {
+            instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+            owner: crate::AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+            insertion: crate::AudioProcessorInsertionPoint::PreFader,
+        },
+        &definition,
+        &parameters,
+        None,
+        test_render_contract(),
+    )
+    .with_native_child_settlement_registrar(Some(&root));
+    let error = resolver.prepare(request).err().expect("original inner error");
+    assert_eq!(
+        error,
+        AudioProcessorHostError::Unavailable("exact original spec refusal".into())
+    );
+    assert_eq!(calls.load(SeqCst), 1);
+    assert_eq!(counts.children.load(SeqCst), 0);
+    assert!(counts.bad.load(SeqCst));
 }

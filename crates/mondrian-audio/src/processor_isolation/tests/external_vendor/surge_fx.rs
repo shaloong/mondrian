@@ -224,7 +224,7 @@ fn observe_pcm(
     // Keep the original validation.shutdown hard gate and all spec deadlines.
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("native prepare and validation shutdown");
-    let mut processor = factory.create().expect("fresh actual native process");
+    let mut processor = factory.create(None).expect("fresh actual native process");
     let before = processor
         .native_audio_object_observation()
         .expect("authenticated observation")

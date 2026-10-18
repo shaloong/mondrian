@@ -18,6 +18,12 @@ use mondrian_timeline::audio::{
 use std::sync::Arc;
 
 impl AudioProcessorResolver for BuiltInAudioProcessorResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn prepare(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
@@ -229,7 +235,10 @@ impl AudioProcessorFactory for BuiltInGainFactory {
         self.execution_contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let samples = self
             .max_block_frames
             .checked_mul(self.channel_layout.channel_count())
@@ -356,7 +365,10 @@ impl AudioProcessorFactory for BuiltInSampleDelayFactory {
         self.execution_contract
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         let delay_samples = self
             .delay_frames
             .checked_mul(self.channel_layout.channel_count())

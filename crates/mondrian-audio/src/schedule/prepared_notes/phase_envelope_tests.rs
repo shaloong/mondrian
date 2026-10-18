@@ -301,7 +301,10 @@ impl AudioProcessorFactory for MetadataFactory {
         self.queries.fetch_add(1, Ordering::Relaxed);
         self.notes.clone()
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.creates.fetch_add(1, Ordering::Relaxed);
         Err(AudioProcessorHostError::Unavailable(
             "owned metadata only".to_owned(),

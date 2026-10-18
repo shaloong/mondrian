@@ -12,7 +12,7 @@ fn installed_clap_restart_activation_profile_pcm() {
             assert_eq!(delay, if restart_seen { 7 } else { 3 });
             let factory =
                 IsolatedAudioProcessorFactory::prepare(spec).expect("native profile factory");
-            let mut processor = factory.create().expect("native activated profile");
+            let mut processor = factory.create(None).expect("native activated profile");
             // A false restart profile stays below the trigger; a true profile
             // records an already acknowledged restart and never requests again.
             processor.enter_state(-16).expect("fresh reference history");
@@ -49,7 +49,7 @@ fn installed_clap_process_restart_preserves_completed_trigger_window() {
         let keys: Vec<_> =
             spec.auxiliary_inputs.buses.iter().map(|bus| bus.bus_key.clone()).collect();
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("native restart factory");
-        let mut processor = factory.create().expect("native restart child");
+        let mut processor = factory.create(None).expect("native restart child");
         processor.enter_state(0).expect("native restart epoch");
         for start in [0, 4, 8] {
             let mut audio = restart_audio(&keys);

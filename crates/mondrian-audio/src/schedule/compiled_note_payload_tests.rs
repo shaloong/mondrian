@@ -124,7 +124,10 @@ impl AudioProcessorFactory for Factory {
         ))
     }
 
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        _native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.0.creates.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(OwnedProcessor))
     }

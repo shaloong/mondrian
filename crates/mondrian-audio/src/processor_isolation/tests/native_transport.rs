@@ -101,7 +101,7 @@ fn transport_reference(clap: bool) {
             for partitions in [&[4, 4, 4, 2][..], &[3, 2, 1, 4, 4][..]] {
                 let factory = IsolatedAudioProcessorFactory::prepare(spec.clone())
                     .expect("native isolated factory");
-                let mut processor = factory.create().expect("native isolated occurrence");
+                let mut processor = factory.create(None).expect("native isolated occurrence");
                 // Sequence input-signal coordinates are already latency-adjusted
                 // by processor_host before this typed adapter boundary. Keep the
                 // originating request and PDC explicit in this independent oracle.
@@ -536,7 +536,7 @@ fn installed_vst3_product_musical_reference_reaches_bounded_effect_worker() {
                     spec.auxiliary_inputs.buses.iter().map(|bus| bus.bus_key.clone()).collect();
                 assert_eq!(keys, ["vst3.audio-input.1", "vst3.audio-input.2"]);
                 let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
-                let mut processor = factory.create().unwrap();
+                let mut processor = factory.create(None).unwrap();
                 processor.enter_state(start).unwrap();
                 let first = processor
                     .native_audio_object_observation()

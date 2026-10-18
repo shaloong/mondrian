@@ -215,9 +215,12 @@ impl AudioProcessorFactory for ChargedFactory {
         ))?;
         self.inner.visit_host_owned_storage(visitor)
     }
-    fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+    fn create(
+        &self,
+        native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
+    ) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
         self.creates.fetch_add(1, Ordering::SeqCst);
-        self.inner.create()
+        self.inner.create(native_child_settlement)
     }
 }
 struct NoMedia;

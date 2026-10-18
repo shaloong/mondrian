@@ -876,7 +876,7 @@ fn process_case(
     // validation.shutdown() false gate. Outer Job cleanup cannot pass this gate.
     let factory = IsolatedAudioProcessorFactory::prepare(spec)
         .expect("native validation including shutdown must succeed");
-    let mut processor = factory.create().expect("fresh actual native processing child");
+    let mut processor = factory.create(None).expect("fresh actual native processing child");
     let before = processor
         .native_audio_object_observation()
         .expect("authenticated native object")
