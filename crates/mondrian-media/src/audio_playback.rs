@@ -1,6 +1,8 @@
 //! Deep realtime Audio Playback scheduling Module.
 
 mod native_author;
+mod native_child_settlement;
+use native_child_settlement::ForeignOwnerRetirementTracker;
 mod state_entry;
 pub use native_author::{
     AudioPcmNativeAuthorHandoff, AudioPcmNativeAuthorHandoffContinuity,
@@ -559,6 +561,20 @@ pub enum AudioNativeObservationPollRefusal {
 /// renderer, so this foreign execution trait has no second contract authority.
 /// Both paths emit structured evidence and never shift media time.
 pub trait AudioPcmRenderer: Send + Sync + 'static {
+    /// Observe this complete renderer's native child ownership domain.
+    ///
+    /// Success means every owned execution path either forwards to its actual
+    /// child owner or is explicitly known to own no native child. This aggregate
+    /// result is not a per-child registration or a DSP/Source admission grant.
+    /// Missing forwarding makes shutdown evidence unavailable without changing
+    /// the renderer's existing execution permission.
+    fn bind_native_child_settlement(
+        &self,
+        _registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        Err(mondrian_core::NativeChildSettlementError::Unavailable)
+    }
+
     /// Read-only native diagnostics capability captured before trait erasure.
     /// This does not perform a native poll or create editor/author permission.
     fn native_observations_supported(&self) -> bool {
@@ -1385,24 +1401,6 @@ struct ForeignOwnerRetirementEvidence {
 }
 
 #[derive(Default)]
-struct ForeignOwnerRetirementTracker {
-    evidence: Mutex<ForeignOwnerRetirementEvidence>,
-}
-
-impl ForeignOwnerRetirementTracker {
-    fn record(&self, evidence: ForeignOwnerRetirementEvidence) {
-        let mut retained = self.evidence.lock();
-        retained.panics = retained.panics.saturating_add(evidence.panics);
-        retained.owner_abandonments =
-            retained.owner_abandonments.saturating_add(evidence.owner_abandonments);
-    }
-
-    fn snapshot(&self) -> ForeignOwnerRetirementEvidence {
-        *self.evidence.lock()
-    }
-}
-
-#[derive(Default)]
 struct RetiredRenderOwners {
     pending: VecDeque<RenderWork>,
     renderers: VecDeque<Arc<dyn AudioPcmRenderer>>,
@@ -2176,12 +2174,14 @@ impl AudioPlayback {
             self.handoff_retired_render_owners(VecDeque::new(), Some(renderer.owner));
         }
         self.stop_render_retirement_worker();
+        let native_children_complete = self.foreign_owner_retirements.seal();
         let retirement = self.foreign_owner_retirements.snapshot();
         let mut foreign_owner_panics = retirement.panics;
         let mut foreign_owner_abandonments = retirement.owner_abandonments;
         let mut resource_facts_complete = true;
         let mut owner_lifetime_unresolved = false;
-        if retirement.panics > 0
+        if !native_children_complete
+            || retirement.panics > 0
             || retirement.owner_abandonments > 0
             || self.render_retirement_workers_started != self.render_retirement_workers_terminated
             || self.render_retirement_worker_panics > 0
@@ -2674,6 +2674,7 @@ impl AudioPlayback {
         renderer: Arc<dyn AudioPcmRenderer>,
         continuity_model: AudioPcmContinuityModel,
     ) -> Result<(), AudioPlaybackError> {
+        self.observe_native_child_settlement(&renderer);
         if let Err(error) = self
             .validate_reprime_anchor_pure(anchor)
             .and_then(|()| self.ensure_render_execution_available())
@@ -5786,6 +5787,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for DropTrackingRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5800,6 +5809,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for GateRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5822,6 +5839,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for DetachedPanicRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             _request: AudioPcmRenderRequest,
@@ -5836,6 +5861,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for RecordingRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5856,6 +5889,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for FailOnceStatefulRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5879,6 +5920,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for StatefulRecordingRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5894,6 +5943,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for AlwaysFailStatefulRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -5920,6 +5977,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for DeferredTrackingRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -6041,6 +6106,14 @@ mod tests {
     fn scheduling_actual_playback_producer_enters_before_render_and_restores_after_join() {
         struct ActualThreadRenderer(Arc<std::sync::atomic::AtomicU32>);
         impl AudioPcmRenderer for ActualThreadRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                // This portable test adapter owns only the host fields declared here.
+                let _ = registrar;
+                Ok(())
+            }
             fn render(
                 &self,
                 request: AudioPcmRenderRequest,
@@ -6910,6 +6983,12 @@ mod tests {
         }
 
         impl AudioPcmRenderer for GatedInstalledRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                self.installed.bind_native_child_settlement(registrar)
+            }
             fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
                 self.installed.owner_installation_verifier()
             }
@@ -8837,6 +8916,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for NativeHoldDeferredRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             request: AudioPcmRenderRequest,
@@ -9133,6 +9220,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for CompleteThenNativeDeferredRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn render(
             &self,
             _request: AudioPcmRenderRequest,
@@ -9253,6 +9348,14 @@ mod tests {
     }
 
     impl AudioPcmRenderer for NativeInstallationProbe {
+        fn bind_native_child_settlement(
+            &self,
+            registrar: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            // This portable test adapter owns only the host fields declared here.
+            let _ = registrar;
+            Ok(())
+        }
         fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
             self.verifier.lock().clone()
         }
@@ -9752,6 +9855,12 @@ mod tests {
             }
         }
         impl AudioPcmRenderer for CleanupRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                self.installed.bind_native_child_settlement(registrar)
+            }
             fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
                 self.installed.owner_installation_verifier()
             }
@@ -10337,6 +10446,14 @@ mod tests {
             }
         }
         impl AudioPcmRenderer for DiagnosticRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                // This portable test adapter owns only the host fields declared here.
+                let _ = registrar;
+                Ok(())
+            }
             fn native_observations_supported(&self) -> bool {
                 true
             }
@@ -10811,6 +10928,12 @@ mod tests {
             }
         }
         impl AudioPcmRenderer for Renderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                self.installed.bind_native_child_settlement(registrar)
+            }
             fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
                 self.installed.owner_installation_verifier()
             }
@@ -11917,6 +12040,281 @@ mod tests {
                 .lock()
                 .is_some_and(|current| current.binding != target.binding));
             assert_eq!(renderer.enters.load(Ordering::Acquire), 1);
+        }
+    }
+    mod native_child_settlement_contracts {
+        use super::*;
+        use mondrian_core::{
+            NativeChildSettlementError as SettlementError,
+            NativeChildSettlementRegistrar as Registrar,
+        };
+
+        // Intentionally omits aggregate forwarding, even though its inner host
+        // adapter is trusted. A capability query must not turn this into NA.
+        struct UnknownRenderer(RecordingRenderer);
+        impl AudioPcmRenderer for UnknownRenderer {
+            fn render(
+                &self,
+                request: AudioPcmRenderRequest,
+                cancellation: &ExecutionCancellationToken,
+            ) -> mondrian_core::Result<AudioPcmRenderOutcome> {
+                self.0.render(request, cancellation)
+            }
+        }
+
+        // Portable ownership model only: it retains the actual counted scope,
+        // never a Child, Runtime or fake native-process success statement.
+        struct RetainedScopeRenderer {
+            pcm: RecordingRenderer,
+            registrar: Mutex<Option<Registrar>>,
+        }
+        impl AudioPcmRenderer for RetainedScopeRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                registrar: &Registrar,
+            ) -> Result<(), SettlementError> {
+                let mut current = self.registrar.lock();
+                if let Some(current) = current.as_ref() {
+                    if current.same_domain(registrar) {
+                        return Ok(());
+                    }
+                    current.mark_unavailable();
+                    registrar.mark_unavailable();
+                    return Err(SettlementError::ForeignDomain);
+                }
+                *current = Some(registrar.try_fork()?);
+                Ok(())
+            }
+            fn render(
+                &self,
+                request: AudioPcmRenderRequest,
+                cancellation: &ExecutionCancellationToken,
+            ) -> mondrian_core::Result<AudioPcmRenderOutcome> {
+                self.pcm.render(request, cancellation)
+            }
+        }
+
+        fn pcm(requests: &Arc<Mutex<Vec<AudioPcmRenderRequest>>>) -> RecordingRenderer {
+            RecordingRenderer {
+                requests: requests.clone(),
+                wrong_frame_count: false,
+            }
+        }
+
+        #[test]
+        fn aggregate_unknown_is_unavailable_without_changing_pcm_admission() {
+            for unknown in [false, true] {
+                let (output, _) = fake_output();
+                let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let renderer: Arc<dyn AudioPcmRenderer> = if unknown {
+                    Arc::new(UnknownRenderer(pcm(&requests)))
+                } else {
+                    Arc::new(pcm(&requests))
+                };
+                playback
+                    .prepare(
+                        sample_position(0),
+                        renderer,
+                        AudioPcmContinuityModel::IndependentWindows,
+                    )
+                    .expect("observation does not alter Source admission");
+                poll_until_settled(&mut playback, sample_position(0));
+                assert!(!requests.lock().is_empty(), "same ordinary PCM execution");
+                let evidence = playback.shutdown_and_wait();
+                assert_eq!(evidence.foreign_owner_panics, 0);
+                assert_eq!(evidence.foreign_owner_abandonments, 0);
+                assert_eq!(evidence.all_workers_terminated(), !unknown);
+                assert_eq!(
+                    evidence.shutdown_resource_facts_complete_at_deadline,
+                    !unknown
+                );
+                assert_eq!(
+                    evidence.shutdown_owner_lifetime_unresolved_at_deadline,
+                    unknown
+                );
+            }
+        }
+
+        #[test]
+        fn external_renderer_scope_keeps_shutdown_unresolved() {
+            let (output, _) = fake_output();
+            let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let renderer = Arc::new(RetainedScopeRenderer {
+                pcm: pcm(&requests),
+                registrar: Mutex::new(None),
+            });
+            let tracker = playback.foreign_owner_retirements.clone();
+            playback
+                .prepare(
+                    sample_position(0),
+                    renderer.clone(),
+                    AudioPcmContinuityModel::IndependentWindows,
+                )
+                .unwrap();
+            poll_until_settled(&mut playback, sample_position(0));
+            let evidence = playback.shutdown_and_wait();
+            assert!(!evidence.all_workers_terminated());
+            assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+            assert!(
+                !tracker.seal(),
+                "same external Arc still holds its prospective scope"
+            );
+            drop(renderer);
+            assert!(
+                tracker.seal(),
+                "real final Arc Drop ends that scope after sealing"
+            );
+            assert!(
+                !evidence.all_workers_terminated(),
+                "receipt never changes retrospectively"
+            );
+        }
+
+        #[test]
+        fn same_arc_rebind_preserves_original_domain_and_sticky_failure() {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let renderer = Arc::new(RetainedScopeRenderer {
+                pcm: pcm(&requests),
+                registrar: Mutex::new(None),
+            });
+            let (output_a, _) = fake_output();
+            let mut a = AudioPlayback::with_output(test_config(), output_a).unwrap();
+            a.prepare(
+                sample_position(0),
+                renderer.clone(),
+                AudioPcmContinuityModel::IndependentWindows,
+            )
+            .unwrap();
+            // A repeated same-source prepare reaches observation again without
+            // minting a replacement domain for the retained renderer.
+            a.prepare(
+                sample_position(0),
+                renderer.clone(),
+                AudioPcmContinuityModel::IndependentWindows,
+            )
+            .unwrap();
+            let old = a.foreign_owner_retirements.clone();
+            let old_domain = Registrar::try_new(old.clone()).expect("original domain witness");
+            let (output_b, _) = fake_output();
+            let mut b = AudioPlayback::with_output(test_config(), output_b).unwrap();
+            let new = b.foreign_owner_retirements.clone();
+            b.prepare(
+                sample_position(0),
+                renderer.clone(),
+                AudioPcmContinuityModel::IndependentWindows,
+            )
+            .expect("observation rejection alone does not change existing Source policy");
+            let original = renderer.registrar.lock();
+            assert!(original
+                .as_ref()
+                .expect("original registrar remains")
+                .same_domain(&old_domain));
+            let raw: Arc<dyn mondrian_core::NativeChildSettlementReporter> = old.clone();
+            assert!(matches!(
+                Registrar::try_new(raw),
+                Err(SettlementError::Unavailable)
+            ));
+            assert!(!new.seal());
+            drop(original);
+            drop(old_domain);
+            drop(renderer);
+            let a_receipt = a.shutdown_and_wait();
+            let b_receipt = b.shutdown_and_wait();
+            assert!(!a_receipt.all_workers_terminated());
+            assert!(!b_receipt.all_workers_terminated());
+            assert!(!old.seal(), "foreign rebind cannot clear the old failure");
+        }
+
+        #[test]
+        fn unknown_binding_is_observed_before_both_prepare_retirement_paths() {
+            for continuity in [
+                AudioPcmContinuityModel::IndependentWindows,
+                AudioPcmContinuityModel::GenerationStateFromOrigin(sample_position(0)),
+            ] {
+                let (output, _) = fake_output();
+                let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+                let anchor = if continuity == AudioPcmContinuityModel::IndependentWindows {
+                    AudioSamplePosition::new(0, AudioSampleRate::new(2_000).unwrap())
+                } else {
+                    sample_position(1)
+                };
+                let result = playback.prepare(
+                    anchor,
+                    Arc::new(UnknownRenderer(pcm(&Arc::new(Mutex::new(Vec::new()))))),
+                    continuity,
+                );
+                let expected = if continuity == AudioPcmContinuityModel::IndependentWindows {
+                    AudioPlaybackError::InvalidSampleAnchor(AudioTimeError::RateMismatch {
+                        left: 2_000,
+                        right: 1_000,
+                    })
+                } else {
+                    AudioPlaybackError::FreshEntryOriginMismatch {
+                        required: sample_position(0),
+                        actual: sample_position(1),
+                    }
+                };
+                assert_eq!(result, Err(expected), "original refusal is preserved");
+                let evidence = playback.shutdown_and_wait();
+                assert!(!evidence.all_workers_terminated());
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+            }
+        }
+
+        struct PanickingAggregate {
+            opaque: bool,
+            payload_dropped: Arc<AtomicBool>,
+        }
+        impl AudioPcmRenderer for PanickingAggregate {
+            fn bind_native_child_settlement(
+                &self,
+                _registrar: &Registrar,
+            ) -> Result<(), SettlementError> {
+                if self.opaque {
+                    std::panic::panic_any(DropProbe { dropped: self.payload_dropped.clone() });
+                }
+                panic!("controlled aggregate binding panic");
+            }
+            fn render(
+                &self,
+                request: AudioPcmRenderRequest,
+                _cancellation: &ExecutionCancellationToken,
+            ) -> mondrian_core::Result<AudioPcmRenderOutcome> {
+                Ok(AudioPcmRenderOutcome::Rendered(AudioBuffer::silent(
+                    request.sample_rate,
+                    request.channel_layout,
+                    request.frame_count,
+                )))
+            }
+        }
+
+        #[test]
+        fn aggregate_binding_panic_is_caught_and_keeps_foreign_evidence() {
+            for opaque in [false, true] {
+                let (output, _) = fake_output();
+                let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+                let payload_dropped = Arc::new(AtomicBool::new(false));
+                playback
+                    .prepare(
+                        sample_position(0),
+                        Arc::new(PanickingAggregate {
+                            opaque,
+                            payload_dropped: payload_dropped.clone(),
+                        }),
+                        AudioPcmContinuityModel::IndependentWindows,
+                    )
+                    .expect("observer panic alone does not revoke Source admission");
+                poll_until_settled(&mut playback, sample_position(0));
+                let evidence = playback.shutdown_and_wait();
+                assert_eq!(evidence.foreign_owner_panics, 1);
+                assert_eq!(evidence.foreign_owner_abandonments, u32::from(opaque));
+                assert!(!evidence.all_workers_terminated());
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(!payload_dropped.load(Ordering::Acquire));
+            }
         }
     }
 }
