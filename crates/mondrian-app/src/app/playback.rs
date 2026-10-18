@@ -2030,11 +2030,24 @@ impl AppState {
         let binding = self.current_audio_playback_author_binding()?;
         if let Some(source) = source {
             let concrete = Arc::downgrade(&source.renderer);
+            let identity: std::sync::Weak<dyn AudioPcmRenderer> = concrete.clone();
+            let retained_entry = self
+                .audio_playback
+                .native_author_state_entry_target()
+                .filter(|_| self.audio_playback.matches_source_weak(&identity));
             let erased: Arc<dyn AudioPcmRenderer> = source.renderer;
             self.audio_playback
                 .prepare(anchor, erased, source.continuity_model)
                 .map_err(|error| transport_action_error(action, error))?;
-            self.invalidate_native_audio_parameter_presentation();
+            // An exact retained state-entry reprime keeps the same Source,
+            // claim and parameter facts. Other successful preparations may
+            // install a fresh claim even when the renderer Arc is unchanged.
+            if retained_entry.is_none()
+                || retained_entry != self.audio_playback.native_author_state_entry_target()
+                || !self.audio_playback.matches_source_weak(&identity)
+            {
+                self.invalidate_native_audio_parameter_presentation();
+            }
             self.native_audio_renderer = Some(concrete);
             self.audio_monitoring.bind_meter(
                 source.authoring_session_id,
