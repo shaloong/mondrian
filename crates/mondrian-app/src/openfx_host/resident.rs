@@ -1357,6 +1357,7 @@ impl OpenFxFilterSession {
         }
         let deadline = Instant::now() + RETIRE;
         self.process.close_trace.record(close_observation::Stage::ParentBegin, 0);
+        let mut exit_queries = self.process.close_trace.exit_query_probe();
         let graceful = (|| {
             let mut checkpoint = || {
                 if Instant::now() >= deadline {
@@ -1402,7 +1403,7 @@ impl OpenFxFilterSession {
                 .record(close_observation::Stage::ParentClosedObserved, 0);
             loop {
                 if let Some(observed) = observe_retirement_exit(deadline, Instant::now, || {
-                    self.process.child.try_wait()
+                    exit_queries.observe(|| self.process.child.try_wait())
                 })? {
                     self.process.close_trace.record(
                         close_observation::Stage::ParentOsExitObserved,
@@ -1418,6 +1419,7 @@ impl OpenFxFilterSession {
             close_observation::Stage::ParentGracefulEnd,
             close_observation::result_code(&graceful),
         );
+        self.process.close_trace.publish_exit_queries(exit_queries);
         self.process
             .close_trace
             .record(close_observation::Stage::ParentSettlementBegin, 0);

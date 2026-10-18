@@ -5,7 +5,7 @@
 //! waiter occurs in a close record. Read/decode only after the original owner
 //! has settled. Zero slots are missing; status 2 is a failed clock observation.
 //! QPC ticks use one Windows system clock/frequency, never process-local Instant.
-//! Version 2 adds a parent-only exit observation in the reserved tail. UTC
+//! Version 3 adds one parent-only query summary; all prior offsets stay fixed. UTC
 //! FILETIMEs are diagnostic raw facts, never deadlines or interval authority.
 use super::*;
 
@@ -33,12 +33,97 @@ pub(super) enum Stage {
     ChildAttached,
 }
 
+// Cold stack-only statistics. A failed observation cannot replace the query result.
+#[derive(Debug, Default)]
+pub(super) struct ExitQueryProbe {
+    enabled: bool,
+    unavailable: bool,
+    last_result: u32, // 0 no query, 1 pending, 2 exited, 3 IO error
+    query_count: u64,
+    none_count: u64,
+    last_none_qpc: i64,
+    last_start_qpc: i64,
+    last_end_qpc: i64,
+    max_query_ticks: u64,
+}
+impl ExitQueryProbe {
+    fn new(enabled: bool) -> Self {
+        Self { enabled, ..Self::default() }
+    }
+    pub(super) fn observe<T>(
+        &mut self,
+        query: impl FnOnce() -> io::Result<Option<T>>,
+    ) -> io::Result<Option<T>> {
+        self.observe_with(query, || {
+            #[cfg(windows)]
+            {
+                windows::query_counter()
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+    }
+    fn observe_with<T>(
+        &mut self,
+        query: impl FnOnce() -> io::Result<Option<T>>,
+        mut clock: impl FnMut() -> Option<i64>,
+    ) -> io::Result<Option<T>> {
+        if !self.enabled || self.unavailable {
+            return query();
+        }
+        let start = clock();
+        let result = query();
+        let end = clock();
+        let count = self.query_count.checked_add(1);
+        let none_count = self.none_count.checked_add(u64::from(matches!(&result, Ok(None))));
+        if let (Some(start), Some(end), Some(count), Some(none_count)) =
+            (start, end, count, none_count)
+            && start >= 0
+            && end >= start
+            && (self.query_count == 0 || start >= self.last_end_qpc)
+        {
+            self.query_count = count;
+            self.none_count = none_count;
+            self.last_result = match &result {
+                Ok(None) => 1,
+                Ok(Some(_)) => 2,
+                Err(_) => 3,
+            };
+            if self.last_result == 1 {
+                self.last_none_qpc = end;
+            }
+            self.last_start_qpc = start;
+            self.last_end_qpc = end;
+            self.max_query_ticks = self.max_query_ticks.max((end - start) as u64);
+        } else {
+            self.unavailable = true;
+        }
+        result
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Trace {
     #[cfg(windows)]
     mapping: Option<std::sync::Arc<windows::Mapping>>,
 }
 impl Trace {
+    pub(super) fn exit_query_probe(&self) -> ExitQueryProbe {
+        #[cfg(windows)]
+        let enabled = self.mapping.is_some();
+        #[cfg(not(windows))]
+        let enabled = false;
+        ExitQueryProbe::new(enabled)
+    }
+    pub(super) fn publish_exit_queries(&self, probe: ExitQueryProbe) {
+        #[cfg(windows)]
+        if let Some(mapping) = &self.mapping {
+            mapping.publish_exit_queries(&probe);
+        }
+        let _ = probe;
+    }
     pub(super) fn parent(
         command: &mut Command,
         owner: mondrian_core::EffectProcessorOwnerId,
@@ -140,7 +225,7 @@ mod windows {
     };
 
     const BYTES: usize = 4096;
-    const MAGIC: [u8; 8] = *b"OFXCLQ02";
+    const MAGIC: [u8; 8] = *b"OFXCLQ03";
     const SLOTS: usize = 16;
 
     // Binary little-endian x64 layout, independently readable after settlement.
@@ -192,6 +277,53 @@ mod windows {
         creation_utc_filetime: AtomicU64,
         exit_utc_filetime: AtomicU64,
         _reserved: [u8; 24],
+    }
+    // Single publication after the original graceful attempt, never live counters.
+    #[repr(C, align(64))]
+    struct ExitQueryObservation {
+        status: AtomicU32, // 0 missing, 1 usable, 2 unavailable (zero metric payload)
+        pid: AtomicU32,
+        tid: AtomicU32,
+        last_result: AtomicU32,
+        query_count: AtomicU64,
+        none_count: AtomicU64,
+        last_none_qpc: AtomicI64,
+        last_start_qpc: AtomicI64,
+        last_end_qpc: AtomicI64,
+        max_query_ticks: AtomicU64,
+    }
+    impl ExitQueryObservation {
+        fn new() -> Self {
+            Self {
+                status: AtomicU32::new(0),
+                pid: AtomicU32::new(0),
+                tid: AtomicU32::new(0),
+                last_result: AtomicU32::new(0),
+                query_count: AtomicU64::new(0),
+                none_count: AtomicU64::new(0),
+                last_none_qpc: AtomicI64::new(0),
+                last_start_qpc: AtomicI64::new(0),
+                last_end_qpc: AtomicI64::new(0),
+                max_query_ticks: AtomicU64::new(0),
+            }
+        }
+        fn commit(&self, pid: u32, tid: u32, probe: &ExitQueryProbe) {
+            if !probe.enabled || self.status.load(Ordering::Relaxed) != 0 {
+                return;
+            }
+            self.pid.store(pid, Ordering::Relaxed);
+            self.tid.store(tid, Ordering::Relaxed);
+            if !probe.unavailable {
+                self.last_result.store(probe.last_result, Ordering::Relaxed);
+                self.query_count.store(probe.query_count, Ordering::Relaxed);
+                self.none_count.store(probe.none_count, Ordering::Relaxed);
+                self.last_none_qpc.store(probe.last_none_qpc, Ordering::Relaxed);
+                self.last_start_qpc.store(probe.last_start_qpc, Ordering::Relaxed);
+                self.last_end_qpc.store(probe.last_end_qpc, Ordering::Relaxed);
+                self.max_query_ticks.store(probe.max_query_ticks, Ordering::Relaxed);
+            }
+            self.status.store(if probe.unavailable { 2 } else { 1 }, Ordering::Release);
+        }
     }
     struct ProcessTimes {
         creation: u64,
@@ -268,7 +400,8 @@ mod windows {
         header: Header,
         records: [Record; SLOTS],
         exit_observation: ExitObservation,
-        _reserved: [u8; 2880],
+        exit_queries: ExitQueryObservation,
+        _reserved: [u8; 2816],
     }
     const _: () = {
         assert!(std::mem::size_of::<Header>() == 128);
@@ -276,7 +409,9 @@ mod windows {
         assert!(std::mem::size_of::<ExitObservation>() == 64);
         assert!(std::mem::offset_of!(Layout, records) == 128);
         assert!(std::mem::offset_of!(Layout, exit_observation) == 1152);
-        assert!(std::mem::offset_of!(Layout, _reserved) == 1216);
+        assert!(std::mem::size_of::<ExitQueryObservation>() == 64);
+        assert!(std::mem::offset_of!(Layout, exit_queries) == 1216);
+        assert!(std::mem::offset_of!(Layout, _reserved) == 1280);
         assert!(std::mem::size_of::<Layout>() == BYTES);
     };
     impl Layout {
@@ -284,7 +419,7 @@ mod windows {
             Self {
                 header: Header {
                     magic: MAGIC,
-                    version: 2,
+                    version: 3,
                     bytes: BYTES as u32,
                     frequency,
                     owner,
@@ -297,13 +432,14 @@ mod windows {
                 },
                 records: std::array::from_fn(|_| Record::new()),
                 exit_observation: ExitObservation::new(),
-                _reserved: [0; 2880],
+                exit_queries: ExitQueryObservation::new(),
+                _reserved: [0; 2816],
             }
         }
         fn valid(&self, owner: &[u8; 16], nonce: &[u8; 16], frequency: i64) -> bool {
             self.header.ready.load(Ordering::Acquire) == 1
                 && self.header.magic == MAGIC
-                && self.header.version == 2
+                && self.header.version == 3
                 && self.header.bytes == BYTES as u32
                 && frequency > 0
                 && self.header.frequency == frequency
@@ -328,6 +464,11 @@ mod windows {
     unsafe impl Send for Mapping {}
     unsafe impl Sync for Mapping {}
 
+    pub(super) fn query_counter() -> Option<i64> {
+        let mut tick = 0;
+        // SAFETY: optional observation only, one live aligned output, no wait or owner operation.
+        (unsafe { QueryPerformanceCounter(&mut tick) } != 0).then_some(tick)
+    }
     fn setup_error(error: io::Error) -> OpenFxHostError {
         unavailable(format!("OpenFX close observation setup failed: {error}"))
     }
@@ -429,6 +570,14 @@ mod windows {
             }
             Ok(mapping)
         }
+        pub(super) fn publish_exit_queries(&self, probe: &ExitQueryProbe) {
+            if self.pid != self.layout().header.parent_pid {
+                return;
+            }
+            // SAFETY: only obtains this existing writer's identity; never observes a Child.
+            let tid = unsafe { GetCurrentThreadId() };
+            self.layout().exit_queries.commit(self.pid, tid, probe);
+        }
         pub(super) fn set_child(&self, pid: u32, handle: u64) {
             self.layout().header.process_handle.store(handle, Ordering::Relaxed);
             self.layout().header.child_pid.store(pid, Ordering::Release);
@@ -495,7 +644,9 @@ mod windows {
             assert_eq!(std::mem::size_of::<ExitObservation>(), 64);
             assert_eq!(std::mem::offset_of!(Layout, records), 128);
             assert_eq!(std::mem::offset_of!(Layout, exit_observation), 1152);
-            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1216);
+            assert_eq!(std::mem::size_of::<ExitQueryObservation>(), 64);
+            assert_eq!(std::mem::offset_of!(Layout, exit_queries), 1216);
+            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1280);
             assert_eq!(std::mem::size_of::<Layout>(), 4096);
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.ready.store(1, Ordering::Release);
@@ -506,12 +657,42 @@ mod windows {
             assert!(!layout.valid(&[1; 16], &[2; 16], 0));
             layout.header.version = 1;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
-            layout.header.version = 2;
+            layout.header.version = 3;
             layout.header.magic = *b"OFXCLQ01";
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.magic = MAGIC;
             layout.header.bytes = 4095;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
+        }
+        #[test]
+        fn exit_query_summary_is_one_shot_and_unavailable_is_not_zero_queries() {
+            let record = ExitQueryObservation::new();
+            let mut probe = ExitQueryProbe::new(true);
+            record.commit(11, 22, &probe);
+            assert_eq!(record.status.load(Ordering::Acquire), 1);
+            assert_eq!(record.query_count.load(Ordering::Relaxed), 0);
+            probe.observe_with::<u8>(|| Ok(None), || Some(10)).unwrap();
+            record.commit(99, 99, &probe);
+            assert_eq!(record.pid.load(Ordering::Relaxed), 11);
+            assert_eq!(record.query_count.load(Ordering::Relaxed), 0);
+            let failed = ExitQueryObservation::new();
+            probe.observe_with::<u8>(|| Ok(None), || None).unwrap();
+            failed.commit(11, 22, &probe);
+            assert_eq!(failed.status.load(Ordering::Acquire), 2);
+            assert_eq!(failed.last_result.load(Ordering::Relaxed), 0);
+            assert_eq!(failed.query_count.load(Ordering::Relaxed), 0);
+            assert_eq!(failed.last_none_qpc.load(Ordering::Relaxed), 0);
+            let measured = ExitQueryObservation::new();
+            let mut probe = ExitQueryProbe::new(true);
+            let mut ticks = [10, 14].into_iter();
+            probe.observe_with::<u8>(|| Ok(None), || ticks.next()).unwrap();
+            measured.commit(11, 22, &probe);
+            assert_eq!(measured.query_count.load(Ordering::Relaxed), 1);
+            assert_eq!(measured.none_count.load(Ordering::Relaxed), 1);
+            assert_eq!(measured.last_none_qpc.load(Ordering::Relaxed), 14);
+            assert_eq!(measured.last_start_qpc.load(Ordering::Relaxed), 10);
+            assert_eq!(measured.last_end_qpc.load(Ordering::Relaxed), 14);
+            assert_eq!(measured.max_query_ticks.load(Ordering::Relaxed), 4);
         }
         #[test]
         fn committed_slots_are_one_shot_and_clock_failure_is_not_a_timestamp() {
@@ -637,7 +818,7 @@ mod windows {
                 "{}",
                 serde_json::json!({
                     "control": "owned_natural_exit_timestamp_distinguishes_delayed_parent_observation",
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "child_pid": pid,
                     "retained_child_handle": handle,
                     "natural_exit_code": 7,
@@ -705,5 +886,123 @@ mod windows {
                 0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod query_probe_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn disabled_exit_query_probe_calls_once_without_clock() {
+        let calls = Cell::new(0);
+        let mut probe = ExitQueryProbe::new(false);
+        let result = probe.observe_with(
+            || {
+                calls.set(calls.get() + 1);
+                Ok(Some(7))
+            },
+            || panic!("disabled observation must not read QPC"),
+        );
+        assert_eq!(result.unwrap(), Some(7));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(probe.query_count, 0);
+    }
+
+    #[test]
+    fn exit_query_probe_preserves_each_result_and_pending_timestamp() {
+        let mut probe = ExitQueryProbe::new(true);
+        let mut ticks = [10, 13, 20, 29, 30, 31].into_iter();
+        let calls = Cell::new(0);
+        let mut clock = || ticks.next();
+        assert!(probe
+            .observe_with::<u8>(
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(None)
+                },
+                &mut clock
+            )
+            .unwrap()
+            .is_none());
+        let error = probe
+            .observe_with::<u8>(
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(io::Error::from_raw_os_error(87))
+                },
+                &mut clock,
+            )
+            .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(87));
+        assert_eq!(
+            probe
+                .observe_with(
+                    || {
+                        calls.set(calls.get() + 1);
+                        Ok(Some(42))
+                    },
+                    &mut clock
+                )
+                .unwrap(),
+            Some(42)
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(
+            (probe.query_count, probe.none_count, probe.last_result),
+            (3, 1, 2)
+        );
+        assert_eq!(
+            (
+                probe.last_none_qpc,
+                probe.last_start_qpc,
+                probe.last_end_qpc,
+                probe.max_query_ticks
+            ),
+            (13, 30, 31, 9)
+        );
+        assert!(!probe.unavailable);
+        assert!(ticks.next().is_none());
+    }
+
+    #[test]
+    fn exit_query_probe_clock_or_counter_failure_is_only_unavailable() {
+        for ticks in [[None, Some(2)], [Some(2), None], [Some(2), Some(1)]] {
+            let mut probe = ExitQueryProbe::new(true);
+            let mut ticks = ticks.into_iter();
+            let error = probe
+                .observe_with::<u8>(
+                    || Err(io::Error::from_raw_os_error(5)),
+                    || ticks.next().unwrap(),
+                )
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(5));
+            assert!(probe.unavailable);
+            assert_eq!(
+                probe
+                    .observe_with(
+                        || Ok(Some(9)),
+                        || panic!("invalid statistics stay unavailable")
+                    )
+                    .unwrap(),
+                Some(9)
+            );
+        }
+        let mut probe = ExitQueryProbe::new(true);
+        probe.observe_with::<u8>(|| Ok(None), || Some(10)).unwrap();
+        let mut regressed = [9, 12].into_iter();
+        assert_eq!(
+            probe.observe_with(|| Ok(Some(4)), || regressed.next()).unwrap(),
+            Some(4)
+        );
+        assert!(probe.unavailable);
+        let mut probe = ExitQueryProbe::new(true);
+        probe.query_count = u64::MAX;
+        assert_eq!(
+            probe.observe_with(|| Ok(Some(3)), || Some(1)).unwrap(),
+            Some(3)
+        );
+        assert!(probe.unavailable);
     }
 }
