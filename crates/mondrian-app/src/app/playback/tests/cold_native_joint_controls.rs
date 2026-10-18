@@ -115,6 +115,34 @@ fn prepare_app_native_control(
     state.test_set_sequence(Some(sequence));
     state.test_set_asset_library(Some(library));
 
+    // The fixture setters install Project data only. Bind the original
+    // stopped Engine before native construction, as production authoring
+    // does, so the first editor commit need not perform an initial seek.
+    assert_eq!(
+        state.playback_engine.snapshot().state,
+        mondrian_playback::TransportState::Stopped
+    );
+    assert!(state.native_audio_renderer.is_none());
+    state
+        .synchronize_playback_authoring_binding()
+        .expect("bind the actual Sequence before cold native construction");
+    assert_eq!(
+        state.playback_engine.sequence_id(),
+        state.active_sequence_id()
+    );
+    let bound = state.playback_engine.snapshot();
+    assert_eq!(bound.state, mondrian_playback::TransportState::Paused);
+    assert_eq!(bound.position.frame, 0);
+    assert!(state.native_audio_renderer.is_none());
+    let prepared = state.audio_playback_snapshot();
+    assert_eq!(prepared.in_flight, 0);
+    assert_eq!(prepared.next_start_sample, 0);
+    assert_eq!(prepared.output.expect("software output").buffered_frames, 0);
+    assert_eq!(output.lock().queued, 0);
+    let history = state.authoring.as_ref().unwrap().history().diagnostics();
+    assert_eq!(history.undo_entries, 0);
+    assert_eq!(history.pending_entries, 0);
+
     // Exactly one original App -> Timeline/Delivery/Runtime construction,
     // with its actual installed composite resolver and Playback registrar.
     let source = state
