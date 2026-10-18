@@ -29,6 +29,10 @@ pub(super) struct TimelineAudioPcmRenderer {
 struct TimelineAudioRenderState {
     delivery: AudioProgramDeliveryRuntime,
     generation: Option<AudioPcmRenderGeneration>,
+    // Drop after Delivery and all its retained Sessions. Every strong renderer
+    // alias therefore retains the same observation scope, without another lock.
+    // This App payload is outside the Audio Runtime's Session resource grant.
+    native_child_settlement: Option<mondrian_core::NativeChildSettlementRegistrar>,
 }
 
 impl TimelineAudioPcmRenderer {
@@ -160,7 +164,11 @@ impl TimelineAudioPcmRenderer {
             delivery_metadata: delivery.evidence(),
             author_snapshot: parking_lot::RwLock::new(None),
             audition: captured_audition,
-            state: Mutex::new(TimelineAudioRenderState { delivery, generation: None }),
+            state: Mutex::new(TimelineAudioRenderState {
+                delivery,
+                generation: None,
+                native_child_settlement: None,
+            }),
             continuity_model,
             sample_rate,
             channel_layout,
@@ -229,6 +237,31 @@ impl TimelineAudioPcmRenderer {
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
+    fn bind_native_child_settlement(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut state = self.state.lock();
+        if let Some(current) = &state.native_child_settlement {
+            if !current.same_domain(registrar) {
+                current.mark_unavailable();
+                registrar.mark_unavailable();
+                return Err(mondrian_core::NativeChildSettlementError::ForeignDomain);
+            }
+        } else {
+            // Retain the root before entering Delivery, including a failed or
+            // panicking bind. Observation failure never grants native work.
+            state.native_child_settlement = Some(registrar.try_fork()?);
+        }
+        let TimelineAudioRenderState { delivery, generation: _, native_child_settlement } =
+            &mut *state;
+        let Some(root) = native_child_settlement.as_ref() else {
+            registrar.mark_unavailable();
+            return Err(mondrian_core::NativeChildSettlementError::Unavailable);
+        };
+        delivery.bind_native_child_settlement(root)
+    }
+
     fn native_observations_supported(&self) -> bool {
         self.state.lock().delivery.native_observations_supported()
     }
@@ -765,6 +798,145 @@ fn handoff_continuity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, Default, Clone, Copy)]
+    struct SettlementSnapshot {
+        scopes: u32,
+        children: u32,
+        unavailable: bool,
+    }
+
+    #[derive(Default)]
+    struct SettlementCounts(Mutex<SettlementSnapshot>);
+
+    impl mondrian_core::NativeChildSettlementReporter for SettlementCounts {
+        fn begin_scope(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            let mut state = self.0.lock();
+            let Some(next) = state.scopes.checked_add(1) else {
+                state.unavailable = true;
+                return Err(mondrian_core::NativeChildSettlementError::Overflow);
+            };
+            state.scopes = next;
+            Ok(())
+        }
+
+        fn end_scope(&self) {
+            let mut state = self.0.lock();
+            if let Some(next) = state.scopes.checked_sub(1) {
+                state.scopes = next;
+            } else {
+                state.unavailable = true;
+            }
+        }
+
+        fn begin_child(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            let mut state = self.0.lock();
+            if state.scopes == 0 {
+                state.unavailable = true;
+                return Err(mondrian_core::NativeChildSettlementError::Unavailable);
+            }
+            let Some(next) = state.children.checked_add(1) else {
+                state.unavailable = true;
+                return Err(mondrian_core::NativeChildSettlementError::Overflow);
+            };
+            state.children = next;
+            Ok(())
+        }
+
+        fn end_child(&self, settlement: mondrian_core::NativeChildSettlement) {
+            let mut state = self.0.lock();
+            if let Some(next) = state.children.checked_sub(1) {
+                state.children = next;
+            } else {
+                state.unavailable = true;
+            }
+            if settlement == mondrian_core::NativeChildSettlement::Unconfirmed {
+                state.unavailable = true;
+            }
+        }
+
+        fn unavailable(&self) {
+            self.0.lock().unavailable = true;
+        }
+    }
+
+    fn settlement_model_renderer() -> (tempfile::TempDir, Arc<TimelineAudioPcmRenderer>) {
+        let root = tempfile::tempdir().expect("private library directory");
+        let library = AssetLibrary::open(root.path().join("library")).expect("asset library");
+        let renderer = TimelineAudioPcmRenderer::new_public_program(
+            Sequence::new("settlement scope model"),
+            Vec::new(),
+            library,
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+        )
+        .expect("actual Timeline/Delivery/Runtime with no native plugin");
+        (root, Arc::new(renderer))
+    }
+
+    #[test]
+    fn timeline_settlement_scope_survives_concrete_and_erased_renderer_aliases() {
+        let (_directory, renderer) = settlement_model_renderer();
+        let counts = Arc::new(SettlementCounts::default());
+        let reporter: Arc<dyn mondrian_core::NativeChildSettlementReporter> = counts.clone();
+        let root = mondrian_core::NativeChildSettlementRegistrar::try_new(reporter).unwrap();
+        renderer.bind_native_child_settlement(&root).expect("real Delivery forwarding");
+        let before = *counts.0.lock();
+        assert!(before.scopes > 1);
+        assert_eq!(
+            before.children, 0,
+            "this is a host model, not a native lifecycle gate"
+        );
+        renderer.bind_native_child_settlement(&root).expect("same-domain idempotence");
+        assert_eq!(counts.0.lock().scopes, before.scopes);
+
+        // These are the concrete/erased aliases retained by the existing
+        // handoff request. Neither is a second Runtime or cleanup owner.
+        let concrete = Arc::clone(&renderer);
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let weak = Arc::downgrade(&renderer);
+        drop(renderer);
+        drop(root);
+        assert!(counts.0.lock().scopes > 0);
+        drop(concrete);
+        assert!(weak.upgrade().is_some());
+        assert!(counts.0.lock().scopes > 0);
+        drop(erased);
+        assert!(weak.upgrade().is_none());
+        let final_state = *counts.0.lock();
+        assert_eq!((final_state.scopes, final_state.children), (0, 0));
+        assert!(!final_state.unavailable);
+    }
+
+    #[test]
+    fn timeline_settlement_foreign_rebind_keeps_both_domains_unavailable() {
+        let (_directory, renderer) = settlement_model_renderer();
+        let first = Arc::new(SettlementCounts::default());
+        let second = Arc::new(SettlementCounts::default());
+        let first_sink: Arc<dyn mondrian_core::NativeChildSettlementReporter> = first.clone();
+        let second_sink: Arc<dyn mondrian_core::NativeChildSettlementReporter> = second.clone();
+        let a = mondrian_core::NativeChildSettlementRegistrar::try_new(first_sink).unwrap();
+        let b = mondrian_core::NativeChildSettlementRegistrar::try_new(second_sink).unwrap();
+        renderer.bind_native_child_settlement(&a).unwrap();
+        let first_scopes = first.0.lock().scopes;
+        assert_eq!(
+            renderer.bind_native_child_settlement(&b),
+            Err(mondrian_core::NativeChildSettlementError::ForeignDomain)
+        );
+        assert_eq!(first.0.lock().scopes, first_scopes);
+        assert_eq!(
+            second.0.lock().scopes,
+            1,
+            "no partial migration into the second domain"
+        );
+        assert!(first.0.lock().unavailable && second.0.lock().unavailable);
+        drop(renderer);
+        drop(a);
+        drop(b);
+        assert_eq!(first.0.lock().scopes, 0);
+        assert_eq!(second.0.lock().scopes, 0);
+        assert!(first.0.lock().unavailable && second.0.lock().unavailable);
+    }
 
     #[derive(Default)]
     struct QuantumRecordingResolver(Mutex<Vec<usize>>);

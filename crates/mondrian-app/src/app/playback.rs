@@ -5310,6 +5310,13 @@ mod tests {
         }
 
         impl AudioPcmRenderer for RestrictedOriginRenderer {
+            fn bind_native_child_settlement(
+                &self,
+                _: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+                Ok(()) // This closed PCM recording model owns no native child.
+            }
+
             fn render(
                 &self,
                 request: mondrian_media::AudioPcmRenderRequest,
@@ -5750,6 +5757,13 @@ mod tests {
     }
 
     impl AudioPcmRenderer for NativeHoldSerialRenderer {
+        fn bind_native_child_settlement(
+            &self,
+            _: &mondrian_core::NativeChildSettlementRegistrar,
+        ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+            Ok(()) // Only host-model atomics and Core notices are retained.
+        }
+
         fn render(
             &self,
             request: mondrian_media::AudioPcmRenderRequest,
