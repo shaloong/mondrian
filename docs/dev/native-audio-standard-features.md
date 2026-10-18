@@ -122,18 +122,30 @@ Zero PCM does not mean zero native/control work. Independent installation and
 create_instance, input inspection, Idle Warmup and precompiled Export still
 have unobserved construction boundaries.
 
-The current ProjectClose candidate prechecks known native obligations, matches
-the concrete Runtime against Media's actual Source Arc, then revokes the Source
-through the original retirement queue before persistence permanently retires.
-Playback remains reusable in the ordinary BuiltIn controls; active-GUI refusal
-also passes with the owned CLAP DLL. The native NoGUI gate remains HOLD: Runtime
-Busy refuses Close, and the subsequent whole-App receipt leaves Project custody
-unreleased despite complete Audio cleanup. Ready is not control quiescence;
-Idle polling can enqueue further observations. The original worker queue needs
-a coordinated close-admission boundary before native ProjectClose is qualified.
+ProjectClose now admits SourceClosed behind earlier control work on Media's
+original render queue. One suspended Source/claim and its opaque ticket remain
+owned until the worker validates closure; caller-side admission does not acquire
+the Timeline Runtime lock. App finishes original Source retirement before
+starting persistence quiescence. Synchronous Close and whole-App shutdown each
+drive that one Session with their original absolute deadline. A real
+close fault poisons that Session's persistence admission, including
+before its first save; already admitted filesystem work retains its ownership,
+but late completions cannot update the project. This is not worker quiescence.
+App158, Media120 and Audio733 ordinary controls pass, including actual Timeline
+binding latches, retained author prefixes, lost-alias fault recovery and rejection
+of an in-flight save's completion. The matching normal Product passes the owned
+CLAP NoGUI ProjectClose gate: claim, Source, Timeline renderer and Project are
+released before whole-App shutdown; its consuming cleanup is complete. The five
+original native App gates also pass, including active-GUI refusal and the
+retained-alias negative control's deliberately unresolved receipt. This finite
+Windows/no-device, zero-PCM case does not qualify general native ProjectClose.
+Ready alone is not control quiescence.
 SourceClosed observes the current prefix; it does not atomically seal future
 callbacks or prove final OS exit. Other synchronous recovery/import handoffs
 retain their separate contracts.
+The current App test build retains 25 warnings; normal Product has 11, including
+`begin_endurance_shutdown`, now called only by validation/test paths. No strict-build
+qualification is granted.
 
 New counting does not run in physical callbacks, native DSP or steady PCM blocks.
 Cold control can still lock, allocate and use synchronous IPC on the MMCSS
