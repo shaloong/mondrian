@@ -50,12 +50,16 @@ resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner �
 返回，父侧约101.07ms仍无 OS 退出观察。4097 拒绝用例另有 libtest 通过但
 Job 首次计数非零的失败，未记录关联进程身份。两项根因仍开放，原预算与断言保留。
 
-2026-10-18：退出观测现按原绝对期限检查查询前后时刻，迟到的真实退出仍结算
-唯一 Child，但不能算 graceful；五个生产 helper 时钟/查询控制通过。新正常
-Product 的首个 readonly 原生门在至少一轮五帧像素等断言后 shutdown 超时，Graph 未到，
-余七门未执行。单次默认关闭观测的三会话通过，inner 返回约3.5–4.3ms、父侧
-OS退出观察约66.7–75.8ms（相对 ParentBegin QPC）；未复现或解释首失败，不能
-分摊 DLL/CRT/OS/调度成本。原十一项与本次失败仍开放，预算和断言不变。
+2026-10-18 Windows x64：退出观测仍按原绝对期限检查查询前后时刻，迟到的真实退出
+仍结算唯一 Child，但不能算 graceful。原5项期限 helper 与新增5项可选 query/probe/
+4096B 映射控制均 exact PASS；74项纯字节解码控制通过。正常 Product 的原实例复用/
+未取 Output 回归也通过，原180秒执行/2秒 Job 回收规则不变。可选 schema3 只汇总
+原有 try_wait，关闭观测时不读 QPC；它不参与退出分类，坏统计保持 unavailable。
+本轮单次 fixed-canvas 门仍在原 shutdown 处 DeadlineExceeded，Graph 未到。实际
+36次查询全部返回 None，最后一次约99.15ms，单次查询观测窗口最大约3.6µs；inner 约47.28ms已返回，
+父 graceful 约100.77ms超时。本次确已反复执行退出查询，未见单次长 try_wait；
+查询间调度及后续退出阶段仍未定位，未证明 TLS/CRT/加载器或操作系统根因；UTC退出事实不能拼成QPC期限，启用观测也有开销。既有退出
+失败均保持开放，不授全关闭时限、性能、第三方或其它平台资格。
 
 2026-10-18 Windows x64：`bed1d101` 在提交既有参数来源后、插件回调前更新实例
 `IsAnimating`，与常量/CurrentFrame/Curve 查询共用来源权威。修复前真实 CreateInstance
