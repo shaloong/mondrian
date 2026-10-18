@@ -3093,8 +3093,12 @@ The in-process FFmpeg lease is `FfmpegNativeDecodedFrameResource`. It retains
 the decoder frame with `av_frame_clone`, thereby retaining the frame's
 `AVBufferRef`-owned hardware surface, and releases that reference with
 `av_frame_free` when the final lease drops. D3D12 residency reads FFmpeg's
-documented `AVD3D12VAFrame` descriptor from `AVFrame::data[0]`: its borrowed
-`ID3D12Resource`, decode-completion `ID3D12Fence`, and fence value remain owned
+documented `AVD3D12VAFrame` descriptor from `AVFrame::data[0]`. Decode and
+resident encode share one media-owned ABI definition, selected from the installed
+`hwcontext_d3d12va.h`: older descriptors have a sync context immediately after
+the texture pointer; the newer texture-array ABI inserts a subresource index
+and adds flags. The libavcodec major version alone cannot select this layout.
+Its borrowed `ID3D12Resource`, decode-completion `ID3D12Fence`, and fence value remain owned
 by the retained AVFrame. A renderer must wait for that value before reading the
 resource; media never performs a CPU fence wait. Preferred D3D11 residency
 reads only FFmpeg's documented `AV_PIX_FMT_D3D11` ABI: `AVFrame::data[0]` is the borrowed

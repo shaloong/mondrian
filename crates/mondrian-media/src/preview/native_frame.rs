@@ -4,6 +4,8 @@ use crate::decoder::{
     DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceColorModel,
     DecodedVideoSurfaceFormat,
 };
+#[cfg(mondrian_ffmpeg_7_1)]
+use crate::ffmpeg_d3d12va::AvD3D12VaFrame;
 use ffmpeg_next as ffmpeg;
 use std::any::Any;
 use std::ffi::c_void;
@@ -723,23 +725,6 @@ pub(super) fn parse_ffmpeg_d3d11_texture(
     Ok(FfmpegD3D11TextureView { texture, array_slice })
 }
 
-#[repr(C)]
-#[cfg(mondrian_ffmpeg_7_1)]
-pub(super) struct FfmpegAvD3D12VaSyncContext {
-    pub(super) fence: *mut c_void,
-    pub(super) event: *mut c_void,
-    pub(super) fence_value: u64,
-}
-
-#[repr(C)]
-#[cfg(mondrian_ffmpeg_7_1)]
-pub(super) struct FfmpegAvD3D12VaFrame {
-    pub(super) texture: *mut c_void,
-    pub(super) subresource_index: i32,
-    pub(super) sync_ctx: FfmpegAvD3D12VaSyncContext,
-    pub(super) flags: i32,
-}
-
 #[cfg(mondrian_ffmpeg_7_1)]
 fn parse_ffmpeg_d3d12_texture(
     frame: NonNull<ffmpeg::ffi::AVFrame>,
@@ -751,7 +736,7 @@ fn parse_ffmpeg_d3d12_texture(
     // SAFETY: the retained AVFrame owns data[0] for this borrow. FFmpeg 7.x+
     // defines AV_PIX_FMT_D3D12 data[0] as `AVD3D12VAFrame*`.
     let raw_frame = unsafe { frame.as_ref() };
-    let native = NonNull::new(raw_frame.data[0].cast::<FfmpegAvD3D12VaFrame>())
+    let native = NonNull::new(raw_frame.data[0].cast::<AvD3D12VaFrame>())
         .ok_or(FfmpegNativeDecodedFrameResourceError::MissingD3D12Texture)?;
     // SAFETY: the data[0] ABI was validated above and remains AVFrame-owned.
     let native = unsafe { native.as_ref() };

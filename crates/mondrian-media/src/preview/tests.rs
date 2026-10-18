@@ -725,12 +725,14 @@ fn synthetic_d3d12_frame(
         let native = (*descriptor).data.cast::<FfmpegAvD3D12VaFrame>();
         native.write(FfmpegAvD3D12VaFrame {
             texture: std::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
+            #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
             subresource_index: 0,
             sync_ctx: FfmpegAvD3D12VaSyncContext {
                 fence: std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>(),
                 event: std::ptr::null_mut(),
                 fence_value: 9,
             },
+            #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
             flags: 0,
         });
         (*raw).buf[0] = descriptor;
@@ -2539,12 +2541,14 @@ fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     let fence = std::ptr::NonNull::<u16>::dangling().as_ptr().cast::<c_void>();
     let native = Box::new(FfmpegAvD3D12VaFrame {
         texture,
+        #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
         subresource_index: 0,
         sync_ctx: FfmpegAvD3D12VaSyncContext {
             fence,
             event: std::ptr::null_mut(),
             fence_value: 42,
         },
+        #[cfg(mondrian_ffmpeg_d3d12va_frame_v2)]
         flags: 0,
     });
     // SAFETY: the synthetic native descriptor remains alive until after

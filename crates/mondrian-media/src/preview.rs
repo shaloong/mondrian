@@ -106,6 +106,10 @@ fn resolve_preview_execution_fingerprint(
     }
 }
 
+#[cfg(all(test, mondrian_ffmpeg_7_1))]
+use crate::ffmpeg_d3d12va::{
+    AvD3D12VaFrame as FfmpegAvD3D12VaFrame, AvD3D12VaSyncContext as FfmpegAvD3D12VaSyncContext,
+};
 use cancellation::{
     preview_decode_interrupt_callback, PreviewDecodeCancelProbe, PreviewDecodeInterruptState,
 };
@@ -131,8 +135,6 @@ use frame_materialization::{
 };
 #[cfg(test)]
 use native_frame::parse_ffmpeg_d3d11_texture;
-#[cfg(all(test, mondrian_ffmpeg_7_1))]
-use native_frame::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
 pub use native_frame::{
     FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, PreviewCvPixelBuffer, PreviewNativeDecodedFrame,

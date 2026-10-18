@@ -25,6 +25,8 @@ pub mod audio_source;
 mod camera_raw;
 pub mod decoder;
 mod ffmpeg_command;
+#[cfg(mondrian_ffmpeg_7_1)]
+mod ffmpeg_d3d12va;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
 mod h264_metadata;
