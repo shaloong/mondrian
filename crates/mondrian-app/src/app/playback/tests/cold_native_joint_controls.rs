@@ -2593,3 +2593,209 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
     );
     drop(state);
 }
+
+#[test]
+#[ignore = "current normal Product and owned CLAP Gain DLL; ProjectClose native custody before whole-App cleanup, no GUI/device/PCM"]
+fn app_owned_clap_project_close_releases_native_source_before_app_shutdown() {
+    let ColdNativeControl { mut state, _directory, output, renderer: weak } =
+        prepare_app_clap_editor_control();
+    let sequence = state.active_sequence().expect("actual authored direct-root Program");
+    assert!(sequence.audio_program.note_lanes.is_empty());
+    assert_eq!(sequence.audio_program.outputs.len(), 1);
+    assert_eq!(
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.len(),
+        1
+    );
+    let original = sequence.audio_program.outputs[0].strip.pre_fader.processors[0].clone();
+    assert_eq!(original.parameters.len(), 1);
+    assert_eq!(
+        original.opaque_state.as_ref().unwrap().as_slice(),
+        &1.0_f32.to_le_bytes()
+    );
+    assert_eq!(
+        state.authoring.as_ref().unwrap().history().diagnostics().undo_entries,
+        0
+    );
+    assert_eq!(
+        state.authoring.as_ref().unwrap().history().diagnostics().pending_entries,
+        0
+    );
+    assert!(state.native_audio_editor.is_none());
+    assert!(!state.is_playing());
+    let verifier = weak
+        .upgrade()
+        .expect("actual installed Timeline")
+        .owner_installation_verifier()
+        .expect("original Media Source registration");
+    let claim = verifier.current_claim().expect("actual installed claim");
+    assert!(verifier.validate(&claim).is_ok());
+    let generation = state.audio_playback_snapshot().generation;
+    let mut renderer_id = None;
+    poll_idle_until(&mut state, generation, |event| match event {
+        AudioPlaybackEvent::NativeOwnerBindingsObserved {
+            renderer_id: actual,
+            generation: observed,
+            status,
+        } => {
+            assert!(renderer_id.is_none());
+            assert_eq!(*observed, generation);
+            assert_eq!(
+                *status,
+                mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready
+            );
+            renderer_id = Some(*actual);
+            true
+        }
+        AudioPlaybackEvent::NativeParameterObservationsObserved { observation, .. } => {
+            assert!(observation.target().continuity_epoch.is_none());
+            false
+        }
+        AudioPlaybackEvent::NativeDiagnosticsObserved { .. } => false,
+        other => panic!("NoGUI setup admits no author, editor or PCM work: {other:?}"),
+    });
+    let renderer_id = renderer_id.unwrap();
+    assert!(verifier.validate(&claim).is_ok());
+    assert!(state.audio_playback.native_editor_source_available());
+    assert_eq!(output.lock().queued, 0);
+
+    // Save all target outcomes while AppState is still alive. A target RED
+    // must not unwind past real native owners before the consuming cleanup.
+    let close = state.close_project().map_err(|error| error.to_string());
+    let post_close_generation = state.audio_playback_snapshot().generation;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut observation_error = None;
+    let mut no_pcm = true;
+    let mut no_editor_or_hold = true;
+    loop {
+        if close.is_err() {
+            break;
+        }
+        match state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(0)) {
+            Ok(poll) => {
+                no_pcm &= poll.snapshot.generation == post_close_generation
+                    && poll.snapshot.in_flight == 0
+                    && poll.snapshot.next_start_sample == 0
+                    && poll.snapshot.output.is_some_and(|snapshot| snapshot.buffered_frames == 0)
+                    && output.lock().queued == 0;
+                for event in poll.events {
+                    let current = match &event {
+                        AudioPlaybackEvent::NativeParameterObservationsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            observation,
+                        } => {
+                            *actual == renderer_id
+                                && *observed == post_close_generation
+                                && observation.target().continuity_epoch.is_none()
+                        }
+                        AudioPlaybackEvent::NativeDiagnosticsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            ..
+                        } => *actual == renderer_id && *observed == post_close_generation,
+                        _ => false,
+                    };
+                    if !current && observation_error.is_none() {
+                        observation_error = Some(format!(
+                            "ProjectClose emitted unexpected author/editor/hold/PCM work: {event:?}"
+                        ));
+                    }
+                    if let Err(error) = state.handle_audio_playback_event(event, Instant::now()) {
+                        observation_error.get_or_insert_with(|| {
+                            format!("original ProjectClose App event consumer: {error:?}")
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                observation_error = Some(format!("original ProjectClose Idle poll: {error:?}"));
+            }
+        }
+        no_editor_or_hold &= state.native_audio_editor.is_none()
+            && state.playback_engine.native_audio_control_hold_ticket().is_none()
+            && state.audio_playback.native_control_hold_generation().is_none()
+            && state.audio_playback.native_reprepare_pending_generation().is_none();
+        let released = matches!(
+            verifier.current_claim(),
+            Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+        ) && !state.audio_playback.native_editor_source_available()
+            && weak.upgrade().is_none();
+        if released || observation_error.is_some() || Instant::now() >= deadline {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    // These are frozen BEFORE shutdown_for_endurance can revoke the Source.
+    let claim_before_app_shutdown = verifier.current_claim();
+    let claim_released_before_app_shutdown = matches!(
+        &claim_before_app_shutdown,
+        Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+    );
+    let source_available_before_app_shutdown =
+        state.audio_playback.native_editor_source_available();
+    let renderer_released_before_app_shutdown = weak.upgrade().is_none();
+    let project_released_before_app_shutdown =
+        state.authoring.is_none() && state.active_sequence().is_none();
+    let snapshot_before_app_shutdown = state.audio_playback_snapshot();
+    no_pcm &= snapshot_before_app_shutdown.in_flight == 0
+        && snapshot_before_app_shutdown.next_start_sample == 0
+        && output.lock().queued == 0;
+    let target_released = claim_released_before_app_shutdown
+        && !source_available_before_app_shutdown
+        && renderer_released_before_app_shutdown
+        && project_released_before_app_shutdown;
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "case": "app-clap-project-close", "stage": "before-app-shutdown",
+            "close_error": close.as_ref().err(), "observation_error": observation_error,
+            "claim_observation": format!("{claim_before_app_shutdown:?}"),
+            "claim_not_installed": claim_released_before_app_shutdown,
+            "media_source_available": source_available_before_app_shutdown,
+            "renderer_released": renderer_released_before_app_shutdown,
+            "project_released": project_released_before_app_shutdown,
+            "target_released": target_released, "no_pcm": no_pcm,
+            "no_editor_or_hold": no_editor_or_hold,
+            "gui_qualified": false, "device_qualified": false,
+            "state_entry_qualified": false, "realtime_qualified": false,
+            "graceful_100ms_qualified": false
+        })
+    );
+
+    // All App/Media owners share this one cleanup deadline. Successful cleanup
+    // cannot replace any of the frozen ProjectClose observations above.
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    println!(
+        "ProjectClose test consuming cleanup: audio={:?}; non_audio_released={}",
+        cleanup.audio,
+        cleanup.all_non_audio_resources_released()
+    );
+    assert!(
+        cleanup.all_resources_released(),
+        "PROJECT_CLOSE_TEST_CLEANUP_HOLD: {cleanup:?}"
+    );
+    assert!(
+        weak.upgrade().is_none(),
+        "consuming cleanup releases the real final Runtime alias"
+    );
+    assert!(matches!(
+        verifier.current_claim(),
+        Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+    ));
+    assert!(
+        close.is_ok(),
+        "original ProjectClose failed before custody observation: {close:?}"
+    );
+    assert!(observation_error.is_none(), "{observation_error:?}");
+    assert!(
+        no_pcm,
+        "ProjectClose must not admit PCM or queue software output"
+    );
+    assert!(
+        no_editor_or_hold,
+        "NoGUI/no-author ProjectClose acquired an unrelated hold"
+    );
+    assert!(target_released,
+        "PROJECT_CLOSE_NATIVE_CUSTODY_BEFORE_APP_SHUTDOWN: claim={claim_before_app_shutdown:?}, media_source_available={source_available_before_app_shutdown}, renderer_released={renderer_released_before_app_shutdown}, project_released={project_released_before_app_shutdown}");
+}
