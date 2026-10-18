@@ -2106,6 +2106,58 @@ impl AppState {
         })
     }
 
+    fn compile_audio_author_closure(
+        &self,
+        session_id: AuthoringSessionId,
+        root: &Sequence,
+        sequences: &[Sequence],
+    ) -> mondrian_core::Result<mondrian_audio::AudioDependencyClosure> {
+        let output_id =
+            root.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
+                transport_action_error("audio_author_binding", "Sequence has no Program Output")
+            })?;
+        let request = mondrian_audio::AudioCompileRequest {
+            output_id,
+            audition: self.audio_monitoring.audition_overlay(session_id, root),
+        };
+        mondrian_audio::compile_full_audio_dependency_closure(root, sequences, request)
+            .map_err(|error| transport_action_error("audio_author_binding", error))
+    }
+
+    /// A busy Source can retain custody while an author-only edit publishes.
+    /// Compare the two author collections, not an absent or stale installed
+    /// binding. Sequence edits do not change the sample rate or Asset Library.
+    pub(super) fn validate_audio_authoring_candidate(
+        &self,
+        candidates: &[Sequence],
+        refusal: mondrian_core::MondrianError,
+    ) -> mondrian_core::Result<()> {
+        let Some((session_id, before)) = self.authoring_session_id().zip(self.active_sequence())
+        else {
+            return Ok(());
+        };
+        let comparison = (|| -> mondrian_core::Result<bool> {
+            let after =
+                candidates.iter().find(|sequence| sequence.id == before.id).ok_or_else(|| {
+                    transport_action_error(
+                        "audio_author_binding",
+                        "prepared collection lost the active Sequence",
+                    )
+                })?;
+            let before = self.compile_audio_author_closure(session_id, before, self.sequences())?;
+            let after = self.compile_audio_author_closure(session_id, after, candidates)?;
+            Ok(before == after)
+        })();
+        match comparison {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(refusal),
+            Err(error) => {
+                tracing::warn!(%error, "cannot establish unchanged audio for a busy author edit");
+                Err(refusal)
+            }
+        }
+    }
+
     fn current_audio_playback_author_binding(
         &self,
     ) -> mondrian_core::Result<Option<AudioPlaybackAuthorBinding>> {
@@ -2113,20 +2165,7 @@ impl AppState {
         else {
             return Ok(None);
         };
-        let output_id =
-            sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
-                transport_action_error("audio_author_binding", "Sequence has no Program Output")
-            })?;
-        let request = mondrian_audio::AudioCompileRequest {
-            output_id,
-            audition: self.audio_monitoring.audition_overlay(session_id, sequence),
-        };
-        let closure = mondrian_audio::compile_full_audio_dependency_closure(
-            sequence,
-            self.sequences(),
-            request,
-        )
-        .map_err(|error| transport_action_error("audio_author_binding", error))?;
+        let closure = self.compile_audio_author_closure(session_id, sequence, self.sequences())?;
         let asset_library_revision = if closure.media_components().is_empty() {
             None
         } else {

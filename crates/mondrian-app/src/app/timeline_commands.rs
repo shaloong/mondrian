@@ -377,6 +377,15 @@ impl AppState {
         description: impl Into<String>,
         edit: impl FnOnce(&mut Sequence) -> mondrian_core::Result<T>,
     ) -> mondrian_core::Result<T> {
+        let replacement_refusal = if self.parameter_gesture_command.is_none() {
+            self.validate_audio_source_replacement_admission(
+                "authoring_commit",
+                "audio Source replacement",
+            )
+            .err()
+        } else {
+            None
+        };
         let session = self.authoring.as_mut().ok_or_else(|| {
             mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "commit_sequence_edit".to_owned(),
@@ -393,7 +402,25 @@ impl AppState {
                     .edit_sequence_from_gesture_origin(gesture, sequence_id, description, edit)?,
             }
         } else {
-            session.edit_sequence(sequence_id, description, edit)?
+            let (value, prepared) =
+                session.prepare_sequence_edit(sequence_id, description, edit)?;
+            let commit = if let Some(prepared) = prepared {
+                if let Some(refusal) = replacement_refusal {
+                    self.validate_audio_authoring_candidate(
+                        prepared.candidate_sequences(),
+                        refusal,
+                    )?;
+                }
+                Some(
+                    self.authoring
+                        .as_mut()
+                        .expect("prepared edit retains its exclusive Authoring Session")
+                        .install_prepared_sequence_edit(prepared),
+                )
+            } else {
+                None
+            };
+            (value, commit)
         };
         if let Some(commit) = commit {
             self.consume_authoring_commit(commit)?;
