@@ -813,7 +813,9 @@ mod attachment_continuity_contracts {
             definition: mondrian_timeline::audio::AudioProcessorDefinitionRef::Clap {
                 plugin_id: "owned pending-open metadata".into(),
                 schema_version: 1,
-                binary_sha256: None,
+                // Author metadata admission requires a nonzero pinned revision;
+                // this ordinary control never resolves or loads that binary.
+                binary_sha256: Some([7; 32]),
             },
             bypassed: false,
             parameters: Default::default(),
@@ -919,7 +921,7 @@ mod attachment_continuity_contracts {
 
     #[test]
     fn pending_open_rejects_foreign_proposal_and_absent_or_foreign_open_intent() {
-        for case in 0..4 {
+        for case in 0..5 {
             let (_directory, mut state, proposal) = pending_open();
             let context = state.native_audio_editor.as_mut().unwrap();
             let proposal = match case {
@@ -943,6 +945,10 @@ mod attachment_continuity_contracts {
                         },
                         title: NativeAudioEditorTitle::new("Mondrian".to_owned()).unwrap(),
                     });
+                    proposal
+                }
+                4 => {
+                    context.queued = Some(Intent::Close { target: proposal.target() });
                     proposal
                 }
                 _ => unreachable!(),
