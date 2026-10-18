@@ -180,8 +180,16 @@ starts at the independently observed postcommit Engine anchor; the entire new
 window suffix is checked after the original quiescence acknowledgement clear.
 This deterministic software callback control does not verify the interval
 between consumption and that new anchor, physical/gapless output, the full UI
-pump or realtime scheduling. Generic DSP memory/tail continuity across the
-reconstruction remains unmeasured; mode0's finite history is PDC-recoverable.
+pump or realtime scheduling. Mode0's finite history is PDC-recoverable.
+A separate owned mode12 control (latency0, finite echo/tail256) fails with
+`HISTORY_DISCONTINUITY`: actual A=20248 and completed F=65536 cover the full
+256-frame witness; both old PCM scaled by the new fader and the independent
+echo formula require .20961826 where the first new sample is .1400718. All
+65280 new frames outside that witness and the original consuming cleanup pass.
+This is a known finite history defect, not a successful compatibility result
+or proof of a particular private reset call. Generic DSP/tail preservation
+remains unsupported by the reconstruction contract; a retained execution path
+must define its actual processing seam and preserve original Source ownership.
 The current App test build retains 25 warnings; normal Product has 10. No
 strict-build qualification is granted.
 
