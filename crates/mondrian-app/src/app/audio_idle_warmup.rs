@@ -283,6 +283,9 @@ impl AudioIdleWarmupExecutor for ProductionAudioIdleWarmupExecutor {
             key.channel_layout,
             key.chunk_frames,
             self.processor_resolver.as_ref(),
+            // This service owns a separate background execution lifetime.
+            // Playback's closure tracker cannot stand in for its own closure.
+            None,
         );
         if !asset_library_revision_matches(&revision_probe, key.binding.asset_library_revision)? {
             return Ok(AudioIdleWarmupExecutionOutcome::Superseded);

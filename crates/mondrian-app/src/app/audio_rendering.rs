@@ -95,6 +95,7 @@ impl TimelineAudioPcmRenderer {
             channel_layout,
             MAX_AUDIO_RENDER_BLOCK_FRAMES,
             &BuiltInAudioProcessorResolver,
+            None,
         )
     }
 
@@ -110,6 +111,7 @@ impl TimelineAudioPcmRenderer {
         channel_layout: AudioChannelLayout,
         max_block_frames: usize,
         processor_resolver: &dyn AudioProcessorResolver,
+        native_child_settlement: Option<mondrian_core::NativeChildSettlementRegistrar>,
     ) -> mondrian_core::Result<Self> {
         if max_block_frames == 0 {
             return Err(audio_render_error(
@@ -136,17 +138,17 @@ impl TimelineAudioPcmRenderer {
             sequence.audio_program.outputs.first().map(|output| output.id).ok_or_else(|| {
                 audio_render_error("timeline_audio_prepare", "Sequence has no Program Output")
             })?;
-        let runtime =
-            AudioProgramRuntime::build_with_compile_request_processor_resolver_and_resource_grant(
-                &sequence,
-                &sequences,
-                &resolver,
-                processor_resolver,
-                contract,
-                AudioCompileRequest { output_id, audition },
-                runtime_grant,
-            )
-            .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
+        let runtime = AudioProgramRuntime::build_observing_native_child_settlement(
+            &sequence,
+            &sequences,
+            &resolver,
+            processor_resolver,
+            contract,
+            AudioCompileRequest { output_id, audition },
+            runtime_grant,
+            native_child_settlement.as_ref(),
+        )
+        .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?;
         let continuity_model = match runtime
             .state_entry_origin()
             .map_err(|error| audio_render_error("timeline_audio_prepare", error.to_string()))?
@@ -167,7 +169,7 @@ impl TimelineAudioPcmRenderer {
             state: Mutex::new(TimelineAudioRenderState {
                 delivery,
                 generation: None,
-                native_child_settlement: None,
+                native_child_settlement,
             }),
             continuity_model,
             sample_rate,
@@ -981,6 +983,7 @@ mod tests {
                 AudioChannelLayout::Stereo,
                 max_block_frames,
                 &resolver,
+                None,
             )
         };
         assert!(
@@ -1090,6 +1093,7 @@ mod tests {
             }
             fn create(
                 &self,
+                _: Option<&mondrian_core::NativeChildSettlementRegistrar>,
             ) -> Result<
                 Box<dyn mondrian_audio::AudioProcessor>,
                 mondrian_audio::AudioProcessorHostError,
@@ -1177,6 +1181,7 @@ mod tests {
             AudioChannelLayout::Stereo,
             7,
             &Model,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1489,6 +1494,7 @@ mod tests {
             AudioChannelLayout::Stereo,
             MAX_AUDIO_RENDER_BLOCK_FRAMES,
             resolver,
+            None,
         )
         .expect("prepare native plugin preview");
         assert!(renderer.execution_demand().requires_execution());

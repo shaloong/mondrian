@@ -101,10 +101,24 @@ impl mondrian_core::NativeChildSettlementReporter for ForeignOwnerRetirementTrac
 }
 
 impl AudioPlayback {
-    pub(super) fn observe_native_child_settlement(&self, renderer: &Arc<dyn AudioPcmRenderer>) {
+    /// Observe cold renderer construction in this Playback's existing owner domain.
+    ///
+    /// Acquire before invoking any resolver or factory. Failure is already sticky
+    /// in the original tracker and must not become a new execution refusal. This
+    /// counted capability retains no Playback, device, renderer or child handle.
+    pub fn native_child_settlement_registrar(
+        &self,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementRegistrar,
+        mondrian_core::NativeChildSettlementError,
+    > {
         let reporter: Arc<dyn mondrian_core::NativeChildSettlementReporter> =
             self.foreign_owner_retirements.clone();
-        let registrar = match mondrian_core::NativeChildSettlementRegistrar::try_new(reporter) {
+        mondrian_core::NativeChildSettlementRegistrar::try_new(reporter)
+    }
+
+    pub(super) fn observe_native_child_settlement(&self, renderer: &Arc<dyn AudioPcmRenderer>) {
+        let registrar = match self.native_child_settlement_registrar() {
             Ok(registrar) => registrar,
             Err(_) => return, // The original reporter has already recorded failure.
         };

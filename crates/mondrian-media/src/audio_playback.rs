@@ -12102,6 +12102,62 @@ mod tests {
         }
 
         #[test]
+        fn cold_registrar_uses_original_prepare_domain_and_counts_uninstalled_owner() {
+            let (output, _) = fake_output();
+            let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+            let cold = playback.native_child_settlement_registrar().unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let renderer = Arc::new(RetainedScopeRenderer {
+                pcm: pcm(&requests),
+                registrar: Mutex::new(Some(cold)),
+            });
+            // The actual prepare observer must use this same original tracker.
+            playback
+                .prepare(
+                    sample_position(0),
+                    renderer.clone(),
+                    AudioPcmContinuityModel::IndependentWindows,
+                )
+                .unwrap();
+            let witness = playback.native_child_settlement_registrar().unwrap();
+            assert!(renderer.registrar.lock().as_ref().unwrap().same_domain(&witness));
+            drop(witness);
+            let evidence = playback.shutdown_and_wait();
+            assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+            assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+            assert_eq!(evidence.foreign_owner_panics, 0);
+            assert_eq!(evidence.foreign_owner_abandonments, 0);
+            drop(renderer);
+            assert!(!evidence.all_workers_terminated());
+        }
+
+        #[test]
+        fn cold_registrar_acquisition_failure_keeps_original_pcm_admission() {
+            let (output, _) = fake_output();
+            let mut playback = AudioPlayback::with_output(test_config(), output).unwrap();
+            assert!(playback.foreign_owner_retirements.seal());
+            assert!(matches!(
+                playback.native_child_settlement_registrar(),
+                Err(SettlementError::Closed)
+            ));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            playback
+                .prepare(
+                    sample_position(0),
+                    Arc::new(pcm(&requests)),
+                    AudioPcmContinuityModel::IndependentWindows,
+                )
+                .unwrap();
+            poll_until_settled(&mut playback, sample_position(0));
+            assert!(!requests.lock().is_empty());
+            let evidence = playback.shutdown_and_wait();
+            assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+            assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+            assert_eq!(evidence.foreign_owner_panics, 0);
+            assert_eq!(evidence.foreign_owner_abandonments, 0);
+        }
+
+        #[test]
         fn aggregate_unknown_is_unavailable_without_changing_pcm_admission() {
             for unknown in [false, true] {
                 let (output, _) = fake_output();

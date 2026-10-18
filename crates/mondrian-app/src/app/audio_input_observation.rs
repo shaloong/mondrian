@@ -455,6 +455,7 @@ pub(crate) mod tests {
         }
         fn create(
             &self,
+            _: Option<&mondrian_core::NativeChildSettlementRegistrar>,
         ) -> std::result::Result<Box<dyn mondrian_audio::AudioProcessor>, AudioProcessorHostError>
         {
             Err(AudioProcessorHostError::InstanceCreation(

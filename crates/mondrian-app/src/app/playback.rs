@@ -103,6 +103,17 @@ impl AppAudioPlayback {
         }
     }
 
+    fn native_child_settlement_registrar(
+        &self,
+    ) -> Option<mondrian_core::NativeChildSettlementRegistrar> {
+        match self {
+            // The same Media tracker has already recorded an acquisition error.
+            // Continue the original constructor; None never asserts no children.
+            Self::Available(playback) => playback.native_child_settlement_registrar().ok(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
     fn begin_endurance_shutdown(&mut self) {
         if let Self::Available(playback) = self {
             playback.begin_shutdown();
@@ -1725,6 +1736,7 @@ impl AppState {
             AUDIO_OUTPUT_LAYOUT,
             max_block_frames,
             self.audio_processor_resolver.as_ref(),
+            self.audio_playback.native_child_settlement_registrar(),
         )
         .map_err(|error| transport_action_error(action, error))?;
         renderer.bind_author_snapshot(
@@ -5576,6 +5588,7 @@ mod tests {
             }
             fn create(
                 &self,
+                _: Option<&mondrian_core::NativeChildSettlementRegistrar>,
             ) -> Result<
                 Box<dyn mondrian_audio::AudioProcessor>,
                 mondrian_audio::AudioProcessorHostError,
@@ -5679,6 +5692,7 @@ mod tests {
                     AudioChannelLayout::Stereo,
                     4,
                     &resolver,
+                    None,
                 )
                 .expect("actual Timeline/Delivery/Runtime ordinary resolver seam"),
             );
@@ -5861,6 +5875,13 @@ mod tests {
     fn product_audio_renderer_uses_available_playback_quantum_and_skips_unavailable() {
         struct Resolver(parking_lot::Mutex<Vec<usize>>);
         impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                // The only prepare branch directly forwards to the host built-in resolver.
+                mondrian_core::NativeChildSettlementRequirement::NotApplicable
+            }
+
             fn prepare(
                 &self,
                 request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
@@ -5868,6 +5889,7 @@ mod tests {
                 Arc<dyn mondrian_audio::AudioProcessorFactory>,
                 mondrian_audio::AudioProcessorHostError,
             > {
+                assert!(request.native_child_settlement_registrar().is_some());
                 self.0.lock().push(request.render_contract().max_block_frames);
                 mondrian_audio::BuiltInAudioProcessorResolver.prepare(request)
             }
@@ -5920,6 +5942,107 @@ mod tests {
             vec![7],
             "inactive path prepares nothing"
         );
+    }
+
+    fn observe_cold_product_renderer(fail_unknown: bool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Resolver {
+            calls: AtomicUsize,
+            fail_unknown: bool,
+        }
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                if self.fail_unknown {
+                    mondrian_core::NativeChildSettlementRequirement::Unavailable
+                } else {
+                    mondrian_core::NativeChildSettlementRequirement::NotApplicable
+                }
+            }
+
+            fn prepare(
+                &self,
+                request: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                assert!(
+                    request.native_child_settlement_registrar().is_some(),
+                    "the actual App constructor must observe before resolver entry"
+                );
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_unknown {
+                    Err(mondrian_audio::AudioProcessorHostError::InvalidContract(
+                        "cold-observation-control-original-error".to_owned(),
+                    ))
+                } else {
+                    mondrian_audio::BuiltInAudioProcessorResolver.prepare(request)
+                }
+            }
+        }
+        let mut state = state_with_sequence(20);
+        assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+        let mut sequence = state.active_sequence().unwrap().clone();
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            ),
+        );
+        state.test_set_sequence(Some(sequence));
+        let mut snapshot = audio_snapshot();
+        snapshot.active = false;
+        snapshot.buffered_frames = 0;
+        let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+            snapshot,
+            revision: 0,
+            acknowledged: 0,
+            auto_acknowledge: true,
+            queued: 0,
+        }));
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::with_output(
+                mondrian_media::AudioPlaybackConfig::product_default(),
+                Box::new(NativeHoldPlatformOutput(output)),
+            )
+            .unwrap(),
+        ));
+        let resolver = Arc::new(Resolver { calls: AtomicUsize::new(0), fail_unknown });
+        state.audio_processor_resolver = resolver.clone();
+        let result = state.audio_playback_renderer("cold construction control");
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        let prepared = if fail_unknown {
+            let error = result.err().expect("the original resolver still refuses");
+            assert!(error.to_string().contains("cold-observation-control-original-error"));
+            None
+        } else {
+            Some(result.expect("the original constructor succeeds").expect("gain executes"))
+        };
+        // No prepare/commit, Source binding or render has occurred. A returned
+        // cold renderer is nevertheless a live capability to own native children.
+        let evidence = state.audio_playback.shutdown_and_wait(48_000);
+        assert!(!evidence.all_workers_terminated());
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert_eq!(evidence.foreign_owner_panics, 0);
+        assert_eq!(evidence.foreign_owner_abandonments, 0);
+        drop(prepared);
+        assert!(
+            !evidence.all_workers_terminated(),
+            "the receipt stays immutable"
+        );
+    }
+
+    #[test]
+    fn product_cold_uninstalled_renderer_keeps_original_playback_scope_unresolved() {
+        observe_cold_product_renderer(false);
+    }
+
+    #[test]
+    fn product_cold_unknown_resolver_preserves_original_error_and_unresolved_evidence() {
+        observe_cold_product_renderer(true);
     }
 
     impl mondrian_media::AudioOutputAdapter for NativeHoldPlatformOutput {

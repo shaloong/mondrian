@@ -643,6 +643,21 @@ struct NativeAudioProcessorSpecResolver {
 }
 
 impl IsolatedAudioProcessorSpecResolver for NativeAudioProcessorSpecResolver {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        use mondrian_core::NativeChildSettlementRequirement as Requirement;
+        // Both concrete installed catalogs forward the request's short borrow
+        // through their actual fresh probe. Preserve an unknown inner contract.
+        if self.clap.native_child_settlement_requirement() == Requirement::Unavailable
+            || self.vst3.native_child_settlement_requirement() == Requirement::Unavailable
+        {
+            Requirement::Unavailable
+        } else {
+            Requirement::Required
+        }
+    }
+
     fn resolve(
         &self,
         request: AudioProcessorPrepareRequest<'_>,
