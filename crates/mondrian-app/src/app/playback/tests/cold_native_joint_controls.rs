@@ -1973,6 +1973,12 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
         ),
         open: true,
     };
+    let requested_locator = mondrian_core::NativeAudioEditorLocator {
+        sequence: payload.sequence_id,
+        instance: original.id,
+        owner: mondrian_core::NativeAudioEditorOccurrenceOwner::Output(native_output.id),
+        insertion: mondrian_core::NativeAudioEditorInsertion::PreFader,
+    };
     let engine_before = state.playback_engine.snapshot();
     let mut verifier = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
     let mut claim = verifier.current_claim().unwrap();
@@ -1984,7 +1990,17 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
     let mut closed = false;
     let mut native_object = None;
     let mut parameters: Option<mondrian_core::NativeAudioParameterObservation> = None;
+    // Test receipts only: the production Runtime retains the actual Source
+    // batch and naturally reoffers the same Arc after Opened. This local
+    // observation neither seeds App target nor resubmits/acknowledges anything.
+    let mut before_open: Option<mondrian_core::NativeAudioAuthorProposal> = None;
+    let mut pre_open_deliveries = 0_usize;
+    let mut pending_open_deferred = 0_usize;
+    let mut redelivered_after_open = false;
     let mut pending: Option<mondrian_core::NativeAudioAuthorProposal> = None;
+    let mut installed_awaiting = None;
+    let mut awaiting_ack_observations = 0_usize;
+    let mut installations = 0_usize;
     let mut proposals = 0_usize;
     let mut acknowledgements = 0_usize;
     let mut attachment = None;
@@ -2031,7 +2047,9 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                 0
             );
             for event in poll.events {
-                let mut accepted = None;
+                let mut published = None;
+                let mut deferred_before = None;
+                let mut ack_retry_before = None;
                 match &event {
                     AudioPlaybackEvent::NativeOwnerBindingsObserved {
                         renderer_id: actual,
@@ -2062,8 +2080,17 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                                 Outcome::Opened { target, width, height },
                             ) => {
                                 assert!(opened.is_none());
+                                assert_eq!(*locator, requested_locator);
                                 assert!(locator.matches_target(*target));
                                 assert_eq!(locator.sequence, payload.sequence_id);
+                                if let Some(early) = &before_open {
+                                    assert_eq!(
+                                        early.target(),
+                                        *target,
+                                        "actual Opened authenticates the deferred target"
+                                    );
+                                    assert_eq!(early.sequence(), locator.sequence);
+                                }
                                 assert_eq!(target.instance, original.id);
                                 assert_eq!(target.installed_generation, claim.generation());
                                 assert!(*width > 0 && *height > 0, "actual native GUI extent");
@@ -2118,16 +2145,84 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                         generation: observed,
                         proposal,
                     } => {
-                        assert_ne!(phase, 0, "pre-Open author work has no App editor consumer");
                         assert_eq!(Some(*actual), renderer_id);
                         assert_eq!(*observed, generation);
-                        assert_eq!(Some(proposal.target()), current_target);
                         assert_eq!(proposal.sequence(), payload.sequence_id);
-                        if let Some(previous) = &pending {
-                            assert!(previous.same_retained_proposal(proposal));
+                        if opened.is_none() {
+                            assert!(phase <= 1);
+                            assert!(current_target.is_none());
+                            assert!(pending.is_none());
+                            assert_eq!(acknowledgements, 0);
+                            assert!(requested_locator.matches_target(proposal.target()));
+                            assert_eq!(proposal.target().installed_generation, claim.generation());
+                            assert!(verifier.validate(&claim).is_ok());
+                            assert_eq!(
+                                state.native_audio_editor_surface_state(&payload),
+                                (false, phase == 1),
+                                "no attachment; only phase1 has actual queued ResolveAndOpen"
+                            );
+                            if let Some(facts) = &parameters {
+                                assert_eq!(facts.target(), proposal.target());
+                                assert_eq!(
+                                    Some((facts.process_id(), facts.object_serial())),
+                                    native_object
+                                );
+                            }
+                            if let Some(previous) = &before_open {
+                                assert!(previous.same_retained_proposal(proposal));
+                            } else {
+                                before_open = Some(proposal.as_ref().clone());
+                            }
+                            pre_open_deliveries = pre_open_deliveries.checked_add(1).unwrap();
+                            if phase == 1 {
+                                pending_open_deferred =
+                                    pending_open_deferred.checked_add(1).unwrap();
+                            }
+                            let author = state.authoring.as_ref().unwrap();
+                            deferred_before = Some((
+                                author.author_generation(),
+                                author.history().diagnostics(),
+                                author.is_dirty(),
+                                serde_json::to_value(
+                                    &state.active_sequence().unwrap().audio_program.outputs[0]
+                                        .strip
+                                        .pre_fader
+                                        .processors[0],
+                                )
+                                .unwrap(),
+                            ));
                         } else {
-                            proposals = proposals.checked_add(1).unwrap();
-                            pending = Some(proposal.as_ref().clone());
+                            if !redelivered_after_open && let Some(early) = &before_open {
+                                assert!(
+                                    early.same_retained_proposal(proposal),
+                                    "the Runtime naturally reoffers its original held Arc"
+                                );
+                                redelivered_after_open = true;
+                            }
+                            if let Some(previous) = &pending {
+                                assert!(previous.same_retained_proposal(proposal));
+                                if let Some(installed) = installed_awaiting {
+                                    assert_eq!(current_target, Some(installed));
+                                    let author = state.authoring.as_ref().unwrap();
+                                    ack_retry_before = Some((
+                                        author.author_generation(),
+                                        author.history().diagnostics(),
+                                        serde_json::to_value(
+                                            &state.active_sequence().unwrap().audio_program.outputs
+                                                [0]
+                                            .strip
+                                            .pre_fader
+                                            .processors[0],
+                                        )
+                                        .unwrap(),
+                                    ));
+                                }
+                            } else {
+                                assert_eq!(Some(proposal.target()), current_target);
+                                assert!(installed_awaiting.is_none());
+                                proposals = proposals.checked_add(1).unwrap();
+                                pending = Some(proposal.as_ref().clone());
+                            }
                         }
                     }
                     AudioPlaybackEvent::NativeAuthorHandoffObserved {
@@ -2142,8 +2237,18 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                             .as_ref()
                             .expect("actual proposal before handoff")
                             .same_retained_proposal(proposal));
-                        let Status::Acknowledged { target, continuity } = status else {
-                            panic!("initialization prefix must install and exact Ack: {status:?}");
+                        let (target, continuity, acknowledged) = match status {
+                            Status::Acknowledged { target, continuity } => {
+                                (target, continuity, true)
+                            }
+                            Status::InstalledAwaitingAcknowledgement { target, continuity } => {
+                                awaiting_ack_observations =
+                                    awaiting_ack_observations.checked_add(1).unwrap();
+                                (target, continuity, false)
+                            }
+                            Status::Refused(reason) => {
+                                panic!("initialization prefix must settle, never hide refusal: {reason:?}")
+                            }
                         };
                         assert_eq!(*continuity, Continuity::Preserved);
                         let previous = current_target.unwrap();
@@ -2151,10 +2256,26 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                         assert_eq!(target.local_session, previous.local_session);
                         assert_eq!(target.instance, previous.instance);
                         assert_eq!(target.continuity_epoch, previous.continuity_epoch);
-                        current_target = Some(**target);
-                        accepted = Some((**target, proposal.state().cloned()));
-                        pending = None;
-                        acknowledgements = acknowledgements.checked_add(1).unwrap();
+                        if let Some(installed) = installed_awaiting {
+                            assert_eq!(
+                                **target, installed,
+                                "Ack retry cannot install a second target/transaction"
+                            );
+                            assert_eq!(current_target, Some(installed));
+                            assert_eq!(target.installed_generation, claim.generation());
+                            assert!(verifier.validate(&claim).is_ok());
+                        } else {
+                            current_target = Some(**target);
+                            published = Some((**target, proposal.state().cloned()));
+                            installations = installations.checked_add(1).unwrap();
+                        }
+                        if acknowledged {
+                            installed_awaiting = None;
+                            pending = None;
+                            acknowledgements = acknowledgements.checked_add(1).unwrap();
+                        } else {
+                            installed_awaiting = Some(**target);
+                        }
                     }
                     AudioPlaybackEvent::NativeEditorAttachmentObserved {
                         renderer_id: actual,
@@ -2184,7 +2305,61 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                 state
                     .handle_audio_playback_event(event, Instant::now())
                     .expect("original canonical App proposal/install/Ack consumer");
-                if let Some((target, accepted_state)) = accepted {
+                if let Some((author_generation, history, dirty, instance)) = deferred_before {
+                    let author = state.authoring.as_ref().unwrap();
+                    assert_eq!(author.author_generation(), author_generation);
+                    assert_eq!(author.history().diagnostics(), history);
+                    assert_eq!(author.is_dirty(), dirty);
+                    assert_eq!(
+                        serde_json::to_value(
+                            &state.active_sequence().unwrap().audio_program.outputs[0]
+                                .strip
+                                .pre_fader
+                                .processors[0],
+                        )
+                        .unwrap(),
+                        instance
+                    );
+                    assert_eq!(
+                        state.native_audio_editor_surface_state(&payload),
+                        (false, phase == 1)
+                    );
+                    assert!(current_target.is_none());
+                    assert!(pending.is_none());
+                    assert_eq!(acknowledgements, 0);
+                    assert!(verifier.validate(&claim).is_ok());
+                    let current = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+                    assert!(verifier.same_source(&current));
+                    assert!(verifier.same_registration(&current));
+                    assert_eq!(
+                        current.current_claim().unwrap().generation(),
+                        claim.generation()
+                    );
+                }
+                if let Some((author_generation, history, instance)) = ack_retry_before {
+                    let author = state.authoring.as_ref().unwrap();
+                    assert_eq!(author.author_generation(), author_generation);
+                    assert_eq!(author.history().diagnostics(), history);
+                    assert_eq!(
+                        serde_json::to_value(
+                            &state.active_sequence().unwrap().audio_program.outputs[0]
+                                .strip
+                                .pre_fader
+                                .processors[0],
+                        )
+                        .unwrap(),
+                        instance,
+                        "redelivery queues only the original exact Ack"
+                    );
+                    let current = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+                    assert!(verifier.same_source(&current));
+                    assert!(verifier.same_registration(&current));
+                    assert_eq!(
+                        current.current_claim().unwrap().generation(),
+                        claim.generation()
+                    );
+                }
+                if let Some((target, accepted_state)) = published {
                     let next = weak
                         .upgrade()
                         .expect("same original Timeline")
@@ -2229,16 +2404,23 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
                 .is_some_and(|actual| std::sync::Weak::ptr_eq(actual, &weak)));
             assert_eq!(state.playback_engine.snapshot(), engine_before);
             assert!(state.playback_engine.native_audio_control_hold_ticket().is_none());
-            assert!(state.audio_playback.native_control_hold_generation().is_none());
+            assert_eq!(
+                state.audio_playback.native_control_hold_generation(),
+                pending.as_ref().map(|_| generation),
+                "only the queued exact author receipt may retain AuthorPending"
+            );
             assert!(state.audio_playback.native_reprepare_pending_generation().is_none());
             assert_eq!(output.lock().queued, 0);
             let settled = pending.is_none()
+                && installed_awaiting.is_none()
                 && proposals == acknowledgements
+                && installations == acknowledgements
                 && state.authoring.as_ref().unwrap().history().diagnostics().pending_entries == 0;
             let complete = match phase {
                 0 => renderer_id.is_some(),
                 1 => {
                     opened.is_some()
+                        && (before_open.is_none() || redelivered_after_open)
                         && settled
                         && parameters
                             .as_ref()
@@ -2346,10 +2528,25 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
             }
         }
     }
+    if before_open.is_some() {
+        assert!(
+            redelivered_after_open,
+            "actual Opened precedes natural redelivery, canonical install and exact Ack"
+        );
+    }
+    // Natural scheduling is not forced to produce an early callback. Record
+    // whether this run actually covered pending-Open deferral; portable
+    // consumer controls cover that branch deterministically.
+
     assert_eq!(
         proposals, acknowledgements,
-        "every actual initialization receipt exact-Acked"
+        "every actual initialization receipt exact-Acked once, not once per reoffer"
     );
+    assert_eq!(
+        installations, acknowledgements,
+        "one canonical installation per exact acknowledged prefix"
+    );
+    assert!(installed_awaiting.is_none());
     assert!(pending.is_none());
     for window in windows {
         assert_eq!(
@@ -2384,6 +2581,11 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
         serde_json::json!({
             "case": "app-surge-fx-editor", "descriptor_version": descriptor_version,
             "initialization_proposals": proposals, "exact_acknowledgements": acknowledgements,
+            "pre_open_deliveries": pre_open_deliveries,
+            "pending_open_deferred": pending_open_deferred,
+            "installations": installations,
+            "installed_awaiting_ack_observations": awaiting_ack_observations,
+            "same_retained_redelivered_after_open": redelivered_after_open,
             "opened": true, "closed": closed, "same_native_object": true,
             "pcm_qualified": false, "device_qualified": false, "author_edit_stimulus": false,
             "algorithm_qualified": false, "realtime_qualified": false
