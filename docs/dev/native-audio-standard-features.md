@@ -238,7 +238,7 @@ unless the row explicitly identifies an accepted core/output behavior gap.
 | [latency](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/latency.h) | P plugin latency queried activated on main role; N host changed callback; CD/CW | Dynamic restart/reconfigure at legal inactive boundary with new canonical PDC, not active mutation. |
 | [tail](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/tail.h) | P plugin finite/infinite tail queried audio role, exact admission; N host changed callback | Dynamic tail observation/schedule update, sleep/wake and export termination policy. |
 | [thread-check](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/thread-check.h) | P/S host declaration: fixed main OS identity and instance-owned exclusive inline/scoped audio-role identity with !Send/!Sync guard; CW | The Windows source assigns audio identity to the actual scoped DSP thread; main-only services use fixed main identity even when inline main/audio roles coincide. Discovery/inline controls do not qualify the new GUI/DSP workflow or future thread-pool roles. |
-| [gui](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/gui.h) | P finite Windows embedded Win32 GUI on the same loaded CLAP object, borrowed real parent HWND and main OS pump; host resize/scale remain negotiated | Q Windows x64 owned fixed-size DLL and normal-Product App Ready/Open/G/three callbacks/4B author transaction/one Undo entry/same-Source new binding/exact Ack/current facts/Close pass; see the compatibility report. Floating and other platform APIs, broader vendor GUI, resize/DPI/focus/keyboard coverage, Undo execution/save/reopen and realtime remain unqualified. |
+| [gui](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/gui.h) | P finite Windows embedded Win32 GUI on the same loaded CLAP object, borrowed real parent HWND and main OS pump; host resize/scale remain negotiated | Q Windows x64 owned DLL/App scalar editing and a separate real Surge XT Effects 1.3.4 App lifecycle pass; see the qualification below and compatibility report. Floating and other platform APIs, broader vendor GUI, resize/DPI/focus/keyboard coverage, Undo execution/save/reopen and realtime remain unqualified. |
 | [timer-support](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/timer-support.h) | S: bounded Windows main registration/unregistration and idle plugin timer delivery; timers persist independently of GUI close until actual unregister or plugin teardown | Matching native timer/lifecycle qualification remains pending; non-Windows main services and timer consumers remain incomplete. |
 | [posix-fd-support](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/posix-fd-support.h) | Conditional N on POSIX | FD readiness/lifetime/event-loop integration, unregister/teardown races. |
 | [note-ports](https://github.com/free-audio/clap/blob/195b42a004144fab0b3cf95e9c067187d15365b7/include/clap/ext/note-ports.h) | P/R: inactive input metadata capped at32 before allocation/get; absent/zero inputs, unsigned native IDs and restored binary/state identity retained. Admitted processing uses one same-instance offer and conditionally exposes one raw HostNotePorts table for the CLAP Note dialect; canonical port IDs resolve to native indices through existing dispatch | Q finite Windows owned public Runtime DSP with two ports, including a high unsigned ID and the fixed zero-audio-input mono/offline case; [qualification](native-plugin-compatibility.md#implementation-boundary). Metadata-only discovery does not promise processing. Note outputs, other dialects, general instrument support, third-party/RT and App Playback/Export qualification remain incomplete; dynamic rescan/restart requires a fresh legal contract. |
@@ -423,6 +423,18 @@ state, one Undo entry and the original same-Source author/install/exact Ack path
 The new target retains the native PID/object and reports .75 / `75.00 %`; PCM
 generation, transport cursor and queued frames remain unchanged at zero work.
 Two ordinary fixture transport controls, the unchanged two-mode real-DLL PCM gate,
-App76 and the four original VST3 setup gates pass. This qualifies the fixed
+App82 and the four original VST3 setup gates pass. This qualifies the fixed
 owned scalar case, not third-party GUI, Undo execution/save/reopen, physical UX,
 realtime, whole-process allocation or other-platform behavior.
+
+The separate real Surge XT Effects 1.3.4 App gate passes Open/Close and explicit
+Audio shutdown on Windows x64. It observes one proposal before Opened, then the
+Runtime's natural redelivery of the same retained proposal and six initialization
+installations/exact acknowledgements on the same native object. The App defers
+only an exact pending ResolveAndOpen with current Session/processor metadata;
+it grants no target, renderer or author transaction before actual Opened.
+The ignored `app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source`
+control uses `MONDRIAN_SURGE_XT_EFFECTS_CLAP_TEST_PLUGIN` and the matching normal
+Product helper. This is Idle lifecycle qualification without deliberate editing,
+device/PCM, resize, performance or other-platform evidence. InstalledAwaiting
+was not observed; the earlier panic-unwind outlive remains a separate open boundary.
