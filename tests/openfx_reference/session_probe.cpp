@@ -2058,10 +2058,58 @@ void legacyPriorityError(const void* handle, LegacyPriorityState& state) {
   state.posted = true;
 }
 
+// This mode delegates the identity decision to the untouched official Basic
+// implementation. It never fetches Output or manufactures a Render receipt.
+OfxStatus currentSourceIdentity(const void* handle, OfxPropertySetHandle in,
+                                OfxPropertySetHandle out) {
+  double time = -1.0, currentTime = -1.0, renderScale[2]{};
+  const auto* timeline = auxTimelineSuite();
+  bool valid = timeline && canonicalProgressiveContract(handle, in) &&
+      timeline->getTime(const_cast<void*>(handle), &currentTime) == kOfxStatOK &&
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) == kOfxStatOK &&
+      (time == 0.0 || time == 1.0 || time == 2.0) && currentTime == time &&
+      gPropHost->propGetDoubleN(in, kOfxImageEffectPropRenderScale, 2, renderScale) == kOfxStatOK &&
+      renderScale[0] == 1.0 && renderScale[1] == 1.0;
+  const auto stringIs = [](OfxPropertySetHandle properties, const char* name, const char* expected) {
+    char* value = nullptr;
+    return gPropHost->propGetString(properties, name, 0, &value) == kOfxStatOK && value &&
+        std::strcmp(value, expected) == 0;
+  };
+  for (const char* name : {kOfxImageEffectSimpleSourceClipName, kOfxImageEffectOutputClipName}) {
+    OfxImageClipHandle clip = nullptr;
+    OfxPropertySetHandle properties = nullptr;
+    OfxRectD rod{};
+    double par = 0.0;
+    valid = valid && gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, name, &clip,
+        &properties) == kOfxStatOK && clip && properties &&
+        gEffectHost->clipGetRegionOfDefinition(clip, time, &rod) == kOfxStatOK &&
+        rod.x1 == 0.0 && rod.y1 == 0.0 && rod.x2 == 6.0 && rod.y2 == 2.0 &&
+        gPropHost->propGetDouble(properties, kOfxImagePropPixelAspectRatio, 0, &par) == kOfxStatOK &&
+        par == 2.0 && stringIs(properties, kOfxImageEffectPropPixelDepth, kOfxBitDepthFloat) &&
+        stringIs(properties, kOfxImageEffectPropComponents, kOfxImageComponentRGBA) &&
+        stringIs(properties, kOfxImageEffectPropPreMultiplication, kOfxImageUnPreMultiplied);
+  }
+  const auto result = valid ? pluginMain(kOfxImageEffectActionIsIdentity, handle, in, out) : kOfxStatFailed;
+  valid = valid && result == (time == 1.0 ? kOfxStatReplyDefault : kOfxStatOK);
+  double outputTime = -1.0;
+  valid = valid && gPropHost->propGetDouble(out, kOfxPropTime, 0, &outputTime) == kOfxStatOK &&
+      outputTime == time;
+  if (result == kOfxStatOK) {
+    valid = valid && stringIs(out, kOfxPropName, kOfxImageEffectSimpleSourceClipName);
+  }
+  describeActionReceipt("identity-current", "contract", 1, valid ? 1 : 0, result);
+  return valid ? result : kOfxStatFailed;
+}
+
 OfxStatus probeAction(const char* action, const void* handle,
                 OfxPropertySetHandle in, OfxPropertySetHandle out) {
   const std::string operation(action);
   const std::string selected = mode();
+  if (operation == kOfxImageEffectActionIsIdentity) {
+    // The other fixture modes test their real Render work, including pixel
+    // overrides after Basic. Opt out of this optional optimization explicitly.
+    return selected == "identity_current" ? currentSourceIdentity(handle, in, out) : kOfxStatReplyDefault;
+  }
   if (temporalClipAdmissionMode(selected)) {
     if (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender) { std::abort(); }
     if (operation == kOfxImageEffectActionDescribeInContext) {
@@ -2608,6 +2656,9 @@ OfxStatus probe(const char* action, const void* handle,
   if (mode() == "optional_unmapped" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "identity_current" && std::strcmp(action, kOfxImageEffectActionIsIdentity) == 0) {
+    observed = action;
+  }
   const char* directory = std::getenv("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY");
   const bool observing = directory && *directory;
   static std::atomic<const void*> describedBase{nullptr}, describedContext{nullptr};

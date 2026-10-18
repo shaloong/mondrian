@@ -4711,6 +4711,174 @@ fn assert_fixed_canvas_literal(actual: &EffectFloatFrame, phase: usize) {
     }
 }
 
+#[test]
+#[ignore = "requires current Product, SessionProbe identity_current and an empty action-receipt directory"]
+fn product_worker_obeys_current_source_identity_and_default_render() {
+    use std::io::Read;
+    let directory = PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_DESCRIBE_ACTION_RECEIPT_DIRECTORY")
+            .expect("new empty native action directory"),
+    );
+    assert!(directory.is_absolute() && directory.is_dir());
+    assert!(std::fs::read_dir(&directory).expect("action directory").next().is_none());
+    let inspection = cpu_contract_probe("identity_current");
+    assert_eq!(inspection.plugins.len(), 1);
+    // Independent dyadic tables: signed/HDR RGB, unequal rows/channels and
+    // varied straight alpha (including nonzero RGB at alpha zero).
+    const SOURCES: [[[f32; 4]; 6]; 3] = [
+        [
+            [-0.5, 2.0, 0.125, 0.5],
+            [3.0, -2.0, 0.25, 0.25],
+            [0.125, 8.0, -4.0, 0.0],
+            [1.5, -0.25, 4.0, 1.0],
+            [-8.0, 0.5, 2.0, 0.75],
+            [2.0, -4.0, 0.0625, 0.125],
+        ],
+        [
+            [2.0, -1.0, 0.5, 0.5],
+            [-0.25, 4.0, 2.0, 0.25],
+            [8.0, -2.0, 0.125, 0.0],
+            [-4.0, 1.5, 0.25, 1.0],
+            [0.5, -8.0, 4.0, 0.75],
+            [1.0, -0.125, -2.0, 0.125],
+        ],
+        [
+            [-2.0, 0.125, 8.0, 0.25],
+            [0.25, 2.0, -0.5, 0.5],
+            [4.0, -8.0, 1.0, 1.0],
+            [0.5, 1.5, -4.0, 0.0],
+            [-1.0, 4.0, 0.0625, 0.125],
+            [8.0, -0.5, 2.0, 0.75],
+        ],
+    ];
+    const HALF: [[f32; 4]; 6] = [
+        [1.0, -0.5, 0.25, 0.25],
+        [-0.125, 2.0, 1.0, 0.125],
+        [4.0, -1.0, 0.0625, 0.0],
+        [-2.0, 0.75, 0.125, 0.5],
+        [0.25, -4.0, 2.0, 0.375],
+        [0.5, -0.0625, -1.0, 0.0625],
+    ];
+    let format = cpu_contract_input().format();
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        "uk.co.thefoundry.BasicGainPlugin",
+        3,
+        2,
+        format,
+        &mut || Ok(()),
+    )
+    .expect("one actual current-source identity resident");
+    let pid = session.worker_process_id();
+    for (phase, pixels) in SOURCES.into_iter().enumerate() {
+        let input = EffectFloatFrame::from_pixels(
+            mondrian_effects::EffectFrameExtent::new(3, 2),
+            format,
+            pixels.to_vec(),
+        )
+        .expect("literal Float32 straight Source");
+        let original = input.clone();
+        let timing = OpenFxRenderTiming { frame: phase as f64, ..cpu_contract_timing(2.0) };
+        let parameters = constant_parameters([(
+            "scale".to_owned(),
+            OpenFxParameterValue::Double(if phase == 1 { 0.5 } else { 1.0 }),
+        )]);
+        let output = session
+            .render(&timing, &parameters, &input, &mut || Ok(()))
+            .expect("identity, default Render, then identity on the same resident");
+        assert_eq!(session.worker_process_id(), pid);
+        assert_eq!(
+            (output.width(), output.height(), output.format()),
+            (3, 2, format)
+        );
+        let expected = if phase == 1 { &HALF } else { &pixels };
+        assert_eq!(output.pixels().len(), expected.len());
+        for (index, (actual, expected)) in output.pixels().iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.map(f32::to_bits),
+                expected.map(f32::to_bits),
+                "phase {phase}, pixel {index}"
+            );
+        }
+        assert_eq!(input, original, "supplied Source remains immutable");
+    }
+    let read_actions = || -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(directory.join(format!("actions-{pid}.txt")))?
+            .take(4097)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    // Save the actual action facts without panicking, then always attempt the
+    // original cleanup before the target assertion. Keep a simultaneous old
+    // shutdown failure visible rather than mislabeling it as this target RED.
+    let action_bytes = read_actions();
+    let shutdown = session.shutdown();
+    let bytes = action_bytes.expect("bounded actual resident receipt, not a discovery PID");
+    assert!(!bytes.is_empty() && bytes.len() <= 4096 && bytes.is_ascii());
+    let text = std::str::from_utf8(&bytes).expect("fixed ASCII rows");
+    assert!(text.ends_with('\n'), "no incomplete final row");
+    let rows: Vec<_> = text.lines().collect();
+    assert!(rows.len() <= 32);
+    let mut ordered = Vec::new();
+    let mut queries = 0;
+    let mut renders = 0;
+    for (index, row) in rows.iter().enumerate() {
+        let fields: Vec<_> = row.split_whitespace().collect();
+        assert_eq!(fields.len(), 9);
+        assert_eq!(fields[0].parse::<usize>().expect("ordinal"), index + 1);
+        assert_eq!(&fields[1..3], ["D=0", "I=0"]);
+        assert_eq!(fields[8], "complete=1");
+        if fields[3] == "OfxImageEffectActionIsIdentity"
+            || fields[3] == "OfxImageEffectActionRender"
+            || fields[3] == "identity-current"
+        {
+            queries +=
+                usize::from(fields[3] == "OfxImageEffectActionIsIdentity" && fields[4] == "enter");
+            renders +=
+                usize::from(fields[3] == "OfxImageEffectActionRender" && fields[4] == "enter");
+            ordered.push(fields[3..].join(" "));
+        }
+    }
+    assert_eq!(
+        (queries, renders),
+        (3, 1),
+        "current-source identity query/render contract; original shutdown result: {shutdown:?}"
+    );
+    shutdown.expect("same resident closes and reaps within the original budget");
+    let closed_bytes = read_actions().expect("bounded closed resident receipt");
+    assert!(closed_bytes.len() <= 4096 && closed_bytes.is_ascii());
+    let closed = std::str::from_utf8(&closed_bytes).expect("closed ASCII rows");
+    assert!(
+        closed.starts_with(text),
+        "original action rows are retained"
+    );
+    assert!(closed.lines().count() <= 32);
+    assert!(
+        closed.ends_with(" OfxActionUnload return attempted=0 accepted=0 status=0 complete=1\n")
+    );
+    assert_eq!(
+        ordered,
+        [
+            "OfxImageEffectActionIsIdentity enter attempted=0 accepted=0 status=0 complete=1",
+            "identity-current contract attempted=1 accepted=1 status=0 complete=1",
+            "OfxImageEffectActionIsIdentity return attempted=0 accepted=0 status=0 complete=1",
+            "OfxImageEffectActionIsIdentity enter attempted=0 accepted=0 status=0 complete=1",
+            "identity-current contract attempted=1 accepted=1 status=14 complete=1",
+            "OfxImageEffectActionIsIdentity return attempted=0 accepted=0 status=14 complete=1",
+            "OfxImageEffectActionRender enter attempted=0 accepted=0 status=0 complete=1",
+            "OfxImageEffectActionRender return attempted=0 accepted=0 status=0 complete=1",
+            "OfxImageEffectActionIsIdentity enter attempted=0 accepted=0 status=0 complete=1",
+            "identity-current contract attempted=1 accepted=1 status=0 complete=1",
+            "OfxImageEffectActionIsIdentity return attempted=0 accepted=0 status=0 complete=1",
+        ],
+        "real ordered action calls, with no fabricated Output fetch"
+    );
+    // This public session gate does not observe a private raw output sentinel,
+    // off-time/other-clip identities, graph caching or performance.
+}
+
 fn assert_fixed_canvas_actions(directory: &Path, pid: u32) {
     use std::io::Read;
     let path = directory.join(format!("actions-{pid}.txt"));
