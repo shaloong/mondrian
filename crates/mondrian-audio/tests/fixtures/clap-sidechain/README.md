@@ -85,3 +85,26 @@ process callback. The independent original sidechain PCM and latency3 remain
 unchanged. The process callback allocates, waits and spawns no threads.
 These are legal log callbacks; separate defensive controls for invalid UTF-8,
 null strings and unknown signed severities are not conforming-vendor evidence.
+
+
+## Finite echo history (state mode 12)
+
+Modes 0–11 retain their existing PCM, state and extension contracts. Mode12
+keeps the same ports and five-byte mode/gain configuration, but has latency0
+and finite tail256. After the original sidechain mix and gain, its native DSP
+is `y[n] = x[n] + 0.5*x[n-256]`. The stereo ring has 2048 bytes of sample data
+plus its cursor and allocation; reset and a fresh activation clear it. State
+does not include the ring. The local impulse and cold/reset controls exercise
+the same DSP helper used by actual native processing.
+
+The ignored App selector
+`native_clap_playing_host_fader_preserves_finite_echo_history` uses the actual
+Product fader action and software Output. It requires an observed postcommit
+anchor A >= 256 and checked A+256 <= the old completed public frontier F; the
+fixed workload does not guarantee this on every machine. `NOT_COVERED_ECHO_HISTORY`
+fails the gate when that prerequisite is absent. With complete old/new windows,
+the first 256 new samples are checked against both old actual PCM scaled by the
+new Host fader and the independent absolute-sample echo formula. Only
+`HISTORY_DISCONTINUITY`, with all other checks and cleanup complete, identifies
+that finite output-history failure. It does not prove a private ring/reset
+cause, exact create counts, native migration, arbitrary tails or hardware audio.

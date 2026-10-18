@@ -135,6 +135,7 @@ impl Shared<'_> {
 
     fn next_activation_delay_frames(&self) -> u32 {
         match self.mode.load(Ordering::Relaxed) {
+            12 => 0,
             3 if self.render_mode.load(Ordering::Relaxed) == 1 => 5,
             7..=9 if self.restart_seen.load(Ordering::Relaxed) => 7,
             _ => 3,
@@ -178,10 +179,7 @@ impl PluginStateImpl for Main<'_> {
         self.0.check_role(RoleRequirement::Main)?;
         let mut bytes = [0; 5];
         input.read_exact(&mut bytes)?;
-        let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        if bytes[0] > 11 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
-            return Err(PluginError::Message("invalid fixture state"));
-        }
+        let gain = configuration_gain(bytes)?;
         let restart_seen = if (7..=9).contains(&bytes[0]) {
             let mut flag = [0];
             input.read_exact(&mut flag)?;
@@ -267,11 +265,49 @@ impl PluginAudioPortsImpl for Main<'_> {
     }
 }
 
+const ECHO_FRAMES: usize = 256;
+
+// Only the existing five-byte mode/gain header is configuration. Modes 7–9
+// retain their separate restart flag; mode12 never serializes its live ring.
+fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
+    let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    if bytes[0] > 12 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+        return Err(PluginError::Message("invalid fixture state"));
+    }
+    Ok(gain)
+}
+
+// The 2048-byte stereo ring belongs to this native DSP instance. Latency is
+// zero: a tap is audible history, not a delay for the host to compensate.
+struct FiniteEcho {
+    ring: [[f32; 2]; ECHO_FRAMES],
+    cursor: usize,
+}
+
+impl FiniteEcho {
+    fn new() -> Self {
+        Self { ring: [[0.0; 2]; ECHO_FRAMES], cursor: 0 }
+    }
+
+    fn process_frame(&mut self, current: [f32; 2]) -> [f32; 2] {
+        let tap = self.ring[self.cursor];
+        self.ring[self.cursor] = current;
+        self.cursor = (self.cursor + 1) % ECHO_FRAMES;
+        [current[0] + 0.5 * tap[0], current[1] + 0.5 * tap[1]]
+    }
+
+    fn reset(&mut self) {
+        self.ring.fill([0.0; 2]);
+        self.cursor = 0;
+    }
+}
+
 /// Prepared PCM, mode-specific delay and independent transport qualification.
 pub struct Processor<'a> {
     shared: &'a Shared<'a>,
     mix: Vec<[f32; 2]>,
     delay: Vec<[f32; 2]>,
+    echo: Option<Box<FiniteEcho>>,
     cursor: usize,
     mode: u8,
     gain: f32,
@@ -280,7 +316,9 @@ pub struct Processor<'a> {
 
 impl PluginTailImpl for Processor<'_> {
     fn get(&self) -> TailLength {
-        if self.shared.check_role(RoleRequirement::MainOrAudio).is_ok() { TailLength::Finite(self.delay.len() as u32) }
+        if self.shared.check_role(RoleRequirement::MainOrAudio).is_ok() {
+            TailLength::Finite(if self.mode == 12 { ECHO_FRAMES as u32 } else { self.delay.len() as u32 })
+        }
         else { TailLength::Infinite }
     }
 }
@@ -316,6 +354,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             sample_rate: config.sample_rate as u32,
             mix: vec![[0.0; 2]; config.max_frames_count as usize],
             delay: vec![[0.0; 2]; shared.delay_frames()],
+            echo: (shared.mode.load(Ordering::Relaxed) == 12).then(|| Box::new(FiniteEcho::new())),
             cursor: 0,
             mode: shared.mode.load(Ordering::Relaxed),
             gain: f32::from_bits(shared.gain.load(Ordering::Relaxed))
@@ -332,6 +371,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         let _ = self.shared.check_role(RoleRequirement::Audio);
         self.delay.fill([0.0; 2]);
         self.cursor = 0;
+        if let Some(echo) = self.echo.as_mut() { echo.reset(); }
     }
 
     fn start_processing(&mut self) -> Result<(), PluginError> {
@@ -423,10 +463,16 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
                 let tempo = process.transport.ok_or(PluginError::Message("missing tempo"))?.tempo as f32;
                 self.gain + (sample % 251) as f32 / 1024.0 + tempo / 1024.0
             } else if timeline_start.is_some() { self.gain + tag } else { self.gain };
-            let delayed = self.delay[self.cursor];
-            self.delay[self.cursor] = [frame[0] * gain, frame[1] * gain];
-            *frame = delayed;
-            self.cursor = (self.cursor + 1) % self.delay.len();
+            if let Some(echo) = self.echo.as_mut() {
+                *frame = echo.process_frame([frame[0] * gain, frame[1] * gain]);
+            } else {
+                // Original modes retain their exact delay path. Mode12's
+                // latency0 never indexes or takes modulo an empty delay Vec.
+                let delayed = self.delay[self.cursor];
+                self.delay[self.cursor] = [frame[0] * gain, frame[1] * gain];
+                *frame = delayed;
+                self.cursor = (self.cursor + 1) % self.delay.len();
+            }
         }
         let mut output =
             audio.output_ports().next().ok_or(PluginError::Message("missing output"))?;
@@ -488,5 +534,55 @@ mod role_contract_tests {
                     "{requirement:?}: main={main:?}, audio={audio:?}, actual_initial_main={on_initial_main}");
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod finite_echo_tests {
+    use super::{configuration_gain, FiniteEcho, ECHO_FRAMES};
+
+    #[test]
+    fn impulse_has_immediate_dry_signal_and_exact_finite_tap_across_blocks() {
+        let mut echo = FiniteEcho::new();
+        let mut frame = 0;
+        // Unequal blocks cross both the tap and ring wrap boundaries. The
+        // expected impulse response is independent of the ring implementation.
+        for block in [127, 130, 19, 257] {
+            for _ in 0..block {
+                let input = if frame == 0 { [1.0, -0.5] } else { [0.0; 2] };
+                let expected = match frame {
+                    0 => [1.0, -0.5],
+                    ECHO_FRAMES => [0.5, -0.25],
+                    _ => [0.0; 2],
+                };
+                assert_eq!(echo.process_frame(input), expected, "public frame {frame}");
+                frame += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_restore_is_cold_and_reset_discards_live_history() {
+        let mut bytes = [12, 0, 0, 0, 0];
+        bytes[1..].copy_from_slice(&0.5_f32.to_le_bytes());
+        let gain = configuration_gain(bytes).expect("actual load header accepts mode12");
+        assert_eq!(gain, 0.5);
+        let mut live = FiniteEcho::new();
+        for _ in 0..ECHO_FRAMES {
+            assert_eq!(live.process_frame([2.0 * gain, -gain]), [1.0, -0.5]);
+        }
+        // Configuration contains only these same five bytes; restoring it
+        // constructs a fresh ring, not an exact-history checkpoint.
+        assert_eq!(configuration_gain(bytes).unwrap(), gain);
+        let mut restored = FiniteEcho::new();
+        assert_eq!(live.process_frame([0.0; 2]), [0.5, -0.25]);
+        assert_eq!(restored.process_frame([0.0; 2]), [0.0; 2]);
+        live.reset();
+        for _ in 0..=ECHO_FRAMES {
+            assert_eq!(live.process_frame([0.0; 2]), [0.0; 2]);
+        }
+        bytes[0] = 13;
+        assert!(configuration_gain(bytes).is_err());
     }
 }
