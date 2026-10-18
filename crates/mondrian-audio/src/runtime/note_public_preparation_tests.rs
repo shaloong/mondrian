@@ -237,6 +237,7 @@ fn clap_child_refuses_before_its_factory_even_with_original_receipt() {
         &mut BTreeSet::new(),
         1,
         &mut ledger,
+        None,
     );
     assert!(matches!(
         error(result),
@@ -264,6 +265,7 @@ fn clap_window_refuses_before_factory_and_does_not_gain_direct_receipt() {
         &mut BTreeSet::new(),
         0,
         &mut ledger,
+        None,
     );
     assert!(matches!(
         error(result),

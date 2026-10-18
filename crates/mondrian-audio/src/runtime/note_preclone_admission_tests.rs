@@ -490,6 +490,7 @@ fn real_descendant_admission_keeps_pending_note_parent_until_build_abandonment()
             &mut stack,
             0,
             &mut ledger,
+            None,
         );
         assert!(stack.is_empty());
         if short_by == 1 {
