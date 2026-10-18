@@ -117,7 +117,7 @@ abandonment evidence. Counting cannot override those failures.
 
 Finite Windows owned probe, Runtime-to-Media and App preparation controls cover
 released/retained aliases and actual Ready/NoEditor delivery. Their current
-conditions and counts belong to the [qualification table](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
+conditions and counts belong to the [qualification table](native-plugin-compatibility.md#current-qualification-summary-2026-10-19).
 Zero PCM does not mean zero native/control work. Independent installation and
 create_instance, input inspection, Idle Warmup and precompiled Export still
 have unobserved construction boundaries.
@@ -131,7 +131,7 @@ drive that one Session with their original absolute deadline. A real
 close fault poisons that Session's persistence admission, including
 before its first save; already admitted filesystem work retains its ownership,
 but late completions cannot update the project. This is not worker quiescence.
-App162, Media120 and Audio733 ordinary controls pass, including actual Timeline
+App165, Media120 and Audio733 ordinary controls pass, including actual Timeline
 binding latches, retained author prefixes, lost-alias fault recovery and rejection
 of an in-flight save's completion. The matching normal Product passes the owned
 CLAP NoGUI ProjectClose gate: claim, Source, Timeline renderer and Project are
@@ -155,12 +155,25 @@ The six original native App gates also pass with the matching normal Product.
 This is Windows owned-fixture, Idle, no-device/zero-PCM qualification, not
 third-party history, acoustic output, playing or realtime qualification.
 
-Generic commits that have already published while native work is busy preserve
-the original Source custody and report preparation refusal; they do not establish
-automatic resynchronization, and old PCM may continue. Retained state-entry
+Nongesture Sequence edits prepare on the original author Session. When native
+Source replacement is busy, the App compares the complete current and candidate
+audible closures before installing that same prepared ticket. A changed output
+fader refuses before author/history, Engine, Media or hold mutation; a same-value
+no-op and unchanged-audio metadata remain legal. App165 and EditorState187 ordinary
+controls pass, as does the original nested-audio closure control. These are Media
+host-model/fake-output admission controls, not actual held-DLL or playing tests.
+
+The original postcommit guard remains for gestures and ProjectSnapshot commits:
+if native work is busy after publication, it retains Source custody and reports
+preparation refusal. The ProjectSnapshot ordinary control passes; gestures have
+no new actual qualification. Automatic resynchronization remains unqualified,
+and old PCM may continue. Retained state-entry
 presentation is preserved only with matching actual Source and unchanged target
 witnesses. The original Media same-source control passes; an App nonempty-cache
 state-entry case remains source-reviewed only.
+Playing Host fader edits currently reconstruct Timeline/Runtime/native instances
+from authored state. Live DSP/tail continuity across that reconstruction remains
+unmeasured; Idle history and ordinary media-PCM controls do not qualify it.
 The current App test build retains 25 warnings; normal Product has 10. No
 strict-build qualification is granted.
 
