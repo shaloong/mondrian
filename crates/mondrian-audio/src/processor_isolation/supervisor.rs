@@ -279,13 +279,6 @@ impl ProcessOwner {
 impl Drop for ProcessOwner {
     fn drop(&mut self) {
         let result = self.terminate();
-        if let Some(producer) = self.settlement_producer.take() {
-            producer.finish(if self.state == ProcessState::Settled {
-                mondrian_core::NativeChildSettlement::Settled
-            } else {
-                mondrian_core::NativeChildSettlement::Unconfirmed
-            });
-        }
         // A permanently live child may still use these files. Take and keep
         // the directory before any diagnostic that could panic. A kept path
         // is an explicit residual resource, never evidence of settlement.
@@ -294,6 +287,13 @@ impl Drop for ProcessOwner {
         } else {
             None
         };
+        if let Some(producer) = self.settlement_producer.take() {
+            producer.finish(if self.state == ProcessState::Settled {
+                mondrian_core::NativeChildSettlement::Settled
+            } else {
+                mondrian_core::NativeChildSettlement::Unconfirmed
+            });
+        }
         if let Err(error) = result {
             tracing::warn!(process_id = self.child.id(), state = ?self.state, context = "audio process Drop", error = %error,
                 "Audio native child cleanup failed");
@@ -2172,6 +2172,7 @@ mod control_timeout_worker_lifecycle {
                 finishes: AtomicUsize,
                 unconfirmed: AtomicBool,
                 bad: AtomicBool,
+                panic_end: AtomicBool,
             }
             impl Reporter for Counts {
                 fn begin_scope(&self) -> Result<(), Error> {
@@ -2191,6 +2192,9 @@ mod control_timeout_worker_lifecycle {
                     if result == Settlement::Unconfirmed {
                         self.unconfirmed.store(true, Ordering::SeqCst);
                         self.unavailable();
+                    }
+                    if self.panic_end.swap(false, Ordering::SeqCst) {
+                        panic!("native child settlement reporter test panic");
                     }
                 }
                 fn unavailable(&self) {
@@ -2288,14 +2292,40 @@ mod control_timeout_worker_lifecycle {
                     ),
                     (1, 0)
                 );
+                let staging = tempfile::tempdir().expect("exclusive live-child staging");
+                let staging_path = staging.path().to_owned();
+                let sentinel = staging_path.join("still-in-use");
+                std::fs::write(&sentinel, b"actual live-child staging").unwrap();
+                owner.staging = Some(staging);
                 owner.cleanup_hooks = Some((denied_observe, denied_kill, forbidden_wait));
-                drop(owner); // Original final terminate refuses; the producer reports Unconfirmed.
+                counts.panic_end.store(true, Ordering::SeqCst);
+                let dropped =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(owner)));
+                let expected_panic = dropped.as_ref().err().is_some_and(|payload| {
+                    payload.downcast_ref::<&str>()
+                        == Some(&"native child settlement reporter test panic")
+                });
+                // Capture before external cleanup. Reporter unwind must not let
+                // TempDir field drop delete a still-unconfirmed child's staging.
+                let retained_bytes = std::fs::read(&sentinel).ok();
                 let receipt = (
                     counts.finishes.load(Ordering::SeqCst),
                     counts.children.load(Ordering::SeqCst),
                     counts.unconfirmed.load(Ordering::SeqCst),
                 );
                 external.close().expect("test cleanup before result assertions");
+                if staging_path.exists() {
+                    std::fs::remove_dir_all(&staging_path)
+                        .expect("retire test-owned staging after child exit");
+                }
+                assert!(
+                    expected_panic,
+                    "only the injected Reporter contract violation is accepted"
+                );
+                assert_eq!(
+                    retained_bytes.as_deref(),
+                    Some(b"actual live-child staging".as_slice())
+                );
                 assert_eq!(receipt, (1, 0, true));
                 drop(root);
                 drop(foreign);
