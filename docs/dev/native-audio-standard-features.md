@@ -131,9 +131,16 @@ Current Windows controls pass Audio725, Playback108 and App76 (909 ordinary),
 including ten new controls; Core509 retains its earlier baseline. Four actual
 owned-plugin gates pass one VST3 fresh probe, CLAP normal probe, Note Offer and
 rejected child registration. The last preserves exact successful probe metadata
-without a settlement report. These are probe gates, not an actual App cold-native
-joint closure or PCM qualification. The normal Product and additional integration
-type check pass; existing App warnings remain, without strict zero-warning GO.
+without a settlement report. Two additional actual App owned-VST3 controls now
+pass installed-catalog construction through the original Timeline/Runtime and
+Media prepare, with App76 rerun after this test-only addition. Releasing all
+renderer aliases yields complete closure; an external alias retains unresolved
+ownership, and its late release cannot rewrite the captured receipt. Both verify
+the original Source claim is removed at shutdown. They use no device and dispatch
+no PCM; independent installation/author capture remains unobserved. This does not
+prove each cold probe's registration or legal native handoff. The normal Product
+and additional integration type check pass; existing App warnings remain,
+without strict zero-warning GO.
 
 New counting does not run in physical callbacks, native DSP or steady PCM blocks.
 Cold handoff control on the MMCSS producer does take the tracker mutex; that
