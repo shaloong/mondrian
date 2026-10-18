@@ -1311,9 +1311,15 @@ fn app_owned_vst3_editor_group_commits_through_same_source() {
     drop(state);
 }
 
-#[test]
-#[ignore = "current normal Product and owned CLAP Gain editor DLL; actual App author handoff, no PCM/device"]
-fn app_owned_clap_editor_parameter_commits_through_same_source() {
+struct ClosedOwnedClapAuthorControl {
+    control: ColdNativeControl,
+    payload: super::super::super::product_action::AudioNativeEditorPayload,
+    verifier: mondrian_core::AudioOwnerInstallationVerifier,
+    installed_verifier: mondrian_core::AudioOwnerInstallationVerifier,
+    installed_claim: mondrian_core::AudioOwnerInstallationClaim,
+}
+
+fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
     use super::super::super::product_action::{
         AudioNativeEditorPayload, AudioProductAction, ProductAction,
     };
@@ -1895,6 +1901,24 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
     assert_eq!(state.audio_playback_snapshot().next_start_sample, 0);
     assert_eq!(state.audio_playback_snapshot().in_flight, 0);
     assert_eq!(output.lock().queued, 0);
+    ClosedOwnedClapAuthorControl {
+        control: ColdNativeControl { state, _directory, output, renderer: weak },
+        payload,
+        verifier,
+        installed_verifier,
+        installed_claim,
+    }
+}
+
+#[test]
+#[ignore = "current normal Product and owned CLAP Gain editor DLL; actual App author handoff, no PCM/device"]
+fn app_owned_clap_editor_parameter_commits_through_same_source() {
+    let ClosedOwnedClapAuthorControl {
+        control: ColdNativeControl { mut state, _directory, output: _, renderer: weak },
+        verifier,
+        installed_verifier,
+        ..
+    } = prepare_app_clap_editor_author_closed();
     let evidence = state.shutdown_audio_playback_and_wait();
     assert_eq!(evidence.render_workers_started, 1);
     assert_eq!(evidence.render_workers_terminated, 1);
@@ -1915,6 +1939,378 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
     // Real normal-Product/CLAP GUI and App author flow only. Idle servicing is
     // not zero native calls, acoustic/DSP, device, RT or broader GUI qualification.
     drop(state);
+}
+
+#[test]
+#[ignore = "current normal Product and owned CLAP Gain editor DLL; public Idle Undo/Redo native-state restoration, no PCM/device"]
+fn app_owned_clap_editor_undo_redo_restores_native_state() {
+    use super::super::super::product_action::{AudioProductAction, ProductAction};
+    use anyhow::Context as _;
+    use mondrian_core::{
+        AudioOwnerInstallationError, NativeAudioEditorControlIntent as Intent,
+        NativeAudioEditorControlOutcome as Outcome,
+    };
+
+    let ClosedOwnedClapAuthorControl {
+        control: ColdNativeControl { mut state, _directory, output, renderer: weak },
+        payload,
+        installed_verifier,
+        installed_claim,
+        ..
+    } = prepare_app_clap_editor_author_closed();
+    let volume = mondrian_core::ParameterId::new("clap.param.1").unwrap();
+    let mut previous_verifier = installed_verifier;
+    let mut previous_claim = installed_claim;
+    let mut stage = "after-original-close";
+    let mut observations = Vec::new();
+    // Only the NEW history stages are fenced. Original setup/G/Ack/Close
+    // assertions remain unchanged; a history-stage panic is preserved as the
+    // final target failure after the original consuming cleanup has completed.
+    let history_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> anyhow::Result<()> {
+            for (redo, expected, text, undo_entries, redo_entries) in [
+                (false, 1.0_f64, "100.00 %", 0, 1),
+                (true, 0.75_f64, "75.00 %", 1, 0),
+            ] {
+                stage = if redo { "redo-author" } else { "undo-author" };
+                anyhow::ensure!(
+                    previous_verifier.validate(&previous_claim).is_ok(),
+                    "history starts from the actual post-Close current claim"
+                );
+                let restored = if redo {
+                    state.redo_timeline()
+                } else {
+                    state.undo_timeline()
+                }
+                .with_context(|| format!("public {stage}"))?;
+                anyhow::ensure!(
+                    restored,
+                    "public {stage} must restore its original history entry"
+                );
+                let author =
+                    state.authoring.as_ref().context("actual restored Authoring Session")?;
+                let history = author.history().diagnostics();
+                anyhow::ensure!(
+                    state.authoring_session_id() == Some(payload.session_id)
+                        && state.current_frame() == 0
+                        && !state.is_playing(),
+                    "public history keeps the original author Session and Idle zero coordinate"
+                );
+                anyhow::ensure!(
+                    history.undo_entries == undo_entries
+                        && history.redo_entries == redo_entries
+                        && history.pending_entries == 0,
+                    "{stage} moves exactly the one native-author history entry: {history:?}"
+                );
+                let instance =
+                    &state.active_sequence().context("restored Sequence")?.audio_program.outputs[0]
+                        .strip
+                        .pre_fader
+                        .processors[0];
+                anyhow::ensure!(
+                    instance.id == payload.processor_id
+                        && instance.definition == payload.definition,
+                    "history preserves the authored processor identity and definition"
+                );
+                let parameter =
+                    instance.parameters.get(&volume).context("restored Volume schema/lane")?;
+                let curve = parameter.automation.as_ref().context("restored writable lane")?;
+                anyhow::ensure!(
+                    curve.default_value.to_bits() == expected.to_bits()
+                        && curve.keyframes.is_empty(),
+                    "{stage} restores the authored unkeyed Volume"
+                );
+                anyhow::ensure!(
+                    instance.opaque_state.as_ref().map(|value| value.as_slice())
+                        == Some((expected as f32).to_le_bytes().as_slice()),
+                    "{stage} restores the exact original four native-state bytes"
+                );
+
+                stage = if redo {
+                    "redo-source-retirement"
+                } else {
+                    "undo-source-retirement"
+                };
+                let previous_claim_status = previous_verifier.current_claim();
+                let source_available = state.audio_playback.native_editor_source_available();
+                let presentation = state.native_audio_parameter_presentation(&payload, &volume);
+                observations.push(serde_json::json!({
+                    "stage": stage, "author_value_bits": expected.to_bits(),
+                    "native_state": instance.opaque_state.as_ref().map(|value| value.as_slice()),
+                    "undo_entries": history.undo_entries, "redo_entries": history.redo_entries,
+                    "old_claim": format!("{previous_claim_status:?}"),
+                    "source_available": source_available,
+                    "old_presentation_value_bits": presentation.and_then(|fact| fact.value_bits),
+                    "old_presentation_display": presentation.and_then(|fact| fact.display.as_deref()),
+                }));
+                anyhow::ensure!(matches!(previous_claim_status, Err(AudioOwnerInstallationError::NotInstalled))
+                    && !source_available && presentation.is_none(),
+                    "{stage}: current post-G/Ack/Close claim must be NotInstalled, Media Source absent and old presentation unavailable");
+
+                stage = if redo { "redo-open" } else { "undo-open" };
+                state
+                    .dispatch_action(
+                        ProductAction::Audio(AudioProductAction::NativeEditor(payload.clone()))
+                            .into_external_action(),
+                    )
+                    .with_context(|| format!("original App {stage} action"))?;
+                let generation = state.audio_playback_snapshot().generation;
+                let mut opened = None;
+                let mut parameters = None;
+                let mut renderer_id = None;
+                poll_gui_until(&mut state, generation, |event| match event {
+                    AudioPlaybackEvent::NativeOwnerBindingsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        status,
+                    } => {
+                        assert_eq!(*observed, generation);
+                        assert_eq!(
+                            *status,
+                            mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready
+                        );
+                        assert!(renderer_id.replace(*actual).is_none());
+                        false
+                    }
+                    AudioPlaybackEvent::NativeEditorObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        intent,
+                        outcome,
+                    } => {
+                        assert_eq!(*observed, generation);
+                        if let Some(prior) = renderer_id {
+                            assert_eq!(*actual, prior);
+                        }
+                        renderer_id = Some(*actual);
+                        let Intent::ResolveAndOpen { locator, .. } = intent else {
+                            panic!("actual history ResolveAndOpen: {intent:?}")
+                        };
+                        let Outcome::Opened { target, width, height } = outcome else {
+                            panic!("actual history Open must succeed: {outcome:?}")
+                        };
+                        assert!(locator.matches_target(*target));
+                        assert_eq!(locator.sequence, payload.sequence_id);
+                        assert_eq!(target.instance, payload.processor_id);
+                        assert_eq!((*width, *height), (320, 100));
+                        assert!(opened.replace(*target).is_none());
+                        true
+                    }
+                    AudioPlaybackEvent::NativeParameterObservationsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        observation,
+                    } => {
+                        assert_eq!(*observed, generation);
+                        if let Some(prior) = renderer_id {
+                            assert_eq!(*actual, prior);
+                        }
+                        parameters = Some(observation.as_ref().clone());
+                        false
+                    }
+                    AudioPlaybackEvent::NativeDiagnosticsObserved {
+                        generation: observed, ..
+                    } => {
+                        assert_eq!(*observed, generation);
+                        false
+                    }
+                    other => panic!("unexpected history Open event: {other:?}"),
+                });
+                let opened = opened.context("actual history Opened target")?;
+                let renderer_id = renderer_id.context("actual history renderer materialization")?;
+                let current_verifier = state
+                    .native_audio_renderer
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                    .context("actual current Timeline after Open")?
+                    .owner_installation_verifier()
+                    .context("current Runtime registration")?;
+                let current_claim =
+                    current_verifier.current_claim().context("current actual installation")?;
+                anyhow::ensure!(
+                    current_verifier.validate(&current_claim).is_ok()
+                        && opened.installed_generation == current_claim.generation(),
+                    "new Opened target belongs to the actual current claim"
+                );
+                if parameters.as_ref().is_none_or(|actual| actual.target() != opened) {
+                    poll_gui_until(&mut state, generation, |event| match event {
+                        AudioPlaybackEvent::NativeParameterObservationsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            observation,
+                        } => {
+                            assert_eq!(*actual, renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert_eq!(observation.target(), opened);
+                            parameters = Some(observation.as_ref().clone());
+                            true
+                        }
+                        AudioPlaybackEvent::NativeDiagnosticsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            ..
+                        } => {
+                            assert_eq!(*actual, renderer_id);
+                            assert_eq!(*observed, generation);
+                            false
+                        }
+                        other => panic!("unexpected history presentation event: {other:?}"),
+                    });
+                }
+                let parameters = parameters.context("actual history native parameter receipt")?;
+                anyhow::ensure!(
+                    parameters.target() == opened,
+                    "history facts target the current actual Open"
+                );
+                let fact = parameters
+                    .facts()
+                    .iter()
+                    .rev()
+                    .find(|fact| fact.parameter == volume)
+                    .context("actual current Volume fact")?;
+                anyhow::ensure!(
+                    fact.value_bits == Some(expected.to_bits())
+                        && fact.display.as_deref() == Some(text),
+                    "{stage}: actual native value/text must match restored state: {fact:?}"
+                );
+                let presentation = state
+                    .native_audio_parameter_presentation(&payload, &volume)
+                    .context("App current-target history presentation")?;
+                anyhow::ensure!(
+                    presentation.value_bits == Some(expected.to_bits())
+                        && presentation.display.as_deref() == Some(text),
+                    "App stores exact native history facts"
+                );
+                let native_object = (parameters.process_id(), parameters.object_serial());
+                let view = owned_editor_view_matching(
+                    native_object.0,
+                    b"MondrianClapGainEditor_",
+                    false,
+                    Some(b"Mondrian CLAP Gain Editor"),
+                );
+                observations.push(serde_json::json!({"stage": stage, "value_bits": fact.value_bits,
+                    "display": fact.display, "process_id": native_object.0, "object_serial": native_object.1,
+                    "installed_generation": current_claim.generation().get(), "media_generation": generation}));
+                let history_before_close =
+                    state.authoring.as_ref().unwrap().history().diagnostics();
+                stage = if redo { "redo-close" } else { "undo-close" };
+                let mut close = payload.clone();
+                close.open = false;
+                state
+                    .dispatch_action(
+                        ProductAction::Audio(AudioProductAction::NativeEditor(close))
+                            .into_external_action(),
+                    )
+                    .with_context(|| format!("original App {stage} action"))?;
+                poll_gui_until(&mut state, generation, |event| match event {
+                    AudioPlaybackEvent::NativeEditorObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        intent,
+                        outcome,
+                    } => {
+                        assert_eq!(*actual, renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert!(matches!(intent, Intent::Close { target } if *target == opened));
+                        assert!(matches!(outcome, Outcome::Closed { target } if *target == opened));
+                        true
+                    }
+                    AudioPlaybackEvent::NativeParameterObservationsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        observation,
+                    } => {
+                        assert_eq!(*actual, renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert_eq!(observation.target(), opened);
+                        assert_eq!(
+                            (observation.process_id(), observation.object_serial()),
+                            native_object
+                        );
+                        false
+                    }
+                    AudioPlaybackEvent::NativeDiagnosticsObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        ..
+                    } => {
+                        assert_eq!(*actual, renderer_id);
+                        assert_eq!(*observed, generation);
+                        false
+                    }
+                    other => panic!("unexpected history Close event: {other:?}"),
+                });
+                anyhow::ensure!(
+                    unsafe { is_window(view) } == 0
+                        && state.native_audio_editor_surface_state(&payload) == (false, false),
+                    "{stage} destroys the actual view and completes the original App surface"
+                );
+                anyhow::ensure!(
+                    state.authoring.as_ref().unwrap().history().diagnostics()
+                        == history_before_close,
+                    "view lifecycle creates no extra author transaction"
+                );
+                anyhow::ensure!(
+                    current_verifier.validate(&current_claim).is_ok(),
+                    "Close retains its current installation"
+                );
+                anyhow::ensure!(
+                    state.playback_engine.native_audio_control_hold_ticket().is_none()
+                        && state.audio_playback.native_control_hold_generation().is_none()
+                        && state.audio_playback.native_reprepare_pending_generation().is_none(),
+                    "history phase settles all original control holds"
+                );
+                anyhow::ensure!(
+                    state.audio_playback_snapshot().next_start_sample == 0
+                        && state.audio_playback_snapshot().in_flight == 0
+                        && output.lock().queued == 0,
+                    "Idle history lifecycle performs no PCM or device delivery"
+                );
+                previous_verifier = current_verifier;
+                previous_claim = current_claim;
+            }
+            stage = "history-complete";
+            Ok(())
+        },
+    ));
+    let target_error = match history_result {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("{error:#?}")),
+        Err(panic) => Some(
+            panic
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| panic.downcast_ref::<&str>().map(|value| (*value).to_owned()))
+                .unwrap_or_else(|| "non-string panic in new history stage".to_owned()),
+        ),
+    };
+    // Freeze target facts BEFORE whole-App cleanup can retire the stale Source.
+    let before_cleanup = serde_json::json!({
+        "case": "app_owned_clap_editor_undo_redo_restores_native_state", "stage": stage,
+        "first_failure": target_error, "observations": observations,
+        "history": state.authoring.as_ref().map(|author| format!("{:?}", author.history().diagnostics())),
+        "author_native_state": state.active_sequence().and_then(|sequence| sequence.audio_program.outputs.first())
+            .and_then(|output| output.strip.pre_fader.processors.first())
+            .and_then(|instance| instance.opaque_state.as_ref()).map(|value| value.as_slice()),
+        "media_generation": state.audio_playback_snapshot().generation,
+        "next_start_sample": state.audio_playback_snapshot().next_start_sample,
+        "in_flight": state.audio_playback_snapshot().in_flight, "queued_frames": output.lock().queued,
+        "source_available": state.audio_playback.native_editor_source_available(),
+        "previous_claim": format!("{:?}", previous_verifier.current_claim()),
+        "surface": state.native_audio_editor_surface_state(&payload),
+        "old_presentation_available": state.native_audio_parameter_presentation(&payload, &volume).is_some(),
+    });
+    println!("{before_cleanup}");
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    assert!(
+        cleanup.all_resources_released(),
+        "IDLE_HISTORY_TEST_CLEANUP_HOLD: {cleanup:?}; before_cleanup={before_cleanup}"
+    );
+    assert!(
+        target_error.is_none(),
+        "CLAP_IDLE_HISTORY_NATIVE_RESTORE_BEFORE_APP_SHUTDOWN: {before_cleanup}"
+    );
+    assert!(weak.upgrade().is_none());
 }
 
 #[test]
