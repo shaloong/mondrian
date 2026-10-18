@@ -764,7 +764,7 @@ impl AppState {
         }
         if !self.project_audio_source_is_current() {
             let reason = format!(
-                "{reason}; original audio Source ownership was lost during close admission"
+                "{reason}; original audio Source ownership could not be proven during close admission"
             );
             self.retain_project_close_fault(session_id, reason.clone());
             self.set_status_hint(

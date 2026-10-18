@@ -409,3 +409,112 @@ fn endurance_shutdown_waits_for_previous_serial_timeline_binding() {
     assert_eq!(probe.drop_count.load(Ordering::Acquire), 1);
     assert_eq!(output.lock().queued, 0);
 }
+
+#[test]
+fn project_close_retains_fault_when_timeline_alias_is_lost_after_admission() {
+    let BindingControl {
+        mut state,
+        output,
+        probe,
+        started,
+        mut release,
+        dropped,
+        weak,
+    } = binding_control();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual previous binding entered");
+        let session = state.authoring_session_id().unwrap();
+        let history = state.authoring.as_ref().unwrap().history().diagnostics();
+        let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
+        assert!(state.begin_project_close().expect("one close admission"));
+        assert!(state.project_close_awaiting_audio());
+        // Lose only the App's derived alias, not Media's actual Source/claim.
+        // This proves the rejection guard without manufacturing a native fault.
+        state.native_audio_renderer = None;
+        release.release();
+        let verifier = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+        let claim = verifier.current_claim().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reason = loop {
+            match state.poll_project_close() {
+                crate::app::project_lifecycle::ProjectClosePoll::Pending => {}
+                crate::app::project_lifecycle::ProjectClosePoll::Faulted(reason) => break reason,
+                other => panic!("lost alias must retain a close fault: {other:?}"),
+            }
+            assert!(Instant::now() < deadline, "same request did not settle");
+            std::thread::yield_now();
+        };
+        assert!(
+            reason.contains("installed audio Source has no current Timeline Runtime"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains(
+                "original audio Source ownership could not be proven during close admission"
+            ),
+            "{reason}"
+        );
+        assert!(state.has_project_close_fault());
+        assert!(state.project_lifecycle_blocks_actions());
+        assert!(
+            state.begin_project_close().is_err(),
+            "a second close cannot bypass the retained fault"
+        );
+        assert!(state.audio_playback.native_editor_source_available());
+        assert!(verifier.validate(&claim).is_ok());
+        assert_eq!(state.authoring_session_id(), Some(session));
+        assert_eq!(
+            state.authoring.as_ref().unwrap().history().diagnostics(),
+            history
+        );
+        assert_eq!(
+            serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),
+            document
+        );
+        assert_eq!(state.project_persistence.pending_requests(), 0);
+        assert_eq!(probe.entries.load(Ordering::Acquire), 0);
+        assert_eq!(probe.processed.load(Ordering::Acquire), 0);
+        assert_eq!(output.lock().queued, 0);
+
+        state.native_audio_renderer = Some(weak.clone());
+        state
+            .force_close_project_after_fault()
+            .expect("explicit original fault-discard path");
+        assert!(state.authoring.is_none());
+        assert!(!state.audio_playback.native_editor_source_available());
+        assert!(matches!(
+            verifier.current_claim(),
+            Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+        ));
+        dropped
+            .recv_timeout(Duration::from_secs(2))
+            .expect("original processor retired");
+        assert!(weak.upgrade().is_none());
+        assert_eq!(probe.binding_queries.load(Ordering::Acquire), 1);
+        assert_eq!(probe.drop_count.load(Ordering::Acquire), 1);
+    }));
+    drop(release);
+    // Repair the deliberately removed projection before failure cleanup. This
+    // grants no native Closed result; the original fault path still validates.
+    if state.audio_playback.native_editor_source_available()
+        && state.native_audio_renderer.is_none()
+    {
+        state.native_audio_renderer = Some(weak);
+    }
+    let fault_cleanup = if state.has_project_close_fault() {
+        state.force_close_project_after_fault().map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    assert!(
+        cleanup.all_resources_released(),
+        "SOURCE_CLOSE_LOST_ALIAS_CLEANUP_HOLD: {cleanup:?}; fault_cleanup={fault_cleanup:?}"
+    );
+    assert!(fault_cleanup.is_ok(), "{fault_cleanup:?}");
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
