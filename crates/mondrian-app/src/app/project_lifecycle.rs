@@ -821,7 +821,7 @@ impl AppState {
         self.project_close_fault.is_some()
     }
 
-    /// Abandon a failed persistence handoff without claiming quiescence.
+    /// Abandon a failed Project handoff without claiming persistence quiescence.
     ///
     /// The worker retains its own payload/lease ownership. Retiring admission
     /// makes every eventual completion stale before author state is removed.
@@ -845,6 +845,7 @@ impl AppState {
     }
 
     fn retain_project_close_fault(&mut self, session_id: AuthoringSessionId, reason: String) {
+        self.project_persistence.poison_session_after_lifecycle_failure(session_id);
         self.project_close_fault = Some(ProjectCloseFault { session_id, reason });
     }
 
