@@ -1002,6 +1002,185 @@ fn clap_paused_empty_author_poll_queries_once_and_rescans_new_source() {
 }
 
 #[test]
+fn clap_paused_changed_binding_refreshes_presentation_without_new_source() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery, NativeAudioObjectBindOutcome as BindOutcome,
+        NativeAudioObservationConsumption as Consumption,
+    };
+    let _serial = SERIAL.lock().expect("actual native fixture serialization");
+    reset_audit();
+    let mut worker = owned_worker();
+    worker.enter_state(23).expect("actual entry");
+    let binding = bind_and_open(worker.as_mut());
+    let object = binding.expected_object;
+    exchange_another_paused_gui_value(worker.as_mut());
+
+    let before = parameter_query_counts();
+    let original = worker
+        .poll_native_observations(Consumption::DrainAuthor(binding))
+        .expect("actual callback prefix and current values");
+    assert_eq!(original.object, Some(object));
+    assert!(original
+        .parameters
+        .iter()
+        .any(|fact| fact.value_bits == Some(0.75_f64.to_bits())));
+    let original_source = original.author.as_ref().expect("actual Source").source;
+    assert_eq!(original_source.revision(), 3);
+    let Some(crate::NativeAudioAuthorObservation {
+        delivery: Delivery::Delivered(delivery), ..
+    }) = original.author
+    else {
+        panic!("actual paused flush must retain an author prefix");
+    };
+    assert_eq!(delivery.binding, binding);
+    assert_eq!(delivery.revision, original_source.revision());
+    assert_eq!(
+        delivery.configuration.as_ref().expect("actual coherent state").bytes(),
+        &0.75_f64.to_bits().to_le_bytes()
+    );
+    let once = std::array::from_fn(|index| before[index] + 1);
+    assert_eq!(parameter_query_counts(), once);
+
+    let installed =
+        crate::NativeAudioObjectBindRequest { binding: AudioProcessorBindingId::new(), ..binding };
+    assert_ne!(installed.binding, binding.binding);
+    let BindOutcome::Bound(receipt) = worker
+        .bind_native_audio_object(installed)
+        .expect("same actual object new Plan binding")
+    else {
+        panic!("same actual object must accept its new binding");
+    };
+    assert_eq!(receipt.binding(), installed.binding);
+    assert_eq!(receipt.object(), object);
+    assert_eq!(
+        parameter_query_counts(),
+        once,
+        "Bind does not query native parameters"
+    );
+    let preserved = worker
+        .poll_native_observations(Consumption::Preserve)
+        .expect("held prefix status only");
+    assert_eq!(preserved.object, Some(object));
+    assert!(preserved.parameters.is_empty());
+    let preserved = preserved.author.expect("original held Source");
+    assert_eq!(preserved.source, original_source);
+    assert!(matches!(
+        preserved.delivery,
+        Delivery::AwaitingAcknowledgement {
+            binding: actual, revision: 3, request_cohort: None,
+        } if actual == binding
+    ));
+    assert_eq!(
+        parameter_query_counts(),
+        once,
+        "Preserve does not query after Bind"
+    );
+
+    let acknowledgement = crate::NativeAudioAuthorAcknowledgement {
+        source_binding: binding,
+        installed_binding: installed,
+        revision: delivery.revision,
+    };
+    let accepted = worker
+        .poll_native_observations(Consumption::AcknowledgeAuthor(acknowledgement))
+        .expect("exact original prefix Ack at the installed binding");
+    assert_eq!(accepted.object, Some(object));
+    assert!(accepted.parameters.is_empty());
+    let accepted = accepted.author.expect("actual retired prefix");
+    assert!(matches!(
+        accepted.delivery,
+        Delivery::Acknowledged { acknowledgement: actual, request_cohort: None }
+            if actual == acknowledgement
+    ));
+    assert!(accepted.source.closed_empty());
+    assert_eq!(accepted.source.revision(), original_source.revision());
+    assert_eq!(
+        parameter_query_counts(),
+        once,
+        "Ack does not query native parameters"
+    );
+
+    let refreshed = worker
+        .poll_native_observations(Consumption::DrainAuthor(installed))
+        .expect("current facts for the new binding on the same actual object");
+    assert_eq!(refreshed.object, Some(object));
+    assert_eq!(refreshed.parameter_revision, original_source.revision());
+    assert_eq!(
+        refreshed.parameters.len(),
+        1,
+        "changed CLAP binding must refresh presentation at the unchanged Source revision"
+    );
+    let fact = &refreshed.parameters[0];
+    assert_eq!(
+        fact.parameter,
+        mondrian_core::ParameterId::new("clap.param.17").unwrap()
+    );
+    assert_eq!(fact.value_bits, Some(0.75_f64.to_bits()));
+    assert_eq!(fact.revision, original_source.revision());
+    assert_eq!(
+        fact.origin,
+        mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 0 }
+    );
+    let refreshed = refreshed.author.expect("same closed Source after actual query");
+    assert_eq!(refreshed.source, accepted.source);
+    assert!(matches!(refreshed.delivery, Delivery::Preserved));
+    let twice = std::array::from_fn(|index| once[index] + 1);
+    assert_eq!(parameter_query_counts(), twice);
+
+    assert!(matches!(
+        worker.bind_native_audio_object(installed).expect("idempotent installed binding"),
+        BindOutcome::Bound(actual) if actual == receipt
+    ));
+    let wrong_object = crate::NativeAudioObjectObservation::new(
+        object.process_id(),
+        std::num::NonZeroU64::new(
+            object.object_serial().get().checked_add(1).expect("test object serial"),
+        )
+        .unwrap(),
+    );
+    let refused = crate::NativeAudioObjectBindRequest {
+        binding: AudioProcessorBindingId::new(),
+        expected_object: wrong_object,
+    };
+    assert_eq!(
+        worker.bind_native_audio_object(refused).expect("wrong object pure refusal"),
+        BindOutcome::Refused(crate::NativeAudioObjectBindRefusal::ObjectChanged)
+    );
+    for consumption in [
+        Consumption::Preserve,
+        Consumption::Drain,
+        Consumption::DrainAuthor(installed),
+        Consumption::DrainAuthor(installed),
+    ] {
+        let unchanged = worker.poll_native_observations(consumption).expect("same bound Source");
+        assert_eq!(unchanged.object, Some(object));
+        assert!(unchanged.parameters.is_empty());
+        assert_eq!(
+            unchanged.author.expect("same closed Source").source,
+            accepted.source
+        );
+    }
+    assert_eq!(
+        parameter_query_counts(),
+        twice,
+        "same receipt and refused Bind keep the cache"
+    );
+    assert_eq!(ACCEPTED_EVENTS.load(AuditOrdering::SeqCst), 3);
+    assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(
+        worker
+            .close_native_audio_editor(installed)
+            .expect("original same-object view close"),
+        crate::NativeAudioEditorOutcome::Closed { binding: installed }
+    );
+    drop(worker);
+    assert_eq!(CREATED.load(AuditOrdering::SeqCst), 1);
+    assert_eq!(DESTROYED.load(AuditOrdering::SeqCst), 1);
+    assert_eq!(WRONG_THREAD.load(AuditOrdering::SeqCst), 0);
+    assert_eq!(PROCESSES.load(AuditOrdering::SeqCst), 0);
+}
+
+#[test]
 fn clap_paused_without_state_delivers_canonical_parameters_and_keeps_exact_ack() {
     use crate::{
         NativeAudioAuthorDeliveryState as Delivery,
