@@ -56,6 +56,13 @@ impl AudioProcessorResolver for PreflightResolver {
     }
 }
 impl AudioProcessorFactory for PreflightFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        // This portable author model has no OS child, despite its synthetic ABI facts.
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         AudioProcessorExecutionContract::new(0, AudioProcessorTail::None, true, true, true, 0)
             .expect("same portable zero-latency contract")
@@ -114,6 +121,16 @@ impl AudioProcessorFactory for PreflightFactory {
     }
 }
 impl AudioProcessor for PreflightProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn native_observations_supported(&self) -> bool {
         self.inner.native_observations_supported()
     }

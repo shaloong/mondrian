@@ -256,6 +256,26 @@ impl PreparedAudioSessionStorage {
         Ok(self.session)
     }
 
+    pub(crate) fn validate_native_child_settlement_domain(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.session.validate_native_child_settlement_domain(registrar)
+    }
+
+    pub(crate) fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.session.attach_native_child_settlement(registrar)?;
+        // An unpublished or retired storage destination legitimately has no
+        // instances. Its counted capability still covers a prospective transfer.
+        if self.session.processor_host.occurrence_count() != 0 {
+            self.session.bind_current_native_child_settlement()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn inherit_native_child_settlement(&mut self, current: &AudioRenderSession) {
         if let Some(registrar) = &current.native_child_settlement {
             // This counted branch exists before populate/create or Source commit.
@@ -2469,6 +2489,63 @@ mod native_child_settlement_tests {
             native_child_settlement_slot_bytes(),
             std::alloc::Layout::new::<Option<Registrar>>().size()
         );
+    }
+
+    #[test]
+    fn native_child_late_prepared_storage_binding_survives_actual_retained_swap() {
+        let counts = Arc::new(Counts::default());
+        let other = Arc::new(Counts::default());
+        let root = Registrar::try_new(counts.clone()).unwrap();
+        let foreign = Registrar::try_new(other.clone()).unwrap();
+        let creates = Arc::new(AtomicUsize::new(0));
+        let plan = plan(Requirement::NotApplicable, false, creates.clone());
+        let mut current = AudioRenderSession::new(plan.clone()).unwrap();
+        let mut prepared = AudioRenderSession::allocate_storage(plan).unwrap();
+        assert_eq!(creates.load(Ordering::SeqCst), 1);
+        // Exact late-first-bind shape: both actual current and already-existing
+        // prospective storage must hold their own counted scope before transfer.
+        current.bind_native_child_settlement(&root).unwrap();
+        prepared.validate_native_child_settlement_domain(&root).unwrap();
+        prepared.bind_native_child_settlement(&root).unwrap();
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 3);
+        assert_eq!(prepared.session.processor_host.occurrence_count(), 0);
+        prepared.swap_retained(&mut current);
+        assert_eq!(current.processor_host.occurrence_count(), 1);
+        assert_eq!(prepared.session.processor_host.occurrence_count(), 0);
+        assert_eq!(
+            creates.load(Ordering::SeqCst),
+            1,
+            "storage swap never creates an instance"
+        );
+        assert!(current.native_child_settlement.as_ref().unwrap().same_domain(&root));
+        assert!(prepared.session.native_child_settlement.as_ref().unwrap().same_domain(&root));
+        assert_eq!(
+            current.bind_native_child_settlement(&foreign),
+            Err(Error::ForeignDomain)
+        );
+        assert_eq!(
+            prepared.validate_native_child_settlement_domain(&foreign),
+            Err(Error::ForeignDomain)
+        );
+        assert_eq!(
+            (
+                counts.scopes.load(Ordering::SeqCst),
+                other.scopes.load(Ordering::SeqCst)
+            ),
+            (3, 1)
+        );
+        drop(prepared);
+        assert_eq!(
+            counts.scopes.load(Ordering::SeqCst),
+            2,
+            "current remains counted after retired storage drops"
+        );
+        drop(current);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 1);
+        assert!(counts.bad.load(Ordering::SeqCst) && other.bad.load(Ordering::SeqCst));
+        assert_eq!(counts.children.load(Ordering::SeqCst), 0);
+        // This is storage ownership evidence, not permission for a public Source
+        // commit, successful StateEntry, DSP, or a native plugin incarnation.
     }
 
     #[test]

@@ -459,13 +459,22 @@ impl AudioProgramRuntime {
         &self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
     ) -> Result<(), mondrian_core::NativeChildSettlementError> {
-        self.session.validate_native_child_settlement_domain(registrar)?;
-        for source in self.sources.entries.values() {
-            if let RuntimeSource::Nested(nested) = source {
-                nested.runtime.validate_native_child_settlement_domain(registrar)?;
+        let mut failure = self.session.validate_native_child_settlement_domain(registrar).err();
+        if let Some(cohort) = &self.native_author_scope {
+            if let Err(error) = cohort.validate_native_child_settlement_domain(registrar) {
+                failure.get_or_insert(error);
             }
         }
-        Ok(())
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                if let Err(error) =
+                    nested.runtime.validate_native_child_settlement_domain(registrar)
+                {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     fn bind_native_child_settlement_admitted(
@@ -473,6 +482,11 @@ impl AudioProgramRuntime {
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
     ) -> Result<(), mondrian_core::NativeChildSettlementError> {
         let mut failure = self.session.bind_native_child_settlement(registrar).err();
+        if let Some(cohort) = &mut self.native_author_scope {
+            if let Err(error) = cohort.bind_native_child_settlement(registrar) {
+                failure.get_or_insert(error);
+            }
+        }
         for source in self.sources.entries.values_mut() {
             if let RuntimeSource::Nested(nested) = source {
                 if let Err(error) = nested.runtime.bind_native_child_settlement_admitted(registrar)

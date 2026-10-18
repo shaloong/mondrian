@@ -796,3 +796,211 @@ fn native_author_state_entry_prefix_cohort_drift_refuses_before_any_native_prepa
             .same_retained_proposal(&proposal)
     );
 }
+
+#[test]
+fn native_child_late_runtime_binding_includes_real_held_scope_before_foreign_preflight() {
+    use mondrian_core::{
+        NativeChildSettlement as Settlement, NativeChildSettlementError as Error,
+        NativeChildSettlementRegistrar as Registrar, NativeChildSettlementReporter as Reporter,
+    };
+    use std::sync::atomic::AtomicBool;
+    #[derive(Default)]
+    struct Counts {
+        scopes: AtomicUsize,
+        children: AtomicUsize,
+        bad: AtomicBool,
+    }
+    impl Reporter for Counts {
+        fn begin_scope(&self) -> Result<(), Error> {
+            self.scopes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end_scope(&self) {
+            self.scopes.fetch_sub(1, Ordering::SeqCst);
+        }
+        fn begin_child(&self) -> Result<(), Error> {
+            self.children.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end_child(&self, result: Settlement) {
+            self.children.fetch_sub(1, Ordering::SeqCst);
+            if result == Settlement::Unconfirmed {
+                self.unavailable();
+            }
+        }
+        fn unavailable(&self) {
+            self.bad.store(true, Ordering::SeqCst);
+        }
+    }
+    let mut spec = preflight_spec(PreflightPlacement::ScopeTwoContributions);
+    // The existing state-entry inspector admits VST3 only. This remains the
+    // same portable no-OS-child model; no successful native preparation is added.
+    for scope in &mut spec.canonical.audio_program.processing_scopes {
+        for processor in &mut scope.processors.processors {
+            if processor.id == spec.instance {
+                processor.definition = mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+                    class_id: "portable.actual.rescan".into(),
+                    vendor: None,
+                    schema_version: 1,
+                    binary_sha256: None,
+                };
+            }
+        }
+    }
+    spec.root = spec.canonical.clone();
+    let mut fixture = preflight_build(&spec, usize::MAX);
+    fixture.inner.queue_value(0.75);
+    {
+        let mut probe = fixture.inner.probe.lock().unwrap();
+        probe.open = 0;
+        probe.revision += 1;
+        probe.pending.push(NativeAudioAuthorEvent::Parameter(
+            NativeAudioAuthorParameterEvent::admit(
+                ParameterId::new_static("native.gain"),
+                NativeAudioAuthorParameterPhase::End,
+                None,
+            )
+            .unwrap(),
+        ));
+        probe.configuration = Some(0.75_f64.to_le_bytes().to_vec());
+        assert!(probe.request_cohort.is_none());
+    }
+    let mut delivered = None;
+    for _ in 0..2 {
+        // Existing Runtime fairly polls its actual two producers.
+        let batch = fixture
+            .inner
+            .runtime
+            .poll_native_observations(&ExecutionCancellationToken::new())
+            .unwrap();
+        if let Some(proposal) = batch.and_then(|batch| batch.author) {
+            delivered = Some(proposal);
+            break;
+        }
+    }
+    let proposal = delivered.expect("selected actual terminal prefix within one fair cycle");
+    assert_eq!(proposal.target(), fixture.inner.target);
+    assert!(proposal.terminal());
+    assert_eq!(
+        proposal.completion(),
+        mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+    );
+    assert_eq!(
+        proposal.state().map(|state| state.as_slice()),
+        Some(0.75_f64.to_le_bytes().as_slice())
+    );
+    assert!(fixture.inner.runtime.native_author_state_entry_required(&proposal).unwrap());
+    let scope_id = match fixture.inner.target.owner {
+        mondrian_core::NativeAudioEditorOccurrenceOwner::Contribution { scope_id, .. } => scope_id,
+        other => panic!("actual Scope target required: {other:?}"),
+    };
+    fixture
+        .inner
+        .sequence
+        .audio_program
+        .processing_scopes
+        .iter_mut()
+        .find(|scope| scope.id == scope_id)
+        .unwrap()
+        .processors
+        .processors[0]
+        .opaque_state = proposal.state().cloned();
+    let programs = preflight_programs(&mut fixture, 0.75);
+    let (_, destination) = fixture.inner.source.register().unwrap();
+    let error = match fixture.inner.runtime.prepare_native_author_parameter_handoff(
+        &programs,
+        &proposal,
+        destination,
+        &ExecutionCancellationToken::new(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("portable model must not invent successful native StateEntry"),
+    };
+    assert!(
+        matches!(
+            &error,
+            NativeAudioParameterHandoffError::Admission(NativeAudioAuthorAdmissionError::Pending {
+                reason: NativeAudioAuthorHoldReason::CoherentPeerStateRequired,
+                ..
+            })
+        ),
+        "actual={error:?}"
+    );
+    // Default prepare_native_author_state_entry -> UnsupportedAdapter maps to
+    // this exact hold AFTER the real scope cohort has been retained.
+    let before_claim = fixture.inner.source.current_claim().unwrap().unwrap();
+    let before_verifier = fixture.inner.runtime.native_owner_installation_verifier().unwrap();
+    let before_cursors = preflight_cursors(&fixture.inner.runtime);
+    let before_probes = scope_repeat_poll_probe_snapshots(&fixture);
+    let before_calls = fixture.registry.calls.snapshot();
+    let before_root = fixture.inner.runtime.resource_root_identity();
+    let before_weight = fixture.inner.runtime.resource_footprint();
+    let counts = Arc::new(Counts::default());
+    let other = Arc::new(Counts::default());
+    let first = Registrar::try_new(counts.clone()).unwrap();
+    let foreign = Registrar::try_new(other.clone()).unwrap();
+    fixture.inner.runtime.bind_native_child_settlement(&first).unwrap();
+    fixture.inner.runtime.bind_native_child_settlement(&first).unwrap();
+    assert_eq!(
+        counts.scopes.load(Ordering::SeqCst),
+        3,
+        "root capability + current + real held candidate"
+    );
+    assert_eq!(
+        counts.children.load(Ordering::SeqCst),
+        0,
+        "portable model has no OS child"
+    );
+    assert!(!counts.bad.load(Ordering::SeqCst));
+    assert_eq!(
+        fixture.inner.runtime.bind_native_child_settlement(&foreign),
+        Err(Error::ForeignDomain)
+    );
+    assert_eq!(
+        (
+            counts.scopes.load(Ordering::SeqCst),
+            other.scopes.load(Ordering::SeqCst)
+        ),
+        (3, 1)
+    );
+    assert!(counts.bad.load(Ordering::SeqCst) && other.bad.load(Ordering::SeqCst));
+    assert_eq!(
+        fixture.inner.source.current_claim().unwrap().unwrap().generation(),
+        before_claim.generation()
+    );
+    assert_eq!(
+        before_verifier.validate(&before_claim),
+        Ok(()),
+        "the original exact opaque claim is still current"
+    );
+    assert!(fixture
+        .inner
+        .runtime
+        .native_owner_installation_verifier()
+        .unwrap()
+        .same_registration(&before_verifier));
+    assert_eq!(preflight_cursors(&fixture.inner.runtime), before_cursors);
+    assert_eq!(scope_repeat_poll_probe_snapshots(&fixture), before_probes);
+    assert_eq!(
+        fixture.registry.calls.snapshot(),
+        before_calls,
+        "no extra Poll/Bind/create"
+    );
+    assert_eq!(fixture.inner.runtime.resource_root_identity(), before_root);
+    assert_eq!(fixture.inner.runtime.resource_footprint(), before_weight);
+    drop(fixture);
+    assert_eq!(
+        counts.scopes.load(Ordering::SeqCst),
+        1,
+        "both real Runtime/cohort scopes retire"
+    );
+    drop(first);
+    drop(foreign);
+    assert_eq!(
+        (
+            counts.scopes.load(Ordering::SeqCst),
+            other.scopes.load(Ordering::SeqCst)
+        ),
+        (0, 0)
+    );
+}

@@ -36,6 +36,34 @@ pub(super) struct NativeAuthorScopeCohort {
     logical_fee: Option<LogicalPlanFee>,
 }
 
+impl NativeAuthorScopeCohort {
+    pub(super) fn validate_native_child_settlement_domain(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut failure = None;
+        for local in &self.locals {
+            if let Err(error) = local.next.validate_native_child_settlement_domain(registrar) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    pub(super) fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut failure = None;
+        for local in &mut self.locals {
+            if let Err(error) = local.next.bind_native_child_settlement(registrar) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
 /// Private exact operation handle, not author, resource or installation authority.
 pub(super) struct PreparedScopeHandle {
     old_root: crate::AudioSessionCursorIdentity,
