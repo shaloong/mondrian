@@ -363,7 +363,8 @@ impl AudioProgramRuntime {
             }
             .into());
         }
-        let next = AudioRenderSession::allocate_storage(plan)?;
+        let mut next = AudioRenderSession::allocate_storage(plan)?;
+        next.inherit_native_child_settlement(&self.session);
         next.validate_transfer(&self.session)?;
         locals.push(ScopeLocal {
             current: self.session.native_owner_identity(),

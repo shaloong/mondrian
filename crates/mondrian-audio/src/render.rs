@@ -209,6 +209,13 @@ pub struct AudioRenderSession {
     meter_block_serial: u64,
     continuity: SessionContinuity,
     capacity: AudioRenderCapacity,
+    // Last: actual processor/delivery owners retire before this counted capability.
+    native_child_settlement: Option<mondrian_core::NativeChildSettlementRegistrar>,
+}
+
+/// Known additional per-Session inline evidence slot, not a whole-heap claim.
+pub(crate) fn native_child_settlement_slot_bytes() -> usize {
+    std::alloc::Layout::new::<Option<mondrian_core::NativeChildSettlementRegistrar>>().size()
 }
 
 /// Private preparation of actual Session buffers, without processor creation.
@@ -235,11 +242,25 @@ impl PreparedAudioSessionStorage {
     /// completed. A failed population drops this unpublished preparation.
     pub(crate) fn populate(mut self) -> Result<AudioRenderSession, AudioExecutionError> {
         let expected_occurrences = self.capacity().processor_occurrences;
-        self.session.processor_host.populate_instances(&self.session.plan.schedule)?;
+        if let Err(error) =
+            self.session.processor_host.populate_instances(&self.session.plan.schedule)
+        {
+            self.session.mark_native_child_settlement_unavailable();
+            return Err(error);
+        }
         if self.session.processor_host.occurrence_count() != expected_occurrences {
             return Err(AudioExecutionError::InvalidPreparedSchedule);
         }
+        // Evidence failure is sticky, not a new DSP/installation refusal.
+        let _ = self.session.bind_current_native_child_settlement();
         Ok(self.session)
+    }
+
+    pub(crate) fn inherit_native_child_settlement(&mut self, current: &AudioRenderSession) {
+        if let Some(registrar) = &current.native_child_settlement {
+            // This counted branch exists before populate/create or Source commit.
+            let _ = self.session.attach_native_child_settlement(registrar);
+        }
     }
 }
 
@@ -304,6 +325,56 @@ enum SessionContinuity {
 }
 
 impl AudioRenderSession {
+    pub(crate) fn validate_native_child_settlement_domain(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        if let Some(current) = &self.native_child_settlement {
+            if !current.same_domain(registrar) {
+                current.mark_unavailable();
+                registrar.mark_unavailable();
+                return Err(mondrian_core::NativeChildSettlementError::ForeignDomain);
+            }
+        }
+        Ok(())
+    }
+
+    fn attach_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.validate_native_child_settlement_domain(registrar)?;
+        if self.native_child_settlement.is_some() {
+            return Ok(());
+        }
+        self.native_child_settlement = Some(registrar.try_fork()?);
+        Ok(())
+    }
+
+    fn mark_native_child_settlement_unavailable(&self) {
+        if let Some(registrar) = &self.native_child_settlement {
+            registrar.mark_unavailable();
+        }
+    }
+
+    fn bind_current_native_child_settlement(
+        &mut self,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        if let Some(registrar) = &self.native_child_settlement {
+            self.processor_host
+                .bind_native_child_settlement(&self.plan.schedule, registrar)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.attach_native_child_settlement(registrar)?;
+        self.bind_current_native_child_settlement()
+    }
+
     #[cfg(test)]
     pub(crate) fn is_unentered_for_owned_note_control(&self) -> bool {
         matches!(self.continuity, SessionContinuity::Unentered)
@@ -488,6 +559,7 @@ impl AudioRenderSession {
                 pending_reprepare_ticket: None,
                 continuity: SessionContinuity::Unentered,
                 capacity,
+                native_child_settlement: None,
             },
         })
     }
@@ -2219,5 +2291,246 @@ impl From<crate::AudioNativeOwnerError> for AudioExecutionError {
 impl From<mondrian_core::AutomationError> for AudioExecutionError {
     fn from(error: mondrian_core::AutomationError) -> Self {
         Self::Automation(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod native_child_settlement_tests {
+    use super::*;
+    use crate::{
+        AudioCompileRequest, AudioParameterEventBatch, AudioProcessor, AudioProcessorAudioIo,
+        AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
+        AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
+        BuiltInAudioProcessorResolver,
+    };
+    use mondrian_core::{
+        NativeChildSettlement as Settlement, NativeChildSettlementError as Error,
+        NativeChildSettlementRegistrar as Registrar, NativeChildSettlementReporter as Reporter,
+        NativeChildSettlementRequirement as Requirement,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Counts {
+        scopes: AtomicUsize,
+        children: AtomicUsize,
+        bad: AtomicBool,
+    }
+    impl Reporter for Counts {
+        fn begin_scope(&self) -> Result<(), Error> {
+            self.scopes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end_scope(&self) {
+            self.scopes.fetch_sub(1, Ordering::SeqCst);
+        }
+        fn begin_child(&self) -> Result<(), Error> {
+            self.children.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end_child(&self, result: Settlement) {
+            self.children.fetch_sub(1, Ordering::SeqCst);
+            if result == Settlement::Unconfirmed {
+                self.unavailable();
+            }
+        }
+        fn unavailable(&self) {
+            self.bad.store(true, Ordering::SeqCst);
+        }
+    }
+    struct MissingProcessor;
+    impl AudioProcessor for MissingProcessor {
+        fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
+            Ok(())
+        }
+        fn process(
+            &mut self,
+            _: AudioProcessorProcessContext,
+            _: &mut dyn AudioProcessorAudioIo,
+            _: AudioParameterEventBatch<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            Ok(())
+        }
+    }
+    struct Factory {
+        inner: Arc<dyn AudioProcessorFactory>,
+        requirement: Requirement,
+        missing: bool,
+        creates: Arc<AtomicUsize>,
+    }
+    impl AudioProcessorFactory for Factory {
+        fn execution_contract(&self) -> AudioProcessorExecutionContract {
+            self.inner.execution_contract()
+        }
+        fn native_child_settlement_requirement(&self) -> Requirement {
+            self.requirement
+        }
+        fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
+            self.creates.fetch_add(1, Ordering::SeqCst);
+            if self.missing {
+                Ok(Box::new(MissingProcessor))
+            } else {
+                self.inner.create()
+            }
+        }
+    }
+    struct Resolver {
+        requirement: Requirement,
+        missing: bool,
+        creates: Arc<AtomicUsize>,
+    }
+    impl AudioProcessorResolver for Resolver {
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            Ok(Arc::new(Factory {
+                inner: BuiltInAudioProcessorResolver.prepare(request)?,
+                requirement: self.requirement,
+                missing: self.missing,
+                creates: self.creates.clone(),
+            }))
+        }
+    }
+    fn plan(
+        requirement: Requirement,
+        missing: bool,
+        creates: Arc<AtomicUsize>,
+    ) -> Arc<PreparedAudioPlan> {
+        use mondrian_timeline::{
+            audio::{AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID},
+            Sequence,
+        };
+        let mut sequence = Sequence::new("child settlement forwarding");
+        sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+            AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
+        );
+        let output = sequence.audio_program.outputs[0].id;
+        let compiled =
+            crate::compile_audio_program(&sequence, AudioCompileRequest::program(output)).unwrap();
+        let contract = AudioRenderContract {
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            max_block_frames: 4,
+            processing_mode: crate::AudioProcessingMode::Offline,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        Arc::new(
+            PreparedAudioPlan::prepare_with_processor_resolver(
+                Arc::new(compiled),
+                contract,
+                crate::AudioKernelBackend::ScalarReference,
+                &Resolver { requirement, missing, creates },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn native_child_session_candidate_is_counted_before_create_and_factory_retains_no_domain() {
+        let counts = Arc::new(Counts::default());
+        let root = Registrar::try_new(counts.clone()).unwrap();
+        let creates = Arc::new(AtomicUsize::new(0));
+        let plan = plan(Requirement::NotApplicable, false, creates.clone());
+        let mut session = AudioRenderSession::new(plan.clone()).unwrap();
+        session.bind_native_child_settlement(&root).unwrap();
+        session.bind_native_child_settlement(&root).unwrap();
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 2);
+        let mut candidate = AudioRenderSession::allocate_storage(plan.clone()).unwrap();
+        candidate.inherit_native_child_settlement(&session);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            creates.load(Ordering::SeqCst),
+            1,
+            "fork precedes actual candidate create"
+        );
+        let candidate = candidate.populate().unwrap();
+        assert_eq!(creates.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            counts.children.load(Ordering::SeqCst),
+            0,
+            "actual builtin is NotApplicable"
+        );
+        drop(session);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 2);
+        drop(candidate);
+        drop(root);
+        assert_eq!(counts.scopes.load(Ordering::SeqCst), 0);
+        assert!(!counts.bad.load(Ordering::SeqCst));
+        assert_eq!(
+            Arc::strong_count(&counts),
+            1,
+            "still-retained Factory/Plan has no domain"
+        );
+        assert_eq!(
+            native_child_settlement_slot_bytes(),
+            std::alloc::Layout::new::<Option<Registrar>>().size()
+        );
+    }
+
+    #[test]
+    fn native_child_required_cannot_be_washed_by_actual_na_or_default_missing_binding() {
+        for (requirement, missing) in [
+            (Requirement::Required, false),
+            (Requirement::Required, true),
+            (Requirement::NotApplicable, true),
+            (Requirement::Unavailable, false),
+        ] {
+            let counts = Arc::new(Counts::default());
+            let root = Registrar::try_new(counts.clone()).unwrap();
+            let mut session =
+                AudioRenderSession::new(plan(requirement, missing, Arc::new(AtomicUsize::new(0))))
+                    .unwrap();
+            assert_eq!(
+                session.bind_native_child_settlement(&root),
+                Err(Error::Unavailable)
+            );
+            assert!(counts.bad.load(Ordering::SeqCst));
+            assert_eq!(
+                counts.scopes.load(Ordering::SeqCst),
+                2,
+                "failed evidence still owns its scope"
+            );
+            assert_eq!(counts.children.load(Ordering::SeqCst), 0);
+            drop(session);
+            drop(root);
+            assert_eq!(counts.scopes.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn native_child_session_foreign_rebind_invalidates_both_without_migration() {
+        let a = Arc::new(Counts::default());
+        let b = Arc::new(Counts::default());
+        let first = Registrar::try_new(a.clone()).unwrap();
+        let foreign = Registrar::try_new(b.clone()).unwrap();
+        let mut session = AudioRenderSession::new(plan(
+            Requirement::NotApplicable,
+            false,
+            Arc::new(AtomicUsize::new(0)),
+        ))
+        .unwrap();
+        session.bind_native_child_settlement(&first).unwrap();
+        assert_eq!(
+            session.bind_native_child_settlement(&foreign),
+            Err(Error::ForeignDomain)
+        );
+        assert!(a.bad.load(Ordering::SeqCst) && b.bad.load(Ordering::SeqCst));
+        assert_eq!(
+            (
+                a.scopes.load(Ordering::SeqCst),
+                b.scopes.load(Ordering::SeqCst)
+            ),
+            (2, 1)
+        );
+        assert!(session.native_child_settlement.as_ref().unwrap().same_domain(&first));
+        session.bind_native_child_settlement(&first).unwrap();
+        assert!(
+            a.bad.load(Ordering::SeqCst),
+            "same-domain retry cannot erase the prior failure"
+        );
     }
 }

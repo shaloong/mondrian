@@ -67,6 +67,13 @@ pub(super) struct ProcessOwner {
     staging: Option<TempDir>,
     #[cfg(test)]
     cleanup_hooks: Option<CleanupHooks>,
+    settlement_producer: Option<mondrian_core::NativeChildResultProducer>,
+}
+
+// Known new parent inline slot, charged once through the original Session contract.
+// This is not a complete ProcessOwner/std/foreign-heap accounting claim.
+pub(super) fn child_settlement_slot_bytes() -> usize {
+    std::alloc::Layout::new::<Option<mondrian_core::NativeChildResultProducer>>().size()
 }
 
 #[cfg(test)]
@@ -77,6 +84,22 @@ type CleanupHooks = (
 );
 
 impl ProcessOwner {
+    fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        if let Some(producer) = &self.settlement_producer {
+            if producer.same_domain(registrar) {
+                return Ok(());
+            }
+            producer.mark_unavailable();
+            registrar.mark_unavailable();
+            return Err(mondrian_core::NativeChildSettlementError::ForeignDomain);
+        }
+        self.settlement_producer = Some(registrar.try_child()?);
+        Ok(())
+    }
+
     pub(super) fn new(child: Child) -> Self {
         Self {
             child,
@@ -84,6 +107,7 @@ impl ProcessOwner {
             staging: None,
             #[cfg(test)]
             cleanup_hooks: None,
+            settlement_producer: None,
         }
     }
 
@@ -94,6 +118,7 @@ impl ProcessOwner {
             staging: Some(staging),
             #[cfg(test)]
             cleanup_hooks: None,
+            settlement_producer: None,
         }
     }
 
@@ -254,6 +279,13 @@ impl ProcessOwner {
 impl Drop for ProcessOwner {
     fn drop(&mut self) {
         let result = self.terminate();
+        if let Some(producer) = self.settlement_producer.take() {
+            producer.finish(if self.state == ProcessState::Settled {
+                mondrian_core::NativeChildSettlement::Settled
+            } else {
+                mondrian_core::NativeChildSettlement::Unconfirmed
+            });
+        }
         // A permanently live child may still use these files. Take and keep
         // the directory before any diagnostic that could panic. A kept path
         // is an explicit residual resource, never evidence of settlement.
@@ -274,6 +306,13 @@ impl Drop for ProcessOwner {
 }
 
 impl SupervisedAudioWorker {
+    pub(super) fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.process.bind_native_child_settlement(registrar)
+    }
+
     pub(super) fn launch(
         spec: &IsolatedAudioProcessorWorkerSpec,
         contract: AudioRenderContract,
@@ -2111,6 +2150,164 @@ mod control_timeout_worker_lifecycle {
         use std::io::Write;
         use std::path::PathBuf;
         use std::process::{Command, ExitStatus, Stdio};
+
+        mod native_child_settlement_tests {
+            use super::*;
+            use mondrian_core::{
+                NativeChildSettlement as Settlement, NativeChildSettlementError as Error,
+                NativeChildSettlementRegistrar as Registrar,
+                NativeChildSettlementReporter as Reporter,
+            };
+            use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
+            use std::sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                Arc,
+            };
+            use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+            #[derive(Default)]
+            struct Counts {
+                scopes: AtomicUsize,
+                children: AtomicUsize,
+                finishes: AtomicUsize,
+                unconfirmed: AtomicBool,
+                bad: AtomicBool,
+            }
+            impl Reporter for Counts {
+                fn begin_scope(&self) -> Result<(), Error> {
+                    self.scopes.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+                fn end_scope(&self) {
+                    self.scopes.fetch_sub(1, Ordering::SeqCst);
+                }
+                fn begin_child(&self) -> Result<(), Error> {
+                    self.children.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+                fn end_child(&self, result: Settlement) {
+                    self.finishes.fetch_add(1, Ordering::SeqCst);
+                    self.children.fetch_sub(1, Ordering::SeqCst);
+                    if result == Settlement::Unconfirmed {
+                        self.unconfirmed.store(true, Ordering::SeqCst);
+                        self.unavailable();
+                    }
+                }
+                fn unavailable(&self) {
+                    self.bad.store(true, Ordering::SeqCst);
+                }
+            }
+            struct Cleanup(OwnedHandle);
+            impl Cleanup {
+                fn close(&self) -> io::Result<()> {
+                    // SAFETY: the owned handle duplicates the original live Child
+                    // process handle with its existing termination/synchronize rights.
+                    // No PID reopen or second Child owner is involved.
+                    let handle = self.0.as_raw_handle().cast();
+                    if unsafe { WaitForSingleObject(handle, 0) } == 0 {
+                        return Ok(());
+                    }
+                    if unsafe { TerminateProcess(handle, 73) } == 0
+                        && unsafe { WaitForSingleObject(handle, 0) } != 0
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if unsafe { WaitForSingleObject(handle, 2_000) } != 0 {
+                        return Err(io::Error::other(
+                            "same-child test cleanup did not confirm exit",
+                        ));
+                    }
+                    Ok(())
+                }
+            }
+            impl Drop for Cleanup {
+                fn drop(&mut self) {
+                    let _ = self.close();
+                }
+            }
+            fn denied_observe(_: &mut Child) -> io::Result<Option<ExitStatus>> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test observation refused",
+                ))
+            }
+            fn denied_kill(_: &mut Child) -> io::Result<()> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "test kill refused",
+                ))
+            }
+            fn forbidden_wait(_: &mut Child) -> io::Result<ExitStatus> {
+                Err(io::Error::other("no wait after refused kill"))
+            }
+
+            #[test]
+            #[ignore = "actual owner Job required; original ProcessOwner forced-kill result, not native DSP"]
+            fn native_child_forced_kill_reports_settled_only_on_final_owner_drop() {
+                let (mut owner, _directory) = sleeping_owner();
+                let counts = Arc::new(Counts::default());
+                let root = Registrar::try_new(counts.clone()).unwrap();
+                owner.bind_native_child_settlement(&root).unwrap();
+                owner.bind_native_child_settlement(&root).unwrap();
+                assert_eq!(counts.children.load(Ordering::SeqCst), 1);
+                owner.terminate().expect("real forced kill and reap");
+                assert_eq!(owner.state, ProcessState::Settled);
+                assert_eq!(
+                    counts.finishes.load(Ordering::SeqCst),
+                    0,
+                    "no early report at terminate"
+                );
+                drop(owner);
+                assert_eq!(counts.finishes.load(Ordering::SeqCst), 1);
+                assert_eq!(counts.children.load(Ordering::SeqCst), 0);
+                assert!(!counts.unconfirmed.load(Ordering::SeqCst));
+                assert!(!counts.bad.load(Ordering::SeqCst));
+                drop(root);
+                assert_eq!(counts.scopes.load(Ordering::SeqCst), 0);
+            }
+
+            #[test]
+            #[ignore = "actual owner Job required; original refused cleanup reports unconfirmed before test-only same-handle cleanup"]
+            fn native_child_refused_final_cleanup_reports_unconfirmed_and_preserves_domain() {
+                let (mut owner, _directory) = sleeping_owner();
+                let external = Cleanup(owner.child.as_handle().try_clone_to_owned().unwrap());
+                let counts = Arc::new(Counts::default());
+                let other = Arc::new(Counts::default());
+                let root = Registrar::try_new(counts.clone()).unwrap();
+                let foreign = Registrar::try_new(other.clone()).unwrap();
+                owner.bind_native_child_settlement(&root).unwrap();
+                assert_eq!(
+                    owner.bind_native_child_settlement(&foreign),
+                    Err(Error::ForeignDomain)
+                );
+                assert!(counts.bad.load(Ordering::SeqCst) && other.bad.load(Ordering::SeqCst));
+                assert_eq!(
+                    (
+                        counts.children.load(Ordering::SeqCst),
+                        other.children.load(Ordering::SeqCst)
+                    ),
+                    (1, 0)
+                );
+                owner.cleanup_hooks = Some((denied_observe, denied_kill, forbidden_wait));
+                drop(owner); // Original final terminate refuses; the producer reports Unconfirmed.
+                let receipt = (
+                    counts.finishes.load(Ordering::SeqCst),
+                    counts.children.load(Ordering::SeqCst),
+                    counts.unconfirmed.load(Ordering::SeqCst),
+                );
+                external.close().expect("test cleanup before result assertions");
+                assert_eq!(receipt, (1, 0, true));
+                drop(root);
+                drop(foreign);
+                assert_eq!(
+                    (
+                        counts.scopes.load(Ordering::SeqCst),
+                        other.scopes.load(Ordering::SeqCst)
+                    ),
+                    (0, 0)
+                );
+            }
+        }
 
         const READY_ENV: &str = "MONDRIAN_AUDIO_RETIREMENT_FIXTURE_READY";
         const EXIT_ENV: &str = "MONDRIAN_AUDIO_RETIREMENT_FIXTURE_EXIT";

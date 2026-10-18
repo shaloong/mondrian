@@ -435,11 +435,53 @@ impl AudioProgramRuntime {
                 .and_then(|bytes| bytes.checked_add(next.prepared_logical_bytes)),
         )?;
         // Existing canonical allocator/population; no Enter, Bind, lease or origin.
-        let session = AudioRenderSession::allocate_storage(plan)?.populate()?;
+        let mut storage = AudioRenderSession::allocate_storage(plan)?;
+        storage.inherit_native_child_settlement(&self.session);
+        let session = storage.populate()?;
         self.session = session;
         self.resource_footprint.fixed_resident_bytes = final_fixed;
         self.resource_footprint.prepared_logical_bytes = final_logical;
         Ok(())
+    }
+
+    /// Bind child-settlement evidence to every currently owned actual Session.
+    /// This performs no DSP or owner replacement and grants no execution permission.
+    /// Missing forwarding permanently invalidates the supplied evidence domain.
+    pub fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.validate_native_child_settlement_domain(registrar)?;
+        self.bind_native_child_settlement_admitted(registrar)
+    }
+
+    fn validate_native_child_settlement_domain(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.session.validate_native_child_settlement_domain(registrar)?;
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                nested.runtime.validate_native_child_settlement_domain(registrar)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_native_child_settlement_admitted(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let mut failure = self.session.bind_native_child_settlement(registrar).err();
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source {
+                if let Err(error) = nested.runtime.bind_native_child_settlement_admitted(registrar)
+                {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Bind one read-only registration supplied by the actual Media slot owner.

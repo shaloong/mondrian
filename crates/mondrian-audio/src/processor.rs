@@ -396,6 +396,14 @@ pub trait AudioProcessorResolver: Send + Sync {
 
 /// Render-contract-bound factory retained by an immutable prepared plan.
 pub trait AudioProcessorFactory: Send + Sync {
+    /// Explicit child-settlement evidence requirement, independent of DSP admission.
+    /// Missing forwarding is unavailable, never evidence of no native child.
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Unavailable
+    }
+
     /// Visit each actual nested immutable factory allocation without loading,
     /// creating, entering or mutating a processor. The prepared binding separately
     /// reports this factory's Arc payload and its own auxiliary metadata.
@@ -471,6 +479,18 @@ pub trait AudioProcessorFactory: Send + Sync {
 /// another thread/device, panic, or retain borrowed block data. An isolated
 /// plugin Adapter owns enforcing its deadline and failure policy.
 pub trait AudioProcessor: Send {
+    /// Forward evidence to this actual instance's original native child owner.
+    /// This grants no execution, installation, teardown or retry permission.
+    fn bind_native_child_settlement(
+        &mut self,
+        _registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Err(mondrian_core::NativeChildSettlementError::Unavailable)
+    }
+
     /// Whether this exact instance has an authenticated native observation lane.
     /// This read-only capability performs no foreign/native calls.
     fn native_observations_supported(&self) -> bool {

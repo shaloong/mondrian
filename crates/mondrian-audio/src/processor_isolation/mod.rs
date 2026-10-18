@@ -554,11 +554,18 @@ impl IsolatedAudioProcessorFactory {
             .with_additional_session_scratch_bytes(spec.native_lane.map_or(
                 0,
                 crate::NativeWorkerLaneResourceProfile::additional_session_reservation_bytes,
-            ))
+            ))?
+            .with_additional_session_scratch_bytes(supervisor::child_settlement_slot_bytes())
     }
 }
 
 impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::Required
+    }
+
     fn visit_host_owned_storage<'a>(
         &'a self,
         visitor: &mut dyn FnMut(
@@ -801,6 +808,17 @@ struct IsolatedAudioProcessor {
 }
 
 impl AudioProcessor for IsolatedAudioProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        self.worker.bind_native_child_settlement(registrar)?;
+        Ok(mondrian_core::NativeChildSettlementBinding::Registered)
+    }
+
     fn open_native_audio_editor(
         &mut self,
         request: crate::NativeAudioEditorOpenRequest,
@@ -2013,6 +2031,43 @@ pub fn run_isolated_audio_processor_worker(
 #[cfg(test)]
 mod note_spec_contracts {
     use super::*;
+
+    #[test]
+    fn native_child_parent_slot_adds_exactly_one_existing_session_charge() {
+        let spec = spec();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let base = spec
+            .plugin_execution_contract
+            .session_scratch_bytes()
+            .checked_add(layout.total_bytes)
+            .unwrap()
+            .checked_add(
+                isolated_output_contract_clone_reservation_bytes(&spec.auxiliary_outputs).unwrap(),
+            )
+            .unwrap();
+        assert!(spec.native_lane.is_none());
+        let expected = base
+            .checked_add(
+                std::alloc::Layout::new::<Option<mondrian_core::NativeChildResultProducer>>()
+                    .size(),
+            )
+            .unwrap();
+        let contract =
+            IsolatedAudioProcessorFactory::requested_execution_contract(&spec, layout).unwrap();
+        assert_eq!(contract.session_scratch_bytes(), expected);
+        let max = AudioProcessorExecutionContract::new(
+            0,
+            crate::AudioProcessorTail::None,
+            false,
+            true,
+            true,
+            usize::MAX - supervisor::child_settlement_slot_bytes() + 1,
+        )
+        .unwrap();
+        assert!(max
+            .with_additional_session_scratch_bytes(supervisor::child_settlement_slot_bytes())
+            .is_err());
+    }
 
     fn spec() -> IsolatedAudioProcessorWorkerSpec {
         IsolatedAudioProcessorWorkerSpec::new(

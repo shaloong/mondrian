@@ -947,6 +947,7 @@ fn session_resource_footprint(
     ])?;
     let fixed_resident_bytes = checked_sum([
         SESSION_BASE_BYTES,
+        crate::render::native_child_settlement_slot_bytes(),
         render_scratch_bytes,
         summary.processor_session_scratch_bytes,
         compensation_delay_bytes,

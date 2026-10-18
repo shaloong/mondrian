@@ -184,6 +184,12 @@ struct LookaheadLimiterFactory {
 }
 
 impl AudioProcessorFactory for LookaheadLimiterFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
@@ -250,6 +256,16 @@ struct LookaheadLimiterProcessor {
 }
 
 impl AudioProcessor for LookaheadLimiterProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
         self.delayed_audio.fill(0.0);
         self.delayed_ceiling_db.fill(0.0);

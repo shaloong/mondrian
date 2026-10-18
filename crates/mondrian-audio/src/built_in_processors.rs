@@ -208,6 +208,12 @@ struct BuiltInGainFactory {
 }
 
 impl AudioProcessorFactory for BuiltInGainFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn visit_host_owned_storage<'a>(
         &'a self,
         _visitor: &mut dyn FnMut(
@@ -247,6 +253,16 @@ struct BuiltInGainProcessor {
 }
 
 impl AudioProcessor for BuiltInGainProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
         Ok(())
     }
@@ -319,6 +335,12 @@ struct BuiltInSampleDelayFactory {
 }
 
 impl AudioProcessorFactory for BuiltInSampleDelayFactory {
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        mondrian_core::NativeChildSettlementRequirement::NotApplicable
+    }
+
     fn visit_host_owned_storage<'a>(
         &'a self,
         _visitor: &mut dyn FnMut(
@@ -360,6 +382,16 @@ struct BuiltInSampleDelayProcessor {
 }
 
 impl AudioProcessor for BuiltInSampleDelayProcessor {
+    fn bind_native_child_settlement(
+        &mut self,
+        _: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<
+        mondrian_core::NativeChildSettlementBinding,
+        mondrian_core::NativeChildSettlementError,
+    > {
+        Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+    }
+
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
         self.delay_line.fill(0.0);
         self.cursor = 0;

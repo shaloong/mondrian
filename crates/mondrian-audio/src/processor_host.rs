@@ -109,6 +109,15 @@ impl PreparedProcessorFactoryBinding {
         Ok(())
     }
 
+    fn native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        isolate_adapter_value("native child settlement requirement", || {
+            self.factory.native_child_settlement_requirement()
+        })
+        .unwrap_or(mondrian_core::NativeChildSettlementRequirement::Unavailable)
+    }
+
     pub(crate) const fn contract(&self) -> AudioProcessorExecutionContract {
         self.contract
     }
@@ -1292,6 +1301,39 @@ impl PreparedProcessorHost {
             });
         }
         Ok(())
+    }
+
+    pub(crate) fn bind_native_child_settlement(
+        &mut self,
+        schedule: &PreparedAudioSchedule,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        use mondrian_core::{
+            NativeChildSettlementBinding as Binding, NativeChildSettlementError as Error,
+            NativeChildSettlementRequirement as Requirement,
+        };
+        if self.instances.len() != schedule.processors.len() {
+            registrar.mark_unavailable();
+            return Err(Error::Unavailable);
+        }
+        let mut failure = None;
+        for (instance, prepared) in self.instances.iter_mut().zip(&schedule.processors) {
+            let requirement = prepared.factory.native_child_settlement_requirement();
+            let result = isolate_adapter_value("native child settlement binding", || {
+                instance.processor.bind_native_child_settlement(registrar)
+            })
+            .unwrap_or(Err(Error::Unavailable));
+            let matched = matches!(
+                (requirement, &result),
+                (Requirement::Required, Ok(Binding::Registered))
+                    | (Requirement::NotApplicable, Ok(Binding::NotApplicable))
+            );
+            if !matched {
+                registrar.mark_unavailable();
+                failure.get_or_insert_with(|| result.err().unwrap_or(Error::Unavailable));
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     pub(crate) fn occurrence_count(&self) -> usize {
