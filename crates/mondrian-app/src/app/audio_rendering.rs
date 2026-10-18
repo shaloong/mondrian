@@ -207,6 +207,19 @@ impl TimelineAudioPcmRenderer {
             .is_some_and(|snapshot| snapshot.enter_commit().is_ok())
     }
 
+    /// Check existing native author obligations without waiting for a DSP-held
+    /// renderer mutex. The admitted Runtime check may use its normal control IPC;
+    /// success is an observation, not an atomic seal against later callbacks.
+    pub(super) fn validate_native_author_source_closed(&self) -> mondrian_core::Result<()> {
+        let mut state = self.state.try_lock().ok_or_else(|| {
+            audio_render_error("project_audio_handoff", "Timeline audio Runtime is busy")
+        })?;
+        state
+            .delivery
+            .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+            .map_err(|error| audio_render_error("project_audio_handoff", error))
+    }
+
     /// Pure metadata comparison; no native/DSP or author permission is issued.
     pub(super) fn same_presentation_execution(
         &self,

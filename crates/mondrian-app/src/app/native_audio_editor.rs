@@ -42,6 +42,15 @@ struct NativeAudioEditorPendingAuthor {
 }
 
 impl NativeAudioEditorProductContext {
+    /// An inactive target after a genuine Close is presentation metadata. Only
+    /// live attachment/control or undelivered author work blocks Source retirement.
+    pub(super) fn blocks_project_audio_handoff(&self) -> bool {
+        self.queued.is_some()
+            || self.attachment_target.is_some()
+            || self.gesture.is_some()
+            || self.outstanding.is_some()
+    }
+
     /// Select the captured exact source during an actual Media state-entry
     /// hold. This is metadata selection only: Media verifies the same Arc,
     /// registered source and current claim before retaining any control work.

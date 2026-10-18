@@ -108,6 +108,15 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.poll_native_observations(cancellation)
     }
 
+    /// Check the sole Runtime's existing author obligations before retiring its
+    /// Source. This observes the current prefix; it does not seal future callbacks.
+    pub fn validate_native_author_source_closed(
+        &mut self,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        self.runtime.validate_native_author_source_closed(cancellation)
+    }
+
     /// Current actual Runtime registration; no wrapper-cached owner is inferred.
     pub fn native_owner_installation_verifier(
         &self,

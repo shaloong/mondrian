@@ -1498,6 +1498,41 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
         false,
         Some(b"Mondrian CLAP Gain Editor"),
     );
+    // A real attached GUI blocks ProjectClose before stop or persistence.
+    // Continue the original author path afterwards on that exact live owner.
+    assert!(state.native_audio_editor.as_ref().unwrap().blocks_project_audio_handoff());
+    let close_error = state.close_project().expect_err("actual Opened view blocks ProjectClose");
+    assert!(
+        matches!(close_error.downcast_ref::<mondrian_core::MondrianError>(),
+        Some(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
+        if step_id == "project_audio_handoff"
+            && reason == "native author or editor work must settle before Project handoff")
+    );
+    assert_eq!(state.playback_engine.snapshot(), engine_before);
+    assert_eq!(state.audio_playback_snapshot().generation, generation);
+    assert_eq!(state.audio_playback_snapshot().next_start_sample, 0);
+    assert_eq!(state.audio_playback_snapshot().in_flight, 0);
+    assert_eq!(verifier.current_claim().unwrap(), original_claim);
+    assert!(state.audio_playback.native_editor_source_available());
+    assert!(state
+        .native_audio_renderer
+        .as_ref()
+        .is_some_and(|actual| std::sync::Weak::ptr_eq(actual, &weak)));
+    assert_eq!(
+        state.native_audio_editor_surface_state(&payload),
+        (true, false)
+    );
+    assert!(state.native_audio_editor.as_ref().unwrap().blocks_project_audio_handoff());
+    assert_eq!(state.authoring_session_id(), Some(payload.session_id));
+    assert_eq!(
+        state.authoring.as_ref().unwrap().history().diagnostics(),
+        history_before
+    );
+    assert!(state.pending_project_close.is_none());
+    assert!(state.project_close_fault.is_none());
+    assert!(!state.project_lifecycle_blocks_actions());
+    assert_eq!(output.lock().queued, 0);
+    assert_ne!(unsafe { is_window(view) }, 0);
     assert_ne!(
         unsafe { post_window_message(view, 0x0100, b'G' as usize, 0) },
         0,

@@ -2793,6 +2793,14 @@ impl AudioPlayback {
         }
     }
 
+    /// Compare the actual installed owner, without calling the renderer or
+    /// granting native/author permission. Aliases retain the same identity.
+    pub fn matches_source(&self, renderer: &Arc<dyn AudioPcmRenderer>) -> bool {
+        self.renderer
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.owner, renderer))
+    }
+
     /// Pure current-slot availability; no native or author permission is issued.
     pub fn native_editor_source_available(&self) -> bool {
         self.renderer.is_some()

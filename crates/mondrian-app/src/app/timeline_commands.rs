@@ -555,7 +555,10 @@ impl AppState {
         if self.project_lifecycle_blocks_actions() {
             anyhow::bail!("Project close is already active or fail-closed");
         }
-        self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        // Keep the public synchronous Close's original active-Sequence contract.
+        if self.active_sequence().is_none() {
+            self.stop()?;
+        }
         self.prepare_project_session_close()?;
         self.finalize_project_close_state()
             .map_err(|error| anyhow::anyhow!(error.to_string()))

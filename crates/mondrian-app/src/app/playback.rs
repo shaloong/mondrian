@@ -194,6 +194,13 @@ impl AppAudioPlayback {
         }
     }
 
+    fn matches_source(&self, renderer: &Arc<dyn AudioPcmRenderer>) -> bool {
+        match self {
+            Self::Available(playback) => playback.matches_source(renderer),
+            Self::Unavailable { .. } => false,
+        }
+    }
+
     pub(super) fn native_editor_source_available(&self) -> bool {
         match self {
             Self::Available(playback) => playback.native_editor_source_available(),
@@ -769,6 +776,78 @@ impl AppState {
         self.reanchor_playback_observation_projection(observed_at);
         self.capture_playback_evidence();
         self.refresh_internal_execution_resource_decision();
+        Ok(())
+    }
+
+    /// Terminate the current Project's audio domain before persistence admission
+    /// retires. Known author/editor obligations refuse before transport changes.
+    /// The original Media clear revokes old claims and retires owners on its own
+    /// queue; it leaves Playback reusable and does not certify native OS exit.
+    pub(super) fn prepare_project_audio_handoff(&mut self) -> mondrian_core::Result<()> {
+        let cleanup_complete = self.audio_playback_snapshot().state
+            == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused;
+        if self
+            .native_audio_editor
+            .as_ref()
+            .is_some_and(|context| context.blocks_project_audio_handoff())
+            || self.playback_engine.native_audio_control_hold_ticket().is_some()
+            || self.audio_playback.native_author_state_entry_target().is_some()
+            || self.audio_playback.native_reprepare_pending_generation().is_some()
+            || (!cleanup_complete
+                && (self.audio_playback.native_control_hold_generation().is_some()
+                    || self.audio_playback.native_editor_cleanup_target().is_some()))
+        {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "native author or editor work must settle before Project handoff",
+            ));
+        }
+        let has_source = self.audio_playback.native_editor_source_available();
+        if has_source {
+            if self.active_sequence().is_none() {
+                return Err(transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no active Sequence",
+                ));
+            }
+            let renderer = self
+                .native_audio_renderer
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+                .ok_or_else(|| {
+                transport_action_error(
+                    "project_audio_handoff",
+                    "installed audio Source has no current Timeline Runtime",
+                )
+            })?;
+            let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+            if !self.audio_playback.matches_source(&erased) {
+                return Err(transport_action_error(
+                    "project_audio_handoff",
+                    "Timeline Runtime is not the installed audio Source",
+                ));
+            }
+            renderer.validate_native_author_source_closed()?;
+        }
+        // Cancelled cold Open has no old Sequence or Source. A real Project,
+        // including video-only/AudioUnavailable, still uses the original stop.
+        if self.active_sequence().is_some() {
+            self.stop()?;
+            if has_source {
+                let anchor = self.authoritative_audio_anchor(
+                    &self.playback_engine,
+                    self.playback_engine.monotonic_high_water(),
+                    "project_audio_handoff",
+                )?;
+                self.audio_playback
+                    .clear_source(anchor)
+                    .map_err(|error| transport_action_error("project_audio_handoff", error))?;
+            }
+        }
+        self.native_audio_renderer = None;
+        self.audio_playback_author_binding = None;
+        self.audio_monitoring.clear_meter();
+        self.native_audio_editor = None;
         Ok(())
     }
 
@@ -5553,6 +5632,8 @@ mod tests {
 
     #[cfg(windows)]
     mod cold_native_joint_controls;
+
+    mod project_close_audio_contracts;
 
     mod native_settlement_queue_controls {
         use super::*;

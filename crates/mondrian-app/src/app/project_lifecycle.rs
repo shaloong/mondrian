@@ -206,7 +206,6 @@ impl AppState {
         let source_session_id = self.authoring.as_ref().map(AuthoringSession::session_id);
         let phase = match source_session_id {
             Some(session_id) => {
-                self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 let ticket = self.begin_project_lifecycle_pause(session_id)?;
                 PendingProjectOpenPhase::Quiescing { path, ticket }
             }
@@ -228,6 +227,7 @@ impl AppState {
         &mut self,
         session_id: AuthoringSessionId,
     ) -> anyhow::Result<ProjectPersistencePauseTicket> {
+        self.prepare_project_audio_handoff()?;
         match self.project_persistence.begin_pause_and_quiesce(session_id) {
             Ok(ticket) => Ok(ticket),
             Err(reason) => {
@@ -330,6 +330,13 @@ impl AppState {
         &mut self,
         mut handoff: Option<ProjectPersistencePauseToken>,
     ) -> ProjectOpenPoll {
+        if let Err(error) = self.prepare_project_audio_handoff() {
+            return self.finish_project_open_error(
+                self.authoring.as_ref().map(AuthoringSession::session_id),
+                handoff,
+                error.to_string(),
+            );
+        }
         if let Err(reason) = self.retire_project_session_handoff(&mut handoff) {
             if let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) {
                 self.retain_project_close_fault(session_id, reason.clone());
@@ -668,6 +675,9 @@ impl AppState {
     }
 
     pub(super) fn prepare_project_session_close(&mut self) -> anyhow::Result<()> {
+        // Do not permanently retire persistence until native/audio admission
+        // succeeds; a refusal must retain an editable original Session.
+        self.prepare_project_audio_handoff()?;
         let mut handoff = self.begin_project_session_handoff()?;
         self.retire_project_session_handoff(&mut handoff).map_err(anyhow::Error::msg)?;
         self.retain_current_project_library_generation();
@@ -720,7 +730,6 @@ impl AppState {
         let Some(session_id) = self.authoring.as_ref().map(AuthoringSession::session_id) else {
             return Ok(false);
         };
-        self.stop().map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let ticket = self.begin_project_lifecycle_pause(session_id)?;
         self.pending_project_close =
             Some(PendingProjectClose { session_id, ticket, required_manual_save });
@@ -748,12 +757,13 @@ impl AppState {
     pub(crate) fn force_close_project_after_fault(&mut self) -> anyhow::Result<()> {
         let fault = self
             .project_close_fault
-            .take()
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Project close has no retained lifecycle fault"))?;
         if self.authoring.as_ref().map(AuthoringSession::session_id) != Some(fault.session_id) {
-            self.project_close_fault = Some(fault);
             anyhow::bail!("failed Project close authority belongs to another Authoring Session");
         }
+        self.prepare_project_audio_handoff()?;
+        let fault = self.project_close_fault.take().expect("validated lifecycle fault");
         if let Err(reason) = self.project_persistence.abandon_session(fault.session_id) {
             self.project_close_fault = Some(fault);
             anyhow::bail!(reason);
