@@ -514,12 +514,12 @@ impl EffectExecutionContract {
         topology: EffectGraphTopology::LinearChain,
     };
 
-    /// Conservative plugin default.
+    /// Conservative default for externally registered effect definitions.
     ///
     /// It deliberately admits no backend and assumes unbounded, stateful,
-    /// full-frame execution. A plugin must replace this complete contract before
+    /// full-frame execution. A provider must replace this complete contract before
     /// a prepared program can execute it.
-    pub const CONSERVATIVE_PLUGIN_DEFAULT: Self = Self {
+    pub const CONSERVATIVE_EXTENSION_DEFAULT: Self = Self {
         execution_modes: EffectExecutionModes::NONE,
         determinism: EffectDeterminism::Nondeterministic,
         state_model: EffectStateModel::StatefulSequential,
@@ -562,7 +562,7 @@ impl EffectExecutionContract {
 
 impl Default for EffectExecutionContract {
     fn default() -> Self {
-        Self::CONSERVATIVE_PLUGIN_DEFAULT
+        Self::CONSERVATIVE_EXTENSION_DEFAULT
     }
 }
 

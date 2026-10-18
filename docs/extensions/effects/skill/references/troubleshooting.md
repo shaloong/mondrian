@@ -1,8 +1,8 @@
-# Troubleshooting Mondrian Plugins
+# Troubleshooting Mondrian Effect Extensions
 
 ## Effect not appearing in the Effects Library
 
-**Symptom:** Plugin registers successfully, but effect doesn't show up in the UI's effects panel.
+**Symptom:** Effect extension registers successfully, but effect doesn't show up in the UI's effects panel.
 
 **Checklist:**
 
@@ -11,13 +11,13 @@
 3. Check `effect_definition(&your_type)` returns `Some(...)`
 4. Check the registered Definition's Contract uses the intended library policy
 5. Verify API version compatibility: `contract.is_api_compatible()` returns `true`
-6. Check runtime status: `effect_plugin_runtime_status(key)` — is `disabled` false?
+6. Check runtime status: `effect_extension_runtime_status(key)` — is `disabled` false?
 
 **Common causes:**
-- Plugin crate's `register()` function not called in app init
-- Plugin API version incompatible with runtime (major mismatch, or plugin minor > runtime minor)
-- Plugin was disabled by a previous runtime failure (if using `DisableDefinition`)
-- Library policy is `HideWhenUnavailable` and plugin is not compatible
+- Effect extension crate's `register()` function not called in app init
+- Effect extension API version incompatible with runtime (major mismatch, or effect extension minor > runtime minor)
+- Effect extension was disabled by a previous runtime failure (if using `DisableDefinition`)
+- Library policy is `HideWhenUnavailable` and effect extension is not compatible
 
 ## Effect applies but no visual change
 
@@ -45,18 +45,18 @@
    the processor directly; an unbound manually constructed raw Custom node is
    intentionally rejected at compilation
 2. Check `params_builder` returns `Ok(Some(...))`; `Ok(None)` intentionally skips the processor and `Err` fails graph construction
-3. Check `effect_plugin_runtime_status(key)` — a quarantined current Definition generation is rejected before execution
+3. Check `effect_extension_runtime_status(key)` — a quarantined current Definition generation is rejected before execution
 4. Inspect whether the engine-emitted, Definition-bound internal
    `EffectRenderOp::Custom` node appears in the compiled graph; never construct it manually
 
 **Common causes:**
 - `params_builder` returns `Ok(None)` because the definition deliberately treats current parameters as identity; missing required state should instead return `EffectGraphBuildError`
-- Plugin was disabled by a previous failure (check runtime status)
+- Effect extension was disabled by a previous failure (check runtime status)
 - The prepared graph was rejected before execution because its Definition contract was too optimistic
 
 ## Performance issues
 
-**Symptom:** Plugin causes frame drops, slow preview, or high memory usage.
+**Symptom:** Effect extension causes frame drops, slow preview, or high memory usage.
 
 **Diagnosis:**
 
@@ -74,25 +74,25 @@
 
 ## Build errors
 
-**Symptom:** Cargo build fails after adding a plugin crate.
+**Symptom:** Cargo build fails after adding an effect extension crate.
 
 **Checklist:**
 
-1. Plugin crate is listed in root `Cargo.toml` `[workspace].members`
+1. Effect extension crate is listed in root `Cargo.toml` `[workspace].members`
 2. All path dependencies use correct relative paths (e.g., `path = "../mondrian-core"`)
 3. Dependency versions are compatible with the workspace
-4. Workspace plugin crate inherits `edition.workspace = true` and `rust-version.workspace = true`
-5. `mondrian-app` (or wherever `register()` is called) has the plugin as a dependency
+4. In-repository effect extension crate inherits the workspace edition and Rust version (`edition.workspace = true`, `rust-version.workspace = true`)
+5. `mondrian-app` (or wherever `register()` is called) has the effect extension as a dependency
 
 **Common causes:**
 - Missing workspace member entry
-- Incorrect relative path in `Cargo.toml` (paths are relative to the plugin crate's location)
+- Incorrect relative path in `Cargo.toml` (paths are relative to the effect extension crate's location)
 - Using features that don't exist in the dependency crates
-- Version mismatch between workspace and plugin dependencies
+- Version mismatch between workspace and effect extension dependencies
 
 ## Runtime errors
 
-**Symptom:** Plugin compiles but panics or produces errors at runtime.
+**Symptom:** Effect extension compiles but panics or produces errors at runtime.
 
 **Key guarantees:**
 - Panics in Definition preparation and graph builders are caught by `catch_unwind`
@@ -101,8 +101,8 @@
 - Semi-finished pixels never leak to the output frame
 
 **Debugging:**
-1. Check `effect_plugin_runtime_status(key).last_error` for recorded error messages
-2. Check if the plugin was disabled: `effect_plugin_runtime_status(key).disabled`
+1. Check `effect_extension_runtime_status(key).last_error` for recorded error messages
+2. Check if the effect extension was disabled: `effect_extension_runtime_status(key).disabled`
 3. For custom processors: test with a minimal buffer first
 4. Verify buffer dimensions: `buffer.len() == width * height * 4`
 
@@ -127,10 +127,10 @@
 **Checklist:**
 
 1. Every product descriptor explicitly binds a stable `ParameterId`
-2. Property paths use the `plugin.<author>.<name>.<param>` convention as current UI/authoring aliases
+2. Property paths use the `extension.<author>.<name>.<param>` convention as current UI/authoring aliases
 3. Parameter value types and schema revisions remain compatible
 
 **Common causes:**
 - Changed `ParameterId` without migration — old projects lose the stable identity
 - Changed a parameter type (Float → Int) — old values can't be deserialized
-- Changed the plugin key — old projects can't find the effect definition
+- Changed the effect extension key — old projects can't find the effect definition

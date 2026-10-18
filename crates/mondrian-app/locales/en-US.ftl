@@ -203,6 +203,7 @@ effect-category-stylize = Stylize
 effect-category-transform = Transform
 effect-category-keying = Keying
 effect-category-plugins = Plugins
+effect-category-external = External Effects
 effect-basic-correction = Basic Correction
 effect-white-balance = White Balance
 effect-lut-3d = 3D LUT

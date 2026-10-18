@@ -1,7 +1,7 @@
 //! Unified stable-address authoring for Sequence audio automation.
 //!
 //! Every audio control that owns an exact numeric curve is addressed through
-//! this Module. Mixer, Inspector, plugin, and scripting Adapters therefore do
+//! this Module. Mixer, Inspector, Extension, and scripting Adapters therefore do
 //! not need to know which persistent struct stores a curve, which owner-time
 //! domain gives its keyframe coordinates meaning, or how Track locks propagate
 //! through shared Processing Scopes.

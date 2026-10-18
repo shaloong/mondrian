@@ -5,8 +5,8 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     EffectCachePolicy, EffectColorDomainContract, EffectDeterminism, EffectEvalContext,
-    EffectExecutionContract, EffectExecutionModes, EffectGraphDsl, EffectGraphTopology,
-    EffectGraphValue, EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+    EffectExecutionContract, EffectExecutionModes, EffectExtensionDefinitionBuilder,
+    EffectGraphDsl, EffectGraphTopology, EffectGraphValue, EffectRenderOp, EffectResourceLifetime,
     EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType, Lut3D, MaskOp,
     PreparedLut3D,
 };
@@ -45,13 +45,13 @@ fn compile_branching_dsl_signatures(
 }
 
 #[test]
-fn public_plugin_sdk_contract_compiles_from_crate_reexports() {
-    let plugin_type = EffectType::Plugin("plugin.test.public_api".to_owned());
-    let amount_id = plugin_type.parameter_id("amount").expect("static parameter ID");
+fn public_extension_sdk_contract_compiles_from_crate_reexports() {
+    let extension_type = EffectType::External("extension.test.public_api".to_owned());
+    let amount_id = extension_type.parameter_id("amount").expect("static parameter ID");
     let amount_id_for_graph = amount_id.clone();
 
-    let definition = EffectPluginDefinitionBuilder::new(
-        plugin_type.key(),
+    let definition = EffectExtensionDefinitionBuilder::new(
+        extension_type.key(),
         "Public API",
         EffectColorDomainContract::SCENE_LINEAR,
     )
@@ -61,7 +61,7 @@ fn public_plugin_sdk_contract_compiles_from_crate_reexports() {
     ))
     .property(
         PropertyDescriptor::new(
-            "plugin.test.public_api.amount",
+            "extension.test.public_api.amount",
             "Amount",
             PropertyValue::Float(0.5),
         )
@@ -82,14 +82,14 @@ fn public_plugin_sdk_contract_compiles_from_crate_reexports() {
     })
     .build();
 
-    assert_eq!(definition.key(), "plugin.test.public_api");
+    assert_eq!(definition.key(), "extension.test.public_api");
     assert_eq!(
         definition.execution_contract().topology,
         EffectGraphTopology::GeneralDag
     );
 
-    let custom = EffectPluginDefinitionBuilder::new(
-        "plugin.test.public_api.custom",
+    let custom = EffectExtensionDefinitionBuilder::new(
+        "extension.test.public_api.custom",
         "Public Custom API",
         EffectColorDomainContract::SCENE_LINEAR,
     )

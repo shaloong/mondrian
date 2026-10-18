@@ -1451,7 +1451,8 @@ mod tests {
     fn temporal_effect(offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.prepared-visual-closure.temporal.{id}"));
+        let effect_type =
+            EffectType::External(format!("test.prepared-visual-closure.temporal.{id}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),

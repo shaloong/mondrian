@@ -1,6 +1,6 @@
 # 快速入门
 
-本文帮你搭建 Mondrian 插件开发环境，并在 5 分钟内写出第一个可运行的特效插件。
+本文介绍源码级 Effect SDK，并创建一个可注册的效果定义。它不是通用 Extension 安装或沙箱运行教程。
 
 ## 1. 前置条件
 
@@ -12,27 +12,27 @@
 cargo build -p mondrian-app
 ```
 
-## 2. 创建插件目录
+## 2. 创建效果扩展目录
 
-Mondrian 插件目前以 Rust crate 形式存在。在仓库中创建你的插件目录：
+本教程把效果实现放在一个 Rust crate 中，由应用显式注册。在仓库中创建示例目录：
 
 ```bash
-mkdir -p crates/mondrian-plugin-hello/src
+mkdir -p crates/mondrian-effect-hello/src
 ```
 
 ## 3. 编写 Cargo.toml
 
 ```toml
 [package]
-name = "mondrian-plugin-hello"
+name = "mondrian-effect-hello"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-mondrian-core = { path = "../mondrian-core" }
-mondrian-effects = { path = "../mondrian-effects" }
-serde_json = "1"
+mondrian-core.workspace = true
+mondrian-effects.workspace = true
+serde_json.workspace = true
 ```
 
 同时在仓库根 `Cargo.toml` 的 `[workspace]` 中加入：
@@ -40,33 +40,33 @@ serde_json = "1"
 ```toml
 members = [
     # ... 已有成员
-    "crates/mondrian-plugin-hello",
+    "crates/mondrian-effect-hello",
 ]
 ```
 
 ## 4. 编写第一个特效
 
-在 `crates/mondrian-plugin-hello/src/lib.rs` 中：
+在 `crates/mondrian-effect-hello/src/lib.rs` 中：
 
 ```rust
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
 use mondrian_effects::effect::EffectDefinitionError;
 use mondrian_effects::{
     register_effect_definition, EffectColorDomainContract, EffectDeterminism,
-    EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectPluginContract,
-    EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
+    EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectExtensionContract,
+    EffectExtensionDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
     EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
 };
 
-/// 插件入口：在库加载时注册特效定义
+/// 效果扩展入口：在库加载时注册特效定义
 pub fn register() -> Result<(), EffectDefinitionError> {
-    let plugin_type = EffectType::Plugin("plugin.example.hello".to_string());
-    let amount_id = plugin_type
+    let effect_type = EffectType::External("extension.example.hello".to_string());
+    let amount_id = effect_type
         .parameter_id("amount")
         .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(
-        plugin_type.key(),
+    let definition = EffectExtensionDefinitionBuilder::new(
+        effect_type.key(),
         "Hello Effect",
         EffectColorDomainContract::SCENE_LINEAR,
     )
@@ -79,9 +79,9 @@ pub fn register() -> Result<(), EffectDefinitionError> {
             resource_lifetime: EffectResourceLifetime::Frame,
             topology: EffectGraphTopology::LinearChain,
         })
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
+        .with_extension_contract(EffectExtensionContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
-            "plugin.example.hello.amount",
+            "extension.example.hello.amount",
             "Amount",
             PropertyValue::Float(0.5),
         ).with_parameter_id(amount_id.clone()))
@@ -99,15 +99,15 @@ pub fn register() -> Result<(), EffectDefinitionError> {
 
 上面的合同只声明当前实现真实具备的 CPU Float32、单帧和无状态能力，并对 ROI
 保持保守。声明 GPU、额外 precision 或更小 ROI 之前，必须先有对应实现并通过 emitted
-graph 合同校验；缺省合同会保守地让插件保持不可执行。
+graph 合同校验；缺省合同会保守地让效果扩展保持不可执行。
 
-## 5. 在应用中加载插件
+## 5. 在应用中加载效果扩展
 
-在 `mondrian-app` 的依赖中加入你的插件 crate，然后在应用初始化时调用 `register()`：
+在 `mondrian-app` 的依赖中加入你的效果扩展 crate，然后在应用初始化时调用 `register()`：
 
 ```rust
 // 在 mondrian-app 初始化代码中
-mondrian_plugin_hello::register()?;
+mondrian_effect_hello::register()?;
 ```
 
 ## 6. 验证
@@ -116,14 +116,14 @@ mondrian_plugin_hello::register()?;
 
 ## 7. 发生了什么
 
-你刚刚用四件事创建了一个完整插件：
+你刚刚用四件事创建了一个源码级效果定义：
 
-1. **声明身份** —— `EffectType::Plugin("plugin.example.hello")` 定义了插件的全局唯一标识
+1. **声明身份** —— `EffectType::External("extension.example.hello")` 定义了这个效果的稳定 key
 2. **声明参数** —— `PropertyDescriptor` 定义了可动画、可在 Inspector 中编辑的参数
-3. **声明契约** —— `EffectPluginContract` 声明版本和失败策略
+3. **声明契约** —— `EffectExtensionContract` 声明版本和失败策略
 4. **描述效果** —— `with_graph(...)` 描述了效果在渲染图中的行为
 
 ## 下一步
 
-- 阅读 [核心概念](./02-core-concepts.md) 理解插件模型的完整设计
-- 阅读 [特效开发](./03-effect-development.md) 学习 Graph DSL 和分支效果
+- 阅读 [核心概念](02-core-concepts.md) 理解效果扩展模型的完整设计
+- 阅读 [特效开发](03-effect-development.md) 学习 Graph DSL 和分支效果

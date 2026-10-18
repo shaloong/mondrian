@@ -1,6 +1,6 @@
 # 特效开发
 
-本文详述如何开发 Mondrian 特效插件，从简单的线性特效到需要自定义渲染后端的分支效果。
+本文详述如何开发 Mondrian 效果扩展，从简单的线性特效到需要自定义渲染后端的分支效果。
 
 ## 1. 选择开发路径
 
@@ -22,19 +22,19 @@
 use mondrian_effects::{
     register_effect_definition, EffectColorDomainContract, EffectDeterminism,
     EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp,
+    EffectExtensionContract, EffectExtensionDefinitionBuilder, EffectRenderOp,
     EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
     EffectTemporalInputExtent, EffectType,
 };
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
 
-let plugin_type = EffectType::Plugin("plugin.example.sharpen".to_string());
-let amount_id = plugin_type
+let effect_type = EffectType::External("extension.example.sharpen".to_string());
+let amount_id = effect_type
     .parameter_id("amount")
     .expect("static parameter ID");
 
-let definition = EffectPluginDefinitionBuilder::new(
-    plugin_type.key(),
+let definition = EffectExtensionDefinitionBuilder::new(
+    effect_type.key(),
     "Sharpen",
     EffectColorDomainContract::SCENE_LINEAR,
 )
@@ -47,9 +47,9 @@ let definition = EffectPluginDefinitionBuilder::new(
         resource_lifetime: EffectResourceLifetime::Frame,
         topology: EffectGraphTopology::LinearChain,
     })
-    .with_plugin_contract(EffectPluginContract::new("1.0.0"))
+    .with_extension_contract(EffectExtensionContract::new("1.0.0"))
     .property(PropertyDescriptor::new(
-        "plugin.example.sharpen.amount",
+        "extension.example.sharpen.amount",
         "Amount",
         PropertyValue::Float(0.5),
     ).with_parameter_id(amount_id.clone()))
@@ -73,8 +73,8 @@ register_effect_definition(definition)?;
 "软化"类特效的典型模式：从当前输出分叉，处理后再与原输出混合：
 
 ```rust
-let radius_id = plugin_type.parameter_id("radius").expect("static parameter ID");
-let opacity_id = plugin_type.parameter_id("opacity").expect("static parameter ID");
+let radius_id = effect_type.parameter_id("radius").expect("static parameter ID");
+let opacity_id = effect_type.parameter_id("opacity").expect("static parameter ID");
 
 // PropertyDescriptor 分别通过 with_parameter_id(...) 绑定上述稳定身份。
 let builder = builder.with_branching_graph(move |effect, context, graph| {
@@ -105,10 +105,10 @@ let builder = builder.with_branching_graph(move |effect, context, graph| {
 `MaskOp::{Add, Subtract, Intersect, Difference}`。`invert = true` 表示先反转 matte；
 构图闭包的末尾表达式必须返回 `EffectGraphValue`。
 
-当前高层插件 DSL 尚未公开 alpha `MaskSource` 或 RGB-to-matte producer，因此不要直接
+当前高层效果扩展 DSL 尚未公开 alpha `MaskSource` 或 RGB-to-matte producer，因此不要直接
 构造 raw `EffectRenderOp::Custom` 来伪造蒙版：它既没有通过 Definition 绑定 processor，
 也不能证明 AlphaMask 颜色域，编译会失败关闭。Clip 作者蒙版由引擎在编译阶段注入；
-插件侧 mask producer 要等类型化入口公开后再使用此组合方法。
+效果扩展侧 mask producer 要等类型化入口公开后再使用此组合方法。
 
 ### 3.3 Branch（通用分支）
 
@@ -133,7 +133,7 @@ let branch_result = graph.branch(some_input, |graph, input| {
 自定义渲染后端涉及四块配置：
 
 ```rust
-let amount_id = plugin_type.parameter_id("amount").expect("static parameter ID");
+let amount_id = effect_type.parameter_id("amount").expect("static parameter ID");
 
 let builder = builder.with_custom_render_backend(
     // 1. 参数构建器 —— 从特效节点和上下文中提取渲染参数
@@ -168,13 +168,13 @@ let builder = builder.with_custom_render_backend(
   `EffectExecutionModes::CPU_U8`，不能声明 CPU Float32 或 GPU
 - 处理器在**独立 staged buffer** 上执行，不是帧主链 buffer
 - `Ok(())` 返回时，staged 结果提交到渲染管线
-- `Err(...)` 或 panic 时，staged 结果被丢弃并返回结构化执行错误；插件契约只决定定义后续是否禁用和是否在效果库可见
+- `Err(...)` 或 panic 时，staged 结果被丢弃并返回结构化执行错误；效果扩展契约只决定定义后续是否禁用和是否在效果库可见
 - 不要在处理器中半途报错却仍然写回部分像素结果
 - 参数构建器、cache-key 构建器和 processor 都是执行路径，禁止文件或网络 I/O
 
 ### 4.3 何时提供 cache_key
 
-`cache_key` 只能标识已经绑定的不可变资源 revision，例如随插件注册并预加载的
+`cache_key` 只能标识已经绑定的不可变资源 revision，例如随效果扩展注册并预加载的
 固定 kernel。路径本身不是 revision；同一路径的内容可以改变。
 
 ```rust
@@ -184,11 +184,11 @@ Some(Arc::new(move |_effect, _context| {
 }))
 ```
 
-当前高层 `EffectPluginDefinitionBuilder` 尚未提供“作者路径 → 版本化不可变资源”的
+当前高层 `EffectExtensionDefinitionBuilder` 尚未提供“作者路径 → 版本化不可变资源”的
 preparation/revalidation Interface。依赖用户选择的 LUT、模型或配置时，在该 Interface
 落地前必须返回 `EffectGraphBuildError::ResourceUnavailable`，不能逐帧读取文件、
 用 path-only key 复用，或把资源缺失当 identity。不要用临时字符串、随机数、时间戳
-作为 cache key。详见 [性能与缓存](./04-performance-and-caching.md)。
+作为 cache key。详见 [性能与缓存](04-performance-and-caching.md)。
 
 ## 5. 参数模型设计
 
@@ -196,16 +196,16 @@ preparation/revalidation Interface。依赖用户选择的 LUT、模型或配置
 
 ### 5.1 参数命名
 
-遵循 `{plugin_key}.{param_name}` 格式：
+遵循 `{extension_key}.{param_name}` 格式：
 
 ```rust
 PropertyDescriptor::new(
-    "plugin.example.glow.radius", // 当前作者/UI 地址
+    "extension.example.glow.radius", // 当前作者/UI 地址
     "Radius",                     // 显示名称
     PropertyValue::Float(6.0),    // 默认值
 )
 .with_parameter_id(
-    plugin_type.parameter_id("radius").expect("static parameter ID"),
+    effect_type.parameter_id("radius").expect("static parameter ID"),
 )
 ```
 
@@ -248,9 +248,9 @@ PropertyDescriptor::new(
 | `mask(input, invert, mask_op, f)` | 用 alpha 子图和显式 `MaskOp` 遮蔽 input |
 | `mask_current(invert, mask_op, f)` | 用 alpha 子图和显式 `MaskOp` 遮蔽当前输出 |
 
-完整 API 见 [EffectGraphDsl API 参考](./sdk/effect-graph-dsl.md)。
+完整 API 见 [EffectGraphDsl API 参考](sdk/effect-graph-dsl.md)。
 
 ## 下一步
 
-- [性能与缓存](./04-performance-and-caching.md) —— 让你的特效在预览和导出中都高效
-- [版本契约](./05-versioning-and-compatibility.md) —— 管理版本兼容、错误传播、定义状态与效果库可见性
+- [性能与缓存](04-performance-and-caching.md) —— 让你的特效在预览和导出中都高效
+- [版本契约](05-versioning-and-compatibility.md) —— 管理版本兼容、错误传播、定义状态与效果库可见性

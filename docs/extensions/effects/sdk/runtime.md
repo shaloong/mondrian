@@ -3,11 +3,11 @@
 ## 概述
 
 本文列出特效运行时公开的编译、执行和缓存 Interface。生产执行只接受不可变
-`CompiledEffectGraph`；`EffectRenderGraph` 是 Definition/插件构图阶段的编译器
+`CompiledEffectGraph`；`EffectRenderGraph` 是 Definition/效果扩展构图阶段的编译器
 输入，不存在供跨 crate 调用的 raw graph 调度或执行入口。这样图结构、拓扑调度、
 颜色域、执行合同、资源生命周期与缓存证据不能被拆开或错配。
 
-这些函数主要由核心渲染管线调用，插件开发者通常只需通过 Definition Builder 和
+这些函数主要由核心渲染管线调用，效果扩展开发者通常只需通过 Definition Builder 和
 `EffectGraphDsl` 声明语义。
 
 **源码位置：**
@@ -73,7 +73,7 @@ pub fn compile_reference_effect_graph(
 通过 `PreparedEffectProgram` 绑定 Definition、资源、零时刻拓扑和不可变编译图；
 动态拓扑变体由调用者自己的 `EffectExecutionSession` 限额保留。除规范
 source-only identity 图外，不存在进程级 `CompiledEffectGraph` 缓存。
-这些参考构造器从生成的普通公开文档中隐藏；插件和生产调用方不得用它们绕过
+这些参考构造器从生成的普通公开文档中隐藏；效果扩展和生产调用方不得用它们绕过
 Prepared Program 的 Definition、资源与执行合同绑定。
 
 ## 编译图结构
@@ -220,7 +220,7 @@ pub type CustomEffectRenderProcessor =
 
 ### 绑定边界
 
-`EffectPluginDefinitionBuilder::with_custom_render_backend(...)` 是自定义处理器的唯一绑定
+`EffectExtensionDefinitionBuilder::with_custom_render_backend(...)` 是自定义处理器的唯一绑定
 入口。Definition 求值时会把处理器及其进程内实现修订直接嵌入图节点，之后由编译图持有
 该不可变绑定。不存在按字符串注册或补绑处理器的全局 Registry；任何可达且未绑定的 raw
 Custom 节点都必须在编译时失败关闭。这样，同一个作者/Program 修订不会因进程内环境变化
@@ -228,7 +228,7 @@ Custom 节点都必须在编译时失败关闭。这样，同一个作者/Progra
 
 ## 缓存结构
 
-内部缓存结构（不直接暴露给插件）：
+内部缓存结构（不直接暴露给效果扩展）：
 
 ```rust
 struct EffectOutputCacheKey {
@@ -278,6 +278,6 @@ EffectExecutionSession::apply_compiled_*() ← 生产执行编译图
 
 ## 相关
 
-- [EffectDefinition API](./effect-definition.md) —— 特效定义
-- [EffectGraphDsl API](./effect-graph-dsl.md) —— 构图 API
-- [Plugin Contract API](./plugin-contract.md) —— 版本与容错
+- [EffectDefinition API](effect-definition.md) —— 特效定义
+- [EffectGraphDsl API](effect-graph-dsl.md) —— 构图 API
+- [效果合同 API](extension-contract.md) —— 版本与容错

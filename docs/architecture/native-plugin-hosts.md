@@ -1,8 +1,14 @@
-# Plugin System
+# Native-format Plugin Hosts and Effect Integration
 
-The most concrete plugin surface today is the effect plugin contract. UI and command plugin surfaces are planned and should reuse existing command/widget boundaries.
+This document describes the current Effect integration and native-format
+OpenFX/VST3/CLAP plugin hosts. **Extension** is the formal name of the broader
+platform; see [Extension System](extension-system.md) and
+[ADR 0011](../adr/0011-use-managed-extension-platform.md) for its accepted target.
+Effect integration uses EffectExtension* contracts and EffectType::External.
+Native-format ABIs and authored definition identities remain separate. Native Worker crash/hang containment is not
+evidence of the future Extension permission sandbox.
 
-The current effect contract is visual-only and is not the future VST3/CLAP host
+The current effect contract is visual-only and is not the VST3/CLAP host
 ABI. Audio plugins adapt to the Audio Processor author/compiler boundary defined
 in [Audio Pipeline](audio-pipeline.md); project files preserve their stable
 native identity, parameters, expected buses, and opaque state without persisting
@@ -152,11 +158,11 @@ disabling per-component scaling produced the Float32 pixel
 parameter-suite path separately from the hardcoded-gain render check; it is
 still an external feasibility fixture, not a product Adapter.
 
-## Effect Plugins
+## Effect Extension Integration
 
-Plugin effects are represented as `EffectType::Plugin(String)` and registered through `EffectDefinition`.
+Externally registered effects are represented as `EffectType::External(String)` and registered through `EffectDefinition`.
 
-Plugin definitions may provide:
+Effect Extension definitions may provide:
 
 - display name and category path
 - default properties
@@ -164,7 +170,7 @@ Plugin definitions may provide:
 - branching graph builder
 - custom render backend
 - cache key/policy
-- plugin contract/runtime availability metadata
+- extension contract/runtime availability metadata
 
 The `EffectGraphDsl` exposes source/current nodes, unary ops, branches, blends, and masks.
 
@@ -173,23 +179,21 @@ The `EffectGraphDsl` exposes source/current nodes, unary ops, branches, blends, 
 Graph builders and custom processors execute against staged state. Builder
 errors/panics return `EffectGraphBuildError`; processor errors/panics return
 `EffectExecutionError`, and neither commits partial graph or pixel state.
-Failures are recorded through the plugin runtime-status path. The runtime
+Failures are recorded through the extension runtime-status path. The runtime
 failure policy decides only whether the definition remains callable; the
 library policy decides only new-insertion visibility. Neither policy permits a
-failed instance to become identity output. Plugin code must still avoid panic
+failed instance to become identity output. Extension code must still avoid panic
 across the host boundary.
 
-## Future UI Plugins
+## Future Extension integration
 
-Future UI plugin entries should integrate through:
-
-- command registry descriptors
-- panel/workspace registry
-- typed actions
-- theme tokens
-- platform services
-
-Plugins must not directly own app state, OS handles, or renderer internals.
+The [Extension platform](extension-system.md) will manage contributions and
+public workbench interfaces after the intended native-format host work. Web UI
+uses real HTML/CSS/DOM in isolated surfaces, with host theme tokens and scoped
+APIs. Rust entries also require restricted execution; shared Rust Widget trait
+objects are not a public cross-binary UI contract. Neither runtime directly owns
+AppState, OS handles, or renderer internals. Processing stays with its owning
+Effects/Audio domain and qualified native Adapter.
 
 ## Native-format adoption order
 

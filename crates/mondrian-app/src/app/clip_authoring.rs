@@ -1,6 +1,6 @@
 //! Stable-identity authoring for properties owned directly by a Timeline Clip.
 //!
-//! Inspector, Viewer, Headless, scripting, and future plugin Adapters all use
+//! Inspector, Viewer, Headless, scripting, and future Extension Adapters all use
 //! this Module. It derives current Track placement, resolves persistent
 //! parameters, prepares exact mutations, rejects stale/no-op requests before a
 //! mutable candidate exists, and commits one Author Transaction per gesture.

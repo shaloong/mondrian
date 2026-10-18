@@ -7,7 +7,7 @@
 > 当前主线：完成 M1 当前候选资格收口，再推进 M2 的产品可靠性与交互完整性
 
 ROADMAP 只记录产品范围、里程碑状态和退出门槛。实现细节放在
-[`CONTEXT.md`](../CONTEXT.md) 与 [`docs/architecture/`](architecture/)；测试命令、
+[`CONTEXT.md`](../CONTEXT.md) 与 [`docs/architecture/`](architecture)；测试命令、
 报告和历史运行放在 [`docs/dev/reference-validation.md`](dev/reference-validation.md)
 与 [`docs/dev/performance-profiling.md`](dev/performance-profiling.md)。已完成能力不在
 这里复制类名、内部账本、逐次性能样本或调试过程。
@@ -182,7 +182,7 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
   不允许以 RGBA8 临时旁路或整图 CPU 重跑掩盖半途失败。
 - 完成自由 Path/Bezier Mask 的产品级编辑、羽化/扩张交互和缓存失效；tracking、warp、
   temporal/stateful 专业效果仍属于 M3。
-- Effect 浏览、Inspector、节点诊断和插件缺失状态必须从同一 Definition/Compiled Graph 投影，
+- Effect 浏览、Inspector、节点诊断和效果依赖缺失状态必须从同一 Definition/Compiled Graph 投影，
   不创建另一套“UI 可用效果”清单。
 
 ### 5.5 色彩、音频与交付
@@ -243,11 +243,11 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
 - VST3/CLAP Adapter 必须具备进程/线程隔离、deadline、state migration、bus negotiation、
   latency/PDC、crash quarantine 和缺失插件恢复；插件不得直接成为作者权威。
 
-### 6.3 Effect 插件平台
+### 6.3 Effect 扩展与原生格式插件宿主
 
 - 内建效果与至少一个受控第三方 Adapter 共用 Definition、Parameter Schema、Compiled Graph、
   capability、缓存、失败隔离和 Preview/Export 解释后，才评估 OpenFX 等更广 ABI。
-- 插件版本、资源、GPU/CPU 能力、确定性、temporal extent 和 state migration 必须持久化为
+- 效果扩展与原生格式插件的版本、资源、GPU/CPU 能力、确定性、temporal extent 和 state migration 必须持久化为
   可诊断合同；未知能力失败关闭，不能假定“像素大概兼容”。
 
 ### 6.4 交换格式、专业媒体与 QC
@@ -265,6 +265,15 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
 - 第三方插件崩溃、超时、缺失、升级和 state 迁移不会破坏 Project、实时线程或 Export job；
   Preview/Export 对相同插件状态具有一致结论。
 - 已声明可往返的交换子集通过版本化 corpus；未支持语义全部显式保留或报告，无静默数据丢失。
+
+### 6.6 通用 Extension 平台（音视频插件宿主之后）
+
+先完成预定 OpenFX/VST3/CLAP 宿主范围，再推进通用 Extension。该平台覆盖资源包、
+命令、真实 HTML/CSS/DOM 面板、Rust/Web 受限运行和统一授权；完整编辑器替换及
+第三方新创作类型是长期目标。Alpha API 允许调整，成熟后逐项稳定。
+这里不把 Extension 记为已实现，也不把原生格式插件统称改名。范围与验收见
+[Extension 架构](architecture/extension-system.md) 和
+[ADR 0011](adr/0011-use-managed-extension-platform.md)。
 
 ---
 

@@ -1197,7 +1197,7 @@ fn custom_u8_effect_graph(
     static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
     let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
     let effect_type =
-        mondrian_effects::EffectType::Plugin(format!("test.preview.custom.{label}.{suffix}"));
+        mondrian_effects::EffectType::External(format!("test.preview.custom.{label}.{suffix}"));
     let determinism = match cache_policy {
         EffectCachePolicy::Deterministic => mondrian_effects::EffectDeterminism::Deterministic,
         EffectCachePolicy::FrameDependent => mondrian_effects::EffectDeterminism::FrameSeeded,

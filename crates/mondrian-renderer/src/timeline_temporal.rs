@@ -858,7 +858,7 @@ mod tests {
     fn temporal_sample_effect(sample_offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.timeline.temporal.{id}"));
+        let effect_type = EffectType::External(format!("test.timeline.temporal.{id}"));
         let temporal_input = if sample_offset.is_negative() {
             EffectTemporalInputExtent {
                 past: EffectTemporalSpan::Finite(
@@ -904,7 +904,7 @@ mod tests {
     fn temporal_dag_effect(offset: TimelineTime) -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.timeline.temporal-dag.{id}"));
+        let effect_type = EffectType::External(format!("test.timeline.temporal-dag.{id}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -954,7 +954,7 @@ mod tests {
     fn sampled_dynamic_topology_effect() -> EffectNode {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.timeline.dynamic-topology.{id}"));
+        let effect_type = EffectType::External(format!("test.timeline.dynamic-topology.{id}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),

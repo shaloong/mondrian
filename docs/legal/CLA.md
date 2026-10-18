@@ -2,7 +2,7 @@
 
 **Version 1.0 · 2026-09-16 · Shaloong · contact@shaloong.com**
 
-**醒目提示 / Important:** 本协议允许项目对贡献进行商业再许可，贡献者不会因此自动取得销售分成。你保留自己的著作权。仅发布独立插件不需要签署。请特别注意 A2—A3 的许可范围及存续、A5 的社区开放承诺、A6 的责任及项目承继安排，以及 A7 的法律适用与争议条款；如需说明，可联系上述邮箱。/ This agreement allows commercial relicensing of Contributions, without an automatic revenue share. You retain your copyright. Merely publishing an independent plugin does not require signing. Pay particular attention to the scope and duration of licenses in A2–A3, the openness commitment in A5, liability and project succession in A6, and governing law and disputes in A7; explanations may be requested at the email above.
+**醒目提示 / Important:** 本协议允许项目对贡献进行商业再许可，贡献者不会因此自动取得销售分成。你保留自己的著作权。仅发布独立扩展不需要签署。请特别注意 A2—A3 的许可范围及存续、A5 的社区开放承诺、A6 的责任及项目承继安排，以及 A7 的法律适用与争议条款；如需说明，可联系上述邮箱。/ This agreement allows commercial relicensing of Contributions, without an automatic revenue share. You retain your copyright. Merely publishing an independent Extension does not require signing. Pay particular attention to the scope and duration of licenses in A2–A3, the openness commitment in A5, liability and project succession in A6, and governing law and disputes in A7; explanations may be requested at the email above.
 
 ## A. 共同条款 / Common terms
 
@@ -36,11 +36,11 @@ One person's signature does not grant rights belonging to other authors or right
 
 贡献者保留其原有权利。在贡献者有权授予的范围内，授予接收方及按本协议获授权的后继者全球、非独占、免许可费、在相关权利存续期内有效且不可撤销（适用法律的强制性规定另有要求的除外）的著作权许可，复制、修改、翻译、汇编、制作衍生作品、公开展示／表演、发行、通过信息网络向公众提供及再许可贡献。
 
-再许可可采用 AGPL-3.0-or-later、插件附加许可、适用于 SDK／示例的宽松许可证及专有商业条款。此授权包括为实施上述许可所需的多层再许可，但不包括贡献者无权授予的第三方权利。本条著作权许可不因 A3 的专利许可终止而自动终止。除合理署名及保留法定声明所需的使用外，本协议不授予使用贡献者商标或商号的权利，也不授权宣称贡献者对项目或其产品作出认可、赞助或推荐。贡献者没有交付未来贡献或持续支持的义务。既有 AGPL 下接收的第三方代码不会仅因签署 CLA 就变为可商业再许可。
+再许可可采用 AGPL-3.0-or-later、扩展附加许可、适用于 SDK／示例的宽松许可证及专有商业条款。此授权包括为实施上述许可所需的多层再许可，但不包括贡献者无权授予的第三方权利。本条著作权许可不因 A3 的专利许可终止而自动终止。除合理署名及保留法定声明所需的使用外，本协议不授予使用贡献者商标或商号的权利，也不授权宣称贡献者对项目或其产品作出认可、赞助或推荐。贡献者没有交付未来贡献或持续支持的义务。既有 AGPL 下接收的第三方代码不会仅因签署 CLA 就变为可商业再许可。
 
 Contributor retains existing rights. To the extent authorized, Contributor grants Recipient and its authorized successors a worldwide, non-exclusive, royalty-free license for the duration of the applicable rights, irrevocable except as required by mandatory law, under copyright to reproduce, modify, translate, compile into collections, prepare derivatives, publicly display/perform, distribute, make available to the public over information networks and sublicense Contributions.
 
-Sublicensing may use AGPL-3.0-or-later, plugin additional permissions, permissive SDK/example licenses and proprietary commercial terms, including necessary tiers of sublicensing. Third-party rights outside Contributor’s licensing authority are not granted. Termination of a patent license under A3 does not itself terminate this copyright license. Except for use needed for reasonable attribution and legally required notices, no right to use Contributor’s trademarks or trade names is granted, and no endorsement, sponsorship or recommendation of the project or its products by Contributor may be claimed. No future contribution or ongoing support is required. Signing does not convert third-party code received only under AGPL into commercially relicensable code.
+Sublicensing may use AGPL-3.0-or-later, extension additional permissions, permissive SDK/example licenses and proprietary commercial terms, including necessary tiers of sublicensing. Third-party rights outside Contributor’s licensing authority are not granted. Termination of a patent license under A3 does not itself terminate this copyright license. Except for use needed for reasonable attribution and legally required notices, no right to use Contributor’s trademarks or trade names is granted, and no endorsement, sponsorship or recommendation of the project or its products by Contributor may be claimed. No future contribution or ongoing support is required. Signing does not convert third-party code received only under AGPL into commercially relicensable code.
 
 ### A3. 专利许可及著作人身权 / Patent license and moral rights
 

@@ -2,15 +2,15 @@
 
 ## 概述
 
-`EffectGraphDsl` 是插件作者构建特效渲染图的高层 API。它封装了 `EffectGraphBuilderState`，提供语义清晰的构图方法。
+`EffectGraphDsl` 是效果扩展作者构建特效渲染图的高层 API。它封装了 `EffectGraphBuilderState`，提供语义清晰的构图方法。
 
 **源码位置：**
-- `crates/mondrian-effects/src/plugin_sdk.rs` —— `EffectGraphDsl`
+- `crates/mondrian-effects/src/extension_sdk.rs` —— `EffectGraphDsl`
 - `crates/mondrian-effects/src/graph.rs` —— `EffectGraphBuilderState`、`EffectRenderGraph`、`EffectGraphNodeKind`
 
 ## EffectGraphDsl
 
-通过 `EffectPluginDefinitionBuilder::with_graph(...)` 或 `with_branching_graph(...)` 的闭包获取。
+通过 `EffectExtensionDefinitionBuilder::with_graph(...)` 或 `with_branching_graph(...)` 的闭包获取。
 
 ```rust
 pub struct EffectGraphDsl<'a> {
@@ -125,8 +125,8 @@ where
 `mask_op` 必须显式选择 `MaskOp::{Add, Subtract, Intersect, Difference}`。闭包最后一个
 表达式必须返回 `EffectGraphValue`，不能以分号丢弃为 `()`。
 
-传入的 mask 分支必须输出 `EffectColorDomain::AlphaMask`。当前高层插件 DSL 尚未公开
-创建 `MaskSource` 或把 RGB 转成 matte 的安全入口，因此插件不能用 raw Custom 节点
+传入的 mask 分支必须输出 `EffectColorDomain::AlphaMask`。当前高层效果扩展 DSL 尚未公开
+创建 `MaskSource` 或把 RGB 转成 matte 的安全入口，因此效果扩展不能用 raw Custom 节点
 伪造 mask producer；这种图会因未绑定 processor 或颜色域不合法而失败关闭。Clip
 作者蒙版由引擎在编译阶段注入。
 
@@ -187,8 +187,8 @@ pub struct EffectRenderGraph {
 }
 ```
 
-`EffectRenderGraph` 只承载 Definition/插件构图结果，是编译器输入，不是可执行的
-生产 IR。插件不得自行生成拓扑调度或直接执行该结构；运行时必须先通过
+`EffectRenderGraph` 只承载 Definition/效果扩展构图结果，是编译器输入，不是可执行的
+生产 IR。效果扩展不得自行生成拓扑调度或直接执行该结构；运行时必须先通过
 Mondrian 的编译入口得到不可变 `CompiledEffectGraph`，确保拓扑、颜色域、
 执行合同、资源生命周期与缓存证据始终作为一个整体。
 
@@ -259,10 +259,10 @@ pub struct EffectGraphNodeId(pub u32);
 
 图节点 ID，`EffectGraphValue` 是其类型别名。
 
-## EffectPluginDefinitionBuilder（SDK 入口）
+## EffectExtensionDefinitionBuilder（SDK 入口）
 
 ```rust
-pub struct EffectPluginDefinitionBuilder {
+pub struct EffectExtensionDefinitionBuilder {
     // 内部持有 EffectDefinition
 }
 ```
@@ -270,7 +270,7 @@ pub struct EffectPluginDefinitionBuilder {
 ### 方法
 
 ```rust
-impl EffectPluginDefinitionBuilder {
+impl EffectExtensionDefinitionBuilder {
     /// 创建新的 builder，并声明精确处理域
     pub fn new(
         key: impl Into<String>,
@@ -284,7 +284,7 @@ impl EffectPluginDefinitionBuilder {
     /// 批量添加属性
     pub fn properties(mut self, properties: PropertyBag) -> Self;
 
-    /// 声明完整执行合同；默认插件合同不会准入任何 backend
+    /// 声明完整执行合同；默认效果扩展合同不会准入任何 backend
     pub fn with_execution_contract(
         mut self,
         contract: EffectExecutionContract,
@@ -323,22 +323,22 @@ impl EffectPluginDefinitionBuilder {
         processor: CustomEffectRenderProcessor,
     ) -> Self;
 
-    /// 设置插件契约
-    pub fn with_plugin_contract(mut self, contract: EffectPluginContract) -> Self;
+    /// 设置效果扩展契约
+    pub fn with_extension_contract(mut self, contract: EffectExtensionContract) -> Self;
 
     /// 构建 EffectDefinition
     pub fn build(self) -> EffectDefinition;
 }
 ```
 
-`EffectPluginDefinitionBuilder` 当前没有作者资源路径到不可变
+`EffectExtensionDefinitionBuilder` 当前没有作者资源路径到不可变
 prepared-resource 的高层 SDK。逐帧 graph/cache-key/processor 闭包不得因此执行文件或
-网络 I/O。需要作者可选择外部 LUT、模型或其他资源的插件，在真正的版本化
+网络 I/O。需要作者可选择外部 LUT、模型或其他资源的效果扩展，在真正的版本化
 preparation/revalidation Interface 暴露前必须失败关闭；不能用 path-only cache key 或
 每帧重读文件伪装成资源绑定。
 
 ## 相关
 
-- [EffectDefinition API](./effect-definition.md) —— 特效定义与节点
-- [Plugin Contract API](./plugin-contract.md) —— 版本与失败策略
-- [运行时函数](./runtime.md) —— 图的编译与执行
+- [EffectDefinition API](effect-definition.md) —— 特效定义与节点
+- [效果合同 API](extension-contract.md) —— 版本与失败策略
+- [运行时函数](runtime.md) —— 图的编译与执行

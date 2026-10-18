@@ -1,12 +1,12 @@
 //! 效果节点抽象
 
 use crate::execution::{CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor};
+use crate::extension_contract::{
+    effect_extension_is_library_visible, record_extension_runtime_failure, EffectExtensionContract,
+};
 use crate::graph::{CompiledEffectGraph, EffectGraphBuilderState, EffectRenderGraph};
 use crate::lut::{Lut3D, LutPreparationCache};
 use crate::mask::MaskComponent;
-use crate::plugin_contract::{
-    effect_plugin_is_library_visible, record_plugin_runtime_failure, EffectPluginContract,
-};
 use crate::{
     EffectExecutionContract, EffectExecutionContractViolation, EffectGraphTopology,
     EffectResourceLifetime, EffectRoiPropagation,
@@ -160,7 +160,7 @@ pub enum EffectGraphBuildError {
         effect_key: String,
         effect_id: EffectId,
     },
-    /// The registered plugin cannot execute in the current process.
+    /// The registered effect definition cannot execute in the current process.
     #[error("effect runtime `{effect_key}` ({effect_id}) is unavailable")]
     RuntimeUnavailable {
         effect_key: String,
@@ -259,7 +259,7 @@ impl EffectGraphBuildError {
     }
 }
 
-/// Fallible graph builder shared by built-in and plugin effect definitions.
+/// Fallible graph builder shared by built-in and external effect definitions.
 pub type EffectGraphBuilder = Arc<
     dyn Fn(
             &EffectNode,
@@ -294,13 +294,13 @@ pub enum EffectResourceDependency {
         /// Stable fingerprint of the complete parsed LUT semantics.
         semantic_fingerprint: [u8; 32],
     },
-    /// Plugin-owned immutable resource identity.
+    /// Definition-owned immutable resource identity.
     ///
-    /// The plugin must re-register its definition when this identity changes.
+    /// The provider must re-register its definition when this identity changes.
     /// Registration advances the global definition revision and invalidates
     /// prepared programs conservatively.
-    PluginManaged {
-        /// Stable plugin-defined resource key.
+    ExtensionManaged {
+        /// Stable provider-defined resource key.
         identity: String,
     },
 }
@@ -368,7 +368,7 @@ impl PreparedEffectEvaluator {
 fn effect_resource_dependency_retained_bytes(dependency: &EffectResourceDependency) -> usize {
     match dependency {
         EffectResourceDependency::CubeLut { path, .. } => path.as_os_str().len(),
-        EffectResourceDependency::PluginManaged { identity } => identity.capacity(),
+        EffectResourceDependency::ExtensionManaged { identity } => identity.capacity(),
     }
 }
 
@@ -847,7 +847,7 @@ static NEXT_CUSTOM_PROCESSOR_REVISION: AtomicU64 = AtomicU64::new(1);
 struct CustomEffectRuntimeOwner {
     effect_key: String,
     definition_registry_revision: u64,
-    contract: EffectPluginContract,
+    contract: EffectExtensionContract,
 }
 
 impl CustomEffectProcessorBinding {
@@ -897,7 +897,7 @@ impl CustomEffectProcessorBinding {
         &self,
         effect_key: &str,
         definition_registry_revision: u64,
-        contract: Option<&EffectPluginContract>,
+        contract: Option<&EffectExtensionContract>,
     ) -> Self {
         Self {
             revision: self.revision,
@@ -914,7 +914,7 @@ impl CustomEffectProcessorBinding {
         let Some(owner) = &self.runtime_owner else {
             return;
         };
-        record_plugin_runtime_failure(
+        record_extension_runtime_failure(
             owner.effect_key.as_str(),
             owner.definition_registry_revision,
             Some(&owner.contract),
@@ -1202,7 +1202,7 @@ pub struct EffectDefinition {
     default_properties: PropertyBag,
     evaluator_factory: Option<EffectEvaluatorFactory>,
     execution_contract: EffectExecutionContract,
-    plugin_contract: Option<EffectPluginContract>,
+    extension_contract: Option<EffectExtensionContract>,
     color_domain_contract: EffectColorDomainContract,
     definition_registry_revision: u64,
 }
@@ -1267,7 +1267,7 @@ impl EffectDefinition {
             default_properties,
             evaluator_factory: None,
             execution_contract: EffectExecutionContract::default(),
-            plugin_contract: None,
+            extension_contract: None,
             color_domain_contract,
             definition_registry_revision: 0,
         }
@@ -1386,8 +1386,9 @@ impl EffectDefinition {
         self
     }
 
-    pub fn with_plugin_contract(mut self, plugin_contract: EffectPluginContract) -> Self {
-        self.plugin_contract = Some(plugin_contract);
+    /// Bind the Effect Extension version and availability contract.
+    pub fn with_extension_contract(mut self, extension_contract: EffectExtensionContract) -> Self {
+        self.extension_contract = Some(extension_contract);
         self
     }
 
@@ -1425,15 +1426,16 @@ impl EffectDefinition {
         self.evaluator_factory.is_some()
             && !self.execution_contract.execution_modes.is_empty()
             && self.execution_contract.state_model == crate::EffectStateModel::Stateless
-            && effect_plugin_is_library_visible(
+            && effect_extension_is_library_visible(
                 self.key(),
                 self.definition_registry_revision,
-                self.plugin_contract(),
+                self.extension_contract(),
             )
     }
 
-    pub fn plugin_contract(&self) -> Option<&EffectPluginContract> {
-        self.plugin_contract.as_ref()
+    /// Contract bound to this registered effect definition, if any.
+    pub fn extension_contract(&self) -> Option<&EffectExtensionContract> {
+        self.extension_contract.as_ref()
     }
 
     pub(crate) const fn definition_registry_revision(&self) -> u64 {
@@ -1449,10 +1451,10 @@ impl EffectDefinition {
         let property_floor = self.default_properties.iter().count().saturating_mul(512);
         let property_bytes = serde_json::to_vec(&self.default_properties)
             .map_or(property_floor, |bytes| bytes.len().max(property_floor));
-        let plugin_bytes = self
-            .plugin_contract
+        let extension_bytes = self
+            .extension_contract
             .as_ref()
-            .map_or(0, |contract| contract.plugin_version.capacity());
+            .map_or(0, |contract| contract.extension_version.capacity());
         std::mem::size_of::<Self>()
             .saturating_add(self.key.capacity())
             .saturating_add(self.display_name.capacity())
@@ -1461,7 +1463,7 @@ impl EffectDefinition {
             )
             .saturating_add(category_bytes)
             .saturating_add(property_bytes)
-            .saturating_add(plugin_bytes)
+            .saturating_add(extension_bytes)
             .saturating_add(OPAQUE_EFFECT_EVALUATOR_BASE_CHARGE_BYTES)
     }
 
@@ -1530,10 +1532,10 @@ impl EffectDefinition {
                 })) {
                     Ok(result) => result,
                     Err(_) => {
-                        record_plugin_runtime_failure(
+                        record_extension_runtime_failure(
                             self.key(),
                             self.definition_registry_revision,
-                            self.plugin_contract(),
+                            self.extension_contract(),
                             "effect resource preparer panicked",
                         );
                         Err(EffectGraphBuildError::BuilderPanicked {
@@ -1571,9 +1573,9 @@ fn builtin_effect_types() -> [EffectType; 19] {
     ]
 }
 
-/// Global effect definition registry. Entries are never evicted — if plugins
-/// are installed and later removed, their definitions persist until restart.
-/// This is acceptable for a desktop NLE where plugin install/uninstall is rare.
+/// Global effect definition registry. Entries are retained until process exit;
+/// replacing a definition advances its registry revision. This registry does
+/// not implement the future Extension installation or unload lifecycle.
 fn effect_registry() -> &'static RwLock<HashMap<String, Arc<EffectDefinition>>> {
     static REGISTRY: OnceLock<RwLock<HashMap<String, Arc<EffectDefinition>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -1595,9 +1597,9 @@ fn effect_registry_revision_counter() -> &'static AtomicU64 {
     &REVISION
 }
 
-/// Process-local revision of the bound definition/plugin registry.
+/// Process-local revision of the effect definition registry.
 ///
-/// Prepared-program cache identity includes this value so replacing any plugin
+/// Prepared-program cache identity includes this value so replacing any effect
 /// definition conservatively invalidates previously bound code and resources.
 pub fn effect_registry_revision() -> u64 {
     effect_registry_revision_counter().load(Ordering::Acquire)
@@ -2420,7 +2422,7 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 None,
             );
         }
-        EffectType::Plugin(_) => {}
+        EffectType::External(_) => {}
     }
 
     properties
@@ -2718,7 +2720,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             topology: EffectGraphTopology::GeneralDag,
             ..cpu_linear
         },
-        EffectType::Plugin(_) => EffectExecutionContract {
+        EffectType::External(_) => EffectExecutionContract {
             execution_modes: EffectExecutionModes::NONE,
             ..cpu_linear
         },
@@ -3429,7 +3431,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::Grain => "颗粒",
         EffectType::ChromaKey => "色度抠像",
         EffectType::LumaKey => "亮度键",
-        EffectType::Plugin(_) => "插件特效",
+        EffectType::External(_) => "外部效果",
     }
 }
 
@@ -3451,7 +3453,7 @@ pub fn effect_display_name(effect_type: &EffectType) -> String {
     if let Some(definition) = effect_definition(effect_type) {
         return definition.display_name().to_string();
     }
-    if let EffectType::Plugin(key) = effect_type {
+    if let EffectType::External(key) = effect_type {
         return key.clone();
     }
     effect_type.display_name().to_string()
@@ -3505,7 +3507,7 @@ mod tests {
         assert_eq!(ntsc.pixel_aspect_ratio().to_f64(), 4.0 / 3.0);
     }
 
-    fn test_plugin_execution_contract() -> EffectExecutionContract {
+    fn test_extension_execution_contract() -> EffectExecutionContract {
         EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_F32,
             determinism: crate::EffectDeterminism::Deterministic,
@@ -3521,23 +3523,23 @@ mod tests {
         EffectExecutionContract {
             roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
             execution_modes: crate::EffectExecutionModes::CPU_U8,
-            ..test_plugin_execution_contract()
+            ..test_extension_execution_contract()
         }
     }
 
     #[test]
     fn authored_float_custom_backend_executes_through_compiled_graph() {
-        let plugin_type = EffectType::Plugin("plugin.test.float.custom_backend".to_owned());
+        let extension_type = EffectType::External("extension.test.float.custom_backend".to_owned());
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Float Custom",
                 PropertyBag::default(),
                 EffectColorDomainContract::SCENE_LINEAR,
             )
             .with_execution_contract(EffectExecutionContract {
                 roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             })
             .with_custom_float_render_backend(
                 Arc::new(|_, _| Ok(Some(serde_json::json!({ "gain": 0.25 })))),
@@ -3550,7 +3552,7 @@ mod tests {
             ),
         )
         .expect("register float custom effect");
-        let effect = EffectNode::with_defaults(plugin_type);
+        let effect = EffectNode::with_defaults(extension_type);
         let compiled = compile_clip_effect_graph(&[effect], &[], tt(0), TEST_WORKING_SPACE)
             .expect("compile float custom effect");
         assert!(crate::compiled_effect_graph_supports_rgba_f32(&compiled));
@@ -3584,7 +3586,7 @@ mod tests {
             second_property.static_value()
         );
 
-        let missing = EffectType::Plugin("plugin.test.not_registered".to_owned());
+        let missing = EffectType::External("extension.test.not_registered".to_owned());
         assert!(matches!(
             instantiate_effect_node(missing),
             Err(EffectInstantiationError::DefinitionUnavailable { .. })
@@ -3596,7 +3598,7 @@ mod tests {
         contract: EffectExecutionContract,
         op: EffectRenderOp,
     ) -> crate::EffectExecutionContractViolation {
-        let effect_type = EffectType::Plugin(key.to_owned());
+        let effect_type = EffectType::External(key.to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -3735,7 +3737,7 @@ mod tests {
         .collect::<std::collections::BTreeSet<_>>();
         let actual = effect_library_types()
             .into_iter()
-            .filter(|effect_type| !matches!(effect_type, EffectType::Plugin(_)))
+            .filter(|effect_type| !matches!(effect_type, EffectType::External(_)))
             .map(|effect_type| effect_type.key())
             .collect::<std::collections::BTreeSet<_>>();
 
@@ -4464,18 +4466,18 @@ mod tests {
     }
 
     #[test]
-    fn enabled_unknown_plugin_effect_fails_instead_of_rendering_identity() {
-        let effect = EffectNode::new(EffectType::Plugin(
-            "plugin.missing.persisted-definition".to_string(),
+    fn enabled_unknown_extension_effect_fails_instead_of_rendering_identity() {
+        let effect = EffectNode::new(EffectType::External(
+            "extension.missing.persisted-definition".to_string(),
         ));
 
         let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
-            .expect_err("missing plugin definition must not render as identity");
+            .expect_err("missing extension definition must not render as identity");
 
         assert!(matches!(
             error,
             EffectGraphBuildError::DefinitionUnavailable { effect_key, .. }
-                if effect_key == "plugin.missing.persisted-definition"
+                if effect_key == "extension.missing.persisted-definition"
         ));
     }
 
@@ -4580,10 +4582,10 @@ mod tests {
     }
 
     #[test]
-    fn plugin_can_register_custom_effect_property() {
-        let plugin_type = EffectType::Plugin("plugin.ai.auto_exposure".to_string());
-        let exposure_path = plugin_type.property_path("exposure");
-        let exposure_id = plugin_type.parameter_id("exposure").expect("parameter ID");
+    fn extension_can_register_custom_effect_property() {
+        let extension_type = EffectType::External("extension.ai.auto_exposure".to_string());
+        let exposure_path = extension_type.property_path("exposure");
+        let exposure_id = extension_type.parameter_id("exposure").expect("parameter ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
@@ -4595,12 +4597,12 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "AI 自动曝光",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_execution_contract(test_plugin_execution_contract())
+            .with_execution_contract(test_extension_execution_contract())
             .with_graph_builder(Arc::new(move |effect, context, graph| {
                 let exposure = effect.evaluate_f32_parameter(&exposure_id, context.time, 0.0);
                 if exposure.abs() > 1e-4 {
@@ -4616,35 +4618,38 @@ mod tests {
         )
         .expect("register auto exposure definition");
 
-        let mut effect = EffectNode::with_defaults(plugin_type.clone());
+        let mut effect = EffectNode::with_defaults(extension_type.clone());
         effect
             .apply_property_mutation(PropertyMutation::SetStaticValue {
                 path: exposure_path.clone(),
                 value: PropertyValue::Float(0.85),
             })
-            .expect("set plugin property");
+            .expect("set extension property");
 
         let value = effect
             .evaluate_property(&exposure_path, tt(0))
             .and_then(|value| value.as_f32())
-            .expect("read plugin property");
+            .expect("read extension property");
         assert!((value - 0.85).abs() < 0.001);
 
         // Verify the effect produces a graph node
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
-            .expect("build plugin graph");
+            .expect("build extension graph");
         assert!(!graph.nodes.is_empty());
-        assert_eq!(effect_display_name(&plugin_type), "AI 自动曝光".to_string());
+        assert_eq!(
+            effect_display_name(&extension_type),
+            "AI 自动曝光".to_string()
+        );
     }
 
     #[test]
-    fn plugin_can_build_custom_render_op_plan() {
-        let plugin_type = EffectType::Plugin("plugin.render.glow".to_string());
-        let amount_id = plugin_type.parameter_id("amount").expect("parameter ID");
+    fn extension_can_build_custom_render_op_plan() {
+        let extension_type = EffectType::External("extension.render.glow".to_string());
+        let amount_id = extension_type.parameter_id("amount").expect("parameter ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
-                "plugin.render.glow.amount",
+                "extension.render.glow.amount",
                 "Glow Amount",
                 PropertyValue::Float(0.4),
             )
@@ -4652,7 +4657,7 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Glow",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4672,7 +4677,7 @@ mod tests {
         )
         .expect("register custom render definition");
 
-        let effect = EffectNode::with_defaults(plugin_type);
+        let effect = EffectNode::with_defaults(extension_type);
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build custom graph");
         let custom_node = graph.nodes.iter().find(|n| {
@@ -4687,7 +4692,7 @@ mod tests {
             ..
         } = &custom_node.unwrap().kind
         {
-            assert_eq!(key, "plugin.render.glow");
+            assert_eq!(key, "extension.render.glow");
             assert_eq!(*cache_key, None);
             assert_eq!(*cache_policy, EffectCachePolicy::Deterministic);
             assert!(
@@ -4699,14 +4704,14 @@ mod tests {
     #[test]
     fn emitted_graph_rejects_optimistic_mode_determinism_and_roi_contracts() {
         let backend = emitted_op_contract_violation(
-            "plugin.contract.backend",
+            "extension.contract.backend",
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::GPU_F32,
                 roi_propagation: crate::EffectRoiPropagation::Expand {
                     horizontal_pixels: 1,
                     vertical_pixels: 1,
                 },
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::GaussianBlur { radius: 1.0 },
         );
@@ -4716,11 +4721,11 @@ mod tests {
         ));
 
         let determinism = emitted_op_contract_violation(
-            "plugin.contract.determinism",
+            "extension.contract.determinism",
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::CPU_F32
                     .union(crate::EffectExecutionModes::GPU_F32),
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::Grain { amount: 0.5 },
         );
@@ -4730,8 +4735,8 @@ mod tests {
         ));
 
         let roi = emitted_op_contract_violation(
-            "plugin.contract.roi",
-            test_plugin_execution_contract(),
+            "extension.contract.roi",
+            test_extension_execution_contract(),
             EffectRenderOp::GaussianBlur { radius: 7.25 },
         );
         assert!(matches!(
@@ -4740,10 +4745,10 @@ mod tests {
         ));
 
         let unsupported_gpu_representation = emitted_op_contract_violation(
-            "plugin.contract.gpu_u8",
+            "extension.contract.gpu_u8",
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::GPU_U8,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::ColorAdjust {
                 exposure: 0.0,
@@ -4758,14 +4763,14 @@ mod tests {
         ));
 
         let unsupported_custom_representation = emitted_op_contract_violation(
-            "plugin.contract.custom_precision",
+            "extension.contract.custom_precision",
             EffectExecutionContract {
                 execution_modes: crate::EffectExecutionModes::CPU_F32,
                 roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             },
             EffectRenderOp::Custom {
-                key: "plugin.contract.custom_precision".to_owned(),
+                key: "extension.contract.custom_precision".to_owned(),
                 params: serde_json::json!({}),
                 cache_key: None,
                 cache_policy: EffectCachePolicy::Deterministic,
@@ -4779,14 +4784,14 @@ mod tests {
     }
 
     #[test]
-    fn plugin_can_build_branching_render_graph() {
-        let plugin_type = EffectType::Plugin("plugin.graph.glow_mix".to_string());
-        let radius_id = plugin_type.parameter_id("radius").expect("radius ID");
-        let opacity_id = plugin_type.parameter_id("opacity").expect("opacity ID");
+    fn extension_can_build_branching_render_graph() {
+        let extension_type = EffectType::External("extension.graph.glow_mix".to_string());
+        let radius_id = extension_type.parameter_id("radius").expect("radius ID");
+        let opacity_id = extension_type.parameter_id("opacity").expect("opacity ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
-                "plugin.graph.glow_mix.radius",
+                "extension.graph.glow_mix.radius",
                 "Glow Radius",
                 PropertyValue::Float(4.0),
             )
@@ -4794,7 +4799,7 @@ mod tests {
         );
         properties.define(
             PropertyDescriptor::new(
-                "plugin.graph.glow_mix.opacity",
+                "extension.graph.glow_mix.opacity",
                 "Glow Opacity",
                 PropertyValue::Float(0.35),
             )
@@ -4802,7 +4807,7 @@ mod tests {
         );
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Glow Mix",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4812,7 +4817,7 @@ mod tests {
                     horizontal_pixels: 4,
                     vertical_pixels: 4,
                 },
-                ..test_plugin_execution_contract()
+                ..test_extension_execution_contract()
             })
             .with_branching_graph_builder(Arc::new(move |effect, context, graph| {
                 let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
@@ -4834,7 +4839,7 @@ mod tests {
         )
         .expect("register branching definition");
 
-        let effect = EffectNode::with_defaults(plugin_type.clone());
+        let effect = EffectNode::with_defaults(extension_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build branching graph");
         assert_eq!(graph.nodes.len(), 3);
@@ -4847,7 +4852,7 @@ mod tests {
             Some(crate::graph::EffectGraphNodeKind::Blend { .. })
         ));
 
-        let definition = effect_definition(&plugin_type).expect("effect definition");
+        let definition = effect_definition(&extension_type).expect("effect definition");
         let contract = definition.execution_contract();
         assert_eq!(contract.topology, EffectGraphTopology::GeneralDag);
         assert!(contract.execution_modes.contains(
@@ -4858,12 +4863,12 @@ mod tests {
 
     #[test]
     fn custom_render_backend_can_provide_stable_cache_key_contract() {
-        let plugin_type = EffectType::Plugin("plugin.render.lut_loader".to_string());
-        let path_id = plugin_type.parameter_id("asset_path").expect("asset path ID");
+        let extension_type = EffectType::External("extension.render.lut_loader".to_string());
+        let path_id = extension_type.parameter_id("asset_path").expect("asset path ID");
         let mut properties = PropertyBag::default();
         properties.define(
             PropertyDescriptor::new(
-                "plugin.render.lut_loader.asset_path",
+                "extension.render.lut_loader.asset_path",
                 "LUT Path",
                 PropertyValue::Text("looks/teal_orange.cube".to_string()),
             )
@@ -4874,7 +4879,7 @@ mod tests {
         let cache_path_id = path_id;
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "LUT Loader",
                 properties,
                 EffectColorDomainContract::SCENE_LINEAR,
@@ -4906,7 +4911,7 @@ mod tests {
         )
         .expect("register cached render definition");
 
-        let effect = EffectNode::with_defaults(plugin_type.clone());
+        let effect = EffectNode::with_defaults(extension_type.clone());
         let graph = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect("build cached graph");
         let custom_node = graph.nodes.iter().find_map(|n| match &n.kind {
@@ -4920,8 +4925,9 @@ mod tests {
         assert_eq!(cache_key.as_deref(), Some("lut:looks/teal_orange.cube"));
         assert_eq!(cache_policy, EffectCachePolicy::Deterministic);
 
-        let contract =
-            effect_definition(&plugin_type).expect("effect definition").execution_contract();
+        let contract = effect_definition(&extension_type)
+            .expect("effect definition")
+            .execution_contract();
         assert_eq!(contract.topology, EffectGraphTopology::LinearChain);
         assert!(contract.execution_modes.contains(
             crate::EffectProcessingBackend::Cpu,
@@ -4933,7 +4939,7 @@ mod tests {
     fn custom_cache_key_does_not_hide_dynamic_parameters_from_graph_identity() {
         let plan = |amount| EffectRenderPlan {
             ops: vec![EffectRenderOp::Custom {
-                key: "plugin.render.animated".to_owned(),
+                key: "extension.render.animated".to_owned(),
                 params: serde_json::json!({ "amount": amount }),
                 cache_key: Some("stable-resource-v1".to_owned()),
                 cache_policy: EffectCachePolicy::Deterministic,
@@ -4949,22 +4955,22 @@ mod tests {
     }
 
     #[test]
-    fn failing_plugin_graph_builder_isolated_and_hidden_after_disable_policy() {
-        let plugin_type = EffectType::Plugin("plugin.graph.unstable".to_string());
+    fn failing_extension_graph_builder_isolated_and_hidden_after_disable_policy() {
+        let extension_type = EffectType::External("extension.graph.unstable".to_string());
         register_effect_definition(
             EffectDefinition::new(
-                plugin_type.key(),
+                extension_type.key(),
                 "Unstable Graph",
                 PropertyBag::default(),
                 EffectColorDomainContract::SCENE_LINEAR,
             )
-            .with_execution_contract(test_plugin_execution_contract())
-            .with_plugin_contract(
-                crate::EffectPluginContract::new("1.0.0")
+            .with_execution_contract(test_extension_execution_contract())
+            .with_extension_contract(
+                crate::EffectExtensionContract::new("1.0.0")
                     .with_runtime_failure_policy(
-                        crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+                        crate::EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                     )
-                    .with_library_policy(crate::EffectPluginLibraryPolicy::HideWhenUnavailable),
+                    .with_library_policy(crate::EffectExtensionLibraryPolicy::HideWhenUnavailable),
             )
             .with_graph_builder(Arc::new(|_, _, _| {
                 panic!("unstable graph builder");
@@ -4972,7 +4978,7 @@ mod tests {
         )
         .expect("register unstable definition");
 
-        let effect = EffectNode::new(plugin_type.clone());
+        let effect = EffectNode::new(extension_type.clone());
         let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect_err("builder must fail");
         assert!(matches!(
@@ -4980,13 +4986,13 @@ mod tests {
             EffectGraphBuildError::BuilderPanicked { .. }
         ));
 
-        let status =
-            crate::effect_plugin_runtime_status(&plugin_type.key()).expect("plugin runtime status");
+        let status = crate::effect_extension_runtime_status(&extension_type.key())
+            .expect("extension runtime status");
         assert!(status.disabled);
         assert_eq!(
             status.last_error.as_deref(),
             Some("effect graph builder panicked")
         );
-        assert!(!effect_library_types().contains(&plugin_type));
+        assert!(!effect_library_types().contains(&extension_type));
     }
 }

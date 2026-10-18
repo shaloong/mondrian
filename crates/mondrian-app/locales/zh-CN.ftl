@@ -197,6 +197,7 @@ effect-category-stylize = 风格化
 effect-category-transform = 变换
 effect-category-keying = 抠像
 effect-category-plugins = 插件
+effect-category-external = 外部效果
 effect-basic-correction = 基础调色
 effect-white-balance = 白平衡
 effect-lut-3d = 3D LUT

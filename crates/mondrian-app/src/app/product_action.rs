@@ -2,7 +2,7 @@
 //!
 //! Product code dispatches and admits the typed algebra in this Module.
 //! `Action::Custom` remains an external transport for reusable Widgets,
-//! scripting, and future plugin Adapters; it is decoded only at this seam.
+//! scripting, and future Extension Adapters; it is decoded only at this seam.
 
 mod visual_mask;
 
@@ -563,7 +563,7 @@ pub enum VideoTransitionProductAction {
 /// Failure to decode a recognized external custom Action.
 ///
 /// Unknown namespaces and names are not errors: they return `None` from
-/// [`ProductAction::decode_external`] so an owning legacy or plugin Adapter may
+/// [`ProductAction::decode_external`] so an owning legacy or Extension Adapter may
 /// inspect them. A recognized product name with a malformed payload fails
 /// closed and must never fall through to another interpretation.
 #[derive(Debug, thiserror::Error)]
@@ -1083,7 +1083,7 @@ impl ProductAction {
         }
     }
 
-    /// Encode a typed product Action for an external Widget or plugin envelope.
+    /// Encode a typed product Action for an external Widget or Extension envelope.
     ///
     /// Product dispatch immediately lowers this envelope back through
     /// [`Self::decode_external`]; no other App Module may reinterpret these wire
@@ -4373,7 +4373,7 @@ mod tests {
     fn external_codec_distinguishes_unknown_and_malformed_known_actions() {
         let unknown = Action::Custom {
             namespace: TIMELINE_NAMESPACE.to_owned(),
-            name: "plugin_extension".to_owned(),
+            name: "extension_example".to_owned(),
             payload: serde_json::json!({"anything": true}),
         };
         assert!(ProductAction::decode_external(&unknown)
@@ -4389,7 +4389,7 @@ mod tests {
 
         let unknown_audio = Action::Custom {
             namespace: AUDIO_NAMESPACE.to_owned(),
-            name: "plugin_extension".to_owned(),
+            name: "extension_example".to_owned(),
             payload: serde_json::json!({"anything": true}),
         };
         assert!(ProductAction::decode_external(&unknown_audio)
@@ -4464,7 +4464,7 @@ mod tests {
         for namespace in [PROJECT_NAMESPACE, SEQUENCE_NAMESPACE, EXPORT_NAMESPACE] {
             let unknown = Action::Custom {
                 namespace: namespace.to_owned(),
-                name: "plugin_extension".to_owned(),
+                name: "extension_example".to_owned(),
                 payload: serde_json::Value::Null,
             };
             assert!(ProductAction::decode_external(&unknown)
@@ -4701,7 +4701,7 @@ mod tests {
         let missing_add = ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
             VisualEffectAddToClipPayload {
                 clip_id,
-                effect_type: EffectType::Plugin("plugin.test.missing".to_owned()),
+                effect_type: EffectType::External("extension.test.missing".to_owned()),
             },
         ));
         let select = ProductAction::VisualEffect(VisualEffectProductAction::Select(

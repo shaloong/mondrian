@@ -1,4 +1,4 @@
-# Mondrian Plugin Additional Permission v1.0 / Mondrian 插件附加许可 v1.0
+# Mondrian Extension Additional Permission v1.0 / Mondrian 扩展附加许可 v1.0
 
 Shaloong · contact@shaloong.com
 
@@ -20,9 +20,9 @@ The adopting rightsholders permit you to develop, reproduce, modify, combine, li
 
 ## 3. SDK and interface material / SDK 与接口材料
 
-The first-party SDK file `crates/mondrian-effects/src/plugin_sdk.rs` and first-party fenced source/configuration examples in Markdown files under `docs/plugins/` are additionally available under [MIT](MIT-SDK.txt). This does not relicense their dependencies, documentation prose, images or third-party examples. Other material is MIT-licensed only where expressly identified as such.
+The first-party SDK file `crates/mondrian-effects/src/extension_sdk.rs` and first-party fenced source/configuration examples in Markdown files under `docs/extensions/effects/` are additionally available under [MIT](MIT-SDK.txt). This does not relicense their dependencies, documentation prose, images or third-party examples. Other material is MIT-licensed only where expressly identified as such.
 
-自有 SDK 文件 `crates/mondrian-effects/src/plugin_sdk.rs` 及 `docs/plugins/` 下 Markdown 文件中自有的围栏源码／配置示例，另按 [MIT](MIT-SDK.txt) 提供。本授权不改变其依赖、文档正文、图像或第三方示例的许可。其他材料仅在明确标注时适用 MIT。
+自有 SDK 文件 `crates/mondrian-effects/src/extension_sdk.rs` 及 `docs/extensions/effects/` 下 Markdown 文件中自有的围栏源码／配置示例，另按 [MIT](MIT-SDK.txt) 提供。本授权不改变其依赖、文档正文、图像或第三方示例的许可。其他材料仅在明确标注时适用 MIT。
 
 To the extent rights are needed, you may reproduce interface declarations, type layouts and function or method signatures from the Covered Software as necessary for interoperability in an Independent Extension and convey them as part of that extension under its chosen terms. This does not authorize copying implementation bodies, algorithms, macros or inline helpers except under an applicable separate license. Normal compilation, including inlining or generic instantiation, does not disqualify an Independent Extension; generated copies of Covered Software remain Covered Software subject to section 4.
 

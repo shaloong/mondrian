@@ -4726,7 +4726,7 @@ fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
         .collect();
     assert!(
         root_categories.starts_with(&["Color", "Transform", "Keying"]),
-        "built-in roots must retain their order when plugin tests register extra roots: {root_categories:?}"
+        "built-in roots must retain their order when extension tests register extra roots: {root_categories:?}"
     );
     let color = model
         .items
@@ -6263,8 +6263,8 @@ fn panel_domain_accents_use_theme_tokens() {
         colors.media_solid
     );
     assert_eq!(
-        effect_node_accent(&EffectType::Plugin("demo.plugin".to_owned())),
-        colors.effect_plugin
+        effect_node_accent(&EffectType::External("extension.demo".to_owned())),
+        colors.effect_external
     );
     assert_eq!(
         effect_node_accent(&EffectType::GaussianBlur),

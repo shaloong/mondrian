@@ -12,7 +12,7 @@ use mondrian_core::{MondrianError, ParameterId};
 use mondrian_effects::{
     register_effect_definition, EffectCachePolicy, EffectColorDomainContract, EffectDefinition,
     EffectDefinitionError, EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
-    EffectGraphBuildError, EffectGraphTopology, EffectPluginContract, EffectResourceLifetime,
+    EffectExtensionContract, EffectGraphBuildError, EffectGraphTopology, EffectResourceLifetime,
     EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
 };
 use serde::{Deserialize, Serialize};
@@ -262,7 +262,7 @@ fn build_definition(
         EffectCachePolicy::Uncacheable,
         processor,
     )
-    .with_plugin_contract(EffectPluginContract::new(version)))
+    .with_extension_contract(EffectExtensionContract::new(version)))
 }
 
 fn stable_key(prefix: &str, bytes: &[u8]) -> String {
@@ -285,7 +285,7 @@ fn effect_type_for_filter(
         "{}\0{}.{}\0{}",
         plugin_identifier, plugin.version_major, plugin.version_minor, inspection.binary_sha256
     );
-    Ok(EffectType::Plugin(stable_key(
+    Ok(EffectType::External(stable_key(
         "openfx.",
         identity.as_bytes(),
     )))

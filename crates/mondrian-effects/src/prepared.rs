@@ -133,10 +133,10 @@ impl PreparedEffectStack {
                     effect_id: effect.id,
                 }
             })?;
-            if !crate::plugin_contract::effect_plugin_is_runtime_available(
+            if !crate::extension_contract::effect_extension_is_runtime_available(
                 definition.key(),
                 definition.definition_registry_revision(),
-                definition.plugin_contract(),
+                definition.extension_contract(),
             ) {
                 return Err(EffectGraphBuildError::RuntimeUnavailable {
                     effect_key,
@@ -308,7 +308,7 @@ impl PreparedEffectStack {
             .iter()
             .map(|dependency| match dependency {
                 EffectResourceDependency::CubeLut { path, .. } => path.as_os_str().len(),
-                EffectResourceDependency::PluginManaged { identity } => identity.capacity(),
+                EffectResourceDependency::ExtensionManaged { identity } => identity.capacity(),
             })
             .fold(0_usize, usize::saturating_add);
         let binding_nodes = self
@@ -461,7 +461,7 @@ fn evaluate_instance_into_builder(
                 checkpoint,
                 instance.definition.key(),
                 instance.definition.definition_registry_revision(),
-                instance.definition.plugin_contract(),
+                instance.definition.extension_contract(),
             );
             if !staged.satisfies_topology_since(
                 checkpoint,
@@ -496,10 +496,10 @@ fn evaluate_instance_into_builder(
         }
         Ok(Err(error)) => Err(error),
         Err(_) => {
-            crate::plugin_contract::record_plugin_runtime_failure(
+            crate::extension_contract::record_extension_runtime_failure(
                 instance.definition.key(),
                 instance.definition.definition_registry_revision(),
-                instance.definition.plugin_contract(),
+                instance.definition.extension_contract(),
                 "effect graph builder panicked",
             );
             Err(EffectGraphBuildError::BuilderPanicked {
@@ -805,7 +805,7 @@ fn grade_graph_composite_contract() -> EffectExecutionContract {
 /// Cache identity beyond Sequence revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectProgramDependencyIdentity {
-    /// Process-local definition/plugin registry revision.
+    /// Process-local definition/extension registry revision.
     pub definition_registry_revision: u64,
     /// Stable digest of every retained immutable resource identity.
     pub resource_fingerprint: [u8; 32],
@@ -1181,14 +1181,14 @@ impl PreparedEffectProgram {
         })
     }
 
-    /// Revalidate process-local plugin definitions and external resources.
+    /// Revalidate process-local extension definitions and external resources.
     ///
     /// This is an explicit low-frequency cache-admission/invalidation check. It
     /// may read and parse external files and must never run in per-frame
     /// evaluation or frame-cache lookup.
     ///
-    /// Plugin-managed resources remain current only while their definition
-    /// registry revision is unchanged; plugins must re-register when the
+    /// Extension-managed resources remain current only while their definition
+    /// registry revision is unchanged; extensions must re-register when the
     /// identity they supplied during preparation changes.
     pub fn dependencies_are_current(&self) -> Result<bool, EffectDependencyCheckError> {
         if !dependencies_are_current_for_stack(&self.inner.stack)? {
@@ -1202,7 +1202,7 @@ impl PreparedEffectProgram {
         Ok(true)
     }
 
-    /// Cheap process-local definition/plugin revision check.
+    /// Cheap process-local definition/extension revision check.
     ///
     /// This does not read external resources and can reject a cached program
     /// before scheduling low-frequency dependency revalidation.
@@ -1237,7 +1237,7 @@ fn dependency_identity(stack: &PreparedEffectStack) -> EffectProgramDependencyId
                 hasher.update(path.as_bytes());
                 hasher.update(semantic_fingerprint);
             }
-            EffectResourceDependency::PluginManaged { identity } => {
+            EffectResourceDependency::ExtensionManaged { identity } => {
                 hasher.update([1]);
                 hasher.update((identity.len() as u64).to_le_bytes());
                 hasher.update(identity.as_bytes());
@@ -1422,7 +1422,7 @@ fn dependencies_are_current_for_stack(
                     return Ok(false);
                 }
             }
-            EffectResourceDependency::PluginManaged { .. } => {}
+            EffectResourceDependency::ExtensionManaged { .. } => {}
         }
     }
     Ok(true)
@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     fn dynamic_topology_program(key: &str) -> PreparedEffectProgram {
-        let effect_type = EffectType::Plugin(key.to_owned());
+        let effect_type = EffectType::External(key.to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -1631,8 +1631,8 @@ mod tests {
     }
 
     fn dynamic_temporal_topology_program(key: &str) -> PreparedEffectProgram {
-        let dynamic_effect_type = EffectType::Plugin(key.to_owned());
-        let temporal_effect_type = EffectType::Plugin(format!("{key}.temporal"));
+        let dynamic_effect_type = EffectType::External(key.to_owned());
+        let temporal_effect_type = EffectType::External(format!("{key}.temporal"));
         let offset = TimelineTime::new(1, 2).expect("temporal offset");
         register_effect_definition(
             EffectDefinition::new(
@@ -1699,7 +1699,9 @@ mod tests {
 
     #[test]
     fn preparation_rejects_missing_definition() {
-        let effect = EffectNode::new(EffectType::Plugin("plugin.prepared.missing".to_owned()));
+        let effect = EffectNode::new(EffectType::External(
+            "extension.prepared.missing".to_owned(),
+        ));
         assert!(matches!(
             PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709),
             Err(EffectGraphBuildError::DefinitionUnavailable { .. })
@@ -1925,7 +1927,7 @@ mod tests {
         let path = temporary_cube("mondrian-prepared-grade-lut");
         let grade = (0..32)
             .find_map(|_| {
-                // Other unit tests register plugins in this process. A registry
+                // Other unit tests register extensions in this process. A registry
                 // edit legitimately invalidates a prepared graph; only assert
                 // LUT freshness across a coherent registry observation.
                 let revision = effect_registry_revision();
@@ -2041,8 +2043,8 @@ mod tests {
     }
 
     #[test]
-    fn conservative_plugin_default_fails_closed() {
-        let effect_type = EffectType::Plugin("plugin.prepared.conservative".to_owned());
+    fn conservative_extension_default_fails_closed() {
+        let effect_type = EffectType::External("extension.prepared.conservative".to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -2052,7 +2054,7 @@ mod tests {
             )
             .with_graph_builder(Arc::new(|_, _, _| Ok(()))),
         )
-        .expect("register plugin");
+        .expect("register extension");
         let effect = EffectNode::new(effect_type);
         assert!(matches!(
             PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709),
@@ -2129,7 +2131,7 @@ mod tests {
 
     #[test]
     fn immutable_resource_is_prepared_once_for_many_frames() {
-        let effect_type = EffectType::Plugin("plugin.prepared.resource_once".to_owned());
+        let effect_type = EffectType::External("extension.prepared.resource_once".to_owned());
         let prepare_count = Arc::new(AtomicUsize::new(0));
         let prepare_count_for_factory = Arc::clone(&prepare_count);
         let preparer: EffectGraphPreparer = Arc::new(move |_, _, _| {
@@ -2139,7 +2141,7 @@ mod tests {
                 Ok(())
             });
             Ok(PreparedEffectEvaluator::new(evaluator).with_dependency(
-                EffectResourceDependency::PluginManaged { identity: "resource-v1".to_owned() },
+                EffectResourceDependency::ExtensionManaged { identity: "resource-v1".to_owned() },
             ))
         });
         register_effect_definition(
@@ -2155,7 +2157,7 @@ mod tests {
             })
             .with_prepared_graph_builder(preparer),
         )
-        .expect("register plugin");
+        .expect("register extension");
 
         let program = PreparedEffectProgram::prepare(
             &[EffectNode::new(effect_type)],
@@ -2178,11 +2180,11 @@ mod tests {
     #[test]
     fn prepared_dependency_rejects_frame_lifetime_declaration() {
         let effect_type =
-            EffectType::Plugin("plugin.prepared.invalid_resource_lifetime".to_owned());
+            EffectType::External("extension.prepared.invalid_resource_lifetime".to_owned());
         let preparer: EffectGraphPreparer = Arc::new(|_, _, _| {
             Ok(
                 PreparedEffectEvaluator::new(Arc::new(|_, _, _| Ok(()))).with_dependency(
-                    EffectResourceDependency::PluginManaged {
+                    EffectResourceDependency::ExtensionManaged {
                         identity: "resource-with-invalid-lifetime".to_owned(),
                     },
                 ),
@@ -2248,7 +2250,7 @@ mod tests {
 
     #[test]
     fn dynamic_topology_residency_is_session_owned_and_program_charge_is_immutable() {
-        let program = dynamic_topology_program("plugin.prepared.session_topology_owner");
+        let program = dynamic_topology_program("extension.prepared.session_topology_owner");
         let retained_before = program.retained_bytes_estimate();
         let mut preview = EffectExecutionSession::new(topology_session_config(10, 2 * 1024 * 1024));
         let mut export = EffectExecutionSession::new(topology_session_config(10, 2 * 1024 * 1024));
@@ -2307,7 +2309,8 @@ mod tests {
 
     #[test]
     fn temporal_preparation_reuses_owner_topology_and_rotates_with_generation() {
-        let program = dynamic_temporal_topology_program("plugin.prepared.temporal_topology_owner");
+        let program =
+            dynamic_temporal_topology_program("extension.prepared.temporal_topology_owner");
         let extent = crate::EffectFrameExtent::new(8, 4);
         let request = crate::EffectTemporalExecutionRequest::new(
             11,
@@ -2360,7 +2363,7 @@ mod tests {
 
     #[test]
     fn over_budget_dynamic_topology_executes_without_entering_residency() {
-        let program = dynamic_topology_program("plugin.prepared.oversize_topology");
+        let program = dynamic_topology_program("extension.prepared.oversize_topology");
         let reference = program.evaluate(tt(1)).expect("uncached reference");
         let retained_before = program.retained_bytes_estimate();
         let mut session = EffectExecutionSession::new(topology_session_config(5, 5));
@@ -2381,8 +2384,8 @@ mod tests {
 
     #[test]
     fn stack_contract_aggregates_exact_modes_determinism_and_roi() {
-        let deterministic_type = EffectType::Plugin("plugin.prepared.contract_a".to_owned());
-        let seeded_type = EffectType::Plugin("plugin.prepared.contract_b".to_owned());
+        let deterministic_type = EffectType::External("extension.prepared.contract_a".to_owned());
+        let seeded_type = EffectType::External("extension.prepared.contract_b".to_owned());
         let evaluator: EffectGraphBuilder = Arc::new(|_, _, _| Ok(()));
         register_effect_definition(
             EffectDefinition::new(
@@ -2449,7 +2452,7 @@ mod tests {
 
     #[test]
     fn general_dag_definition_binds_every_emitted_value_to_one_stage() {
-        let effect_type = EffectType::Plugin("plugin.prepared.bound_general_dag".to_owned());
+        let effect_type = EffectType::External("extension.prepared.bound_general_dag".to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -2503,8 +2506,8 @@ mod tests {
 
     #[test]
     fn heterogeneous_backend_chain_remains_valid_and_retains_stage_contracts() {
-        let cpu_type = EffectType::Plugin("plugin.prepared.heterogeneous_cpu".to_owned());
-        let gpu_type = EffectType::Plugin("plugin.prepared.heterogeneous_gpu".to_owned());
+        let cpu_type = EffectType::External("extension.prepared.heterogeneous_cpu".to_owned());
+        let gpu_type = EffectType::External("extension.prepared.heterogeneous_gpu".to_owned());
         let cpu_evaluator: EffectGraphBuilder = Arc::new(|_, _, graph| {
             graph.append_unary(EffectRenderOp::GaussianBlur { radius: 1.0 });
             Ok(())
@@ -2599,7 +2602,7 @@ mod tests {
 
     #[test]
     fn stateful_contract_prepares_but_single_frame_executor_fails_closed() {
-        let effect_type = EffectType::Plugin("plugin.prepared.stateful".to_owned());
+        let effect_type = EffectType::External("extension.prepared.stateful".to_owned());
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -2648,7 +2651,7 @@ mod tests {
 
     #[test]
     fn prepared_custom_processor_is_immutable_across_definition_replacement() {
-        let effect_type = EffectType::Plugin("plugin.prepared.immutable_processor".to_owned());
+        let effect_type = EffectType::External("extension.prepared.immutable_processor".to_owned());
         let definition = |red: u8| {
             EffectDefinition::new(
                 effect_type.key(),

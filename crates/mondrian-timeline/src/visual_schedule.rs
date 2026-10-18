@@ -1006,8 +1006,8 @@ mod tests {
                         FlatVideoTransitionDefinition::CrossDissolve => json!({
                             "kind": "cross_dissolve",
                         }),
-                        FlatVideoTransitionDefinition::Plugin { definition_id } => json!({
-                            "kind": "plugin",
+                        FlatVideoTransitionDefinition::External { definition_id } => json!({
+                            "kind": "external",
                             "definition_id": definition_id,
                         }),
                     };

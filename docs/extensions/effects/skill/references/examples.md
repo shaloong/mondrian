@@ -1,7 +1,7 @@
 # Complete Examples
 
 The snippets below assume this conservative helper is in scope. Select only an
-exact mode the emitted operations really implement. The high-level plugin SDK
+exact mode the emitted operations really implement. The high-level Effect SDK
 currently admits only stateless current-frame examples here; author-selected
 external resources and continuity state must remain fail-closed until their
 real preparation or Session Interface is exposed.
@@ -31,18 +31,18 @@ A linear chain effect with one parameter.
 ```rust
 use mondrian_core::automation::{PropertyDescriptor, PropertyValue};
 use mondrian_effects::{
-    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp, EffectType,
+    EffectExtensionContract, EffectExtensionDefinitionBuilder, EffectRenderOp, EffectType,
     register_effect_definition,
 };
 
 pub fn register() {
-    let plugin_type = EffectType::Plugin("plugin.example.soft_blur".to_string());
-    let radius_id = plugin_type
+    let effect_type = EffectType::External("extension.example.soft_blur".to_string());
+    let radius_id = effect_type
         .parameter_id("radius")
         .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(
-        plugin_type.key(),
+    let definition = EffectExtensionDefinitionBuilder::new(
+        effect_type.key(),
         "Soft Blur",
         EffectColorDomainContract::SCENE_LINEAR,
     )
@@ -51,9 +51,9 @@ pub fn register() {
             EffectGraphTopology::LinearChain,
             EffectResourceLifetime::Frame,
         ))
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
+        .with_extension_contract(EffectExtensionContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
-            "plugin.example.soft_blur.radius",
+            "extension.example.soft_blur.radius",
             "Radius",
             PropertyValue::Float(4.0),
         ).with_parameter_id(radius_id.clone()))
@@ -80,21 +80,21 @@ use mondrian_core::{
     types::BlendMode,
 };
 use mondrian_effects::{
-    EffectPluginContract, EffectPluginDefinitionBuilder, EffectRenderOp, EffectType,
+    EffectExtensionContract, EffectExtensionDefinitionBuilder, EffectRenderOp, EffectType,
     register_effect_definition,
 };
 
 pub fn register() {
-    let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
-    let radius_id = plugin_type
+    let effect_type = EffectType::External("extension.example.glow".to_string());
+    let radius_id = effect_type
         .parameter_id("radius")
         .expect("static parameter ID");
-    let opacity_id = plugin_type
+    let opacity_id = effect_type
         .parameter_id("opacity")
         .expect("static parameter ID");
 
-    let definition = EffectPluginDefinitionBuilder::new(
-        plugin_type.key(),
+    let definition = EffectExtensionDefinitionBuilder::new(
+        effect_type.key(),
         "Glow",
         EffectColorDomainContract::SCENE_LINEAR,
     )
@@ -103,14 +103,14 @@ pub fn register() {
             EffectGraphTopology::GeneralDag,
             EffectResourceLifetime::Frame,
         ))
-        .with_plugin_contract(EffectPluginContract::new("0.1.0"))
+        .with_extension_contract(EffectExtensionContract::new("0.1.0"))
         .property(PropertyDescriptor::new(
-            "plugin.example.glow.radius",
+            "extension.example.glow.radius",
             "Radius",
             PropertyValue::Float(8.0),
         ).with_parameter_id(radius_id.clone()))
         .property(PropertyDescriptor::new(
-            "plugin.example.glow.opacity",
+            "extension.example.glow.opacity",
             "Opacity",
             PropertyValue::Float(0.4),
         ).with_parameter_id(opacity_id.clone()))
@@ -139,7 +139,7 @@ Do not implement an author-selected LUT by carrying its path into
 opening the file from a graph/cache-key/processor closure. A path is not content
 identity, and all three closures may run on the frame path.
 
-The high-level `EffectPluginDefinitionBuilder` currently has no complete,
+The high-level `EffectExtensionDefinitionBuilder` currently has no complete,
 versioned “author path → immutable prepared LUT + dependency revalidation”
 Interface. Such an instance must therefore return a structured
 `EffectGraphBuildError::ResourceUnavailable` and remain blocked. A future
@@ -153,23 +153,23 @@ resource lifetime without inventing another cache or filesystem authority.
 `MaskOp::{Add, Subtract, Intersect, Difference}`, and a closure returning an
 `EffectGraphValue`. That value must have `EffectColorDomain::AlphaMask`.
 
-The current high-level plugin DSL does not expose `MaskSource` or a typed
+The current high-level Effect DSL does not expose `MaskSource` or a typed
 RGB-to-matte producer. Do not fabricate one with raw `EffectRenderOp::Custom`:
 it would be missing the Definition-bound processor and an AlphaMask domain
 proof, so compilation correctly fails closed. Clip author masks are injected
-by the engine; a plugin mask example should be added only when a typed producer
+by the engine; an effect extension mask example should be added only when a typed producer
 is part of the public SDK.
 
-## Example 5: Registering multiple effects from one plugin
+## Example 5: Registering multiple effects from one effect extension
 
-A plugin crate can register multiple effects:
+An effect extension crate can register multiple effects:
 
 ```rust
 pub fn register_all()
     -> Result<(), mondrian_effects::effect::EffectDefinitionError>
 {
     // Each function builds a complete definition: color domain, exact execution
-    // contract, parameter schema, graph builder, and plugin contract.
+    // contract, parameter schema, graph builder, and effect contract.
     register_glow_effect()?;
     register_sharpen_effect()?;
     register_vignette_effect()
@@ -177,9 +177,9 @@ pub fn register_all()
 ```
 
 Do not register placeholder definitions that omit their execution contract or
-graph builder. The conservative plugin default is intentionally not executable.
+graph builder. The conservative effect extension default is intentionally not executable.
 
-## Testing a plugin
+## Testing an effect extension
 
 ```rust
 #[cfg(test)]
@@ -196,8 +196,8 @@ mod tests {
     fn glow_effect_produces_valid_graph() {
         register_glow_effect().expect("register Glow");
 
-        let plugin_type = EffectType::Plugin("plugin.example.glow".to_string());
-        let effect = EffectNode::with_defaults(plugin_type.clone());
+        let effect_type = EffectType::External("extension.example.glow".to_string());
+        let effect = EffectNode::with_defaults(effect_type.clone());
 
         let graph = build_effect_render_graph(
             &[effect],
@@ -208,7 +208,7 @@ mod tests {
         // Glow with blend creates at least 3 nodes: source → blur → blend
         assert!(graph.nodes.len() >= 3);
         assert!(graph.output.is_some());
-        let def = effect_definition(&plugin_type).expect("effect definition should exist");
+        let def = effect_definition(&effect_type).expect("effect definition should exist");
         let contract = def.execution_contract();
         assert!(contract.execution_modes.contains(
             EffectProcessingBackend::Cpu,
@@ -224,12 +224,12 @@ mod tests {
 In `crates/mondrian-app/Cargo.toml`:
 ```toml
 [dependencies]
-mondrian-plugin-example = { path = "../mondrian-plugin-example" }
+mondrian-effect-example = { path = "../mondrian-effect-example" }
 ```
 
 In the app initialization code (typically in `app.rs` or `main.rs`):
 ```rust
-fn init_plugins() {
-    mondrian_plugin_example::register();
+fn register_effects() {
+    mondrian_effect_example::register();
 }
 ```

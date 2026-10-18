@@ -1168,7 +1168,7 @@ impl EffectGraphBuilderState {
         checkpoint: EffectGraphBuilderCheckpoint,
         effect_key: &str,
         definition_registry_revision: u64,
-        contract: Option<&crate::EffectPluginContract>,
+        contract: Option<&crate::EffectExtensionContract>,
     ) {
         for node in self.graph.nodes.iter_mut().skip(checkpoint.node_count) {
             let (EffectGraphNodeKind::UnaryEffect {

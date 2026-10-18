@@ -22,7 +22,7 @@
 - 改变类型 → 关键帧数据不可用
 - 改变默认值 → 旧项目重新打开后行为差异
 
-在插件设计阶段就确定参数命名和类型，后续避免不兼容的变更。
+在效果扩展设计阶段就确定参数命名和类型，后续避免不兼容的变更。
 
 ### 1.3 让图语义直观
 
@@ -36,17 +36,17 @@
 
 ### 1.4 不要推测预览/导出的差异
 
-插件代码只描述特效语义，不要在里面写 `if is_preview { ... } else { ... }` 之类的逻辑。运行时负责调度和缓存策略的差异化，插件的责任是正确描述效果。
+效果扩展代码只描述特效语义，不要在里面写 `if is_preview { ... } else { ... }` 之类的逻辑。运行时负责调度和缓存策略的差异化，效果扩展的责任是正确描述效果。
 
 ## 2. 最佳实践清单
 
 ### 特效定义
 
-- [ ] 使用 `Plugin("plugin.<author>.<name>")` 作为 `EffectType`
-- [ ] 显式声明 `EffectPluginContract`
+- [ ] 使用 `EffectType::External("extension.<author>.<name>".into())` 作为 `EffectType`
+- [ ] 显式声明 `EffectExtensionContract`
 - [ ] 显式声明 `EffectColorDomainContract` 与完整 `EffectExecutionContract`
 - [ ] 只声明真实实现的精确 backend/representation 组合、temporal/ROI/state/lifetime
-- [ ] 参数 key 遵循 `{plugin_key}.{param}` 命名惯例
+- [ ] 参数 key 遵循 `{extension_key}.{param}` 命名惯例
 - [ ] 参数有合理的默认值和范围
 - [ ] 图逻辑在参数不足以产生可见效果时提前 return（退化为 identity）
 
@@ -79,15 +79,15 @@
 
 ## 3. 反模式
 
-### 3.1 在插件中直接依赖时间线或导出队列实现
+### 3.1 在效果扩展中直接依赖时间线或导出队列实现
 
 ```rust
-// 反模式：插件直接访问时间线内部
+// 反模式：效果扩展直接访问时间线内部
 let track = get_current_track(); // 不要这样做
 let export_settings = get_export_queue_config(); // 不要这样做
 ```
 
-插件只知道 Effect 语义。时间线和导出是上层关注的事情。
+效果扩展只知道 Effect 语义。时间线和导出是上层关注的事情。
 
 ### 3.2 把 frame-dependent 效果声明成 deterministic
 
@@ -110,12 +110,12 @@ cache_key: Some(format!("lut_{}", std::time::Instant::now().elapsed().as_nanos()
 
 cache_key 必须在相同语义下产生相同值。
 
-### 3.4 多个概念不同的效果共用一个 plugin key
+### 3.4 多个概念不同的效果共用一个 effect extension key
 
 ```rust
 // 反模式
-let def = EffectPluginDefinitionBuilder::new(
-    "plugin.example.everything",
+let def = EffectExtensionDefinitionBuilder::new(
+    "extension.example.everything",
     "Everything",
     EffectColorDomainContract::SCENE_LINEAR,
 )
@@ -131,7 +131,7 @@ let def = EffectPluginDefinitionBuilder::new(
     });
 ```
 
-应该拆成多个独立的 plugin key，每个只做一件事。
+应该拆成多个独立的 effect extension key，每个只做一件事。
 
 ### 3.5 处理器半途报错但写回部分像素
 
@@ -166,13 +166,13 @@ Arc::new(|buffer, width, height, params, frame_seed| {
 
 Graph builder、cache-key builder 和 custom processor 都可能位于逐帧执行路径，三者
 均不得负责文件或网络 I/O。资源必须在执行路径之外解析为不可变 payload，并用稳定
-内容/revision 身份绑定。当前高层插件 SDK 对作者可选外部资源尚无完整
+内容/revision 身份绑定。当前高层效果扩展 SDK 对作者可选外部资源尚无完整
 preparation/revalidation Interface；这类实例在该边界落地前必须失败关闭，不能把 I/O
 挪到 processor、用 path-only key 或把缺失资源当 identity。
 
 ## 4. 代码审查自检清单
 
-在提交插件代码前，自问这几个问题：
+在提交效果扩展代码前，自问这几个问题：
 
 1. 这个特效是否错误地依赖了时间线或导出逻辑？
 2. 这个 cache_key 是否稳定——同一输入总能产生同样的 key？
@@ -183,5 +183,5 @@ preparation/revalidation Interface；这类实例在该边界落地前必须失�
 
 ## 下一步
 
-- [UI 扩展](./07-ui-extensions.md) —— 注册面板和菜单
-- [打包与分发](./08-packaging.md) —— 发布你的插件
+- [UI 扩展](07-ui-extensions.md) —— 注册面板和菜单
+- [打包与分发](08-packaging.md) —— 发布你的效果扩展

@@ -1,36 +1,40 @@
 # 版本契约、失败与可见性
 
-插件版本兼容、实例执行失败、定义会话状态和效果库可见性是四个不同问题。插件失败不得静默变成 identity；项目可以保留并检查作者意图，但预览/导出必须报告失败，直到用户修复、安装兼容插件或显式禁用该实例。
+> 本文描述现有 Effect SDK 的版本与运行时合同。这里的 API `1.0` 不代表未来
+> Extension 平台已经稳定；通用平台在 Alpha 阶段允许调整，见
+> [Extension 兼容与交付规划](../../architecture/extension-system.md#rollout-and-evidence)。
+
+效果扩展版本兼容、实例执行失败、定义会话状态和效果库可见性是四个不同问题。效果扩展失败不得静默变成 identity；项目可以保留并检查作者意图，但预览/导出必须报告失败，直到用户修复、安装兼容效果扩展或显式禁用该实例。
 
 ## 1. API 版本
 
-当前运行时使用 `CURRENT_EFFECT_PLUGIN_API_VERSION = 1.0`。
+当前运行时使用 `CURRENT_EFFECT_EXTENSION_API_VERSION = 1.0`。
 
 - `major` 必须一致。
-- 插件声明的 `minor` 不得高于运行时。
+- 效果扩展声明的 `minor` 不得高于运行时。
 - 不兼容定义不可执行；已持久化实例不会被删除或改写。
 
-## 2. EffectPluginContract
+## 2. EffectExtensionContract
 
 ```rust
-pub struct EffectPluginContract {
-    pub plugin_version: String,
-    pub api_version: EffectPluginApiVersion,
-    pub runtime_failure_policy: EffectPluginRuntimeFailurePolicy,
-    pub library_policy: EffectPluginLibraryPolicy,
+pub struct EffectExtensionContract {
+    pub extension_version: String,
+    pub api_version: EffectExtensionApiVersion,
+    pub runtime_failure_policy: EffectExtensionRuntimeFailurePolicy,
+    pub library_policy: EffectExtensionLibraryPolicy,
 }
 ```
 
 推荐的正式定义：
 
 ```rust
-.with_plugin_contract(
-    EffectPluginContract::new("1.2.0")
+.with_extension_contract(
+    EffectExtensionContract::new("1.2.0")
         .with_runtime_failure_policy(
-            EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            EffectExtensionRuntimeFailurePolicy::DisableDefinition,
         )
         .with_library_policy(
-            EffectPluginLibraryPolicy::HideWhenUnavailable,
+            EffectExtensionLibraryPolicy::HideWhenUnavailable,
         ),
 )
 ```
@@ -71,7 +75,7 @@ Revision，不会被旧编译图的迟到失败污染。已放置实例仍保留
 ## 7. 运行时状态查询
 
 ```rust
-let status = effect_plugin_runtime_status("plugin.example.my_effect");
+let status = effect_extension_runtime_status("extension.example.my_effect");
 // status.definition_registry_revision: u64
 // status.disabled: bool
 // status.last_error: Option<String>
@@ -80,9 +84,9 @@ let status = effect_plugin_runtime_status("plugin.example.my_effect");
 
 该查询只报告当前已注册 Definition Generation 的状态，不是执行成功证据；完整能力仍须
 经过构图、具体 backend 与 Preview/Export 验证。库可见性由 Definition 的 Contract 和
-这一冻结代的状态在 Effects Module 内部投影，插件不能独立改写。
+这一冻结代的状态在 Effects Module 内部投影，效果扩展不能独立改写。
 
 ## 下一步
 
-- [最佳实践](./06-best-practices.md)
-- [SDK 参考](./sdk/plugin-contract.md)
+- [最佳实践](06-best-practices.md)
+- [SDK 参考](sdk/extension-contract.md)

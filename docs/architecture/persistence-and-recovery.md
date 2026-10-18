@@ -14,7 +14,7 @@ requests a save but never serializes a live document or SQLite connection.
 - `library/index.db`: one transactionally snapshotted SQLite asset library.
 
 Rebuildable proxies, thumbnails, waveforms, decoded frames, prepared render
-plans, plugin runtime state, UI navigation, and device handles never enter the
+plans, provider runtime state, UI navigation, and device handles never enter the
 archive. Project Gallery stills are the explicit exception for pixels: they are
 user-authored portable references, stored as bounded base64 PNG payloads inside
 canonical `project.json`, not incidental Viewer/cache residency. Archive read

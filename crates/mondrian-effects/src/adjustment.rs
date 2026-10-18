@@ -2194,7 +2194,7 @@ mod tests {
             1,
             &EffectRenderPlan {
                 ops: vec![EffectRenderOp::Custom {
-                    key: "plugin.render.glow".to_string(),
+                    key: "extension.render.glow".to_string(),
                     params: serde_json::json!({ "amount": 0.5 }),
                     cache_key: None,
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
@@ -2272,7 +2272,7 @@ mod tests {
                     kind: EffectGraphNodeKind::DomainEffect {
                         input: EffectGraphNodeId(0),
                         op: EffectRenderOp::Custom {
-                            key: "plugin.render.alpha_mask".to_string(),
+                            key: "extension.render.alpha_mask".to_string(),
                             params: serde_json::json!({}),
                             cache_key: None,
                             cache_policy: crate::effect::EffectCachePolicy::Deterministic,
@@ -2455,7 +2455,7 @@ mod tests {
             ops: vec![
                 EffectRenderOp::GaussianBlur { radius: 2.0 },
                 EffectRenderOp::Custom {
-                    key: "plugin.render.cache_counter".to_string(),
+                    key: "extension.render.cache_counter".to_string(),
                     params: serde_json::json!({}),
                     cache_key: Some("cache-counter".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
@@ -2514,7 +2514,7 @@ mod tests {
         let first_graph = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::Custom {
-                    key: "plugin.render.shared_subtree".to_string(),
+                    key: "extension.render.shared_subtree".to_string(),
                     params: serde_json::json!({}),
                     cache_key: Some("shared-subtree".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
@@ -2533,7 +2533,7 @@ mod tests {
         let second_graph = compile_reference_effect_graph(&EffectRenderPlan {
             ops: vec![
                 EffectRenderOp::Custom {
-                    key: "plugin.render.shared_subtree".to_string(),
+                    key: "extension.render.shared_subtree".to_string(),
                     params: serde_json::json!({}),
                     cache_key: Some("shared-subtree".to_string()),
                     cache_policy: crate::effect::EffectCachePolicy::Deterministic,
@@ -2562,14 +2562,14 @@ mod tests {
 
     #[test]
     fn failing_custom_processor_does_not_commit_partial_frame_changes() {
-        let key = "plugin.render.fail_safe";
+        let key = "extension.render.fail_safe";
         let processor = crate::CustomEffectProcessorBinding::new(Arc::new(
             |buffer, _width, _height, _params, _frame_seed| {
                 for px in buffer.chunks_exact_mut(4) {
                     px[0] = 255;
                 }
                 Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                    step_id: "plugin.render.fail_safe".to_string(),
+                    step_id: "extension.render.fail_safe".to_string(),
                     reason: "intentional failure".to_string(),
                 })
             },
@@ -2596,14 +2596,14 @@ mod tests {
         assert!(matches!(
             error,
             crate::EffectExecutionError::CustomProcessorFailed { ref key, .. }
-                if key == "plugin.render.fail_safe"
+                if key == "extension.render.fail_safe"
         ));
     }
 
     #[test]
     fn failure_from_old_compiled_custom_binding_does_not_quarantine_replacement_definition() {
-        let key = "plugin.render.generation_isolation";
-        let effect_type = crate::EffectType::Plugin(key.to_owned());
+        let key = "extension.render.generation_isolation";
+        let effect_type = crate::EffectType::External(key.to_owned());
         let contract = crate::EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_U8,
             determinism: crate::EffectDeterminism::Deterministic,
@@ -2613,9 +2613,9 @@ mod tests {
             resource_lifetime: crate::EffectResourceLifetime::Frame,
             topology: crate::EffectGraphTopology::LinearChain,
         };
-        let plugin_contract = crate::EffectPluginContract::new("1.0.0")
+        let extension_contract = crate::EffectExtensionContract::new("1.0.0")
             .with_runtime_failure_policy(
-                crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+                crate::EffectExtensionRuntimeFailurePolicy::DisableDefinition,
             );
         crate::register_effect_definition(
             crate::EffectDefinition::new(
@@ -2636,7 +2636,7 @@ mod tests {
                     })
                 }),
             )
-            .with_plugin_contract(plugin_contract.clone()),
+            .with_extension_contract(extension_contract.clone()),
         )
         .expect("register old definition");
         let old_graph = crate::PreparedEffectProgram::prepare(
@@ -2665,11 +2665,11 @@ mod tests {
                     Ok(())
                 }),
             )
-            .with_plugin_contract(plugin_contract),
+            .with_extension_contract(extension_contract),
         )
         .expect("register replacement definition");
         let current_before =
-            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+            crate::effect_extension_runtime_status(key).expect("replacement runtime status");
         assert!(!current_before.disabled);
 
         let error = apply_compiled_effect_graph(&[0, 0, 0, 255], 1, 1, old_graph.as_ref(), 0)
@@ -2679,7 +2679,7 @@ mod tests {
             crate::EffectExecutionError::CustomProcessorFailed { .. }
         ));
         let current_after =
-            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+            crate::effect_extension_runtime_status(key).expect("replacement runtime status");
         assert_eq!(
             current_after, current_before,
             "old Program failure must not mutate replacement Definition quarantine"

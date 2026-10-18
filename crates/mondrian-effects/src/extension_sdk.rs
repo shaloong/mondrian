@@ -3,13 +3,18 @@
 // Additionally licensed under MIT; see LICENSES/MIT-SDK.txt.
 // Dependencies retain their own licenses.
 
+//! Effect Extension authoring SDK.
+//!
+//! This provides processing definitions, not the general Extension package/runtime
+//! API or a third-party security sandbox.
+
 use crate::{
     effect::{
         EffectCacheKeyBuilder, EffectCachePolicy, EffectDefinition, EffectEvalContext,
         EffectGraphBuildError, EffectGraphBuilder, EffectNode, EffectRenderParamsBuilder,
     },
     graph::{EffectGraphBuilderState, EffectGraphValue},
-    CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor, EffectPluginContract,
+    CustomEffectFloatRenderProcessor, CustomEffectRenderProcessor, EffectExtensionContract,
     EffectRenderOp,
 };
 use mondrian_core::{
@@ -114,12 +119,13 @@ impl<'a> EffectGraphDsl<'a> {
     }
 }
 
-pub struct EffectPluginDefinitionBuilder {
+/// Builds a registered effect definition from typed properties and graph logic.
+pub struct EffectExtensionDefinitionBuilder {
     definition: EffectDefinition,
 }
 
-impl EffectPluginDefinitionBuilder {
-    /// Start a plugin definition with its required processing-domain contract.
+impl EffectExtensionDefinitionBuilder {
+    /// Start an external effect definition with its required processing-domain contract.
     pub fn new(
         key: impl Into<String>,
         display_name: impl Into<String>,
@@ -146,7 +152,7 @@ impl EffectPluginDefinitionBuilder {
     }
 
     /// Declare the complete processing, temporal, ROI, precision, and lifetime
-    /// contract required before this plugin can enter prepared execution.
+    /// contract required before this definition can enter prepared execution.
     pub fn with_execution_contract(mut self, contract: crate::EffectExecutionContract) -> Self {
         self.definition = self.definition.with_execution_contract(contract);
         self
@@ -258,8 +264,9 @@ impl EffectPluginDefinitionBuilder {
         self
     }
 
-    pub fn with_plugin_contract(mut self, contract: EffectPluginContract) -> Self {
-        self.definition = self.definition.with_plugin_contract(contract);
+    /// Bind the version, failure and visibility contract to this definition.
+    pub fn with_extension_contract(mut self, contract: EffectExtensionContract) -> Self {
+        self.definition = self.definition.with_extension_contract(contract);
         self
     }
 
@@ -284,7 +291,7 @@ mod tests {
         TimelineTime::new(frame, 25).expect("valid test time")
     }
 
-    fn plugin_test_execution_contract() -> crate::EffectExecutionContract {
+    fn extension_test_execution_contract() -> crate::EffectExecutionContract {
         crate::EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_F32,
             determinism: crate::EffectDeterminism::Deterministic,
@@ -297,31 +304,32 @@ mod tests {
     }
 
     #[test]
-    fn plugin_definition_exposes_its_explicit_color_domain_contract() {
+    fn extension_definition_exposes_its_explicit_color_domain_contract() {
         let domain = crate::EffectColorDomainContract::preserving(
             crate::EffectColorDomain::LogPerceptualRgb {
                 color_space: mondrian_core::ColorSpace::AcesCct,
             },
         );
         let definition =
-            EffectPluginDefinitionBuilder::new("plugin.sdk.log_grade", "Log Grade", domain).build();
+            EffectExtensionDefinitionBuilder::new("extension.sdk.log_grade", "Log Grade", domain)
+                .build();
 
         assert_eq!(definition.color_domain_contract(), domain);
     }
 
     #[test]
-    fn plugin_sdk_builds_branching_graph_definition() {
-        let plugin_type = EffectType::Plugin("plugin.sdk.soft_glow".to_string());
-        let radius_id = plugin_type.parameter_id("radius").expect("radius ID");
-        let opacity_id = plugin_type.parameter_id("opacity").expect("opacity ID");
-        let definition = EffectPluginDefinitionBuilder::new(
-            plugin_type.key(),
+    fn extension_sdk_builds_branching_graph_definition() {
+        let extension_type = EffectType::External("extension.sdk.soft_glow".to_string());
+        let radius_id = extension_type.parameter_id("radius").expect("radius ID");
+        let opacity_id = extension_type.parameter_id("opacity").expect("opacity ID");
+        let definition = EffectExtensionDefinitionBuilder::new(
+            extension_type.key(),
             "Soft Glow",
             crate::EffectColorDomainContract::SCENE_LINEAR,
         )
         .property(
             PropertyDescriptor::new(
-                "plugin.sdk.soft_glow.radius",
+                "extension.sdk.soft_glow.radius",
                 "Radius",
                 PropertyValue::Float(6.0),
             )
@@ -329,13 +337,13 @@ mod tests {
         )
         .property(
             PropertyDescriptor::new(
-                "plugin.sdk.soft_glow.opacity",
+                "extension.sdk.soft_glow.opacity",
                 "Opacity",
                 PropertyValue::Float(0.35),
             )
             .with_parameter_id(opacity_id.clone()),
         )
-        .with_execution_contract(plugin_test_execution_contract())
+        .with_execution_contract(extension_test_execution_contract())
         .with_branching_graph(move |effect, context, graph| {
             let radius = effect.evaluate_f32_parameter(&radius_id, context.time, 0.0);
             let opacity = effect.evaluate_f32_parameter(&opacity_id, context.time, 0.0);
@@ -349,17 +357,18 @@ mod tests {
         .build();
         register_effect_definition(definition).expect("register SDK definition");
 
-        let effect = crate::EffectNode::with_defaults(plugin_type.clone());
+        let effect = crate::EffectNode::with_defaults(extension_type.clone());
         let graph = build_effect_render_graph(
             &[effect],
             tt(0),
             mondrian_core::WorkingColorSpace::LinearRec709,
         )
-        .expect("build plugin SDK graph");
+        .expect("build extension SDK graph");
         assert_eq!(graph.nodes.len(), 3);
 
-        let contract =
-            effect_definition(&plugin_type).expect("effect definition").execution_contract();
+        let contract = effect_definition(&extension_type)
+            .expect("effect definition")
+            .execution_contract();
         assert_eq!(contract.topology, crate::EffectGraphTopology::GeneralDag);
         assert_eq!(
             contract.execution_modes,

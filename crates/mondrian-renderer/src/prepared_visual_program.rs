@@ -692,7 +692,7 @@ impl PreparedVisualProgram {
                         "Cross Dissolve carries unsupported definition state",
                     ))
                 }
-                VideoTransitionType::Plugin { definition_id } => {
+                VideoTransitionType::External { definition_id } => {
                     blocked_transitions += 1;
                     PreparedVisualTransition::Blocked(Arc::from(format!(
                         "requires unavailable definition `{definition_id}`"
@@ -2301,7 +2301,7 @@ mod tests {
     fn identity_effect_with_contract(label: &str, contract: EffectExecutionContract) -> EffectNode {
         static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
         let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.visual.preflight.{label}.{suffix}"));
+        let effect_type = EffectType::External(format!("test.visual.preflight.{label}.{suffix}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),
@@ -2478,7 +2478,7 @@ mod tests {
         let mut sequence = single_solid_sequence(None);
         let rate = sequence.time_base();
         let blocked_effect =
-            EffectNode::new(EffectType::Plugin("missing.preview.effect".to_owned()));
+            EffectNode::new(EffectType::External("missing.preview.effect".to_owned()));
         let mut blocked =
             Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(20, rate), tt(20, rate))
                 .expect("blocked Clip");
@@ -2509,7 +2509,7 @@ mod tests {
     #[test]
     fn negative_preflight_time_is_not_silently_clamped_to_frame_zero() {
         let blocked_effect =
-            EffectNode::new(EffectType::Plugin("missing.frame-zero.effect".to_owned()));
+            EffectNode::new(EffectType::External("missing.frame-zero.effect".to_owned()));
         let program = prepare_stable(&single_solid_sequence(Some(blocked_effect)));
 
         assert!(
@@ -2541,7 +2541,7 @@ mod tests {
             right_id,
             TimelineTimeRange::new(tt(8, rate), tt(4, rate)).expect("Transition range"),
         );
-        transition.transition_type = VideoTransitionType::Plugin {
+        transition.transition_type = VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         let transition_id = transition.id;
