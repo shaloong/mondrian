@@ -91,6 +91,9 @@ struct Probe {
     cleanup_error: Option<AudioProcessorHostError>,
     graceful: Option<bool>,
     renders: usize,
+    settlement_forwards: usize,
+    settlement_forward_successes: usize,
+    child_producer_registered: bool,
 }
 
 fn refuse_observation(_: &mut Child) -> io::Result<Option<std::process::ExitStatus>> {
@@ -133,6 +136,7 @@ fn attach_retained(
     state.handle = Some(RetainedHandle(Some(handle)));
     drop(state);
     worker.before_drop_test_hook = Some(Box::new(move |worker| {
+        let child_producer_registered = worker.process.settlement_producer.is_some();
         let before = worker.process.state;
         let mut cleanup = CleanupObservation {
             origin: Instant::now(),
@@ -158,6 +162,7 @@ fn attach_retained(
         state.cleanup = Some(cleanup);
         state.cleanup_error = error;
         state.graceful = graceful;
+        state.child_producer_registered = child_producer_registered;
         // Return to the SAME original SupervisedAudioWorker::Drop and then
         // ProcessOwner::Drop. No fake Settled assignment or second state machine.
     }));
@@ -219,6 +224,19 @@ fn render_error(error: impl ToString) -> mondrian_core::MondrianError {
     }
 }
 impl AudioPcmRenderer for RuntimeRenderer {
+    fn bind_native_child_settlement(
+        &self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        let result = self.runtime.lock().unwrap().bind_native_child_settlement(registrar);
+        let mut probe = self.probe.lock().unwrap();
+        probe.settlement_forwards += 1;
+        if result.is_ok() {
+            probe.settlement_forward_successes += 1;
+        }
+        result
+    }
+
     fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
         self.runtime.lock().unwrap().native_owner_installation_verifier()
     }
@@ -373,6 +391,18 @@ fn observe_closure(refuse: bool) -> AudioPlaybackShutdownEvidence {
         Some("mondrian-audio-render-retirement")
     );
     assert_eq!(state.renders, 0, "lifecycle-only gate scheduled no PCM");
+    assert_eq!(
+        state.settlement_forwards, 1,
+        "aggregate forwarded the actual Runtime"
+    );
+    assert_eq!(
+        state.settlement_forward_successes, 1,
+        "actual typed instances bound"
+    );
+    assert!(
+        state.child_producer_registered,
+        "the original ProcessOwner held the producer"
+    );
     if refuse {
         assert_eq!(state.after, Some(ProcessState::Retiring));
         assert!(matches!(
@@ -451,6 +481,7 @@ fn observe_closure(refuse: bool) -> AudioPlaybackShutdownEvidence {
             "test_cleanup_already_exited": already_exited, "test_cleanup_exit": exit,
             "app_timeline_dynamic": false, "original_owner_reaped": !refuse,
             "pcm_qualification": false, "grace_100ms_qualification": false,
+            "settlement_forwarded": true, "actual_child_producer_registered": true,
         })
     );
     evidence
