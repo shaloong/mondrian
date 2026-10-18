@@ -826,6 +826,14 @@ pub struct PreparedProjectSequenceReplacement {
 }
 
 impl PreparedProjectSequenceReplacement {
+    /// Borrow the complete validated candidate collection for cold publication checks.
+    ///
+    /// The prepared ticket retains its document and certificate. This borrowed
+    /// view grants no installation authority and is intended for non-RT callers.
+    pub fn candidate_sequences(&self) -> &[Sequence] {
+        self.document.sequences.sequences.as_slice()
+    }
+
     /// Read the already-validated replacement for History preparation.
     pub fn replacement(&self) -> &Sequence {
         &self.document.sequences.sequences[self.replacement_index]

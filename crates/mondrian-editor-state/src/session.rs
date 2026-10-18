@@ -106,6 +106,16 @@ pub struct PreparedSequenceEdit {
     group: Option<AuthoringHistoryGroup>,
 }
 
+impl PreparedSequenceEdit {
+    /// Borrow the complete validated candidate collection for cold publication checks.
+    ///
+    /// The original ticket retains the candidate and its installation boundary.
+    /// This view grants no installation authority and is intended for non-RT callers.
+    pub fn candidate_sequences(&self) -> &[Sequence] {
+        self.replacement.candidate_sequences()
+    }
+}
+
 /// Explicit editor navigation operation for a Sequence target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SequenceNavigationIntent {
@@ -2824,6 +2834,23 @@ mod tests {
             })
             .expect("prepare");
         assert!(discarded.is_some());
+        let candidates = discarded.as_ref().expect("prepared edit").candidate_sequences();
+        assert_eq!(
+            candidates.iter().find(|sequence| sequence.id == sequence_id).unwrap().name,
+            "Prepared"
+        );
+        let unchanged = session
+            .document()
+            .sequences
+            .sequences
+            .iter()
+            .find(|sequence| sequence.id != sequence_id)
+            .expect("other actual Sequence");
+        assert_eq!(
+            candidates.iter().find(|sequence| sequence.id == unchanged.id),
+            Some(unchanged),
+            "the same ticket includes the unchanged dependency candidates"
+        );
         assert_eq!(session.active_sequence().expect("active").name, "Primary");
         assert_eq!(session.author_generation(), generation);
         assert!(!session.history().can_undo());
