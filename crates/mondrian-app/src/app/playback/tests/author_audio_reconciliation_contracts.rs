@@ -218,3 +218,98 @@ fn idle_metadata_author_edit_retains_installed_source_and_rebinds_author_snapsho
     }
     assert!(installed.unwrap().upgrade().is_none());
 }
+
+#[test]
+fn pending_project_close_refuses_nonempty_history_before_transport_or_author_mutation() {
+    for redo in [false, true] {
+        let (mut state, output) = available_state();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state
+                .commit_active_sequence_edit("seed history lifecycle control", |sequence| {
+                    sequence.name = "history before pending Close".to_owned();
+                    Ok(())
+                })
+                .expect("one real metadata history entry");
+            if redo {
+                assert!(state.undo_timeline().expect("ordinary public Undo seeds Redo"));
+            }
+            let history = state.authoring.as_ref().unwrap().history().diagnostics();
+            assert_eq!(history.undo_entries, usize::from(!redo));
+            assert_eq!(history.redo_entries, usize::from(redo));
+            assert_eq!(history.pending_entries, 0);
+            assert!(!state.audio_playback.native_editor_source_available());
+            assert!(state.native_audio_renderer.is_none());
+            assert!(state.active_audio_delivery_evidence().is_none());
+            assert!(state.begin_project_close().expect("original NoSource Close admission"));
+            assert!(state.pending_project_close.is_some());
+            assert!(
+                !state.project_close_awaiting_audio(),
+                "NoSource enters persistence Quiescing without a Media close gate"
+            );
+            assert!(state.project_lifecycle_blocks_actions());
+            let session = state.authoring_session_id().unwrap();
+            let author_generation = state.authoring.as_ref().unwrap().author_generation();
+            let document = serde_json::to_value(state.authoring.as_ref().unwrap().document())
+                .expect("complete retained author document");
+            let engine = state.playback_engine.snapshot();
+            let playback = state.audio_playback_snapshot();
+            assert_eq!(playback.in_flight, 0);
+            assert_eq!(playback.next_start_sample, 0);
+            assert_eq!(output.lock().queued, 0);
+
+            let action = if redo {
+                "redo_timeline"
+            } else {
+                "undo_timeline"
+            };
+            let error = if redo {
+                state.redo_timeline()
+            } else {
+                state.undo_timeline()
+            }
+            .expect_err("nonempty public history must respect Project lifecycle admission");
+            assert!(
+                matches!(&error,
+                    mondrian_core::MondrianError::ActionNotExecuted { action: actual, reason }
+                    if actual == action
+                        && reason == "Project lifecycle must settle before history restore"),
+                "unexpected {action} refusal: {error:?}"
+            );
+            assert_eq!(state.authoring_session_id(), Some(session));
+            assert_eq!(
+                state.authoring.as_ref().unwrap().author_generation(),
+                author_generation
+            );
+            assert_eq!(
+                state.authoring.as_ref().unwrap().history().diagnostics(),
+                history
+            );
+            assert_eq!(
+                serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),
+                document
+            );
+            assert_eq!(state.playback_engine.snapshot(), engine);
+            assert_eq!(
+                state.audio_playback_snapshot().generation,
+                playback.generation
+            );
+            assert_eq!(state.audio_playback_snapshot().in_flight, 0);
+            assert_eq!(state.audio_playback_snapshot().next_start_sample, 0);
+            assert_eq!(output.lock().queued, 0);
+            assert!(!state.audio_playback.native_editor_source_available());
+            assert!(state.native_audio_renderer.is_none());
+            assert!(state.active_audio_delivery_evidence().is_none());
+            assert!(state.pending_project_close.is_some());
+            assert!(!state.project_close_awaiting_audio());
+            assert!(state.project_close_fault.is_none());
+        }));
+        let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+        assert!(
+            cleanup.all_resources_released(),
+            "HISTORY_LIFECYCLE_GUARD_CLEANUP_HOLD: redo={redo}; {cleanup:?}"
+        );
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
