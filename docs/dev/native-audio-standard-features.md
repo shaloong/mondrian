@@ -133,11 +133,17 @@ owned-plugin gates pass one VST3 fresh probe, CLAP normal probe, Note Offer and
 rejected child registration. The last preserves exact successful probe metadata
 without a settlement report. Two additional actual App owned-VST3 controls now
 pass installed-catalog construction through the original Timeline/Runtime and
-Media prepare, with App76 rerun after this test-only addition. Releasing all
-renderer aliases yields complete closure; an external alias retains unresolved
+Media prepare. Releasing all renderer aliases yields complete closure; an
+external alias retains unresolved
 ownership, and its late release cannot rewrite the captured receipt. Both verify
-the original Source claim is removed at shutdown. They use no device and dispatch
-no PCM; independent installation/author capture remains unobserved. This does not
+the original Source claim is removed at shutdown. A third App control passes
+actual binding Ready delivery through the original Media Idle poll/App handler,
+then one original editor action returns NoEditor, clears the queued request and
+leaves no outstanding author work, without changing author state or the installed
+Source. All three gates and App76 pass after their shared test setup was extracted.
+Idle can service
+diagnostics/native controls; the tests use no device and dispatch no PCM.
+Independent installation/author capture remains unobserved. This does not
 prove each cold probe's registration or legal native handoff. The normal Product
 and additional integration type check pass; existing App warnings remain,
 without strict zero-warning GO.
@@ -148,7 +154,9 @@ existing branch also allocates and uses synchronous IPC. Neither its lock wait
 nor whole-producer realtime behavior is qualified. Independent catalog discovery
 and create_instance, input inspection, Idle Warmup and precompiled Export still
 have unobserved construction. Residual Child custody, whole-shutdown100ms and
-other platforms remain separate unfinished work.
+other platforms remain separate unfinished work. The post-ACK OS-exit observation
+window, capped at 100ms, is a host cleanup policy, separate from the audio
+processing deadline; its observed failures have not identified the slow teardown stage.
 
 ## VST3 workflow matrix
 
