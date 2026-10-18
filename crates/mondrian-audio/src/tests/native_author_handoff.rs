@@ -1823,6 +1823,115 @@ fn native_author_transient_dsp_feedback_cannot_hide_an_outstanding_hosted_prefix
 }
 
 #[test]
+fn native_author_closed_source_retained_raw_prefix_refuses_without_ack() {
+    use crate::{NativeAudioAuthorAdmissionError as Error, NativeAudioAuthorHoldReason as Reason};
+    let mut fixture = HandoffFixture::new();
+    fixture.queue_value(0.75);
+    {
+        let mut probe = fixture.probe.lock().expect("actual Raw author source");
+        assert_eq!(probe.open, 1);
+        probe.open = 0;
+        probe.parameter_only = true;
+        probe.revision += 1;
+        probe.pending.push(NativeAudioAuthorEvent::Parameter(
+            NativeAudioAuthorParameterEvent::admit(
+                ParameterId::new_static("native.gain"),
+                NativeAudioAuthorParameterPhase::End,
+                None,
+            )
+            .expect("actual Raw End"),
+        ));
+        assert_eq!(probe.pending.len(), 3, "original Begin/Value/End prefix");
+        assert_eq!(probe.retained, None);
+        assert_eq!(probe.ack_attempts, 0);
+        assert_eq!(probe.accepted_acks, 0);
+    }
+    let proposal = fixture.drain();
+    assert_eq!(proposal.target(), fixture.target);
+    assert_eq!(proposal.revision(), 3);
+    assert_eq!(proposal.callbacks().len(), 3);
+    assert_eq!(
+        proposal.completion(),
+        mondrian_core::NativeAudioAuthorCompletion::ParametersOnly
+    );
+    assert!(proposal.terminal());
+    assert!(proposal.state().is_none());
+    assert_eq!(proposal.open_parameter_edits(), 0);
+    assert_eq!(proposal.group_depth(), 0);
+    let snapshot = |fixture: &HandoffFixture| {
+        let probe = fixture.probe.lock().expect("actual retained producer");
+        (
+            (
+                probe.revision,
+                probe.open,
+                probe.pending.clone(),
+                probe.retained,
+                probe.binding,
+                probe.configuration.clone(),
+                probe.retained_configuration.clone(),
+                probe.accepted_seed.clone(),
+            ),
+            (
+                probe.creates,
+                probe.binds,
+                probe.entries,
+                probe.processed.clone(),
+                probe.ack_attempts,
+                probe.accepted_acks,
+            ),
+        )
+    };
+    let before = snapshot(&fixture);
+    assert!(
+        before.0 .2.is_empty(),
+        "Raw prefix has really reached Hosted"
+    );
+    assert_eq!(
+        before.0 .3,
+        Some((
+            before.0 .4.expect("actual bound object"),
+            proposal.revision(),
+            None
+        ))
+    );
+    assert_eq!(before.1 .4, 0);
+    assert_eq!(before.1 .5, 0);
+    let identity = fixture.runtime.resource_root_identity();
+    let claim = fixture.source.current_claim().unwrap().expect("actual installed Source");
+    assert_eq!(
+        fixture
+            .runtime
+            .validate_native_author_source_closed(&ExecutionCancellationToken::new()),
+        Err(Error::Pending {
+            target: Box::new(proposal.target()),
+            reason: Reason::OutstandingDelivery,
+        }),
+        "empty native source cannot erase the original unacknowledged Hosted prefix"
+    );
+    assert_eq!(snapshot(&fixture), before);
+    let retained = fixture.drain();
+    assert!(retained.same_retained_proposal(&proposal));
+    assert_eq!(retained.target(), proposal.target());
+    assert_eq!(retained.revision(), proposal.revision());
+    assert_eq!(
+        snapshot(&fixture),
+        before,
+        "Closed admission neither drains nor acknowledges"
+    );
+    assert_eq!(fixture.runtime.resource_root_identity(), identity);
+    assert_eq!(fixture.target, proposal.target());
+    assert_eq!(
+        fixture
+            .source
+            .current_claim()
+            .unwrap()
+            .expect("same Source still installed")
+            .generation(),
+        claim.generation()
+    );
+}
+
+#[test]
 fn native_author_parameter_completion_handoff_ack_continues_same_runtime_without_seed() {
     use mondrian_core::NativeAudioAuthorCompletion as Completion;
     let mut fixture = HandoffFixture::new();
