@@ -779,11 +779,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Terminate the current Project's audio domain before persistence admission
-    /// retires. Known author/editor obligations refuse before transport changes.
-    /// The original Media clear revokes old claims and retires owners on its own
-    /// queue; it leaves Playback reusable and does not certify native OS exit.
-    pub(super) fn prepare_project_audio_handoff(&mut self) -> mondrian_core::Result<()> {
+    fn validate_project_audio_handoff_admission(&self) -> mondrian_core::Result<()> {
         let cleanup_complete = self.audio_playback_snapshot().state
             == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused;
         if self
@@ -802,6 +798,29 @@ impl AppState {
                 "native author or editor work must settle before Project handoff",
             ));
         }
+        Ok(())
+    }
+
+    /// Open already detached the old Source before entering its persistence
+    /// barrier. Cancellation verifies that boundary without submitting another
+    /// stop to Media, which the enclosing App shutdown may already have sealed.
+    pub(super) fn validate_project_audio_detached(&self) -> mondrian_core::Result<()> {
+        self.validate_project_audio_handoff_admission()?;
+        if self.audio_playback.native_editor_source_available() {
+            return Err(transport_action_error(
+                "project_audio_handoff",
+                "requested Project Open regained an audio Source",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Terminate the current Project's audio domain before persistence admission
+    /// retires. Known author/editor obligations refuse before transport changes.
+    /// The original Media clear revokes old claims and retires owners on its own
+    /// queue; it leaves Playback reusable and does not certify native OS exit.
+    pub(super) fn prepare_project_audio_handoff(&mut self) -> mondrian_core::Result<()> {
+        self.validate_project_audio_handoff_admission()?;
         let has_source = self.audio_playback.native_editor_source_available();
         if has_source {
             if self.active_sequence().is_none() {

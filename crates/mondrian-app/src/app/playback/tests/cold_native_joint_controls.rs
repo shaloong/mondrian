@@ -1504,9 +1504,10 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
     let close_error = state.close_project().expect_err("actual Opened view blocks ProjectClose");
     assert!(
         matches!(close_error.downcast_ref::<mondrian_core::MondrianError>(),
-        Some(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
-        if step_id == "project_audio_handoff"
-            && reason == "native author or editor work must settle before Project handoff")
+        Some(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+        if action == "project_audio_handoff"
+            && reason == "native author or editor work must settle before Project handoff"),
+        "unexpected ProjectClose refusal: {close_error:?}"
     );
     assert_eq!(state.playback_engine.snapshot(), engine_before);
     assert_eq!(state.audio_playback_snapshot().generation, generation);

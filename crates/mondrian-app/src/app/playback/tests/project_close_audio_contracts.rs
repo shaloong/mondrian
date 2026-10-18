@@ -1,4 +1,4 @@
-//! Ordinary ProjectClose contracts over the actual Timeline/BuiltIn source.
+//! Ordinary Project audio lifecycle contracts over the actual Timeline/BuiltIn source.
 //! These controls do not load a native DLL or manufacture native Closed facts.
 
 use super::*;
@@ -60,7 +60,11 @@ fn install_builtin_source(state: &mut AppState) -> std::sync::Weak<TimelineAudio
             Some(source),
         )
         .expect("original Media installation");
+    settle_builtin_binding(state);
+    weak
+}
 
+fn settle_builtin_binding(state: &mut AppState) {
     // Settle the original binding job before the pure try_lock close guard.
     // A real BuiltIn owner has no native object; this is not a fake Closed DTO.
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -96,7 +100,6 @@ fn install_builtin_source(state: &mut AppState) -> std::sync::Weak<TimelineAudio
         );
         std::thread::yield_now();
     }
-    weak
 }
 
 #[test]
@@ -224,9 +227,10 @@ fn project_close_missing_timeline_alias_refuses_before_stop_or_persistence() {
         .expect_err("SourceSome requires its actual Timeline alias");
     assert!(
         matches!(error.downcast_ref::<mondrian_core::MondrianError>(),
-        Some(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
-        if step_id == "project_audio_handoff"
-            && reason == "installed audio Source has no current Timeline Runtime")
+        Some(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+        if action == "project_audio_handoff"
+            && reason == "installed audio Source has no current Timeline Runtime"),
+        "unexpected ProjectClose refusal: {error:?}"
     );
     assert_eq!(
         state.playback_engine.snapshot(),
@@ -306,9 +310,10 @@ fn project_close_stale_timeline_alias_refuses_current_source_without_mutation() 
         .expect_err("an old live Timeline is not the current Source");
     assert!(
         matches!(error.downcast_ref::<mondrian_core::MondrianError>(),
-        Some(mondrian_core::MondrianError::WorkflowStepFailed { step_id, reason })
-        if step_id == "project_audio_handoff"
-            && reason == "Timeline Runtime is not the installed audio Source")
+        Some(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+        if action == "project_audio_handoff"
+            && reason == "Timeline Runtime is not the installed audio Source"),
+        "unexpected ProjectClose refusal: {error:?}"
     );
     assert_eq!(
         state.playback_engine.snapshot(),
@@ -366,4 +371,130 @@ fn project_close_stale_timeline_alias_refuses_current_source_without_mutation() 
     assert!(cleanup.all_resources_released(), "{cleanup:?}");
     assert!(previous_weak.upgrade().is_none());
     assert!(current_weak.upgrade().is_none());
+}
+
+#[test]
+fn cancelled_project_open_finishes_after_audio_shutdown_without_resubmitting_stop() {
+    let directory = tempfile::tempdir().expect("owned persistence input");
+    let project_file = directory.path().join("project.mdp");
+    let (mut state, output) = available_state();
+    let weak = install_builtin_source(&mut state);
+    let verifier = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+    state.save_project_file_as(project_file.clone()).expect("durable baseline");
+    let gate = state.project_persistence.gate_next_request();
+    state.request_project_save().expect("save before Open barrier");
+    gate.wait_until_running();
+
+    state.request_project_open(project_file).expect("original Open admission");
+    assert!(matches!(
+        verifier.current_claim(),
+        Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+    ));
+    assert!(!state.audio_playback.native_editor_source_available());
+    assert!(state.native_audio_renderer.is_none());
+    assert_eq!(
+        state.playback_engine.snapshot().state,
+        TransportState::Stopped
+    );
+    assert_eq!(state.current_frame(), 0);
+    assert!(state.begin_project_close().expect("cancel pending Open"));
+    assert_eq!(
+        state.poll_project_close(),
+        crate::app::project_lifecycle::ProjectClosePoll::Pending
+    );
+    state.begin_endurance_shutdown();
+    assert!(matches!(
+        state.audio_playback,
+        AppAudioPlayback::Available(_)
+    ));
+    gate.release();
+
+    // The original lifecycle control uses this same persistence deadline.
+    // Media remains the same sealed owner until the consuming phase joins it.
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(10));
+    assert!(cleanup.all_resources_released(), "{cleanup:?}");
+    assert!(cleanup.project.pending_open_was_active);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(output.lock().queued, 0);
+}
+
+#[test]
+fn cancelled_project_open_refuses_a_source_reinstalled_through_public_play() {
+    let directory = tempfile::tempdir().expect("owned persistence input");
+    let project_file = directory.path().join("project.mdp");
+    let (mut state, output) = available_state();
+    install_builtin_source(&mut state);
+    state.save_project_file_as(project_file.clone()).expect("durable baseline");
+    let gate = state.project_persistence.gate_next_request();
+    state.request_project_save().expect("save before Open barrier");
+    gate.wait_until_running();
+    state.request_project_open(project_file).expect("original Open admission");
+    assert!(!state.audio_playback.native_editor_source_available());
+
+    // Product dispatch refuses playback during this barrier. Direct public
+    // callers still exist: the cancel terminal must not silently discard an
+    // owner installed through that path or assume the dispatch guard ran.
+    state.play().expect("direct public playback re-installs the actual source");
+    state.pause().expect("pause retains that source");
+    settle_builtin_binding(&mut state);
+    let weak = state.native_audio_renderer.clone().expect("new actual Timeline");
+    let verifier = weak.upgrade().unwrap().owner_installation_verifier().unwrap();
+    let claim = verifier.current_claim().expect("new installed permission");
+    let session = state.authoring_session_id().unwrap();
+    let author_generation = state.authoring.as_ref().unwrap().author_generation();
+    let history = state.authoring.as_ref().unwrap().history().diagnostics();
+    let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
+    let engine = state.playback_engine.snapshot();
+    let audio_generation = state.audio_playback_snapshot().generation;
+    assert!(state.begin_project_close().expect("cancel pending Open"));
+    gate.release();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let result = loop {
+        let result = state.poll_project_close();
+        if result != crate::app::project_lifecycle::ProjectClosePoll::Pending {
+            break result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancel did not reach its original barrier"
+        );
+        std::thread::yield_now();
+    };
+    let reason = mondrian_core::MondrianError::ActionNotExecuted {
+        action: "project_audio_handoff".to_owned(),
+        reason: "requested Project Open regained an audio Source".to_owned(),
+    }
+    .to_string();
+    assert_eq!(
+        result,
+        crate::app::project_lifecycle::ProjectClosePoll::SaveRejected(reason)
+    );
+    assert!(!state.project_lifecycle_blocks_actions());
+    assert_eq!(state.authoring_session_id(), Some(session));
+    assert_eq!(
+        state.authoring.as_ref().unwrap().author_generation(),
+        author_generation
+    );
+    assert_eq!(
+        state.authoring.as_ref().unwrap().history().diagnostics(),
+        history
+    );
+    assert_eq!(
+        serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap(),
+        document
+    );
+    assert_eq!(state.playback_engine.snapshot(), engine);
+    assert_eq!(state.audio_playback_snapshot().generation, audio_generation);
+    assert!(state.audio_playback.native_editor_source_available());
+    assert!(verifier.validate(&claim).is_ok());
+    assert!(state
+        .native_audio_renderer
+        .as_ref()
+        .is_some_and(|actual| { std::sync::Weak::ptr_eq(actual, &weak) }));
+    assert_eq!(output.lock().queued, 0);
+    state.save_project_file().expect("original persistence admission resumed");
+    state.close_project().expect("explicit later Close retires the retained source");
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    assert!(cleanup.all_resources_released(), "{cleanup:?}");
+    assert!(weak.upgrade().is_none());
 }

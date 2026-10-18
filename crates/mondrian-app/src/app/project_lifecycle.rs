@@ -330,7 +330,7 @@ impl AppState {
         &mut self,
         mut handoff: Option<ProjectPersistencePauseToken>,
     ) -> ProjectOpenPoll {
-        if let Err(error) = self.prepare_project_audio_handoff() {
+        if let Err(error) = self.validate_project_audio_detached() {
             return self.finish_project_open_error(
                 self.authoring.as_ref().map(AuthoringSession::session_id),
                 handoff,
