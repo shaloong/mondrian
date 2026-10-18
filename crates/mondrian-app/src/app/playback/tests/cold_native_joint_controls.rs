@@ -2302,6 +2302,8 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
     });
     println!("{before_cleanup}");
     let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    let renderer_released_after_shutdown = weak.upgrade().is_none();
+    drop(state);
     assert!(
         cleanup.all_resources_released(),
         "IDLE_HISTORY_TEST_CLEANUP_HOLD: {cleanup:?}; before_cleanup={before_cleanup}"
@@ -2310,7 +2312,7 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
         target_error.is_none(),
         "CLAP_IDLE_HISTORY_NATIVE_RESTORE_BEFORE_APP_SHUTDOWN: {before_cleanup}"
     );
-    assert!(weak.upgrade().is_none());
+    assert!(renderer_released_after_shutdown);
 }
 
 #[test]
