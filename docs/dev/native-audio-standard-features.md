@@ -1,7 +1,7 @@
 # Native audio standard features
 
 Standards reviewed on 2026-10-10. Scoped product-capability notes include accepted
-updates through 2026-10-17. This document separates the
+updates through 2026-10-18. This document separates the
 negotiated product implementation from vendor APIs, unavailable services and
 remaining work. Qualification states the tested inputs, builds, platform and limits in
 [Native plugin compatibility and qualification](native-plugin-compatibility.md).
@@ -88,6 +88,21 @@ method/thread/lifetime obligations become binding when exposed or consumed.
 | SDK | `vendor/vst3-sdk/{src,com-scrape-types,PROVENANCE.json,GENERATION-SOURCES.json}`: one generated ABI/runtime |
 | UI | `crates/mondrian-app/src/app_ui/audio_processor_rack.rs` and `crates/mondrian-app/src/app/audio_rendering.rs`: product controls and sole delivery adapter |
 | PERF | `crates/mondrian-audio/src/processor_isolation/tests/native_performance.rs`, `scripts/validation/collect-native-perf-context.py`: release-only isolated-worker acceptance harness and artifact receipt |
+
+## Shared playback shutdown
+
+Media stops completion publication under the original queue lock, then drains
+completed work before joining its existing retirement worker. Only completion
+payloads that retain foreign Work enter that worker; PCM and closed Core values
+consume no additional foreign-owner units. The original 256-unit limit remains.
+Four exact regressions and 96 ordinary Playback controls pass on Windows; one
+ignored actual MMCSS case is excluded. See the [qualification conditions](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
+
+Private child settlement is still a separate open gap: an owned-plugin
+Runtime-to-Media control retains a Retiring child yet reports complete resource
+facts. Its actual Settled positive control passes. Worker joins alone therefore
+do not establish native process closure; these controls grant no App Timeline,
+whole-shutdown deadline, construction-custody or realtime qualification.
 
 ## VST3 workflow matrix
 
