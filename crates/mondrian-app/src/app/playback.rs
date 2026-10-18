@@ -822,12 +822,20 @@ impl AppState {
     }
 
     fn validate_project_audio_handoff_admission(&self) -> mondrian_core::Result<()> {
+        self.validate_audio_source_replacement_admission("project_audio_handoff", "Project handoff")
+    }
+
+    pub(super) fn validate_audio_source_replacement_admission(
+        &self,
+        action: &str,
+        operation: &str,
+    ) -> mondrian_core::Result<()> {
         let cleanup_complete = self.audio_playback_snapshot().state
             == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused;
         if self
             .native_audio_editor
             .as_ref()
-            .is_some_and(|context| context.blocks_project_audio_handoff())
+            .is_some_and(|context| context.blocks_source_replacement())
             || self.playback_engine.native_audio_control_hold_ticket().is_some()
             || self.audio_playback.native_author_state_entry_target().is_some()
             || self.audio_playback.native_reprepare_pending_generation().is_some()
@@ -836,8 +844,8 @@ impl AppState {
                     || self.audio_playback.native_editor_cleanup_target().is_some()))
         {
             return Err(transport_action_error(
-                "project_audio_handoff",
-                "native author or editor work must settle before Project handoff",
+                action,
+                format!("native author or editor work must settle before {operation}"),
             ));
         }
         Ok(())
@@ -2026,6 +2034,7 @@ impl AppState {
             self.audio_playback
                 .prepare(anchor, erased, source.continuity_model)
                 .map_err(|error| transport_action_error(action, error))?;
+            self.invalidate_native_audio_parameter_presentation();
             self.native_audio_renderer = Some(concrete);
             self.audio_monitoring.bind_meter(
                 source.authoring_session_id,
@@ -2049,6 +2058,7 @@ impl AppState {
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.clear_meter();
             self.native_audio_renderer = None;
+            self.invalidate_native_audio_parameter_presentation();
         }
         self.audio_playback_author_binding = binding;
         Ok(())
@@ -2120,9 +2130,9 @@ impl AppState {
         }))
     }
 
-    /// Every author transaction reaches this seam. Only changes to the compiled
-    /// audible closure retire queued PCM; opacity, visibility and author-only
-    /// metadata do not restart audio or destroy processor history.
+    /// Every author transaction reaches this seam. Changes to the compiled
+    /// audible closure reconcile the prepared Source, including while paused;
+    /// opacity, visibility and author-only metadata preserve processor history.
     pub(super) fn reconcile_audio_after_authoring_commit(&mut self) {
         if self
             .current_audio_playback_author_binding()
@@ -2138,7 +2148,19 @@ impl AppState {
             }
             return;
         }
-        if !self.is_playing() || !self.playback_engine.snapshot().rate.supports_realtime_audio() {
+        // The author transaction is already committed. Live native work still
+        // owns this Source; refusal cannot flow into the refresh helper's
+        // failure cleanup, which would otherwise retire that same owner.
+        if let Err(error) = self.validate_audio_source_replacement_admission(
+            "authoring_commit",
+            "audio Source replacement",
+        ) {
+            tracing::warn!(%error, "audio Source replacement refused after authoring committed");
+            self.set_status_hint(
+                AppMessage::new("status-audio-prepare-failed")
+                    .with_text("error", format!("Authoring committed; {error}")),
+                true,
+            );
             return;
         }
         self.reconcile_audio_after_committed_authoring_change("authoring_commit");
@@ -2186,7 +2208,11 @@ impl AppState {
                         .map_err(|cleanup_error| {
                             transport_action_error("clear_stale_audio", cleanup_error)
                         })
-                        .map(|()| self.audio_monitoring.clear_meter())
+                        .map(|()| {
+                            self.audio_monitoring.clear_meter();
+                            self.native_audio_renderer = None;
+                            self.invalidate_native_audio_parameter_presentation();
+                        })
                 });
             if let Err(cleanup_error) = cleanup {
                 tracing::error!(
@@ -5806,6 +5832,7 @@ mod tests {
     #[cfg(windows)]
     mod cold_native_joint_controls;
 
+    mod author_audio_reconciliation_contracts;
     mod project_close_audio_contracts;
     mod source_close_admission_contracts;
 

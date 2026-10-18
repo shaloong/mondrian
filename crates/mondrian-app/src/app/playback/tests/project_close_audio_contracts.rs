@@ -36,7 +36,9 @@ pub(super) fn available_state() -> (AppState, Arc<parking_lot::Mutex<NativeHoldP
     (state, output)
 }
 
-fn install_builtin_source(state: &mut AppState) -> std::sync::Weak<TimelineAudioPcmRenderer> {
+pub(super) fn install_builtin_source(
+    state: &mut AppState,
+) -> std::sync::Weak<TimelineAudioPcmRenderer> {
     let mut sequence = state.active_sequence().expect("real Authoring Session").clone();
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
         mondrian_timeline::audio::AudioProcessorInstance::built_in(

@@ -1506,7 +1506,7 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
     );
     // A real attached GUI blocks ProjectClose before stop or persistence.
     // Continue the original author path afterwards on that exact live owner.
-    assert!(state.native_audio_editor.as_ref().unwrap().blocks_project_audio_handoff());
+    assert!(state.native_audio_editor.as_ref().unwrap().blocks_source_replacement());
     let close_error = state.close_project().expect_err("actual Opened view blocks ProjectClose");
     assert!(
         matches!(close_error.downcast_ref::<mondrian_core::MondrianError>(),
@@ -1529,7 +1529,7 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
         state.native_audio_editor_surface_state(&payload),
         (true, false)
     );
-    assert!(state.native_audio_editor.as_ref().unwrap().blocks_project_audio_handoff());
+    assert!(state.native_audio_editor.as_ref().unwrap().blocks_source_replacement());
     assert_eq!(state.authoring_session_id(), Some(payload.session_id));
     assert_eq!(
         state.authoring.as_ref().unwrap().history().diagnostics(),
@@ -2191,6 +2191,64 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
                 observations.push(serde_json::json!({"stage": stage, "value_bits": fact.value_bits,
                     "display": fact.display, "process_id": native_object.0, "object_serial": native_object.1,
                     "installed_generation": current_claim.generation().get(), "media_generation": generation}));
+                stage = if redo {
+                    "redo-open-undo-refusal"
+                } else {
+                    "undo-open-redo-refusal"
+                };
+                let blocked_action = if redo {
+                    "undo_timeline"
+                } else {
+                    "redo_timeline"
+                };
+                let author_before_refusal = state.authoring.as_ref().unwrap();
+                let document_before_refusal =
+                    serde_json::to_value(author_before_refusal.document())?;
+                let author_generation_before_refusal = author_before_refusal.author_generation();
+                let history_before_refusal = author_before_refusal.history().diagnostics();
+                let engine_before_refusal = state.playback_engine.snapshot();
+                let surface_before_refusal = state.native_audio_editor_surface_state(&payload);
+                let refused = if redo {
+                    state.undo_timeline()
+                } else {
+                    state.redo_timeline()
+                };
+                anyhow::ensure!(
+                    matches!(&refused,
+                        Err(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+                            if action == blocked_action && reason ==
+                                "native author or editor work must settle before history restore"),
+                    "{stage}: an actual open view must reject history before mutation: {refused:?}"
+                );
+                let author_after_refusal = state.authoring.as_ref().unwrap();
+                anyhow::ensure!(
+                    serde_json::to_value(author_after_refusal.document())?
+                        == document_before_refusal
+                        && author_after_refusal.author_generation()
+                            == author_generation_before_refusal
+                        && author_after_refusal.history().diagnostics() == history_before_refusal
+                        && state.playback_engine.snapshot() == engine_before_refusal
+                        && state.audio_playback_snapshot().generation == generation
+                        && state.audio_playback.native_editor_source_available()
+                        && current_verifier.validate(&current_claim).is_ok()
+                        && state.native_audio_editor_surface_state(&payload)
+                            == surface_before_refusal
+                        && unsafe { is_window(view) } != 0,
+                    "{stage}: refusal preserves author, Engine, Source/claim and actual open view"
+                );
+                let unchanged_presentation = state
+                    .native_audio_parameter_presentation(&payload, &volume)
+                    .context("refused history retains its actual current presentation")?;
+                anyhow::ensure!(
+                    unchanged_presentation.value_bits == Some(expected.to_bits())
+                        && unchanged_presentation.display.as_deref() == Some(text),
+                    "{stage}: refusal does not invalidate the current native facts"
+                );
+                observations.push(
+                    serde_json::json!({"stage": stage, "refused_action": blocked_action,
+                    "author_unchanged": true, "source_claim_preserved": true,
+                    "media_generation": generation}),
+                );
                 let history_before_close =
                     state.authoring.as_ref().unwrap().history().diagnostics();
                 stage = if redo { "redo-close" } else { "undo-close" };

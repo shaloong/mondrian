@@ -44,7 +44,7 @@ struct NativeAudioEditorPendingAuthor {
 impl NativeAudioEditorProductContext {
     /// An inactive target after a genuine Close is presentation metadata. Only
     /// live attachment/control or undelivered author work blocks Source retirement.
-    pub(super) fn blocks_project_audio_handoff(&self) -> bool {
+    pub(super) fn blocks_source_replacement(&self) -> bool {
         self.queued.is_some()
             || self.attachment_target.is_some()
             || self.gesture.is_some()
@@ -128,6 +128,14 @@ fn refusal_key(reason: Refusal) -> &'static str {
 }
 
 impl AppState {
+    /// A successful Source replacement invalidates presentation, without
+    /// changing author delivery, attachment or retained state-entry ownership.
+    pub(super) fn invalidate_native_audio_parameter_presentation(&mut self) {
+        if let Some(context) = &mut self.native_audio_editor {
+            context.parameter_observation = None;
+        }
+    }
+
     fn prepare_native_audio_editor_context(
         &self,
         payload: AudioNativeEditorPayload,

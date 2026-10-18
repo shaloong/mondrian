@@ -509,10 +509,21 @@ impl AppState {
         self.seek_with_source(frame, TimelineSeekSource::Settled)
     }
 
+    fn validate_history_restore_admission(&self, action: &str) -> mondrian_core::Result<()> {
+        if self.project_lifecycle_blocks_actions() {
+            return Err(mondrian_core::MondrianError::ActionNotExecuted {
+                action: action.to_owned(),
+                reason: "Project lifecycle must settle before history restore".to_owned(),
+            });
+        }
+        self.validate_audio_source_replacement_admission(action, "history restore")
+    }
+
     pub fn undo_timeline(&mut self) -> mondrian_core::Result<bool> {
         if !self.can_undo_action() {
             return Ok(false);
         }
+        self.validate_history_restore_admission("undo_timeline")?;
         self.pause()?;
         let previous_owner = self.active_sequence_id();
         let previous_position = self.playback_engine.snapshot().position;
@@ -534,6 +545,7 @@ impl AppState {
         if !self.can_redo_action() {
             return Ok(false);
         }
+        self.validate_history_restore_admission("redo_timeline")?;
         self.pause()?;
         let previous_owner = self.active_sequence_id();
         let previous_position = self.playback_engine.snapshot().position;

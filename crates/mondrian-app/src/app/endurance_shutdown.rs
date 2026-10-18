@@ -996,6 +996,7 @@ impl AppState {
 
     /// Signal independent owners now. Audio and persistence stay live until
     /// Project close finishes its Audio admission and queues persistence's pause.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn begin_endurance_shutdown(&mut self) {
         if let Some(reason) = self.signal_endurance_shutdown() {
             tracing::warn!(%reason, "failed to begin Project close during endurance signal phase");
