@@ -457,7 +457,13 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         // The existing headless video model supplies both prerequisites of
         // original play_ready: Ready delivery, then the matching preroll.
         assert!(!state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready));
-        let demand = state.pending_playback_frame_demand_identity().expect("original video demand");
+        // Ready consumes the pending terminal ticket; preroll still names the
+        // same Engine demand, as the original play_ready fixture does.
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("original Engine video demand after Ready");
         // Existing deterministic video-preroll seam only; this audio gate does
         // not assert actual Viewer/GPU presentation or full public UI pumping.
         assert!(state.observe_video_preroll_at_wall(
