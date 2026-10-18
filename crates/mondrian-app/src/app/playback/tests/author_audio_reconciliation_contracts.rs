@@ -31,7 +31,7 @@ fn idle_audible_author_edit_retires_installed_source_without_moving_transport() 
             .pre_fader
             .processors
             .len();
-        assert_eq!(engine.state, TransportState::Stopped);
+        assert_eq!(engine.state, TransportState::Paused);
         assert_eq!(state.current_frame(), 0);
         assert_eq!(playback.in_flight, 0);
         assert_eq!(playback.next_start_sample, 0);
@@ -149,7 +149,7 @@ fn idle_metadata_author_edit_retains_installed_source_and_rebinds_author_snapsho
             state.active_sequence().unwrap().name,
             "renamed Idle Program"
         );
-        assert_eq!(engine.state, TransportState::Stopped);
+        assert_eq!(engine.state, TransportState::Paused);
         assert_eq!(state.current_frame(), 0);
         assert_eq!(playback.in_flight, 0);
         assert_eq!(playback.next_start_sample, 0);
