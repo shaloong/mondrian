@@ -95,7 +95,8 @@ Media stops completion publication under the original queue lock, then drains
 completed work before joining its existing retirement worker. Only completion
 payloads that retain foreign Work enter that worker; PCM and closed Core values
 consume no additional foreign-owner units. The original 256-unit limit remains.
-Four exact regressions and 96 ordinary Playback controls pass on Windows; one
+Four exact regressions remain covered by 108 current ordinary Playback controls
+on Windows (default plus validation features); one
 ignored actual MMCSS case is excluded. See the [qualification conditions](native-plugin-compatibility.md#current-qualification-summary-2026-10-18).
 
 Native-child observation now uses that same tracker. Once bound, counted, non-clonable
@@ -107,24 +108,40 @@ observation never grants DSP or Source permission. Session and parent producer
 slots use the existing resource ledger; App/tracker payloads and Arc blocks
 remain outside complete Root heap accounting.
 
-Windows ordinary controls pass: Core509, Audio719, Playback105 and App74, plus
+The earlier Windows baseline passes Core509, Audio719, Playback105 and App74, plus
 two separate actual OS-owner controls. The App set includes real queued typed
 refusals and both retired/external renderer-alias lifetimes; it does not prove
 legal native handoff. An old mute-test alias is now released before its original
 complete-closure assertion. The owned-VST3 Runtime-to-Media pair also passes with
-the current normal Product: an unconfirmed Retiring child now yields incomplete
+its matching normal Product: an unconfirmed Retiring child now yields incomplete
 facts and unresolved ownership, while a Settled child yields complete facts and
 resolved ownership. Both gates verify actual Runtime forwarding and the original
 child's producer, with the original180s/2s Job limits. Test-only same-HANDLE
 cleanup happens after receipt capture and cannot upgrade the original owner's
 result. This closes the earlier false-healthy projection, not its cleanup failure.
 
+Cold Playback construction now acquires a counted root from that same Media
+tracker before the original Timeline/Runtime builder. A short borrow reaches
+fresh VST3 and CLAP probes, factory validation and retained creation; each Session
+forks before population and each original ProcessOwner registers immediately
+after spawn. Observation failure stays sticky without changing the original
+constructor result or DSP/Source admission. Factories and catalogs retain no domain.
+
+Current Windows controls pass Audio725, Playback108 and App76 (909 ordinary),
+including ten new controls; Core509 retains its earlier baseline. Four actual
+owned-plugin gates pass one VST3 fresh probe, CLAP normal probe, Note Offer and
+rejected child registration. The last preserves exact successful probe metadata
+without a settlement report. These are probe gates, not an actual App cold-native
+joint closure or PCM qualification. The normal Product and additional integration
+type check pass; existing App warnings remain, without strict zero-warning GO.
+
 New counting does not run in physical callbacks, native DSP or steady PCM blocks.
 Cold handoff control on the MMCSS producer does take the tracker mutex; that
 existing branch also allocates and uses synchronous IPC. Neither its lock wait
-nor whole-producer realtime behavior is qualified. Initial construction/probe
-coverage, residual Child custody, whole-shutdown100ms and other platforms remain
-separate unfinished work.
+nor whole-producer realtime behavior is qualified. Independent catalog discovery
+and create_instance, input inspection, Idle Warmup and precompiled Export still
+have unobserved construction. Residual Child custody, whole-shutdown100ms and
+other platforms remain separate unfinished work.
 
 ## VST3 workflow matrix
 
