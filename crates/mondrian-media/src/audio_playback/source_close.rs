@@ -25,7 +25,7 @@ pub enum AudioPcmSourceCloseStatus<'a> {
 
 pub(super) struct SourceCloseAdmission {
     ticket: AudioPcmSourceCloseTicket,
-    cancellation: ExecutionCancellationToken,
+    pub(super) cancellation: ExecutionCancellationToken,
     result: Option<mondrian_core::Result<()>>,
 }
 
