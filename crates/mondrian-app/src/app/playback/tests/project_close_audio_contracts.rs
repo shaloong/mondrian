@@ -426,7 +426,7 @@ fn cancelled_project_open_refuses_a_source_reinstalled_through_public_play() {
     install_builtin_source(&mut state);
     state.save_project_file_as(project_file.clone()).expect("durable baseline");
     let gate = state.project_persistence.gate_next_request();
-    state.request_project_save().expect("save before Open barrier");
+    let save_request = state.request_project_save().expect("save before Open barrier");
     gate.wait_until_running();
     state.request_project_open(project_file).expect("original Open admission");
     assert!(!state.audio_playback.native_editor_source_available());
@@ -443,12 +443,30 @@ fn cancelled_project_open_refuses_a_source_reinstalled_through_public_play() {
     let session = state.authoring_session_id().unwrap();
     let author_generation = state.authoring.as_ref().unwrap().author_generation();
     let history = state.authoring.as_ref().unwrap().history().diagnostics();
-    let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
     let engine = state.playback_engine.snapshot();
     let audio_generation = state.audio_playback_snapshot().generation;
     assert!(state.begin_project_close().expect("cancel pending Open"));
     gate.release();
     let deadline = Instant::now() + Duration::from_secs(2);
+    // Apply the admitted save through its original authority before freezing
+    // the complete document. Publication legitimately advances its revision
+    // and timestamp; neither belongs to the cancel terminal under test.
+    loop {
+        state.poll_project_persistence();
+        if state
+            .manual_project_file_applied_request
+            .as_ref()
+            .is_some_and(|(_, applied)| *applied == save_request)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the exact admitted save was not applied"
+        );
+        std::thread::yield_now();
+    }
+    let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
     let result = loop {
         let result = state.poll_project_close();
         if result != crate::app::project_lifecycle::ProjectClosePoll::Pending {
