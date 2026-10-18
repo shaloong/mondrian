@@ -84,6 +84,15 @@ struct AudioSubmittedWindowCursor {
 }
 
 impl AudioProgramDeliveryRuntime {
+    /// Forward child-settlement evidence to the sole owned Program Runtime.
+    /// This adds no delivery state, native execution or installation permission.
+    pub fn bind_native_child_settlement(
+        &mut self,
+        registrar: &mondrian_core::NativeChildSettlementRegistrar,
+    ) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.runtime.bind_native_child_settlement(registrar)
+    }
+
     /// Read-only capability of the sole owned Program Runtime.
     pub fn native_observations_supported(&self) -> bool {
         self.runtime.native_observations_supported()
