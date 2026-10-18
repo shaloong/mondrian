@@ -131,7 +131,7 @@ drive that one Session with their original absolute deadline. A real
 close fault poisons that Session's persistence admission, including
 before its first save; already admitted filesystem work retains its ownership,
 but late completions cannot update the project. This is not worker quiescence.
-App158, Media120 and Audio733 ordinary controls pass, including actual Timeline
+App162, Media120 and Audio733 ordinary controls pass, including actual Timeline
 binding latches, retained author prefixes, lost-alias fault recovery and rejection
 of an in-flight save's completion. The matching normal Product passes the owned
 CLAP NoGUI ProjectClose gate: claim, Source, Timeline renderer and Project are
@@ -143,9 +143,26 @@ Ready alone is not control quiescence.
 SourceClosed observes the current prefix; it does not atomically seal future
 callbacks or prove final OS exit. Other synchronous recovery/import handoffs
 retain their separate contracts.
-The current App test build retains 25 warnings; normal Product has 11, including
-`begin_endurance_shutdown`, now called only by validation/test paths. No strict-build
-qualification is granted.
+Idle author commits now reconcile changed audible closures through the original
+Source seam; unchanged metadata retains its Source and rebinds the author snapshot.
+The owned CLAP history gate passes actual Undo/Redo, restoring exact four-byte
+state and fresh native GUI value/text at 100%/75%. Each restore revokes the old
+claim, removes its Source and invalidates presentation before reopening. Nonempty
+history refuses before author/transport mutation during Project close or known
+unsettled native author/editor/hold obligations; the actual reopened views retain
+their claims and facts on refusal.
+The six original native App gates also pass with the matching normal Product.
+This is Windows owned-fixture, Idle, no-device/zero-PCM qualification, not
+third-party history, acoustic output, playing or realtime qualification.
+
+Generic commits that have already published while native work is busy preserve
+the original Source custody and report preparation refusal; they do not establish
+automatic resynchronization, and old PCM may continue. Retained state-entry
+presentation is preserved only with matching actual Source and unchanged target
+witnesses. The original Media same-source control passes; an App nonempty-cache
+state-entry case remains source-reviewed only.
+The current App test build retains 25 warnings; normal Product has 10. No
+strict-build qualification is granted.
 
 New counting does not run in physical callbacks, native DSP or steady PCM blocks.
 Cold control can still lock, allocate and use synchronous IPC on the MMCSS
