@@ -315,7 +315,7 @@ fn pending_project_close_refuses_nonempty_history_before_transport_or_author_mut
 }
 
 #[test]
-fn generic_author_commit_preserves_pending_native_hold_and_reports_prepare_refusal() {
+fn project_snapshot_commit_preserves_pending_native_hold_and_reports_prepare_refusal() {
     let (mut state, output, required, handled_at) = native_hold_actual_required(true, false, false);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state
@@ -373,11 +373,18 @@ fn generic_author_commit_preserves_pending_native_hold_and_reports_prepare_refus
             0.0
         );
 
+        let before = state.authoring.as_ref().unwrap().document().clone();
+        let mut after = before.clone();
+        after
+            .sequences
+            .sequence_mut(sequence)
+            .expect("actual active Sequence in the Project candidate")
+            .audio_program
+            .outputs[0]
+            .strip
+            .fader_db = -6.0;
         state
-            .commit_active_sequence_edit("generic author commit during native hold", |sequence| {
-                sequence.audio_program.outputs[0].strip.fader_db = -6.0;
-                Ok(())
-            })
+            .commit_project_snapshot_command("project snapshot during native hold", before, after)
             .expect("author commit succeeds before execution preparation is refused");
 
         let author = state.authoring.as_ref().unwrap();
@@ -399,7 +406,7 @@ fn generic_author_commit_preserves_pending_native_hold_and_reports_prepare_refus
         assert_ne!(
             state.current_audio_playback_author_binding().unwrap(),
             binding,
-            "the generic transaction really changes the compiled audible closure"
+            "the Project snapshot transaction really changes the compiled audible closure"
         );
         assert_eq!(
             state.audio_playback_author_binding.as_ref(),
