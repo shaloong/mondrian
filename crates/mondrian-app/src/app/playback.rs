@@ -5539,6 +5539,324 @@ mod tests {
 
     struct NativeHoldPlatformOutput(Arc<parking_lot::Mutex<NativeHoldPlatformState>>);
 
+    mod native_settlement_queue_controls {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct DropProbe {
+            created: AtomicUsize,
+            entered: AtomicUsize,
+            processed: AtomicUsize,
+            dropped: parking_lot::Mutex<Vec<(std::thread::ThreadId, Option<String>)>>,
+        }
+
+        struct Resolver(Arc<DropProbe>);
+        struct Factory(Arc<DropProbe>);
+        struct Processor(Arc<DropProbe>);
+        impl mondrian_audio::AudioProcessorResolver for Resolver {
+            fn prepare(
+                &self,
+                _: mondrian_audio::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<
+                Arc<dyn mondrian_audio::AudioProcessorFactory>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                Ok(Arc::new(Factory(self.0.clone())))
+            }
+        }
+        impl mondrian_audio::AudioProcessorFactory for Factory {
+            fn native_child_settlement_requirement(
+                &self,
+            ) -> mondrian_core::NativeChildSettlementRequirement {
+                mondrian_core::NativeChildSettlementRequirement::NotApplicable
+            }
+            fn execution_contract(&self) -> mondrian_audio::AudioProcessorExecutionContract {
+                mondrian_audio::AudioProcessorExecutionContract::stateless()
+            }
+            fn create(
+                &self,
+            ) -> Result<
+                Box<dyn mondrian_audio::AudioProcessor>,
+                mondrian_audio::AudioProcessorHostError,
+            > {
+                self.0.created.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(Processor(self.0.clone())))
+            }
+        }
+        impl mondrian_audio::AudioProcessor for Processor {
+            fn bind_native_child_settlement(
+                &mut self,
+                _: &mondrian_core::NativeChildSettlementRegistrar,
+            ) -> Result<
+                mondrian_core::NativeChildSettlementBinding,
+                mondrian_core::NativeChildSettlementError,
+            > {
+                Ok(mondrian_core::NativeChildSettlementBinding::NotApplicable)
+            }
+            fn enter_state(
+                &mut self,
+                _: i64,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                self.0.entered.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn process(
+                &mut self,
+                _: mondrian_audio::AudioProcessorProcessContext,
+                _: &mut dyn mondrian_audio::AudioProcessorAudioIo,
+                _: mondrian_audio::AudioParameterEventBatch<'_>,
+            ) -> Result<(), mondrian_audio::AudioProcessorHostError> {
+                self.0.processed.fetch_add(1, Ordering::SeqCst);
+                panic!("the lifecycle-only queue control must not schedule PCM")
+            }
+        }
+        impl Drop for Processor {
+            fn drop(&mut self) {
+                let current = std::thread::current();
+                self.0.dropped.lock().push((current.id(), current.name().map(str::to_owned)));
+            }
+        }
+
+        fn observe_refused_timeline_request(retain_external: bool) {
+            let directory = tempfile::tempdir().expect("private author/library fixture");
+            let library =
+                AssetLibrary::open(directory.path().join("library")).expect("actual Asset Library");
+            let mut sequence = Sequence::new("App request queue ownership");
+            let processor = mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                1,
+            );
+            let instance = processor.id;
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+            let sequence_id = sequence.id;
+            let output_id = sequence.audio_program.outputs[0].id;
+            let programs: Arc<[mondrian_audio::NativeAudioAuthorProgram]> =
+                vec![mondrian_audio::NativeAudioAuthorProgram {
+                    sequence: sequence_id,
+                    program: Arc::new(
+                        mondrian_audio::compile_audio_program(
+                            &sequence,
+                            mondrian_audio::AudioCompileRequest {
+                                output_id,
+                                audition: mondrian_audio::AudioAuditionOverlay::default(),
+                            },
+                        )
+                        .expect("actual immutable Program"),
+                    ),
+                }]
+                .into();
+            let document = mondrian_project::ProjectDocument::new(
+                "queue ownership",
+                mondrian_timeline::SequenceCollection::new(sequence.clone()),
+                mondrian_core::ProjectColorEnvironment::default(),
+                mondrian_timeline::SequenceSettings::default(),
+                mondrian_core::ProjectSettings::default(),
+            );
+            let author = mondrian_editor_state::AuthoringSession::new_unsaved(
+                document,
+                directory.path().join("project.mdp"),
+                directory.path().to_owned(),
+                library.clone(),
+            )
+            .expect("actual Authoring Session snapshot");
+            let snapshot = Arc::new(author.execution_snapshot());
+            let probe = Arc::new(DropProbe::default());
+            let resolver = Resolver(probe.clone());
+            let renderer = Arc::new(
+                TimelineAudioPcmRenderer::new_with_processor_resolver(
+                    sequence,
+                    Vec::new(),
+                    library,
+                    Arc::new(AudioSourceCache::new(48_000)),
+                    mondrian_audio::AudioRuntimeResourceGrant::new(
+                        64,
+                        512 * 1024 * 1024,
+                        128 * 1024 * 1024,
+                    ),
+                    mondrian_audio::AudioAuditionOverlay::default(),
+                    48_000,
+                    AudioChannelLayout::Stereo,
+                    4,
+                    &resolver,
+                )
+                .expect("actual Timeline/Delivery/Runtime ordinary resolver seam"),
+            );
+            assert_eq!(probe.created.load(Ordering::SeqCst), 1);
+            let weak = Arc::downgrade(&renderer);
+            let mut output_snapshot = audio_snapshot();
+            output_snapshot.active = false;
+            output_snapshot.buffered_frames = 0;
+            let output = Arc::new(parking_lot::Mutex::new(NativeHoldPlatformState {
+                snapshot: output_snapshot,
+                revision: 0,
+                acknowledged: 0,
+                auto_acknowledge: true,
+                queued: 0,
+            }));
+            let mut playback = AppAudioPlayback::Available(Box::new(
+                AudioPlayback::with_output(
+                    mondrian_media::AudioPlaybackConfig {
+                        chunk_frames: 4,
+                        preroll_frames: 4,
+                        high_watermark_frames: 8,
+                        max_in_flight: 1,
+                        ..mondrian_media::AudioPlaybackConfig::product_default()
+                    },
+                    Box::new(NativeHoldPlatformOutput(output.clone())),
+                )
+                .expect("real Media workers with software output only"),
+            ));
+            playback
+                .prepare(
+                    audio_anchor(0),
+                    renderer.clone(),
+                    renderer.continuity_model(),
+                )
+                .expect("original Media Source/claim admission");
+            let verifier = renderer
+                .owner_installation_verifier()
+                .expect("actual Runtime forwarding of original Media verifier");
+            let claim = verifier.current_claim().expect("actual installed Source claim");
+
+            // Deliberately ineligible native-author DTO. Only its installation
+            // generation comes from the real Source; these IDs grant no actual
+            // native target or Delivered/Plan/Ack permission. The real App Ack
+            // must refuse it because no author snapshot/producer was bound.
+            let root_plan = mondrian_core::AudioPreparedPlanId::new();
+            let root_session = mondrian_core::AudioRenderSessionId::new();
+            let target = mondrian_core::NativeAudioEditorTarget {
+                root_plan,
+                root_session,
+                local_plan: root_plan,
+                local_session: root_session,
+                instance,
+                owner: mondrian_core::NativeAudioEditorOccurrenceOwner::Output(output_id),
+                insertion: mondrian_core::NativeAudioEditorInsertion::PreFader,
+                continuity_epoch: None,
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                installed_generation: claim.generation(),
+            };
+            let proposal = mondrian_core::NativeAudioAuthorProposal::project(
+                target,
+                sequence_id,
+                1,
+                mondrian_core::NativeAudioAuthorBoundaryFacts {
+                    completion: mondrian_core::NativeAudioAuthorCompletion::Nonterminal,
+                    open_parameter_edits: 0,
+                    group_depth: 1,
+                },
+                vec![mondrian_core::NativeAudioAuthorCallback::GroupStarted],
+                None,
+            )
+            .expect("bounded negative DTO, never a synthetic native Source");
+            let request = renderer.native_author_handoff_request(
+                proposal.clone(),
+                target,
+                snapshot,
+                programs,
+                mondrian_media::AudioPcmNativeAuthorHandoffIntent::Acknowledge,
+            );
+            let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+            assert!(Arc::ptr_eq(request.renderer(), &erased));
+            drop(erased);
+            let external = retain_external.then(|| renderer.clone());
+            assert!(playback
+                .request_native_audio_author_handoff(request)
+                .expect("original App wrapper/Media queue admission"));
+            drop(renderer);
+            assert!(probe.dropped.lock().is_empty());
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut refused = false;
+            while Instant::now() < deadline && !refused {
+                let poll = playback
+                    .poll(AudioPlaybackMode::Idle, audio_anchor(0))
+                    .expect("original serial completion path");
+                for event in poll.events {
+                    if let AudioPlaybackEvent::NativeAuthorHandoffObserved {
+                        proposal: completed,
+                        status,
+                        ..
+                    } = event
+                    {
+                        assert!(completed.same_retained_proposal(&proposal));
+                        assert_eq!(
+                            status,
+                            mondrian_media::AudioPcmNativeAuthorHandoffStatus::Refused(
+                                mondrian_media::AudioPcmNativeAuthorHandoffRefusal::Superseded,
+                            ),
+                            "real App Ack refused before any author install/native operation"
+                        );
+                        refused = true;
+                    }
+                }
+                if !refused {
+                    std::thread::yield_now();
+                }
+            }
+            assert!(
+                refused,
+                "must observe executed typed refusal before shutdown, not cancellation"
+            );
+            assert!(
+                weak.upgrade().is_some(),
+                "installed Media source still owns the Timeline"
+            );
+            assert_eq!(probe.entered.load(Ordering::SeqCst), 0);
+            assert_eq!(probe.processed.load(Ordering::SeqCst), 0);
+            assert_eq!(output.lock().queued, 0);
+            let caller = std::thread::current().id();
+            let evidence = playback.shutdown_and_wait(48_000);
+            if retain_external {
+                assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+                assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+                assert!(!evidence.all_workers_terminated());
+                assert!(weak.upgrade().is_some());
+                assert!(
+                    probe.dropped.lock().is_empty(),
+                    "external alias retains real Runtime"
+                );
+                drop(external);
+                assert!(weak.upgrade().is_none());
+                let dropped = probe.dropped.lock();
+                assert_eq!(dropped.len(), 1);
+                assert_eq!(
+                    dropped[0].0, caller,
+                    "late alias release is outside the receipt"
+                );
+                assert!(
+                    !evidence.all_workers_terminated(),
+                    "no retrospective repair"
+                );
+            } else {
+                assert!(evidence.all_workers_terminated(), "{evidence:?}");
+                assert!(weak.upgrade().is_none());
+                let dropped = probe.dropped.lock();
+                assert_eq!(
+                    dropped.len(),
+                    1,
+                    "actual exclusive processor retired exactly once"
+                );
+                assert_ne!(dropped[0].0, caller);
+                assert_eq!(
+                    dropped[0].1.as_deref(),
+                    Some("mondrian-audio-render-retirement")
+                );
+            }
+        }
+
+        #[test]
+        fn timeline_refused_handoff_queue_retires_runtime_before_shutdown_receipt() {
+            observe_refused_timeline_request(false);
+        }
+
+        #[test]
+        fn timeline_refused_handoff_external_alias_keeps_shutdown_unresolved() {
+            observe_refused_timeline_request(true);
+        }
+    }
+
     #[test]
     fn product_audio_renderer_uses_available_playback_quantum_and_skips_unavailable() {
         struct Resolver(parking_lot::Mutex<Vec<usize>>);
