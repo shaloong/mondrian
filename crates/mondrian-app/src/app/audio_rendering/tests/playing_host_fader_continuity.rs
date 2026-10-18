@@ -1,6 +1,6 @@
-//! Finite owned mode0 delay/PDC continuity, using a deterministic software
-//! callback driver. This does not qualify native DSP migration, exact create/
-//! Enter call counts, the complete UI pump, arbitrary tails or a physical DAC.
+//! Finite owned delay/PDC and echo-history continuity, using a deterministic
+//! software callback driver. This does not qualify native DSP migration, exact
+//! create/Enter counts, the complete UI pump, arbitrary tails or a physical DAC.
 
 use super::*;
 use crate::app::playback::{poll_audio_playback_at_for_test, AppAudioPlayback};
@@ -21,12 +21,36 @@ use std::time::{Duration, Instant};
 
 const RATE: u32 = 48_000;
 const SOURCE_FRAMES: usize = RATE as usize * 40;
-const CHUNK: usize = 256;
-const INACTIVE_CALLBACK_FRAMES: usize = CHUNK;
-const WATERMARK: usize = 8_192;
+const INACTIVE_CALLBACK_FRAMES: usize = 256;
 const CONSUMED: usize = 137;
-const CAPTURE_WINDOWS: usize = 80;
-const OUTPUT_CAPACITY: usize = 16_384;
+const ECHO_FRAMES: usize = 256;
+
+#[derive(Clone, Copy)]
+struct Scenario {
+    mode: u8,
+    chunk: usize,
+    watermark: usize,
+    capture_windows: usize,
+    output_capacity: usize,
+    lookahead: i64,
+}
+
+const DELAY: Scenario = Scenario {
+    mode: 0,
+    chunk: 256,
+    watermark: 8_192,
+    capture_windows: 80,
+    output_capacity: 16_384,
+    lookahead: 3,
+};
+const ECHO: Scenario = Scenario {
+    mode: 12,
+    chunk: 8_192,
+    watermark: 65_536,
+    capture_windows: 20,
+    output_capacity: 96_000,
+    lookahead: 0,
+};
 
 // Two coprime periods have a joint period over four billion frames, so the
 // stereo pair never repeats within this finite 40-second WAV. Exact binary
@@ -50,6 +74,7 @@ struct Discard {
 }
 
 struct CaptureState {
+    scenario: Scenario,
     snapshot: RealtimeAudioOutputSnapshot,
     revision: u64,
     // Output.clear grouping only; never a Media generation or AudioContinuityEpoch.
@@ -62,8 +87,9 @@ struct CaptureState {
 }
 
 impl CaptureState {
-    fn new() -> Self {
+    fn new(scenario: Scenario) -> Self {
         Self {
+            scenario,
             snapshot: RealtimeAudioOutputSnapshot {
                 captured_at: Instant::now(),
                 stream_generation: 1,
@@ -97,8 +123,8 @@ impl CaptureState {
             },
             revision: 0,
             clear_serial: 0,
-            queue: VecDeque::with_capacity(OUTPUT_CAPACITY),
-            windows: Vec::with_capacity(CAPTURE_WINDOWS),
+            queue: VecDeque::with_capacity(scenario.output_capacity),
+            windows: Vec::with_capacity(scenario.capture_windows),
             cleared: Vec::with_capacity(8),
             activation_discarded: 0,
             overflow: false,
@@ -110,7 +136,7 @@ impl CaptureState {
     // latest-callback facts. Only an active block advances its active interval.
     // This is a synchronous software callback, not hardware timestamp evidence.
     fn callback(&mut self, frames: usize, observed_at: Instant) -> Vec<[f32; 2]> {
-        assert!(frames > 0 && frames <= CHUNK);
+        assert!(frames > 0 && frames <= INACTIVE_CALLBACK_FRAMES);
         let active_block = self.snapshot.active;
         let output = if active_block {
             assert!(frames <= self.queue.len());
@@ -171,9 +197,9 @@ impl AudioOutputAdapter for CaptureOutput {
             );
         }
         let frames = buffer.frame_count();
-        if state.windows.len() == CAPTURE_WINDOWS
-            || frames > CHUNK
-            || frames > OUTPUT_CAPACITY - state.queue.len()
+        if state.windows.len() == state.scenario.capture_windows
+            || frames > state.scenario.chunk
+            || frames > state.scenario.output_capacity - state.queue.len()
         {
             state.overflow = true;
             return Err(RealtimeAudioOutputEnqueueError::InsufficientCapacity {
@@ -293,7 +319,7 @@ impl AudioOutputAdapter for CaptureOutput {
     }
 
     fn capacity_frames(&self) -> Option<usize> {
-        Some(OUTPUT_CAPACITY)
+        Some(self.0.lock().scenario.output_capacity)
     }
 
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
@@ -330,9 +356,12 @@ fn cursor_facts(state: &AppState) -> CursorFacts {
     facts
 }
 
-fn assert_heads(facts: &CursorFacts, generation: u64, next_public: i64) {
+fn assert_heads(facts: &CursorFacts, generation: u64, next_public: i64, scenario: Scenario) {
     let session = facts.session.expect("one actual Session");
-    assert_eq!(session.public_output_lookahead_frames, 3);
+    assert_eq!(
+        session.public_output_lookahead_frames,
+        scenario.lookahead as usize
+    );
     let AudioSessionCursorState::Active {
         epoch,
         next_public_sample,
@@ -345,7 +374,10 @@ fn assert_heads(facts: &CursorFacts, generation: u64, next_public: i64) {
     assert_eq!(epoch.get(), generation);
     assert!(alignment_primed);
     assert_eq!(next_public_sample.sample(), next_public);
-    assert_eq!(next_execution_sample.sample(), next_public + 3);
+    assert_eq!(
+        next_execution_sample.sample(),
+        next_public + scenario.lookahead
+    );
     let processor = facts.processor.expect("one actual native occurrence");
     assert_eq!(processor.identity, session.identity);
     let AudioProcessorCursorState::Active { epoch, next_input_signal_sample } = processor.state
@@ -353,7 +385,10 @@ fn assert_heads(facts: &CursorFacts, generation: u64, next_public: i64) {
         panic!("actual completed native processor: {processor:?}")
     };
     assert_eq!(epoch.get(), generation);
-    assert_eq!(next_input_signal_sample.sample(), next_public + 3);
+    assert_eq!(
+        next_input_signal_sample.sample(),
+        next_public + scenario.lookahead
+    );
 }
 
 fn assert_healthy(snapshot: AudioPlaybackSnapshot, generation: u64) {
@@ -373,14 +408,19 @@ fn assert_healthy(snapshot: AudioPlaybackSnapshot, generation: u64) {
     assert!(!snapshot.output.unwrap().stream_failed);
 }
 
-fn fill_to_watermark(state: &mut AppState, generation: u64) -> AudioPlaybackSnapshot {
+fn fill_to_watermark(
+    state: &mut AppState,
+    generation: u64,
+    scenario: Scenario,
+) -> AudioPlaybackSnapshot {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let observed_at = state.playback_observation_instant_anchor;
         let snapshot = poll_audio_playback_at_for_test(state, observed_at, false)
             .expect("original deterministic App/Media poll");
         assert_healthy(snapshot, generation);
-        if snapshot.in_flight == 0 && snapshot.output.unwrap().buffered_frames == WATERMARK {
+        if snapshot.in_flight == 0 && snapshot.output.unwrap().buffered_frames == scenario.watermark
+        {
             assert!(
                 snapshot.activation_preroll_satisfied
                     && snapshot.output.unwrap().active
@@ -397,28 +437,58 @@ fn fill_to_watermark(state: &mut AppState, generation: u64) -> AudioPlaybackSnap
     }
 }
 
+fn native_sample(scenario: Scenario, absolute: usize) -> [f32; 2] {
+    // mode0's latency3 is compensated by public lookahead3. Mode12 has no
+    // latency; its causal tap must remain part of the public native signal.
+    let mut sample = input_sample(absolute);
+    if scenario.mode == 12 && absolute >= ECHO_FRAMES {
+        let tap = input_sample(absolute - ECHO_FRAMES);
+        for channel in 0..2 {
+            sample[channel] += 0.5 * tap[channel];
+        }
+    }
+    sample
+}
+
+fn assert_window_shape(
+    state: &CaptureState,
+    first_window: usize,
+    clear_serial: u64,
+    scenario: Scenario,
+) {
+    let windows = &state.windows[first_window..];
+    assert_eq!(windows.len(), scenario.watermark / scenario.chunk);
+    for window in windows {
+        assert_eq!(window.clear_serial, clear_serial);
+        assert_eq!(window.samples.len(), scenario.chunk * 2);
+    }
+    assert_eq!(
+        windows.iter().map(|window| window.samples.len()).sum::<usize>(),
+        scenario.watermark * 2,
+        "all original complete windows, including the first"
+    );
+    assert!(!state.overflow);
+}
+
 fn assert_windows(
     state: &CaptureState,
     first_window: usize,
     clear_serial: u64,
     start_sample: i64,
     fader_db: f64,
+    scenario: Scenario,
 ) {
-    // mode0 uses main weight2 and saved gain.5; unconnected auxiliary inputs
-    // are zero. Its latency3 is compensated by public lookahead3, so expected
-    // public sample n is the original WAV[n], with no extra +/-3 shift.
+    assert_window_shape(state, first_window, clear_serial, scenario);
     let gain = 10.0_f64.powf(fader_db / 20.0);
     let mut frames = 0;
     for window in &state.windows[first_window..] {
-        assert_eq!(window.clear_serial, clear_serial);
-        assert_eq!(window.samples.len(), CHUNK * 2);
         for pair in window.samples.chunks_exact(2) {
             let absolute = usize::try_from(start_sample + frames as i64).unwrap();
             assert!(
                 absolute < SOURCE_FRAMES,
                 "reference stays inside the real WAV"
             );
-            let expected = input_sample(absolute);
+            let expected = native_sample(scenario, absolute);
             for channel in 0..2 {
                 let expected = (f64::from(expected[channel]) * gain) as f32;
                 assert!(
@@ -430,16 +500,92 @@ fn assert_windows(
             frames += 1;
         }
     }
-    assert_eq!(
-        frames, WATERMARK,
-        "all original complete windows, including the first"
+}
+
+// The old completed PCM is an observation, never a DSP checkpoint or permission
+// to restore it. Check every other new sample before returning the bounded W
+// discrepancy, so a target RED cannot hide later ordinary PCM failures.
+fn echo_history_discrepancy(
+    state: &CaptureState,
+    first_window: usize,
+    anchor: i64,
+    frontier: i64,
+    scenario: Scenario,
+) -> Option<String> {
+    let end = anchor.checked_add(ECHO_FRAMES as i64);
+    eprintln!("finite echo witness: A={anchor} F={frontier} W=[{anchor},{end:?}) H={ECHO_FRAMES}");
+    assert!(
+        anchor >= ECHO_FRAMES as i64 && end.is_some_and(|end| end <= frontier),
+        "NOT_COVERED_ECHO_HISTORY: require 256 <= A and checked A+256 <= completed F; A={anchor} F={frontier} end={end:?}"
     );
-    assert!(!state.overflow);
+    let end = end.unwrap();
+    assert_eq!(end - anchor, ECHO_FRAMES as i64);
+    let gain = 10.0_f64.powf(-6.0 / 20.0);
+    let mut first = None;
+    let mut max_old = 0.0_f32;
+    let mut max_formula = 0.0_f32;
+    let mut witness_frames = 0;
+    let mut frames = 0;
+    for window in &state.windows[first_window..] {
+        for pair in window.samples.chunks_exact(2) {
+            let absolute = usize::try_from(anchor + frames as i64).unwrap();
+            let formula = native_sample(scenario, absolute);
+            for channel in 0..2 {
+                let expected = (f64::from(formula[channel]) * gain) as f32;
+                if (absolute as i64) < end {
+                    // Original windows start at public0 and cover all of F.
+                    let old = state.windows[absolute / scenario.chunk].samples
+                        [(absolute % scenario.chunk) * 2 + channel];
+                    let old_scaled = (f64::from(old) * gain) as f32;
+                    let tap = input_sample(absolute - ECHO_FRAMES)[channel];
+                    assert!(
+                        (f64::from(tap) * 0.5 * gain).abs() > 1e-3,
+                        "history stimulus exceeds the unchanged 1e-6 tolerance"
+                    );
+                    let old_error = (pair[channel] - old_scaled).abs();
+                    let formula_error = (pair[channel] - expected).abs();
+                    max_old = max_old.max(old_error);
+                    max_formula = max_formula.max(formula_error);
+                    if (old_error > 1e-6
+                        || formula_error > 1e-6
+                        || !old_error.is_finite()
+                        || !formula_error.is_finite())
+                        && first.is_none()
+                    {
+                        first = Some((absolute, channel, pair[channel], old_scaled, expected));
+                    }
+                } else {
+                    assert!(
+                        (pair[channel] - expected).abs() <= 1e-6,
+                        "ECHO_NON_WITNESS_PCM: public{absolute} channel{channel}: {} != {expected}",
+                        pair[channel]
+                    );
+                }
+            }
+            if (absolute as i64) < end {
+                witness_frames += 1;
+            }
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, scenario.watermark);
+    assert_eq!(witness_frames, ECHO_FRAMES);
+    first.map(|first| format!("A={anchor} F={frontier} W=[{anchor},{end}) frames={witness_frames} first(public,channel,actual,old_scaled,formula)={first:?} max_old={max_old} max_formula={max_formula}"))
 }
 
 #[test]
 #[ignore = "current normal Product and owned CLAP sidechain mode0 DLL; software callback only"]
 fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
+    run_host_fader_continuity(DELAY);
+}
+
+#[test]
+#[ignore = "current normal Product and owned CLAP sidechain mode12 DLL; finite software history witness only"]
+fn native_clap_playing_host_fader_preserves_finite_echo_history() {
+    run_host_fader_continuity(ECHO);
+}
+
+fn run_host_fader_continuity(scenario: Scenario) {
     let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
         .map(std::path::PathBuf::from)
         .expect("current normal Product");
@@ -450,7 +596,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
     assert!(plugin.is_absolute() && plugin.is_file());
     let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
         .expect("actual owned CLAP discovery");
-    let mut opaque = vec![0];
+    let mut opaque = vec![scenario.mode];
     opaque.extend_from_slice(&0.5_f32.to_le_bytes());
     let instance = installed
         .create_instance(
@@ -458,7 +604,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             reference_render_contract(),
             Some(opaque.clone()),
         )
-        .expect("actual mode0 native author state");
+        .expect("actual owned native author state");
     assert_eq!(
         instance.opaque_state.as_ref().map(|state| state.as_slice()),
         Some(opaque.as_slice())
@@ -470,13 +616,13 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let mut state = AppState::with_audio_processor_resolver(resolver);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
-    let output = Arc::new(Mutex::new(CaptureState::new()));
+    let output = Arc::new(Mutex::new(CaptureState::new(scenario)));
     state.audio_playback = AppAudioPlayback::Available(Box::new(
         AudioPlayback::with_output(
             AudioPlaybackConfig {
-                chunk_frames: CHUNK,
-                preroll_frames: CHUNK,
-                high_watermark_frames: WATERMARK,
+                chunk_frames: scenario.chunk,
+                preroll_frames: scenario.chunk,
+                high_watermark_frames: scenario.watermark,
                 max_in_flight: 1,
                 ..AudioPlaybackConfig::product_default()
             },
@@ -543,12 +689,17 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             assert!(!capture.snapshot.active);
         }
         let generation = state.audio_playback_snapshot().generation;
-        let warmed = fill_to_watermark(&mut state, generation);
+        let warmed = fill_to_watermark(&mut state, generation, scenario);
         assert_eq!(warmed.media_anchor.unwrap().sample(), 0);
-        assert_eq!(warmed.next_start_sample, WATERMARK as i64);
-        assert_heads(&cursor_facts(&state), generation, WATERMARK as i64);
+        assert_eq!(warmed.next_start_sample, scenario.watermark as i64);
+        assert_heads(
+            &cursor_facts(&state),
+            generation,
+            scenario.watermark as i64,
+            scenario,
+        );
         let old_clear_serial = output.lock().clear_serial;
-        assert_windows(&output.lock(), 0, old_clear_serial, 0, 0.0);
+        assert_windows(&output.lock(), 0, old_clear_serial, 0, 0.0, scenario);
 
         let observed_at = state.playback_observation_instant_anchor
             + Duration::from_nanos((CONSUMED as u64 * 1_000_000_000).div_ceil(u64::from(RATE)));
@@ -556,7 +707,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
         for (frame, actual) in consumed.iter().enumerate() {
             assert_eq!(
                 *actual,
-                input_sample(frame),
+                native_sample(scenario, frame),
                 "actual original software FIFO consumption"
             );
         }
@@ -571,8 +722,8 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             consumed_snapshot.output.unwrap().callback_consumed_frames,
             (INACTIVE_CALLBACK_FRAMES + CONSUMED) as u64
         );
-        // 8055 queued + the next indivisible 256-frame admission exceeds
-        // watermark8192. This partial callback cannot trigger a refill.
+        // The fixed partial callback is smaller than either indivisible chunk.
+        // (watermark - 137) + chunk > watermark, so no refill can be admitted.
         assert_eq!(consumed_snapshot.in_flight, 0);
         assert_eq!(
             state.playback_clock_master(),
@@ -588,8 +739,13 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             .unwrap();
         assert_eq!(authority.sample(), CONSUMED as i64);
         assert!(authority.sample() > 0 && authority.sample() < warmed.next_start_sample);
-        assert_eq!(output.lock().queue.len(), WATERMARK - CONSUMED);
-        assert_heads(&cursor_facts(&state), generation, WATERMARK as i64);
+        assert_eq!(output.lock().queue.len(), scenario.watermark - CONSUMED);
+        assert_heads(
+            &cursor_facts(&state),
+            generation,
+            scenario.watermark as i64,
+            scenario,
+        );
         let before_facts = cursor_facts(&state);
         let before_author = state.project_author_generation();
         let before_history = state.authoring_history().unwrap().diagnostics();
@@ -642,7 +798,10 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             )
             .unwrap();
         assert!(post_authority.sample() >= authority.sample());
-        assert!(post_authority.sample() + WATERMARK as i64 <= SOURCE_FRAMES as i64);
+        assert!(post_authority
+            .sample()
+            .checked_add(scenario.watermark as i64)
+            .is_some_and(|end| end <= SOURCE_FRAMES as i64));
         let changed = state.audio_playback_snapshot();
         assert_healthy(changed, generation + 1);
         assert_eq!(
@@ -659,7 +818,7 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             assert_eq!(discard.clear_serial, old_clear_serial);
             assert_eq!(
                 discard.frames,
-                WATERMARK - CONSUMED,
+                scenario.watermark - CONSUMED,
                 "retire all old unconsumed PCM"
             );
             assert!(captured.queue.is_empty());
@@ -677,22 +836,24 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
                 capture.clear_serial,
             )
         };
-        let continued = fill_to_watermark(&mut state, generation + 1);
+        let continued = fill_to_watermark(&mut state, generation + 1, scenario);
         assert_eq!(continued.media_anchor, Some(post_authority));
         assert_eq!(
             continued.next_start_sample,
-            post_authority.sample() + WATERMARK as i64
+            post_authority.sample() + scenario.watermark as i64
         );
         let after_facts = cursor_facts(&state);
         assert_heads(
             &after_facts,
             generation + 1,
-            post_authority.sample() + WATERMARK as i64,
+            post_authority.sample() + scenario.watermark as i64,
+            scenario,
         );
         eprintln!(
-            "mode0 compensated continuity: old={:?}; new={:?}",
-            before_facts.session, after_facts.session
+            "mode{} finite continuity: old={:?}; new={:?}",
+            scenario.mode, before_facts.session, after_facts.session
         );
+        let history_failure;
         {
             let capture = output.lock();
             assert_eq!(capture.cleared.len(), pending_clear_count + 1);
@@ -706,19 +867,32 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             // Inspect the entire newly captured suffix, not a filtered latest
             // group that could hide an earlier discarded or extra window.
             let new_windows = &capture.windows[new_windows_start..];
-            assert_eq!(new_windows.len(), WATERMARK / CHUNK);
+            assert_eq!(new_windows.len(), scenario.watermark / scenario.chunk);
             assert!(new_windows.iter().all(|window| window.clear_serial == capture.clear_serial));
             assert_eq!(
                 new_windows.iter().map(|window| window.samples.len()).sum::<usize>(),
-                WATERMARK * 2
+                scenario.watermark * 2
             );
-            assert_windows(
-                &capture,
-                new_windows_start,
-                capture.clear_serial,
-                post_authority.sample(),
-                -6.0,
-            );
+            assert_window_shape(&capture, new_windows_start, capture.clear_serial, scenario);
+            history_failure = if scenario.mode == 12 {
+                echo_history_discrepancy(
+                    &capture,
+                    new_windows_start,
+                    post_authority.sample(),
+                    warmed.next_start_sample,
+                    scenario,
+                )
+            } else {
+                assert_windows(
+                    &capture,
+                    new_windows_start,
+                    capture.clear_serial,
+                    post_authority.sample(),
+                    -6.0,
+                    scenario,
+                );
+                None
+            };
         }
         assert_eq!(output.lock().snapshot.active_callback_consumed_frames, 0);
         assert_eq!(
@@ -726,8 +900,13 @@ fn native_clap_playing_host_fader_preserves_latency_compensated_pcm() {
             (INACTIVE_CALLBACK_FRAMES + CONSUMED) as u64
         );
         assert_eq!(output.lock().activation_discarded, 0);
-        // Identity change is an observation, not an exact create/Enter counter
-        // or a failure oracle. mode0's whole finite history is PDC-recoverable.
+        // Identity change and the five-byte configuration are not a diagnosis
+        // of a ring/reset cause. All ordinary PCM and control checks precede W.
+        assert!(
+            history_failure.is_none(),
+            "HISTORY_DISCONTINUITY: {}",
+            history_failure.unwrap_or_default()
+        );
     }));
 
     let deadline = Instant::now() + Duration::from_secs(2);
