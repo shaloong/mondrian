@@ -684,7 +684,74 @@ struct MondrianOpenFxSession {
                          static_cast<double>(info.height)};
     const bool guiOpen = host.auxiliary().hasInteractiveControl();
     const bool userEdited = host.auxiliary().hasUserEditedControl();
-    probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+    // Only ask for an identity whose current Source can be published without
+    // fetching another clip/time or converting its fixed raster representation.
+    const auto currentSourceIdentityCompatible = [&]() {
+      if (representation != info.source_alpha) { return false; }
+      for (const char* name : {"Source", "Output"}) {
+        const auto* clip = instance->getClip(name);
+        if (!clip || !clip->getConnected() || clip->getPixelDepth() != kOfxBitDepthFloat ||
+            clip->getComponents() != kOfxImageComponentRGBA ||
+            clip->getPremult() != premultiplication || clip->getAspectRatio() != info.pixel_aspect_ratio ||
+            clip->getFieldOrder() != kOfxImageFieldNone) { return false; }
+        const auto rod = clip->getRegionOfDefinition(info.frame);
+        if (rod.x1 != region.x1 || rod.y1 != region.y1 ||
+            rod.x2 != region.x2 || rod.y2 != region.y2) { return false; }
+      }
+      return true;
+    };
+    if (currentSourceIdentityCompatible()) {
+      probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+      phase = probe.start();
+      double identityTime = info.frame;
+      std::string identityClip;
+      const auto identityStatus = instance->isIdentityAction(identityTime, kOfxImageFieldNone,
+                                                            window, scale, identityClip);
+      // This optional query is frame setup, never a plugin Render action.
+      probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+      phase = probe.start();
+      if (frame.invalidImageLifetime) {
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        failed = true; return 5;
+      }
+      if (host.auxiliary().fatal()) {
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        failed = true; return 6;
+      }
+      if (identityStatus != kOfxStatOK && identityStatus != kOfxStatReplyDefault) {
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        return 5;
+      }
+      if (identityStatus == kOfxStatOK &&
+          (identityClip != "Source" || !std::isfinite(identityTime) || identityTime != info.frame ||
+           !currentSourceIdentityCompatible())) {
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        return 7;
+      }
+      probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+      phase = probe.start();
+      if (host.auxiliary().blocked(instance->getHandle())) {
+        failed = false;
+        report.completion = MONDRIAN_OPENFX_RENDER_USER_BLOCKED;
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        return 0;
+      }
+      if (identityStatus == kOfxStatOK) {
+        // loadFrame already validated all source pixels and the exact byte
+        // count. Use the existing staging allocation without pretending Output
+        // was fetched. memmove adds no partial-overlap assumption to the CABI.
+        std::memmove(frame.output, frame.input, bytes);
+        probe.finish(MONDRIAN_OPENFX_OUTPUT_VALIDATION, phase);
+        phase = probe.start();
+        failed = false;
+        report.output_alpha = representation;
+        report.completion = MONDRIAN_OPENFX_RENDER_FRAME;
+        probe.finish(MONDRIAN_OPENFX_DISPOSITION, phase);
+        return 0;
+      }
+    } else {
+      probe.finish(MONDRIAN_OPENFX_FRAME_SETUP, phase);
+    }
     phase = probe.start();
     OfxStatus status = instance->beginRenderAction(info.frame, info.frame, 1.0,
                                                   guiOpen, scale, false, userEdited);
