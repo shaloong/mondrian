@@ -313,3 +313,154 @@ fn pending_project_close_refuses_nonempty_history_before_transport_or_author_mut
         }
     }
 }
+
+#[test]
+fn generic_author_commit_preserves_pending_native_hold_and_reports_prepare_refusal() {
+    let (mut state, output, required, handled_at) = native_hold_actual_required(true, false, false);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        state
+            .handle_audio_playback_event(required, handled_at)
+            .expect("original pending native control event");
+        state.reanchor_playback_observation_projection(Instant::now());
+        let engine = state.playback_engine.snapshot();
+        let ticket = state.playback_engine.native_audio_control_hold_ticket();
+        let playback = state.audio_playback_snapshot();
+        let hold_generation = state.audio_playback.native_control_hold_generation();
+        let reprepare_generation = state.audio_playback.native_reprepare_pending_generation();
+        let binding = state.current_audio_playback_author_binding().expect("old audible closure");
+        assert_eq!(
+            state.audio_playback_author_binding.as_ref(),
+            binding.as_ref()
+        );
+        let session = state.authoring_session_id().unwrap();
+        let sequence = state.active_sequence_id().unwrap();
+        let author_generation = state.authoring.as_ref().unwrap().author_generation();
+        let history = state.authoring.as_ref().unwrap().history().diagnostics();
+        let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
+        let output_facts = {
+            let owned = output.lock();
+            (
+                owned.snapshot,
+                owned.revision,
+                owned.acknowledged,
+                owned.queued,
+                owned.auto_acknowledge,
+            )
+        };
+        assert_eq!(engine.state, TransportState::HoldingForNativeAudioControl);
+        assert!(ticket.is_some());
+        assert_eq!(hold_generation, Some(playback.generation));
+        assert_eq!(reprepare_generation, Some(playback.generation));
+        assert_eq!(
+            playback.state,
+            mondrian_media::AudioPlaybackState::RepreparePending
+        );
+        assert!(state.audio_playback.native_editor_source_available());
+        assert!(state.native_audio_renderer.is_none());
+        assert_ne!(
+            output_facts.1, output_facts.2,
+            "physical output retirement is outstanding"
+        );
+        assert_eq!(output_facts.3, 0);
+        assert!(!output_facts.4);
+        assert!(state
+            .playback_engine
+            .next_wake(state.playback_engine.monotonic_high_water())
+            .expect("original output retirement wake")
+            .is_some());
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.outputs[0].strip.fader_db,
+            0.0
+        );
+
+        state
+            .commit_active_sequence_edit("generic author commit during native hold", |sequence| {
+                sequence.audio_program.outputs[0].strip.fader_db = -6.0;
+                Ok(())
+            })
+            .expect("author commit succeeds before execution preparation is refused");
+
+        let author = state.authoring.as_ref().unwrap();
+        let committed_history = author.history().diagnostics();
+        assert_eq!(state.authoring_session_id(), Some(session));
+        assert_eq!(state.active_sequence_id(), Some(sequence));
+        assert_eq!(
+            author.author_generation().get(),
+            author_generation.get() + 1
+        );
+        assert_eq!(committed_history.undo_entries, history.undo_entries + 1);
+        assert_eq!(committed_history.redo_entries, 0);
+        assert_eq!(committed_history.pending_entries, 0);
+        assert_ne!(serde_json::to_value(author.document()).unwrap(), document);
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.outputs[0].strip.fader_db,
+            -6.0
+        );
+        assert_ne!(
+            state.current_audio_playback_author_binding().unwrap(),
+            binding,
+            "the generic transaction really changes the compiled audible closure"
+        );
+        assert_eq!(
+            state.audio_playback_author_binding.as_ref(),
+            binding.as_ref(),
+            "a refused replacement does not rebind the retained Source to new author state"
+        );
+        assert_eq!(state.playback_engine.snapshot(), engine);
+        assert_eq!(
+            state.playback_engine.native_audio_control_hold_ticket(),
+            ticket
+        );
+        assert_eq!(state.audio_playback_snapshot(), playback);
+        assert_eq!(
+            state.audio_playback.native_control_hold_generation(),
+            hold_generation
+        );
+        assert_eq!(
+            state.audio_playback.native_reprepare_pending_generation(),
+            reprepare_generation
+        );
+        // This fixture exposes real Media Source occupancy and hold custody,
+        // not a native Runtime verifier or a Timeline Source Arc.
+        assert!(state.audio_playback.native_editor_source_available());
+        assert!(state.native_audio_renderer.is_none());
+        let current_output_facts = {
+            let owned = output.lock();
+            (
+                owned.snapshot,
+                owned.revision,
+                owned.acknowledged,
+                owned.queued,
+                owned.auto_acknowledge,
+            )
+        };
+        assert_eq!(current_output_facts, output_facts);
+        assert!(state
+            .playback_engine
+            .next_wake(state.playback_engine.monotonic_high_water())
+            .expect("the same unacknowledged output retirement remains pending")
+            .is_some());
+        let refusal = mondrian_core::MondrianError::ActionNotExecuted {
+            action: "authoring_commit".to_owned(),
+            reason: "native author or editor work must settle before audio Source replacement"
+                .to_owned(),
+        };
+        let status = AppMessage::new("status-audio-prepare-failed")
+            .with_text("error", format!("Authoring committed; {refusal}"));
+        assert_eq!(state.status_hint(), Some(&(status, true)));
+    }));
+    // Target custody facts above precede explicit teardown. The fixture has no
+    // device worker or native consumer; teardown does not manufacture their Ack.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pause = state.pause();
+    let audio = state.shutdown_audio_playback_until(deadline);
+    let cleanup = state.shutdown_for_endurance(deadline);
+    assert!(
+        pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
+        "NATIVE_HOLD_AUTHOR_CONTROL_CLEANUP_HOLD: target_passed={}; pause={pause:?}; audio={audio:?}; app={cleanup:?}",
+        result.is_ok()
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
