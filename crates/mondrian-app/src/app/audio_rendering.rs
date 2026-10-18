@@ -217,7 +217,7 @@ impl TimelineAudioPcmRenderer {
         state
             .delivery
             .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-            .map_err(|error| audio_render_error("project_audio_handoff", error))
+            .map_err(|error| audio_render_error("project_audio_handoff", error.to_string()))
     }
 
     /// Pure metadata comparison; no native/DSP or author permission is issued.

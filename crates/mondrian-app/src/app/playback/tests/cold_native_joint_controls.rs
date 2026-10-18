@@ -1512,7 +1512,7 @@ fn app_owned_clap_editor_parameter_commits_through_same_source() {
     assert_eq!(state.audio_playback_snapshot().generation, generation);
     assert_eq!(state.audio_playback_snapshot().next_start_sample, 0);
     assert_eq!(state.audio_playback_snapshot().in_flight, 0);
-    assert_eq!(verifier.current_claim().unwrap(), original_claim);
+    assert!(verifier.validate(&original_claim).is_ok());
     assert!(state.audio_playback.native_editor_source_available());
     assert!(state
         .native_audio_renderer
