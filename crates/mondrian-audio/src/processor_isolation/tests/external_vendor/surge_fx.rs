@@ -1,7 +1,10 @@
 //! Finite PCM/lifecycle observations for the pinned external Effects case.
 //! Neither native-bypass precision nor fresh-output equality is a DSP oracle.
 
-use super::vst3_runtime_pcm::{observe_runtime_pcm, RuntimeObservationConfiguration};
+use super::vst3_runtime_pcm::{
+    observe_runtime_pcm, observe_runtime_pcm_with_host_fader_control, HostFaderControl,
+    RuntimeObservationConfiguration,
+};
 use super::*;
 
 #[test]
@@ -349,7 +352,20 @@ fn external_vst3_effect_musical_reference_runtime_restore_pcm_observations() {
     ));
 }
 
+#[test]
+#[ignore = "pinned Surge Effects case, current normal Product and outer native Job; finite offline retained-F reference only"]
+fn external_vst3_effect_retained_host_fader_matches_continuous_reference() {
+    runtime_pcm_observations(None, true);
+}
+
 fn runtime_restore_pcm_observations(musical_time_reference: Option<MusicalTimeReference>) {
+    runtime_pcm_observations(musical_time_reference, false);
+}
+
+fn runtime_pcm_observations(
+    musical_time_reference: Option<MusicalTimeReference>,
+    retained_host_fader: bool,
+) {
     let path = PathBuf::from(std::env::var_os(CASE_ENV).expect("external case path"));
     let mut case_lease = Lease::open(
         &Binding {
@@ -441,6 +457,109 @@ fn runtime_restore_pcm_observations(musical_time_reference: Option<MusicalTimeRe
     );
     assert_eq!(catalog.descriptors().len(), 1);
     assert_eq!(json!(catalog.descriptors()), list["descriptors"]);
+    if retained_host_fader {
+        // Fixed before native execution. This validates repeatability for this
+        // input/state only, never an independent oracle for the vendor DSP.
+        const REFERENCE_EPSILON: f32 = 1e-6;
+        const FADER_AT: usize = 2_048;
+        let period: Arc<[f32]> = input.into();
+        let configuration = || RuntimeObservationConfiguration {
+            case: &case,
+            constant_parameter_values: &[],
+            sequence_name: "Surge identical-state continuous Host fader reference",
+            auxiliary_input_key: Some("vst3.audio-input.1"),
+            musical_time_reference,
+            native_bypass: false,
+        };
+        let first = observe_runtime_pcm_with_host_fader_control(
+            catalog.clone(),
+            &state,
+            period.clone(),
+            &facts,
+            configuration(),
+            "fader-reference-a",
+            &case.evidence_directory,
+            HostFaderControl::ContinuousReference,
+        );
+        let second = observe_runtime_pcm_with_host_fader_control(
+            catalog.clone(),
+            &state,
+            period.clone(),
+            &facts,
+            configuration(),
+            "fader-reference-b",
+            &case.evidence_directory,
+            HostFaderControl::ContinuousReference,
+        );
+        assert_eq!(
+            first.len(),
+            FRAMES * 2,
+            "NOT_COVERED_REFERENCE: first extent"
+        );
+        assert_eq!(
+            second.len(),
+            first.len(),
+            "NOT_COVERED_REFERENCE: second extent"
+        );
+        for (run, samples) in [("first", first.as_slice()), ("second", second.as_slice())] {
+            assert!(
+                samples.iter().all(|sample| sample.is_finite()),
+                "NOT_COVERED_REFERENCE: {run} nonfinite output"
+            );
+            for region in [&samples[..FADER_AT * 2], &samples[FADER_AT * 2..]] {
+                assert!(
+                    region.iter().any(|sample| sample.abs() > REFERENCE_EPSILON),
+                    "NOT_COVERED_REFERENCE: {run} must expose nonzero PCM on both sides of F"
+                );
+            }
+        }
+        for (sample, (first, second)) in first.iter().zip(&second).enumerate() {
+            assert!((first - second).abs() <= REFERENCE_EPSILON,
+                "NOT_COVERED_REFERENCE: fresh identical-state sample{sample}: {first} != {second}; absolute tolerance={REFERENCE_EPSILON}");
+        }
+        // Both independent references have completed actual Drop/exit checks
+        // before the retained case begins. No comparison can conceal cleanup.
+        let retained = observe_runtime_pcm_with_host_fader_control(
+            catalog,
+            &state,
+            period,
+            &facts,
+            configuration(),
+            "fader-retained",
+            &case.evidence_directory,
+            HostFaderControl::Retained,
+        );
+        assert_eq!(retained.len(), first.len());
+        let gain = 10.0_f64.powf(-6.0 / 20.0);
+        for (sample, (&actual, &reference)) in retained.iter().zip(&first).enumerate() {
+            let expected = if sample / 2 < FADER_AT {
+                reference
+            } else {
+                (f64::from(reference) * gain) as f32
+            };
+            let marker = if sample / 2 < FADER_AT {
+                "NOT_COVERED_REFERENCE"
+            } else {
+                "RETAINED_HOST_FADER_PCM"
+            };
+            assert!(actual.is_finite() && (actual - expected).abs() <= REFERENCE_EPSILON,
+                "{marker}: public{} channel{}: {actual} != {expected}; absolute tolerance={REFERENCE_EPSILON}",
+                sample / 2, sample % 2);
+        }
+        write_json(
+            &case.evidence_directory,
+            "host-fader-reference.json",
+            json!({
+                "frames_per_run":FRAMES, "fresh_runs":3, "reference_runs":2,
+                "absolute_tolerance":REFERENCE_EPSILON, "fader_public_frame":FADER_AT,
+                "terminal_host_fader_db":-6.0, "identical_original_state_bytes":state.len(),
+                "continuous_references_repeatable":true, "retained_pcm_matches_scaled_reference":true,
+                "independent_vendor_algorithm_qualified":false, "tail_qualified":false,
+                "app_action_qualified":false, "realtime_or_performance_qualified":false,
+            }),
+        );
+        return;
+    }
     let reference: Vec<f32> = input.iter().map(|&raw| 0.0_f32 + raw).collect();
     assert_eq!(
         input

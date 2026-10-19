@@ -29,6 +29,58 @@ pub(super) fn observe_runtime_pcm(
     label: &str,
     directory: &Path,
 ) -> Vec<f32> {
+    observe_runtime_pcm_inner(
+        catalog,
+        state,
+        period,
+        facts,
+        configuration,
+        label,
+        directory,
+        None,
+    )
+}
+
+// Controls only this finite external-plugin test; neither variant grants native
+// or Source authority. Both use the same actual Runtime/owner/exit path below.
+#[derive(Clone, Copy)]
+pub(super) enum HostFaderControl {
+    ContinuousReference,
+    Retained,
+}
+
+pub(super) fn observe_runtime_pcm_with_host_fader_control(
+    catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
+    state: &[u8],
+    period: Arc<[f32]>,
+    facts: &Facts,
+    configuration: RuntimeObservationConfiguration<'_>,
+    label: &str,
+    directory: &Path,
+    control: HostFaderControl,
+) -> Vec<f32> {
+    observe_runtime_pcm_inner(
+        catalog,
+        state,
+        period,
+        facts,
+        configuration,
+        label,
+        directory,
+        Some(control),
+    )
+}
+
+fn observe_runtime_pcm_inner(
+    catalog: Arc<DiscoveredVst3AudioProcessorSpecResolver>,
+    state: &[u8],
+    period: Arc<[f32]>,
+    facts: &Facts,
+    configuration: RuntimeObservationConfiguration<'_>,
+    label: &str,
+    directory: &Path,
+    control: Option<HostFaderControl>,
+) -> Vec<f32> {
     let RuntimeObservationConfiguration {
         case,
         constant_parameter_values,
@@ -138,7 +190,7 @@ pub(super) fn observe_runtime_pcm(
     let installation = AudioOwnerInstallationSource::new();
     let (registration, verifier) = installation.register().unwrap();
     runtime
-        .bind_native_owner_installation(verifier)
+        .bind_native_owner_installation(verifier.clone())
         .expect("actual Runtime registration");
     let claim = installation
         .reserve_install(&registration, None)
@@ -166,7 +218,7 @@ pub(super) fn observe_runtime_pcm(
             start_sample: 0,
         })
         .expect("actual public Runtime first signal entry");
-    let lease = owner(&runtime);
+    let mut lease = owner(&runtime);
     assert_eq!(lease.editor_target().instance, instance_id);
     assert_eq!(lease.editor_target().continuity_epoch, Some(1));
     let entered_object = runtime
@@ -193,43 +245,215 @@ pub(super) fn observe_runtime_pcm(
         258
     );
     observe(&mut runtime, lease, &mut observations);
-    let mut output = Vec::with_capacity(FRAMES * 2);
-    let mut calls = 0;
-    for start in (0..FRAMES).step_by(64) {
-        let frames = 64.min(FRAMES - start);
-        let mut pcm = vec![f32::NAN; frames * 2];
-        runtime
-            .render_into(
+    let mut render_pcm = || {
+        let mut output = Vec::with_capacity(FRAMES * 2);
+        let mut calls = 0;
+        for start in (0..FRAMES).step_by(64) {
+            if matches!(control, Some(HostFaderControl::Retained)) && start == 2_048 {
+                let mut before = Cursors::default();
+                runtime.visit_continuity_evidence(&mut before).unwrap();
+                assert_eq!((before.sessions.len(), before.processors.len()), (1, 1));
+                assert!(matches!(before.sessions[0].state,
+                    crate::AudioSessionCursorState::Active {
+                        epoch, next_public_sample, next_execution_sample, alignment_primed: true,
+                    } if epoch == AudioContinuityEpoch::new(1)
+                        && next_public_sample.sample() == 2_048
+                        && next_execution_sample.sample() == 2_048));
+                assert!(matches!(before.processors[0].state,
+                    crate::AudioProcessorCursorState::Active {epoch, next_input_signal_sample}
+                        if epoch == AudioContinuityEpoch::new(1)
+                            && next_input_signal_sample.sample() == 2_048));
+                let prior = lease;
+                let prior_claim = installation.current_claim().unwrap().unwrap();
+                verifier.validate(&prior_claim).unwrap();
+                assert_eq!(
+                    runtime.observe_native_owner_object(prior).unwrap(),
+                    entered_object
+                );
+                let mut candidate = sequence.clone();
+                candidate.audio_program.outputs[0].strip.fader_db = -6.0;
+                assert_eq!(
+                    candidate.audio_program.outputs[0].strip.pre_fader,
+                    sequence.audio_program.outputs[0].strip.pre_fader
+                );
+                let program = Arc::new(
+                    crate::compile_audio_program(
+                        &candidate,
+                        crate::AudioCompileRequest::program(candidate.audio_program.outputs[0].id),
+                    )
+                    .unwrap(),
+                );
+                let (next_registration, destination) = installation.register().unwrap();
+                let cancellation = ExecutionCancellationToken::new();
+                let mut prepared = runtime
+                    .prepare_host_output_fader_handoff(program, destination.clone(), &cancellation)
+                    .expect(
+                        "real closed direct-root native Runtime admits terminal Host fader only",
+                    );
+                // Preparation alone cannot revoke the current Source or advance DSP.
+                verifier.validate(&prior_claim).unwrap();
+                assert_eq!(owner(&runtime), prior);
+                let mut prepared_cursors = Cursors::default();
+                runtime.visit_continuity_evidence(&mut prepared_cursors).unwrap();
+                assert_eq!(prepared_cursors.sessions, before.sessions);
+                assert_eq!(prepared_cursors.processors, before.processors);
+                let reservation =
+                    installation.reserve_install(&next_registration, Some(&prior_claim)).unwrap();
+                let mut authorization =
+                    installation.authorize_runtime_installation(reservation).unwrap();
+                let receipt = runtime.install_host_output_fader_handoff(
+                    &mut prepared, &mut authorization, &cancellation,
+                ).expect("same actual DSP publishes at the frozen F=2048 through its original Source");
+                assert_eq!(receipt.frontier, before.sessions[0]);
+                assert_eq!(
+                    receipt.identity.session_id,
+                    receipt.frontier.identity.session_id
+                );
+                assert_ne!(
+                    receipt.identity.prepared_plan_id,
+                    receipt.frontier.identity.prepared_plan_id
+                );
+                assert_eq!(receipt.native_bindings, 1);
+                assert!(verifier.validate(&prior_claim).is_err());
+                destination.validate(&receipt.claim).unwrap();
+                assert_eq!(
+                    installation.current_claim().unwrap().unwrap().generation(),
+                    receipt.claim.generation()
+                );
+                lease = owner(&runtime);
+                let mut next_address = prior.address();
+                next_address.root = receipt.identity;
+                next_address.local = receipt.identity;
+                assert_eq!(lease.address(), next_address);
+                assert_eq!(lease.binding(), prior.binding());
+                assert_eq!(lease.installed_root_serial(), receipt.claim.generation());
+                assert_ne!(lease.editor_target(), prior.editor_target());
+                assert!(runtime.native_editor_target(prior.address()).is_err());
+                assert!(runtime.observe_native_owner_object(prior).is_err());
+                assert_eq!(
+                    runtime.native_editor_target(lease.address()).unwrap(),
+                    lease.editor_target()
+                );
+                assert_eq!(
+                    runtime.observe_native_owner_object(lease).unwrap(),
+                    entered_object
+                );
+                let mut after = Cursors::default();
+                runtime.visit_continuity_evidence(&mut after).unwrap();
+                assert_eq!((after.sessions.len(), after.processors.len()), (1, 1));
+                assert_eq!(after.sessions[0].identity, receipt.identity);
+                assert_eq!(after.sessions[0].state, before.sessions[0].state);
+                assert_eq!(after.processors[0].state, before.processors[0].state);
+                assert_eq!(
+                    after.processors[0].occurrence,
+                    before.processors[0].occurrence
+                );
+                assert_eq!(
+                    candidate.audio_program.outputs[0].strip.pre_fader,
+                    sequence.audio_program.outputs[0].strip.pre_fader
+                );
+                // No Source/Runtime locks are held by this single-threaded consumer.
+                // Retired plan/scratch and fee owners leave scope before more DSP.
+                drop(prepared);
+            }
+            let frames = 64.min(FRAMES - start);
+            let mut pcm = vec![f32::NAN; frames * 2];
+            let rendered = runtime.render_into(
                 AudioRenderRequest { start_sample: start as i64, frames },
                 &mut pcm,
-            )
-            .expect("actual contiguous Runtime PCM; native typed failures remain failures");
-        assert_eq!(pcm.len(), frames * 2);
-        assert!(pcm.iter().all(|value| value.is_finite()));
-        output.extend(pcm);
-        calls += 1;
-        observe(&mut runtime, lease, &mut observations);
-    }
-    assert_eq!(output.len(), FRAMES * 2);
-    assert_eq!(calls, FRAMES / 64);
-    assert!(
-        reads.load(Ordering::Relaxed) > 0,
-        "actual bound media source read"
-    );
-    assert_eq!(
-        owner(&runtime),
-        lease,
-        "one real owner/epoch across all PCM"
-    );
-    assert_eq!(
+            );
+            if matches!(control, Some(HostFaderControl::ContinuousReference)) {
+                rendered.unwrap_or_else(|error| panic!(
+                    "NOT_COVERED_REFERENCE: actual continuous Runtime PCM failed at {start}: {error:?}"
+                ));
+            } else {
+                rendered
+                    .expect("actual contiguous Runtime PCM; native typed failures remain failures");
+            }
+            assert_eq!(pcm.len(), frames * 2);
+            assert!(
+                pcm.iter().all(|value| value.is_finite()),
+                "{}: nonfinite actual Runtime output",
+                if matches!(control, Some(HostFaderControl::ContinuousReference)) {
+                    "NOT_COVERED_REFERENCE"
+                } else {
+                    "NATIVE_RUNTIME_PCM"
+                }
+            );
+            output.extend(pcm);
+            calls += 1;
+            observe(&mut runtime, lease, &mut observations);
+        }
+        assert_eq!(output.len(), FRAMES * 2);
+        assert_eq!(calls, FRAMES / 64);
+        assert!(
+            reads.load(Ordering::Relaxed) > 0,
+            "actual bound media source read"
+        );
+        assert_eq!(
+            owner(&runtime),
+            lease,
+            "one real owner/epoch across all PCM"
+        );
+        assert_eq!(
+            runtime
+                .observe_native_owner_object(lease)
+                .expect("current same-object native owner after PCM"),
+            entered_object
+        );
         runtime
-            .observe_native_owner_object(lease)
-            .expect("current same-object native owner after PCM"),
-        entered_object
-    );
-    runtime
-        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-        .expect("actual author Source closed after the real PCM calls");
+            .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+            .expect("actual author Source closed after the real PCM calls");
+        if control.is_some() {
+            let mut terminal = Cursors::default();
+            runtime.visit_continuity_evidence(&mut terminal).unwrap();
+            assert_eq!((terminal.sessions.len(), terminal.processors.len()), (1, 1));
+            assert!(matches!(terminal.sessions[0].state,
+                crate::AudioSessionCursorState::Active {
+                    epoch, next_public_sample, next_execution_sample, alignment_primed: true,
+                } if epoch == AudioContinuityEpoch::new(1)
+                    && next_public_sample.sample() == FRAMES as i64
+                    && next_execution_sample.sample() == FRAMES as i64));
+            assert!(matches!(terminal.processors[0].state,
+                crate::AudioProcessorCursorState::Active {epoch, next_input_signal_sample}
+                    if epoch == AudioContinuityEpoch::new(1)
+                        && next_input_signal_sample.sample() == FRAMES as i64));
+        }
+        output
+    };
+    // New target failures must settle the exact authenticated child before they
+    // escape. Existing observation selectors retain their original unwind path.
+    let result = if control.is_some() {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut render_pcm))
+    } else {
+        Ok(render_pcm())
+    };
+    drop(render_pcm);
+    let output = match result {
+        Ok(output) => output,
+        Err(panic) => {
+            let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+            drop(runtime);
+            let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+            let mut exit_code = 0;
+            let queried =
+                unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
+            assert_eq!(
+                alive, 258,
+                "target-failure child was alive before original Runtime Drop"
+            );
+            assert_eq!(
+                settled, 0,
+                "target-failure original Runtime Drop settles exact child"
+            );
+            assert_ne!(queried, 0);
+            assert_eq!(
+                exit_code, 0,
+                "target-failure child exits cleanly before rethrow"
+            );
+            std::panic::resume_unwind(panic)
+        }
+    };
     write_new(
         directory,
         &format!("{label}-output.f32le"),
@@ -281,6 +505,15 @@ pub(super) fn observe_runtime_pcm(
         .unwrap()
         .clone(),
     );
+    if let Some(control) = control {
+        receipt.as_object_mut().unwrap().extend(json!({
+            "host_fader_control": if matches!(control, HostFaderControl::Retained) { "retained-at-2048-minus6db" } else { "continuous-unscaled-reference" },
+            "host_fader_public_frame": if matches!(control, HostFaderControl::Retained) { Some(2_048) } else { None },
+            "same_installed_owner_across_pcm": matches!(control, HostFaderControl::ContinuousReference),
+            "same_native_binding_across_pcm": true,
+            "app_action_or_realtime_qualified": false,
+        }).as_object().unwrap().clone());
+    }
     let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     drop(runtime);
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
