@@ -1478,7 +1478,11 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::to_vec_pretty(&run).expect("serialize run"),
     )
     .expect("write run");
-    let replay_binary = Path::new(env!("CARGO_BIN_EXE_mondrian-endurance-replay"));
+    // Cargo's target directory may be a junction. Keep the verifier's strict
+    // no-reparse ancestry policy and resolve this same built binary physically.
+    let replay_binary = Path::new(env!("CARGO_BIN_EXE_mondrian-endurance-replay"))
+        .canonicalize()
+        .expect("canonical physical path of the Cargo-built replay binary");
     let output_path = temporary.path().join("report.json");
     let mut verifier = Command::new("pwsh");
     verifier
@@ -1492,9 +1496,9 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         .arg("-ChunkDirectory")
         .arg(&evidence_directory)
         .arg("-ReplayBinaryPath")
-        .arg(replay_binary)
+        .arg(&replay_binary)
         .arg("-ReplayBinarySha256")
-        .arg(file_sha256(replay_binary))
+        .arg(file_sha256(&replay_binary))
         .arg("-ExpectedProfileFileSha256")
         .arg(file_sha256(&profile_path))
         .arg("-ExpectedCaptureAuthorityPath")
