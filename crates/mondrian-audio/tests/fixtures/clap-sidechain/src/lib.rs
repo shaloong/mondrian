@@ -66,6 +66,7 @@ impl DefaultPluginFactory for SidechainFixture {
             render_mode: AtomicU8::new(0),
             active: AtomicBool::new(false),
             restart_seen: AtomicBool::new(false),
+            repeat_restart_count: AtomicU8::new(0),
             configured_latency: AtomicU32::new(3),
             mode: AtomicU8::new(0),
             gain: AtomicU32::new(1.0_f32.to_bits()),
@@ -99,6 +100,7 @@ pub struct Shared<'a> {
     render_mode: AtomicU8,
     active: AtomicBool,
     restart_seen: AtomicBool,
+    repeat_restart_count: AtomicU8,
     configured_latency: AtomicU32,
     mode: AtomicU8,
     gain: AtomicU32,
@@ -136,6 +138,7 @@ impl Shared<'_> {
     fn next_activation_delay_frames(&self) -> u32 {
         match self.mode.load(Ordering::Relaxed) {
             12 => 0,
+            13 => 3 + 4 * u32::from(self.repeat_restart_count.load(Ordering::Relaxed)),
             3 if self.render_mode.load(Ordering::Relaxed) == 1 => 5,
             7..=9 if self.restart_seen.load(Ordering::Relaxed) => 7,
             _ => 3,
@@ -160,6 +163,9 @@ impl PluginStateImpl for Main<'_> {
         output.write_all(&self.0.gain.load(Ordering::Relaxed).to_le_bytes())?;
         if (7..=9).contains(&self.0.mode.load(Ordering::Relaxed)) {
             output.write_all(&[u8::from(self.0.restart_seen.load(Ordering::Relaxed))])?;
+        }
+        if self.0.mode.load(Ordering::Relaxed) == 13 {
+            output.write_all(&[self.0.repeat_restart_count.load(Ordering::Relaxed)])?;
         }
         if self.0.restart_seen.load(Ordering::Relaxed)
             && self.0.configured_latency.load(Ordering::Relaxed) == 7 {
@@ -186,6 +192,10 @@ impl PluginStateImpl for Main<'_> {
             if flag[0] > 1 { return Err(PluginError::Message("invalid fixture restart flag")); }
             flag[0] != 0
         } else { false };
+        let repeat_restart_count = if bytes[0] == 13 {
+            read_repeat_restart_count(input)?
+        } else { 0 };
+        self.0.repeat_restart_count.store(repeat_restart_count, Ordering::Relaxed);
         self.0.restart_seen.store(restart_seen, Ordering::Relaxed);
         self.0.mode.store(bytes[0], Ordering::Relaxed);
         self.0.gain.store(gain.to_bits(), Ordering::Relaxed);
@@ -269,12 +279,36 @@ const ECHO_FRAMES: usize = 256;
 
 // Only the existing five-byte mode/gain header is configuration. Modes 7–9
 // retain their separate restart flag; mode12 never serializes its live ring.
+// Isolated mode13 appends only a bounded configuration generation 0..=2.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 12 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 13 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
+}
+
+fn read_repeat_restart_count(input: &mut impl Read) -> Result<u8, PluginError> {
+    let mut count = [0];
+    input.read_exact(&mut count)?;
+    if count[0] > 2 {
+        return Err(PluginError::Message(
+            "invalid repeated fixture restart count",
+        ));
+    }
+    Ok(count[0])
+}
+
+// This real process-boundary decision emits exactly two actual host callbacks;
+// the host cannot obtain either request by inventing a parent-side ticket.
+fn repeat_restart_boundary(count: &AtomicU8, end: i64) -> bool {
+    let previous = count.load(Ordering::Relaxed);
+    if !matches!((previous, end), (0, 10..) | (1, 30..)) {
+        return false;
+    }
+    count
+        .compare_exchange(previous, previous + 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
 
 // The 2048-byte stereo ring belongs to this native DSP instance. Latency is
@@ -493,6 +527,11 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             // deactivates and activates at a later legal boundary.
             self.shared.host.request_restart();
         }
+        if self.mode == 13 && timeline_start.is_some_and(|start| {
+            repeat_restart_boundary(&self.shared.repeat_restart_count, start.saturating_add(frames as i64))
+        }) {
+            self.shared.host.request_restart();
+        }
         Ok(ProcessStatus::Continue)
     }
 }
@@ -582,7 +621,46 @@ mod finite_echo_tests {
         for _ in 0..=ECHO_FRAMES {
             assert_eq!(live.process_frame([0.0; 2]), [0.0; 2]);
         }
-        bytes[0] = 13;
+        bytes[0] = 14;
         assert!(configuration_gain(bytes).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod repeat_restart_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_restart_configuration_is_bounded_and_requires_its_sixth_byte() {
+        let mut header = [13, 0, 0, 0, 0];
+        header[1..].copy_from_slice(&0.5_f32.to_le_bytes());
+        assert_eq!(configuration_gain(header).unwrap(), 0.5);
+        for expected in 0..=2 {
+            assert_eq!(
+                read_repeat_restart_count(&mut &[expected][..]).unwrap(),
+                expected
+            );
+        }
+        assert!(read_repeat_restart_count(&mut &[][..]).is_err());
+        assert!(read_repeat_restart_count(&mut &[3][..]).is_err());
+        header[0] = 14;
+        assert!(configuration_gain(header).is_err());
+    }
+
+    #[test]
+    fn real_process_boundary_decision_requests_only_two_distinct_generations() {
+        let count = AtomicU8::new(0);
+        assert!(!repeat_restart_boundary(&count, 9));
+        assert!(repeat_restart_boundary(&count, 10));
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        for end in [10, 11, 29] {
+            assert!(!repeat_restart_boundary(&count, end));
+        }
+        assert!(repeat_restart_boundary(&count, 30));
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+        for end in [30, 31, i64::MAX] {
+            assert!(!repeat_restart_boundary(&count, end));
+        }
     }
 }
