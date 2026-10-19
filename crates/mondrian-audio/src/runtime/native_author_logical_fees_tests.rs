@@ -160,6 +160,13 @@ fn logical_fee_refinement_handles_maximum_and_an_already_credited_peer() {
     assert_eq!(scope.load(Ordering::SeqCst), 13);
     drop(fee);
     assert_eq!(scope.load(Ordering::SeqCst), 0);
+    let mut canceled = active_fee(&scope, 13, 29);
+    let peer = active_fee(&scope, 7, 11);
+    canceled.shrink_prepared_to(17).unwrap();
+    drop(canceled); // Prepared cancellation credits A, never U or old.
+    assert_eq!(scope.load(Ordering::SeqCst), 11);
+    drop(peer);
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
 }
 
 #[test]
