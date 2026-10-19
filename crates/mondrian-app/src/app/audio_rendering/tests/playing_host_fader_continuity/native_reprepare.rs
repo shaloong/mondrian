@@ -314,6 +314,10 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                             .observe_native_owner_object(lease)
                             .expect("authenticated new object after the original Fresh entry");
                         new_object = Some((object.process_id(), object.object_serial()));
+                        assert!(
+                            Instant::now() < deadline,
+                            "authenticated identity RPC exceeded the original restart deadline"
+                        );
                         break;
                     }
                 }
