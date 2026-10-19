@@ -1,4 +1,4 @@
-//! Audio-only retained capture. No Media/output-quiescence or full C07 qualification.
+//! Audio-only retained restart controls. No Media/output-quiescence or full C07 qualification.
 use super::*;
 use mondrian_core::{AudioOwnerInstallationSource, AudioRenderSessionId};
 use std::path::PathBuf;
@@ -53,16 +53,103 @@ fn installed_clap_runtime_restart_pdc_refusal_keeps_capture_and_old_source_held(
     retained_restart_control(Preparation::RefusePdc);
 }
 
+#[test]
+#[ignore = "current production helper and owned CLAP mode7; stopped Source installation then explicit Fresh Enter, no Media quiescence"]
+fn installed_clap_runtime_restart_installs_same_child_then_requires_fresh_entry() {
+    retained_restart_control(Preparation::Install);
+}
+
+#[test]
+#[ignore = "current production helper and owned CLAP mode7; child commit followed by wrong Source CAS must remain held"]
+fn installed_clap_runtime_restart_commit_then_wrong_cas_retains_old_hold_without_retry() {
+    retained_restart_control(Preparation::RefuseCas);
+}
+
+#[test]
+#[ignore = "current production helper and owned CLAP mode7; authenticated Commit reply deliberately hidden from Runtime, not TCP loss"]
+fn installed_clap_runtime_restart_lost_commit_reply_is_unconfirmed_and_never_retried() {
+    retained_restart_control(Preparation::LostCommitReply);
+}
+
+#[test]
+#[ignore = "current production helper and isolated CLAP mode13; two same-child restart installations under one Root grant, no Media quiescence"]
+fn installed_clap_runtime_repeated_restart_retires_resources_under_the_same_grant() {
+    retained_restart_control(Preparation::TwoCycles);
+}
+
+fn assert_restarted_pcm(runtime: &mut AudioProgramRuntime, start: i64) {
+    let mut pcm = [99.0; 8];
+    runtime
+        .render_into(
+            AudioRenderRequest { start_sample: start, frames: 4 },
+            &mut pcm,
+        )
+        .expect("new canonical PDC public window after explicit Fresh Enter");
+    for (offset, pair) in pcm.chunks_exact(2).enumerate() {
+        let expected = (start as usize + offset + 1) as f32 * 2.5;
+        assert_eq!(
+            pair,
+            [expected, -expected],
+            "unchanged main + routed detector PCM"
+        );
+    }
+}
+
+// Observation-only original child/domain counts, never an execution proof.
+#[derive(Default)]
+struct ChildCounts {
+    scopes: std::sync::atomic::AtomicUsize,
+    children: std::sync::atomic::AtomicUsize,
+    settled: std::sync::atomic::AtomicUsize,
+    unavailable: std::sync::atomic::AtomicBool,
+}
+impl mondrian_core::NativeChildSettlementReporter for ChildCounts {
+    fn begin_scope(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.scopes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn end_scope(&self) {
+        self.scopes.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn begin_child(&self) -> Result<(), mondrian_core::NativeChildSettlementError> {
+        self.children.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn end_child(&self, result: mondrian_core::NativeChildSettlement) {
+        self.children.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if result == mondrian_core::NativeChildSettlement::Settled {
+            self.settled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            self.unavailable();
+        }
+    }
+    fn unavailable(&self) {
+        self.unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Preparation {
     CaptureOnly,
     Ready,
     RefusePdc,
+    Install,
+    RefuseCas,
+    LostCommitReply,
+    TwoCycles,
 }
 
 fn retained_restart_control(preparation: Preparation) {
     let prepare = preparation != Preparation::CaptureOnly;
+    let install = matches!(
+        preparation,
+        Preparation::Install
+            | Preparation::RefuseCas
+            | Preparation::LostCommitReply
+            | Preparation::TwoCycles
+    );
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::sync::atomic::Ordering::SeqCst;
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, WaitForSingleObject,
     };
@@ -86,7 +173,12 @@ fn retained_restart_control(preparation: Preparation) {
         },
         compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
-    let mut state = vec![7];
+    let mode = if preparation == Preparation::TwoCycles {
+        13
+    } else {
+        7
+    };
+    let mut state = vec![mode];
     state.extend_from_slice(&0.5_f32.to_le_bytes());
     state.push(0);
     let instance = catalog
@@ -144,7 +236,12 @@ fn retained_restart_control(preparation: Preparation) {
     ));
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let author_before = serde_json::to_value(&sequence).unwrap();
-    let processors = IsolatedAudioProcessorResolver::new(catalog);
+    let mut processors = IsolatedAudioProcessorResolver::new(catalog);
+    let lost_reply = (preparation == Preparation::LostCommitReply)
+        .then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    if let Some(observed) = &lost_reply {
+        processors.discard_next_seed_commit_reply_for_test(Arc::clone(observed));
+    }
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
         &sequence,
         &[],
@@ -192,6 +289,9 @@ fn retained_restart_control(preparation: Preparation) {
     let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
     assert!(!raw.is_null());
     let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let counts = install.then(|| Arc::new(ChildCounts::default()));
+    let mut registrar = None;
+    let mut installed = false;
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_eq!(runtime.public_output_lookahead_frames(), 3);
         // Priming evaluates 0..3, then these public windows evaluate 3..7 and
@@ -276,7 +376,7 @@ fn retained_restart_control(preparation: Preparation) {
             .service_native_reprepare(ticket, &cancellation)
             .expect("actual retained Runtime capture must succeed");
         let identity = operation.configuration_identity();
-        let mut expected = vec![7];
+        let mut expected = vec![mode];
         expected.extend_from_slice(&0.5_f32.to_le_bytes());
         expected.push(1);
         assert_eq!(
@@ -320,6 +420,8 @@ fn retained_restart_control(preparation: Preparation) {
             runtime.service_native_reprepare(ticket, &cancellation),
             Err(NativeAudioReprepareError::Admission(_))
         ));
+        let mut next_identity = None;
+        let mut next_resources = None;
         let retained_footprint = if prepare {
             let canceled = ExecutionCancellationToken::new();
             canceled.cancel();
@@ -351,6 +453,8 @@ fn retained_restart_control(preparation: Preparation) {
                 let facts = planned.expect(
                     "actual retained capture must prepare the canonical PDC and empty Session",
                 );
+                next_identity = Some(facts.identity());
+                next_resources = Some(facts.resources());
                 assert_ne!(
                     facts.identity().prepared_plan_id,
                     held.session.unwrap().identity.prepared_plan_id
@@ -415,6 +519,453 @@ fn retained_restart_control(preparation: Preparation) {
         } else {
             captured_footprint
         };
+        if install {
+            // Deliberately bind the real original child AFTER preparation. The
+            // empty destination must inherit this same domain at installation.
+            let observed = counts.as_ref().unwrap();
+            registrar = Some(
+                mondrian_core::NativeChildSettlementRegistrar::try_new(observed.clone())
+                    .expect("late original domain"),
+            );
+            runtime
+                .bind_native_child_settlement(registrar.as_ref().unwrap())
+                .expect("late actual child registration");
+            assert_eq!(observed.children.load(SeqCst), 1);
+            assert_eq!(observed.settled.load(SeqCst), 0);
+            assert_eq!(observed.scopes.load(SeqCst), 2);
+            let mut authorization = source
+                .authorize_runtime_installation(
+                    source.reserve_install(&registration, Some(&claim)).unwrap(),
+                )
+                .unwrap();
+            let canceled = ExecutionCancellationToken::new();
+            canceled.cancel();
+            assert!(matches!(
+                runtime.install_native_reprepare_plan(&operation, &mut authorization, &canceled),
+                Err(NativeAudioReprepareError::Cancelled)
+            ));
+            assert_eq!(runtime.resource_footprint(), retained_footprint);
+            assert_eq!(cursors(&runtime), held);
+            // An unrelated real Source permission reaches begin_commit only
+            // AFTER actual Stage/Commit and all stopped transfer validations.
+            if preparation == Preparation::RefuseCas {
+                let unrelated = AudioOwnerInstallationSource::new();
+                let (other_registration, _) = unrelated.register().unwrap();
+                authorization = unrelated
+                    .authorize_runtime_installation(
+                        unrelated.reserve_install(&other_registration, None).unwrap(),
+                    )
+                    .unwrap();
+            }
+            let outcome = runtime.install_native_reprepare_plan(
+                &operation,
+                &mut authorization,
+                &cancellation,
+            );
+            if matches!(preparation, Preparation::Install | Preparation::TwoCycles) {
+                let receipt = outcome.expect("actual same-child Source installation");
+                installed = true;
+                assert_eq!(receipt.identity(), next_identity.unwrap());
+                assert_eq!(receipt.previous_epoch(), Some(AudioContinuityEpoch::new(1)));
+                verifier.validate(receipt.claim()).unwrap();
+                assert_ne!(receipt.claim().generation(), claim.generation());
+                assert!(verifier.validate(&claim).is_err());
+                assert_eq!(
+                    source.current_claim().unwrap().unwrap().generation(),
+                    receipt.claim().generation()
+                );
+                assert_eq!(runtime.public_output_lookahead_frames(), 7);
+                let unentered = cursors(&runtime);
+                assert_eq!(unentered.session.unwrap().identity, receipt.identity());
+                assert_eq!(
+                    unentered.session.unwrap().state,
+                    AudioSessionCursorState::Unentered
+                );
+                assert_eq!(
+                    unentered.processor.unwrap().state,
+                    AudioProcessorCursorState::Unentered
+                );
+                assert!(runtime.native_owner_lease(address).is_err());
+                assert_eq!(
+                    runtime.render_into(
+                        AudioRenderRequest { start_sample: 8, frames: 4 },
+                        &mut unpublished
+                    ),
+                    Err(AudioExecutionError::StateEntryRequired)
+                );
+                assert_eq!(unpublished, [99.0; 8]);
+                assert_eq!(
+                    observed.children.load(SeqCst),
+                    1,
+                    "Hosted transfer does not register/create another child"
+                );
+                assert_eq!(
+                    observed.scopes.load(SeqCst),
+                    3,
+                    "new Session inherited actual late-bound domain; retired one stays live"
+                );
+                let published = runtime.resource_footprint();
+                assert_eq!(
+                    published.fixed_resident_bytes,
+                    retained_footprint.fixed_resident_bytes + expected.len()
+                );
+                assert_eq!(
+                    published.prepared_logical_bytes,
+                    next_resources.unwrap().prepared_logical_bytes
+                );
+                assert_eq!(
+                    published.compensation_delay_bytes,
+                    next_resources.unwrap().compensation_delay_bytes
+                );
+                assert_eq!(published.runtime_occurrences, 1);
+                runtime
+                    .enter_state_cancellable(
+                        AudioStateEntry {
+                            epoch: AudioContinuityEpoch::new(2),
+                            start_sample: 8,
+                        },
+                        &cancellation,
+                    )
+                    .expect("explicit consumer Fresh Enter");
+                let new_address = AudioNativeProcessorAddress {
+                    root: receipt.identity(),
+                    local: receipt.identity(),
+                    occurrence,
+                    epoch: Some(AudioContinuityEpoch::new(2)),
+                };
+                let new_lease = runtime.native_owner_lease(new_address).unwrap();
+                assert_ne!(new_lease.binding(), lease.binding());
+                assert_eq!(
+                    new_lease.installed_root_serial(),
+                    receipt.claim().generation()
+                );
+                assert_eq!(
+                    runtime.observe_native_owner_object(new_lease).unwrap(),
+                    object,
+                    "same authenticated child/object, not a newly created native instance"
+                );
+                for start in [8, 12] {
+                    assert_restarted_pcm(&mut runtime, start);
+                }
+                let active = cursors(&runtime);
+                let rate = active.session.unwrap().sample_rate;
+                assert_eq!(
+                    active.session.unwrap().state,
+                    AudioSessionCursorState::Active {
+                        epoch: AudioContinuityEpoch::new(2),
+                        next_public_sample: mondrian_core::AudioSamplePosition::new(16, rate),
+                        next_execution_sample: mondrian_core::AudioSamplePosition::new(23, rate),
+                        alignment_primed: true,
+                    }
+                );
+                assert_eq!(
+                    active.processor.unwrap().state,
+                    AudioProcessorCursorState::Active {
+                        epoch: AudioContinuityEpoch::new(2),
+                        next_input_signal_sample: mondrian_core::AudioSamplePosition::new(23, rate),
+                    }
+                );
+                assert!(matches!(
+                    runtime.install_native_reprepare_plan(
+                        &operation,
+                        &mut authorization,
+                        &cancellation
+                    ),
+                    Err(NativeAudioReprepareError::Admission(_))
+                ));
+                let first_claim = receipt.claim().clone();
+                let first_resources = next_resources.unwrap();
+                let second_ticket = if preparation == Preparation::TwoCycles {
+                    // Public16/20 complete before the actual second callback;
+                    // installed PDC7 evaluates through31, threshold29.
+                    for start in [16, 20] {
+                        assert_restarted_pcm(&mut runtime, start);
+                    }
+                    let ticket = match runtime.render_into(
+                        AudioRenderRequest { start_sample: 24, frames: 4 },
+                        &mut unpublished,
+                    ) {
+                        Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
+                        other => panic!("actual mode13 second callback: {other:?}"),
+                    };
+                    assert_eq!(ticket.prepared_plan_id, receipt.identity().prepared_plan_id);
+                    assert_eq!(ticket.session_id, receipt.identity().session_id);
+                    assert_eq!(ticket.continuity_epoch, Some(AudioContinuityEpoch::new(2)));
+                    assert_eq!(ticket.occurrence, occurrence);
+                    Some(ticket)
+                } else {
+                    None
+                };
+                let still_high = runtime.resource_footprint();
+                assert!(matches!(
+                    runtime
+                        .service_native_reprepare(second_ticket.unwrap_or(ticket), &cancellation),
+                    Err(NativeAudioReprepareError::Admission(
+                        "an actual restart attempt is already retained"
+                    ))
+                ));
+                assert_eq!(runtime.resource_footprint(), still_high);
+                // Actual old Session/Factory/candidate/last logical fee retire
+                // here, with no Runtime/metadata/Source guard held.
+                let retired = receipt.retire();
+                assert_eq!(observed.scopes.load(SeqCst), 2);
+                assert_eq!(observed.children.load(SeqCst), 1);
+                assert_eq!(observed.settled.load(SeqCst), 0);
+                assert_eq!(
+                    runtime.resource_footprint(),
+                    still_high,
+                    "physical Drop alone cannot publish a credit"
+                );
+                runtime
+                    .finish_native_reprepare_retirement(retired)
+                    .expect("exact original Runtime consumes actual retirement");
+                let normalized_one = runtime.resource_footprint();
+                assert!(normalized_one.fixed_resident_bytes < still_high.fixed_resident_bytes);
+                assert_eq!(
+                    normalized_one.prepared_logical_bytes,
+                    first_resources.prepared_logical_bytes
+                );
+                assert_eq!(normalized_one.runtime_occurrences, 1);
+                assert_eq!(
+                    source.current_claim().unwrap().unwrap().generation(),
+                    first_claim.generation()
+                );
+                if let Some(ticket_two) = second_ticket {
+                    let held_two = cursors(&runtime);
+                    let second = runtime
+                        .service_native_reprepare(ticket_two, &cancellation)
+                        .expect("same Root/grant admits second actual restart after retirement");
+                    let mut expected_two = vec![13];
+                    expected_two.extend_from_slice(&0.5_f32.to_le_bytes());
+                    expected_two.push(2);
+                    assert_eq!(
+                        runtime.native_reprepare_configuration(&second).unwrap(),
+                        expected_two
+                    );
+                    assert_eq!(
+                        second
+                            .configuration_identity()
+                            .observed_contract
+                            .algorithmic_latency_frames(),
+                        11
+                    );
+                    assert_eq!(
+                        second.configuration_identity().observed_contract.tail(),
+                        AudioProcessorTail::Finite(11)
+                    );
+                    let second_plan = runtime
+                        .prepare_native_reprepare_plan(&second, verifier.clone(), &cancellation)
+                        .expect("canonical PDC11 preparation");
+                    assert_eq!(second_plan.schedule().public_output_lookahead_frames, 11);
+                    assert_eq!(second_plan.schedule().processor_occurrence_count, 1);
+                    assert_eq!(second_plan.schedule().sidechain_binding_count, 1);
+                    assert_eq!(
+                        second_plan.resources().processor_session_bytes,
+                        processor_session_bytes
+                    );
+                    assert_eq!(cursors(&runtime), held_two);
+                    let mut second_permission = source
+                        .authorize_runtime_installation(
+                            source.reserve_install(&registration, Some(&first_claim)).unwrap(),
+                        )
+                        .unwrap();
+                    let receipt_two = runtime
+                        .install_native_reprepare_plan(
+                            &second,
+                            &mut second_permission,
+                            &cancellation,
+                        )
+                        .expect("same actual child installs second stopped candidate");
+                    assert_eq!(receipt_two.identity(), second_plan.identity());
+                    assert_eq!(
+                        receipt_two.previous_epoch(),
+                        Some(AudioContinuityEpoch::new(2))
+                    );
+                    verifier.validate(receipt_two.claim()).unwrap();
+                    assert!(verifier.validate(&first_claim).is_err());
+                    assert_eq!(runtime.public_output_lookahead_frames(), 11);
+                    assert_eq!(
+                        cursors(&runtime).session.unwrap().state,
+                        AudioSessionCursorState::Unentered
+                    );
+                    assert_eq!(
+                        cursors(&runtime).processor.unwrap().state,
+                        AudioProcessorCursorState::Unentered
+                    );
+                    assert_eq!(
+                        runtime.render_into(
+                            AudioRenderRequest { start_sample: 24, frames: 4 },
+                            &mut unpublished
+                        ),
+                        Err(AudioExecutionError::StateEntryRequired)
+                    );
+                    assert_eq!(unpublished, [99.0; 8]);
+                    assert!(runtime.native_owner_lease(new_address).is_err());
+                    runtime
+                        .enter_state_cancellable(
+                            AudioStateEntry {
+                                epoch: AudioContinuityEpoch::new(3),
+                                start_sample: 24,
+                            },
+                            &cancellation,
+                        )
+                        .expect("second explicit consumer Fresh Enter");
+                    let address_three = AudioNativeProcessorAddress {
+                        root: receipt_two.identity(),
+                        local: receipt_two.identity(),
+                        occurrence,
+                        epoch: Some(AudioContinuityEpoch::new(3)),
+                    };
+                    let lease_three = runtime.native_owner_lease(address_three).unwrap();
+                    assert_ne!(lease_three.binding(), new_lease.binding());
+                    assert_eq!(
+                        lease_three.installed_root_serial(),
+                        receipt_two.claim().generation()
+                    );
+                    assert_eq!(
+                        runtime.observe_native_owner_object(lease_three).unwrap(),
+                        object
+                    );
+                    for start in [24, 28] {
+                        assert_restarted_pcm(&mut runtime, start);
+                    }
+                    let active_three = cursors(&runtime);
+                    assert_eq!(
+                        active_three.session.unwrap().state,
+                        AudioSessionCursorState::Active {
+                            epoch: AudioContinuityEpoch::new(3),
+                            next_public_sample: mondrian_core::AudioSamplePosition::new(32, rate),
+                            next_execution_sample: mondrian_core::AudioSamplePosition::new(
+                                43, rate
+                            ),
+                            alignment_primed: true,
+                        }
+                    );
+                    assert_eq!(
+                        active_three.processor.unwrap().state,
+                        AudioProcessorCursorState::Active {
+                            epoch: AudioContinuityEpoch::new(3),
+                            next_input_signal_sample: mondrian_core::AudioSamplePosition::new(
+                                43, rate
+                            ),
+                        }
+                    );
+                    let high_two = runtime.resource_footprint();
+                    assert!(high_two.fixed_resident_bytes <= grant.max_fixed_resident_bytes);
+                    assert!(matches!(
+                        runtime.service_native_reprepare(ticket_two, &cancellation),
+                        Err(NativeAudioReprepareError::Admission(
+                            "an actual restart attempt is already retained"
+                        ))
+                    ));
+                    assert_eq!(runtime.resource_footprint(), high_two);
+                    assert_eq!(observed.children.load(SeqCst), 1);
+                    assert_eq!(observed.scopes.load(SeqCst), 3);
+                    let current_claim = receipt_two.claim().clone();
+                    let retired_two = receipt_two.retire();
+                    assert_eq!(runtime.resource_footprint(), high_two);
+                    runtime.finish_native_reprepare_retirement(retired_two).unwrap();
+                    let normalized_two = runtime.resource_footprint();
+                    assert_eq!(normalized_two.fixed_resident_bytes,
+                        normalized_one.fixed_resident_bytes
+                            - first_resources.fixed_resident_bytes
+                            + second_plan.resources().fixed_resident_bytes,
+                        "same-sized mode13 metadata/seed replace old extras; no capture/codec/seed fee accumulation");
+                    assert_eq!(
+                        normalized_two.prepared_logical_bytes,
+                        second_plan.resources().prepared_logical_bytes
+                    );
+                    assert_eq!(normalized_two.runtime_occurrences, 1);
+                    assert_eq!(observed.children.load(SeqCst), 1);
+                    assert_eq!(observed.scopes.load(SeqCst), 2);
+                    assert_eq!(observed.settled.load(SeqCst), 0);
+                    verifier.validate(&current_claim).unwrap();
+                    assert_eq!(
+                        source.current_claim().unwrap().unwrap().generation(),
+                        current_claim.generation()
+                    );
+                    drop(second);
+                    assert_eq!(runtime.resource_footprint(), normalized_two);
+                }
+            } else {
+                match outcome {
+                    Err(NativeAudioReprepareError::Owner(AudioNativeOwnerError::Installation(
+                        mondrian_core::AudioOwnerInstallationError::WrongRegistration,
+                    ))) if preparation == Preparation::RefuseCas => {}
+                    Err(NativeAudioReprepareError::Processor(
+                        AudioProcessorHostError::WorkerFailed {
+                            operation: "configuration seed commit",
+                            detail,
+                        },
+                    )) if preparation == Preparation::LostCommitReply => {
+                        assert!(detail.contains("test discarded authenticated seed commit reply"));
+                        assert!(
+                            lost_reply.as_ref().unwrap().load(SeqCst),
+                            "actual authenticated Accepted preceded injected parent-visible loss"
+                        );
+                    }
+                    _ => panic!("exact post-commit failure category was not reached"),
+                }
+                assert_eq!(cursors(&runtime), held);
+                verifier.validate(&claim).unwrap();
+                assert_eq!(
+                    source.current_claim().unwrap().unwrap().generation(),
+                    claim.generation()
+                );
+                assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
+                assert_eq!(
+                    runtime.native_reprepare_configuration(&operation).unwrap(),
+                    expected
+                );
+                let failed = runtime.resource_footprint();
+                assert_eq!(
+                    failed.fixed_resident_bytes,
+                    retained_footprint.fixed_resident_bytes + expected.len()
+                );
+                let mut other_weights = failed;
+                other_weights.fixed_resident_bytes = retained_footprint.fixed_resident_bytes;
+                assert_eq!(other_weights, retained_footprint);
+                let mut retry = source
+                    .authorize_runtime_installation(
+                        source.reserve_install(&registration, Some(&claim)).unwrap(),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    runtime.install_native_reprepare_plan(&operation, &mut retry, &cancellation),
+                    Err(NativeAudioReprepareError::Admission(
+                        "restart installation already attempted or not prepared"
+                    ))
+                ));
+                assert_eq!(runtime.resource_footprint(), failed);
+                assert_eq!(
+                    runtime.render_into(
+                        AudioRenderRequest { start_sample: 8, frames: 4 },
+                        &mut unpublished
+                    ),
+                    Err(AudioExecutionError::ReprepareRequired(ticket))
+                );
+                assert_eq!(
+                    runtime.enter_state_cancellable(
+                        AudioStateEntry {
+                            epoch: AudioContinuityEpoch::new(2),
+                            start_sample: 8,
+                        },
+                        &cancellation
+                    ),
+                    Err(AudioExecutionError::ReprepareRequired(ticket))
+                );
+                assert_eq!(unpublished, [99.0; 8]);
+                assert_eq!(cursors(&runtime), held);
+                drop(operation);
+                assert_eq!(
+                    runtime.resource_footprint(),
+                    failed,
+                    "failure ownership/seed credit is independent of the external handle"
+                );
+            }
+            assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
+            return;
+        }
         drop(operation);
         // Handle Drop cannot release parent candidate/preparation or child fees.
         assert_eq!(runtime.resource_footprint(), retained_footprint);
@@ -440,6 +991,7 @@ fn retained_restart_control(preparation: Preparation) {
     // target is not evidence of successful cleanup or physical-output quiescence.
     let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     drop(runtime);
+    drop(registrar);
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     let mut exit = 0;
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) };
@@ -447,18 +999,40 @@ fn retained_restart_control(preparation: Preparation) {
         Preparation::CaptureOnly => "runtime-retained-clap-capture-only",
         Preparation::Ready => "runtime-retained-clap-execution-prepare",
         Preparation::RefusePdc => "runtime-retained-clap-pdc-refusal",
+        Preparation::Install => "runtime-retained-clap-install-fresh-entry",
+        Preparation::RefuseCas => "runtime-retained-clap-commit-cas-refusal",
+        Preparation::LostCommitReply => "runtime-retained-clap-commit-reply-loss",
+        Preparation::TwoCycles => "runtime-retained-clap-repeat-install-retire",
     };
     println!(
         "{}",
         serde_json::json!({"case":case, "native_pid":pid,
         "alive_before_drop":alive,"post_drop_wait_status":settled,"exit_query_succeeded":queried!=0,"exit_code":exit,
-        "media_quiescence_qualified":false,"canonical_author_or_plan_installed":false})
+        "media_quiescence_qualified":false,"canonical_author_or_plan_installed":installed})
     );
     assert_eq!(settled, 0, "original native owner cleanup");
     assert_ne!(queried, 0);
-    assert_eq!(exit, 0);
+    if preparation != Preparation::LostCommitReply {
+        assert_eq!(exit, 0);
+    }
+    if let Some(observed) = counts {
+        assert_eq!(
+            observed.scopes.load(SeqCst),
+            0,
+            "all actual Session/receipt domain forks retired"
+        );
+        assert_eq!(observed.children.load(SeqCst), 0);
+        assert_eq!(
+            observed.settled.load(SeqCst),
+            1,
+            "one original ProcessOwner reports once"
+        );
+        assert!(!observed.unavailable.load(SeqCst));
+    }
     if let Err(payload) = target {
         std::panic::resume_unwind(payload);
     }
-    assert_eq!(alive, 258);
+    if preparation != Preparation::LostCommitReply {
+        assert_eq!(alive, 258);
+    }
 }

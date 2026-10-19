@@ -44,6 +44,8 @@ pub(super) struct SupervisedAudioWorker {
     configured_control_timeout: Option<Duration>,
     #[cfg(test)]
     before_drop_test_hook: Option<BeforeDropTestHook>,
+    #[cfg(test)]
+    discard_seed_commit_reply: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[cfg(test)]
@@ -503,6 +505,8 @@ impl SupervisedAudioWorker {
                 configured_control_timeout: Some(spec.operation_timeout),
                 #[cfg(test)]
                 before_drop_test_hook: None,
+                #[cfg(test)]
+                discard_seed_commit_reply: None,
             },
             input_names,
         ))
@@ -962,6 +966,14 @@ impl SupervisedAudioWorker {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn discard_next_seed_commit_reply_for_test(
+        &mut self,
+        observed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.discard_seed_commit_reply = Some(observed);
+    }
+
     pub(super) fn stage_native_configuration_seed(
         &mut self,
         request: super::NativeConfigurationSeedRequest<'_>,
@@ -1020,7 +1032,24 @@ impl SupervisedAudioWorker {
             } else {
                 wire::write_commit(&mut self.control, ticket)?;
             }
-            wire::read_reply(&mut self.control, ticket, grant)
+            let reply = wire::read_reply(&mut self.control, ticket, grant)?;
+            #[cfg(test)]
+            if matches!(kind, super::protocol::CommandKind::CommitConfigurationSeed)
+                && matches!(
+                    &reply,
+                    SeedReply::Outcome(super::NativeConfigurationSeedOutcome::Accepted(_))
+                )
+                && let Some(observed) = self.discard_seed_commit_reply.take()
+            {
+                // Actual authenticated same-ticket Accepted was already read.
+                // Model loss to the parent consumer, not physical TCP loss.
+                observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    "test discarded authenticated seed commit reply",
+                ));
+            }
+            Ok(reply)
         })();
         match result {
             Ok(SeedReply::Outcome(outcome)) => Ok(outcome),
@@ -1795,6 +1824,8 @@ mod control_timeout_worker_lifecycle {
             state_entry_timeout: Duration::from_secs(30),
             configured_control_timeout: None,
             before_drop_test_hook: None,
+            #[cfg(test)]
+            discard_seed_commit_reply: None,
         })
     }
 

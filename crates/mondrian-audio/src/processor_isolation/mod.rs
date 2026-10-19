@@ -395,6 +395,18 @@ impl IsolatedAudioProcessorResolver {
             retained_create_test_hook: None,
         }
     }
+    // Existing create seam applies only to the actual retained Ready owner.
+    // A single-occurrence test owns the one-shot witness, not a global switch.
+    #[cfg(test)]
+    pub(crate) fn discard_next_seed_commit_reply_for_test(
+        &mut self,
+        observed: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.retained_create_test_hook = Some(Arc::new(move |worker| {
+            worker.discard_next_seed_commit_reply_for_test(Arc::clone(&observed));
+            Ok(())
+        }));
+    }
 }
 
 impl AudioProcessorResolver for IsolatedAudioProcessorResolver {
