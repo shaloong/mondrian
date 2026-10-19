@@ -1309,3 +1309,333 @@ pub(super) fn run_native_host_fader_publication_exclusion() {
         std::panic::resume_unwind(panic);
     }
 }
+
+// Only this new control needs three full captured intervals. The original
+// DELAY/ECHO scenarios and legacy reconstruction expectations stay unchanged.
+fn consume_pdc_interval(
+    output: &Arc<Mutex<CaptureState>>,
+    start: usize,
+    end: usize,
+    fader_db: f64,
+) {
+    assert!(start < end);
+    assert_eq!(
+        output.lock().snapshot.active_callback_consumed_frames,
+        start as u64
+    );
+    let gain = 10.0_f64.powf(fader_db / 20.0);
+    let mut absolute = start;
+    while absolute < end {
+        let frames = (end - absolute).min(INACTIVE_CALLBACK_FRAMES);
+        let samples = output.lock().consume(frames, Instant::now());
+        for (offset, sample) in samples.iter().enumerate() {
+            let expected = input_sample(absolute + offset);
+            for channel in 0..2 {
+                assert!(
+                    (sample[channel] - (f64::from(expected[channel]) * gain) as f32).abs() <= 1e-6,
+                    "actual PDC-aligned FIFO public{} channel{channel}: {} != {} at {fader_db}dB",
+                    absolute + offset,
+                    sample[channel],
+                    (f64::from(expected[channel]) * gain) as f32
+                );
+            }
+        }
+        absolute += frames;
+    }
+    assert_eq!(
+        output.lock().snapshot.active_callback_consumed_frames,
+        end as u64
+    );
+}
+
+#[test]
+#[ignore = "current normal Product and owned CLAP mode0 DLL; repeated retained PDC frontiers with software consumption only"]
+fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
+    let scenario = Scenario { capture_windows: 96, ..DELAY };
+    let (_directory, mut state, output, output_id) = native_fader_fixture(scenario);
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (generation, warmed) = warm_native_fader_source(&mut state, &output, scenario);
+        let clear_serial = output.lock().clear_serial;
+        let clear_count = output.lock().cleared.len();
+        let stream_generation = output.lock().snapshot.stream_generation;
+        assert_windows(&output.lock(), 0, clear_serial, 0, 0.0, scenario);
+        let renderer = state.native_audio_renderer.as_ref().unwrap().upgrade().unwrap();
+        let verifier = renderer.owner_installation_verifier().unwrap();
+        let original_facts = cursor_facts(&state);
+        let original_session = original_facts.session.unwrap().identity.session_id;
+        let original_lease = actual_native_lease(&renderer, &original_facts);
+        let expected_source = Arc::downgrade(&renderer);
+        let observed_at = state.playback_observation_instant_anchor
+            + Duration::from_nanos((CONSUMED as u64 * 1_000_000_000).div_ceil(u64::from(RATE)));
+        let consumed = output.lock().consume(CONSUMED, observed_at);
+        for (absolute, sample) in consumed.iter().enumerate() {
+            assert_eq!(*sample, input_sample(absolute));
+        }
+        let partial = poll_audio_playback_at_for_test(&mut state, observed_at, true).expect(
+            "PDC_REPEAT_CLOCK_SETUP: original converter must accept initial software consumption",
+        );
+        assert_healthy(partial, generation);
+        assert_eq!(partial.in_flight, 0);
+        assert_eq!(
+            partial.output.unwrap().active_callback_consumed_frames,
+            CONSUMED as u64
+        );
+        let initial_authority = state
+            .authoritative_audio_anchor(
+                &state.playback_engine,
+                state.playback_engine.monotonic_high_water(),
+                "PDC repeat initial clock",
+            )
+            .unwrap();
+        assert_eq!(initial_authority.sample(), CONSUMED as i64);
+        assert_eq!(
+            state.playback_clock_master(),
+            Some(mondrian_playback::ClockMaster::AudioDevice)
+        );
+        // Original actions sample the real wall clock. Catch up only to this
+        // fixed ~3ms callback observation; never pin later Engine authority to F.
+        std::thread::sleep(observed_at.saturating_duration_since(Instant::now()));
+        let mut consumer = CONSUMED;
+        let mut previous_gain = 0.0;
+        for (round, next_gain) in [-6.0, -12.0].into_iter().enumerate() {
+            let before_facts = cursor_facts(&state);
+            let old_session = before_facts.session.unwrap();
+            let AudioSessionCursorState::Active {
+                next_public_sample,
+                next_execution_sample,
+                alignment_primed: true,
+                ..
+            } = old_session.state
+            else {
+                panic!("actual primed PDC frontier");
+            };
+            let frontier = usize::try_from(next_public_sample.sample()).unwrap();
+            assert_eq!(frontier, (round + 1) * scenario.watermark);
+            assert_eq!(
+                next_execution_sample.sample(),
+                next_public_sample.sample() + 3
+            );
+            assert_heads(&before_facts, generation, frontier as i64, scenario);
+            assert_eq!(old_session.identity.session_id, original_session);
+            let before = state.audio_playback_snapshot();
+            assert_healthy(before, generation);
+            assert_eq!(before.in_flight, 0);
+            assert_eq!(before.next_start_sample, frontier as i64);
+            assert_eq!(before.media_anchor, warmed.media_anchor);
+            assert_eq!(before.output.unwrap().buffered_frames, frontier - consumer);
+            assert_eq!(
+                before.output.unwrap().active_callback_consumed_frames,
+                consumer as u64
+            );
+            let old_claim = verifier.current_claim().unwrap();
+            let old_lease = actual_native_lease(&renderer, &before_facts);
+            assert_eq!(old_lease.binding(), original_lease.binding());
+            let old_snapshot = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+            let author_generation = state.project_author_generation();
+            let history = state.authoring_history().unwrap().diagnostics();
+            let engine = state.playback_engine.snapshot();
+            let windows_start = output.lock().windows.len();
+            state
+                .dispatch_action(
+                    ProductAction::Audio(AudioProductAction::EditChannelStrip(
+                        mondrian_timeline::AudioChannelStripEditRequest {
+                            owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                                output_id,
+                            },
+                            edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb {
+                                value: next_gain,
+                            },
+                        },
+                    ))
+                    .into_external_action(),
+                )
+                .expect("each public Host fader publishes at its actual retained PDC frontier");
+            assert_eq!(state.project_author_generation(), author_generation + 1);
+            let current_history = state.authoring_history().unwrap().diagnostics();
+            assert_eq!(current_history.undo_entries, history.undo_entries + 1);
+            assert_eq!(current_history.redo_entries, 0);
+            assert_eq!(current_history.pending_entries, 0);
+            assert_eq!(
+                state.active_sequence().unwrap().audio_program.outputs[0].strip.fader_db,
+                next_gain
+            );
+            let current_engine = state.playback_engine.snapshot();
+            assert_eq!(current_engine.epoch, engine.epoch);
+            assert_eq!(current_engine.rate, engine.rate);
+            assert_eq!(
+                current_engine.state,
+                mondrian_playback::TransportState::Playing
+            );
+            assert_eq!(
+                state.playback_clock_master(),
+                Some(mondrian_playback::ClockMaster::AudioDevice)
+            );
+            assert!(state
+                .native_audio_renderer
+                .as_ref()
+                .is_some_and(|actual| actual.ptr_eq(&expected_source)));
+            let changed = state.audio_playback_snapshot();
+            assert_healthy(changed, generation);
+            assert_eq!(changed.next_start_sample, frontier as i64);
+            assert_eq!(changed.in_flight, 0);
+            assert_eq!(changed.media_anchor, warmed.media_anchor);
+            assert_eq!(changed.output.unwrap().stream_generation, stream_generation);
+            assert_eq!(
+                changed.output.unwrap().active_callback_consumed_frames,
+                consumer as u64
+            );
+            assert_eq!(changed.output.unwrap().buffered_frames, frontier - consumer);
+            let AppAudioPlayback::Available(playback) = &state.audio_playback else {
+                panic!("same Media Source");
+            };
+            assert_eq!(
+                playback.native_owner_binding_status(),
+                Some(mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready)
+            );
+            let claim = verifier.current_claim().unwrap();
+            assert!(verifier.validate(&old_claim).is_err());
+            assert!(verifier.validate(&claim).is_ok());
+            assert!(old_snapshot.enter_commit().is_err());
+            let fresh = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+            assert!(fresh.enter_commit().is_ok());
+            assert_eq!(
+                fresh.generation(),
+                state.authoring.as_ref().unwrap().author_generation()
+            );
+            let after_facts = cursor_facts(&state);
+            assert_heads(&after_facts, generation, frontier as i64, scenario);
+            assert_retained_parent_migration(
+                &renderer,
+                &before_facts,
+                &after_facts,
+                old_lease,
+                &claim,
+            );
+            assert_eq!(output.lock().cleared.len(), clear_count);
+            assert_eq!(output.lock().clear_serial, clear_serial);
+            assert_eq!(output.lock().windows.len(), windows_start);
+            // Every queued old sample still uses the preceding gain. The
+            // boundary is public F; native execution/input remain F+3.
+            consume_pdc_interval(&output, consumer, frontier, previous_gain);
+            assert!(output.lock().queue.is_empty());
+            let filled = fill_to_watermark(&mut state, generation, scenario);
+            assert_eq!(filled.media_anchor, warmed.media_anchor);
+            assert_eq!(
+                filled.next_start_sample,
+                (frontier + scenario.watermark) as i64
+            );
+            assert_eq!(filled.output.unwrap().stream_generation, stream_generation);
+            let completed = cursor_facts(&state);
+            assert_eq!(
+                completed.session.unwrap().identity,
+                after_facts.session.unwrap().identity
+            );
+            assert_heads(
+                &completed,
+                generation,
+                (frontier + scenario.watermark) as i64,
+                scenario,
+            );
+            {
+                let capture = output.lock();
+                assert_windows(
+                    &capture,
+                    windows_start,
+                    clear_serial,
+                    frontier as i64,
+                    next_gain,
+                    scenario,
+                );
+                // Explicitly distinguish the first three newly scaled public
+                // samples from an erroneous extra latency3 or stale Host gain.
+                let gain = 10.0_f64.powf(next_gain / 20.0);
+                for offset in 0..3 {
+                    let pair = &capture.windows[windows_start].samples[offset * 2..offset * 2 + 2];
+                    let expected = input_sample(frontier + offset);
+                    let shifted = input_sample(frontier + offset - 3);
+                    for channel in 0..2 {
+                        let correct = (f64::from(expected[channel]) * gain) as f32;
+                        assert!((pair[channel] - correct).abs() <= 1e-6);
+                        assert!(
+                            (correct - (f64::from(shifted[channel]) * gain) as f32).abs() > 2e-6,
+                            "nonconstant input independently distinguishes the PDC boundary"
+                        );
+                    }
+                }
+                assert_eq!(capture.cleared.len(), clear_count);
+                assert_eq!(capture.clear_serial, clear_serial);
+                assert_eq!(capture.activation_discarded, 0);
+                assert!(!capture.overflow);
+            }
+            let consumed_now = if round == 0 {
+                CONSUMED
+            } else {
+                INACTIVE_CALLBACK_FRAMES
+            };
+            consume_pdc_interval(&output, frontier, frontier + consumed_now, next_gain);
+            consumer = frontier + consumed_now;
+            previous_gain = next_gain;
+            if round == 0 {
+                // Actual cumulative callbacks feed the original converter once
+                // more. Never derive its authority from F or inject a new clock.
+                let callback_at = output.lock().snapshot.captured_at;
+                let partial = poll_audio_playback_at_for_test(&mut state, callback_at, true)
+                    .expect("PDC_REPEAT_CLOCK_SETUP: second original consumption observation must settle without reentry");
+                assert_healthy(partial, generation);
+                assert_eq!(partial.in_flight, 0); // 8055+256 >8192: no refill.
+                assert_eq!(
+                    partial.next_start_sample,
+                    (frontier + scenario.watermark) as i64
+                );
+                assert_eq!(
+                    partial.output.unwrap().active_callback_consumed_frames,
+                    consumer as u64
+                );
+                assert_eq!(
+                    state.playback_clock_master(),
+                    Some(mondrian_playback::ClockMaster::AudioDevice)
+                );
+                assert_heads(
+                    &cursor_facts(&state),
+                    generation,
+                    (frontier + scenario.watermark) as i64,
+                    scenario,
+                );
+            }
+        }
+        let capture = output.lock();
+        assert_eq!(capture.windows.len(), 96);
+        assert_eq!(capture.cleared.len(), clear_count);
+        assert_eq!(capture.clear_serial, clear_serial);
+        assert_eq!(capture.snapshot.stream_generation, stream_generation);
+        assert_eq!(
+            capture.snapshot.active_callback_consumed_frames,
+            consumer as u64
+        );
+        assert_eq!(
+            capture.snapshot.callback_consumed_frames,
+            (INACTIVE_CALLBACK_FRAMES + consumer) as u64
+        );
+        assert_eq!(consumer, scenario.watermark * 2 + INACTIVE_CALLBACK_FRAMES);
+        assert_eq!(
+            capture.queue.len(),
+            scenario.watermark - INACTIVE_CALLBACK_FRAMES
+        );
+        assert_eq!(capture.activation_discarded, 0);
+        assert!(!capture.overflow);
+        drop(capture);
+        println!("retained PDC repeat: public F1=8192/F2=16384; execution=8195/16387; consumed={consumer}; complete intervals=3");
+        drop(renderer);
+    }));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pause = state.pause();
+    let audio = state.shutdown_audio_playback_until(deadline);
+    let cleanup = state.shutdown_for_endurance(deadline);
+    assert!(
+        pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
+        "complete repeated-PDC cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
+    );
+    if let Err(panic) = target {
+        std::panic::resume_unwind(panic);
+    }
+}
