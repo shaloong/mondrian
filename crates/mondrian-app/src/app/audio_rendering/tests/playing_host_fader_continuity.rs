@@ -1611,7 +1611,12 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
                 );
                 assert_eq!(
                     state.playback_clock_master(),
-                    Some(mondrian_playback::ClockMaster::AudioDevice)
+                    Some(mondrian_playback::ClockMaster::AudioDevice),
+                    "[DEBUG-pdc-clock] before_action={engine:?}; after_action={current_engine:?}; accepted_callback_at={accepted_callback_at:?}; accepted_consumed={accepted_consumed}; second_output={:?}; second_engine={:?}; raw_elapsed_ns={}; consumed_delta={:?}",
+                    partial.output.unwrap(),
+                    state.playback_engine.snapshot(),
+                    callback_at.saturating_duration_since(accepted_callback_at).as_nanos(),
+                    partial.output.unwrap().active_callback_consumed_frames.checked_sub(accepted_consumed),
                 );
                 assert_heads(
                     &cursor_facts(&state),
