@@ -570,8 +570,19 @@ mod tests {
             self.0.release_retirement.store(true, Ordering::Release);
         }
     }
+    fn playback_config() -> AudioPlaybackConfig {
+        // The reused parent FakeOutput advertises an exact 1 kHz contract.
+        AudioPlaybackConfig {
+            sample_rate: 1_000,
+            chunk_frames: 4,
+            preroll_frames: 4,
+            high_watermark_frames: 12,
+            max_in_flight: 2,
+            ..AudioPlaybackConfig::product_default()
+        }
+    }
     fn anchor(n: i64) -> AudioSamplePosition {
-        AudioSamplePosition::new(n, mondrian_core::AudioSampleRate::new(48_000).unwrap())
+        AudioSamplePosition::new(n, mondrian_core::AudioSampleRate::new(1_000).unwrap())
     }
     fn renderer() -> Arc<Renderer> {
         Arc::new(Renderer {
@@ -608,12 +619,7 @@ mod tests {
     }
     fn held() -> (AudioPlayback, Arc<Renderer>) {
         let (output, _) = super::super::tests::fake_output();
-        let mut config = AudioPlaybackConfig::product_default();
-        config.chunk_frames = 4;
-        config.preroll_frames = 4;
-        config.high_watermark_frames = 12;
-        config.max_in_flight = 2;
-        let mut playback = AudioPlayback::with_output(config, output).unwrap();
+        let mut playback = AudioPlayback::with_output(playback_config(), output).unwrap();
         let renderer = renderer();
         playback
             .prepare(
@@ -649,8 +655,7 @@ mod tests {
     #[test]
     fn rejected_restart_providers_retire_without_installing_or_caller_drop() {
         let (output, _) = super::super::tests::fake_output();
-        let mut empty =
-            AudioPlayback::with_output(AudioPlaybackConfig::product_default(), output).unwrap();
+        let mut empty = AudioPlayback::with_output(playback_config(), output).unwrap();
         let uninstalled = renderer();
         let facts = Arc::new(Facts::default());
         assert!(!empty
