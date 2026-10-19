@@ -3,6 +3,7 @@ use super::*;
 use mondrian_core::{AudioOwnerInstallationSource, AudioRenderSessionId};
 use std::path::PathBuf;
 
+#[path = "native_reprepare_service/vst3.rs"]
 mod vst3;
 
 #[derive(Default, Debug, PartialEq, Eq)]
