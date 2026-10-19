@@ -814,12 +814,167 @@ fn handoff_continuity(
     }
 }
 
+// One cold carrier. The Media work owns the actual renderer; these Weak
+// identities do not keep a second Runtime/controller alive.
+struct NativeAudioReprepareHandoffRequest {
+    renderer: std::sync::Weak<TimelineAudioPcmRenderer>,
+    source: std::sync::Weak<dyn AudioPcmRenderer>,
+    owner: NativeAudioReprepareOwner,
+}
+
+enum NativeAudioReprepareOwner {
+    Empty,
+    Installed(mondrian_audio::NativeAudioReprepareInstallReceipt),
+    Retired(mondrian_audio::NativeAudioReprepareRetirement),
+    Failed(mondrian_audio::NativeAudioReprepareError),
+    Finished,
+}
+
+impl TimelineAudioPcmRenderer {
+    pub(super) fn native_reprepare_request(
+        self: &Arc<Self>,
+    ) -> Box<dyn mondrian_media::AudioPcmNativeReprepareHandoff> {
+        let source: Arc<dyn AudioPcmRenderer> = self.clone();
+        Box::new(NativeAudioReprepareHandoffRequest {
+            renderer: Arc::downgrade(self),
+            source: Arc::downgrade(&source),
+            owner: NativeAudioReprepareOwner::Empty,
+        })
+    }
+}
+
+fn reprepare_refusal(
+    error: &mondrian_audio::NativeAudioReprepareError,
+) -> mondrian_media::AudioPcmNativeReprepareRefusal {
+    use mondrian_audio::NativeAudioReprepareError as E;
+    use mondrian_media::AudioPcmNativeReprepareRefusal as R;
+    match error {
+        E::Cancelled => R::Cancelled,
+        E::Resources(_) => R::ResourceAdmission,
+        E::Owner(_) | E::Admission(_) => R::Superseded,
+        _ => R::ProcessorRejected,
+    }
+}
+
+impl NativeAudioReprepareHandoffRequest {
+    fn failed(
+        &mut self,
+        error: mondrian_audio::NativeAudioReprepareError,
+    ) -> mondrian_media::AudioPcmNativeReprepareRefusal {
+        let refusal = reprepare_refusal(&error);
+        // The original first error is retained until the SAME carrier retires.
+        // This method is called after Runtime/Source/metadata guards are gone.
+        if !matches!(self.owner, NativeAudioReprepareOwner::Failed(_)) {
+            self.owner = NativeAudioReprepareOwner::Failed(error);
+            if let NativeAudioReprepareOwner::Failed(error) = &self.owner {
+                tracing::warn!(%error, "retained native restart refused; keeping its original owner hold");
+            }
+        }
+        refusal
+    }
+}
+
+impl mondrian_media::AudioPcmNativeReprepareHandoff for NativeAudioReprepareHandoffRequest {
+    fn renderer(&self) -> &std::sync::Weak<dyn AudioPcmRenderer> {
+        &self.source
+    }
+
+    fn install(
+        &mut self,
+        expected_notice: mondrian_core::NativeAudioReprepareNotice,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<
+        mondrian_core::AudioOwnerInstallationClaim,
+        mondrian_media::AudioPcmNativeReprepareRefusal,
+    > {
+        use mondrian_media::AudioPcmNativeReprepareRefusal as R;
+        if !matches!(self.owner, NativeAudioReprepareOwner::Empty) {
+            return Err(R::Superseded);
+        }
+        let Some(renderer) = self.renderer.upgrade() else {
+            return Err(R::Superseded);
+        };
+        let mut state = renderer.state.lock();
+        if !state
+            .delivery
+            .native_owner_installation_verifier()
+            .is_some_and(|actual| actual.same_registration(&destination))
+        {
+            return Err(R::Superseded);
+        }
+        let result = (|| {
+            // The notice is only an equality hint. Audio reads its actual pending
+            // Session ticket and owns capture/prepare/seed/CAS and every failure.
+            let operation =
+                state.delivery.service_pending_native_reprepare(expected_notice, cancellation)?;
+            state
+                .delivery
+                .prepare_native_reprepare_plan(&operation, destination, cancellation)?;
+            state
+                .delivery
+                .install_native_reprepare_plan(&operation, authorization, cancellation)
+        })();
+        match result {
+            Ok(receipt) => {
+                let claim = receipt.claim().clone();
+                // Adopt BEFORE any following action can fail or unwind.
+                self.owner = NativeAudioReprepareOwner::Installed(receipt);
+                state.generation = None;
+                let next_meter = state.delivery.meter_observer();
+                let retired_meter =
+                    std::mem::replace(&mut *renderer.meter_metadata.write(), next_meter);
+                drop(state);
+                drop(retired_meter);
+                Ok(claim)
+            }
+            Err(error) => {
+                drop(state);
+                Err(self.failed(error))
+            }
+        }
+    }
+
+    fn retire(&mut self) -> Result<(), mondrian_media::AudioPcmNativeReprepareRefusal> {
+        let owner = std::mem::replace(&mut self.owner, NativeAudioReprepareOwner::Finished);
+        match owner {
+            NativeAudioReprepareOwner::Installed(receipt) => {
+                // NO renderer upgrade, Runtime/Source lock or credit publication.
+                self.owner = NativeAudioReprepareOwner::Retired(receipt.retire());
+                Ok(())
+            }
+            owner => {
+                self.owner = owner;
+                Err(mondrian_media::AudioPcmNativeReprepareRefusal::RetirementUnconfirmed)
+            }
+        }
+    }
+
+    fn settle(&mut self) -> Result<(), mondrian_media::AudioPcmNativeReprepareRefusal> {
+        use mondrian_media::AudioPcmNativeReprepareRefusal as R;
+        let Some(renderer) = self.renderer.upgrade() else {
+            return Err(R::Superseded);
+        };
+        let owner = std::mem::replace(&mut self.owner, NativeAudioReprepareOwner::Finished);
+        let NativeAudioReprepareOwner::Retired(completion) = owner else {
+            self.owner = owner;
+            return Err(R::RetirementUnconfirmed);
+        };
+        let mut state = renderer.state.lock();
+        // Pure resource settlement: old PCM cancellation never discards it.
+        let result = state.delivery.finish_native_reprepare_retirement(completion);
+        drop(state);
+        result.map_err(|error| self.failed(error))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    mod playing_host_fader_continuity;
     mod host_output_fader_publication_contracts;
+    mod playing_host_fader_continuity;
 
     #[derive(Debug, Default, Clone, Copy)]
     struct SettlementSnapshot {
@@ -894,6 +1049,62 @@ mod tests {
         )
         .expect("actual Timeline/Delivery/Runtime with no native plugin");
         (root, Arc::new(renderer))
+    }
+
+    #[test]
+    fn native_restart_provider_retains_original_no_pending_error_without_clearing_generation() {
+        use mondrian_media::AudioPcmNativeReprepareHandoff;
+        let (_directory, renderer) = settlement_model_renderer();
+        let source = mondrian_core::AudioOwnerInstallationSource::new();
+        let (registration, verifier) = source.register().unwrap();
+        let previous = source
+            .begin_commit(source.reserve_install(&registration, None).unwrap())
+            .unwrap()
+            .commit()
+            .unwrap();
+        renderer.bind_owner_installation(verifier.clone()).unwrap();
+        let generation = AudioPcmRenderGeneration::new(9);
+        renderer.state.lock().generation = Some(generation);
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let mut provider = NativeAudioReprepareHandoffRequest {
+            renderer: Arc::downgrade(&renderer),
+            source: Arc::downgrade(&erased),
+            owner: NativeAudioReprepareOwner::Empty,
+        };
+        let mut authorization = source
+            .authorize_runtime_installation(
+                source.reserve_install(&registration, Some(&previous)).unwrap(),
+            )
+            .unwrap();
+        let notice = mondrian_core::NativeAudioReprepareNotice {
+            instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+            request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+        };
+        assert!(matches!(
+            provider.install(
+                notice,
+                verifier.clone(),
+                &mut authorization,
+                &ExecutionCancellationToken::new()
+            ),
+            Err(mondrian_media::AudioPcmNativeReprepareRefusal::Superseded)
+        ));
+        assert!(matches!(
+            provider.owner,
+            NativeAudioReprepareOwner::Failed(
+                mondrian_audio::NativeAudioReprepareError::Admission(_)
+            )
+        ));
+        assert_eq!(renderer.state.lock().generation, Some(generation));
+        verifier.validate(&previous).unwrap();
+        assert_eq!(
+            provider.retire(),
+            Err(mondrian_media::AudioPcmNativeReprepareRefusal::RetirementUnconfirmed)
+        );
+        assert!(matches!(
+            provider.owner,
+            NativeAudioReprepareOwner::Failed(_)
+        ));
     }
 
     #[test]

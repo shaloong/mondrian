@@ -2,6 +2,11 @@
 
 mod host_output_fader;
 mod native_author;
+mod native_reprepare;
+use native_reprepare::NativeReprepareAdmission;
+pub use native_reprepare::{
+    AudioPcmNativeReprepareHandoff, AudioPcmNativeReprepareRefusal, AudioPcmNativeReprepareStatus,
+};
 mod native_child_settlement;
 use native_child_settlement::ForeignOwnerRetirementTracker;
 mod source_close;
@@ -63,7 +68,7 @@ const RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED: u8 = 3;
 const MAX_RETIRED_RENDER_OWNERS: usize = 256;
 // One FIFO and serial worker; PCM cannot consume the reserved control frontier.
 const MAX_PENDING_NATIVE_EDITOR_WORK: usize = 2;
-const MAX_PENDING_NATIVE_WORK: usize = MAX_PENDING_NATIVE_EDITOR_WORK + 3;
+const MAX_PENDING_NATIVE_WORK: usize = MAX_PENDING_NATIVE_EDITOR_WORK + 4;
 const RENDER_WORKER_TERMINAL_SCHEDULING_UNCONFIRMED: u8 = 4;
 /// Explicit producer stack reservation; native/CRT/kernel allocations are separate.
 pub const AUDIO_PLAYBACK_PRODUCER_STACK_BYTES: usize = 2 * 1024 * 1024;
@@ -836,6 +841,13 @@ pub enum AudioPlaybackEvent {
         /// Actual typed native request; diagnostic identity is not mutation authority.
         notice: mondrian_core::NativeAudioReprepareNotice,
     },
+    /// Original serial restart work produced a resource result. This does not
+    /// acknowledge output callbacks, enter DSP or resume transport.
+    NativeReprepareObserved {
+        renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+        generation: u64,
+        status: AudioPcmNativeReprepareStatus,
+    },
     /// The retained pending source's exact output deactivation was acknowledged.
     /// This event provides final callback evidence, never permission to resume PCM.
     NativeReprepareOutputQuiesced {
@@ -1080,6 +1092,7 @@ pub struct AudioPlaybackPoll {
 }
 
 enum RenderWork {
+    NativeReprepare(Box<native_reprepare::NativeReprepareWork>),
     Pcm(PcmRenderWork),
     NativeEditor(Box<NativeEditorWork>),
     NativeObservations(NativeObservationWork),
@@ -1129,6 +1142,7 @@ struct PcmRenderWork {
 }
 
 enum RenderCompletion {
+    NativeReprepare(native_reprepare::NativeReprepareCompletion),
     NativeAuthorHandoff(Box<native_author::NativeAuthorHandoffCompletion>),
     Pcm(PcmRenderCompletion),
     NativeEditor(Box<NativeEditorCompletion>),
@@ -1185,6 +1199,11 @@ struct PreparedAudioPcmRenderer {
     native_observations_supported: bool,
 }
 
+enum RenderQueuePushError {
+    Closed(RenderWork),
+    Busy(RenderWork),
+}
+
 struct RenderQueueState {
     pending: VecDeque<RenderWork>,
     stopped: bool,
@@ -1223,24 +1242,33 @@ impl RenderWorkQueue {
     }
 
     fn push(&self, work: RenderWork) -> Result<(), RenderWork> {
+        self.try_push(work).map_err(|error| match error {
+            RenderQueuePushError::Closed(work) | RenderQueuePushError::Busy(work) => work,
+        })
+    }
+
+    fn try_push(&self, work: RenderWork) -> Result<(), RenderQueuePushError> {
         let mut state = self.state.lock();
+        if state.stopped {
+            return Err(RenderQueuePushError::Closed(work));
+        }
         let limit = match &work {
             RenderWork::Pcm(_) => self.pcm_capacity,
             RenderWork::NativeEditor(_) => MAX_PENDING_NATIVE_EDITOR_WORK,
             RenderWork::NativeObservations(_)
+            | RenderWork::NativeReprepare(_)
             | RenderWork::NativeAuthorHandoff(_)
             | RenderWork::NativeOwnerBindings(_) => 1,
         };
         let kind = std::mem::discriminant(&work);
-        if state.stopped
-            || state
-                .pending
-                .iter()
-                .filter(|queued| std::mem::discriminant(*queued) == kind)
-                .count()
-                >= limit
+        if state
+            .pending
+            .iter()
+            .filter(|queued| std::mem::discriminant(*queued) == kind)
+            .count()
+            >= limit
         {
-            return Err(work);
+            return Err(RenderQueuePushError::Busy(work));
         }
         debug_assert!(state.pending.len() < state.pending.capacity());
         state.pending.push_back(work);
@@ -1301,7 +1329,9 @@ impl RenderWorkQueue {
                     }
                     _ => false,
                 };
-            if editor || suspended_control {
+            let restart = matches!(&work, RenderWork::NativeReprepare(work)
+                if work.preserve_for_slot(renderer_id, installed_generation));
+            if editor || suspended_control || restart {
                 state.pending.push_back(work);
             } else {
                 retired.push_back(work);
@@ -1543,10 +1573,20 @@ impl RenderOwnerRetirementQueue {
     }
 }
 
-fn retire_render_owners(mut retired: RetiredRenderOwners) -> ForeignOwnerRetirementEvidence {
+fn retire_render_owners(
+    mut retired: RetiredRenderOwners,
+    queue: &RenderOwnerRetirementQueue,
+    tracker: &ForeignOwnerRetirementTracker,
+) -> ForeignOwnerRetirementEvidence {
     let mut evidence = ForeignOwnerRetirementEvidence::default();
     while let Some(work) = retired.pending.pop_front() {
-        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(work)))
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match work {
+                RenderWork::NativeReprepare(work) => {
+                    native_reprepare::retire_work(work, queue, tracker)
+                }
+                work => drop(work),
+            }))
         {
             evidence.panics = evidence.panics.saturating_add(1);
             if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -1595,7 +1635,7 @@ fn run_render_owner_retirement_worker(
     tracker: &ForeignOwnerRetirementTracker,
 ) {
     while let Some(retired) = queue.pop() {
-        let evidence = retire_render_owners(retired);
+        let evidence = retire_render_owners(retired, queue, tracker);
         if evidence.panics > 0 || evidence.owner_abandonments > 0 {
             queue.mark_faulted();
         }
@@ -1806,6 +1846,7 @@ enum NativeControlHold {
     Reprepare {
         notice: mondrian_core::NativeAudioReprepareNotice,
         phase: NativeRepreparePhase,
+        admission: NativeReprepareAdmission,
     },
     EditorCleanupPending(mondrian_core::NativeAudioEditorTarget),
     EditorDetachedAwaitingQuiescence(mondrian_core::NativeAudioEditorTarget),
@@ -2981,12 +3022,15 @@ impl AudioPlayback {
         }
         self.consecutive_render_generation_failures = 0;
         self.render_blocked = self.native_control_hold.is_some();
-        self.reprime_prevalidated(
-            anchor,
-            false,
-            self.renderer.clone(),
-            PcmRetirementPolicy::FreshContinuity,
-        )?;
+        let pcm_policy = if matches!(self.native_control_hold,
+            Some(NativeControlHold::Reprepare { admission, .. })
+                if admission != NativeReprepareAdmission::Unstarted)
+        {
+            PcmRetirementPolicy::PreserveNativeHold
+        } else {
+            PcmRetirementPolicy::FreshContinuity
+        };
+        self.reprime_prevalidated(anchor, false, self.renderer.clone(), pcm_policy)?;
         if matches!(
             self.native_control_hold,
             Some(NativeControlHold::EditorCleanupCompletePaused(_))
@@ -3975,6 +4019,10 @@ impl AudioPlayback {
             };
             let completion = match completion {
                 RenderCompletion::Pcm(completion) => completion,
+                RenderCompletion::NativeReprepare(completion) => {
+                    self.accept_native_reprepare_completion(completion, &mut events);
+                    continue;
+                }
                 RenderCompletion::NativeAuthorHandoff(completion) => {
                     self.accept_native_author_handoff_completion(*completion, &mut events);
                     continue;
@@ -4292,6 +4340,7 @@ impl AudioPlayback {
                     self.native_control_hold = Some(NativeControlHold::Reprepare {
                         notice,
                         phase: NativeRepreparePhase::WaitingOutput,
+                        admission: NativeReprepareAdmission::Unstarted,
                     });
                     self.native_control_output_retirement = Some(NativeControlOutputRetirement {
                         generation: self.generation,
@@ -4972,6 +5021,10 @@ fn retire_render_completion(
     // data. New variants or local payload fields require this boundary review.
     // Pure PCM/DTO storage must not consume foreign retirement capacity.
     let work = match completion {
+        RenderCompletion::NativeReprepare(completion) => {
+            drop(completion);
+            None
+        }
         RenderCompletion::NativeAuthorHandoff(completion) => {
             completion.into_retired_work().map(RenderWork::NativeAuthorHandoff)
         }
@@ -5146,6 +5199,42 @@ fn run_render_worker(
     while let Some(work) = worker_queue.pop() {
         let work = match work {
             RenderWork::Pcm(work) => work,
+            RenderWork::NativeReprepare(mut work) => {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    native_reprepare::execute(&mut work)
+                }));
+                match result {
+                    Ok(execution) => {
+                        if let Some(completion) =
+                            native_reprepare::complete(work, execution, worker_queue)
+                            && !publish_render_completion(
+                                completion_tx,
+                                RenderCompletion::NativeReprepare(completion),
+                                worker_queue,
+                            )
+                        {
+                            break;
+                        }
+                    }
+                    Err(payload) => {
+                        work.terminal();
+                        enqueue_retired_render_owners(
+                            &worker_queue.retirement_queue,
+                            &worker_queue.retirement_tracker,
+                            RetiredRenderOwners {
+                                pending: VecDeque::from([RenderWork::NativeReprepare(work)]),
+                                ..Default::default()
+                            },
+                        );
+                        return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                            RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                        } else {
+                            RENDER_WORKER_TERMINAL_PANICKED
+                        };
+                    }
+                }
+                continue;
+            }
             RenderWork::NativeAuthorHandoff(work) => {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     native_author::execute_native_author_handoff(&work)
@@ -5667,7 +5756,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeOutputState {
+    pub(super) struct FakeOutputState {
         events: VecDeque<RealtimeAudioOutputEvent>,
         snapshot: Option<RealtimeAudioOutputSnapshot>,
         channel_layout: AudioChannelLayout,
@@ -5692,7 +5781,7 @@ mod tests {
         drop_finished: Option<Arc<AtomicBool>>,
     }
 
-    struct FakeOutput {
+    pub(super) struct FakeOutput {
         state: Arc<Mutex<FakeOutputState>>,
         control: FakeOutputControl,
     }
@@ -6486,7 +6575,7 @@ mod tests {
         assert!(error.contains("20"));
     }
 
-    fn fake_output() -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {
+    pub(super) fn fake_output() -> (Box<dyn AudioOutputAdapter>, Arc<Mutex<FakeOutputState>>) {
         fake_output_with_control(FakeOutputControl::default())
     }
 
