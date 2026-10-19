@@ -1749,6 +1749,7 @@ impl AudioProgramRuntime {
                 native_reprepare: native_reprepare::NativeReprepareState {
                     attempt: None,
                     next_attempt: 1,
+                    current_fixed_extra: 0,
                 },
             })
         })();

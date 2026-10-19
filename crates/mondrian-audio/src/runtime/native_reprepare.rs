@@ -56,27 +56,58 @@ impl NativeAudioRepreparePlanFacts {
 }
 
 /// Successful Source publication of a stopped replacement Session.
-/// This non-Clone receipt retains the old Session/Plan and claim until the caller
-/// drops it outside Runtime, metadata and Source guards. It grants no PCM entry.
+/// This non-Clone receipt retains retired owners until the caller consumes
+/// `retire` outside Runtime, metadata and Source locks. It grants no PCM entry.
 pub struct NativeAudioReprepareInstallReceipt {
     claim: mondrian_core::AudioOwnerInstallationClaim,
     identity: crate::AudioSessionCursorIdentity,
     previous_epoch: Option<crate::AudioContinuityEpoch>,
-    // Contains the retired storage and the original logical fee LAST.
-    _retired: Box<NativeReprepareAttempt>,
+    key: NonZeroU64,
+    _retired: RetiredReprepareOwners,
 }
+
+// Inline receipt storage, not another allocation/registry. Drop glue retires
+// every old owner and preparation alias BEFORE the original logical fee.
+struct RetiredReprepareOwners {
+    _constants: Vec<f64>,
+    _candidate: Option<crate::NativeConfigurationCandidate>,
+    _factory: Option<Arc<dyn crate::AudioProcessorFactory>>,
+    _plan: Option<Arc<PreparedAudioPlan>>,
+    _session: Option<crate::render::PreparedAudioSessionStorage>,
+    _claim: Option<mondrian_core::AudioOwnerInstallationClaim>,
+    _verifier: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    _destination: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    _plan_fee: Option<super::native_author_logical_fees::LogicalPlanFee>,
+}
+
+/// Unforgeable evidence that this receipt's actual owners finished retirement.
+/// It grants no Source, callback, parameter or DSP permission.
+pub struct NativeAudioReprepareRetirement {
+    key: NonZeroU64,
+    identity: crate::AudioSessionCursorIdentity,
+}
+
 impl NativeAudioReprepareInstallReceipt {
     /// Actual newly published Source claim; no native binding is ready yet.
     pub fn claim(&self) -> &mondrian_core::AudioOwnerInstallationClaim {
         &self.claim
     }
-    /// New empty/unentered Session, containing the retained actual processors.
+    /// New empty/unentered Session containing the retained actual processors.
     pub const fn identity(&self) -> crate::AudioSessionCursorIdentity {
         self.identity
     }
     /// Consumer must explicitly select a fresh epoch, never infer a resume.
     pub const fn previous_epoch(&self) -> Option<crate::AudioContinuityEpoch> {
         self.previous_epoch
+    }
+    /// Consume on the existing retirement worker, outside all caller locks.
+    /// If a destructor unwinds, no completion is issued and Root credit stays
+    /// held. Merely dropping a receipt does not publish resource normalization.
+    pub fn retire(self) -> NativeAudioReprepareRetirement {
+        let key = self.key;
+        let identity = self.identity;
+        drop(self);
+        NativeAudioReprepareRetirement { key, identity }
     }
 }
 
@@ -107,6 +138,9 @@ pub enum NativeAudioReprepareError {
     /// Complete local allocation evidence could not be recorded.
     #[error(transparent)]
     Storage(#[from] crate::NativeHostLedgerError),
+    /// Original immutable Factory inventory failed before any seed command.
+    #[error(transparent)]
+    FactoryStorage(#[from] crate::AudioProcessorFactoryStorageError),
     /// Adapter explicitly refused retained configuration capture.
     #[error("native restart configuration capability refused: {0:?}")]
     Capability(crate::NativeConfigurationRefusal),
@@ -130,7 +164,7 @@ enum CapturePhase {
     CommitAttempted,
     // Written immediately after authenticated Accepted, before any postcheck.
     SeedCommitted,
-    Installed,
+    InstalledAwaitingRetirement,
     Refused,
     Failed,
 }
@@ -141,10 +175,17 @@ enum CapturePhase {
 pub(super) struct NativeReprepareState {
     pub(super) attempt: Option<Box<NativeReprepareAttempt>>,
     pub(super) next_attempt: u64,
+    // Attribution of current execution-only Factory/seed/fee owners in the
+    // ORIGINAL Root Fixed footprint, not a second grant or fee registry.
+    pub(super) current_fixed_extra: usize,
 }
 
 pub(super) struct NativeReprepareAttempt {
     key: NonZeroU64,
+    before_capture: AudioRuntimeResourceFootprint,
+    factory_fixed_bound: usize,
+    fee_scope_added: usize,
+    retirement: Option<RestartRetirement>,
     ticket: crate::AudioProcessorReprepareTicket,
     serial: NonZeroU64,
     selection: ReprepareSelection,
@@ -163,6 +204,53 @@ pub(super) struct NativeReprepareAttempt {
     retired_verifier: Option<mondrian_core::AudioOwnerInstallationVerifier>,
     // Last: actual candidate/Factory/Plan/storage owners retire before credit.
     plan_fee: Option<super::native_author_logical_fees::LogicalPlanFee>,
+}
+
+#[derive(Clone, Copy)]
+struct RestartRetirement {
+    identity: crate::AudioSessionCursorIdentity,
+    serial: NonZeroU64,
+    high: AudioRuntimeResourceFootprint,
+    final_footprint: AudioRuntimeResourceFootprint,
+    fixed_extra: usize,
+}
+
+impl RestartRetirement {
+    fn matches(
+        self,
+        key: NonZeroU64,
+        phase: CapturePhase,
+        current: crate::AudioSessionCursorIdentity,
+        serial: NonZeroU64,
+        footprint: AudioRuntimeResourceFootprint,
+        completion: &NativeAudioReprepareRetirement,
+    ) -> bool {
+        phase == CapturePhase::InstalledAwaitingRetirement
+            && key == completion.key
+            && current == completion.identity
+            && self.identity == completion.identity
+            && footprint == self.high
+            && serial == self.serial
+    }
+}
+
+fn normalized_restart_footprint(
+    mut before: AudioRuntimeResourceFootprint,
+    old_extra: usize,
+    old_session: crate::AudioSessionResourceFootprint,
+    new_session: crate::AudioSessionResourceFootprint,
+    new_extra: usize,
+) -> Result<AudioRuntimeResourceFootprint, AudioRuntimeBuildError> {
+    before.fixed_resident_bytes = before
+        .fixed_resident_bytes
+        .checked_sub(old_extra)
+        .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+    let mut next = super::native_author_scope::replace_weights(before, old_session, new_session)?;
+    next.fixed_resident_bytes = next
+        .fixed_resident_bytes
+        .checked_add(new_extra)
+        .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+    Ok(next)
 }
 
 fn add(a: usize, b: usize) -> Result<usize, NativeAudioReprepareError> {
@@ -328,9 +416,14 @@ impl AudioProgramRuntime {
         // The original Root footprint remains the sole fixed-policy authority.
         // This conservative reservation is not credited until the actual Runtime
         // retires; external handles own no allocations or releasable credit.
+        let before_capture = self.resource_footprint;
         self.resource_footprint.fixed_resident_bytes = reserved_fixed;
         self.native_reprepare.attempt = Some(Box::new(NativeReprepareAttempt {
             key,
+            before_capture,
+            factory_fixed_bound: 0,
+            fee_scope_added: 0,
+            retirement: None,
             ticket,
             serial,
             selection,
@@ -544,6 +637,8 @@ impl AudioProgramRuntime {
         let attempt = self.native_reprepare.attempt.as_mut().unwrap();
         attempt.held_fixed_bytes = next_held_fixed;
         attempt.phase = CapturePhase::Preparing;
+        attempt.factory_fixed_bound = factory_bound;
+        attempt.fee_scope_added = fee_scope_bytes;
         attempt.destination = Some(destination);
         let fee = self.prepare_native_plan_logical_fee(old_logical, requested_logical, next)?;
         let attempt = self.native_reprepare.attempt.as_mut().unwrap();
@@ -759,12 +854,64 @@ impl AudioProgramRuntime {
             // Do not release old storage under the CAS or charge new storage twice.
             footprint.fixed_resident_bytes = self.resource_footprint.fixed_resident_bytes;
             let seed = operation.facts;
-            let reserved = check_seed_overlap(
-                self.resource_footprint,
-                self.resource_grant,
-                seed.configuration_bytes,
+            let mut factory_bytes = 0_usize;
+            // Successful Factory owners use the existing inventory/kinds.
+            // Alias double-count is conservative. Arc payload/encoded capacity
+            // is not upgraded to complete prefix/platform/SDK heap evidence.
+            attempt.prepared_plan.as_ref().unwrap().visit_factory_host_owned_storage(
+                &mut |owner| {
+                    factory_bytes = factory_bytes
+                        .checked_add(owner.layout().size())
+                        .ok_or(crate::NativeHostLedgerError::ExtentOverflow)?;
+                    Ok(())
+                },
             )?;
-            let held = add(attempt.held_fixed_bytes, seed.configuration_bytes)?;
+            let (old_seeds, selected_seed) =
+                self.session.reprepare_seed_weights(&attempt.selection)?;
+            let next_seeds = old_seeds
+                .checked_sub(selected_seed)
+                .and_then(|bytes| bytes.checked_add(seed.configuration_bytes))
+                .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+            let fee_scope = std::mem::size_of::<std::sync::atomic::AtomicUsize>();
+            let fixed_extra = add(add(factory_bytes, next_seeds)?, fee_scope)?;
+            let final_footprint = normalized_restart_footprint(
+                attempt.before_capture,
+                self.native_reprepare.current_fixed_extra,
+                old,
+                next,
+                fixed_extra,
+            )?;
+            // The original FB already admits the selected new Factory/codec.
+            // Whole-Plan peer/binding metadata not covered by FB gets credit
+            // now, BEFORE Stage, while all old owners remain alive.
+            let metadata_extra = factory_bytes.saturating_sub(attempt.factory_fixed_bound);
+            let scope_extra =
+                if self.native_reprepare.current_fixed_extra == 0 && attempt.fee_scope_added == 0 {
+                    fee_scope
+                } else {
+                    0
+                };
+            let mut preseed = self.resource_footprint;
+            preseed.fixed_resident_bytes = add(
+                preseed.fixed_resident_bytes,
+                add(metadata_extra, scope_extra)?,
+            )?;
+            let reserved =
+                check_seed_overlap(preseed, self.resource_grant, seed.configuration_bytes)?;
+            if final_footprint.fixed_resident_bytes > reserved {
+                return Err(Error::Admission(
+                    "restart final owners exceed admitted peak",
+                ));
+            }
+            let mut final_roles = final_footprint;
+            final_roles.fixed_resident_bytes = footprint.fixed_resident_bytes;
+            if final_roles != footprint {
+                return Err(Error::Admission("restart final resource roles changed"));
+            }
+            let held = add(
+                attempt.held_fixed_bytes,
+                add(seed.configuration_bytes, add(metadata_extra, scope_extra)?)?,
+            )?;
             let destination = attempt
                 .destination
                 .as_ref()
@@ -834,6 +981,12 @@ impl AudioProgramRuntime {
                     // This MUST precede every late validation, cancellation or
                     // CAS. An Err below can never grant a second Commit RPC.
                     attempt.phase = CapturePhase::SeedCommitted;
+                    if receipt.child_seed_capacity_bytes > seed.configuration_bytes {
+                        let extra = receipt.child_seed_capacity_bytes - seed.configuration_bytes;
+                        self.resource_footprint.fixed_resident_bytes =
+                            self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+                        attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+                    }
                     if receipt != staged {
                         return Err(Error::Admission("committed seed receipt changed"));
                     }
@@ -863,6 +1016,21 @@ impl AudioProgramRuntime {
                 attempt.plan_fee.as_ref().unwrap(),
                 footprint,
             )?;
+            let (committed_seeds, _) = self.session.reprepare_seed_weights(&attempt.selection)?;
+            let actual_extra = add(add(factory_bytes, committed_seeds)?, fee_scope)?;
+            let final_footprint = normalized_restart_footprint(
+                attempt.before_capture,
+                self.native_reprepare.current_fixed_extra,
+                old,
+                next,
+                actual_extra,
+            )?;
+            if final_footprint.fixed_resident_bytes > footprint.fixed_resident_bytes {
+                return Err(Error::Admission(
+                    "actual restart owners exceed admitted peak",
+                ));
+            }
+            let identity = storage.identity();
             let next_verifier = destination.clone();
             let commit = authorization
                 .begin_commit(&destination)
@@ -875,25 +1043,91 @@ impl AudioProgramRuntime {
             attempt.retired_verifier = self.native_installation.verifier.replace(next_verifier);
             let claim = commit.commit();
             attempt.retired_claim = self.native_installation.claim.replace(claim.clone());
-            attempt.phase = CapturePhase::Installed;
+            attempt.phase = CapturePhase::InstalledAwaitingRetirement;
+            attempt.retirement = Some(RestartRetirement {
+                identity,
+                serial: claim.generation(),
+                high: footprint,
+                final_footprint,
+                fixed_extra: actual_extra,
+            });
             // Outside the Source guard; new Session remains Unentered.
             self.refresh_native_entry_context();
             Ok(claim)
         })();
-        match result {
-            Ok(claim) => Ok(NativeAudioReprepareInstallReceipt {
-                claim,
-                identity: self.session.native_owner_identity(),
-                previous_epoch: attempt.ticket.continuity_epoch,
-                _retired: attempt,
-            }),
-            Err(error) => {
-                // Includes StageAttempted/CommitAttempted (unconfirmed) and
-                // SeedCommitted. None of these phases is retryable.
-                self.native_reprepare.attempt = Some(attempt);
-                Err(error)
+        let result = match result {
+            Ok(claim) => {
+                let receipt = NativeAudioReprepareInstallReceipt {
+                    claim,
+                    identity: self.session.native_owner_identity(),
+                    previous_epoch: attempt.ticket.continuity_epoch,
+                    key: attempt.key,
+                    _retired: RetiredReprepareOwners {
+                        _constants: std::mem::take(&mut attempt.selection.constants),
+                        _candidate: attempt.candidate.take(),
+                        _factory: attempt.prepared_factory.take(),
+                        _plan: attempt.prepared_plan.take(),
+                        _session: attempt.prepared_session.take(),
+                        _claim: attempt.retired_claim.take(),
+                        _verifier: attempt.retired_verifier.take(),
+                        _destination: attempt.destination.take(),
+                        _plan_fee: attempt.plan_fee.take(),
+                    },
+                };
+                Ok(receipt)
             }
+            Err(error) => Err(error),
+        };
+        // On success this SAME Box is now only a metadata fence. No second
+        // capture can start until real retirement and exact completion below.
+        // On failure it still holds all actual owners/phase and conservative fees.
+        self.native_reprepare.attempt = Some(attempt);
+        result
+    }
+
+    /// Complete resource normalization only after the receipt's real lock-free
+    /// retirement. An unrelated/newer Session, Source claim or footprint refuses
+    /// without credit. This operation grants no DSP or native owner permission.
+    pub fn finish_native_reprepare_retirement(
+        &mut self,
+        completion: NativeAudioReprepareRetirement,
+    ) -> Result<(), NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        let attempt = self
+            .native_reprepare
+            .attempt
+            .as_ref()
+            .ok_or(Error::Admission("no restart retirement is pending"))?;
+        let retired = attempt
+            .retirement
+            .ok_or(Error::Admission("restart owners have not been published"))?;
+        if !retired.matches(
+            attempt.key,
+            attempt.phase,
+            self.session.native_owner_identity(),
+            self.native_author_installation_serial()?,
+            self.resource_footprint,
+            &completion,
+        ) || attempt.candidate.is_some()
+            || attempt.prepared_factory.is_some()
+            || attempt.prepared_plan.is_some()
+            || attempt.prepared_session.is_some()
+            || attempt.plan_fee.is_some()
+            || attempt.retired_claim.is_some()
+            || attempt.retired_verifier.is_some()
+            || attempt.destination.is_some()
+            || !attempt.selection.constants.is_empty()
+        {
+            return Err(Error::Admission(
+                "stale or foreign restart retirement completion",
+            ));
         }
+        // The fence Box was in the original capture R. Destroy its now-empty
+        // metadata allocation BEFORE publishing Final, which does not contain it.
+        drop(self.native_reprepare.attempt.take());
+        self.resource_footprint = retired.final_footprint;
+        self.native_reprepare.current_fixed_extra = retired.fixed_extra;
+        Ok(())
     }
 
     /// Borrow only the current Runtime's retained captured bytes. No allocation,
@@ -1058,6 +1292,114 @@ mod inline_admission_tests {
         assert_eq!(current.fixed_resident_bytes, 17);
         assert_eq!(current.prepared_logical_bytes, 23);
         assert_eq!(current.runtime_occurrences, 1);
+    }
+
+    #[test]
+    fn restart_retirement_normalizes_two_cycles_without_reusing_old_extra_credit() {
+        let mut first = session(40);
+        first.prepared_logical_bytes = 10;
+        let mut second = first;
+        second.fixed_resident_bytes = 60;
+        second.prepared_logical_bytes = 14;
+        let mut third = second;
+        third.fixed_resident_bytes = 80;
+        third.prepared_logical_bytes = 18;
+        let before = AudioRuntimeResourceFootprint {
+            runtime_occurrences: 1,
+            fixed_resident_bytes: 100,
+            prepared_logical_bytes: 10,
+            ..AudioRuntimeResourceFootprint::default()
+        };
+        let one = normalized_restart_footprint(before, 0, first, second, 26).unwrap();
+        assert_eq!(one.fixed_resident_bytes, 146);
+        assert_eq!(one.prepared_logical_bytes, 14);
+        let two = normalized_restart_footprint(one, 26, second, third, 30).unwrap();
+        assert_eq!(two.fixed_resident_bytes, (100 - 40) + 80 + 30);
+        assert_eq!(two.prepared_logical_bytes, 18);
+        assert_eq!(two.runtime_occurrences, 1);
+        assert!(normalized_restart_footprint(before, 101, first, second, 26).is_err());
+        assert!(normalized_restart_footprint(before, 0, first, second, usize::MAX).is_err());
+        assert_eq!(before.fixed_resident_bytes, 100);
+        // Real production role algebra, not a native two-restart claim.
+    }
+
+    #[test]
+    fn restart_retirement_completion_matches_exact_owner_phase_claim_and_highwater() {
+        let key = NonZeroU64::new(1).unwrap();
+        let other = NonZeroU64::new(2).unwrap();
+        let identity = crate::AudioSessionCursorIdentity {
+            prepared_plan_id: mondrian_core::AudioPreparedPlanId::new(),
+            session_id: mondrian_core::AudioRenderSessionId::new(),
+        };
+        let footprint = AudioRuntimeResourceFootprint {
+            runtime_occurrences: 1,
+            fixed_resident_bytes: 100,
+            ..AudioRuntimeResourceFootprint::default()
+        };
+        let fence = RestartRetirement {
+            identity,
+            serial: key,
+            high: footprint,
+            final_footprint: footprint,
+            fixed_extra: 0,
+        };
+        let completion = NativeAudioReprepareRetirement { key, identity };
+        assert!(fence.matches(
+            key,
+            CapturePhase::InstalledAwaitingRetirement,
+            identity,
+            key,
+            footprint,
+            &completion
+        ));
+        assert!(!fence.matches(
+            other,
+            CapturePhase::InstalledAwaitingRetirement,
+            identity,
+            key,
+            footprint,
+            &completion
+        ));
+        assert!(!fence.matches(
+            key,
+            CapturePhase::SeedCommitted,
+            identity,
+            key,
+            footprint,
+            &completion
+        ));
+        let mut foreign = identity;
+        foreign.session_id = mondrian_core::AudioRenderSessionId::new();
+        assert!(!fence.matches(
+            key,
+            CapturePhase::InstalledAwaitingRetirement,
+            foreign,
+            key,
+            footprint,
+            &completion
+        ));
+        assert!(!fence.matches(
+            key,
+            CapturePhase::InstalledAwaitingRetirement,
+            identity,
+            other,
+            footprint,
+            &completion
+        ));
+        let mut changed = footprint;
+        changed.fixed_resident_bytes += 1;
+        assert!(!fence.matches(
+            key,
+            CapturePhase::InstalledAwaitingRetirement,
+            identity,
+            key,
+            changed,
+            &completion
+        ));
+        assert_eq!(
+            footprint.fixed_resident_bytes, 100,
+            "matching is read-only; no stale completion can calculate a credit"
+        );
     }
 
     #[test]

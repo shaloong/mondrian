@@ -403,6 +403,8 @@ struct HostedProcessorInstance {
     notes: Option<Box<notes::HostedNoteState>>,
     native_binding: crate::native_runtime_owner::NativeHostedBinding,
     native_author_outstanding: Option<native_author::NativeHostedAuthorDelivery>,
+    // Actual committed child seed owner, not callback/install authority.
+    native_reprepare_seed_bytes: usize,
     native_editor_detached: Option<mondrian_core::NativeAudioEditorTarget>,
     native_editor_attachment: Option<(
         crate::AudioNativeProcessorOwnerLease,
@@ -1343,6 +1345,7 @@ impl PreparedProcessorHost {
                 notes: self.prepared_notes.get_mut(slot).and_then(Option::take),
                 native_binding: crate::native_runtime_owner::NativeHostedBinding::Unbound,
                 native_author_outstanding: None,
+                native_reprepare_seed_bytes: 0,
                 native_editor_attachment: None,
                 native_editor_detached: None,
             });

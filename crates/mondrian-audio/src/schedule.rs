@@ -1076,7 +1076,10 @@ fn session_resource_footprint(
         parameter_event_bytes,
         checked_product([
             summary.processor_occurrence_count,
-            PROCESSOR_INSTANCE_METADATA_BYTES,
+            checked_sum([
+                PROCESSOR_INSTANCE_METADATA_BYTES,
+                crate::processor_host::native_reprepare::native_reprepare_seed_slot_bytes(),
+            ])?,
         ])?,
         checked_product([summary.node_count, channels, METER_CHANNEL_STATE_BYTES])?,
     ])?;

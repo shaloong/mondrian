@@ -13,6 +13,12 @@ pub(crate) struct ReprepareSelection {
     pub(crate) constants: Vec<f64>,
 }
 
+// One real inline capacity slot per Hosted occurrence. Existing metadata
+// policy remains intact; this new known layout is charged separately once.
+pub(crate) const fn native_reprepare_seed_slot_bytes() -> usize {
+    std::mem::size_of::<usize>()
+}
+
 impl PreparedProcessorHost {
     pub(crate) fn inspect_native_reprepare(
         &mut self,
@@ -317,10 +323,30 @@ impl PreparedProcessorHost {
         ticket: crate::NativeConfigurationSeedTicket,
     ) -> Result<crate::NativeConfigurationSeedOutcome, Error> {
         let instance = self.restart_seed_instance(selection)?;
-        Ok(isolate_adapter_call(
-            "retained restart seed commit",
-            || instance.processor.commit_native_configuration_seed(ticket),
-        )?)
+        let outcome = isolate_adapter_call("retained restart seed commit", || {
+            instance.processor.commit_native_configuration_seed(ticket)
+        })?;
+        if let crate::NativeConfigurationSeedOutcome::Accepted(receipt) = outcome {
+            // Authenticated same-child outcome is retained before any caller
+            // postcheck/CAS can fail. This moves with the actual Hosted record.
+            instance.native_reprepare_seed_bytes = receipt.child_seed_capacity_bytes;
+        }
+        Ok(outcome)
+    }
+
+    pub(crate) fn reprepare_seed_weights(
+        &self,
+        selection: &ReprepareSelection,
+    ) -> Result<(usize, usize), Error> {
+        let selected = self
+            .instances
+            .get(selection.index)
+            .ok_or(Error::Admission("restart seed occurrence changed"))?;
+        let total = self.instances.iter().try_fold(0_usize, |sum, instance| {
+            sum.checked_add(instance.native_reprepare_seed_bytes)
+                .ok_or(Error::Admission("committed seed owner extent overflow"))
+        })?;
+        Ok((total, selected.native_reprepare_seed_bytes))
     }
 
     fn restart_seed_instance(
