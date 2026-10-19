@@ -7071,14 +7071,35 @@ pub(in crate::app) mod tests {
         assert_eq!(observed, 0);
         assert_eq!(state.playback_engine.snapshot(), before);
         assert_eq!(state.audio_playback_snapshot(), media);
-        output.lock().auto_acknowledge = true;
+        assert_eq!(
+            media.in_flight, 0,
+            "the single deferred PCM completion was consumed"
+        );
+        let positive_at = handled_at;
+        assert!(positive_at >= at);
+        assert_eq!(
+            state.playback_timestamp_for_observation(positive_at).unwrap(),
+            state.playback_engine.monotonic_high_water(),
+            "the positive input is the fixture's current observation, without clock clamping"
+        );
+        let output_obligation = {
+            let mut owned = output.lock();
+            assert!(!owned.snapshot.active);
+            assert!(!owned.auto_acknowledge);
+            assert!(owned.acknowledged < owned.revision);
+            assert_eq!(owned.snapshot.captured_at, positive_at);
+            let obligation = (owned.snapshot.stream_generation, owned.revision);
+            // The original manual mock protocol confirms the already-issued token.
+            owned.acknowledged = owned.revision;
+            obligation
+        };
         let mut samples = 0;
         let mut observed = 0;
         state
             .pump_audio_output_clocked_for_test(
                 &mut || {
                     samples += 1;
-                    at
+                    positive_at
                 },
                 &mut |_, event| {
                     assert!(matches!(
@@ -7096,6 +7117,21 @@ pub(in crate::app) mod tests {
             "one poll, every original handler and final Observe all sample the supplied clock"
         );
         assert!(state.audio_playback.has_retained_native_reprepare());
+        assert!(
+            state
+                .playback_engine
+                .next_wake(state.playback_engine.monotonic_high_water())
+                .unwrap()
+                .is_none(),
+            "the real acknowledgement was finalized by the original handler"
+        );
+        let owned = output.lock();
+        assert_eq!(
+            (owned.snapshot.stream_generation, owned.revision),
+            output_obligation
+        );
+        assert_eq!(owned.acknowledged, output_obligation.1);
+        assert!(!owned.snapshot.active);
     }
 
     #[test]
