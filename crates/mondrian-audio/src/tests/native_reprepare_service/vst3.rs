@@ -341,6 +341,17 @@ fn installed_vst3_runtime_latency_restart_enters_fresh_component_with_canonical_
         );
         assert_eq!(runtime.public_output_lookahead_frames(), 7);
         assert!(runtime.native_owner_lease(address).is_err());
+        assert!(
+            runtime
+                .native_owner_lease(AudioNativeProcessorAddress {
+                    root: plan.identity(),
+                    local: plan.identity(),
+                    occurrence,
+                    epoch: None,
+                })
+                .is_err(),
+            "Unentered new Session has no installed native lease"
+        );
         untouched.fill(99.0);
         assert_eq!(
             runtime.render_into(
