@@ -1,4 +1,5 @@
 use super::*;
+mod host_output_fader;
 #[cfg(any(test, feature = "validation"))]
 use mondrian_audio::BuiltInAudioProcessorResolver;
 use mondrian_audio::{

@@ -5,6 +5,7 @@ use crate::app::AppMessage;
 enum AuthoringAudioPolicy {
     ReconcileAudibleClosure,
     NativeParameterHandoff,
+    HostOutputFaderRetained,
 }
 
 fn sequence_time_from_frame(
@@ -405,6 +406,20 @@ impl AppState {
             let (value, prepared) =
                 session.prepare_sequence_edit(sequence_id, description, edit)?;
             let commit = if let Some(prepared) = prepared {
+                if let Some((renderer, binding)) =
+                    self.prepare_playing_host_output_fader(prepared.candidate_sequences())?
+                {
+                    let commit =
+                        self.publish_prepared_host_output_fader(prepared, renderer, binding)?;
+                    // Keep original events, targeting and real Engine revision/
+                    // clock synchronization. Only generic Source rebuilding is
+                    // skipped after the actual retained publication succeeded.
+                    self.consume_authoring_commit_with_audio_policy(
+                        commit,
+                        AuthoringAudioPolicy::HostOutputFaderRetained,
+                    )?;
+                    return Ok(value);
+                }
                 if let Some(refusal) = replacement_refusal {
                     self.validate_audio_authoring_candidate(
                         prepared.candidate_sequences(),

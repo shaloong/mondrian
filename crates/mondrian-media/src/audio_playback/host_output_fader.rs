@@ -13,6 +13,7 @@ impl AudioPlayback {
     ///
     /// The supplied verifier is read from that Runtime before this call. No
     /// renderer getter is called here: it could lock the same Runtime again.
+    /// Success carries the actual new claim and migrated native record count.
     /// The callback must return Err before any publication, or perform the
     /// Source CAS and infallible ownership moves, release the Source guard,
     /// install the prepared author ticket and return Ok while Runtime/metadata
@@ -27,7 +28,8 @@ impl AudioPlayback {
         publish: impl FnOnce(
             &AudioOwnerInstallationVerifier,
             &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
-        ) -> Result<T, E>,
+            &ExecutionCancellationToken,
+        ) -> Result<(T, AudioOwnerInstallationClaim, usize), E>,
     ) -> Result<Result<T, E>, AudioPlaybackError> {
         self.ensure_source_close_idle()?;
         self.ensure_render_execution_available()?;
@@ -70,12 +72,30 @@ impl AudioPlayback {
             .reserve_install(&actual.registration(), Some(&previous))?;
         let mut authorization =
             self.owner_installation.authorize_runtime_installation(reservation)?;
-        let outcome = publish(actual, &mut authorization);
-        if outcome.is_ok() {
-            // A new claim invalidates old target facts, not PCM or scheduling.
-            // The actual Runtime already published its same-object parent leases.
-            self.native_owner_binding_status = None;
-        }
-        Ok(outcome)
+        let outcome = publish(
+            actual,
+            &mut authorization,
+            &self.native_control_cancellation,
+        );
+        Ok(match outcome {
+            Ok((value, claim, native_bindings)) => {
+                // This trusted result carries the actual new claim and the
+                // count of records just migrated, never the old Ready cache.
+                // No business refusal remains after its successful Source CAS.
+                assert!(
+                    actual.validate(&claim).is_ok(),
+                    "Host fader provider must return its actual current Source publication"
+                );
+                self.native_owner_binding_status = Some(if native_bindings == 0 {
+                    AudioPcmNativeOwnerBindingStatus::Unavailable(
+                        AudioPcmNativeOwnerBindingRefusal::UnsupportedAdapter,
+                    )
+                } else {
+                    AudioPcmNativeOwnerBindingStatus::Ready
+                });
+                Ok(value)
+            }
+            Err(error) => Err(error),
+        })
     }
 }

@@ -47,9 +47,9 @@ fn host_output_fader_source_publication_preserves_fifo_and_rejection_custody() {
         let foreign_source = AudioOwnerInstallationSource::new();
         let (_, foreign) = foreign_source.register().unwrap();
         let foreign_result =
-            playback.with_host_output_fader_publication(&expected, &foreign, |_, _| {
+            playback.with_host_output_fader_publication(&expected, &foreign, |_, _, _| {
                 callback_calls.set(callback_calls.get() + 1);
-                Ok::<_, ()>(())
+                Ok::<_, ()>(((), before.clone(), 0))
             });
         assert!(matches!(
             foreign_result,
@@ -61,9 +61,9 @@ fn host_output_fader_source_publication_preserves_fifo_and_rejection_custody() {
         let wrong_slot = playback.with_host_output_fader_publication(
             &Arc::downgrade(&other),
             &verifier,
-            |_, _| {
+            |_, _, _| {
                 callback_calls.set(callback_calls.get() + 1);
-                Ok::<_, ()>(())
+                Ok::<_, ()>(((), before.clone(), 0))
             },
         );
         assert!(matches!(
@@ -72,9 +72,11 @@ fn host_output_fader_source_publication_preserves_fifo_and_rejection_custody() {
         ));
         assert_eq!(callback_calls.get(), 0);
         let rejected = playback
-            .with_host_output_fader_publication(&expected, &verifier, |_, _| {
+            .with_host_output_fader_publication(&expected, &verifier, |_, _, _| {
                 callback_calls.set(callback_calls.get() + 1);
-                Err::<(), _>("dependency refused before Source CAS")
+                Err::<((), AudioOwnerInstallationClaim, usize), _>(
+                    "dependency refused before Source CAS",
+                )
             })
             .unwrap();
         assert_eq!(rejected, Err("dependency refused before Source CAS"));
@@ -89,10 +91,13 @@ fn host_output_fader_source_publication_preserves_fifo_and_rejection_custody() {
             .with_host_output_fader_publication(
                 &expected,
                 &verifier,
-                |destination, authorization| {
+                |destination, authorization, cancellation| {
                     callback_calls.set(callback_calls.get() + 1);
+                    assert!(!cancellation.is_canceled());
                     let publication = authorization.begin_commit(destination)?;
-                    Ok::<_, AudioOwnerInstallationError>(publication.commit())
+                    let claim = publication.commit();
+                    // Portable provider result; this is not native DSP evidence.
+                    Ok::<_, AudioOwnerInstallationError>((claim.clone(), claim, 1))
                 },
             )
             .unwrap()
@@ -102,7 +107,47 @@ fn host_output_fader_source_publication_preserves_fifo_and_rejection_custody() {
         assert!(verifier.validate(&after).is_ok());
         assert!(after.generation() > before.generation());
         assert!(playback.matches_source(&renderer));
-        assert_eq!(playback.native_owner_binding_status(), None);
+        assert_eq!(
+            playback.native_owner_binding_status(),
+            Some(AudioPcmNativeOwnerBindingStatus::Ready)
+        );
+        // A second actual Source CAS proves readiness was refreshed; clearing
+        // it to None would leave this same settled Source permanently Busy.
+        let repeated = playback
+            .with_host_output_fader_publication(
+                &expected,
+                &verifier,
+                |destination, authorization, cancellation| {
+                    assert!(!cancellation.is_canceled());
+                    let claim = authorization.begin_commit(destination)?.commit();
+                    Ok::<_, AudioOwnerInstallationError>((claim.clone(), claim, 1))
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(verifier.validate(&after).is_err());
+        assert!(verifier.validate(&repeated).is_ok());
+        assert_eq!(
+            playback.native_owner_binding_status(),
+            Some(AudioPcmNativeOwnerBindingStatus::Ready)
+        );
+        let no_native = playback
+            .with_host_output_fader_publication(
+                &expected,
+                &verifier,
+                |destination, authorization, _| {
+                    let claim = authorization.begin_commit(destination)?.commit();
+                    Ok::<_, AudioOwnerInstallationError>(((), claim, 0))
+                },
+            )
+            .unwrap();
+        assert_eq!(no_native, Ok(()));
+        assert_eq!(
+            playback.native_owner_binding_status(),
+            Some(AudioPcmNativeOwnerBindingStatus::Unavailable(
+                AudioPcmNativeOwnerBindingRefusal::UnsupportedAdapter,
+            ))
+        );
         assert_eq!(playback.generation, generation);
         assert_eq!(playback.next_start_sample, next);
         assert_eq!(playback.media_anchor, anchor);
@@ -135,7 +180,7 @@ fn host_output_fader_refuses_actual_unaccepted_pcm_work_before_publication() {
         let result = playback.with_host_output_fader_publication(
             &Arc::downgrade(&renderer),
             &verifier,
-            |_, _| -> Result<(), ()> {
+            |_, _, _| -> Result<((), AudioOwnerInstallationClaim, usize), ()> {
                 panic!("busy Source must refuse before dependency publication")
             },
         );

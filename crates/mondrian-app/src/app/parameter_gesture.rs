@@ -739,6 +739,39 @@ impl AppState {
             }
         };
         let target = edit.target();
+        let current_intent = if begin {
+            self.parameter_target_is_current(&target)
+        } else {
+            self.parameter_gesture_is_current()
+                && self
+                    .active_parameter_gesture
+                    .as_ref()
+                    .is_some_and(|active| active.id == id && active.target == target)
+        };
+        // This first retained-F consumer admits the original nongesture
+        // prepared ticket. Live gesture updates do not yet expose that split.
+        // Refuse before opening a group or entering error->cancel restoration.
+        if current_intent
+            && self.is_playing()
+            && let ParameterGestureEdit::AudioScalar(scalar) = &edit
+            && let AudioScalarOwner::Fader {
+                owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput { output_id },
+            } = &scalar.target.owner
+            && self
+                .active_sequence()
+                .and_then(|sequence| sequence.audio_program.outputs.first())
+                .is_some_and(|output| {
+                    output.id == *output_id
+                        && output.strip.fader_db.to_bits() != scalar.value.to_bits()
+                })
+            && self.host_output_fader_native_renderer()?.is_some()
+        {
+            return Err(MondrianError::ActionNotExecuted {
+                action: "authoring_commit".to_owned(),
+                reason: "playing Host output fader gestures require prepared author publication"
+                    .to_owned(),
+            });
+        }
         if begin {
             // Reject a queued stale scalar start before sealing any other live
             // gesture. A refused control cannot advance author history.

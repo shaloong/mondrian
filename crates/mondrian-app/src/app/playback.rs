@@ -1,6 +1,7 @@
 use super::product_action::TimelineSeekPayload;
 use super::timeline_position::lower_nearest_sequence_frame;
 use super::*;
+mod host_output_fader;
 use crate::app::AppMessage;
 
 const MAX_PLAYBACK_WAKE_DELAY: Duration = Duration::from_millis(100);
