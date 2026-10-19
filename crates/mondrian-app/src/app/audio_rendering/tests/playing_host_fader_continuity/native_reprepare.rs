@@ -104,32 +104,8 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                             assert!(installed.is_some(), "new binding follows actual settlement");
                         }
                     }
-                    AudioPlaybackEvent::NativeParameterObservationsObserved {
-                        renderer_id: actual,
-                        observation,
-                        ..
-                    } => {
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert!(
-                            observation.facts().is_empty(),
-                            "actual mode7 has no parameter lanes"
-                        );
-                        let object = (observation.process_id(), observation.object_serial());
-                        if observation.target().installed_generation == old_claim.generation() {
-                            if let Some(previous) = old_object {
-                                assert_eq!(previous, object);
-                            }
-                            old_object = Some(object);
-                        } else {
-                            assert!(
-                                installed.is_some(),
-                                "no alternate native object/Source before installation"
-                            );
-                            if let Some(previous) = new_object {
-                                assert_eq!(previous, object);
-                            }
-                            new_object = Some(object);
-                        }
+                    AudioPlaybackEvent::NativeParameterObservationsObserved { .. } => {
+                        panic!("mode7 has no parameter lanes or parameter-observation DTOs");
                     }
                     AudioPlaybackEvent::NativeReprepareRequired {
                         previous_generation,
@@ -149,7 +125,18 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                         let facts = cursor_facts(state);
                         assert_eq!(facts.session.unwrap().identity, old_identity);
                         assert_heads(&facts, old_generation, 8, RESTART);
-                        old_lease = Some(actual_native_lease(&renderer, &facts));
+                        let lease = actual_native_lease(&renderer, &facts);
+                        old_lease = Some(lease);
+                        // One real non-RT Preserve RPC under the original Runtime mutex.
+                        // The actual Required boundary precedes capture/installation.
+                        let object = renderer
+                            .state
+                            .lock()
+                            .delivery
+                            .observe_native_owner_object(lease)
+                            .expect("authenticated old object while the original restart is held");
+                        assert_ne!(object.process_id().get(), std::process::id());
+                        old_object = Some((object.process_id(), object.object_serial()));
                         assert_eq!(
                             notice.instance_id,
                             facts.processor.unwrap().occurrence.instance_id
@@ -282,7 +269,6 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                 if snapshot.generation == generation
                     && snapshot.in_flight == 0
                     && snapshot.output.unwrap().buffered_frames == 8
-                    && new_object.is_some()
                 {
                     if !fresh_video_ready {
                         assert_eq!(
@@ -305,23 +291,36 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                                 && snapshot.output.unwrap().active
                         );
                         assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
-                        let capture = output.lock();
-                        assert_eq!(
-                            capture.windows.len(),
-                            4,
-                            "two complete old and two complete new windows"
-                        );
-                        assert_restart_windows(&capture, 0, 0);
-                        assert_restart_windows(&capture, 2, anchor);
-                        assert!(!capture.overflow);
-                        assert_eq!(capture.activation_discarded, 0);
+                        {
+                            let capture = output.lock();
+                            assert_eq!(
+                                capture.windows.len(),
+                                4,
+                                "two complete old and two complete new windows"
+                            );
+                            assert_restart_windows(&capture, 0, 0);
+                            assert_restart_windows(&capture, 2, anchor);
+                            assert!(!capture.overflow);
+                            assert_eq!(capture.activation_discarded, 0);
+                        }
+                        let facts = cursor_facts(&state);
+                        let lease = actual_native_lease(&renderer, &facts);
+                        // A second real non-RT RPC, only after actual Fresh Ready,
+                        // activation and both complete new PCM windows. No output lock.
+                        let object = renderer
+                            .state
+                            .lock()
+                            .delivery
+                            .observe_native_owner_object(lease)
+                            .expect("authenticated new object after the original Fresh entry");
+                        new_object = Some((object.process_id(), object.object_serial()));
                         break;
                     }
                 }
             }
             assert!(
                 Instant::now() < deadline,
-                "owned App/Media restart did not complete: {snapshot:?}"
+                "owned App/Media restart did not complete: {snapshot:?}; old_ready={old_ready} old_object={old_object:?} new_object={new_object:?} pending={pending:?} quiesced={quiesced} installed={installed:?} fresh={fresh:?} fresh_video_ready={fresh_video_ready}"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
