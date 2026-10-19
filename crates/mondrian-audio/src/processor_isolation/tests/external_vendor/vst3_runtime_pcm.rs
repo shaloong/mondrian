@@ -367,8 +367,9 @@ fn observe_runtime_pcm_inner(
                     "NOT_COVERED_REFERENCE: actual continuous Runtime PCM failed at {start}: {error:?}"
                 ));
             } else {
-                rendered
-                    .expect("actual contiguous Runtime PCM; native typed failures remain failures");
+                rendered.unwrap_or_else(|error| panic!(
+                    "actual contiguous Runtime PCM; native typed failures remain failures; label={label}; start_sample={start}: {error:?}"
+                ));
             }
             assert_eq!(pcm.len(), frames * 2);
             assert!(
@@ -438,18 +439,11 @@ fn observe_runtime_pcm_inner(
             let mut exit_code = 0;
             let queried =
                 unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit_code) };
-            assert_eq!(
-                alive, 258,
-                "target-failure child was alive before original Runtime Drop"
-            );
-            assert_eq!(
-                settled, 0,
-                "target-failure original Runtime Drop settles exact child"
-            );
-            assert_ne!(queried, 0);
-            assert_eq!(
-                exit_code, 0,
-                "target-failure child exits cleanly before rethrow"
+            // A supervisor error may already have terminated/reaped this child.
+            // These raw error-path observations grant no cleanup qualification
+            // and must not replace the original native/target panic.
+            eprintln!(
+                "native Runtime target failure; not cleanup qualification: before_drop_wait={alive}; after_drop_wait={settled}; exit_query_result={queried}; raw_exit_code={exit_code}"
             );
             std::panic::resume_unwind(panic)
         }
