@@ -3,6 +3,7 @@
 //! create/Enter counts, the complete UI pump, arbitrary tails or a physical DAC.
 
 use super::*;
+mod native_reprepare;
 use crate::app::playback::{poll_audio_playback_at_for_test, AppAudioPlayback};
 use crate::app::product_action::{AudioProductAction, ProductAction};
 use mondrian_audio::{
@@ -593,6 +594,18 @@ fn native_fader_fixture(
     Arc<Mutex<CaptureState>>,
     mondrian_core::ProgramOutputId,
 ) {
+    native_fader_fixture_with_configuration(scenario, None)
+}
+
+fn native_fader_fixture_with_configuration(
+    scenario: Scenario,
+    configuration: Option<Vec<u8>>,
+) -> (
+    tempfile::TempDir,
+    AppState,
+    Arc<Mutex<CaptureState>>,
+    mondrian_core::ProgramOutputId,
+) {
     let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
         .map(std::path::PathBuf::from)
         .expect("current normal Product");
@@ -603,8 +616,11 @@ fn native_fader_fixture(
     assert!(plugin.is_absolute() && plugin.is_file());
     let installed = DiscoveredClapAudioProcessorSpecResolver::discover(helper, [plugin])
         .expect("actual owned CLAP discovery");
-    let mut opaque = vec![scenario.mode];
-    opaque.extend_from_slice(&0.5_f32.to_le_bytes());
+    let opaque = configuration.unwrap_or_else(|| {
+        let mut opaque = vec![scenario.mode];
+        opaque.extend_from_slice(&0.5_f32.to_le_bytes());
+        opaque
+    });
     let instance = installed
         .create_instance(
             "org.mondrian.fixture.sidechain",
