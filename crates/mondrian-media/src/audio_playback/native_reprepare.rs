@@ -342,7 +342,10 @@ pub(super) fn execute(work: &mut NativeReprepareWork) -> Execution {
                 Err(_) => return Execution::Finished(Err(R::Superseded)),
             };
             match work.request.install(a.notice, actual.clone(), &mut authority, &a.cancellation) {
-                Ok(claim) if actual.validate(&claim).is_ok() => {
+                Ok(claim)
+                    if claim.generation() != a.expected.generation()
+                        && actual.validate(&claim).is_ok() =>
+                {
                     a.installed = Some(claim);
                     Execution::Retire
                 }
@@ -527,6 +530,11 @@ mod tests {
             assert_eq!(notice, renderer.notice);
             if self.fail == 1 {
                 return Err(AudioPcmNativeReprepareRefusal::ProcessorRejected);
+            }
+            if self.fail == 4 {
+                // An old valid claim is not evidence of consuming replacement
+                // authority or actually installing a new Session.
+                return Ok(destination.current_claim().unwrap());
             }
             let claim = authority.begin_commit(&destination).unwrap().commit();
             renderer.restarted.store(true, Ordering::Release);
@@ -754,6 +762,34 @@ mod tests {
             old
         );
         assert!(!playback.finish_native_reprepare(playback.generation, anchor(0)).unwrap());
+    }
+
+    #[test]
+    fn returning_the_old_valid_claim_cannot_fake_restart_installation() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        let expected = playback.owner_installation.current_claim().unwrap().unwrap();
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 4))
+            .unwrap());
+        pump(&mut playback, refused);
+        assert_eq!(
+            playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+            expected.generation()
+        );
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+        assert!(!facts.entered_retirement.load(Ordering::Acquire));
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare { admission: NativeReprepareAdmission::Refused, .. })
+        ));
+        assert!(!playback.finish_native_reprepare(playback.generation, anchor(0)).unwrap());
+        assert!(facts
+            .calls
+            .lock()
+            .iter()
+            .all(|(name, _)| *name != "retire" && *name != "settle"));
     }
 
     #[test]
