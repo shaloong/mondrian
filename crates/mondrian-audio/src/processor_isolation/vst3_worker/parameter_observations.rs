@@ -1,5 +1,6 @@
 //! Optional current presentation facts, never author edits or a delivery service.
-//! Both main roles query the original selected lanes of the same native owner.
+//! Explicit full-owner diagnostics query the original selected native lanes;
+//! source/control observations do not query parameter presentations.
 use super::*;
 use mondrian_core::{
     NativeAudioParameterFact as Fact, NativeAudioParameterObservationOrigin as Origin,
@@ -217,7 +218,8 @@ pub(super) fn capture(
 }
 
 /// An optional presentation cannot change a successful author/ack result.
-/// Acknowledgements never run a new getter after their irreversible operation.
+/// Control observations never query presentations; acknowledgements never run
+/// a new getter after their irreversible operation.
 pub(super) fn append_optional(
     observations: &mut crate::NativeAudioObservations,
     consumption: crate::NativeAudioObservationConsumption,
@@ -227,7 +229,9 @@ pub(super) fn append_optional(
     use crate::NativeAudioObservationConsumption as Consumption;
     if matches!(
         consumption,
-        Consumption::AcknowledgeAuthor(_) | Consumption::AcknowledgeReenteredAuthor(_)
+        Consumption::Preserve
+            | Consumption::AcknowledgeAuthor(_)
+            | Consumption::AcknowledgeReenteredAuthor(_)
     ) || !no_retained_delivery_or_configuration
         || !observations.author.as_ref().is_some_and(|author| {
             author.source.closed_empty()
@@ -660,7 +664,7 @@ mod tests {
         }
         let mut original = observations();
         let before = original.clone();
-        append_optional(&mut original, Consumption::Preserve, false, || {
+        append_optional(&mut original, Consumption::Drain, false, || {
             panic!("held receipt or pending configuration cannot query")
         });
         assert_eq!(original, before);
@@ -689,19 +693,19 @@ mod tests {
         let mut original = observations();
         let before = original.clone();
         let mut calls = 0;
-        append_optional(&mut original, Consumption::Preserve, true, || {
+        append_optional(&mut original, Consumption::Drain, true, || {
             calls += 1;
             None
         });
         assert_eq!(calls, 1);
         assert_eq!(original, before);
-        append_optional(&mut original, Consumption::Preserve, true, || {
+        append_optional(&mut original, Consumption::Drain, true, || {
             let mut wrong = one();
             wrong.owner = NonZeroU64::new(8).unwrap();
             Some(wrong)
         });
         assert_eq!(original, before);
-        append_optional(&mut original, Consumption::Preserve, true, || Some(one()));
+        append_optional(&mut original, Consumption::Drain, true, || Some(one()));
         assert_eq!(original.object, before.object);
         assert_eq!(original.author, before.author);
         assert_eq!(original.pending_reprepare, before.pending_reprepare);
@@ -870,8 +874,19 @@ mod tests {
     fn native_vst3_full_owner_parameter_presentations_use_actual_selected_lanes() {
         let mut worker = prepare_editor();
         let before = native_snapshot(&worker);
-        let observed = worker.poll_native_observations(Consumption::Preserve).unwrap();
+        let preserved = worker.poll_native_observations(Consumption::Preserve).unwrap();
+        assert!(preserved.parameters.is_empty());
+        assert_eq!(preserved.parameter_revision, 0);
+        assert_eq!(native_snapshot(&worker), before);
+        let observed = worker.poll_native_observations(Consumption::Drain).unwrap();
         assert_editor_facts(&observed, before.object);
+        let mut control = observed.clone();
+        control.parameters.clear();
+        control.parameter_revision = 0;
+        assert_eq!(
+            preserved, control,
+            "Drain changes only optional presentation facts"
+        );
         assert_eq!(native_snapshot(&worker), before);
         let binding = worker.native_binding.unwrap();
         let request = crate::NativeAudioObjectBindRequest {
@@ -900,18 +915,38 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "requires current normal Product and owned editor DLL under native Job"]
-    fn native_vst3_live_main_parameter_presentations_use_same_actual_object() {
+    fn native_vst3_live_main_preserves_control_facts_without_parameter_queries() {
         let mut worker = prepare_editor();
         let before = native_snapshot(&worker);
         let binding = worker.native_binding;
         let super::super::super::IsolatedAudioProcessorWorkerSplit { main, processing } =
             worker.split_native_processing().unwrap();
         let observed = main.preserve_native_observations().unwrap();
-        assert_editor_facts(&observed, before.object);
+        assert_eq!(
+            observed,
+            crate::NativeAudioObservations {
+                object: Some(before.object),
+                author: Some(crate::NativeAudioAuthorObservation {
+                    source: native_author::status(before.source).unwrap(),
+                    delivery: crate::NativeAudioAuthorDeliveryState::Preserved,
+                }),
+                ..Default::default()
+            }
+        );
         assert_eq!(main.preserve_native_observations().unwrap(), observed);
         assert_eq!(main.pending_reprepare().unwrap(), None);
         drop(processing);
         drop(main);
+        assert_eq!(native_snapshot(&worker), before);
+        let presentation = worker.poll_native_observations(Consumption::Drain).unwrap();
+        assert_editor_facts(&presentation, before.object);
+        let mut control = presentation;
+        control.parameters.clear();
+        control.parameter_revision = 0;
+        assert_eq!(
+            observed, control,
+            "joined diagnostics preserve the same control facts"
+        );
         assert_eq!(native_snapshot(&worker), before);
         assert_eq!(worker.native_binding, binding);
         assert!(worker.native_author_delivery.is_none());

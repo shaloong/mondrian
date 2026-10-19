@@ -882,8 +882,6 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             native_binding: &self.native_binding,
             native_author_delivery: &self.native_author_delivery,
             prepared_author_entry: &self.prepared_author_entry,
-            parameters: &self.payload.parameters,
-            parameter_ids: &self.payload.parameter_ids,
         })))
     }
 
@@ -919,8 +917,6 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                 native_binding: &self.native_binding,
                 native_author_delivery: &self.native_author_delivery,
                 prepared_author_entry: &self.prepared_author_entry,
-                parameters: &self.payload.parameters,
-                parameter_ids: &self.payload.parameter_ids,
             }),
             processing: Box::new(VstDspRole { native: processor, signal }),
         })
@@ -2048,8 +2044,6 @@ struct VstMainRole<'a> {
     native_binding: &'a Option<crate::NativeAudioObjectBindReceipt>,
     native_author_delivery: &'a Option<native_author::PendingDelivery>,
     prepared_author_entry: &'a Option<author_state_entry::PreparedAuthorEntry>,
-    parameters: &'a [Vst3ParameterDescriptor],
-    parameter_ids: &'a [u32],
 }
 
 #[cfg(target_os = "windows")]
@@ -2161,23 +2155,14 @@ impl super::IsolatedAudioProcessorMainRole for VstMainRole<'_> {
         });
         // Attachment cleanup is a full-owner transition after this borrow joins.
         // Live role service never closes/replaces the canonical native object.
-        let mut observations = crate::NativeAudioObservations {
+        Ok(crate::NativeAudioObservations {
             object: Some(crate::NativeAudioObjectObservation::new(
                 pid,
                 owner.serial(),
             )),
             author,
             ..Default::default()
-        };
-        parameter_observations::append_optional(
-            &mut observations,
-            crate::NativeAudioObservationConsumption::Preserve,
-            self.native_author_delivery.is_none()
-                && self.prepared_author_entry.is_none()
-                && self.configuration_phase.blocked_request().is_none(),
-            || parameter_observations::capture(&self.editor, self.parameters, self.parameter_ids),
-        );
-        Ok(observations)
+        })
     }
 
     fn native_author_binding_matches(

@@ -168,7 +168,8 @@ impl NativeAudioLogBatch {
 /// consumer drains them; neither request creates author or editor permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeAudioObservationConsumption {
-    /// Observe capability facts without consuming a diagnostic prefix.
+    /// Observe only source/control capability facts, without consuming a
+    /// diagnostic prefix or querying optional parameter presentations.
     Preserve,
     /// Consume at most one admitted fixed diagnostic batch.
     Drain,
