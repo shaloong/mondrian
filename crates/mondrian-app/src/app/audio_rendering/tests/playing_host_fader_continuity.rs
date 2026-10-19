@@ -585,7 +585,14 @@ fn native_clap_playing_host_fader_preserves_finite_echo_history() {
     run_host_fader_continuity(ECHO);
 }
 
-fn run_host_fader_continuity(scenario: Scenario) {
+fn native_fader_fixture(
+    scenario: Scenario,
+) -> (
+    tempfile::TempDir,
+    AppState,
+    Arc<Mutex<CaptureState>>,
+    mondrian_core::ProgramOutputId,
+) {
     let helper = std::env::var_os("MONDRIAN_CLAP_TEST_HELPER")
         .map(std::path::PathBuf::from)
         .expect("current normal Product");
@@ -610,7 +617,7 @@ fn run_host_fader_continuity(scenario: Scenario) {
         Some(opaque.as_slice())
     );
     let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
-    let (_directory, library, mut sequence) =
+    let (directory, library, mut sequence) =
         native_gain_media_fixture_with_samples(SOURCE_FRAMES, input_sample);
     let output_id = sequence.audio_program.outputs[0].id;
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
@@ -633,71 +640,86 @@ fn run_host_fader_continuity(scenario: Scenario) {
     state.test_set_sequence(Some(sequence));
     state.test_set_asset_library(Some(library));
 
-    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        state.play().expect("original App play prepares the actual native Source");
-        // The existing headless video model supplies both prerequisites of
-        // original play_ready: Ready delivery, then the matching preroll.
-        assert!(!state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready));
-        // Ready consumes the pending terminal ticket; preroll still names the
-        // same Engine demand, as the original play_ready fixture does.
-        let demand = state
-            .playback_engine
-            .frame_demand()
-            .map(|demand| demand.identity())
-            .expect("original Engine video demand after Ready");
-        // Existing deterministic video-preroll seam only; this audio gate does
-        // not assert actual Viewer/GPU presentation or full public UI pumping.
-        assert!(state.observe_video_preroll_at_wall(
-            demand,
-            0,
-            0,
-            true,
-            true,
+    (directory, state, output, output_id)
+}
+
+fn warm_native_fader_source(
+    state: &mut AppState,
+    output: &Arc<Mutex<CaptureState>>,
+    scenario: Scenario,
+) -> (u64, AudioPlaybackSnapshot) {
+    state.play().expect("original App play prepares the actual native Source");
+    // The existing headless video model supplies both prerequisites of
+    // original play_ready: Ready delivery, then the matching preroll.
+    assert!(!state.observe_viewer_frame_delivery(mondrian_playback::FrameDeliveryKind::Ready));
+    // Ready consumes the pending terminal ticket; preroll still names the
+    // same Engine demand, as the original play_ready fixture does.
+    let demand = state
+        .playback_engine
+        .frame_demand()
+        .map(|demand| demand.identity())
+        .expect("original Engine video demand after Ready");
+    // Existing deterministic video-preroll seam only; this audio gate does
+    // not assert actual Viewer/GPU presentation or full public UI pumping.
+    assert!(state.observe_video_preroll_at_wall(
+        demand,
+        0,
+        0,
+        true,
+        true,
+        state.playback_observation_instant_anchor,
+    ));
+    assert_eq!(
+        state.playback_engine.snapshot().state,
+        mondrian_playback::TransportState::Playing
+    );
+    {
+        let mut capture = output.lock();
+        assert!(!capture.snapshot.active);
+        let queued_before = capture.queue.len();
+        let silent = capture.callback(
+            INACTIVE_CALLBACK_FRAMES,
             state.playback_observation_instant_anchor,
-        ));
+        );
+        assert_eq!(silent, vec![[0.0; 2]; INACTIVE_CALLBACK_FRAMES]);
+        assert_eq!(capture.queue.len(), queued_before);
+        assert_eq!(capture.snapshot.buffered_frames, queued_before);
         assert_eq!(
-            state.playback_engine.snapshot().state,
-            mondrian_playback::TransportState::Playing
+            capture.snapshot.callback_consumed_frames,
+            INACTIVE_CALLBACK_FRAMES as u64
         );
-        {
-            let mut capture = output.lock();
-            assert!(!capture.snapshot.active);
-            let queued_before = capture.queue.len();
-            let silent = capture.callback(
-                INACTIVE_CALLBACK_FRAMES,
-                state.playback_observation_instant_anchor,
-            );
-            assert_eq!(silent, vec![[0.0; 2]; INACTIVE_CALLBACK_FRAMES]);
-            assert_eq!(capture.queue.len(), queued_before);
-            assert_eq!(capture.snapshot.buffered_frames, queued_before);
-            assert_eq!(
-                capture.snapshot.callback_consumed_frames,
-                INACTIVE_CALLBACK_FRAMES as u64
-            );
-            assert_eq!(capture.snapshot.active_callback_consumed_frames, 0);
-            assert_eq!(capture.snapshot.active_duration, None);
-            assert_eq!(capture.snapshot.callback_count, 1);
-            assert_eq!(
-                capture.snapshot.last_callback_frames,
-                INACTIVE_CALLBACK_FRAMES as u32
-            );
-            assert_eq!(capture.snapshot.last_callback_age, Some(Duration::ZERO));
-            assert_eq!(
-                capture.snapshot.captured_at,
-                state.playback_observation_instant_anchor
-            );
-            assert!(!capture.snapshot.active);
-        }
-        let generation = state.audio_playback_snapshot().generation;
-        let warmed = fill_to_watermark(&mut state, generation, scenario);
-        assert_eq!(warmed.media_anchor.unwrap().sample(), 0);
-        assert_eq!(warmed.next_start_sample, scenario.watermark as i64);
-        assert_heads(
-            &cursor_facts(&state),
-            generation,
-            scenario.watermark as i64,
-            scenario,
+        assert_eq!(capture.snapshot.active_callback_consumed_frames, 0);
+        assert_eq!(capture.snapshot.active_duration, None);
+        assert_eq!(capture.snapshot.callback_count, 1);
+        assert_eq!(
+            capture.snapshot.last_callback_frames,
+            INACTIVE_CALLBACK_FRAMES as u32
         );
+        assert_eq!(capture.snapshot.last_callback_age, Some(Duration::ZERO));
+        assert_eq!(
+            capture.snapshot.captured_at,
+            state.playback_observation_instant_anchor
+        );
+        assert!(!capture.snapshot.active);
+    }
+    let generation = state.audio_playback_snapshot().generation;
+    let warmed = fill_to_watermark(state, generation, scenario);
+    assert_eq!(warmed.media_anchor.unwrap().sample(), 0);
+    assert_eq!(warmed.next_start_sample, scenario.watermark as i64);
+    assert_heads(
+        &cursor_facts(state),
+        generation,
+        scenario.watermark as i64,
+        scenario,
+    );
+    (generation, warmed)
+}
+
+fn run_host_fader_continuity(scenario: Scenario) {
+    let (_directory, mut state, output, output_id) = native_fader_fixture(scenario);
+
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (generation, warmed) = warm_native_fader_source(&mut state, &output, scenario);
         let old_clear_serial = output.lock().clear_serial;
         assert_windows(&output.lock(), 0, old_clear_serial, 0, 0.0, scenario);
 
@@ -916,6 +938,372 @@ fn run_host_fader_continuity(scenario: Scenario) {
     assert!(
         pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
         "complete finite cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
+    );
+    if let Err(panic) = target {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+// These two controls qualify the new retained-F capability. The legacy A-source
+// reconstruction controls above keep their original assertions and identity.
+fn actual_native_lease(
+    renderer: &TimelineAudioPcmRenderer,
+    facts: &CursorFacts,
+) -> mondrian_audio::AudioNativeProcessorOwnerLease {
+    let session = facts.session.unwrap();
+    let processor = facts.processor.unwrap();
+    let AudioProcessorCursorState::Active { epoch, .. } = processor.state else {
+        panic!("actual active native occurrence");
+    };
+    renderer
+        .state
+        .lock()
+        .delivery
+        .native_owner_lease(mondrian_audio::AudioNativeProcessorAddress {
+            root: session.identity,
+            local: processor.identity,
+            occurrence: processor.occurrence,
+            epoch: Some(epoch),
+        })
+        .expect("actual parent-issued native lease")
+}
+
+fn assert_retained_parent_migration(
+    renderer: &TimelineAudioPcmRenderer,
+    old_facts: &CursorFacts,
+    next_facts: &CursorFacts,
+    old_lease: mondrian_audio::AudioNativeProcessorOwnerLease,
+    new_claim: &mondrian_core::AudioOwnerInstallationClaim,
+) {
+    let old = old_facts.session.unwrap().identity;
+    let next = next_facts.session.unwrap().identity;
+    assert_eq!(next.session_id, old.session_id);
+    assert_ne!(next.prepared_plan_id, old.prepared_plan_id);
+    assert_eq!(
+        old_facts.processor.unwrap().occurrence,
+        next_facts.processor.unwrap().occurrence
+    );
+    let next_lease = actual_native_lease(renderer, next_facts);
+    assert_eq!(
+        next_lease.binding(),
+        old_lease.binding(),
+        "parent relocation preserves actual native binding UUID"
+    );
+    assert_eq!(next_lease.installed_root_serial(), new_claim.generation());
+    assert_ne!(
+        next_lease.installed_root_serial(),
+        old_lease.installed_root_serial()
+    );
+    assert_eq!(next_lease.editor_target().root_plan, next.prepared_plan_id);
+    let delivery = renderer.state.lock();
+    assert!(delivery.delivery.validate_native_owner(next_lease).is_ok());
+    assert!(delivery.delivery.validate_native_owner(old_lease).is_err());
+}
+
+#[test]
+#[ignore = "current normal Product and owned CLAP mode12 DLL; finite retained-frontier software PCM only"]
+fn native_clap_playing_host_fader_preserves_processing_frontier_pcm() {
+    let scenario = ECHO;
+    let (_directory, mut state, output, output_id) = native_fader_fixture(scenario);
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (generation, warmed) = warm_native_fader_source(&mut state, &output, scenario);
+        let clear_serial = output.lock().clear_serial;
+        assert_windows(&output.lock(), 0, clear_serial, 0, 0.0, scenario);
+        let old_facts = cursor_facts(&state);
+        let renderer = state.native_audio_renderer.as_ref().unwrap().upgrade().unwrap();
+        let verifier = renderer.owner_installation_verifier().unwrap();
+        let old_claim = verifier.current_claim().unwrap();
+        let old_lease = actual_native_lease(&renderer, &old_facts);
+        let old_snapshot = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+        let old_author = state.project_author_generation();
+        let old_history = state.authoring_history().unwrap().diagnostics();
+        let observed_at = state.playback_observation_instant_anchor
+            + Duration::from_nanos((CONSUMED as u64 * 1_000_000_000).div_ceil(u64::from(RATE)));
+        let consumed = output.lock().consume(CONSUMED, observed_at);
+        for (frame, sample) in consumed.iter().enumerate() {
+            assert_eq!(*sample, native_sample(scenario, frame));
+        }
+        let partial = poll_audio_playback_at_for_test(&mut state, observed_at, true).unwrap();
+        assert_healthy(partial, generation);
+        assert_eq!(partial.in_flight, 0);
+        assert_eq!(
+            partial.output.unwrap().buffered_frames,
+            scenario.watermark - CONSUMED
+        );
+        assert_eq!(
+            partial.output.unwrap().active_callback_consumed_frames,
+            CONSUMED as u64
+        );
+        let authority = state
+            .authoritative_audio_anchor(
+                &state.playback_engine,
+                state.playback_engine.monotonic_high_water(),
+                "retained F control",
+            )
+            .unwrap();
+        assert_eq!(authority.sample(), CONSUMED as i64);
+        assert_heads(
+            &cursor_facts(&state),
+            generation,
+            scenario.watermark as i64,
+            scenario,
+        );
+        let before_engine = state.playback_engine.snapshot();
+        let clears = output.lock().cleared.len();
+        let old_windows = output.lock().windows.len();
+        std::thread::sleep(observed_at.saturating_duration_since(Instant::now()));
+        state
+            .dispatch_action(
+                ProductAction::Audio(AudioProductAction::EditChannelStrip(
+                    mondrian_timeline::AudioChannelStripEditRequest {
+                        owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput {
+                            output_id,
+                        },
+                        edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb { value: -6.0 },
+                    },
+                ))
+                .into_external_action(),
+            )
+            .expect("public Product fader retains the actual processing frontier");
+        assert_eq!(state.project_author_generation(), old_author + 1);
+        assert_eq!(
+            state.authoring_history().unwrap().diagnostics().undo_entries,
+            old_history.undo_entries + 1
+        );
+        assert_eq!(
+            state.active_sequence().unwrap().audio_program.outputs[0].strip.fader_db,
+            -6.0
+        );
+        let engine = state.playback_engine.snapshot();
+        assert_eq!(engine.epoch, before_engine.epoch);
+        assert_eq!(engine.rate, before_engine.rate);
+        assert_eq!(engine.state, mondrian_playback::TransportState::Playing);
+        let changed = state.audio_playback_snapshot();
+        assert_healthy(changed, generation);
+        assert_eq!(changed.media_anchor, warmed.media_anchor);
+        assert_eq!(changed.next_start_sample, scenario.watermark as i64);
+        assert_eq!(changed.in_flight, 0);
+        let expected = Arc::downgrade(&renderer);
+        assert!(state
+            .native_audio_renderer
+            .as_ref()
+            .is_some_and(|actual| actual.ptr_eq(&expected)));
+        let new_claim = verifier.current_claim().unwrap();
+        assert!(verifier.validate(&old_claim).is_err());
+        assert!(verifier.validate(&new_claim).is_ok());
+        assert!(old_snapshot.enter_commit().is_err());
+        let fresh = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+        assert_eq!(
+            fresh.generation(),
+            state.authoring.as_ref().unwrap().author_generation()
+        );
+        assert!(fresh.enter_commit().is_ok());
+        let new_facts = cursor_facts(&state);
+        assert_heads(&new_facts, generation, scenario.watermark as i64, scenario);
+        assert_retained_parent_migration(&renderer, &old_facts, &new_facts, old_lease, &new_claim);
+        {
+            let capture = output.lock();
+            assert_eq!(capture.clear_serial, clear_serial);
+            assert_eq!(capture.cleared.len(), clears);
+            assert_eq!(capture.windows.len(), old_windows);
+            assert_eq!(capture.queue.len(), scenario.watermark - CONSUMED);
+            assert_eq!(capture.activation_discarded, 0);
+            assert!(!capture.overflow);
+        }
+        // Drain every already-published old frame without polling/refilling.
+        // This is actual FIFO consumption, not a copy of the enqueue journal.
+        let mut absolute = CONSUMED;
+        while absolute < scenario.watermark {
+            let frames = (scenario.watermark - absolute).min(INACTIVE_CALLBACK_FRAMES);
+            let samples = output.lock().consume(frames, Instant::now());
+            for (offset, sample) in samples.iter().enumerate() {
+                assert_eq!(
+                    *sample,
+                    native_sample(scenario, absolute + offset),
+                    "queued old math must remain unchanged"
+                );
+            }
+            absolute += frames;
+        }
+        assert!(output.lock().queue.is_empty());
+        assert_eq!(
+            output.lock().snapshot.active_callback_consumed_frames,
+            scenario.watermark as u64
+        );
+        let continued = fill_to_watermark(&mut state, generation, scenario);
+        assert_eq!(continued.media_anchor, warmed.media_anchor);
+        assert_eq!(continued.next_start_sample, (scenario.watermark * 2) as i64);
+        let final_facts = cursor_facts(&state);
+        assert_eq!(
+            final_facts.session.unwrap().identity,
+            new_facts.session.unwrap().identity
+        );
+        assert_heads(
+            &final_facts,
+            generation,
+            (scenario.watermark * 2) as i64,
+            scenario,
+        );
+        {
+            let capture = output.lock();
+            assert_eq!(capture.clear_serial, clear_serial);
+            assert_eq!(
+                capture.cleared.len(),
+                clears,
+                "retained publication never discards old or new FIFO"
+            );
+            assert_eq!(capture.activation_discarded, 0);
+            assert_windows(
+                &capture,
+                old_windows,
+                clear_serial,
+                scenario.watermark as i64,
+                -6.0,
+                scenario,
+            );
+        }
+        let first_new = output.lock().consume(ECHO_FRAMES, Instant::now());
+        let gain = 10.0_f64.powf(-6.0 / 20.0);
+        for (offset, sample) in first_new.iter().enumerate() {
+            let expected = native_sample(scenario, scenario.watermark + offset);
+            for channel in 0..2 {
+                assert!(
+                    (sample[channel] - (f64::from(expected[channel]) * gain) as f32).abs() <= 1e-6,
+                    "actual first post-F callback preserves finite echo history"
+                );
+            }
+        }
+        assert_eq!(
+            output.lock().snapshot.callback_consumed_frames,
+            (INACTIVE_CALLBACK_FRAMES + scenario.watermark + ECHO_FRAMES) as u64
+        );
+        println!(
+            "retained frontier PCM: C={CONSUMED}, F={}, H={ECHO_FRAMES}, new_end={}",
+            scenario.watermark, continued.next_start_sample
+        );
+        drop(renderer);
+    }));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pause = state.pause();
+    let audio = state.shutdown_audio_playback_until(deadline);
+    let cleanup = state.shutdown_for_endurance(deadline);
+    assert!(
+        pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
+        "complete retained-F cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
+    );
+    if let Err(panic) = target {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+pub(super) fn run_native_host_fader_publication_exclusion() {
+    let scenario = ECHO;
+    let (_directory, mut state, output, _) = native_fader_fixture(scenario);
+    let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (generation, warmed) = warm_native_fader_source(&mut state, &output, scenario);
+        let renderer = state.native_audio_renderer.as_ref().unwrap().upgrade().unwrap();
+        let verifier = renderer.owner_installation_verifier().unwrap();
+        let old_claim = verifier.current_claim().unwrap();
+        let old_snapshot = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+        let old_facts = cursor_facts(&state);
+        let old_lease = actual_native_lease(&renderer, &old_facts);
+        let old_author = state.authoring.as_ref().unwrap().author_generation();
+        let old_history = state.authoring_history().unwrap().diagnostics();
+        let old_document = state.authoring.as_ref().unwrap().document().clone();
+        let old_clears = output.lock().cleared.len();
+        let sequence_id = state.active_sequence_id().unwrap();
+        let (_, prepared) = state
+            .authoring
+            .as_mut()
+            .unwrap()
+            .prepare_sequence_edit(
+                sequence_id,
+                "native Source/author publication contract",
+                |sequence| {
+                    sequence.audio_program.outputs[0].strip.fader_db = -6.0;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let prepared = prepared.unwrap();
+        let candidate = prepared
+            .candidate_sequences()
+            .iter()
+            .find(|sequence| sequence.id == sequence_id)
+            .unwrap();
+        let program = Arc::new(
+            mondrian_audio::compile_audio_program(
+                candidate,
+                AudioCompileRequest {
+                    output_id: candidate.audio_program.outputs[0].id,
+                    audition: AudioAuditionOverlay::default(),
+                },
+            )
+            .unwrap(),
+        );
+        let installs = std::cell::Cell::new(0);
+        let author = state.authoring.as_mut().unwrap();
+        let AppAudioPlayback::Available(playback) = &mut state.audio_playback else {
+            panic!("actual installed Media");
+        };
+        let (commit, receipt) = renderer
+            .publish_host_output_fader(program, playback, || {
+                // Source publication has succeeded, but this exact canonical author
+                // ticket has not installed yet. No renderer/target reader can cross
+                // either retained lock to execute the new Plan in this interval.
+                assert!(renderer.state.try_lock().is_none());
+                assert!(renderer.author_snapshot.try_read().is_none());
+                assert!(verifier.validate(&old_claim).is_err());
+                assert!(verifier.current_claim().is_ok());
+                assert_eq!(author.document(), &old_document);
+                assert_eq!(author.author_generation(), old_author);
+                assert!(old_snapshot.enter_commit().is_ok());
+                installs.set(installs.get() + 1);
+                let commit = author.install_prepared_sequence_edit(prepared);
+                (commit, author.execution_snapshot())
+            })
+            .expect("actual native Source CAS then original author ticket");
+        assert_eq!(installs.get(), 1);
+        assert_eq!(commit.generation.get(), old_author.get() + 1);
+        assert_eq!(
+            state.authoring_history().unwrap().diagnostics().undo_entries,
+            old_history.undo_entries + 1
+        );
+        assert!(old_snapshot.enter_commit().is_err());
+        let fresh = Arc::clone(renderer.author_snapshot.read().as_ref().unwrap());
+        assert_eq!(fresh.generation(), commit.generation);
+        assert!(fresh.enter_commit().is_ok());
+        assert!(verifier.validate(&receipt.claim).is_ok());
+        assert_eq!(receipt.native_bindings, 1);
+        assert_eq!(receipt.frontier, old_facts.session.unwrap());
+        let new_facts = cursor_facts(&state);
+        assert_eq!(receipt.identity, new_facts.session.unwrap().identity);
+        assert_heads(&new_facts, generation, scenario.watermark as i64, scenario);
+        assert_retained_parent_migration(
+            &renderer,
+            &old_facts,
+            &new_facts,
+            old_lease,
+            &receipt.claim,
+        );
+        assert_eq!(state.audio_playback_snapshot().generation, generation);
+        assert_eq!(
+            state.audio_playback_snapshot().media_anchor,
+            warmed.media_anchor
+        );
+        assert_eq!(output.lock().cleared.len(), old_clears);
+        assert_eq!(output.lock().queue.len(), scenario.watermark);
+        // Direct trusted Renderer closure contract only: no claim of public
+        // action/Engine consumer qualification or arbitrary panic rollback.
+        drop(renderer);
+    }));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pause = state.pause();
+    let audio = state.shutdown_audio_playback_until(deadline);
+    let cleanup = state.shutdown_for_endurance(deadline);
+    assert!(
+        pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
+        "complete native publication cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
     );
     if let Err(panic) = target {
         std::panic::resume_unwind(panic);

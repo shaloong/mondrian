@@ -458,3 +458,9 @@ fn host_fader_dependency_refusals_do_not_install_prepared_author_tickets() {
         });
     }
 }
+
+#[test]
+#[ignore = "current normal Product and owned CLAP mode12 DLL; Source/author lock contract only"]
+fn native_clap_host_fader_publication_preserves_author_exclusion() {
+    super::playing_host_fader_continuity::run_native_host_fader_publication_exclusion();
+}
