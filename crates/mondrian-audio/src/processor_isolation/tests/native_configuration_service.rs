@@ -595,6 +595,141 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
     }
 }
 
+/// Adapter-only successor to an actual configuration seed. The request uses a
+/// real closed peer source; it does not establish canonical Runtime, Source,
+/// author history, PDC or editor permission.
+#[test]
+#[ignore = "current Windows product + owned VST3 mode5/6; actual seed then closed-peer state entry"]
+fn installed_vst3_configuration_seed_commit_allows_new_contract_state_entry() {
+    use crate::{
+        NativeAudioAuthorDeliveryState, NativeAudioAuthorStateEntryOutcome,
+        NativeAudioAuthorStateEntryRequest, NativeAudioAuthorStateEntrySource,
+        NativeAudioObjectBindOutcome, NativeAudioObjectBindRequest,
+        NativeAudioObservationConsumption,
+    };
+    use sha2::{Digest, Sha256};
+
+    let catalog = DiscoveredVst3AudioProcessorSpecResolver::discover(
+        native_path("MONDRIAN_VST3_TEST_HELPER"),
+        [native_path("MONDRIAN_VST3_SIDECHAIN_TEST_PLUGIN")],
+    )
+    .expect("actual constant-profile catalog");
+    let class = &catalog.descriptors()[0].class_id;
+    for mode in [AudioProcessingMode::Realtime, AudioProcessingMode::Offline] {
+        let render = AudioRenderContract { processing_mode: mode, ..test_render_contract() };
+        let authored = catalog
+            .create_instance(class, render, Some(vst3_sidechain_snapshot(0.5, 5)))
+            .expect("independent old configuration");
+        let ids: Vec<_> = authored.parameters.keys().cloned().collect();
+        let spec = configuration_spec(&catalog, &authored, render);
+        let old_contract = spec.plugin_execution_contract;
+        assert_eq!(old_contract.algorithmic_latency_frames(), 3);
+        assert_eq!(old_contract.tail(), AudioProcessorTail::Finite(3));
+        assert!(
+            spec.native_lane.is_some(),
+            "real scoped lane admits state-entry storage"
+        );
+        let keys = auxiliary_keys(&spec);
+        let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
+            .expect("actual profile factory")
+            .create(None)
+            .expect("same persistent native child");
+        let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
+        let token = NonZeroU64::new(79).expect("control token");
+        let outcome = processor
+            .service_native_configuration(NativeConfigurationControlRequest {
+                expected_cohort: cohort,
+                control_token: token,
+                canonical_constant_values: &[0.5],
+                configuration_limit_bytes: 128 * 1024,
+                control_buffer_grant_bytes: 1024 * 1024,
+            })
+            .expect("actual retained activation and state capture");
+        let NativeConfigurationControlOutcome::ReadyForInstall(candidate) = outcome else {
+            panic!("actual new-profile candidate required: {outcome:?}");
+        };
+        assert_candidate(
+            &candidate,
+            cohort,
+            token,
+            NativeConfigurationFormat::Vst3ComponentAndController,
+        );
+        assert_ne!(candidate.observed_contract, old_contract);
+        // Keep all existing refusal/commit checks and both real fresh-Enter PCM
+        // controls. Return the same owned configuration without another clone.
+        let candidate = qualify_same_child_seed(&mut *processor, candidate, &keys, &ids, mode);
+        let object = processor
+            .native_audio_object_observation()
+            .expect("actual post-seed object observation")
+            .expect("supported native object");
+        let binding = NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            expected_object: object,
+        };
+        let NativeAudioObjectBindOutcome::Bound(bound) =
+            processor.bind_native_audio_object(binding).expect("same actual object binding")
+        else {
+            panic!("current native object must acknowledge binding");
+        };
+        assert_eq!((bound.binding(), bound.object()), (binding.binding, object));
+        let observed = processor
+            .poll_native_observations(NativeAudioObservationConsumption::Preserve)
+            .expect("actual source before destructive preparation");
+        assert_eq!(observed.object, Some(object));
+        assert!(observed.editor_cleanup.is_none());
+        assert!(observed.pending_reprepare.is_none());
+        let author = observed.author.expect("actual VST3 author source");
+        assert!(
+            author.source.closed_empty(),
+            "no fabricated closed boundary"
+        );
+        assert_eq!(author.delivery, NativeAudioAuthorDeliveryState::Preserved);
+        let source =
+            NativeAudioAuthorStateEntrySource::CanonicalPeer { revision: author.source.revision() };
+        let prepared =
+            processor.prepare_native_author_state_entry(NativeAudioAuthorStateEntryRequest {
+                binding,
+                source,
+                format: candidate.format,
+                configuration: &candidate.configuration,
+            });
+        let after = if matches!(
+            &prepared,
+            Ok(NativeAudioAuthorStateEntryOutcome::Prepared(_))
+        ) {
+            processor.native_audio_object_observation()
+        } else {
+            Ok(None)
+        };
+        // Run the original supervisor Drop before the target assertion, including
+        // the old parent's post-receipt error. Outer Lab still checks teardown.
+        drop(processor);
+        let receipt = match &prepared {
+            Ok(NativeAudioAuthorStateEntryOutcome::Prepared(receipt)) => *receipt,
+            Err(AudioProcessorHostError::InvalidContract(detail))
+                if detail == "restored native plugin contract changed" =>
+            {
+                panic!("NATIVE_SEED_PARENT_CONTRACT state-entry must accept committed contract: {prepared:?}");
+            }
+            _ => panic!("state-entry prerequisite failed after committed seed: {prepared:?}"),
+        };
+        assert_eq!(receipt.contract(), candidate.observed_contract);
+        assert_eq!(receipt.source_binding(), binding);
+        assert_eq!(receipt.source(), source);
+        assert_eq!(receipt.configuration_bytes(), candidate.configuration.len());
+        assert_eq!(
+            receipt.configuration_sha256(),
+            <[u8; 32]>::from(Sha256::digest(&candidate.configuration))
+        );
+        assert_eq!(
+            after.expect("actual fresh object observation"),
+            Some(receipt.object())
+        );
+        assert_eq!(receipt.object().process_id(), object.process_id());
+        assert!(receipt.object().object_serial() > object.object_serial());
+    }
+}
+
 #[test]
 #[ignore = "fresh product helper + existing owned CLAP constant-profile fixture; blocked seed stage then two fresh reset PCM oracles"]
 fn installed_clap_configuration_seed_commit_preserves_new_profile_on_fresh_enter() {
@@ -642,7 +777,7 @@ fn qualify_same_child_seed(
     keys: &[String],
     ids: &[ParameterId],
     mode: AudioProcessingMode,
-) {
+) -> NativeConfigurationCandidate {
     let ticket = NativeConfigurationSeedTicket::from_candidate(&candidate);
     let old = candidate.serviced_cohort.request;
     assert_eq!(
@@ -746,4 +881,5 @@ fn qualify_same_child_seed(
             None
         );
     }
+    candidate
 }
