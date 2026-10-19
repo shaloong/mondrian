@@ -1,5 +1,6 @@
 //! Render-contract-specific lowering from semantic audio IR to dense execution data.
 
+mod host_output_fader;
 mod native_author;
 #[cfg(test)]
 pub(crate) use prepared_notes::PreparedNoteTarget;

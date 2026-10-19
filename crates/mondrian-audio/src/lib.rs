@@ -118,6 +118,10 @@ pub use runtime::native_author::{
     PreparedNativeAudioParameterHandoff,
 };
 
+pub use runtime::host_output_fader::{
+    AudioHostFaderHandoffError, HostOutputFaderHandoffReceipt, PreparedHostOutputFaderHandoff,
+};
+
 pub use native_factory_storage::{
     AudioProcessorFactoryStorageBorrow, AudioProcessorFactoryStorageError,
     AudioProcessorFactoryStorageKind,

@@ -1,3 +1,4 @@
+pub(crate) mod host_output_fader;
 pub(crate) mod native_author;
 mod native_author_logical_fees;
 mod native_author_preflight;

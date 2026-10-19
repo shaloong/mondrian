@@ -769,6 +769,13 @@ impl AudioRenderSession {
     ) -> Result<PreparedNativeAudioParameterPlan, crate::NativeAudioParameterHandoffError> {
         let next_plan =
             Arc::new(self.plan.prepare_native_author_parameters(next_program, locator)?);
+        Ok(self.prepare_parameter_plan_storage(next_plan)?)
+    }
+
+    fn prepare_parameter_plan_storage(
+        &self,
+        next_plan: Arc<PreparedAudioPlan>,
+    ) -> Result<PreparedNativeAudioParameterPlan, crate::AudioRuntimeBuildError> {
         let maximum_lanes = next_plan
             .schedule
             .processors
@@ -801,6 +808,69 @@ impl AudioRenderSession {
             next_parameter_events,
             next_parameter_event_charge_bytes,
         })
+    }
+
+    pub(crate) fn prepare_host_output_fader_plan(
+        &self,
+        next_program: Arc<crate::CompiledAudioProgram>,
+    ) -> Result<PreparedNativeAudioParameterPlan, crate::AudioHostFaderHandoffError> {
+        let next_plan = Arc::new(self.plan.prepare_host_output_fader(next_program)?);
+        Ok(self.prepare_parameter_plan_storage(next_plan)?)
+    }
+
+    pub(crate) fn host_fader_frontier(
+        &self,
+    ) -> Result<crate::AudioSessionCursorEvidence, crate::AudioExecutionError> {
+        if self.pending_reprepare_ticket.is_some() {
+            return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
+        }
+        let SessionContinuity::Active {
+            epoch, next_public_sample, next_execution_sample, alignment_primed: true,
+        } = self.continuity else {
+            return Err(crate::AudioExecutionError::InvalidPreparedSchedule);
+        };
+        let sample_rate = AudioSampleRate::new(self.plan.contract().sample_rate)?;
+        Ok(crate::AudioSessionCursorEvidence {
+            identity: self.native_owner_identity(),
+            sample_rate,
+            public_output_lookahead_frames: self.public_output_lookahead_frames(),
+            state: crate::AudioSessionCursorState::Active {
+                epoch,
+                next_public_sample: mondrian_core::AudioSamplePosition::new(next_public_sample, sample_rate),
+                next_execution_sample: mondrian_core::AudioSamplePosition::new(next_execution_sample, sample_rate),
+                alignment_primed: true,
+            },
+        })
+    }
+
+    pub(crate) fn prepare_host_fader_bindings(
+        &mut self,
+        next: crate::AudioSessionCursorIdentity,
+        serial: std::num::NonZeroU64,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<crate::processor_host::host_output_fader::PreparedHostFaderBindings, crate::NativeAudioAuthorAdmissionError> {
+        self.processor_host.prepare_host_fader_bindings(
+            self.native_owner_identity(), next, serial, self.plan.program(), &self.plan.schedule, cancellation,
+        )
+    }
+
+    pub(crate) fn validate_host_fader_bindings(
+        &mut self,
+        bindings: &crate::processor_host::host_output_fader::PreparedHostFaderBindings,
+        serial: std::num::NonZeroU64,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioAuthorAdmissionError> {
+        self.processor_host.validate_host_fader_bindings(
+            bindings, self.native_owner_identity(), serial, self.plan.program(), &self.plan.schedule, cancellation,
+        )
+    }
+
+    pub(crate) fn publish_host_fader_bindings(
+        &mut self,
+        bindings: &crate::processor_host::host_output_fader::PreparedHostFaderBindings,
+        serial: std::num::NonZeroU64,
+    ) {
+        self.processor_host.publish_host_fader_bindings(bindings, serial);
     }
 
     pub(crate) fn retain_native_author_proposal(

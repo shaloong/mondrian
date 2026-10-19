@@ -290,6 +290,26 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.native_author_state_entry_required(proposal)
     }
 
+    /// Prepare a terminal static Host fader at the retained Session frontier.
+    pub fn prepare_host_output_fader_handoff(
+        &mut self,
+        next_program: std::sync::Arc<crate::CompiledAudioProgram>,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::PreparedHostOutputFaderHandoff, crate::AudioHostFaderHandoffError> {
+        self.runtime.prepare_host_output_fader_handoff(next_program, destination, cancellation)
+    }
+
+    /// Retain the original submitted window, DSP, layout and output cursor.
+    pub fn install_host_output_fader_handoff(
+        &mut self,
+        prepared: &mut crate::PreparedHostOutputFaderHandoff,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::HostOutputFaderHandoffReceipt, crate::AudioHostFaderHandoffError> {
+        self.runtime.install_host_output_fader_handoff(prepared, authorization, cancellation)
+    }
+
     /// Prepare a canonical parameter-only replacement on the SAME Runtime.
     /// No target-layout remix, state entry or DSP reset is performed.
     pub fn prepare_native_author_parameter_handoff(

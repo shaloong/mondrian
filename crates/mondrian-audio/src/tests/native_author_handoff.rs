@@ -14,6 +14,9 @@ mod note_controls;
 #[path = "native_author_ack_cancellation.rs"]
 mod ack_cancellation;
 
+#[path = "host_output_fader_handoff.rs"]
+mod host_output_fader;
+
 #[derive(Default)]
 struct HandoffProbe {
     revision: u64,

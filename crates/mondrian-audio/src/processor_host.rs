@@ -1,5 +1,6 @@
 //! Plan-time processor resolution and Session-owned callback dispatch.
 
+pub(crate) mod host_output_fader;
 pub(crate) mod native_author;
 mod note_ledger;
 mod notes;
