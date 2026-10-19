@@ -280,46 +280,65 @@ impl ProcessOwner {
 
     fn terminate_with(
         &mut self,
+        observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
+        kill: impl FnMut(&mut Child) -> io::Result<()>,
+        wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+    ) -> Result<(), OpenFxHostError> {
+        let mut probe = self.close_trace.cleanup_probe();
+        let result = self.terminate_with_probe(observe, kill, wait, &mut probe);
+        self.close_trace.publish_cleanup(probe);
+        result
+    }
+
+    // Only captures the results of these original callbacks. The probe cannot
+    // observe another Child, retry a callback, or replace the cleanup result.
+    fn terminate_with_probe(
+        &mut self,
         mut observe: impl FnMut(&mut Child) -> io::Result<Option<std::process::ExitStatus>>,
         mut kill: impl FnMut(&mut Child) -> io::Result<()>,
         mut wait: impl FnMut(&mut Child) -> io::Result<std::process::ExitStatus>,
+        probe: &mut close_observation::CleanupProbe,
     ) -> Result<(), OpenFxHostError> {
+        use close_observation::CleanupStep;
         if self.state == ProcessState::Settled {
+            probe.already_settled();
             return Ok(());
         }
         self.state = ProcessState::Retiring;
-        let observation_error = match observe(&mut self.child) {
-            Ok(Some(_)) => {
-                self.confirmed_exit();
-                return Ok(());
-            }
-            Ok(None) => None,
-            Err(error) => Some(format!(
-                "failed (kind={:?}, raw_os={:?}): {error}",
-                error.kind(),
-                error.raw_os_error()
-            )),
-        };
-        if let Err(error) = kill(&mut self.child) {
-            let final_observation = match observe(&mut self.child) {
+        let observation_error =
+            match probe.observe(CleanupStep::InitialObservation, || observe(&mut self.child)) {
                 Ok(Some(_)) => {
                     self.confirmed_exit();
                     return Ok(());
                 }
-                Ok(None) => "post-kill try_wait: child still running".to_owned(),
-                Err(error) => format!(
-                    "post-kill try_wait failed (kind={:?}, raw_os={:?}): {error}",
+                Ok(None) => None,
+                Err(error) => Some(format!(
+                    "failed (kind={:?}, raw_os={:?}): {error}",
                     error.kind(),
                     error.raw_os_error()
-                ),
+                )),
             };
+        if let Err(error) = probe.kill(|| kill(&mut self.child)) {
+            let final_observation =
+                match probe.observe(CleanupStep::FinalObservation, || observe(&mut self.child)) {
+                    Ok(Some(_)) => {
+                        self.confirmed_exit();
+                        return Ok(());
+                    }
+                    Ok(None) => "post-kill try_wait: child still running".to_owned(),
+                    Err(error) => format!(
+                        "post-kill try_wait failed (kind={:?}, raw_os={:?}): {error}",
+                        error.kind(),
+                        error.raw_os_error()
+                    ),
+                };
             return Err(unavailable(format!(
                 "native session termination unconfirmed (pid={}): kill failed (kind={:?}, raw_os={:?}): {error}; {final_observation}; initial try_wait={}",
                 self.child.id(), error.kind(), error.raw_os_error(),
                 observation_error.as_deref().unwrap_or("child still running")
             )));
         }
-        match wait(&mut self.child) {
+        match probe.wait(|| wait(&mut self.child)) {
             Ok(_) => {
                 self.confirmed_exit();
                 Ok(())
@@ -3317,17 +3336,29 @@ mod process_retirement_tests {
         request_natural_exit(&directory);
         assert_eq!(await_exit(&mut owner.child).code(), Some(7));
         let trace = RefCell::new(Vec::new());
+        let mut cleanup_probe = close_observation::CleanupProbe::new(true);
         owner
-            .terminate_with(
+            .terminate_with_probe(
                 |child| {
                     trace.borrow_mut().push("observe");
                     child.try_wait()
                 },
                 |_| panic!("initial exit must not kill"),
                 |_| panic!("initial exit must not wait"),
+                &mut cleanup_probe,
             )
             .expect("actual initially exited child");
         assert_eq!(trace.into_inner(), ["observe"]);
+        let (result, flags, value) =
+            cleanup_probe.operation(close_observation::CleanupStep::InitialObservation);
+        assert_eq!((result, flags & !1, value), (2, 2, 7));
+        for step in [
+            close_observation::CleanupStep::Kill,
+            close_observation::CleanupStep::FinalObservation,
+            close_observation::CleanupStep::Wait,
+        ] {
+            assert_eq!(cleanup_probe.operation(step), (0, 0, 0));
+        }
         assert_settled_idempotent(&mut owner);
     }
 
@@ -3395,8 +3426,9 @@ mod process_retirement_tests {
     fn resident_process_observation_and_kill_errors_preserve_stages_and_retirement() {
         let (mut owner, _directory) = sleeping_owner();
         let trace = RefCell::new(Vec::new());
+        let mut cleanup_probe = close_observation::CleanupProbe::new(true);
         let mut observations = 0;
-        let result = owner.terminate_with(
+        let result = owner.terminate_with_probe(
             |_| {
                 trace.borrow_mut().push("observe");
                 observations += 1;
@@ -3411,6 +3443,7 @@ mod process_retirement_tests {
                 Err(io::Error::from_raw_os_error(5))
             },
             |_| panic!("failed observations/refused kill must not wait"),
+            &mut cleanup_probe,
         );
         let text = refusal_text(result, owner.child.id());
         for evidence in [
@@ -3423,6 +3456,18 @@ mod process_retirement_tests {
             assert!(text.contains(evidence), "missing {evidence}: {text}");
         }
         assert_eq!(trace.into_inner(), ["observe", "kill", "observe"]);
+        for (step, raw_os) in [
+            (close_observation::CleanupStep::InitialObservation, 87),
+            (close_observation::CleanupStep::Kill, 5),
+            (close_observation::CleanupStep::FinalObservation, 6),
+        ] {
+            let (result, flags, value) = cleanup_probe.operation(step);
+            assert_eq!((result, flags & !1, value), (4, 8, raw_os));
+        }
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::Wait),
+            (0, 0, 0)
+        );
         assert_eq!(owner.state, ProcessState::Retiring);
         assert!(owner.child.try_wait().expect("injection retained actual live child").is_none());
         assert!(matches!(
@@ -3438,7 +3483,8 @@ mod process_retirement_tests {
     fn resident_process_successful_kill_failed_wait_retains_then_observes_exit() {
         let (mut owner, _directory) = sleeping_owner();
         let trace = RefCell::new(Vec::new());
-        let result = owner.terminate_with(
+        let mut cleanup_probe = close_observation::CleanupProbe::new(true);
+        let result = owner.terminate_with_probe(
             |child| {
                 trace.borrow_mut().push("observe");
                 child.try_wait()
@@ -3451,6 +3497,7 @@ mod process_retirement_tests {
                 trace.borrow_mut().push("wait");
                 Err(io::Error::from_raw_os_error(6))
             },
+            &mut cleanup_probe,
         );
         let text = refusal_text(result, owner.child.id());
         assert!(
@@ -3458,6 +3505,12 @@ mod process_retirement_tests {
             "{text}"
         );
         assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+        let (result, flags, value) = cleanup_probe.operation(close_observation::CleanupStep::Wait);
+        assert_eq!((result, flags & !1, value), (4, 8, 6));
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::FinalObservation),
+            (0, 0, 0)
+        );
         assert_eq!(owner.state, ProcessState::Retiring);
         await_exit(&mut owner.child);
         owner
@@ -3475,8 +3528,9 @@ mod process_retirement_tests {
     fn resident_process_successful_kill_and_wait_settles_once() {
         let (mut owner, _directory) = sleeping_owner();
         let trace = RefCell::new(Vec::new());
+        let mut cleanup_probe = close_observation::CleanupProbe::new(true);
         owner
-            .terminate_with(
+            .terminate_with_probe(
                 |child| {
                     trace.borrow_mut().push("observe");
                     child.try_wait()
@@ -3489,9 +3543,26 @@ mod process_retirement_tests {
                     trace.borrow_mut().push("wait");
                     child.wait()
                 },
+                &mut cleanup_probe,
             )
             .expect("real actual child kill and reap");
         assert_eq!(trace.into_inner(), ["observe", "kill", "wait"]);
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::InitialObservation).0,
+            1
+        );
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::Kill).0,
+            3
+        );
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::Wait).0,
+            2
+        );
+        assert_eq!(
+            cleanup_probe.operation(close_observation::CleanupStep::FinalObservation),
+            (0, 0, 0)
+        );
         assert_settled_idempotent(&mut owner);
     }
 

@@ -5,7 +5,7 @@
 //! waiter occurs in a close record. Read/decode only after the original owner
 //! has settled. Zero slots are missing; status 2 is a failed clock observation.
 //! QPC ticks use one Windows system clock/frequency, never process-local Instant.
-//! Version 3 adds one parent-only query summary; all prior offsets stay fixed. UTC
+//! Version 4 adds one parent-only cleanup summary; all prior offsets stay fixed. UTC
 //! FILETIMEs are diagnostic raw facts, never deadlines or interval authority.
 use super::*;
 
@@ -104,12 +104,153 @@ impl ExitQueryProbe {
     }
 }
 
+// The first original cleanup attempt, not a second observer or an exit authority.
+// Operation slots: initial try_wait, kill, post-refused-kill try_wait, wait.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub(super) enum CleanupStep {
+    InitialObservation,
+    Kill,
+    FinalObservation,
+    Wait,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CleanupOperation {
+    result: u32, // 0 not called, 1 pending, 2 exited, 3 kill Ok, 4 IO error
+    flags: u32,  // 1 usable QPC, 2 exit code present, 4 successful exit, 8 raw OS error present
+    value: i32,  // original exit code or raw OS error; flags distinguish absent from zero
+    start_qpc: i64,
+    end_qpc: i64,
+}
+
+#[derive(Debug)]
+pub(super) struct CleanupProbe {
+    enabled: bool,
+    already_settled: bool,
+    operations: [CleanupOperation; 4],
+}
+impl CleanupProbe {
+    pub(super) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            already_settled: false,
+            operations: [CleanupOperation::default(); 4],
+        }
+    }
+    pub(super) fn already_settled(&mut self) {
+        self.already_settled = true;
+    }
+    pub(super) fn observe(
+        &mut self,
+        step: CleanupStep,
+        query: impl FnOnce() -> io::Result<Option<std::process::ExitStatus>>,
+    ) -> io::Result<Option<std::process::ExitStatus>> {
+        self.capture(step, query, |status| match status {
+            Some(status) => Self::exit_status(status),
+            None => CleanupOperation { result: 1, ..CleanupOperation::default() },
+        })
+    }
+    pub(super) fn kill(&mut self, kill: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        self.capture(CleanupStep::Kill, kill, |_| CleanupOperation {
+            result: 3,
+            ..CleanupOperation::default()
+        })
+    }
+    pub(super) fn wait(
+        &mut self,
+        wait: impl FnOnce() -> io::Result<std::process::ExitStatus>,
+    ) -> io::Result<std::process::ExitStatus> {
+        self.capture(CleanupStep::Wait, wait, Self::exit_status)
+    }
+    fn exit_status(status: &std::process::ExitStatus) -> CleanupOperation {
+        CleanupOperation {
+            result: 2,
+            flags: u32::from(status.code().is_some()) * 2 + u32::from(status.success()) * 4,
+            value: status.code().unwrap_or(0),
+            ..CleanupOperation::default()
+        }
+    }
+    fn capture<T>(
+        &mut self,
+        step: CleanupStep,
+        operation: impl FnOnce() -> io::Result<T>,
+        classify: impl FnOnce(&T) -> CleanupOperation,
+    ) -> io::Result<T> {
+        self.capture_with(step, operation, classify, || {
+            #[cfg(windows)]
+            {
+                windows::query_counter()
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+    }
+    fn capture_with<T>(
+        &mut self,
+        step: CleanupStep,
+        operation: impl FnOnce() -> io::Result<T>,
+        classify: impl FnOnce(&T) -> CleanupOperation,
+        mut clock: impl FnMut() -> Option<i64>,
+    ) -> io::Result<T> {
+        if !self.enabled {
+            return operation();
+        }
+        let start = clock();
+        let result = operation();
+        let end = clock();
+        let mut record = match &result {
+            Ok(value) => classify(value),
+            Err(error) => CleanupOperation {
+                result: 4,
+                flags: u32::from(error.raw_os_error().is_some()) * 8,
+                value: error.raw_os_error().unwrap_or(0),
+                ..CleanupOperation::default()
+            },
+        };
+        if let (Some(start), Some(end)) = (start, end)
+            && start >= 0
+            && end >= start
+            && self.operations[..step as usize]
+                .iter()
+                .all(|previous| previous.flags & 1 == 0 || start >= previous.end_qpc)
+        {
+            record.flags |= 1;
+            record.start_qpc = start;
+            record.end_qpc = end;
+        }
+        self.operations[step as usize] = record;
+        result
+    }
+    #[cfg(test)]
+    pub(super) fn operation(&self, step: CleanupStep) -> (u32, u32, i32) {
+        let operation = self.operations[step as usize];
+        (operation.result, operation.flags, operation.value)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct Trace {
     #[cfg(windows)]
     mapping: Option<std::sync::Arc<windows::Mapping>>,
 }
 impl Trace {
+    pub(super) fn cleanup_probe(&self) -> CleanupProbe {
+        #[cfg(windows)]
+        let enabled = self.mapping.as_ref().is_some_and(|mapping| mapping.cleanup_pending());
+        #[cfg(not(windows))]
+        let enabled = false;
+        CleanupProbe::new(enabled)
+    }
+    pub(super) fn publish_cleanup(&self, probe: CleanupProbe) {
+        #[cfg(windows)]
+        if let Some(mapping) = &self.mapping {
+            mapping.publish_cleanup(&probe);
+        }
+        let _ = probe;
+    }
     pub(super) fn exit_query_probe(&self) -> ExitQueryProbe {
         #[cfg(windows)]
         let enabled = self.mapping.is_some();
@@ -225,7 +366,7 @@ mod windows {
     };
 
     const BYTES: usize = 4096;
-    const MAGIC: [u8; 8] = *b"OFXCLQ03";
+    const MAGIC: [u8; 8] = *b"OFXCLQ04";
     const SLOTS: usize = 16;
 
     // Binary little-endian x64 layout, independently readable after settlement.
@@ -325,6 +466,69 @@ mod windows {
             self.status.store(if probe.unavailable { 2 } else { 1 }, Ordering::Release);
         }
     }
+    // One parent-only, one-shot publication after the first original cleanup.
+    // All existing schema3 offsets remain fixed; no live reader is supported.
+    #[repr(C)]
+    struct CleanupOperationRecord {
+        result: AtomicU32,
+        flags: AtomicU32,
+        value: std::sync::atomic::AtomicI32,
+        _reserved: u32,
+        start_qpc: AtomicI64,
+        end_qpc: AtomicI64,
+    }
+    impl CleanupOperationRecord {
+        fn new() -> Self {
+            Self {
+                result: AtomicU32::new(0),
+                flags: AtomicU32::new(0),
+                value: std::sync::atomic::AtomicI32::new(0),
+                _reserved: 0,
+                start_qpc: AtomicI64::new(0),
+                end_qpc: AtomicI64::new(0),
+            }
+        }
+        fn store(&self, operation: &CleanupOperation) {
+            self.result.store(operation.result, Ordering::Relaxed);
+            self.flags.store(operation.flags, Ordering::Relaxed);
+            self.value.store(operation.value, Ordering::Relaxed);
+            self.start_qpc.store(operation.start_qpc, Ordering::Relaxed);
+            self.end_qpc.store(operation.end_qpc, Ordering::Relaxed);
+        }
+    }
+    #[repr(C, align(64))]
+    struct CleanupObservation {
+        status: AtomicU32, // 0 missing/partial, 1 summary published (per-operation QPC may be unavailable)
+        pid: AtomicU32,
+        tid: AtomicU32,
+        already_settled: AtomicU32,
+        _reserved: [u8; 48],
+        operations: [CleanupOperationRecord; 4],
+    }
+    impl CleanupObservation {
+        fn new() -> Self {
+            Self {
+                status: AtomicU32::new(0),
+                pid: AtomicU32::new(0),
+                tid: AtomicU32::new(0),
+                already_settled: AtomicU32::new(0),
+                _reserved: [0; 48],
+                operations: std::array::from_fn(|_| CleanupOperationRecord::new()),
+            }
+        }
+        fn commit(&self, pid: u32, tid: u32, probe: &CleanupProbe) {
+            if !probe.enabled || self.status.load(Ordering::Relaxed) != 0 {
+                return;
+            }
+            self.pid.store(pid, Ordering::Relaxed);
+            self.tid.store(tid, Ordering::Relaxed);
+            self.already_settled.store(u32::from(probe.already_settled), Ordering::Relaxed);
+            for (record, operation) in self.operations.iter().zip(&probe.operations) {
+                record.store(operation);
+            }
+            self.status.store(1, Ordering::Release);
+        }
+    }
     struct ProcessTimes {
         creation: u64,
         exit: u64,
@@ -401,7 +605,8 @@ mod windows {
         records: [Record; SLOTS],
         exit_observation: ExitObservation,
         exit_queries: ExitQueryObservation,
-        _reserved: [u8; 2816],
+        cleanup: CleanupObservation,
+        _reserved: [u8; 2624],
     }
     const _: () = {
         assert!(std::mem::size_of::<Header>() == 128);
@@ -411,7 +616,10 @@ mod windows {
         assert!(std::mem::offset_of!(Layout, exit_observation) == 1152);
         assert!(std::mem::size_of::<ExitQueryObservation>() == 64);
         assert!(std::mem::offset_of!(Layout, exit_queries) == 1216);
-        assert!(std::mem::offset_of!(Layout, _reserved) == 1280);
+        assert!(std::mem::size_of::<CleanupOperationRecord>() == 32);
+        assert!(std::mem::size_of::<CleanupObservation>() == 192);
+        assert!(std::mem::offset_of!(Layout, cleanup) == 1280);
+        assert!(std::mem::offset_of!(Layout, _reserved) == 1472);
         assert!(std::mem::size_of::<Layout>() == BYTES);
     };
     impl Layout {
@@ -419,7 +627,7 @@ mod windows {
             Self {
                 header: Header {
                     magic: MAGIC,
-                    version: 3,
+                    version: 4,
                     bytes: BYTES as u32,
                     frequency,
                     owner,
@@ -433,13 +641,14 @@ mod windows {
                 records: std::array::from_fn(|_| Record::new()),
                 exit_observation: ExitObservation::new(),
                 exit_queries: ExitQueryObservation::new(),
-                _reserved: [0; 2816],
+                cleanup: CleanupObservation::new(),
+                _reserved: [0; 2624],
             }
         }
         fn valid(&self, owner: &[u8; 16], nonce: &[u8; 16], frequency: i64) -> bool {
             self.header.ready.load(Ordering::Acquire) == 1
                 && self.header.magic == MAGIC
-                && self.header.version == 3
+                && self.header.version == 4
                 && self.header.bytes == BYTES as u32
                 && frequency > 0
                 && self.header.frequency == frequency
@@ -570,6 +779,18 @@ mod windows {
             }
             Ok(mapping)
         }
+        pub(super) fn cleanup_pending(&self) -> bool {
+            self.pid == self.layout().header.parent_pid
+                && self.layout().cleanup.status.load(Ordering::Relaxed) == 0
+        }
+        pub(super) fn publish_cleanup(&self, probe: &CleanupProbe) {
+            if !probe.enabled || self.pid != self.layout().header.parent_pid {
+                return;
+            }
+            // SAFETY: only this existing writer identity is read, never another Child.
+            let tid = unsafe { GetCurrentThreadId() };
+            self.layout().cleanup.commit(self.pid, tid, probe);
+        }
         pub(super) fn publish_exit_queries(&self, probe: &ExitQueryProbe) {
             if self.pid != self.layout().header.parent_pid {
                 return;
@@ -646,7 +867,10 @@ mod windows {
             assert_eq!(std::mem::offset_of!(Layout, exit_observation), 1152);
             assert_eq!(std::mem::size_of::<ExitQueryObservation>(), 64);
             assert_eq!(std::mem::offset_of!(Layout, exit_queries), 1216);
-            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1280);
+            assert_eq!(std::mem::size_of::<CleanupOperationRecord>(), 32);
+            assert_eq!(std::mem::size_of::<CleanupObservation>(), 192);
+            assert_eq!(std::mem::offset_of!(Layout, cleanup), 1280);
+            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1472);
             assert_eq!(std::mem::size_of::<Layout>(), 4096);
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.ready.store(1, Ordering::Release);
@@ -657,13 +881,68 @@ mod windows {
             assert!(!layout.valid(&[1; 16], &[2; 16], 0));
             layout.header.version = 1;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
-            layout.header.version = 3;
+            layout.header.version = 4;
             layout.header.magic = *b"OFXCLQ01";
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.magic = MAGIC;
             layout.header.bytes = 4095;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
         }
+        #[test]
+        fn cleanup_summary_is_one_shot_and_preserves_results_without_clock() {
+            let record = CleanupObservation::new();
+            record.commit(11, 22, &CleanupProbe::new(false));
+            assert_eq!(record.status.load(Ordering::Acquire), 0);
+            assert_eq!(record.pid.load(Ordering::Relaxed), 0);
+            assert_eq!(record.tid.load(Ordering::Relaxed), 0);
+            assert_eq!(record.already_settled.load(Ordering::Relaxed), 0);
+            assert!(record.operations.iter().all(|operation| {
+                operation.result.load(Ordering::Relaxed) == 0
+                    && operation.flags.load(Ordering::Relaxed) == 0
+                    && operation.value.load(Ordering::Relaxed) == 0
+                    && operation.start_qpc.load(Ordering::Relaxed) == 0
+                    && operation.end_qpc.load(Ordering::Relaxed) == 0
+            }));
+            let mut probe = CleanupProbe::new(true);
+            let error = probe
+                .capture_with::<()>(
+                    CleanupStep::InitialObservation,
+                    || Err(io::Error::from_raw_os_error(87)),
+                    |_| panic!("error must not classify success"),
+                    || None,
+                )
+                .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(87));
+            record.commit(11, 22, &probe);
+            assert_eq!(record.status.load(Ordering::Acquire), 1);
+            assert_eq!(record.pid.load(Ordering::Relaxed), 11);
+            assert_eq!(record.tid.load(Ordering::Relaxed), 22);
+            let initial = &record.operations[0];
+            assert_eq!(initial.result.load(Ordering::Relaxed), 4);
+            assert_eq!(initial.flags.load(Ordering::Relaxed), 8);
+            assert_eq!(initial.value.load(Ordering::Relaxed), 87);
+            assert_eq!(initial.start_qpc.load(Ordering::Relaxed), 0);
+            assert_eq!(initial.end_qpc.load(Ordering::Relaxed), 0);
+            let mut retry = CleanupProbe::new(true);
+            retry.already_settled();
+            record.commit(99, 99, &retry);
+            assert_eq!(record.pid.load(Ordering::Relaxed), 11);
+            assert_eq!(record.already_settled.load(Ordering::Relaxed), 0);
+            assert_eq!(initial.result.load(Ordering::Relaxed), 4);
+            for operation in &record.operations[1..] {
+                assert_eq!(operation.result.load(Ordering::Relaxed), 0);
+                assert_eq!(operation.flags.load(Ordering::Relaxed), 0);
+            }
+            let settled = CleanupObservation::new();
+            settled.commit(11, 33, &retry);
+            assert_eq!(settled.status.load(Ordering::Acquire), 1);
+            assert_eq!(settled.already_settled.load(Ordering::Relaxed), 1);
+            assert!(settled
+                .operations
+                .iter()
+                .all(|operation| operation.result.load(Ordering::Relaxed) == 0));
+        }
+
         #[test]
         fn exit_query_summary_is_one_shot_and_unavailable_is_not_zero_queries() {
             let record = ExitQueryObservation::new();
@@ -818,7 +1097,7 @@ mod windows {
                 "{}",
                 serde_json::json!({
                     "control": "owned_natural_exit_timestamp_distinguishes_delayed_parent_observation",
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "child_pid": pid,
                     "retained_child_handle": handle,
                     "natural_exit_code": 7,
@@ -1004,5 +1283,186 @@ mod query_probe_tests {
             Some(3)
         );
         assert!(probe.unavailable);
+    }
+}
+
+#[cfg(test)]
+mod cleanup_probe_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn disabled_cleanup_probe_calls_original_once_without_clock_or_payload_read() {
+        let calls = Cell::new(0);
+        let mut probe = CleanupProbe::new(false);
+        let original = io::Error::from_raw_os_error(87);
+        let error = probe
+            .capture_with::<u8>(
+                CleanupStep::InitialObservation,
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(original)
+                },
+                |_| panic!("disabled observation must not inspect payload"),
+                || panic!("disabled observation must not read QPC"),
+            )
+            .unwrap_err();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(error.raw_os_error(), Some(87));
+        assert_eq!(probe.operation(CleanupStep::InitialObservation), (0, 0, 0));
+    }
+
+    #[test]
+    fn cleanup_probe_clock_failure_never_changes_original_results() {
+        for ticks in [
+            [None, Some(2)],
+            [Some(2), None],
+            [Some(2), Some(1)],
+            [Some(-1), Some(2)],
+        ] {
+            let mut probe = CleanupProbe::new(true);
+            let mut ticks = ticks.into_iter();
+            let calls = Cell::new(0);
+            let error = probe
+                .capture_with::<u8>(
+                    CleanupStep::FinalObservation,
+                    || {
+                        calls.set(calls.get() + 1);
+                        Err(io::Error::from_raw_os_error(6))
+                    },
+                    |_| panic!("error must not classify success"),
+                    || ticks.next().unwrap(),
+                )
+                .unwrap_err();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.raw_os_error(), Some(6));
+            let operation = probe.operations[CleanupStep::FinalObservation as usize];
+            assert_eq!(
+                (operation.result, operation.flags, operation.value),
+                (4, 8, 6)
+            );
+            assert_eq!((operation.start_qpc, operation.end_qpc), (0, 0));
+        }
+        let mut probe = CleanupProbe::new(true);
+        let mut ticks = [10, 20, 19, 21].into_iter();
+        probe
+            .capture_with(
+                CleanupStep::InitialObservation,
+                || Ok(()),
+                |_| CleanupOperation { result: 1, ..CleanupOperation::default() },
+                || ticks.next(),
+            )
+            .unwrap();
+        probe
+            .capture_with(
+                CleanupStep::Kill,
+                || Ok(()),
+                |_| CleanupOperation { result: 3, ..CleanupOperation::default() },
+                || ticks.next(),
+            )
+            .unwrap();
+        assert_eq!(probe.operation(CleanupStep::InitialObservation), (1, 1, 0));
+        assert_eq!(probe.operation(CleanupStep::Kill), (3, 0, 0));
+        assert_eq!(
+            (probe.operations[1].start_qpc, probe.operations[1].end_qpc),
+            (0, 0)
+        );
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn cleanup_probe_preserves_exit_status_and_distinguishes_kill_from_wait() {
+        fn status(code: u32) -> std::process::ExitStatus {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw(code)
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                std::process::ExitStatus::from_raw((code as i32) << 8)
+            }
+        }
+        let mut probe = CleanupProbe::new(true);
+        let calls = Cell::new(0);
+        let original = status(7);
+        assert_eq!(
+            probe
+                .observe(CleanupStep::InitialObservation, || {
+                    calls.set(calls.get() + 1);
+                    Ok(Some(original))
+                })
+                .unwrap(),
+            Some(original)
+        );
+        probe
+            .kill(|| {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        let success = status(0);
+        assert_eq!(
+            probe
+                .wait(|| {
+                    calls.set(calls.get() + 1);
+                    Ok(success)
+                })
+                .unwrap(),
+            success
+        );
+        assert_eq!(calls.get(), 3);
+        let (result, flags, value) = probe.operation(CleanupStep::InitialObservation);
+        assert_eq!((result, flags & !1, value), (2, 2, 7));
+        let (result, flags, value) = probe.operation(CleanupStep::Kill);
+        assert_eq!((result, flags & !1, value), (3, 0, 0));
+        let (result, flags, value) = probe.operation(CleanupStep::Wait);
+        assert_eq!((result, flags & !1, value), (2, 6, 0));
+        assert_eq!(probe.operation(CleanupStep::FinalObservation), (0, 0, 0));
+    }
+
+    #[test]
+    fn cleanup_probe_records_only_invoked_operations_and_original_error_availability() {
+        let mut probe = CleanupProbe::new(true);
+        let mut ticks = [10, 13, 20, 29].into_iter();
+        let calls = Cell::new(0);
+        let value = probe
+            .capture_with(
+                CleanupStep::InitialObservation,
+                || {
+                    calls.set(calls.get() + 1);
+                    Ok(17_u8)
+                },
+                |_| CleanupOperation { result: 1, ..CleanupOperation::default() },
+                || ticks.next(),
+            )
+            .unwrap();
+        assert_eq!(value, 17);
+        let error = probe
+            .capture_with::<()>(
+                CleanupStep::Kill,
+                || {
+                    calls.set(calls.get() + 1);
+                    Err(io::Error::other("original non-OS refusal"))
+                },
+                |_| panic!("error must not classify success"),
+                || ticks.next(),
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), "original non-OS refusal");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(probe.operation(CleanupStep::InitialObservation), (1, 1, 0));
+        assert_eq!(probe.operation(CleanupStep::Kill), (4, 1, 0));
+        assert_eq!(probe.operation(CleanupStep::FinalObservation), (0, 0, 0));
+        assert_eq!(probe.operation(CleanupStep::Wait), (0, 0, 0));
+        assert_eq!(
+            (probe.operations[0].start_qpc, probe.operations[0].end_qpc),
+            (10, 13)
+        );
+        assert_eq!(
+            (probe.operations[1].start_qpc, probe.operations[1].end_qpc),
+            (20, 29)
+        );
     }
 }
