@@ -1388,6 +1388,8 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
             )
             .unwrap();
         assert_eq!(initial_authority.sample(), CONSUMED as i64);
+        let accepted_callback_at = partial.output.unwrap().captured_at;
+        let accepted_consumed = partial.output.unwrap().active_callback_consumed_frames;
         assert_eq!(
             state.playback_clock_master(),
             Some(mondrian_playback::ClockMaster::AudioDevice)
@@ -1572,6 +1574,22 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
             } else {
                 INACTIVE_CALLBACK_FRAMES
             };
+            if round == 0 {
+                // The next original clock observation includes every callback
+                // since the first accepted one. Do not compress 8192/RATE of
+                // actual consumption into an arbitrarily fast software loop.
+                // Wait BEFORE the last real callback samples Instant::now;
+                // this changes no Engine authority, F, PCM or uncertainty.
+                let consumed_before = output.lock().snapshot.active_callback_consumed_frames;
+                let next_consumed = consumed_before.checked_add(consumed_now as u64).unwrap();
+                let delta = next_consumed.checked_sub(accepted_consumed).unwrap();
+                assert_eq!(delta, scenario.watermark as u64);
+                let elapsed_ns =
+                    delta.checked_mul(1_000_000_000).unwrap().div_ceil(u64::from(RATE));
+                let callback_due =
+                    accepted_callback_at.checked_add(Duration::from_nanos(elapsed_ns)).unwrap();
+                std::thread::sleep(callback_due.saturating_duration_since(Instant::now()));
+            }
             consume_pdc_interval(&output, frontier, frontier + consumed_now, next_gain);
             consumer = frontier + consumed_now;
             previous_gain = next_gain;
