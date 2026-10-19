@@ -1465,15 +1465,20 @@ impl PreparedProcessorHost {
             crate::native_audio_author_runtime::closed_source(observed.author.as_ref(), false)
                 .map_err(|_| Error::Admission("restart author source is not closed and empty"))?;
             if index == selection.index {
+                // Capture retires the serviced callback, while its issued phase
+                // and the parent Session ticket remain HOLD. A fresh callback
+                // must not be confused with this captured configuration.
                 if observed.pending_reprepare
-                    != Some(crate::NativeObservedRequest::Cohort(selection.cohort))
+                    != Some(crate::NativeObservedRequest::RequestOnly(
+                        selection.cohort.request,
+                    ))
                 {
                     return Err(Error::Admission("restart callback cohort changed"));
                 }
                 let cohort = isolate_adapter_call("restart captured cohort recheck", || {
                     instance.processor.native_configuration_cohort()
                 })?;
-                if cohort != Some(selection.cohort) {
+                if cohort.is_some() {
                     return Err(Error::Cohort(cohort));
                 }
             } else if observed.pending_reprepare.is_some() {
