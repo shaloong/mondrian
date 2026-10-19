@@ -98,6 +98,15 @@ Catalog 每 bundle 最多256条、text+id合计1 MiB，溢出丢弃整批准备�
 每行只覆盖声明的上下文、格式、时间与消费者；头文件、enum、upstream wrapper
 和测试名字都不能单独证明运行支持。
 
+2026-10-19 Windows x64：String setter 现复用既有 `permitsParameterWrite`，
+保留 null/长度及时间错误的原优先级。真实 SessionProbe 的非 GUI 初始化、宿主
+A/B 应用，以及 Begin、两次 Render、End 中普通/当前时间 String 拒写和即时值不变
+全部通过；同实例原 Close/Destroy、输入/作者值和 Float 像素均核验。
+原 `gui_cycle`、新配对正常 Product 的 String 全模式/合法64KiB/非法输入后同 worker
+复用门，以及 OpenFX 三模块96项普通测试通过；stderr0，原180秒/2秒 Job 回收通过。
+此资格限内部 readonly-GUI 策略；完整 action-specific 写权限和 C2 canonical author
+桥仍缺，不代表插件写入已可 Undo/save、Product GUI、旧退出修复或完整标准兼容。
+
 ## 1. 规范版本与证据
 
 官方 GitHub `releases/latest` 实际返回 **OFX_Release_1.5.1**，发布时间为
@@ -258,7 +267,7 @@ authoring transaction/Undo/save；worker中局部赋值不能替代这个闭环�
 | P16 | paramGetValue/GetValueAtTime | 实现常量与canonical numericcurves；FrameSample off-time无authority明确拒绝；numeric keys/tuple一致 | `parameter_instance.cpp::queryParameter`; `curves.rs::CurveContext` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html) |
 | P17 | paramGetDerivative/GetIntegral | 实现admitted Double/tuple canonical evaluator；unsupportedcalculus显式状态，nonfinite/overflow请求不改输出；Discrete不是浮点calculus | `curves`; `NumericTupleState`; nativecalculusfixtures | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html) |
 | P18 | paramGetNumKeys/GetKeyTime/GetKeyIndex | 实现canonical sparsecurvekeys/time/indexdirection；constant0keys；FrameSample无suppliedcurve拒绝 | `ParameterQueryInstance`; `curves.rs` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html) |
-| P19 | paramSetValue/SetValueAtTime/DeleteKey/DeleteAllKeys/Copy/EditBegin/EditEnd | 部分：局部constantset存在但noauthorresponse；animatingwrite/delete/copy/edit缺失/unsupported，不形成Undo/save。不能仅SDKsetterOK认为可persist | `parameter_instance.*`; vendor`paramChangedByPlugin`; `FilterEffectInstance::editBegin/End` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html)；S07 |
+| P19 | paramSetValue/SetValueAtTime/DeleteKey/DeleteAllKeys/Copy/EditBegin/EditEnd | 部分：String已补既有readonly-GUI检查，两setter/四阶段拒写且宿主A/B可用；局部constantset仍noauthorresponse，完整action准入/C2桥及animatingwrite/delete/copy/edit缺失，不形成Undo/save | `parameter_instance.*`; `FrameState::permitsParameterWrite`; vendor`paramChangedByPlugin`; `FilterEffectInstance::editBegin/End` | [Parameter suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxParametersSuiteReference.html)；S07 |
 | P20 | Animates/IsAnimating/IsAutoKeying/Persistant/EvaluateOnChange/CacheInvalidation/CanUndo | 部分：IsAnimating由既有参数来源推导，九轮functional与四原回归通过，新门shutdown仍HOLD；author supports admittednumericcurves/cachepolicyUncacheable；完整autokey/nativeprivatepersist/dirtymetadata响应无资格 | host/parameterpropertytables；`render.cpp`；`openfx_effect` | [Parameter properties](https://openfx.readthedocs.io/en/main/Reference/ofxParameter.html)；S06–S07 |
 | P21 | Secret/enabled/label/hint/choiceoptions/ranges/script/parent/parameterinteract dynamicmetadata | 部分：注册时snapshot，secret/disabled不提供editcontrol；postInstanceChanged动态值未回refresh，可能staleUI/default | `describe`; `build_definition`; no metadataresponse | [Parameter properties](https://openfx.readthedocs.io/en/main/Reference/ofxParameter.html)；S05 |
 | P22 | Parametric曲线（独立于timeline），optional | 未实现，不用timelinekeyframes代替x-function；需要曲线default/domain/controlpoint/animation及sharedauthorowner | no suite；no type | [Parametric](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxParametricParam_8h.html)；S08 |
