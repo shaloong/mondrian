@@ -1088,6 +1088,10 @@ impl AudioProcessor for IsolatedAudioProcessor {
         match self.worker.commit_native_configuration_seed(staged) {
             Ok(outcome) => {
                 if let NativeConfigurationSeedOutcome::Accepted(_) = outcome {
+                    // The authenticated reply matched this exact staged ticket.
+                    // Keep the parent aligned with the committed native contract;
+                    // this does not install a Runtime plan or authorize PCM.
+                    self.native_plugin_contract = ticket.observed_contract;
                     self.staged_configuration_seed = None;
                     self.pending_reprepare = None;
                 }
