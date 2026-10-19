@@ -428,7 +428,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         let frames = audio.frames_count() as usize;
         // New state 6 is an independent ABI oracle. Other states retain their
         // original PCM, ports and mode-specific lifecycle requirements.
-        let timeline_start = if (6..=9).contains(&self.mode) {
+        let timeline_start = if (6..=9).contains(&self.mode) || self.mode == 13 {
             let transport = process.transport.ok_or(PluginError::Message("missing timeline transport"))?;
             if transport.flags != TransportFlags::HAS_SECONDS_TIMELINE
                 || transport.header.time() != 0 || process.steady_time.is_some()
