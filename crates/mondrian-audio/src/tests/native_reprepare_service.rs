@@ -82,17 +82,23 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
             render,
         ))
         .expect("actual unchanged ports/profile");
+    // This no-Note catalog resolve already carries NativeProbed evidence.
+    // Consume that same Spec without another validation worker or native probe.
+    let metadata_factory = crate::processor_isolation::IsolatedAudioProcessorFactory::prepare(spec)
+        .expect("existing native-probed preparation metadata");
     assert_eq!(
-        spec.plugin_execution_contract.algorithmic_latency_frames(),
+        crate::AudioProcessorFactory::execution_contract(metadata_factory.as_ref())
+            .algorithmic_latency_frames(),
         3
     );
-    let detector = spec
-        .auxiliary_inputs
-        .buses
-        .first()
-        .expect("real first sidechain")
-        .bus_key
-        .clone();
+    let detector =
+        crate::AudioProcessorFactory::auxiliary_input_contract(metadata_factory.as_ref())
+            .buses
+            .first()
+            .expect("real first sidechain")
+            .bus_key
+            .clone();
+    drop(metadata_factory);
     sequence.audio_program.sidechain_routes.push(AudioProcessorSidechainRoute::new(
         AudioRouteSource::Track {
             track_id: sequence.audio_tracks[0].id,

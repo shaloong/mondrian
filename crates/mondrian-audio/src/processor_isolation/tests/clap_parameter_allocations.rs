@@ -865,7 +865,7 @@ fn retained_clap_metadata_success_and_schema_mismatch_allocate_no_containers() {
     use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
     let _reset = MetadataOracleReset;
     set_metadata_oracle(0, 0);
-    let instance = metadata_instance();
+    let mut instance = metadata_instance();
     let handle = instance.plugin_handle();
     let expected = list_parameters(&handle).expect("actual original snapshot");
     let mut scratch = MetadataScanScratch::new();
@@ -903,7 +903,7 @@ fn retained_clap_metadata_preserves_query_errors_before_deferred_row_or_shape_er
     use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
     let _reset = MetadataOracleReset;
     set_metadata_oracle(0, 0);
-    let instance = metadata_instance();
+    let mut instance = metadata_instance();
     let handle = instance.plugin_handle();
     let mut expected = list_parameters(&handle).expect("actual expected snapshot");
     expected[0].default_value = 0.5; // A valid early structural mismatch must defer.
@@ -942,7 +942,7 @@ fn retained_clap_ports_complete_native_validation_before_shape_and_ignore_displa
     use super::super::clap_metadata::{revalidate_audio_ports, MetadataScanScratch};
     let _reset = MetadataOracleReset;
     set_metadata_oracle(0, 1);
-    let instance = metadata_instance();
+    let mut instance = metadata_instance();
     let handle = instance.plugin_handle();
     let expected = inspect_audio_ports(&handle, AudioChannelLayout::Stereo)
         .expect("actual 31 aux inputs without Main and 31 aux outputs");
