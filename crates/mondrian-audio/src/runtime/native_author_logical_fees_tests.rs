@@ -136,6 +136,33 @@ fn logical_fee_refinement_allows_zero_but_rejects_inactive_without_mutation() {
 }
 
 #[test]
+fn logical_fee_refinement_handles_maximum_and_an_already_credited_peer() {
+    // Scalar boundary only, not a realizable allocation or native grant.
+    let scope = Arc::new(AtomicUsize::new(0));
+    let mut maximum = active_fee(&scope, 0, usize::MAX);
+    maximum.shrink_prepared_to(usize::MAX).unwrap();
+    maximum.shrink_prepared_to(usize::MAX - 1).unwrap();
+    assert_eq!(scope.load(Ordering::SeqCst), usize::MAX - 1);
+    maximum.shrink_prepared_to(0).unwrap();
+    drop(maximum);
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+    let mut fee = active_fee(&scope, 13, 29);
+    let peer = active_fee(&scope, 7, 11);
+    drop(peer);
+    fee.shrink_prepared_to(17).unwrap();
+    assert_eq!(
+        scope.load(Ordering::SeqCst),
+        17,
+        "refinement cannot resurrect a peer credit"
+    );
+    let transition = fee.checked_retirement(&scope, 40, 44, 57).unwrap();
+    fee.retire(transition);
+    assert_eq!(scope.load(Ordering::SeqCst), 13);
+    drop(fee);
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn logical_fee_checked_overflow_rejects_before_any_role_rmw() {
     // Deliberately malformed scalar input exercises checked arithmetic only.
     // A valid Root can never enroll this impossible H; no wrapping enrollment
