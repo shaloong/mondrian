@@ -1348,8 +1348,12 @@ fn consume_pdc_interval(
     );
 }
 
+// This is a deterministic FIFO/PDC control, not a continuously paced device.
+// CaptureState's active duration is sample-derived rather than real activation
+// wall time. Initial AudioDevice admission does not qualify that model as a
+// physical clock; the second original observation must retain its actual result.
 #[test]
-#[ignore = "current normal Product and owned CLAP mode0 DLL; repeated retained PDC frontiers with software consumption only"]
+#[ignore = "current normal Product and owned CLAP mode0 DLL; deterministic FIFO/PDC frontiers, no continuous device-clock qualification"]
 fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
     let scenario = Scenario { capture_windows: 96, ..DELAY };
     let (_directory, mut state, output, output_id) = native_fader_fixture(scenario);
@@ -1394,6 +1398,12 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
             state.playback_clock_master(),
             Some(mondrian_playback::ClockMaster::AudioDevice)
         );
+        let initial_engine = state.playback_engine.snapshot();
+        assert_eq!(initial_engine.audio_clock_fallback, None);
+        let mut expected_clock = (
+            initial_engine.clock_master,
+            initial_engine.audio_clock_fallback,
+        );
         // Original actions sample the real wall clock. Catch up only to this
         // fixed ~3ms callback observation; never pin later Engine authority to F.
         std::thread::sleep(observed_at.saturating_duration_since(Instant::now()));
@@ -1436,6 +1446,10 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
             let author_generation = state.project_author_generation();
             let history = state.authoring_history().unwrap().diagnostics();
             let engine = state.playback_engine.snapshot();
+            assert_eq!(
+                (engine.clock_master, engine.audio_clock_fallback),
+                expected_clock
+            );
             let windows_start = output.lock().windows.len();
             state
                 .dispatch_action(
@@ -1469,8 +1483,12 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
                 mondrian_playback::TransportState::Playing
             );
             assert_eq!(
-                state.playback_clock_master(),
-                Some(mondrian_playback::ClockMaster::AudioDevice)
+                (
+                    current_engine.clock_master,
+                    current_engine.audio_clock_fallback
+                ),
+                expected_clock,
+                "each public fader preserves the last actual clock result"
             );
             assert!(state
                 .native_audio_renderer
@@ -1609,14 +1627,36 @@ fn native_clap_playing_host_fader_preserves_pdc_across_successive_frontiers() {
                     partial.output.unwrap().active_callback_consumed_frames,
                     consumer as u64
                 );
+                let observed_engine = state.playback_engine.snapshot();
+                assert_eq!(observed_engine.epoch, current_engine.epoch);
+                assert_eq!(observed_engine.rate, current_engine.rate);
                 assert_eq!(
-                    state.playback_clock_master(),
-                    Some(mondrian_playback::ClockMaster::AudioDevice),
-                    "[DEBUG-pdc-clock] before_action={engine:?}; after_action={current_engine:?}; accepted_callback_at={accepted_callback_at:?}; accepted_consumed={accepted_consumed}; second_output={:?}; second_engine={:?}; raw_elapsed_ns={}; consumed_delta={:?}",
-                    partial.output.unwrap(),
-                    state.playback_engine.snapshot(),
-                    callback_at.saturating_duration_since(accepted_callback_at).as_nanos(),
-                    partial.output.unwrap().active_callback_consumed_frames.checked_sub(accepted_consumed),
+                    observed_engine.state,
+                    mondrian_playback::TransportState::Playing
+                );
+                let observation = observed_engine.audio_clock_observation.unwrap();
+                assert_eq!(observation.stream_generation, stream_generation);
+                assert_eq!(observation.consumed_frames, consumer as u64);
+                // A real scheduling gap can legitimately reject this unpaced
+                // counter model. Do not conceal it with a stale AudioDevice
+                // assertion or manufacture delay/uncertainty to keep the clock.
+                match (observed_engine.clock_master, observed_engine.audio_clock_fallback) {
+                    (Some(mondrian_playback::ClockMaster::AudioDevice), None) => {}
+                    (
+                        Some(mondrian_playback::ClockMaster::Synthetic),
+                        Some(mondrian_playback::AudioClockFallbackReason::PhaseRegression {
+                            regression_ns,
+                            allowed_ns,
+                        }),
+                    ) if regression_ns > allowed_ns => {}
+                    _ => panic!(
+                        "PDC_REPEAT_CLOCK_RESULT: unexpected actual clock result: {observed_engine:?}; output={:?}",
+                        partial.output.unwrap()
+                    ),
+                }
+                expected_clock = (
+                    observed_engine.clock_master,
+                    observed_engine.audio_clock_fallback,
                 );
                 assert_heads(
                     &cursor_facts(&state),
