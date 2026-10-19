@@ -1,4 +1,4 @@
-//! Exact retained CLAP restart admission and stopped same-child seed commands.
+//! Exact retained restart admission and stopped same-child seed commands.
 use super::*;
 use crate::native_runtime_owner::NativeHostedBinding;
 use crate::NativeAudioReprepareError as Error;
@@ -31,13 +31,11 @@ impl PreparedProcessorHost {
         let crate::NativeObservedRequest::Cohort(cohort) = ticket.request else {
             return Err(Error::Admission("restart has no exact callback cohort"));
         };
-        if cohort.exhausted()
-            || cohort.request != mondrian_core::NativeAudioReprepareRequest::ClapRestart
-        {
-            return Err(Error::Admission(
-                "only nonexhausted CLAP restart is supported",
-            ));
-        }
+        let format = crate::NativeConfigurationFormat::for_retained_restart(cohort.request)
+            .filter(|_| cohort.serial != 0 && !cohort.exhausted())
+            .ok_or(Error::Admission(
+                "only exact nonexhausted CLAP or VST3 latency restart is supported",
+            ))?;
         if self.instances.len() != schedule.processors.len() {
             return Err(Error::Admission(
                 "Hosted instances do not match the installed schedule",
@@ -130,8 +128,17 @@ impl PreparedProcessorHost {
                 || observed.pending_reprepare != Some(ticket.request)
                 || lease.address().epoch != ticket.continuity_epoch
                 || !matches!(
-                    crate::schedule::processor(program, instance.occurrence)?.definition,
-                    mondrian_timeline::AudioProcessorDefinitionRef::Clap { .. }
+                    (
+                        format,
+                        &crate::schedule::processor(program, instance.occurrence)?.definition
+                    ),
+                    (
+                        crate::NativeConfigurationFormat::ClapState,
+                        mondrian_timeline::AudioProcessorDefinitionRef::Clap { .. }
+                    ) | (
+                        crate::NativeConfigurationFormat::Vst3ComponentAndController,
+                        mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+                    )
                 )
             {
                 return Err(Error::Admission(
@@ -141,7 +148,7 @@ impl PreparedProcessorHost {
             selected = Some((index, lease, object));
         }
         let (index, lease, object) =
-            selected.ok_or(Error::Admission("no exact CLAP restart occurrence"))?;
+            selected.ok_or(Error::Admission("no exact retained restart occurrence"))?;
         let prepared = &schedule.processors[index];
         let mut constants = Vec::new();
         constants

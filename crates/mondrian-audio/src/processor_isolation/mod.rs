@@ -545,16 +545,10 @@ impl IsolatedAudioProcessorFactory {
     ) -> bool {
         let old = self.spec.plugin_execution_contract;
         let next = identity.observed_contract;
-        matches!(
-            (identity.format, identity.serviced_cohort.request),
-            (
-                NativeConfigurationFormat::ClapState,
-                mondrian_core::NativeAudioReprepareRequest::ClapRestart
-            ) | (
-                NativeConfigurationFormat::Vst3ComponentAndController,
-                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }
-            )
-        ) && identity.configuration_bytes == configuration_bytes
+        NativeConfigurationFormat::for_retained_restart(identity.serviced_cohort.request)
+            == Some(identity.format)
+            && identity.configuration_bytes == configuration_bytes
+            && identity.serviced_cohort.serial != 0
             && !identity.serviced_cohort.exhausted()
             && self.spec.note_input_contract.ports.is_empty()
             && old.requires_state_entry() == next.requires_state_entry()
@@ -2596,6 +2590,9 @@ mod note_spec_contracts {
         let mut wrong = identity;
         wrong.serviced_cohort.request =
             mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 0 };
+        rejected.push(wrong);
+        wrong = identity;
+        wrong.serviced_cohort.serial = 0;
         rejected.push(wrong);
         wrong = identity;
         wrong.serviced_cohort.serial = u32::MAX;

@@ -118,6 +118,29 @@ pub enum NativeConfigurationFormat {
     ClapState,
 }
 
+impl NativeConfigurationFormat {
+    // Exact first-capability ABI/request mapping, not observed-instance authority.
+    pub(crate) const fn for_retained_restart(request: NativeAudioReprepareRequest) -> Option<Self> {
+        match request {
+            NativeAudioReprepareRequest::ClapRestart => Some(Self::ClapState),
+            NativeAudioReprepareRequest::Vst3Restart { flags: 8 } => {
+                Some(Self::Vst3ComponentAndController)
+            }
+            _ => None,
+        }
+    }
+
+    // Requested capture/envelope byte buffers only, excluding request values.
+    // VST3 has at most two state streams plus one canonical envelope. Using 3N
+    // avoids depending on the private SDK header size or single-component form.
+    pub(crate) const fn capture_byte_buffer_bound(self, state_limit: usize) -> Option<usize> {
+        match self {
+            Self::ClapState => Some(state_limit),
+            Self::Vst3ComponentAndController => state_limit.checked_mul(3),
+        }
+    }
+}
+
 /// Additional byte-buffer evidence; not a complete native resource admission.
 ///
 /// Descriptors, retained payloads, COM/port/bus structures and vendor-private
@@ -319,6 +342,49 @@ impl std::io::Write for FixedConfigurationWriter {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn retained_restart_format_requires_exact_abi_flags_and_preserves_capture_bounds() {
+        use NativeAudioReprepareRequest::{ClapRestart, Vst3Restart};
+        assert_eq!(
+            NativeConfigurationFormat::for_retained_restart(ClapRestart),
+            Some(NativeConfigurationFormat::ClapState)
+        );
+        assert_eq!(
+            NativeConfigurationFormat::for_retained_restart(Vst3Restart { flags: 8 }),
+            Some(NativeConfigurationFormat::Vst3ComponentAndController)
+        );
+        for flags in [0, 1, 2, 4, 9, 12, u32::MAX] {
+            assert_eq!(
+                NativeConfigurationFormat::for_retained_restart(Vst3Restart { flags }),
+                None
+            );
+        }
+        for n in [0, 1, 64 * 1024, usize::MAX / 3] {
+            assert_eq!(
+                NativeConfigurationFormat::ClapState.capture_byte_buffer_bound(n),
+                Some(n)
+            );
+            assert_eq!(
+                NativeConfigurationFormat::Vst3ComponentAndController.capture_byte_buffer_bound(n),
+                Some(n * 3)
+            );
+        }
+        assert_eq!(
+            NativeConfigurationFormat::ClapState.capture_byte_buffer_bound(usize::MAX),
+            Some(usize::MAX)
+        );
+        assert_eq!(
+            NativeConfigurationFormat::Vst3ComponentAndController
+                .capture_byte_buffer_bound(usize::MAX / 3 + 1),
+            None
+        );
+        assert_eq!(
+            NativeConfigurationFormat::Vst3ComponentAndController
+                .capture_byte_buffer_bound(usize::MAX),
+            None
+        );
+    }
 
     #[test]
     fn native_configuration_writer_ignored_overflow_never_publishes_truncated_state() {

@@ -258,6 +258,37 @@ fn add(a: usize, b: usize) -> Result<usize, NativeAudioReprepareError> {
         .ok_or_else(|| AudioRuntimeBuildError::InvalidResourceReplacement.into())
 }
 
+// Pure pre-service admission against the same actual Root grant. Returns
+// (new fixed high water, incremental capture fee, child control byte grant).
+// This reserves known byte buffers/parent owners, not all metadata or SDK heap.
+fn check_capture_overlap(
+    current: AudioRuntimeResourceFootprint,
+    grant: AudioRuntimeResourceGrant,
+    format: crate::NativeConfigurationFormat,
+    state_limit: usize,
+    values_bytes: usize,
+) -> Result<(usize, usize, usize), NativeAudioReprepareError> {
+    let child = format
+        .capture_byte_buffer_bound(state_limit)
+        .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+    let control = add(child, values_bytes)?;
+    let ledger = NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)?.bytes()?;
+    let reserved = add(
+        add(add(control, state_limit)?, values_bytes)?,
+        add(std::mem::size_of::<NativeReprepareAttempt>(), ledger)?,
+    )?;
+    let fixed = add(current.fixed_resident_bytes, reserved)?;
+    if fixed > grant.max_fixed_resident_bytes {
+        return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+            category: AudioRuntimeResourceCategory::FixedResidentBytes,
+            required: fixed,
+            granted: grant.max_fixed_resident_bytes,
+        }
+        .into());
+    }
+    Ok((fixed, reserved, control))
+}
+
 // The original Root grant/footprint (including H from the existing logical fee
 // scope) is the only authority. This pure preflight runs before any new Factory,
 // Plan, empty Session or fee-scope allocation; it cannot publish partial charges.
@@ -355,7 +386,7 @@ impl AudioProgramRuntime {
         self.service_native_reprepare(ticket, cancellation)
     }
 
-    /// Capture one exact retained CLAP restart under the original root grant.
+    /// Capture one exact retained CLAP or VST3 latency restart under the original root grant.
     /// Caller must have quiesced physical output; this Audio-only API cannot
     /// manufacture Media quiescence. No author edit, seed or new Plan is installed.
     ///
@@ -365,6 +396,9 @@ impl AudioProgramRuntime {
     /// CLAP metadata reinspection uses one borrowed scan scratch instead of
     /// descriptor/port Vec/String containers; its actual layout is admitted in
     /// the existing worker main-inline lane obligation, separate from this fee.
+    /// VST3 metadata query Vec/String owners and native stream COM wrappers are
+    /// not part of this buffer reservation; it does not imply a full known-host
+    /// control peak, whole heap or realtime qualification for that adapter.
     /// Cold error Strings, SDK storage and other owners still prevent a complete
     /// known-host control-peak or whole-service zero-allocation claim. A full
     /// canonical reprepare consumer must admit remaining owners before service,
@@ -401,22 +435,17 @@ impl AudioProgramRuntime {
         let values_bytes = std::alloc::Layout::array::<f64>(lanes)
             .map_err(|_| AudioRuntimeBuildError::InvalidResourceReplacement)?
             .size();
+        let format =
+            crate::NativeConfigurationFormat::for_retained_restart(ticket.request.request())
+                .ok_or(Error::Admission("unsupported retained restart format"))?;
         let ledger_bytes =
             NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)?.bytes()?;
-        let reserved = add(
-            add(
-                add(
-                    add(CONFIGURATION_LIMIT, CONFIGURATION_LIMIT)?,
-                    add(values_bytes, values_bytes)?,
-                )?,
-                std::mem::size_of::<NativeReprepareAttempt>(),
-            )?,
-            ledger_bytes,
-        )?;
-        let reserved_fixed = add(self.resource_footprint.fixed_resident_bytes, reserved)?;
-        self.check_resource_ceiling(
-            AudioRuntimeResourceCategory::FixedResidentBytes,
-            reserved_fixed,
+        let (reserved_fixed, reserved, control_grant) = check_capture_overlap(
+            self.resource_footprint,
+            self.resource_grant,
+            format,
+            CONFIGURATION_LIMIT,
+            values_bytes,
         )?;
         let selection = self.session.inspect_native_reprepare(ticket, serial, cancellation)?;
         // Observation of peers may perform control I/O. Recheck the real Source
@@ -439,7 +468,6 @@ impl AudioProgramRuntime {
             .next_attempt
             .checked_add(1)
             .ok_or(Error::Admission("restart attempt serial exhausted"))?;
-        let control_grant = add(CONFIGURATION_LIMIT, values_bytes)?;
         // The original Root footprint remains the sole fixed-policy authority.
         // Only exact successful installation retirement can normalize this
         // conservative reservation; failure/abandonment keeps it until Runtime
@@ -538,7 +566,10 @@ impl AudioProgramRuntime {
         );
         if candidate.serviced_cohort != attempt.selection.cohort
             || candidate.control_token != key
-            || candidate.format != crate::NativeConfigurationFormat::ClapState
+            || Some(candidate.format)
+                != crate::NativeConfigurationFormat::for_retained_restart(
+                    attempt.selection.cohort.request,
+                )
             || candidate.configuration.len() > CONFIGURATION_LIMIT
             || candidate.configuration.capacity() > CONFIGURATION_LIMIT
             || candidate.parent_configuration_capacity_bytes != candidate.configuration.capacity()
@@ -1207,6 +1238,83 @@ mod inline_admission_tests {
             prepared_logical_bytes: 11,
             ..AudioSessionResourceFootprint::default()
         }
+    }
+
+    #[test]
+    fn vst3_capture_buffer_admission_uses_same_root_credit_before_rpc() {
+        let current = AudioRuntimeResourceFootprint {
+            runtime_occurrences: 1,
+            fixed_resident_bytes: 17,
+            prepared_logical_bytes: 23,
+            ..AudioRuntimeResourceFootprint::default()
+        };
+        let n = CONFIGURATION_LIMIT;
+        let v = 8;
+        let parent = std::mem::size_of::<NativeReprepareAttempt>()
+            + NativeHostAllocationLedger::storage_layout(CAPTURE_OWNER_SLOTS)
+                .unwrap()
+                .bytes()
+                .unwrap();
+        for (format, multiplier) in [
+            (crate::NativeConfigurationFormat::ClapState, 2),
+            (
+                crate::NativeConfigurationFormat::Vst3ComponentAndController,
+                4,
+            ),
+        ] {
+            let reserved = multiplier * n + 2 * v + parent;
+            let required = current.fixed_resident_bytes + reserved;
+            let grant = AudioRuntimeResourceGrant::new(1, required, 23);
+            assert_eq!(
+                check_capture_overlap(current, grant, format, n, v).unwrap(),
+                (required, reserved, (multiplier - 1) * n + v)
+            );
+            assert!(
+                matches!(check_capture_overlap(current,AudioRuntimeResourceGrant::new(1,required-1,23),format,n,v),
+                Err(NativeAudioReprepareError::Resources(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                    category:AudioRuntimeResourceCategory::FixedResidentBytes,required:actual,granted,
+                })) if actual==required && granted==required-1)
+            );
+            let mut overflow = current;
+            overflow.fixed_resident_bytes = usize::MAX;
+            assert!(matches!(
+                check_capture_overlap(
+                    overflow,
+                    AudioRuntimeResourceGrant::unbounded(),
+                    format,
+                    n,
+                    v
+                ),
+                Err(NativeAudioReprepareError::Resources(
+                    AudioRuntimeBuildError::InvalidResourceReplacement
+                ))
+            ));
+        }
+        assert!(matches!(
+            check_capture_overlap(
+                current,
+                AudioRuntimeResourceGrant::unbounded(),
+                crate::NativeConfigurationFormat::Vst3ComponentAndController,
+                usize::MAX / 3 + 1,
+                v
+            ),
+            Err(NativeAudioReprepareError::Resources(
+                AudioRuntimeBuildError::InvalidResourceReplacement
+            ))
+        ));
+        assert!(check_capture_overlap(
+            current,
+            AudioRuntimeResourceGrant::unbounded(),
+            crate::NativeConfigurationFormat::ClapState,
+            n,
+            usize::MAX
+        )
+        .is_err());
+        assert_eq!(current.fixed_resident_bytes, 17);
+        assert_eq!(current.prepared_logical_bytes, 23);
+        assert_eq!(current.runtime_occurrences, 1);
+        // Production pure preflight only: no candidate, ticket, fee, native
+        // command or mutable owner is created by these exact/one-byte controls.
     }
 
     #[test]
