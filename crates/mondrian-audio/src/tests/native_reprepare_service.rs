@@ -586,6 +586,7 @@ fn retained_restart_control(preparation: Preparation) {
                     AudioProcessorCursorState::Unentered
                 );
                 assert!(runtime.native_owner_lease(address).is_err());
+                unpublished.fill(99.0);
                 assert_eq!(
                     runtime.render_into(
                         AudioRenderRequest { start_sample: 8, frames: 4 },
@@ -593,7 +594,10 @@ fn retained_restart_control(preparation: Preparation) {
                     ),
                     Err(AudioExecutionError::StateEntryRequired)
                 );
-                assert_eq!(unpublished, [99.0; 8]);
+                assert_eq!(
+                    unpublished, [0.0; 8],
+                    "normal admitted refusal initializes Runtime PCM"
+                );
                 assert_eq!(
                     observed.children.load(SeqCst),
                     1,
@@ -681,6 +685,7 @@ fn retained_restart_control(preparation: Preparation) {
                     for start in [16, 20] {
                         assert_restarted_pcm(&mut runtime, start);
                     }
+                    unpublished.fill(99.0);
                     let ticket = match runtime.render_into(
                         AudioRenderRequest { start_sample: 24, frames: 4 },
                         &mut unpublished,
@@ -688,6 +693,10 @@ fn retained_restart_control(preparation: Preparation) {
                         Err(AudioExecutionError::ReprepareRequired(ticket)) => ticket,
                         other => panic!("actual mode13 second callback: {other:?}"),
                     };
+                    assert_eq!(
+                        unpublished, [99.0; 8],
+                        "pending preflight consumes no caller PCM"
+                    );
                     assert_eq!(ticket.prepared_plan_id, receipt.identity().prepared_plan_id);
                     assert_eq!(ticket.session_id, receipt.identity().session_id);
                     assert_eq!(ticket.continuity_epoch, Some(AudioContinuityEpoch::new(2)));
@@ -792,6 +801,7 @@ fn retained_restart_control(preparation: Preparation) {
                         cursors(&runtime).processor.unwrap().state,
                         AudioProcessorCursorState::Unentered
                     );
+                    unpublished.fill(99.0);
                     assert_eq!(
                         runtime.render_into(
                             AudioRenderRequest { start_sample: 24, frames: 4 },
@@ -799,7 +809,10 @@ fn retained_restart_control(preparation: Preparation) {
                         ),
                         Err(AudioExecutionError::StateEntryRequired)
                     );
-                    assert_eq!(unpublished, [99.0; 8]);
+                    assert_eq!(
+                        unpublished, [0.0; 8],
+                        "normal admitted refusal initializes Runtime PCM"
+                    );
                     assert!(runtime.native_owner_lease(new_address).is_err());
                     runtime
                         .enter_state_cancellable(
@@ -937,6 +950,7 @@ fn retained_restart_control(preparation: Preparation) {
                     ))
                 ));
                 assert_eq!(runtime.resource_footprint(), failed);
+                unpublished.fill(99.0);
                 assert_eq!(
                     runtime.render_into(
                         AudioRenderRequest { start_sample: 8, frames: 4 },
@@ -969,6 +983,7 @@ fn retained_restart_control(preparation: Preparation) {
         drop(operation);
         // Handle Drop cannot release parent candidate/preparation or child fees.
         assert_eq!(runtime.resource_footprint(), retained_footprint);
+        unpublished.fill(99.0);
         assert_eq!(
             runtime.render_into(
                 AudioRenderRequest { start_sample: 8, frames: 4 },
