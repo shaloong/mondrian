@@ -1540,10 +1540,18 @@ impl AppState {
                         // Construct the provider only for an actual available
                         // Playback. The API owns even rejected providers and
                         // retires them away from this caller thread.
-                        if let (AppAudioPlayback::Available(playback), Some(renderer)) = (
-                            &mut self.audio_playback,
-                            self.native_audio_renderer.as_ref().and_then(std::sync::Weak::upgrade),
-                        ) {
+                        let renderer = self
+                            .native_audio_renderer
+                            .as_ref()
+                            .filter(|weak| {
+                                let identity: std::sync::Weak<dyn AudioPcmRenderer> =
+                                    (*weak).clone();
+                                self.audio_playback.matches_source_weak(&identity)
+                            })
+                            .and_then(std::sync::Weak::upgrade);
+                        if let (AppAudioPlayback::Available(playback), Some(renderer)) =
+                            (&mut self.audio_playback, renderer)
+                        {
                             if playback
                                 .request_native_reprepare(
                                     pending_generation,
@@ -7658,7 +7666,13 @@ impl AppState {
         {
             self.playback_engine = engine;
             if let (Some(source), Some(session), Some(sequence)) = (
-                self.native_audio_renderer.as_ref().and_then(std::sync::Weak::upgrade),
+                self.native_audio_renderer
+                    .as_ref()
+                    .filter(|weak| {
+                        let identity: std::sync::Weak<dyn AudioPcmRenderer> = (*weak).clone();
+                        self.audio_playback.matches_source_weak(&identity)
+                    })
+                    .and_then(std::sync::Weak::upgrade),
                 self.authoring_session_id(),
                 self.active_sequence().map(|sequence| sequence.id),
             ) {
