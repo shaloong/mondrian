@@ -266,6 +266,11 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.requires_state_entry()
     }
 
+    #[cfg(test)]
+    pub(crate) fn submitted_window_for_test(&self) -> Option<(AudioContinuityEpoch, i64)> {
+        self.submitted_window.map(|cursor| (cursor.epoch, cursor.next_start_sample))
+    }
+
     /// Enter one fresh Program epoch and start its submitted-window sequence.
     /// The window cursor records public submissions, not private DSP position.
     pub fn enter_state(
@@ -311,6 +316,50 @@ impl AudioProgramDeliveryRuntime {
     ) -> Result<crate::NativeAudioReprepare, crate::NativeAudioReprepareError> {
         self.runtime.service_native_reprepare(ticket, cancellation)
     }
+    /// Service the actual pending Session ticket; a product notice grants no authority.
+    /// Neither refusal nor capture changes the submitted public window.
+    pub fn service_pending_native_reprepare(
+        &mut self,
+        expected: mondrian_core::NativeAudioReprepareNotice,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepare, crate::NativeAudioReprepareError> {
+        self.runtime.service_pending_native_reprepare(expected, cancellation)
+    }
+
+    /// Prepare the canonical replacement on the same held Runtime without entry.
+    pub fn prepare_native_reprepare_plan(
+        &mut self,
+        operation: &crate::NativeAudioReprepare,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioRepreparePlanFacts, crate::NativeAudioReprepareError> {
+        self.runtime.prepare_native_reprepare_plan(operation, destination, cancellation)
+    }
+
+    /// Install an unentered replacement and invalidate only its old public window.
+    /// All errors retain the old window, including errors after child seed commit.
+    /// The receipt must retire outside all caller Runtime/metadata/Source locks.
+    pub fn install_native_reprepare_plan(
+        &mut self,
+        operation: &crate::NativeAudioReprepare,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepareInstallReceipt, crate::NativeAudioReprepareError> {
+        let receipt =
+            self.runtime
+                .install_native_reprepare_plan(operation, authorization, cancellation)?;
+        self.submitted_window = None;
+        Ok(receipt)
+    }
+
+    /// Consume exact retired-owner evidence without entering or changing a window.
+    pub fn finish_native_reprepare_retirement(
+        &mut self,
+        completion: crate::NativeAudioReprepareRetirement,
+    ) -> Result<(), crate::NativeAudioReprepareError> {
+        self.runtime.finish_native_reprepare_retirement(completion)
+    }
+
     /// Borrow current capture bytes without publishing a Plan, Source or author state.
     pub fn native_reprepare_configuration<'a>(
         &'a self,
@@ -326,7 +375,8 @@ impl AudioProgramDeliveryRuntime {
         destination: mondrian_core::AudioOwnerInstallationVerifier,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<crate::PreparedHostOutputFaderHandoff, crate::AudioHostFaderHandoffError> {
-        self.runtime.prepare_host_output_fader_handoff(next_program, destination, cancellation)
+        self.runtime
+            .prepare_host_output_fader_handoff(next_program, destination, cancellation)
     }
 
     /// Retain the original submitted window, DSP, layout and output cursor.
@@ -336,7 +386,8 @@ impl AudioProgramDeliveryRuntime {
         authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<crate::HostOutputFaderHandoffReceipt, crate::AudioHostFaderHandoffError> {
-        self.runtime.install_host_output_fader_handoff(prepared, authorization, cancellation)
+        self.runtime
+            .install_host_output_fader_handoff(prepared, authorization, cancellation)
     }
 
     /// Prepare a canonical parameter-only replacement on the SAME Runtime.
@@ -624,6 +675,47 @@ mod tests {
             error,
             AudioDeliveryError::TargetBufferSizeMismatch { expected: 4, actual: 3 }
         ));
+    }
+
+    #[test]
+    fn delivery_pending_restart_without_ticket_or_after_cancel_preserves_submitted_window() {
+        let mut delivery = AudioProgramDeliveryRuntime::prepare_standard(
+            silent_runtime(AudioChannelLayout::Stereo),
+            AudioChannelLayout::Stereo,
+        )
+        .expect("actual stateless delivery");
+        let epoch = AudioContinuityEpoch::new(7);
+        delivery.enter_state(epoch, 11).expect("actual entered delivery window");
+        let expected = mondrian_core::NativeAudioReprepareNotice {
+            instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+            request: mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+        };
+        let canceled = ExecutionCancellationToken::new();
+        canceled.cancel();
+        let before = delivery.resource_footprint();
+        assert!(matches!(
+            delivery.service_pending_native_reprepare(expected, &canceled),
+            Err(crate::NativeAudioReprepareError::Cancelled)
+        ));
+        assert!(matches!(
+            delivery.service_pending_native_reprepare(expected, &ExecutionCancellationToken::new()),
+            Err(crate::NativeAudioReprepareError::Admission(
+                "no actual Session restart is pending"
+            ))
+        ));
+        assert_eq!(delivery.resource_footprint(), before);
+        let cursor = delivery.submitted_window.expect("unchanged entered window");
+        assert_eq!((cursor.epoch, cursor.next_start_sample), (epoch, 11));
+        let mut pcm = [73.0; 8];
+        delivery
+            .render_into_cancellable(
+                AudioRenderRequest { start_sample: 11, frames: 4 },
+                &mut pcm,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("neither refusal consumed the exact next submission");
+        assert_eq!(pcm, [0.0; 8]);
+        assert_eq!(delivery.submitted_window.unwrap().next_start_sample, 15);
     }
 
     #[test]

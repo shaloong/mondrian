@@ -330,6 +330,31 @@ fn check_seed_overlap(
 }
 
 impl AudioProgramRuntime {
+    /// Capture only the exact pending ticket already retained by this Session.
+    /// The product notice is a rejection hint, never reconstructed authority.
+    /// Physical output quiescence remains the caller's precondition.
+    pub fn service_pending_native_reprepare(
+        &mut self,
+        expected: mondrian_core::NativeAudioReprepareNotice,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<NativeAudioReprepare, NativeAudioReprepareError> {
+        if cancellation.is_canceled() {
+            return Err(NativeAudioReprepareError::Cancelled);
+        }
+        let ticket =
+            self.session
+                .pending_reprepare_ticket()
+                .ok_or(NativeAudioReprepareError::Admission(
+                    "no actual Session restart is pending",
+                ))?;
+        if ticket.product_notice() != expected {
+            return Err(NativeAudioReprepareError::Admission(
+                "pending Session restart does not match the expected notice",
+            ));
+        }
+        self.service_native_reprepare(ticket, cancellation)
+    }
+
     /// Capture one exact retained CLAP restart under the original root grant.
     /// Caller must have quiesced physical output; this Audio-only API cannot
     /// manufacture Media quiescence. No author edit, seed or new Plan is installed.
