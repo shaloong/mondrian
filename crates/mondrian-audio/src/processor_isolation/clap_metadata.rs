@@ -1,11 +1,20 @@
 //! Borrowed native metadata observations and the existing scalar/structure rules.
 //! Views and refusal facts grant no author, processing or Source authority.
 use super::clap_discovery::{
-    parameter_error_with_capture, ClapParameterDescriptor, ParameterQueryCapture,
+    parameter_error_with_capture, ClapParameterDescriptor, ParameterQueryCapture, MAX_INPUT_PORTS,
+    MAX_OUTPUT_PORTS, MAX_PARAMETERS,
 };
-use crate::AudioProcessorHostError;
-use clack_extensions::params::{ParamInfo, ParamInfoBuffer, PluginParams};
+use super::ClapMainAudioInput;
+use crate::{
+    AudioProcessorAuxiliaryInputContract, AudioProcessorAuxiliaryOutputContract,
+    AudioProcessorHostError,
+};
+use clack_extensions::audio_ports::{
+    AudioPortFlags, AudioPortInfo, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
+};
+use clack_extensions::params::{ParamInfo, ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_host::prelude::{ClapId, PluginMainThreadHandle};
+use mondrian_core::AudioChannelLayout;
 fn invalid(detail: impl Into<String>) -> AudioProcessorHostError {
     AudioProcessorHostError::InvalidContract(detail.into())
 }
@@ -23,6 +32,21 @@ pub(super) struct ParameterRow<'a> {
     read_only: bool,
 }
 impl<'a> ParameterRow<'a> {
+    fn from_info(info: &ParamInfo<'a>, name: &'a str, current_value: f64) -> Self {
+        Self {
+            id: info.id.get(),
+            name,
+            min_value: info.min_value,
+            max_value: info.max_value,
+            default_value: info.default_value,
+            current_value,
+            automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
+            stepped: info.flags.contains(ParamInfoFlags::IS_STEPPED),
+            enumeration: info.flags.contains(ParamInfoFlags::IS_ENUM),
+            read_only: info.flags.contains(ParamInfoFlags::IS_READONLY),
+        }
+    }
+
     pub(super) fn from_descriptor(value: &'a ClapParameterDescriptor) -> Self {
         Self {
             id: value.id,
@@ -197,4 +221,222 @@ pub(super) fn same_parameter_structure(a: ParameterRow<'_>, e: ParameterRow<'_>)
         && a.stepped == e.stepped
         && a.enumeration == e.enumeration
         && a.read_only == e.read_only
+}
+
+/// One control-thread scan workspace, reused by both parameter scans and the
+/// inactive port scan. Its real layout is included in the worker's main-inline
+/// stack obligation. Cold error Strings remain outside this allocation claim.
+/// Sorted IDs require at most 523,776 u32 moves (<2 MiB) for 1,024 reverse IDs.
+pub(super) struct MetadataScanScratch {
+    ids: [u32; MAX_PARAMETERS as usize],
+    len: usize,
+    first_invalid: Option<ParameterFailure>,
+    schema_changed: bool,
+}
+
+impl MetadataScanScratch {
+    pub(super) const fn new() -> Self {
+        Self {
+            ids: [0; MAX_PARAMETERS as usize],
+            len: 0,
+            first_invalid: None,
+            schema_changed: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.len = 0;
+        self.first_invalid = None;
+        self.schema_changed = false;
+    }
+
+    fn insert_id(&mut self, id: u32) -> bool {
+        match self.ids[..self.len].binary_search(&id) {
+            Ok(_) => false,
+            Err(position) => {
+                // All callers reject counts above this fixed storage first.
+                self.ids.copy_within(position..self.len, position + 1);
+                self.ids[position] = id;
+                self.len += 1;
+                true
+            }
+        }
+    }
+}
+
+/// A full single native snapshot, without owned descriptors/names or a tree.
+/// Query failures still outrank earlier row/shape errors, exactly as the owned
+/// collector which queries every row before validating its captured vector.
+pub(super) fn revalidate_parameters(
+    handle: &PluginMainThreadHandle<'_>,
+    expected: &[ClapParameterDescriptor],
+    scratch: &mut MetadataScanScratch,
+) -> Result<bool, AudioProcessorHostError> {
+    scratch.reset();
+    let Some(extension) = handle.get_extension::<PluginParams>() else {
+        return Ok(expected.is_empty());
+    };
+    let count = extension.count(handle);
+    if count > MAX_PARAMETERS {
+        return Err(invalid("CLAP parameter count exceeds the supported bound"));
+    }
+    scratch.schema_changed = count as usize != expected.len();
+    for index in 0..count {
+        // Preserve the original fresh, zero-initialized native query buffer.
+        let mut buffer = ParamInfoBuffer::new();
+        let (info, name) = parameter_info_at(handle, &extension, index, &mut buffer, None)?;
+        let current = parameter_value_at(handle, &extension, info.id, index, None)?;
+        let row = ParameterRow::from_info(&info, name, current);
+        let duplicate = ClapId::from_raw(row.id).is_some() && !scratch.insert_id(row.id);
+        if scratch.first_invalid.is_none()
+            && let Some(reason) = parameter_invalid_reason(row, duplicate)
+        {
+            scratch.first_invalid = Some(ParameterFailure::new(index as usize, row, reason));
+        }
+        if expected.get(index as usize).is_none_or(|expected| {
+            !same_parameter_structure(row, ParameterRow::from_descriptor(expected))
+        }) {
+            scratch.schema_changed = true;
+        }
+    }
+    if let Some(failure) = scratch.first_invalid {
+        return Err(failure.error());
+    }
+    Ok(!scratch.schema_changed)
+}
+
+/// Borrowed ABI traversal shared by discovery's owned collector and retained
+/// revalidation. The plugin must be inactive. Invalid native rows fail in the
+/// original order; the visitor cannot shortcut a valid shape mismatch.
+pub(super) fn scan_audio_ports(
+    handle: &PluginMainThreadHandle<'_>,
+    layout: AudioChannelLayout,
+    scratch: &mut MetadataScanScratch,
+    mut visit: impl FnMut(bool, u32, &AudioPortInfo<'_>),
+) -> Result<(ClapMainAudioInput, u32, usize, usize), AudioProcessorHostError> {
+    let expected_type = match layout {
+        AudioChannelLayout::Mono => AudioPortType::MONO,
+        AudioChannelLayout::Stereo => AudioPortType::STEREO,
+        _ => return Err(invalid("CLAP audio port layout is unsupported")),
+    };
+    let ports = handle
+        .get_extension::<PluginAudioPorts>()
+        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
+    let mut main_input = ClapMainAudioInput::Absent;
+    let mut main_output = None;
+    let mut auxiliary_inputs = 0;
+    let mut auxiliary_outputs = 0;
+    for is_input in [true, false] {
+        let count = ports.count(handle, is_input);
+        if (is_input && count > MAX_INPUT_PORTS)
+            || (!is_input && !(1..=MAX_OUTPUT_PORTS).contains(&count))
+        {
+            return Err(invalid(
+                "CLAP requires bounded inputs and one Main with at most 31 auxiliary outputs",
+            ));
+        }
+        scratch.reset();
+        for index in 0..count {
+            let mut buffer = AudioPortInfoBuffer::new();
+            let port = ports
+                .get(handle, index, is_input, &mut buffer)
+                .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
+            let refusal = if !scratch.insert_id(port.id.get()) {
+                Some("duplicate_id")
+            } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
+                || (!is_input && index == 0 && !port.flags.contains(AudioPortFlags::IS_MAIN))
+            {
+                Some("main_role")
+            } else if port.port_type != Some(expected_type) {
+                Some("port_type")
+            } else if usize::try_from(port.channel_count).ok() != Some(layout.channel_count()) {
+                Some("channel_count")
+            } else {
+                None
+            };
+            if let Some(reason) = refusal {
+                return Err(super::clap_discovery::audio_port_refusal(
+                    reason,
+                    is_input,
+                    index,
+                    count,
+                    &port,
+                    layout.channel_count(),
+                ));
+            }
+            if !is_input && index == 0 {
+                main_output = Some(port.id.get());
+            } else if !is_input {
+                auxiliary_outputs += 1;
+            } else if port.flags.contains(AudioPortFlags::IS_MAIN) {
+                main_input = ClapMainAudioInput::Present;
+            } else {
+                auxiliary_inputs += 1;
+            }
+            visit(is_input, index, &port);
+            if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
+                main_input.validate_auxiliary_count(auxiliary_inputs)?;
+            }
+        }
+    }
+    main_input.validate_auxiliary_count(auxiliary_inputs)?;
+    Ok((
+        main_input,
+        main_output.ok_or_else(|| invalid("CLAP Main output is missing"))?,
+        auxiliary_inputs,
+        auxiliary_outputs,
+    ))
+}
+
+// Equivalent to the original format!("{prefix}{id}") equality: no signs,
+// whitespace or leading zeros, and no reserved native identity.
+fn canonical_port_key(key: &str, prefix: &str, id: u32) -> bool {
+    if id == u32::MAX {
+        return false;
+    }
+    let Some(digits) = key.strip_prefix(prefix) else {
+        return false;
+    };
+    if digits.is_empty()
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    digits.parse::<u32>() == Ok(id)
+}
+
+pub(super) fn revalidate_audio_ports(
+    handle: &PluginMainThreadHandle<'_>,
+    layout: AudioChannelLayout,
+    main_input: ClapMainAudioInput,
+    inputs: &AudioProcessorAuxiliaryInputContract,
+    main_output: u32,
+    outputs: &AudioProcessorAuxiliaryOutputContract,
+    scratch: &mut MetadataScanScratch,
+) -> Result<bool, AudioProcessorHostError> {
+    let mut input_index = 0;
+    let mut output_index = 0;
+    let mut matches = true;
+    let (actual_input, actual_output, input_count, output_count) =
+        scan_audio_ports(handle, layout, scratch, |is_input, index, port| {
+            if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
+                matches &= inputs.buses.get(input_index).is_some_and(|bus| {
+                    bus.channel_layout == layout
+                        && canonical_port_key(&bus.bus_key, "clap.audio-input.", port.id.get())
+                });
+                input_index += 1;
+            } else if !is_input && index != 0 {
+                matches &= outputs.buses.get(output_index).is_some_and(|bus| {
+                    bus.channel_layout == layout
+                        && canonical_port_key(&bus.bus_key, "clap.audio-output.", port.id.get())
+                });
+                output_index += 1;
+            }
+        })?;
+    Ok(matches
+        && actual_input == main_input
+        && actual_output == main_output
+        && input_count == inputs.buses.len()
+        && output_count == outputs.buses.len())
 }

@@ -298,7 +298,14 @@ impl ClapMainAudioInput {
         self,
         auxiliary: &AudioProcessorAuxiliaryInputContract,
     ) -> Result<(), AudioProcessorHostError> {
-        if auxiliary.buses.len() >= super::clap_discovery::MAX_INPUT_PORTS as usize {
+        self.validate_auxiliary_count(auxiliary.buses.len())
+    }
+
+    pub(super) fn validate_auxiliary_count(
+        self,
+        count: usize,
+    ) -> Result<(), AudioProcessorHostError> {
+        if count >= super::clap_discovery::MAX_INPUT_PORTS as usize {
             return Err(invalid(
                 "CLAP auxiliary inputs exceed the existing 31-port bound",
             ));
@@ -1875,17 +1882,24 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         configure_render_mode(&self.instance.plugin_handle(), self.render.processing_mode)?;
         self.shared.service_callbacks(&mut self.instance)?;
         let handle = self.instance.plugin_handle();
-        let parameters = list_parameters(&handle)?;
+        let mut metadata_scratch = super::clap_metadata::MetadataScanScratch::new();
         // Current values change after a valid flush; structural metadata must not.
-        if !same_clap_parameter_structure(&parameters, &self.expected_parameters) {
+        if !super::clap_metadata::revalidate_parameters(
+            &handle,
+            &self.expected_parameters,
+            &mut metadata_scratch,
+        )? {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
-        let metadata = inspect_audio_ports(&handle, self.render.channel_layout)?;
-        if metadata.main_audio_input != self.main_audio_input
-            || metadata.contract != self.auxiliary_inputs
-            || metadata.main_audio_output_id != self.main_audio_output_id
-            || metadata.outputs != self.auxiliary_outputs
-        {
+        if !super::clap_metadata::revalidate_audio_ports(
+            &handle,
+            self.render.channel_layout,
+            self.main_audio_input,
+            &self.auxiliary_inputs,
+            self.main_audio_output_id,
+            &self.auxiliary_outputs,
+            &mut metadata_scratch,
+        )? {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
         let configuration = PluginAudioConfiguration {
@@ -1928,7 +1942,11 @@ impl IsolatedAudioProcessorWorker for ClapWorker {
         // CLAP audio-ports may only be scanned while deactivated. The inactive
         // shape+auxiliary check above remains authoritative through activation;
         // active changes require the existing restart/cohort control path.
-        if !same_clap_parameter_structure(&list_parameters(&handle)?, &self.expected_parameters) {
+        if !super::clap_metadata::revalidate_parameters(
+            &handle,
+            &self.expected_parameters,
+            &mut metadata_scratch,
+        )? {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
         }
         let Some(state) = handle.get_extension::<PluginState>() else {
@@ -5480,6 +5498,7 @@ pub(super) fn clap_native_worker_lane_profile(
                 super::worker::WorkerProcessContext<'static>,
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
+                super::clap_metadata::MetadataScanScratch,
             )>()),
             runtime_main_role: clap_native_layout(
                 std::alloc::Layout::new::<ClapMainRole<'static>>(),

@@ -12,9 +12,9 @@ use crate::{
     AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorHostError,
     AudioProcessorTail, AudioRenderContract,
 };
-use clack_extensions::audio_ports::{
-    AudioPortFlags, AudioPortInfoBuffer, AudioPortType, PluginAudioPorts,
-};
+use clack_extensions::audio_ports::{AudioPortFlags, AudioPortType};
+#[cfg(test)]
+use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::latency::PluginLatency;
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
 use clack_extensions::state::PluginState;
@@ -1546,7 +1546,7 @@ pub(super) struct ClapAudioPortMetadata {
 
 // Only the cold refusal path formats owned facts from this same successful get.
 // Clack has already removed unknown flag bits and normalized NULL/empty types.
-fn audio_port_refusal(
+pub(super) fn audio_port_refusal(
     reason: &'static str,
     is_input: bool,
     index: u32,
@@ -1604,71 +1604,21 @@ pub(super) fn inspect_audio_ports(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
     channel_layout: AudioChannelLayout,
 ) -> Result<ClapAudioPortMetadata, AudioProcessorHostError> {
-    let expected_type = match channel_layout {
-        AudioChannelLayout::Mono => AudioPortType::MONO,
-        AudioChannelLayout::Stereo => AudioPortType::STEREO,
-        _ => return Err(invalid("CLAP audio port layout is unsupported")),
-    };
-    let ports = handle
-        .get_extension::<PluginAudioPorts>()
-        .ok_or_else(|| invalid("CLAP plugin does not expose audio ports"))?;
     let mut auxiliary_inputs = AudioProcessorAuxiliaryInputContract::default();
     let mut names = Vec::new();
-    let mut main_audio_input = ClapMainAudioInput::Absent;
-    let mut main_audio_output_id = None;
     let mut outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
-    for is_input in [true, false] {
-        let count = ports.count(handle, is_input);
-        if (is_input && count > MAX_INPUT_PORTS)
-            || (!is_input && !(1..=MAX_OUTPUT_PORTS).contains(&count))
-        {
-            return Err(invalid(
-                "CLAP requires bounded inputs and one Main with at most 31 auxiliary outputs",
-            ));
-        }
-        let mut ids = std::collections::BTreeSet::new();
-        for index in 0..count {
-            let mut buffer = AudioPortInfoBuffer::new();
-            let port = ports
-                .get(handle, index, is_input, &mut buffer)
-                .ok_or_else(|| invalid("CLAP audio port metadata is unavailable"))?;
-            let refusal = if !ids.insert(port.id.get()) {
-                Some("duplicate_id")
-            } else if (port.flags.contains(AudioPortFlags::IS_MAIN) && index != 0)
-                || (!is_input && index == 0 && !port.flags.contains(AudioPortFlags::IS_MAIN))
-            {
-                Some("main_role")
-            } else if port.port_type != Some(expected_type) {
-                Some("port_type")
-            } else if usize::try_from(port.channel_count).ok()
-                != Some(channel_layout.channel_count())
-            {
-                Some("channel_count")
-            } else {
-                None
-            };
-            if let Some(reason) = refusal {
-                return Err(audio_port_refusal(
-                    reason,
-                    is_input,
-                    index,
-                    count,
-                    &port,
-                    channel_layout.channel_count(),
-                ));
-            }
-            if !is_input {
-                if index == 0 {
-                    main_audio_output_id = Some(port.id.get());
-                } else {
-                    outputs.buses.push(crate::AudioProcessorAuxiliaryOutputBusContract {
-                        bus_key: format!("clap.audio-output.{}", port.id.get()),
-                        channel_layout,
-                    });
-                }
-            } else if port.flags.contains(AudioPortFlags::IS_MAIN) {
-                main_audio_input = ClapMainAudioInput::Present;
-            } else if is_input {
+    let mut scratch = super::clap_metadata::MetadataScanScratch::new();
+    let (main_audio_input, main_audio_output_id, _, _) = super::clap_metadata::scan_audio_ports(
+        handle,
+        channel_layout,
+        &mut scratch,
+        |is_input, index, port| {
+            if !is_input && index != 0 {
+                outputs.buses.push(crate::AudioProcessorAuxiliaryOutputBusContract {
+                    bus_key: format!("clap.audio-output.{}", port.id.get()),
+                    channel_layout,
+                });
+            } else if is_input && !port.flags.contains(AudioPortFlags::IS_MAIN) {
                 if let Ok(name) = std::str::from_utf8(port.name)
                     && let Some(name) = crate::AudioProcessorInputName::capture(
                         format!("clap.audio-input.{}", port.id.get()),
@@ -1681,19 +1631,16 @@ pub(super) fn inspect_audio_ports(
                     bus_key: format!("clap.audio-input.{}", port.id.get()),
                     channel_layout,
                 });
-                // Keep the existing 31-auxiliary limit even without a Main.
-                main_audio_input.validate(&auxiliary_inputs)?;
             }
-        }
-    }
+        },
+    )?;
     auxiliary_inputs.validate(channel_layout)?;
     main_audio_input.validate(&auxiliary_inputs)?;
     Ok(ClapAudioPortMetadata {
         main_audio_input,
         contract: auxiliary_inputs,
         names,
-        main_audio_output_id: main_audio_output_id
-            .ok_or_else(|| invalid("CLAP Main output is missing"))?,
+        main_audio_output_id,
         outputs,
     })
 }

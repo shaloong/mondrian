@@ -103,6 +103,37 @@ fn measure<T>(execute: impl FnOnce() -> T) -> (T, AllocationCounts) {
     (result, counts)
 }
 
+// Only these tests' real CLAP callbacks consume the const-TLS controls. The
+// default leaves every existing processing/allocator oracle unchanged.
+#[derive(Clone, Copy, Default)]
+struct MetadataOracle {
+    parameters: u8,
+    ports: u8,
+}
+thread_local! {
+    static METADATA_ORACLE: Cell<MetadataOracle> = const { Cell::new(MetadataOracle { parameters: 0, ports: 0 }) };
+    static METADATA_CALLS: Cell<[u32; 5]> = const { Cell::new([0; 5]) };
+    static METADATA_PORT_COUNTS: Cell<[u32; 2]> = const { Cell::new([0; 2]) };
+}
+fn metadata_call(slot: usize) {
+    METADATA_CALLS.with(|calls| {
+        let mut value = calls.get();
+        value[slot] += 1;
+        calls.set(value);
+    });
+}
+struct MetadataOracleReset;
+impl Drop for MetadataOracleReset {
+    fn drop(&mut self) {
+        METADATA_ORACLE.with(|slot| slot.set(MetadataOracle::default()));
+    }
+}
+fn set_metadata_oracle(parameters: u8, ports: u8) {
+    METADATA_ORACLE.with(|slot| slot.set(MetadataOracle { parameters, ports }));
+    METADATA_CALLS.with(|slot| slot.set([0; 5]));
+    METADATA_PORT_COUNTS.with(|slot| slot.set([0; 2]));
+}
+
 struct ParameterOrderPlugin;
 struct ParameterOrderMain;
 struct ParameterOrderProcessor;
@@ -140,18 +171,55 @@ impl DefaultPluginFactory for ParameterOrderPlugin {
 impl PluginMainThread<'_, ()> for ParameterOrderMain {}
 
 impl PluginAudioPortsImpl for ParameterOrderMain {
-    fn count(&self, _is_input: bool) -> u32 {
-        1
+    fn count(&self, is_input: bool) -> u32 {
+        METADATA_PORT_COUNTS.with(|counts| {
+            let mut value = counts.get();
+            value[usize::from(!is_input)] += 1;
+            counts.set(value);
+        });
+        let case = METADATA_ORACLE.with(|slot| slot.get().ports);
+        if case == 0 {
+            1
+        } else if is_input {
+            31
+        } else {
+            32
+        }
     }
 
-    fn get(&self, index: u32, _is_input: bool, writer: &mut AudioPortInfoWriter) {
-        if index == 0 {
+    fn get(&self, index: u32, is_input: bool, writer: &mut AudioPortInfoWriter) {
+        metadata_call(if is_input { 3 } else { 4 });
+        let case = METADATA_ORACLE.with(|slot| slot.get().ports);
+        let count = if case == 0 {
+            1
+        } else if is_input {
+            31
+        } else {
+            32
+        };
+        if index < count {
             writer.set(&AudioPortInfo {
-                id: ClapId::new(0),
-                name: b"main",
+                id: ClapId::new(if case == 3 && is_input && index == 30 {
+                    0
+                } else {
+                    index
+                }),
+                name: if case == 2 && is_input {
+                    b"\xff"
+                } else {
+                    b"main"
+                },
                 channel_count: 2,
-                flags: AudioPortFlags::IS_MAIN,
-                port_type: Some(AudioPortType::STEREO),
+                flags: if index == 0 && (!is_input || case == 0) {
+                    AudioPortFlags::IS_MAIN
+                } else {
+                    AudioPortFlags::empty()
+                },
+                port_type: Some(if case == 4 && !is_input && index == 31 {
+                    AudioPortType::MONO
+                } else {
+                    AudioPortType::STEREO
+                }),
                 in_place_pair: None,
             });
         }
@@ -160,27 +228,73 @@ impl PluginAudioPortsImpl for ParameterOrderMain {
 
 impl PluginMainThreadParams for ParameterOrderMain {
     fn count(&self) -> u32 {
-        2
+        metadata_call(0);
+        match METADATA_ORACLE.with(|slot| slot.get().parameters) {
+            1 => 1024,
+            8 => 1025,
+            _ => 2,
+        }
     }
 
     fn get_info(&self, index: u32, writer: &mut ParamInfoWriter) {
-        let Some(id) = [17, 3].get(index as usize).copied() else {
+        metadata_call(1);
+        let case = METADATA_ORACLE.with(|slot| slot.get().parameters);
+        if case == 3 && index == 1 {
             return;
+        }
+        let id = if case == 1 {
+            1024 - index
+        } else if case == 7 {
+            17
+        } else {
+            let Some(id) = [17, 3].get(index as usize).copied() else {
+                return;
+            };
+            id
         };
         writer.set(&ParamInfo {
             id: ClapId::new(id),
-            flags: ParamInfoFlags::IS_AUTOMATABLE,
+            flags: ParamInfoFlags::IS_AUTOMATABLE
+                | if case == 2 {
+                    ParamInfoFlags::IS_HIDDEN
+                } else {
+                    ParamInfoFlags::empty()
+                },
             cookie: Default::default(),
-            name: if id == 17 { b"Left" } else { b"Right" },
+            name: if case == 4 && index == 1 {
+                b"\xff"
+            } else if case == 2 {
+                b"renamed"
+            } else if id == 17 {
+                b"Left"
+            } else {
+                b"Right"
+            },
             module: b"",
-            min_value: 0.0,
+            min_value: if (3..=6).contains(&case) && index == 0 {
+                f64::NAN
+            } else if case == 2 {
+                -0.0
+            } else {
+                0.0
+            },
             max_value: 1.0,
             default_value: 1.0,
         });
     }
 
     fn get_value(&self, id: ClapId) -> Option<f64> {
-        [ClapId::new(17), ClapId::new(3)].contains(&id).then_some(1.0)
+        metadata_call(2);
+        let case = METADATA_ORACLE.with(|slot| slot.get().parameters);
+        if case == 5 && id.get() == 3 {
+            return None;
+        }
+        if case == 1 {
+            return Some(1.0);
+        }
+        [ClapId::new(17), ClapId::new(3)]
+            .contains(&id)
+            .then_some(if case == 2 { 0.5 } else { 1.0 })
     }
 
     fn value_to_text(
@@ -719,4 +833,253 @@ pub(crate) fn measure_host_allocations_for_test<T>(execute: impl FnOnce() -> T) 
             counts.largest_request,
         ],
     )
+}
+
+// This uses the same real entry and host handlers as the existing allocator
+// fixture, without activation/PCM. No new mock metadata or native replies.
+fn metadata_instance() -> PluginInstance<ClapHost> {
+    let entry = PluginEntry::load_from_clack::<SinglePluginEntry<ParameterOrderPlugin>>(
+        c"/test/parameter-storage",
+    )
+    .expect("owned real CLAP entry");
+    let info = HostInfo::new(
+        "Mondrian",
+        "Mondrian",
+        "https://github.com/shaloong/mondrian",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .expect("host identity");
+    let native = ClapHostShared::new().with_native_logs().expect("actual host extensions");
+    PluginInstance::<ClapHost>::new(
+        |_| native,
+        |shared| ClapHostMainThread::new(shared),
+        &entry,
+        c"org.mondrian.test.parameter-storage",
+        &info,
+    )
+    .expect("real inactive instance")
+}
+
+#[test]
+fn retained_clap_metadata_success_and_schema_mismatch_allocate_no_containers() {
+    use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
+    let _reset = MetadataOracleReset;
+    set_metadata_oracle(0, 0);
+    let instance = metadata_instance();
+    let handle = instance.plugin_handle();
+    let expected = list_parameters(&handle).expect("actual original snapshot");
+    let mut scratch = MetadataScanScratch::new();
+    set_metadata_oracle(2, 0);
+    let (result, counts) = measure(|| revalidate_parameters(&handle, &expected, &mut scratch));
+    assert!(result.expect("current/name/hidden/signed-zero remain legal"));
+    assert_eq!(counts, AllocationCounts::default());
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 2, 0, 0]);
+    let mut changed = expected.clone();
+    changed[0].default_value = 0.5;
+    set_metadata_oracle(2, 0);
+    let (result, counts) = measure(|| revalidate_parameters(&handle, &changed, &mut scratch));
+    assert!(!result.expect("valid but changed schema"));
+    assert_eq!(counts, AllocationCounts::default());
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 2, 2, 0, 0]);
+
+    set_metadata_oracle(1, 0);
+    let expected = list_parameters(&handle).expect("actual maximum reverse-ID snapshot");
+    set_metadata_oracle(1, 0);
+    let started = std::time::Instant::now();
+    let (result, counts) = measure(|| revalidate_parameters(&handle, &expected, &mut scratch));
+    let elapsed = started.elapsed();
+    assert!(result.expect("1,024 reverse IDs"));
+    assert_eq!(counts, AllocationCounts::default());
+    assert_eq!(METADATA_CALLS.with(Cell::get), [1, 1024, 1024, 0, 0]);
+    eprintln!(
+        "retained metadata: scratch={}B reverse_ids=1024 max_id_move_bytes={} elapsed={elapsed:?}",
+        size_of::<MetadataScanScratch>(),
+        1024usize * 1023 / 2 * size_of::<u32>()
+    );
+}
+
+#[test]
+fn retained_clap_metadata_preserves_query_errors_before_deferred_row_or_shape_errors() {
+    use super::super::clap_metadata::{revalidate_parameters, MetadataScanScratch};
+    let _reset = MetadataOracleReset;
+    set_metadata_oracle(0, 0);
+    let instance = metadata_instance();
+    let handle = instance.plugin_handle();
+    let mut expected = list_parameters(&handle).expect("actual expected snapshot");
+    expected[0].default_value = 0.5; // A valid early structural mismatch must defer.
+    let mut scratch = MetadataScanScratch::new();
+    for (case, reason, expected_calls) in [
+        (3, "CLAP parameter metadata is missing", [1, 2, 1, 0, 0]),
+        (4, "CLAP parameter name is not UTF-8", [1, 2, 1, 0, 0]),
+        (
+            5,
+            "CLAP parameter current value is unavailable",
+            [1, 2, 2, 0, 0],
+        ),
+        (6, "reason=min_nonfinite", [1, 2, 2, 0, 0]),
+        (7, "reason=duplicate_id", [1, 2, 2, 0, 0]),
+        (
+            8,
+            "CLAP parameter count exceeds the supported bound",
+            [1, 0, 0, 0, 0],
+        ),
+    ] {
+        set_metadata_oracle(case, 0);
+        let owned = list_parameters(&handle).expect_err("original malformed snapshot");
+        let original_calls = METADATA_CALLS.with(Cell::get);
+        set_metadata_oracle(case, 0);
+        let borrowed = revalidate_parameters(&handle, &expected, &mut scratch)
+            .expect_err("same original metadata refusal");
+        assert_eq!(METADATA_CALLS.with(Cell::get), expected_calls);
+        assert_eq!(original_calls, expected_calls);
+        assert_eq!(format!("{borrowed:?}"), format!("{owned:?}"));
+        assert!(format!("{borrowed:?}").contains(reason), "{borrowed:?}");
+    }
+}
+
+#[test]
+fn retained_clap_ports_complete_native_validation_before_shape_and_ignore_display_names() {
+    use super::super::clap_metadata::{revalidate_audio_ports, MetadataScanScratch};
+    let _reset = MetadataOracleReset;
+    set_metadata_oracle(0, 1);
+    let instance = metadata_instance();
+    let handle = instance.plugin_handle();
+    let expected = inspect_audio_ports(&handle, AudioChannelLayout::Stereo)
+        .expect("actual 31 aux inputs without Main and 31 aux outputs");
+    assert_eq!(expected.main_audio_input, ClapMainAudioInput::Absent);
+    assert_eq!(expected.contract.buses.len(), 31);
+    assert_eq!(expected.outputs.buses.len(), 31);
+    let mut scratch = MetadataScanScratch::new();
+    for case in [1, 2] {
+        set_metadata_oracle(0, case);
+        let (result, counts) = measure(|| {
+            revalidate_audio_ports(
+                &handle,
+                AudioChannelLayout::Stereo,
+                expected.main_audio_input,
+                &expected.contract,
+                expected.main_audio_output_id,
+                &expected.outputs,
+                &mut scratch,
+            )
+        });
+        assert!(result.expect("display name is not port identity"));
+        assert_eq!(counts, AllocationCounts::default());
+        assert_eq!(METADATA_CALLS.with(Cell::get), [0, 0, 0, 31, 32]);
+        assert_eq!(METADATA_PORT_COUNTS.with(Cell::get), [1, 1]);
+        let owned = inspect_audio_ports(&handle, AudioChannelLayout::Stereo).unwrap();
+        assert_eq!(owned.contract, expected.contract);
+        assert_eq!(owned.outputs, expected.outputs);
+        if case == 2 {
+            assert!(owned.names.is_empty());
+        }
+    }
+    let mut changed = expected.contract.clone();
+    for (index, key) in [
+        (0, "clap.audio-input.00"),
+        (1, "clap.audio-input.01"),
+        (0, "clap.audio-input.+0"),
+        (0, "clap.audio-input. 0"),
+        (0, "clap.audio-input.0 "),
+        (0, "clap.audio-input.4294967296"),
+        (0, "clap.audio-input."),
+    ] {
+        changed.clone_from(&expected.contract);
+        changed.buses[index].bus_key = key.to_owned();
+        set_metadata_oracle(0, 1);
+        let (result, counts) = measure(|| {
+            revalidate_audio_ports(
+                &handle,
+                AudioChannelLayout::Stereo,
+                expected.main_audio_input,
+                &changed,
+                expected.main_audio_output_id,
+                &expected.outputs,
+                &mut scratch,
+            )
+        });
+        assert!(!result.expect("noncanonical expected identity differs"));
+        assert_eq!(counts, AllocationCounts::default());
+        assert_eq!(METADATA_CALLS.with(Cell::get), [0, 0, 0, 31, 32]);
+        assert_eq!(METADATA_PORT_COUNTS.with(Cell::get), [1, 1]);
+    }
+    for (case, reason, calls) in [
+        (3, "reason=duplicate_id", [0, 0, 0, 31, 0]),
+        (4, "reason=port_type", [0, 0, 0, 31, 32]),
+    ] {
+        set_metadata_oracle(0, case);
+        let original = inspect_audio_ports(&handle, AudioChannelLayout::Stereo)
+            .err()
+            .expect("original invalid port refusal");
+        let original_calls = METADATA_CALLS.with(Cell::get);
+        set_metadata_oracle(0, case);
+        let error = revalidate_audio_ports(
+            &handle,
+            AudioChannelLayout::Stereo,
+            expected.main_audio_input,
+            &changed,
+            expected.main_audio_output_id,
+            &expected.outputs,
+            &mut scratch,
+        )
+        .expect_err("late malformed port outranks early shape mismatch");
+        assert_eq!(METADATA_CALLS.with(Cell::get), calls);
+        assert_eq!(
+            METADATA_PORT_COUNTS.with(Cell::get),
+            if case == 3 { [1, 0] } else { [1, 1] }
+        );
+        assert_eq!(original_calls, calls);
+        assert_eq!(format!("{error:?}"), format!("{original:?}"));
+        assert!(format!("{error:?}").contains(reason));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn retained_clap_metadata_scratch_is_charged_once_in_main_inline_obligation() {
+    use super::super::clap_metadata::MetadataScanScratch;
+    let profile = clap_native_worker_lane_profile().unwrap().expect("Windows scoped lane");
+    let original = Layout::new::<(
+        super::super::native_worker_ingress::NativeCommandIngress<'static>,
+        super::super::worker::WorkerProcessContext<'static>,
+        super::super::native_worker_processing::NativeDspDispatch<'static>,
+        crate::NativeAudioObservations,
+    )>();
+    let with_scratch = Layout::new::<(
+        super::super::native_worker_ingress::NativeCommandIngress<'static>,
+        super::super::worker::WorkerProcessContext<'static>,
+        super::super::native_worker_processing::NativeDspDispatch<'static>,
+        crate::NativeAudioObservations,
+        MetadataScanScratch,
+    )>();
+    assert_eq!(
+        profile.owning_layouts().main_inline,
+        clap_native_layout(with_scratch)
+    );
+    let mut old_owners = profile.owning_layouts();
+    old_owners.main_inline = clap_native_layout(original);
+    let before = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+        old_owners,
+        profile.control_overlap(),
+    )
+    .unwrap();
+    let delta = with_scratch.size().checked_sub(original.size()).unwrap();
+    assert!(
+        delta > 0,
+        "actual tuple layout includes the scratch and its padding"
+    );
+    assert_eq!(
+        profile.known_storage_limit_bytes() - before.known_storage_limit_bytes(),
+        delta
+    );
+    assert_eq!(
+        profile.additional_session_reservation_bytes()
+            - before.additional_session_reservation_bytes(),
+        delta
+    );
+    assert_eq!(
+        profile.requested_stack_reservation_bytes(),
+        before.requested_stack_reservation_bytes(),
+        "logical inline obligation must not reserve a second physical worker stack"
+    );
 }
