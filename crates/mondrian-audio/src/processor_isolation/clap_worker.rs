@@ -9,8 +9,10 @@ mod native_note_gate_controls;
 mod native_outputs_controls;
 
 use super::clap_audio_role::{ClapAudioRole, ClapAudioThreadGuard};
+#[cfg(test)]
+use super::clap_discovery::list_parameters;
 use super::clap_discovery::{
-    fingerprint_clap_binary, inspect_audio_ports, list_parameters, list_parameters_observed,
+    fingerprint_clap_binary, inspect_audio_ports, list_parameters_observed,
     probe_clap_plugin_registration_with_names, probe_clap_plugin_registration_with_state,
     validate_parameters, ParameterQueryCapture,
 };

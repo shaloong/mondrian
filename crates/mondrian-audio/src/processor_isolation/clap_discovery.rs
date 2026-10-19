@@ -1882,6 +1882,7 @@ pub(super) fn parameter_error_with_capture(
     }
 }
 
+#[cfg(test)]
 pub(super) fn list_parameters(
     handle: &clack_host::prelude::PluginMainThreadHandle<'_>,
 ) -> Result<Vec<ClapParameterDescriptor>, AudioProcessorHostError> {
