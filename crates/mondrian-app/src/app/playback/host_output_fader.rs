@@ -86,13 +86,15 @@ impl AppState {
         if !selected_static_output_fader_only(before, after) {
             return Ok(None);
         }
+        // Existing native obligations take precedence over capability lookup.
+        // A held Source may have no available Timeline renderer at all.
+        self.validate_audio_source_replacement_admission(
+            "authoring_commit",
+            "audio Source replacement",
+        )?;
         let Some(renderer) = self.host_output_fader_native_renderer()? else {
             return Ok(None);
         };
-        self.validate_audio_source_replacement_admission(
-            "authoring_commit",
-            "Host output fader publication",
-        )?;
         // The original postcommit binding consumer may seek when these fields
         // disagree. Prove its non-seek branch before retaining this DSP owner;
         // the static fader edit and exclusive App borrow preserve these facts.
