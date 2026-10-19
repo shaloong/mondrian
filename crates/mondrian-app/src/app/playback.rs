@@ -7036,7 +7036,15 @@ pub(in crate::app) mod tests {
             native_hold_actual_required(true, false, false);
         state.handle_audio_playback_event(required, handled_at).unwrap();
         let at = state.playback_observation_instant_anchor;
-        let stale = at.checked_sub(Duration::from_nanos(1)).unwrap();
+        // Windows Instant tolerates a backward interval within one QPC tick.
+        // The negative control must also fail checked_duration_since.
+        let stale = at.checked_sub(Duration::from_secs(1)).unwrap();
+        assert!(stale < at, "negative control must be strictly earlier");
+        assert_eq!(
+            stale.checked_duration_since(at),
+            None,
+            "negative control must exceed platform Instant tolerance"
+        );
         let before = state.playback_engine.snapshot();
         let media = state.audio_playback_snapshot();
         let mut samples = 0;
@@ -7051,7 +7059,12 @@ pub(in crate::app) mod tests {
             },
         );
         assert!(
-            refused.is_err(),
+            matches!(
+                refused,
+                Err(mondrian_core::MondrianError::ActionNotExecuted { action, reason })
+                    if action == "pump_audio_output"
+                        && reason == mondrian_playback::PlaybackError::NonMonotonicTimestamp.to_string()
+            ),
             "stale poll time must fail before consuming a DTO"
         );
         assert_eq!(samples, 1);
