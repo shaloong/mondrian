@@ -1803,16 +1803,39 @@ enum NativeControlHold {
         target: mondrian_core::NativeAudioEditorTarget,
         first_unrendered_sample: Option<i64>,
     },
-    Reprepare(mondrian_core::NativeAudioReprepareNotice),
+    Reprepare {
+        notice: mondrian_core::NativeAudioReprepareNotice,
+        phase: NativeRepreparePhase,
+    },
     EditorCleanupPending(mondrian_core::NativeAudioEditorTarget),
     EditorDetachedAwaitingQuiescence(mondrian_core::NativeAudioEditorTarget),
     EditorCleanupCompletePaused(mondrian_core::NativeAudioEditorTarget),
 }
 
+// Retained callback/PCM retirement facts, never native or installation authority.
+// A future service must still revalidate the actual slot, claim and Runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeReprepareOutputRetired {
+    generation: u64,
+    renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+    installed_generation: Option<std::num::NonZeroU64>,
+    token: Option<RealtimeAudioOutputQuiescenceToken>,
+    stream_generation: Option<u64>,
+    anchor: AudioSamplePosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeRepreparePhase {
+    WaitingOutput,
+    OutputRetired(NativeReprepareOutputRetired),
+}
+
 impl NativeControlHold {
     fn cleanup_target(self) -> Option<mondrian_core::NativeAudioEditorTarget> {
         match self {
-            Self::Reprepare(_) | Self::AuthorPending { .. } | Self::AuthorStateEntry { .. } => None,
+            Self::Reprepare { .. } | Self::AuthorPending { .. } | Self::AuthorStateEntry { .. } => {
+                None
+            }
             Self::EditorCleanupPending(target)
             | Self::EditorDetachedAwaitingQuiescence(target)
             | Self::EditorCleanupCompletePaused(target) => Some(target),
@@ -2328,6 +2351,7 @@ impl AudioPlayback {
     pub fn begin_shutdown(&mut self) {
         self.retire_source_close_admission();
         self.shutdown_requested = true;
+        self.invalidate_native_reprepare_output_retirement();
         if let Err(error) = self.owner_installation.revoke() {
             tracing::error!(%error, "native editor owner unavailable during audio shutdown");
         }
@@ -3388,6 +3412,7 @@ impl AudioPlayback {
             }
         }
         self.generation += 1;
+        self.invalidate_native_reprepare_output_retirement();
         if let (Some(renderer), Some(claim), Some(verifier)) =
             (&self.renderer, installed_claim, verifier)
         {
@@ -3535,10 +3560,16 @@ impl AudioPlayback {
     pub fn native_reprepare_pending_generation(&self) -> Option<u64> {
         matches!(
             self.native_control_hold,
-            Some(NativeControlHold::Reprepare(_))
+            Some(NativeControlHold::Reprepare { .. })
         )
         .then(|| self.native_control_hold_generation())
         .flatten()
+    }
+
+    fn invalidate_native_reprepare_output_retirement(&mut self) {
+        if let Some(NativeControlHold::Reprepare { phase, .. }) = &mut self.native_control_hold {
+            *phase = NativeRepreparePhase::WaitingOutput;
+        }
     }
 
     /// Current exact cleanup target from the one held control state.
@@ -3587,7 +3618,37 @@ impl AudioPlayback {
             return Ok(false);
         }
         self.validate_sample_anchor(anchor)?;
+        let reprepare_retired =
+            if let Some(NativeControlHold::Reprepare { phase, .. }) = self.native_control_hold {
+                let retirement = self.native_control_output_retirement.expect("checked retirement");
+                if phase != NativeRepreparePhase::WaitingOutput
+                    || retirement.token != self.quiescence_token
+                    || (retirement.token.is_some() && !self.output_generation_ready)
+                    || self.pcm_journal.old_work_unsettled()
+                {
+                    return Ok(false);
+                }
+                let renderer = self.renderer.as_ref().expect("checked held renderer");
+                Some(NativeReprepareOutputRetired {
+                    generation: retirement.generation,
+                    renderer_id: renderer.materialization_id,
+                    installed_generation: self
+                        .owner_installation
+                        .current_claim()?
+                        .map(|claim| claim.generation()),
+                    token: retirement.token,
+                    stream_generation: retirement.stream_generation,
+                    anchor,
+                })
+            } else {
+                None
+            };
         self.native_control_output_retirement = None;
+        if let Some(retired) = reprepare_retired
+            && let Some(NativeControlHold::Reprepare { phase, .. }) = &mut self.native_control_hold
+        {
+            *phase = NativeRepreparePhase::OutputRetired(retired);
+        }
         self.next_start_sample = anchor.sample();
         if self.generation_render_anchor.is_some() {
             self.generation_render_anchor = self.renderer.as_ref().map(|_| anchor);
@@ -3676,7 +3737,7 @@ impl AudioPlayback {
             .native_control_hold
             .map(|_| NativeControlOutputRetirement { acknowledged: true, ..retirement });
         match self.native_control_hold {
-            Some(NativeControlHold::Reprepare(_)) => {
+            Some(NativeControlHold::Reprepare { .. }) => {
                 events.push(AudioPlaybackEvent::NativeReprepareOutputQuiesced {
                     pending_generation: retirement.generation,
                     final_output,
@@ -4228,7 +4289,10 @@ impl AudioPlayback {
                         self.renderer.clone(),
                         PcmRetirementPolicy::BeginNativeHold,
                     )?;
-                    self.native_control_hold = Some(NativeControlHold::Reprepare(notice));
+                    self.native_control_hold = Some(NativeControlHold::Reprepare {
+                        notice,
+                        phase: NativeRepreparePhase::WaitingOutput,
+                    });
                     self.native_control_output_retirement = Some(NativeControlOutputRetirement {
                         generation: self.generation,
                         token: self.quiescence_token,
@@ -4541,6 +4605,7 @@ impl AudioPlayback {
         self.handoff_retired_render_owners(pending, None);
         self.generation_cancellation = ExecutionCancellationToken::new();
         self.generation += 1;
+        self.invalidate_native_reprepare_output_retirement();
         if self.native_control_hold.is_some() {
             match self.renderer.as_ref() {
                 Some(renderer) => self
@@ -4590,6 +4655,7 @@ impl AudioPlayback {
             return false;
         }
         self.render_execution_unavailable = true;
+        self.invalidate_native_reprepare_output_retirement();
         match self.output.deactivate() {
             Ok(token) => self.quiescence_token = token,
             Err(error) => {
@@ -4662,7 +4728,7 @@ impl AudioPlayback {
                 Some(_)
                     if matches!(
                         self.native_control_hold,
-                        Some(NativeControlHold::Reprepare(_))
+                        Some(NativeControlHold::Reprepare { .. })
                     ) =>
                 {
                     AudioPlaybackState::RepreparePending
@@ -9163,6 +9229,30 @@ mod tests {
         }
     }
 
+    fn retained_native_hold_output(playback: &AudioPlayback) -> NativeReprepareOutputRetired {
+        match playback.native_control_hold {
+            Some(NativeControlHold::Reprepare {
+                phase: NativeRepreparePhase::OutputRetired(retired),
+                ..
+            }) => retired,
+            _ => panic!("actual held output retirement is absent"),
+        }
+    }
+
+    fn acknowledge_native_hold_output(
+        playback: &mut AudioPlayback,
+        state: &Arc<Mutex<FakeOutputState>>,
+    ) {
+        {
+            let mut output = state.lock();
+            output.confirmed_quiescence_revision = output.quiescence_revision;
+        }
+        playback
+            .poll(AudioPlaybackMode::Preroll, sample_position(0))
+            .expect("exact output ack");
+        assert!(playback.native_control_output_retirement.unwrap().acknowledged);
+    }
+
     #[test]
     fn native_reprepare_output_quiescence_waits_for_exact_token_then_captures_final_callback() {
         let NativeHoldPlaybackFixture {
@@ -9218,15 +9308,38 @@ mod tests {
             20
         );
         assert_eq!(finals[0].2, Some(sample_position(0)));
+        let retirement = playback.native_control_output_retirement.unwrap();
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare { phase: NativeRepreparePhase::WaitingOutput, .. })
+        ));
         assert!(!playback
             .finalize_native_control_anchor(generation - 1, sample_position(20))
             .expect("stale generation"));
         assert!(playback
             .finalize_native_control_anchor(generation, sample_position(20))
             .expect("same generation held anchor"));
+        let retained_retirement = retained_native_hold_output(&playback);
+        assert_eq!(
+            retained_retirement,
+            NativeReprepareOutputRetired {
+                generation,
+                renderer_id: playback.renderer.as_ref().unwrap().materialization_id,
+                installed_generation: playback
+                    .owner_installation
+                    .current_claim()
+                    .unwrap()
+                    .map(|claim| claim.generation()),
+                token: retirement.token,
+                stream_generation: retirement.stream_generation,
+                anchor: sample_position(20),
+            }
+        );
+        assert!(playback.native_control_output_retirement.is_none());
         assert!(!playback
             .finalize_native_control_anchor(generation, sample_position(90))
             .expect("same retirement cannot rewrite anchor twice"));
+        assert_eq!(retained_native_hold_output(&playback), retained_retirement);
         assert_eq!(playback.next_start_sample, 20);
         assert_eq!(playback.generation_render_anchor, Some(sample_position(20)));
         for _ in 0..4 {
@@ -9259,11 +9372,18 @@ mod tests {
             retained_renderer: _,
         } = native_hold_pending_playback();
         let old = playback.generation;
+        acknowledge_native_hold_output(&mut playback, &state);
+        assert!(playback.finalize_native_control_anchor(old, sample_position(20)).unwrap());
+        assert_eq!(retained_native_hold_output(&playback).generation, old);
         playback
             .reprime(sample_position(170))
             .expect("explicit user seek while pending");
         let current = playback.generation;
         assert_eq!(current, old + 1);
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare { phase: NativeRepreparePhase::WaitingOutput, .. })
+        ));
         {
             let mut output = state.lock();
             output.confirmed_quiescence_revision = output.quiescence_revision;
@@ -9282,6 +9402,9 @@ mod tests {
         assert!(playback
             .finalize_native_control_anchor(current, sample_position(170))
             .expect("new held seek anchor"));
+        let retired = retained_native_hold_output(&playback);
+        assert_eq!(retired.generation, current);
+        assert_eq!(retired.anchor, sample_position(170));
         assert_eq!(
             playback.snapshot(AudioPlaybackMode::Preroll).state,
             AudioPlaybackState::RepreparePending
@@ -9302,6 +9425,10 @@ mod tests {
             retained_renderer: retained,
         } = native_hold_pending_playback();
         let old = playback.generation;
+        acknowledge_native_hold_output(&mut playback, &state);
+        assert!(playback.finalize_native_control_anchor(old, sample_position(20)).unwrap());
+        let old_retired = retained_native_hold_output(&playback);
+        assert!(old_retired.token.is_some());
         {
             let mut output = state.lock();
             let mut final_snapshot =
@@ -9320,6 +9447,10 @@ mod tests {
         assert_eq!(current, old + 1);
         assert_eq!(poll.snapshot.state, AudioPlaybackState::DeviceUnavailable);
         assert_eq!(playback.native_control_hold_generation(), Some(current));
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare { phase: NativeRepreparePhase::WaitingOutput, .. })
+        ));
         assert!(poll.events.iter().any(
             |event| matches!(event, AudioPlaybackEvent::NativeReprepareOutputQuiesced {
             pending_generation, final_output: None, final_media_anchor: None,
@@ -9328,6 +9459,12 @@ mod tests {
         assert!(playback
             .finalize_native_control_anchor(current, sample_position(170))
             .expect("unchanged accepted authority"));
+        let retired = retained_native_hold_output(&playback);
+        assert_eq!(retired.generation, current);
+        assert_eq!(retired.renderer_id, old_retired.renderer_id);
+        assert_eq!(retired.anchor, sample_position(170));
+        assert_eq!(retired.token, None);
+        assert_eq!(retired.stream_generation, None);
         assert_eq!(playback.next_start_sample, 170);
         assert_eq!(playback.consecutive_render_generation_failures, 0);
         assert!(retained.upgrade().is_some());
@@ -9335,6 +9472,104 @@ mod tests {
             .lock()
             .iter()
             .all(|request| request.continuity.generation().get() != current));
+    }
+
+    #[test]
+    fn native_reprepare_output_retirement_rechecks_token_readiness_and_old_work() {
+        let NativeHoldPlaybackFixture { mut playback, output_state: state, .. } =
+            native_hold_pending_playback();
+        acknowledge_native_hold_output(&mut playback, &state);
+        let generation = playback.generation;
+        let token = playback.quiescence_token.unwrap();
+        playback.quiescence_token =
+            Some(RealtimeAudioOutputQuiescenceToken { revision: token.revision + 1, ..token });
+        assert!(!playback
+            .finalize_native_control_anchor(generation, sample_position(20))
+            .unwrap());
+        playback.quiescence_token = Some(token);
+        playback.output_generation_ready = false;
+        assert!(!playback
+            .finalize_native_control_anchor(generation, sample_position(20))
+            .unwrap());
+        playback.output_generation_ready = true;
+        let renderer_id = playback.renderer.as_ref().unwrap().materialization_id;
+        // Model an outstanding old PCM completion, independently of output ack.
+        playback.pcm_journal.hold(renderer_id, generation - 1, generation, 1).unwrap();
+        assert!(!playback
+            .finalize_native_control_anchor(generation, sample_position(20))
+            .unwrap());
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare { phase: NativeRepreparePhase::WaitingOutput, .. })
+        ));
+        assert!(playback.native_control_output_retirement.unwrap().acknowledged);
+        playback.pcm_journal.settle_old_completion();
+        assert!(playback
+            .finalize_native_control_anchor(generation, sample_position(20))
+            .unwrap());
+        assert_eq!(retained_native_hold_output(&playback).token, Some(token));
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Preroll).state,
+            AudioPlaybackState::RepreparePending
+        );
+    }
+
+    #[test]
+    fn native_reprepare_output_retirement_records_current_source_generation() {
+        let NativeHoldPlaybackFixture { mut playback, output_state: state, .. } =
+            native_hold_pending_playback();
+        // A real Core Source publication for this portable host fixture. It
+        // supplies no native binding, SDK call or DSP permission.
+        let (registration, _) = playback.owner_installation.register().unwrap();
+        let reservation = playback.owner_installation.reserve_install(&registration, None).unwrap();
+        let claim =
+            playback.owner_installation.begin_commit(reservation).unwrap().commit().unwrap();
+        acknowledge_native_hold_output(&mut playback, &state);
+        let generation = playback.generation;
+        assert!(playback
+            .finalize_native_control_anchor(generation, sample_position(20))
+            .unwrap());
+        assert_eq!(
+            retained_native_hold_output(&playback).installed_generation,
+            Some(claim.generation())
+        );
+        playback.clear_source(sample_position(20)).unwrap();
+        assert!(playback.native_control_hold.is_none());
+        assert!(playback.owner_installation.current_claim().unwrap().is_none());
+    }
+
+    #[test]
+    fn native_reprepare_output_retirement_is_revoked_by_shutdown_or_execution_loss() {
+        for shutdown in [true, false] {
+            let NativeHoldPlaybackFixture { mut playback, output_state: state, .. } =
+                native_hold_pending_playback();
+            acknowledge_native_hold_output(&mut playback, &state);
+            let generation = playback.generation;
+            assert!(playback
+                .finalize_native_control_anchor(generation, sample_position(20))
+                .unwrap());
+            assert_eq!(
+                retained_native_hold_output(&playback).generation,
+                generation
+            );
+            if shutdown {
+                playback.begin_shutdown();
+            } else {
+                assert!(playback.mark_render_execution_unavailable());
+            }
+            assert!(matches!(
+                playback.native_control_hold,
+                Some(NativeControlHold::Reprepare {
+                    phase: NativeRepreparePhase::WaitingOutput,
+                    ..
+                })
+            ));
+            assert!(playback.generation_cancellation.is_canceled());
+            assert!(playback.native_control_cancellation.is_canceled());
+            assert!(!playback
+                .finalize_native_control_anchor(generation, sample_position(90))
+                .unwrap());
+        }
     }
 
     struct CompleteThenNativeDeferredRenderer {
