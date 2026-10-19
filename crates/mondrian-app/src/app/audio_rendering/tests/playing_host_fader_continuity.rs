@@ -633,6 +633,19 @@ fn native_fader_fixture_with_configuration(
         Some(opaque.as_slice())
     );
     let resolver = Arc::new(IsolatedAudioProcessorResolver::new(Arc::new(installed)));
+    native_fader_fixture_with_processor(scenario, instance, resolver)
+}
+
+fn native_fader_fixture_with_processor(
+    scenario: Scenario,
+    instance: mondrian_timeline::audio::AudioProcessorInstance,
+    resolver: Arc<dyn mondrian_audio::AudioProcessorResolver>,
+) -> (
+    tempfile::TempDir,
+    AppState,
+    Arc<Mutex<CaptureState>>,
+    mondrian_core::ProgramOutputId,
+) {
     let (directory, library, mut sequence) =
         native_gain_media_fixture_with_samples(SOURCE_FRAMES, input_sample);
     let output_id = sequence.audio_program.outputs[0].id;
