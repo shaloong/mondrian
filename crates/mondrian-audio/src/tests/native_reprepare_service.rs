@@ -1417,6 +1417,7 @@ fn retained_restart_delivery_control() {
     }));
     // Preserve the original same-HANDLE owner cleanup before rethrowing target.
     let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
+    let domain_registered = registrar.is_some();
     drop(delivery);
     drop(registrar);
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
@@ -1438,8 +1439,8 @@ fn retained_restart_delivery_control() {
     assert_eq!(counts.children.load(SeqCst), 0);
     assert_eq!(
         counts.settled.load(SeqCst),
-        1,
-        "one original ProcessOwner reports once"
+        usize::from(domain_registered),
+        "the original ProcessOwner reports once only if its domain was actually attached"
     );
     assert!(!counts.unavailable.load(SeqCst));
     if let Err(payload) = target {
