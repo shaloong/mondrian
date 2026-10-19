@@ -882,6 +882,103 @@ pub(super) fn payload_with_configuration_seed(
     decoded.state = Some(seed);
     super::encode_native_configuration_payload(&decoded)
 }
+// Only the immutable payload of an already admitted actual Factory enters this
+// view. NativeProbed evidence is crate-private; public manual Specs are first
+// typed-decoded by the validation child. This is NOT a decoder for new external
+// metadata. The old native-author codec above remains typed and unchanged.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClapRepreparePayload<'a> {
+    #[serde(borrow)]
+    main_audio_input: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    main_audio_output_id: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    auxiliary_outputs: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    library_path: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    plugin_id: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    binary_sha256: &'a serde_json::value::RawValue,
+    #[serde(default, borrow)]
+    state: Option<&'a serde_json::value::RawValue>,
+    #[serde(borrow)]
+    parameters: &'a serde_json::value::RawValue,
+    #[serde(borrow)]
+    parameter_ids: &'a serde_json::value::RawValue,
+}
+
+// A requested-layout envelope for the pinned serde_json raw scanner's scratch,
+// escaped field keys and cold single-layer Display errors, not heap telemetry.
+// 1024 covers these nine static field names and fixed error prefixes. Raw nested
+// values are skipped iteratively (including numbers), not decoded to containers.
+pub(super) fn reprepare_codec_bound(payload_bytes: usize) -> Option<usize> {
+    if payload_bytes > super::MAX_CONTROL_FRAME_BYTES / 2 {
+        return None;
+    }
+    payload_bytes.checked_add(1024)?.checked_mul(16)
+}
+
+pub(super) fn reprepare_payload_output_bound(
+    payload_bytes: usize,
+    configuration_bytes: usize,
+) -> Option<usize> {
+    reprepare_codec_bound(payload_bytes)?;
+    if configuration_bytes > super::MAX_CONTROL_FRAME_BYTES / 2 {
+        return None;
+    }
+    configuration_bytes
+        .checked_mul(4)?
+        .checked_add(payload_bytes)?
+        .checked_add(1024)
+}
+
+pub(super) fn payload_with_reprepare_configuration(
+    payload: &[u8],
+    configuration: &[u8],
+    report_peak: &mut dyn FnMut(usize),
+) -> Result<Vec<u8>, AudioProcessorHostError> {
+    let codec = reprepare_codec_bound(payload.len())
+        .ok_or_else(|| invalid("retained CLAP metadata exceeds the raw codec bound"))?;
+    reprepare_payload_output_bound(payload.len(), configuration.len())
+        .ok_or_else(|| invalid("retained CLAP configuration exceeds the raw codec bound"))?;
+    report_peak(codec);
+    if payload.iter().copied().find(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t')) != Some(b'{') {
+        return Err(invalid("retained CLAP metadata must be a JSON object"));
+    }
+    let view: ClapRepreparePayload<'_> = serde_json::from_slice(payload)
+        .map_err(|error| invalid(format!("invalid retained CLAP metadata: {error}")))?;
+    // Missing/null old state is allowed by the original schema. Its raw bytes
+    // are borrowed only; no old state Vec is decoded just to discard it.
+    let _old_state = view.state;
+    struct Replacement<'a, 'b> {
+        metadata: &'a ClapRepreparePayload<'b>,
+        state: &'a [u8],
+    }
+    impl Serialize for Replacement<'_, '_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let v = self.metadata;
+            let mut object = serializer.serialize_struct("ClapPayload", 9)?;
+            object.serialize_field("main_audio_input", v.main_audio_input)?;
+            object.serialize_field("main_audio_output_id", v.main_audio_output_id)?;
+            object.serialize_field("auxiliary_outputs", v.auxiliary_outputs)?;
+            object.serialize_field("library_path", v.library_path)?;
+            object.serialize_field("plugin_id", v.plugin_id)?;
+            object.serialize_field("binary_sha256", v.binary_sha256)?;
+            object.serialize_field("state", &self.state)?;
+            object.serialize_field("parameters", v.parameters)?;
+            object.serialize_field("parameter_ids", v.parameter_ids)?;
+            object.end()
+        }
+    }
+    super::encode_native_configuration_payload_observed(
+        &Replacement { metadata: &view, state: configuration },
+        &mut |capacity| report_peak(codec.saturating_add(capacity)),
+    )
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ClapPayload {
@@ -2959,6 +3056,72 @@ mod tests {
                 .unwrap();
             assert_eq!(final_pcm[0], 0.375);
         }
+    }
+
+    fn raw_reprepare_payload() -> Vec<u8> {
+        serde_json::to_vec(&ClapPayload {
+            main_audio_input: ClapMainAudioInput::Present,
+            main_audio_output_id: 0,
+            auxiliary_outputs: Vec::new(),
+            library_path: std::path::PathBuf::from("unchanged.clap"),
+            plugin_id: "unchanged".to_owned(),
+            binary_sha256: [7; 32],
+            state: Some(vec![1, 2, 3]),
+            parameters: Vec::new(),
+            parameter_ids: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn clap_reprepare_raw_codec_changes_only_state_and_preserves_metadata_fragments() {
+        let payload = String::from_utf8(raw_reprepare_payload()).unwrap().replace(
+            "\"parameters\":[]",
+            "\"parameters\":[ {\"raw\": [1e99999,-0.0,1.2300]} ]",
+        );
+        // The raw scanner must not decode a number/container merely to preserve
+        // this already-admitted immutable metadata fragment.
+        let before: ClapRepreparePayload<'_> = serde_json::from_str(&payload).unwrap();
+        let mut peak = 0;
+        let output =
+            payload_with_reprepare_configuration(payload.as_bytes(), &[255, 0, 9], &mut |bytes| {
+                peak = peak.max(bytes)
+            })
+            .unwrap();
+        let after: ClapRepreparePayload<'_> = serde_json::from_slice(&output).unwrap();
+        assert_eq!(before.parameters.get(), after.parameters.get());
+        assert_eq!(before.library_path.get(), after.library_path.get());
+        assert_eq!(before.binary_sha256.get(), after.binary_sha256.get());
+        assert_eq!(after.state.unwrap().get(), "[255,0,9]");
+        assert!(peak >= reprepare_codec_bound(payload.len()).unwrap() + output.capacity());
+        assert!(
+            peak <= reprepare_codec_bound(payload.len()).unwrap()
+                + reprepare_payload_output_bound(payload.len(), 3).unwrap()
+        );
+    }
+
+    #[test]
+    fn clap_reprepare_raw_codec_preserves_root_field_validation_and_default_state() {
+        let payload = String::from_utf8(raw_reprepare_payload()).unwrap();
+        for invalid in [
+            payload.replacen("{", "{\"extra\":0,", 1),
+            payload.replacen("{", "{\"plugin_\\u0069d\":\"duplicate\",", 1),
+            payload.replace("\"main_audio_output_id\":0,", ""),
+            "[]".to_owned(),
+        ] {
+            assert!(
+                payload_with_reprepare_configuration(invalid.as_bytes(), &[8], &mut |_| {})
+                    .is_err()
+            );
+        }
+        let absent = payload.replace("\"state\":[1,2,3],", "");
+        let output =
+            payload_with_reprepare_configuration(absent.as_bytes(), &[8], &mut |_| {}).unwrap();
+        let decoded: ClapPayload = serde_json::from_slice(&output).unwrap();
+        assert_eq!(decoded.state.as_deref(), Some([8].as_slice()));
+        assert!(reprepare_codec_bound(super::super::MAX_CONTROL_FRAME_BYTES / 2).is_some());
+        assert!(reprepare_codec_bound(super::super::MAX_CONTROL_FRAME_BYTES / 2 + 1).is_none());
+        assert!(reprepare_payload_output_bound(payload.len(), usize::MAX).is_none());
     }
 
     #[test]

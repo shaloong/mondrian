@@ -526,6 +526,39 @@ impl IsolatedAudioProcessorFactory {
         })
     }
 
+    fn admits_reprepare_identity(
+        &self,
+        identity: NativeConfigurationSeedTicket,
+        configuration_bytes: usize,
+    ) -> bool {
+        let old = self.spec.plugin_execution_contract;
+        let next = identity.observed_contract;
+        identity.format == NativeConfigurationFormat::ClapState
+            && identity.configuration_bytes == configuration_bytes
+            && !identity.serviced_cohort.exhausted()
+            && identity.serviced_cohort.request
+                == mondrian_core::NativeAudioReprepareRequest::ClapRestart
+            && self.spec.note_input_contract.ports.is_empty()
+            && old.requires_state_entry() == next.requires_state_entry()
+            && old.realtime_capable() == next.realtime_capable()
+            && old.offline_capable() == next.offline_capable()
+            && old.session_scratch_bytes() == next.session_scratch_bytes()
+    }
+
+    // Observed known-parent storage only: platform buffers and Arc prefixes keep
+    // their existing coverage limitation. No allocator/SDK total is inferred.
+    fn known_reprepare_factory_bytes(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>();
+        self.visit_host_owned_storage(&mut |owner| {
+            bytes = bytes
+                .checked_add(owner.layout().size())
+                .ok_or(crate::NativeHostLedgerError::ExtentOverflow)?;
+            Ok(())
+        })
+        .ok()?;
+        Some(bytes)
+    }
+
     /// Validate immutable preparation facts before a Plan retains this Factory.
     /// A fresh native probe supplies presentation metadata without an additional
     /// Worker; generic/manual specs retain the real validation launch and shutdown.
@@ -654,6 +687,85 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         )))
     }
 
+    fn native_reprepare_factory_bound(
+        &self,
+        identity: NativeConfigurationSeedTicket,
+        configuration_bytes: usize,
+    ) -> Option<usize> {
+        if !self.admits_reprepare_identity(identity, configuration_bytes) {
+            return None;
+        }
+        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())?;
+        let output = clap_worker::reprepare_payload_output_bound(
+            self.spec.preparation_payload.len(),
+            configuration_bytes,
+        )?;
+        let clones = self
+            .known_reprepare_factory_bytes()?
+            .checked_sub(self.spec.preparation_payload.capacity())?;
+        codec.checked_add(output)?.checked_add(clones)
+    }
+
+    fn with_native_reprepare_configuration(
+        &self,
+        identity: NativeConfigurationSeedTicket,
+        configuration: &[u8],
+        report_peak: &mut dyn FnMut(usize),
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        use sha2::{Digest, Sha256};
+        if !self.admits_reprepare_identity(identity, configuration.len()) {
+            return Ok(None);
+        }
+        if <[u8; 32]>::from(Sha256::digest(configuration)) != identity.configuration_sha256 {
+            return Err(invalid_contract(
+                "retained restart configuration digest changed",
+            ));
+        }
+        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())
+            .ok_or_else(|| {
+                invalid_contract("retained CLAP metadata exceeds the raw codec bound")
+            })?;
+        let preparation_payload = clap_worker::payload_with_reprepare_configuration(
+            &self.spec.preparation_payload,
+            configuration,
+            report_peak,
+        )?;
+        // Unlike prepare_inner this does not consume/probe new evidence or create
+        // a worker. Original immutable metadata already passed typed admission.
+        let spec = IsolatedAudioProcessorWorkerSpec {
+            musical_time_reference: self.spec.musical_time_reference,
+            helper_executable: self.spec.helper_executable.clone(),
+            helper_arguments: self.spec.helper_arguments.clone(),
+            dispatch_argument: self.spec.dispatch_argument.clone(),
+            preparation_payload,
+            preparation_evidence: PreparationEvidence::Unprobed,
+            plugin_execution_contract: identity.observed_contract,
+            auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
+            note_input_contract: self.spec.note_input_contract.clone(),
+            parameter_ids: self.spec.parameter_ids.clone(),
+            render_contract: self.spec.render_contract,
+            startup_timeout: self.spec.startup_timeout,
+            state_entry_timeout: self.spec.state_entry_timeout,
+            operation_timeout: self.spec.operation_timeout,
+            native_lane: self.spec.native_lane,
+        };
+        let mut next = Self {
+            input_names: self.input_names.clone(),
+            spec,
+            execution_contract: self.execution_contract,
+            layout: self.layout,
+            #[cfg(test)]
+            retained_create_test_hook: self.retained_create_test_hook.clone(),
+        };
+        let actual = next.known_reprepare_factory_bytes().unwrap_or(usize::MAX);
+        report_peak(codec.saturating_add(actual));
+        next.execution_contract = Self::requested_execution_contract(&next.spec, next.layout)?;
+        // After this Arc forms there is no fallible query/cap check: the Runtime
+        // first adopts it, then checks actual peak/cancellation/Source identity.
+        Ok(Some(Arc::new(next)))
+    }
+
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
         self.execution_contract
     }
@@ -725,6 +837,13 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
 fn encode_native_configuration_payload<T: serde::Serialize>(
     payload: &T,
 ) -> Result<Vec<u8>, AudioProcessorHostError> {
+    encode_native_configuration_payload_observed(payload, &mut |_| {})
+}
+
+fn encode_native_configuration_payload_observed<T: serde::Serialize>(
+    payload: &T,
+    report_capacity: &mut dyn FnMut(usize),
+) -> Result<Vec<u8>, AudioProcessorHostError> {
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
@@ -753,6 +872,7 @@ fn encode_native_configuration_payload<T: serde::Serialize>(
     bytes.try_reserve_exact(count.0).map_err(|error| {
         invalid_contract(&format!("native seed payload allocation refused: {error}"))
     })?;
+    report_capacity(bytes.capacity());
     if bytes.capacity() > MAX_PREPARATION_PAYLOAD_BYTES {
         return Err(invalid_contract(
             "native seed actual output capacity exceeds the preparation bound",

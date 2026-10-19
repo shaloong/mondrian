@@ -492,6 +492,33 @@ pub trait AudioProcessorFactory: Send + Sync {
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
         Ok(None)
     }
+    /// Conservative known-parent layout request for an execution-only restart
+    /// Factory. No allocation, native call, author edit or installation occurs.
+    /// The caller must admit this overlap before requesting the replacement.
+    /// This is not a complete allocator/SDK/Arc-prefix peak guarantee.
+    fn native_reprepare_factory_bound(
+        &self,
+        _identity: crate::NativeConfigurationSeedTicket,
+        _configuration_bytes: usize,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// Prepare an immutable execution-only Factory from the caller's actual
+    /// retained capture. Unlike an author seed, latency/tail may change; ports,
+    /// schema, render mode and all other behavior must remain identical.
+    /// `report_peak` records known-parent overlap even before an error returns.
+    /// Neither the returned Factory nor the capture ticket grants native/Source
+    /// or canonical author permission. No create/probe/Enter/seed RPC is allowed.
+    fn with_native_reprepare_configuration(
+        &self,
+        _identity: crate::NativeConfigurationSeedTicket,
+        _configuration: &[u8],
+        _report_peak: &mut dyn FnMut(usize),
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        Ok(None)
+    }
+
     /// Create one exclusive mutable instance before realtime execution starts.
     /// Borrow the optional observation domain for this call only; an immutable
     /// Factory or cache must not retain it. Missing evidence grants no execution
