@@ -379,6 +379,7 @@ namespace MondrianOpenFx {
     size_t length = 0;
     while (length <= MONDRIAN_OPENFX_MAX_STRING_BYTES && value[length] != '\0') { ++length; }
     if (length > MONDRIAN_OPENFX_MAX_STRING_BYTES) { return kOfxStatErrValue; }
+    if (!_effect->frameState().permitsParameterWrite(getName())) { return kOfxStatErrUnsupported; }
     _value.assign(value, length);
     return kOfxStatOK;
   }
