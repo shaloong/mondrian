@@ -610,6 +610,42 @@ mod tests {
         ]
     }
     #[test]
+    fn vst3_preserve_control_observation_does_not_query_optional_presentations() {
+        let mut original = observations();
+        let before = original.clone();
+        let mut calls = 0;
+        append_optional(&mut original, Consumption::Preserve, true, || {
+            calls += 1;
+            Some(one())
+        });
+        assert_eq!(
+            calls, 0,
+            "control preflight cannot query parameter presentations"
+        );
+        assert_eq!(
+            original, before,
+            "Preserve retains every original control fact"
+        );
+
+        let current = one();
+        let mut expected = before;
+        expected.parameter_revision = current.revision;
+        expected.parameters = current.facts.clone();
+        append_optional(&mut original, Consumption::Drain, true, || {
+            calls += 1;
+            Some(current)
+        });
+        assert_eq!(
+            calls, 1,
+            "the explicit diagnostic consumer still queries once"
+        );
+        assert_eq!(
+            original, expected,
+            "Drain retains the complete actual presentation"
+        );
+    }
+
+    #[test]
     fn vst3_optional_presentations_never_query_after_ack_or_held_author_work() {
         for consumption in acknowledgements() {
             let mut original = observations();
