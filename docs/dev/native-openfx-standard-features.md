@@ -1,6 +1,6 @@
 # OpenFX 标准能力与实际支持矩阵
 
-规范版本审计日期：2026-10-08；2026-10-17 增量验证 Host 属性和参数准入，
+规范版本审计日期：2026-10-08；2026-10-20 复核退出观测，2026-10-17 增量验证 Host 属性和参数准入，
 2026-10-16 复核 Message/Progress/Timeline 及通知调用链。范围：实际 native host、Rust
 adapter、Effects 图与产品接入。此文记录可定位的源码能力及限制，**不是编译、
 真实插件执行、跨平台或性能合格的替代证据**。运行验收保留当前提交、环境、
@@ -50,23 +50,24 @@ resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner �
 返回，父侧约101.07ms仍无 OS 退出观察。4097 拒绝用例另有 libtest 通过但
 Job 首次计数非零的失败，未记录关联进程身份。两项根因仍开放，原预算与断言保留。
 
-2026-10-19 Windows x64：退出观测仍按原绝对期限检查查询前后时刻；迟到退出
-结算唯一 Child，但不能算 graceful。可选 schema4 在原4096B 映射中记录第一次原
-cleanup 的查询/kill/wait 结果，不新增调用、重试或退出权威；关闭时不读 QPC。
-16次普通控制与4个真实 OS Child 分支全部 exact PASS（19个不同 selector），
-覆盖原期限、可选观测及映射；122项纯字节解码控制通过。旧实例复用/未取 Output
-回归资格保留。此处不是原生插件退出时限或性能资格。
+2026-10-20 Windows x64：退出观测仍按原绝对期限检查查询前后时刻；迟到退出
+结算唯一 Child，但不能算 graceful。可选 schema5 保留原4096B 映射和第一次原
+cleanup 的查询/kill/wait 记录，另记最后一个认证 Child Mapping 的析构入口。
+它发生在 mmap/file 字段自动释放之前，不是释放完成或退出权威。
+六项映射普通控制全部 exact PASS；既有期限/真实 OS Child 分支资格保持，
+解码器148项纯字节控制通过。原预算不变；不是插件退出时限或性能资格。
 
 当前配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0。
 单次新 fixed-canvas 仍在原 shutdown 处 DeadlineExceeded；三帧 direct 断言已到，
 raw 独立显示23条完整动作至 Unload return0，后置 Rust 动作断言与 Graph 未到。
-native Drop 约56.99ms结束、inner
-约58.77ms返回；25次原查询全为 None，末次约98.70ms、最大查询窗口2.5µs。
-graceful 约100.27ms超时后，原 cleanup 首查询仍 pending，kill 返回 Ok，随后
-wait 于约108.30ms观察 exit1，未调用 post-refused-kill 查询。原门保持 FAIL，
+native Drop 约48.11ms结束、inner 约50.82ms返回；同PID/TID的最后 Mapping
+在19.4µs后进入析构。35次原查询全为 None，末次约99.16ms、最大查询窗口2.8µs。
+graceful 约100.69ms超时后，原 cleanup 首查询仍 pending，kill 返回 Ok，随后
+wait 于约108.48ms观察 exit1，未调用 post-refused-kill 查询。原门保持 FAIL，
 180秒/2秒 Job 回收完整。该记录区分了实际清理分支，不能证明自然退出或 kill
-与退出的因果；inner 标记时外层 trace Mapping 仍存活，其后析构完成时点未记录，
-不是全部宿主 owner 已释放的边界。后续析构/调度根因仍开放；UTC退出事实不能拼成QPC期限，不推断
+与退出的因果；Mapping 入口之后的 UnmapViewOfFile 与两个 file CloseHandle
+尚无完成时点。该 worker 直接返回 main，早于UI/graphics/应用日志初始化，
+未找到这一返回路径上的额外应用等待。资源释放和进程尾部根因仍开放；UTC退出事实不能拼成QPC期限，不推断
 TLS/CRT/加载器或 OS 根因，不授旧失败关闭、全关闭时限、第三方或跨平台资格。
 
 2026-10-18 Windows x64：`bed1d101` 在提交既有参数来源后、插件回调前更新实例
