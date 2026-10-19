@@ -574,6 +574,7 @@ impl AudioProgramRuntime {
                 "actual restart Session exceeded fixed reservation",
             ));
         }
+        self.session.resource_plan().validate_native_reprepare_plan(plan, index)?;
         // The real Plan is already retained. Refine the SAME enrolled fee to
         // its checked actual policy amount before a future replacement can use
         // the original retirement equation; no owner or fee is dropped here.

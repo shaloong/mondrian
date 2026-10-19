@@ -485,14 +485,22 @@ impl PreparedAudioPlan {
                 contribution.source_requires_state_entry,
             )?;
         }
-        let next = Self::prepare_with_dependencies(
+        Self::prepare_with_dependencies(
             Arc::clone(&self.program),
             self.contract,
             self.kernel_backend,
             &dependencies,
             &Retained { old: &self.schedule, selected: index, replacement },
             None,
-        )?;
+        )
+    }
+
+    // Caller retains the fully formed Plan before any of these fallible checks.
+    pub(crate) fn validate_native_reprepare_plan(
+        &self,
+        next: &Self,
+        index: usize,
+    ) -> Result<(), AudioCompileError> {
         for (slot, (old, prepared)) in
             self.schedule.processors.iter().zip(&next.schedule.processors).enumerate()
         {
@@ -513,7 +521,7 @@ impl PreparedAudioPlan {
                 "restart changed processor topology".to_owned(),
             ));
         }
-        Ok(next)
+        Ok(())
     }
 
     // A policy bound before PDC allocation: original node topology bounds all
