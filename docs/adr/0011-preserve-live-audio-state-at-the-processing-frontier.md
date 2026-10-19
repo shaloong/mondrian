@@ -59,12 +59,19 @@ releasing the Runtime. No new DSP or target operation can observe the intermedia
 state through that Runtime. Source claim observation alone is not author or DSP
 permission. Do not hold an author execution read guard across its writer.
 
-No fallible business operation, cancellation reversal or SDK call follows the
-successful CAS. Retired Plan/factory owners move outside all Runtime, metadata
-and Source locks before destruction. Snapshot allocation and the original author
+Within dependent Source/author publication, no fallible business operation,
+cancellation reversal or SDK call follows the successful CAS. Retired Plan/factory
+owners move outside all Runtime, metadata and Source locks before destruction.
+Snapshot allocation and the original author
 retirement occur outside the Source guard on the control thread. This is not an
 arbitrary-panic rollback guarantee; a trusted author installation closure cannot
 reenter App state or treat an invariant panic as a recoverable refusal.
+
+The later original App event and Playback-binding consumer retains its Result
+and real clock observation. Its failure is postcommit: it does not roll back
+Source/author state or permit replaying the edit. Retained admission proves the
+current Sequence, grid and extent binding before publication, avoiding that
+consumer's seek/rebuild branch for this static edit.
 
 Playback and Export keep the same compiler, Plan and Session math. A fresh export
 evaluates its accepted author snapshot through normal entry; it receives no live

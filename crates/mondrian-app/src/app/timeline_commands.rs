@@ -417,7 +417,13 @@ impl AppState {
                     self.consume_authoring_commit_with_audio_policy(
                         commit,
                         AuthoringAudioPolicy::HostOutputFaderRetained,
-                    )?;
+                    )
+                    .inspect_err(|error| {
+                        tracing::error!(
+                            %error,
+                            "Host fader Source and author state committed; Playback binding failed"
+                        );
+                    })?;
                     return Ok(value);
                 }
                 if let Some(refusal) = replacement_refusal {

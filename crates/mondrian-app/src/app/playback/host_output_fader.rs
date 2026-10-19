@@ -93,6 +93,20 @@ impl AppState {
             "authoring_commit",
             "Host output fader publication",
         )?;
+        // The original postcommit binding consumer may seek when these fields
+        // disagree. Prove its non-seek branch before retaining this DSP owner;
+        // the static fader edit and exclusive App borrow preserve these facts.
+        let end_frame = self.last_content_frame()?;
+        let engine = self.playback_engine.snapshot();
+        if self.playback_engine.sequence_id() != Some(before.id)
+            || engine.position.time_base != before.time_base()
+            || engine.position.frame > end_frame
+        {
+            return Err(transport_action_error(
+                "authoring_commit",
+                "Playback binding must settle before retained Host fader publication",
+            ));
+        }
         let current = self.current_audio_playback_author_binding()?.ok_or_else(|| {
             transport_action_error("authoring_commit", "no actual audio author binding")
         })?;
@@ -120,7 +134,7 @@ impl AppState {
 
     pub(in crate::app) fn publish_prepared_host_output_fader(
         &mut self,
-        prepared: mondrian_editor_state::PreparedSequenceEdit,
+        prepared: mondrian_editor_state::session::PreparedSequenceEdit,
         renderer: Arc<TimelineAudioPcmRenderer>,
         binding: AudioPlaybackAuthorBinding,
     ) -> mondrian_core::Result<mondrian_editor_state::AuthoringCommit> {
