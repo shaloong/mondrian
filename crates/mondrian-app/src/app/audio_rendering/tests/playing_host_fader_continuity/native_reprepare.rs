@@ -48,10 +48,13 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         let author_generation = state.project_author_generation();
         let history = state.authoring_history().unwrap().diagnostics();
         let deadline = Instant::now() + Duration::from_secs(30);
-        // This original headless Ready/preroll seam calls public play exactly
-        // once. Preparing a separate cold Source before play would create an
-        // unrelated native object and would invalidate a same-child comparison.
-        crate::app::playback::tests::play_ready(&mut state);
+        // The functional software driver has an explicit observation clock.
+        // Resource waits retain that instant; only an actual FIFO consumption
+        // advances it. Real process/deadline/cleanup clocks remain untouched.
+        state.play().expect("one original public play and native Source");
+        let software_origin = state.playback_observation_instant_anchor;
+        let mut tick = software_origin;
+        let mut consumed_frames = 0_u64;
         let old_generation = state.audio_playback_snapshot().generation;
         let weak = state.native_audio_renderer.as_ref().unwrap().clone();
         let renderer = weak.upgrade().expect("actual sole Timeline renderer");
@@ -60,12 +63,13 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         let old_identity = cursor_facts(&state).session.unwrap().identity;
         {
             let mut capture = output.lock();
-            let at = state.playback_observation_instant_anchor;
-            let silent = capture.callback(INACTIVE_CALLBACK_FRAMES, at);
+            let silent = capture.callback(INACTIVE_CALLBACK_FRAMES, tick);
             assert_eq!(silent, vec![[0.0; 2]; INACTIVE_CALLBACK_FRAMES]);
             assert!(capture.queue.is_empty());
             assert_eq!(capture.snapshot.active_callback_consumed_frames, 0);
         }
+        crate::app::playback::tests::current_playback_ready_at(&mut state, tick);
+        let original_playback_epoch = state.playback_engine.snapshot().epoch;
         let mut old_ready = false;
         let mut renderer_id = None;
         let mut old_object = None;
@@ -77,9 +81,10 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         let mut old_lease = None;
         let mut consumed_old = false;
         let mut fresh = None;
+        let mut fresh_video_ready = false;
         loop {
             state
-                .pump_audio_output_observed_for_test(&mut |state, event| match event {
+                .pump_audio_output_clocked_for_test(&mut || tick, &mut |state, event| match event {
                     AudioPlaybackEvent::NativeOwnerBindingsObserved {
                         renderer_id: actual,
                         generation,
@@ -226,7 +231,9 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                         new_identity = Some(next);
                     }
                     AudioPlaybackEvent::NativeDiagnosticsObserved { .. } => {}
-                    other => panic!("no editor/author/substitution/recovery side path: {other:?}"),
+                    other => {
+                        panic!("no editor/author/substitution/recovery side path: {other:?}")
+                    }
                 })
                 .expect("original App poll/handler/provider/retirement queue");
             let snapshot = state.audio_playback_snapshot();
@@ -258,7 +265,13 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                 let mut capture = output.lock();
                 if capture.windows.len() == 2 && capture.snapshot.active && capture.queue.len() == 8
                 {
-                    let consumed = capture.consume(4, Instant::now());
+                    consumed_frames += 4;
+                    // Derive cumulative time once, avoiding per-block rounding drift.
+                    tick = software_origin
+                        + Duration::from_nanos(
+                            (consumed_frames * 1_000_000_000).div_ceil(u64::from(RATE)),
+                        );
+                    let consumed = capture.consume(4, tick);
                     for (frame, sample) in consumed.iter().enumerate() {
                         assert_eq!(*sample, input_sample(frame));
                     }
@@ -271,21 +284,39 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                     && snapshot.output.unwrap().buffered_frames == 8
                     && new_object.is_some()
                 {
-                    assert!(
-                        snapshot.activation_preroll_satisfied && snapshot.output.unwrap().active
-                    );
-                    assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
-                    let capture = output.lock();
-                    assert_eq!(
-                        capture.windows.len(),
-                        4,
-                        "two complete old and two complete new windows"
-                    );
-                    assert_restart_windows(&capture, 0, 0);
-                    assert_restart_windows(&capture, 2, anchor);
-                    assert!(!capture.overflow);
-                    assert_eq!(capture.activation_discarded, 0);
-                    break;
+                    if !fresh_video_ready {
+                        assert_eq!(
+                            state.playback_engine.snapshot().state,
+                            mondrian_playback::TransportState::Priming
+                        );
+                        assert_ne!(
+                            state.playback_engine.snapshot().epoch,
+                            original_playback_epoch
+                        );
+                        assert!(
+                            !snapshot.output.unwrap().active,
+                            "Fresh PCM cannot activate before its current video demand is ready"
+                        );
+                        crate::app::playback::tests::current_playback_ready_at(&mut state, tick);
+                        fresh_video_ready = true;
+                    } else {
+                        assert!(
+                            snapshot.activation_preroll_satisfied
+                                && snapshot.output.unwrap().active
+                        );
+                        assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
+                        let capture = output.lock();
+                        assert_eq!(
+                            capture.windows.len(),
+                            4,
+                            "two complete old and two complete new windows"
+                        );
+                        assert_restart_windows(&capture, 0, 0);
+                        assert_restart_windows(&capture, 2, anchor);
+                        assert!(!capture.overflow);
+                        assert_eq!(capture.activation_discarded, 0);
+                        break;
+                    }
                 }
             }
             assert!(

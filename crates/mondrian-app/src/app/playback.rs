@@ -1210,27 +1210,29 @@ impl AppState {
         &mut self,
         clock_commit: AudioOutputClockCommit,
     ) -> mondrian_core::Result<()> {
-        self.pump_audio_output_with_observer(clock_commit, &mut |_, _| {})
+        self.pump_audio_output_with_observer_clock(clock_commit, &mut Instant::now, &mut |_, _| {})
     }
 
-    /// Observe the actual owned poll DTO immediately before its original handler.
-    /// No second poll, copied event, stored callback or alternate driver exists.
+    /// Functional software-output tests supply observation time explicitly.
+    /// This changes no production clock, callback counter, deadline or authority.
     #[cfg(test)]
-    pub(in crate::app) fn pump_audio_output_observed_for_test(
+    pub(in crate::app) fn pump_audio_output_clocked_for_test(
         &mut self,
+        clock: &mut impl FnMut() -> Instant,
         observer: &mut impl FnMut(&AppState, &AudioPlaybackEvent),
     ) -> mondrian_core::Result<()> {
-        self.pump_audio_output_with_observer(AudioOutputClockCommit::Observe, observer)
+        self.pump_audio_output_with_observer_clock(AudioOutputClockCommit::Observe, clock, observer)
     }
 
-    fn pump_audio_output_with_observer(
+    fn pump_audio_output_with_observer_clock(
         &mut self,
         clock_commit: AudioOutputClockCommit,
+        clock: &mut impl FnMut() -> Instant,
         observer: &mut impl FnMut(&AppState, &AudioPlaybackEvent),
     ) -> mondrian_core::Result<()> {
         self.poll_audio_idle_warmup();
         let mode = self.audio_playback_mode();
-        let poll_started_at = Instant::now();
+        let poll_started_at = clock();
         let poll_timestamp = self
             .playback_timestamp_for_observation(poll_started_at)
             .map(|timestamp| timestamp.max(self.playback_engine.monotonic_high_water()))
@@ -1246,7 +1248,7 @@ impl AppState {
             .map_err(|error| transport_action_error("pump_audio_output", error))?;
         for event in poll.events {
             observer(self, &event);
-            self.handle_audio_playback_event(event, Instant::now())?;
+            self.handle_audio_playback_event(event, clock())?;
         }
         if self.audio_playback.native_reprepare_pending_generation()
             == Some(poll.snapshot.generation)
@@ -1268,7 +1270,7 @@ impl AppState {
         self.audio_idle_warmup.set_automatic_policy_enabled(false);
         self.audio_idle_warmup.set_dispatch_enabled(false);
         if clock_commit == AudioOutputClockCommit::Observe {
-            self.observe_audio_output_clock(poll.snapshot, Instant::now())?;
+            self.observe_audio_output_clock(poll.snapshot, clock())?;
         }
         Ok(())
     }
@@ -3821,6 +3823,24 @@ pub(in crate::app) mod tests {
         state.test_set_sequences(vec![sequence.clone()]);
         state.test_set_sequence(Some(sequence));
         state
+    }
+
+    pub(in crate::app) fn current_playback_ready_at(state: &mut AppState, observed_at: Instant) {
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("actual current headless video demand");
+        assert!(!state.observe_frame_delivery_candidate(
+            FrameDeliveryCandidate::for_demand(demand, FrameDeliveryKind::Ready),
+            observed_at
+        ));
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("current frame demand after Ready");
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, true, observed_at));
     }
 
     pub(in crate::app) fn play_ready(state: &mut AppState) {
@@ -7007,6 +7027,62 @@ pub(in crate::app) mod tests {
             "the author commit cannot fabricate physical output quiescence"
         );
         native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn injected_audio_observation_clock_preserves_poll_handler_and_observe_boundaries() {
+        // Portable original output/DTO route only; no native fixture or device.
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state.handle_audio_playback_event(required, handled_at).unwrap();
+        let at = state.playback_observation_instant_anchor;
+        let stale = at.checked_sub(Duration::from_nanos(1)).unwrap();
+        let before = state.playback_engine.snapshot();
+        let media = state.audio_playback_snapshot();
+        let mut samples = 0;
+        let mut observed = 0;
+        let refused = state.pump_audio_output_clocked_for_test(
+            &mut || {
+                samples += 1;
+                stale
+            },
+            &mut |_, _| {
+                observed += 1;
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "stale poll time must fail before consuming a DTO"
+        );
+        assert_eq!(samples, 1);
+        assert_eq!(observed, 0);
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.audio_playback_snapshot(), media);
+        output.lock().auto_acknowledge = true;
+        let mut samples = 0;
+        let mut observed = 0;
+        state
+            .pump_audio_output_clocked_for_test(
+                &mut || {
+                    samples += 1;
+                    at
+                },
+                &mut |_, event| {
+                    assert!(matches!(
+                        event,
+                        AudioPlaybackEvent::NativeReprepareOutputQuiesced { .. }
+                    ));
+                    observed += 1;
+                },
+            )
+            .unwrap();
+        assert_eq!(observed, 1, "one actual software-output acknowledgement");
+        assert_eq!(
+            samples,
+            observed + 2,
+            "one poll, every original handler and final Observe all sample the supplied clock"
+        );
+        assert!(state.audio_playback.has_retained_native_reprepare());
     }
 
     #[test]
