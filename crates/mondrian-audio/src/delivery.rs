@@ -166,6 +166,17 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.validate_native_owner(lease)
     }
 
+    /// Observe the actual object through the sole Runtime's authenticated
+    /// non-RT control lane, after validating the current installed owner.
+    /// This performs native IPC without querying parameters or draining author
+    /// work. Returned identity facts grant no execution or author authority.
+    pub fn observe_native_owner_object(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+    ) -> Result<crate::NativeAudioObjectObservation, crate::AudioNativeOwnerError> {
+        self.runtime.observe_native_owner_object(lease)
+    }
+
     /// Read-only editor target from the sole owned Runtime's installed record.
     pub fn native_editor_target(
         &self,
