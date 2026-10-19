@@ -809,6 +809,7 @@ mod tests {
 
     #[test]
     fn output_rotation_revokes_only_proof_and_cannot_cancel_resource_settlement() {
+        // Same-Source resume/output rotation, not an explicit fresh seek.
         let (mut playback, renderer) = held();
         let facts = Arc::new(Facts::default());
         let _release = Release(facts.clone());
@@ -821,7 +822,13 @@ mod tests {
         });
         let installed = playback.owner_installation.current_claim().unwrap().unwrap().generation();
         let old_cancel = playback.generation_cancellation.clone();
-        playback.reprime(anchor(20)).unwrap();
+        playback
+            .prepare(
+                anchor(20),
+                renderer.clone(),
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .unwrap();
         assert!(old_cancel.is_canceled());
         assert!(playback.generation > original);
         assert_eq!(
@@ -855,7 +862,13 @@ mod tests {
         let control = playback.native_control_cancellation.clone();
         playback.suspend(anchor(20)).unwrap();
         let paused = playback.generation;
-        playback.reprime(anchor(20)).unwrap();
+        playback
+            .prepare(
+                anchor(20),
+                renderer.clone(),
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .unwrap();
         assert!(playback.generation > paused);
         assert_eq!(
             playback.owner_installation.current_claim().unwrap().unwrap().generation(),
@@ -943,7 +956,13 @@ mod tests {
         );
         // The transport's later explicit resume rotates only current output
         // proof first; the installed resource result survives that rotation.
-        playback.reprime(anchor(20)).unwrap();
+        playback
+            .prepare(
+                anchor(20),
+                renderer.clone(),
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .unwrap();
         pump(&mut playback, |p| {
             p.native_control_output_retirement.is_some_and(|r| r.acknowledged)
         });

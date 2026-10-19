@@ -1106,16 +1106,25 @@ impl AppState {
         frame: i64,
         source: TimelineSeekSource,
     ) -> mondrian_core::Result<()> {
-        let observed_at = Instant::now();
-        self.synchronize_playback_observation_clock(observed_at);
         self.require_transport_sequence("seek")?;
-        let playback_now = self.playback_engine.monotonic_high_water();
         if frame < 0 {
             return Err(transport_action_error(
                 "seek",
                 "timeline frame must be non-negative",
             ));
         }
+        // Resume retains the exact pending installation; a fresh seek requires
+        // a separate qualified cancellation/migration path. Refuse before any
+        // observation-clock or Engine mutation, without replacing that owner.
+        if self.audio_playback.has_retained_native_reprepare() {
+            return Err(transport_action_error(
+                "seek",
+                "native restart is pending; fresh seek is not yet available",
+            ));
+        }
+        let observed_at = Instant::now();
+        self.synchronize_playback_observation_clock(observed_at);
+        let playback_now = self.playback_engine.monotonic_high_water();
         let was_running = self.is_playing();
         let realtime_audio = self.playback_engine.snapshot().rate.supports_realtime_audio();
         let end_frame = self.last_content_frame()?;
@@ -6998,6 +7007,70 @@ pub(in crate::app) mod tests {
             "the author commit cannot fabricate physical output quiescence"
         );
         native_hold_assert_frozen(&mut state);
+    }
+
+    #[test]
+    fn retained_restart_seek_refusal_preserves_transport_media_and_author() {
+        let (mut state, output, required, handled_at) =
+            native_hold_actual_required(true, false, false);
+        state.handle_audio_playback_event(required, handled_at).unwrap();
+        let engine = state.playback_engine.snapshot();
+        let clock = state.playback_engine.monotonic_high_water();
+        let observation = state.playback_observation_instant_anchor;
+        let frame = state.current_frame();
+        let seek_source = state.last_timeline_seek_source;
+        let author = state.current_audio_playback_author_binding().unwrap();
+        let author_session = state.authoring_session_id();
+        let retained = |state: &AppState| {
+            let AppAudioPlayback::Available(playback) = &state.audio_playback else {
+                panic!("actual installed Media owner")
+            };
+            let generation = playback.snapshot(AudioPlaybackMode::Idle).generation;
+            let mut windows = Vec::new();
+            let journal =
+                playback.visit_native_retained_pcm(generation, audio_anchor(0), |window| {
+                    windows.push((
+                        window.start_sample,
+                        window.first_frame,
+                        window.pcm.samples.as_ptr() as usize,
+                        window.pcm.samples.len(),
+                        window.pcm.samples.capacity(),
+                    ));
+                });
+            (
+                playback.snapshot(AudioPlaybackMode::Idle),
+                playback.native_owner_binding_status(),
+                journal,
+                windows,
+            )
+        };
+        let media = retained(&state);
+        assert!(
+            media.2.is_ok(),
+            "the original complete PCM owner must be observable"
+        );
+        let output_revision = output.lock().revision;
+        let output_queued = output.lock().queued;
+        let invalid = state.seek_with_source(-1, TimelineSeekSource::Settled).unwrap_err();
+        assert!(invalid.to_string().contains("non-negative"));
+        let error = state.seek_with_source(100, TimelineSeekSource::Settled).unwrap_err();
+        assert!(error.to_string().contains("native restart is pending"));
+        assert_eq!(state.playback_engine.snapshot(), engine);
+        assert_eq!(state.playback_engine.monotonic_high_water(), clock);
+        assert_eq!(state.playback_observation_instant_anchor, observation);
+        assert_eq!(state.current_frame(), frame);
+        assert_eq!(state.last_timeline_seek_source, seek_source);
+        assert_eq!(
+            state.current_audio_playback_author_binding().unwrap(),
+            author
+        );
+        assert_eq!(state.authoring_session_id(), author_session);
+        assert_eq!(retained(&state), media);
+        assert_eq!(output.lock().revision, output_revision);
+        assert_eq!(output.lock().queued, output_queued);
+        assert!(state.audio_playback.has_retained_native_reprepare());
+        // This portable App fixture has no DLL/runtime claim. Actual claim
+        // preservation is checked by the same-Arc Media resume controls.
     }
 
     #[test]

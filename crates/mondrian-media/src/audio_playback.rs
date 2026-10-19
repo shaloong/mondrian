@@ -2814,7 +2814,17 @@ impl AudioPlayback {
                     && current.continuity_model == continuity_model
             })
         {
-            return self.reprime(anchor);
+            // Same-Source prepare is the retained resume path. Public reprime
+            // remains an explicit fresh-seek operation with its original PCM duty.
+            let policy = if matches!(
+                self.native_control_hold,
+                Some(NativeControlHold::Reprepare { .. })
+            ) {
+                PcmRetirementPolicy::PreserveNativeHold
+            } else {
+                PcmRetirementPolicy::FreshContinuity
+            };
+            return self.reprime_with_policy(anchor, policy);
         }
         if let Err(error) = continuity_model.validate_fresh_entry(anchor) {
             self.handoff_retired_render_owners(VecDeque::new(), Some(renderer));
@@ -3012,6 +3022,14 @@ impl AudioPlayback {
 
     /// Invalidate outstanding work and restart PCM scheduling at an exact timeline anchor.
     pub fn reprime(&mut self, anchor: AudioSamplePosition) -> Result<(), AudioPlaybackError> {
+        self.reprime_with_policy(anchor, PcmRetirementPolicy::FreshContinuity)
+    }
+
+    fn reprime_with_policy(
+        &mut self,
+        anchor: AudioSamplePosition,
+        pcm_policy: PcmRetirementPolicy,
+    ) -> Result<(), AudioPlaybackError> {
         self.ensure_source_close_idle()?;
         self.validate_reprime_anchor_pure(anchor)?;
         self.ensure_render_execution_available()?;
@@ -3038,14 +3056,6 @@ impl AudioPlayback {
         }
         self.consecutive_render_generation_failures = 0;
         self.render_blocked = self.native_control_hold.is_some();
-        let pcm_policy = if matches!(
-            self.native_control_hold,
-            Some(NativeControlHold::Reprepare { .. })
-        ) {
-            PcmRetirementPolicy::PreserveNativeHold
-        } else {
-            PcmRetirementPolicy::FreshContinuity
-        };
         self.reprime_prevalidated(anchor, false, self.renderer.clone(), pcm_policy)?;
         if matches!(
             self.native_control_hold,
