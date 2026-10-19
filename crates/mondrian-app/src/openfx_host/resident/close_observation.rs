@@ -5,7 +5,8 @@
 //! waiter occurs in a close record. Read/decode only after the original owner
 //! has settled. Zero slots are missing; status 2 is a failed clock observation.
 //! QPC ticks use one Windows system clock/frequency, never process-local Instant.
-//! Version 4 adds one parent-only cleanup summary; all prior offsets stay fixed. UTC
+//! Version 5 adds the final child Mapping Drop entry; it precedes unmap/file Drop
+//! and establishes no completion or OS exit. All prior offsets stay fixed. UTC
 //! FILETIMEs are diagnostic raw facts, never deadlines or interval authority.
 use super::*;
 
@@ -366,7 +367,7 @@ mod windows {
     };
 
     const BYTES: usize = 4096;
-    const MAGIC: [u8; 8] = *b"OFXCLQ04";
+    const MAGIC: [u8; 8] = *b"OFXCLQ05";
     const SLOTS: usize = 16;
 
     // Binary little-endian x64 layout, independently readable after settlement.
@@ -606,7 +607,8 @@ mod windows {
         exit_observation: ExitObservation,
         exit_queries: ExitQueryObservation,
         cleanup: CleanupObservation,
-        _reserved: [u8; 2624],
+        final_child_mapping_drop_entry: Record,
+        _reserved: [u8; 2560],
     }
     const _: () = {
         assert!(std::mem::size_of::<Header>() == 128);
@@ -619,7 +621,8 @@ mod windows {
         assert!(std::mem::size_of::<CleanupOperationRecord>() == 32);
         assert!(std::mem::size_of::<CleanupObservation>() == 192);
         assert!(std::mem::offset_of!(Layout, cleanup) == 1280);
-        assert!(std::mem::offset_of!(Layout, _reserved) == 1472);
+        assert!(std::mem::offset_of!(Layout, final_child_mapping_drop_entry) == 1472);
+        assert!(std::mem::offset_of!(Layout, _reserved) == 1536);
         assert!(std::mem::size_of::<Layout>() == BYTES);
     };
     impl Layout {
@@ -627,7 +630,7 @@ mod windows {
             Self {
                 header: Header {
                     magic: MAGIC,
-                    version: 4,
+                    version: 5,
                     bytes: BYTES as u32,
                     frequency,
                     owner,
@@ -642,13 +645,14 @@ mod windows {
                 exit_observation: ExitObservation::new(),
                 exit_queries: ExitQueryObservation::new(),
                 cleanup: CleanupObservation::new(),
-                _reserved: [0; 2624],
+                final_child_mapping_drop_entry: Record::new(),
+                _reserved: [0; 2560],
             }
         }
         fn valid(&self, owner: &[u8; 16], nonce: &[u8; 16], frequency: i64) -> bool {
             self.header.ready.load(Ordering::Acquire) == 1
                 && self.header.magic == MAGIC
-                && self.header.version == 4
+                && self.header.version == 5
                 && self.header.bytes == BYTES as u32
                 && frequency > 0
                 && self.header.frequency == frequency
@@ -658,6 +662,15 @@ mod windows {
         }
     }
 
+    // Diagnostic writer role only, set after the corresponding setup succeeds.
+    // An invalid/unattached view must not publish from its destructor.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum MappingRole {
+        Unattached,
+        Parent,
+        Child,
+    }
+
     #[derive(Debug)]
     pub(super) struct Mapping {
         // Retained for every reference/Arc, including outer inner-return mark.
@@ -665,6 +678,7 @@ mod windows {
         _file: File,
         layout: NonNull<Layout>,
         pid: u32,
+        role: MappingRole,
     }
     // SAFETY: fixed aligned layout, initialized before release-ready publication.
     // Immutable header fields never change thereafter. Every mutable field is
@@ -714,7 +728,13 @@ mod windows {
             }
             // SAFETY: no arguments/pointers; cached once outside close timing.
             let pid = unsafe { GetCurrentProcessId() };
-            Ok(Self { _mapping: mapping, _file: file, layout, pid })
+            Ok(Self {
+                _mapping: mapping,
+                _file: file,
+                layout,
+                pid,
+                role: MappingRole::Unattached,
+            })
         }
         fn layout(&self) -> &Layout {
             // SAFETY: above mapping lifetime/alignment/atomic invariants. Layout
@@ -746,7 +766,7 @@ mod windows {
                 .open(&path)
                 .map_err(setup_error)?;
             file.set_len(BYTES as u64).map_err(setup_error)?;
-            let mapping = Self::from_file(file)?;
+            let mut mapping = Self::from_file(file)?;
             // SAFETY: parent has the sole view/reference before spawn. Full
             // initialization touches the entire fixed map before close timing.
             unsafe {
@@ -758,6 +778,7 @@ mod windows {
                 ))
             };
             mapping.layout().header.ready.store(1, Ordering::Release);
+            mapping.role = MappingRole::Parent;
             Ok((mapping, path))
         }
         pub(super) fn open(
@@ -771,12 +792,13 @@ mod windows {
                 .share_mode(1 | 2)
                 .open(path)
                 .map_err(setup_error)?;
-            let mapping = Self::from_file(file)?;
+            let mut mapping = Self::from_file(file)?;
             if !mapping.layout().valid(owner.0.as_bytes(), &nonce_bytes(nonce)?, frequency()?) {
                 return Err(invalid(
                     "OpenFX close observation identity/layout/clock mismatch",
                 ));
             }
+            mapping.role = MappingRole::Child;
             Ok(mapping)
         }
         pub(super) fn cleanup_pending(&self) -> bool {
@@ -854,6 +876,42 @@ mod windows {
         }
     }
 
+    // This is only the final child Arc's destructor entry. The existing fields
+    // still drop in declaration order afterwards; no clone keeps the view alive.
+    impl Drop for Mapping {
+        fn drop(&mut self) {
+            self.record_drop_entry_with(query_counter, || {
+                // SAFETY: no retained handle/output; identifies this sole writer.
+                unsafe { GetCurrentThreadId() }
+            });
+        }
+    }
+    impl Mapping {
+        fn record_drop_entry_with(
+            &self,
+            clock: impl FnOnce() -> Option<i64>,
+            thread_id: impl FnOnce() -> u32,
+        ) {
+            let layout = (self.role == MappingRole::Child).then(|| self.layout());
+            record_final_mapping_drop_entry_with(layout, self.pid, clock, thread_id);
+        }
+    }
+    fn record_final_mapping_drop_entry_with(
+        layout: Option<&Layout>,
+        pid: u32,
+        clock: impl FnOnce() -> Option<i64>,
+        thread_id: impl FnOnce() -> u32,
+    ) {
+        let Some(layout) = layout else { return };
+        let record = &layout.final_child_mapping_drop_entry;
+        if record.status.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        let tick = clock().filter(|tick| *tick >= 0);
+        // value 1 is the authenticated child-view role, not a completion result.
+        record.commit(pid, thread_id(), tick, 1);
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -870,7 +928,11 @@ mod windows {
             assert_eq!(std::mem::size_of::<CleanupOperationRecord>(), 32);
             assert_eq!(std::mem::size_of::<CleanupObservation>(), 192);
             assert_eq!(std::mem::offset_of!(Layout, cleanup), 1280);
-            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1472);
+            assert_eq!(
+                std::mem::offset_of!(Layout, final_child_mapping_drop_entry),
+                1472
+            );
+            assert_eq!(std::mem::offset_of!(Layout, _reserved), 1536);
             assert_eq!(std::mem::size_of::<Layout>(), 4096);
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.ready.store(1, Ordering::Release);
@@ -881,13 +943,112 @@ mod windows {
             assert!(!layout.valid(&[1; 16], &[2; 16], 0));
             layout.header.version = 1;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
-            layout.header.version = 4;
+            layout.header.version = 5;
             layout.header.magic = *b"OFXCLQ01";
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
             layout.header.magic = MAGIC;
             layout.header.bytes = 4095;
             assert!(!layout.valid(&[1; 16], &[2; 16], 10_000_000));
         }
+        #[test]
+        fn final_child_mapping_drop_is_published_only_by_the_last_arc() {
+            let directory = tempfile::tempdir().expect("private trace directory");
+            let owner = mondrian_core::EffectProcessorOwnerId::new();
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let (parent, path) = Mapping::create(directory.path().to_path_buf(), owner, &nonce)
+                .expect("actual fixed parent mapping");
+            let child = std::sync::Arc::new(
+                Mapping::open(path, owner, &nonce).expect("authenticated separate child view"),
+            );
+            let last = std::sync::Arc::clone(&child);
+            let record = &parent.layout().final_child_mapping_drop_entry;
+            assert_eq!(record.status.load(Ordering::Acquire), 0);
+            drop(child);
+            assert_eq!(record.status.load(Ordering::Acquire), 0);
+            drop(last);
+            assert_eq!(record.status.load(Ordering::Acquire), 1);
+            assert_eq!(record.pid.load(Ordering::Relaxed), parent.pid);
+            // This ordinary control uses two views in one process; it does not
+            // claim a native child or OS exit. Production uses the real child PID.
+            assert_ne!(record.tid.load(Ordering::Relaxed), 0);
+            assert_eq!(record.value.load(Ordering::Relaxed), 1);
+            assert!(record.qpc.load(Ordering::Relaxed) >= 0);
+        }
+
+        #[test]
+        fn parent_mapping_drop_never_writes_or_reads_the_clock() {
+            let directory = tempfile::tempdir().expect("private trace directory");
+            let owner = mondrian_core::EffectProcessorOwnerId::new();
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let (parent, path) = Mapping::create(directory.path().to_path_buf(), owner, &nonce)
+                .expect("actual fixed parent mapping");
+            let child = Mapping::open(path, owner, &nonce).expect("separate retained view");
+            parent.record_drop_entry_with(
+                || panic!("parent must not read QPC for the child record"),
+                || panic!("parent must not read the child writer TID"),
+            );
+            drop(parent);
+            assert_eq!(
+                child.layout().final_child_mapping_drop_entry.status.load(Ordering::Acquire),
+                0
+            );
+        }
+
+        #[test]
+        fn disabled_final_mapping_drop_observation_never_reads_identity_or_clock() {
+            let trace = Trace::default();
+            assert!(trace.mapping.is_none());
+            record_final_mapping_drop_entry_with(
+                None,
+                0,
+                || panic!("disabled observation must not read QPC"),
+                || panic!("disabled observation must not read TID"),
+            );
+            drop(trace);
+        }
+
+        #[test]
+        fn rejected_child_mapping_setup_never_publishes_a_drop_entry() {
+            let directory = tempfile::tempdir().expect("private trace directory");
+            let owner = mondrian_core::EffectProcessorOwnerId::new();
+            let nonce = uuid::Uuid::new_v4().to_string();
+            let (parent, path) = Mapping::create(directory.path().to_path_buf(), owner, &nonce)
+                .expect("actual fixed parent mapping");
+            assert!(Mapping::open(
+                path.clone(),
+                mondrian_core::EffectProcessorOwnerId::new(),
+                &nonce
+            )
+            .is_err());
+            assert!(Mapping::open(path, owner, &uuid::Uuid::new_v4().to_string()).is_err());
+            assert_eq!(
+                parent.layout().final_child_mapping_drop_entry.status.load(Ordering::Acquire),
+                0
+            );
+        }
+
+        #[test]
+        fn final_mapping_drop_clock_failure_is_one_shot_and_not_completion() {
+            for tick in [None, Some(-1)] {
+                let layout = Layout::new([1; 16], [2; 16], 10_000_000, 11);
+                record_final_mapping_drop_entry_with(Some(&layout), 22, || tick, || 33);
+                let record = &layout.final_child_mapping_drop_entry;
+                assert_eq!(record.status.load(Ordering::Acquire), 2);
+                assert_eq!(record.pid.load(Ordering::Relaxed), 22);
+                assert_eq!(record.tid.load(Ordering::Relaxed), 33);
+                assert_eq!(record.value.load(Ordering::Relaxed), 1);
+                assert_eq!(record.qpc.load(Ordering::Relaxed), 0);
+                record_final_mapping_drop_entry_with(
+                    Some(&layout),
+                    99,
+                    || panic!("a second publication must not read QPC"),
+                    || panic!("a second publication must not read TID"),
+                );
+                assert_eq!(record.pid.load(Ordering::Relaxed), 22);
+                assert_eq!(record.tid.load(Ordering::Relaxed), 33);
+            }
+        }
+
         #[test]
         fn cleanup_summary_is_one_shot_and_preserves_results_without_clock() {
             let record = CleanupObservation::new();
@@ -1097,7 +1258,7 @@ mod windows {
                 "{}",
                 serde_json::json!({
                     "control": "owned_natural_exit_timestamp_distinguishes_delayed_parent_observation",
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "child_pid": pid,
                     "retained_child_handle": handle,
                     "natural_exit_code": 7,
