@@ -46,6 +46,9 @@ namespace MondrianOpenFx {
 
     std::map<std::string, ParameterSource> parameterSources;
     bool applyingParameters = false;
+    // Native setters cannot mutate parameters during the ordinary CPU Render
+    // callback. This parameter capability is independent of image access.
+    bool renderParameterWritesBlocked = false;
     // The ordinary host-owned Inspector can write through the author session;
     // plugin-origin writes require the later coherent C2 author bridge.
     bool readOnlyInteractive = false;
@@ -57,7 +60,7 @@ namespace MondrianOpenFx {
       return found != parameterSources.end() && found->second.mode == 2 ? &found->second : nullptr;
     }
     bool permitsParameterWrite(const std::string& name) const {
-      return applyingParameters || (!readOnlyInteractive && !curveParameter(name));
+      return applyingParameters || (!renderParameterWritesBlocked && !readOnlyInteractive && !curveParameter(name));
     }
     int queryParameter(const std::string& name, int operation, double start,
                        double end, int index, int direction, MondrianOpenFxQueryResult& result) const {
@@ -79,6 +82,21 @@ namespace MondrianOpenFx {
     FrameState& state;
     explicit ParameterAssignment(FrameState& frame) : state(frame) { state.applyingParameters = true; }
     ~ParameterAssignment() { state.applyingParameters = false; }
+  };
+  // Restore the prior capability on every exit, including native exceptions;
+  // a nested scope must never unblock its enclosing Render callback.
+  struct RenderParameterWriteBlock {
+    FrameState& state;
+    const bool previous;
+    explicit RenderParameterWriteBlock(FrameState& frame) noexcept
+      : state(frame), previous(frame.renderParameterWritesBlocked) {
+      state.renderParameterWritesBlocked = true;
+    }
+    ~RenderParameterWriteBlock() noexcept { state.renderParameterWritesBlocked = previous; }
+    RenderParameterWriteBlock(const RenderParameterWriteBlock&) = delete;
+    RenderParameterWriteBlock& operator=(const RenderParameterWriteBlock&) = delete;
+    RenderParameterWriteBlock(RenderParameterWriteBlock&&) = delete;
+    RenderParameterWriteBlock& operator=(RenderParameterWriteBlock&&) = delete;
   };
   // Every exit, including exceptions, retires caller-owned frame addresses.
   struct FrameBorrow {

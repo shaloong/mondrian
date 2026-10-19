@@ -764,8 +764,11 @@ struct MondrianOpenFxSession {
     if (accepted(status)) {
       phase = probe.start();
       MondrianOpenFx::ImageAccess images(frame, true, true);
-      status = instance->renderAction(info.frame, kOfxImageFieldNone, window,
-                                     scale, false, userEdited, false);
+      {
+        MondrianOpenFx::RenderParameterWriteBlock parameterWrites(frame);
+        status = instance->renderAction(info.frame, kOfxImageFieldNone, window,
+                                       scale, false, userEdited, false);
+      }
       probe.finish(MONDRIAN_OPENFX_PLUGIN_RENDER, phase);
     }
     phase = probe.start();
