@@ -59,7 +59,8 @@ fn fixture() -> (
         Some(configuration.as_slice())
     );
     assert_eq!(instance.parameters.len(), 1);
-    let parameter = instance.parameters.keys().next().unwrap().clone();
+    let parameter = mondrian_core::ParameterId::new("vst3.param.0").unwrap();
+    assert_eq!(instance.parameters.keys().next(), Some(&parameter));
     let resolver = Arc::new(IsolatedAudioProcessorResolver::new(catalog));
     let (directory, state, output, output_id) =
         native_fader_fixture_with_processor(RESTART, instance, resolver);
@@ -98,6 +99,10 @@ fn assert_gain(
     assert_eq!(fact.info_flags, Some(1), "actual VST3 kCanAutomate");
     assert_eq!(fact.event_flags, 0);
     assert_eq!(fact.hidden, Some(false));
+    assert_eq!(fact.display.as_deref(), Some("0.5"));
+    assert_eq!(fact.periodic, None);
+    assert_eq!(fact.module, None);
+    assert!(fact.revision <= observation.source_revision());
     assert_eq!(
         fact.origin,
         mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 0 }
