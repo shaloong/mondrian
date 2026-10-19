@@ -4,17 +4,29 @@ use mondrian_core::automation::{
     PropertyValueType,
 };
 use mondrian_core::effect_data::{EffectNode, EffectType};
-use mondrian_core::{AssetId, ParameterId, TimelineTime};
+use mondrian_core::{AssetId, ParameterId, ProjectColorEnvironment, ProjectSettings, TimelineTime};
 use mondrian_project::{read_project_document_from_archive, save_project_archive, ProjectDocument};
-use mondrian_timeline::Clip;
+use mondrian_timeline::{Clip, Sequence, SequenceCollection};
+
+fn current_document() -> ProjectDocument {
+    let sequence = Sequence::new("Main");
+    let settings = sequence.settings.clone();
+    let document = ProjectDocument::new(
+        "Main",
+        SequenceCollection::new(sequence),
+        ProjectColorEnvironment::default(),
+        settings,
+        ProjectSettings::default(),
+    );
+    document.validate().expect("current canonical document");
+    document
+}
 
 #[test]
 fn world_bezier_equal_endpoint_excursion_survives_durable_archive_reopen() {
     use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
     let parameter_id = ParameterId::new_static("test.archive.world_bezier");
-    let mut document: ProjectDocument =
-        serde_json::from_str(include_str!("fixtures/current/project.json"))
-            .expect("canonical fixture");
+    let mut document = current_document();
     let mut effect = EffectNode::new(EffectType::Plugin("test.archive.world_bezier".to_owned()));
     effect.define_property(
         PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(2.0))
@@ -105,9 +117,7 @@ fn asymmetric_channel_contracts_and_keys_survive_a_durable_archive_reopen() {
             &PropertyValue::Float(0.0),
         )
     };
-    let mut document: ProjectDocument =
-        serde_json::from_str(include_str!("fixtures/current/project.json"))
-            .expect("current canonical fixture");
+    let mut document = current_document();
     let parameter_id = ParameterId::new_static("test.channel_contracts.point");
     let mut effect = EffectNode::new(EffectType::Plugin("test.channel_contracts".to_owned()));
     let path = "point".to_owned();
@@ -207,9 +217,7 @@ fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
         PropertyValue::IntVec2([i32::MIN, i32::MAX]),
         PropertyValue::IntVec3([i32::MIN, 0, i32::MAX]),
     ];
-    let mut document: ProjectDocument =
-        serde_json::from_str(include_str!("fixtures/current/project.json"))
-            .expect("current canonical fixture");
+    let mut document = current_document();
     let mut effect = EffectNode::new(EffectType::Plugin("test.precise.compound".to_owned()));
     for (index, value) in cases.into_iter().enumerate() {
         let path = format!("component{index}");
@@ -249,9 +257,7 @@ fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
 fn invalid_visual_handle_document_cannot_replace_a_durable_archive() {
     use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
     let parameter_id = ParameterId::new_static("test.archive.visual.handle");
-    let mut document: ProjectDocument =
-        serde_json::from_str(include_str!("fixtures/current/project.json"))
-            .expect("current canonical fixture");
+    let mut document = current_document();
     let mut effect = EffectNode::new(EffectType::Plugin("test.archive.visual.handle".to_owned()));
     effect.define_property(
         PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(0.0))
