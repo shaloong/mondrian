@@ -205,6 +205,28 @@ App169 and the seven original native App regressions also pass, including the
 deliberately unresolved retained-alias negative control. All native gates retain
 original180s/2s and clean Job settlement.
 
+A pinned Surge XT Effects1.3.4 VST3 Runtime gate also passes: Windows/offline48k,
+stereo/block64, original1150B state and4096 frames per run. Two fresh continuous
+references are finite, nonzero on both sides of F2048 and identical. A third
+Runtime publishes -6dB at that actual frontier through the original Source;
+Session/epoch/native PID/object/binding and cursors survive with new Plan/claim/
+lease. Every pre-F sample matches exactly; maximum post-F absolute error against
+the scaled reference is 3.73e-9, below the predeclared1e-6 bound. All three original
+Drop/HANDLE exit0 checks pass, as does the original180s/2s Job gate (5.86s).
+This is a fixed Runtime integration qualification, not a vendor algorithm,
+arbitrary tail/history, App action or realtime/performance qualification.
+
+The affected old AGain and Surge musical-reference gates also pass. The original
+Surge None-reference regression instead fails during restore-b's render preflight
+with `WorkerDeadlineExceeded { operation: "native observation" }`, after restore-a
+completed4096 frames and its exit0 checks. The failing block and RPC phase were
+not recorded. Its operation budget is100ms;10.83s is the whole test duration,
+not a measured RPC duration. The outer Job settles cleanly, but this does not
+qualify the failed Runtime's original success assertions or close its root cause.
+The new reference gate's pass does not supersede that failure. Error diagnostics
+now preserve the original panic and request position without assuming an already
+failed child is still alive; successful exit assertions remain unchanged.
+
 The repeat gate uses deterministic software counters, not continuous device
 timing: the former AudioDevice-only assertion correctly failed PhaseRegression
 when 8192 consumed frames spanned about509ms of wall time. The corrected control
@@ -212,7 +234,7 @@ keeps that real converter call, accepts only AudioDevice/no-fallback or typed
 PhaseRegression above its bound, and requires the next action to preserve the
 actual clock result without Media recovery. Successful output does not identify
 which branch occurred. Its matched non-harness Product is test-profile opt0/
-debuginfo0; no production clock threshold changed. Queued latency, third-party
+debuginfo0; no production clock threshold changed. Queued latency, broader DSP
 history, continuous device clocks, physical/gapless output, full UI scheduling
 and realtime/performance remain unqualified.
 See [ADR0011](../adr/0011-preserve-live-audio-state-at-the-processing-frontier.md)
