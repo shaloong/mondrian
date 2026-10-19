@@ -444,3 +444,228 @@ fn actual_bank_render_idle_end_render_preserves_native_owner_and_distinct_action
         "destruction cannot duplicate End notices"
     );
 }
+
+/// Internal read-only generic-GUI contract through the real native CABI; this
+/// does not qualify plugin-origin author transactions or a physical App view.
+#[test]
+#[ignore = "requires owned string_gui_permission SessionProbe"]
+fn native_generic_gui_string_writes_respect_existing_author_permission() {
+    const TEST: &str = "openfx_host::native_gui_qualification::native_generic_gui_string_writes_respect_existing_author_permission";
+    if !shared_frame_tests::qualification_child(
+        TEST,
+        &[(
+            "MONDRIAN_OPENFX_SESSION_PROBE_MODE",
+            "string_gui_permission",
+        )],
+    ) {
+        return;
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    struct Phase {
+        action: c_int,
+        interactive: c_int,
+        status: [c_int; 2],
+        before: [[u8; 128]; 2],
+        after: [[u8; 128]; 2],
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug)]
+    struct Receipt {
+        created: c_int,
+        destroyed: c_int,
+        create_status: [c_int; 2],
+        invalid_status: [c_int; 4],
+        phase_count: c_int,
+        phases: [Phase; 4],
+    }
+    let path = resolve_openfx_binary(&PathBuf::from(
+        std::env::var_os("MONDRIAN_OPENFX_SESSION_PROBE_BINARY").expect("owned fixture"),
+    ))
+    .expect("binary");
+    let bundle = path
+        .ancestors()
+        .find(|value| value.extension().is_some_and(|extension| extension == "bundle"))
+        .expect("bundle");
+    let binary = native_string(&path).expect("binary path");
+    let bundle = native_string(bundle).expect("bundle path");
+    let identifier = CString::new("uk.co.thefoundry.BasicGainPlugin").expect("identifier");
+    let names = ["scale", "single", "multi"].map(|value| CString::new(value).unwrap());
+    const INITIAL: [&str; 2] = ["create/plain", "create/timed"];
+    const AUTHOR_A: [&str; 2] = ["host-A/plain🙂", "host-A/timed\nline"];
+    const AUTHOR_B: [&str; 2] = ["host-B/plain另", "host-B/timed\r\nend"];
+    let initial = INITIAL.map(|value| CString::new(value).unwrap());
+    let author_a = AUTHOR_A.map(|value| CString::new(value).unwrap());
+    let author_b = AUTHOR_B.map(|value| CString::new(value).unwrap());
+    let parameters = |values: &[CString; 2]| {
+        std::array::from_fn::<_, 3, _>(|index| NativeParameter {
+            name: names[index].as_ptr(),
+            query_mode: 0,
+            kind: if index == 0 { 1 } else { 6 },
+            value: [if index == 0 { 2.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            string_value: if index == 0 {
+                std::ptr::null()
+            } else {
+                values[index - 1].as_ptr()
+            },
+            string_length: if index == 0 {
+                0
+            } else {
+                values[index - 1].as_bytes().len()
+            },
+            query: None,
+            query_context: std::ptr::null(),
+            query_revision: 0,
+        })
+    };
+    let (initial_parameters, parameters_a, parameters_b) = (
+        parameters(&initial),
+        parameters(&author_a),
+        parameters(&author_b),
+    );
+    let info = NativeFrameInfo {
+        source_alpha: 0,
+        width: 1,
+        height: 1,
+        frame: 0.0,
+        frame_rate: 24.0,
+        first_frame: 0.0,
+        last_frame: 100.0,
+        pixel_aspect_ratio: 1.0,
+    };
+    let input = [0.125_f32, -2.0, 16.0, 0.5]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    let original_input = input.clone();
+    let library = unsafe { libloading::Library::new(&path) }.expect("retain fixture receipts");
+    type ReadReceipt = unsafe extern "C" fn(*mut Receipt, usize) -> c_int;
+    let read_receipt: libloading::Symbol<'_, ReadReceipt> =
+        unsafe { library.get(b"SessionProbeStringGuiPermissionReceipt\0") }
+            .expect("bounded C-linked callback facts");
+    let mut session = NativeSession::create(
+        mondrian_core::EffectProcessorOwnerId::new(),
+        &binary,
+        &bundle,
+        &identifier,
+        &input,
+        &info,
+        &initial_parameters,
+    )
+    .expect("same native instance");
+    let replies = Replies { status: 1, calls: AtomicUsize::new(0) };
+    let control = NativeInvocationControl {
+        context: std::ptr::from_ref(&replies).cast(),
+        abort: None,
+        progress: None,
+        gui_open: 1,
+        interactive_render: 0,
+        question_work: 0,
+        question: Some(answer),
+    };
+    let mut output_a = vec![0_u8; input.len()];
+    let mut output_b = vec![0_u8; input.len()];
+    let rendered_a =
+        session.render_controlled(&input, &mut output_a, &info, &parameters_a, Some(&control));
+    let feedback_a = session.take_feedback();
+    let rendered_b =
+        session.render_controlled(&input, &mut output_b, &info, &parameters_b, Some(&control));
+    let feedback_b = session.take_feedback();
+    // Collect original cleanup before any target assertion, including the RED
+    // path: a plugin permission violation must not mask setup/close failure.
+    let closed = session.close_gui();
+    let closed_again = session.close_gui();
+    drop(session);
+    // SAFETY: all fields are C integers/byte arrays. The pinned fixture copies
+    // its bounded POD only after checking this exact size; no native owner leaks.
+    let mut receipt: Receipt = unsafe { std::mem::zeroed() };
+    let receipt_status = unsafe { read_receipt(&mut receipt, std::mem::size_of::<Receipt>()) };
+    let end = closed.expect("original native Close must succeed").expect("actual End action");
+    assert!(closed_again.expect("idempotent native Close").is_none());
+    assert_eq!(receipt_status, 0, "fixture receipt layout");
+    assert_eq!(
+        (receipt.created, receipt.destroyed),
+        (1, 1),
+        "same instance settled"
+    );
+    assert_eq!(
+        receipt.create_status,
+        [0, 0],
+        "noninteractive initialization remains legal"
+    );
+    assert_eq!(
+        rendered_a,
+        Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+    );
+    assert_eq!(
+        rendered_b,
+        Ok(mondrian_core::ColorFrameAlpha::StraightFloat)
+    );
+    assert_eq!(receipt.phase_count, 4);
+    let first = feedback_a.expect("actual first Render feedback");
+    let second = feedback_b.expect("actual second Render feedback");
+    assert_eq!(
+        (first.invocation(), second.invocation(), end.invocation()),
+        (1, 2, 2)
+    );
+    assert_eq!(first.native_owner(), second.native_owner());
+    assert_eq!(first.native_owner(), end.native_owner());
+    assert_eq!(input, original_input);
+    assert_eq!(
+        replies.calls.load(Ordering::Relaxed),
+        0,
+        "no Question work was requested"
+    );
+    let expected_pixels = [0.25_f32, -4.0, 32.0, 1.0]
+        .into_iter()
+        .flat_map(f32::to_ne_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(output_a, expected_pixels);
+    assert_eq!(output_b, expected_pixels);
+    for (actual, expected) in [
+        (&initial, INITIAL),
+        (&author_a, AUTHOR_A),
+        (&author_b, AUTHOR_B),
+    ] {
+        assert_eq!(
+            actual.each_ref().map(|value| value.as_bytes()),
+            expected.map(str::as_bytes)
+        );
+    }
+    assert_eq!(
+        receipt.invalid_status,
+        [11, 11, 11, 4],
+        "original input-error precedence"
+    );
+    assert_eq!(receipt.phases.map(|phase| phase.action), [1, 2, 2, 3]);
+    assert_eq!(receipt.phases.map(|phase| phase.interactive), [1, 1, 1, 0]);
+    fn text(bytes: &[u8; 128]) -> &str {
+        std::ffi::CStr::from_bytes_until_nul(bytes)
+            .expect("bounded receipt text")
+            .to_str()
+            .expect("actual UTF-8")
+    }
+    // Begin precedes this frame's host assignment. Both Render snapshots must
+    // show the real A/B ParameterAssignment while the same GUI remains open.
+    for (phase, expected) in receipt.phases[1..3].iter().zip([AUTHOR_A, AUTHOR_B]) {
+        assert_eq!(
+            phase.before.each_ref().map(text),
+            expected,
+            "host author assignment"
+        );
+    }
+    for (index, (phase, expected)) in
+        receipt.phases.iter().zip([INITIAL, AUTHOR_A, AUTHOR_B, AUTHOR_B]).enumerate()
+    {
+        assert_eq!(
+            phase.status,
+            [5, 5],
+            "STRING_GUI_PERMISSION phase={index} must refuse local writes"
+        );
+        assert_eq!(phase.before.each_ref().map(text), expected);
+        assert_eq!(
+            phase.after, phase.before,
+            "STRING_GUI_PERMISSION phase={index} changed local text"
+        );
+    }
+}

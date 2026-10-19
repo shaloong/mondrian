@@ -2043,6 +2043,76 @@ OfxStatus genericGuiProbe(const std::string& action, const void* handle,
   return response == expected ? kOfxStatOK : kOfxStatErrValue;
 }
 
+// Fixed test-only receipt from the actual CABI callbacks. No author authority.
+struct StringGuiPermissionPhase {
+  int action = 0, interactive = -1;
+  int status[2]{};
+  char before[2][128]{}, after[2][128]{};
+};
+struct StringGuiPermissionReceipt {
+  int created = 0, destroyed = 0;
+  int createStatus[2]{}, invalidStatus[4]{};
+  int phaseCount = 0;
+  StringGuiPermissionPhase phases[4]{};
+};
+StringGuiPermissionReceipt stringGuiPermission;
+static_assert(std::is_trivially_copyable_v<StringGuiPermissionReceipt>);
+bool copyStringGuiValue(OfxParamHandle parameter, char (&output)[128]) {
+  char* value = nullptr;
+  if (gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value) { return false; }
+  size_t length = 0;
+  while (length < sizeof(output) && value[length] != '\0') { ++length; }
+  if (length == sizeof(output)) { return false; }
+  std::memcpy(output, value, length + 1);
+  return true;
+}
+bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
+  if (action == kOfxActionDestroyInstance) { ++stringGuiPermission.destroyed; return true; }
+  const bool creating = action == kOfxActionCreateInstance;
+  const bool beginning = action == kOfxActionBeginInstanceEdit;
+  const bool rendering = action == kOfxImageEffectActionRender;
+  const bool ending = action == kOfxActionEndInstanceEdit;
+  if (!creating && !beginning && !rendering && !ending) { return true; }
+  if (creating) { stringGuiPermission = {}; ++stringGuiPermission.created; }
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle plain = nullptr, timed = nullptr;
+  double time = 0.0;
+  const auto* timeline = auxTimelineSuite();
+  if (!timeline || timeline->getTime(const_cast<void*>(handle), &time) != kOfxStatOK || !std::isfinite(time) ||
+      gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "single", &plain, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "multi", &timed, nullptr) != kOfxStatOK) { return false; }
+  if (creating) {
+    char first[128]{}, second[128]{};
+    if (!copyStringGuiValue(plain, first) || !copyStringGuiValue(timed, second)) { return false; }
+    stringGuiPermission.createStatus[0] = gParamHost->paramSetValue(plain, first);
+    stringGuiPermission.createStatus[1] = gParamHost->paramSetValueAtTime(timed, time, second);
+    return true;
+  }
+  if (stringGuiPermission.phaseCount >= 4) { return false; }
+  auto& phase = stringGuiPermission.phases[stringGuiPermission.phaseCount];
+  phase.action = beginning ? 1 : rendering ? 2 : 3;
+  OfxPropertySetHandle properties = nullptr;
+  if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK ||
+      gPropHost->propGetInt(properties, kOfxPropIsInteractive, 0, &phase.interactive) != kOfxStatOK ||
+      !copyStringGuiValue(plain, phase.before[0]) || !copyStringGuiValue(timed, phase.before[1])) { return false; }
+  if (beginning) {
+    const std::string oversized(64 * 1024 + 1, 'x');
+    stringGuiPermission.invalidStatus[0] = gParamHost->paramSetValue(plain, static_cast<const char*>(nullptr));
+    stringGuiPermission.invalidStatus[1] = gParamHost->paramSetValue(plain, oversized.c_str());
+    stringGuiPermission.invalidStatus[2] = gParamHost->paramSetValueAtTime(timed, std::numeric_limits<double>::quiet_NaN(), "invalid");
+    stringGuiPermission.invalidStatus[3] = gParamHost->paramSetValueAtTime(timed, time + 1.0, "off-time");
+  }
+  // Distinct parameters prevent the ordinary setter's old mutation from
+  // contaminating the timed setter's target. Freeze facts before host reapply.
+  phase.status[0] = gParamHost->paramSetValue(plain, "plugin/plain");
+  phase.status[1] = gParamHost->paramSetValueAtTime(timed, time, "plugin/timed");
+  if (!copyStringGuiValue(plain, phase.after[0]) || !copyStringGuiValue(timed, phase.after[1])) { return false; }
+  ++stringGuiPermission.phaseCount;
+  // Record the old permission violation without failing Render/End prematurely.
+  return true;
+}
+
 // Test-only conjunction guards; no exported counter or product protocol.
 struct LegacyPriorityState { bool posted = false, repaired = false; };
 std::map<const void*, LegacyPriorityState> legacyPriorityStates;
@@ -2197,6 +2267,7 @@ OfxStatus probeAction(const char* action, const void* handle,
     const OfxStatus gui = genericGuiProbe(operation, handle, in, selected);
     if (operation == kOfxActionBeginInstanceEdit || operation == kOfxActionEndInstanceEdit || gui != kOfxStatOK) { return gui; }
   }
+  if (selected == "string_gui_permission" && !stringGuiPermissionProbe(operation, handle)) { return kOfxStatFailed; }
   if (selected == "cancel_after_create" && operation == kOfxImageEffectActionRender &&
       !constructorActionReceipt("MONDRIAN_OPENFX_ACTUAL_RENDER_ENTERED")) { return kOfxStatFailed; }
   if (selected == "cooperative_abort" && operation == kOfxImageEffectActionRender) { return cooperativeAbortRender(handle, in); }
@@ -2516,7 +2587,7 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected.find("strings") == 0 && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !stringValues(handle, in, true)) { return kOfxStatFailed; }
 
-  if (selected.find("strings") == 0 && result == kOfxStatOK &&
+  if ((selected.find("strings") == 0 || selected == "string_gui_permission") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext) {
     const char* names[] = {"single", "multi", "existingFile", "newFile",
                            "existingDirectory", "newDirectory", "status", "rich"};
@@ -2529,7 +2600,7 @@ OfxStatus probeAction(const char* action, const void* handle,
       u8"Ready ✓", "{\\rtf1\\ansi hello}"};
     OfxParamSetHandle params = nullptr;
     if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return kOfxStatFailed; }
-    const int count = selected == "strings_text" ? 2 : selected == "strings_paths" ? 6 : 8;
+    const int count = (selected == "strings_text" || selected == "string_gui_permission") ? 2 : selected == "strings_paths" ? 6 : 8;
     for (int index = 0; index < count; ++index) {
       OfxPropertySetHandle props = nullptr;
       if (gParamHost->paramDefine(params, kOfxParamTypeString, names[index], &props) != kOfxStatOK ||
@@ -2801,4 +2872,9 @@ OfxExport int SessionProbeGuiReceipt(int coordinate) {
     case 2: return genericGuiReceipt.rendered; case 3: return genericGuiReceipt.open ? 1 : 0; default: return -1; }
 }
 OfxExport int SessionProbeAuxRenderCount() { return auxiliaryErrorRenderCount; }
+OfxExport int SessionProbeStringGuiPermissionReceipt(void* output, size_t bytes) {
+  if (!output || bytes != sizeof(stringGuiPermission)) { return 2; }
+  std::memcpy(output, &stringGuiPermission, bytes);
+  return 0;
+}
 }
