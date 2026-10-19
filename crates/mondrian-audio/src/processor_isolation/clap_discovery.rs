@@ -1753,7 +1753,7 @@ impl ParameterQueryCapture {
         }
     }
 
-    fn begin_row(&mut self, index: u32) {
+    pub(super) fn begin_row(&mut self, index: u32) {
         if self.rows.len() >= MAX_PARAMETERS as usize || self.rows.len() >= self.rows.capacity() {
             self.allocation_or_capacity_loss = true;
             return;
@@ -1769,7 +1769,7 @@ impl ParameterQueryCapture {
         });
     }
 
-    fn record_info(
+    pub(super) fn record_info(
         &mut self,
         index: u32,
         info: clack_extensions::params::ParamInfoQueryObservation,
@@ -1781,7 +1781,7 @@ impl ParameterQueryCapture {
         }
     }
 
-    fn record_value(
+    pub(super) fn record_value(
         &mut self,
         index: u32,
         value: clack_extensions::params::ParamValueQueryObservation,
@@ -1920,7 +1920,7 @@ impl std::fmt::Display for ParameterBitsText {
         }
     }
 }
-fn parameter_error_with_capture(
+pub(super) fn parameter_error_with_capture(
     error: AudioProcessorHostError,
     capture: Option<&ParameterQueryCapture>,
     index: Option<usize>,
@@ -1967,31 +1967,13 @@ pub(super) fn list_parameters_observed(
     }
     for index in 0..count {
         let mut buffer = ParamInfoBuffer::new();
-        let info = match capture.as_deref_mut() {
-            Some(capture) => {
-                capture.begin_row(index);
-                extension.get_info_observed(handle, index, &mut buffer, |info| {
-                    capture.record_info(index, info);
-                })
-            }
-            None => extension.get_info(handle, index, &mut buffer),
-        }
-        .ok_or_else(|| {
-            parameter_error_with_capture(
-                invalid("CLAP parameter metadata is missing"),
-                capture.as_deref(),
-                Some(index as usize),
-                None,
-            )
-        })?;
-        let name = std::str::from_utf8(info.name).map_err(|_| {
-            parameter_error_with_capture(
-                invalid("CLAP parameter name is not UTF-8"),
-                capture.as_deref(),
-                Some(index as usize),
-                None,
-            )
-        })?;
+        let (info, name) = super::clap_metadata::parameter_info_at(
+            handle,
+            &extension,
+            index,
+            &mut buffer,
+            capture.as_deref_mut(),
+        )?;
         parameters.push(ClapParameterDescriptor {
             id: info.id.get(),
             // Keep the original allocation/evaluation order before get_value.
@@ -1999,20 +1981,13 @@ pub(super) fn list_parameters_observed(
             min_value: info.min_value,
             max_value: info.max_value,
             default_value: info.default_value,
-            current_value: match capture.as_deref_mut() {
-                Some(capture) => extension.get_value_observed(handle, info.id, |value| {
-                    capture.record_value(index, value);
-                }),
-                None => extension.get_value(handle, info.id),
-            }
-            .ok_or_else(|| {
-                parameter_error_with_capture(
-                    invalid("CLAP parameter current value is unavailable"),
-                    capture.as_deref(),
-                    Some(index as usize),
-                    None,
-                )
-            })?,
+            current_value: super::clap_metadata::parameter_value_at(
+                handle,
+                &extension,
+                info.id,
+                index,
+                capture.as_deref_mut(),
+            )?,
             automatable: info.flags.contains(ParamInfoFlags::IS_AUTOMATABLE),
             stepped: info.flags.contains(ParamInfoFlags::IS_STEPPED),
             enumeration: info.flags.contains(ParamInfoFlags::IS_ENUM),
@@ -2050,79 +2025,18 @@ fn validate_parameters_observed(
     for (index, parameter) in parameters.iter().enumerate() {
         // Keep the original predicate and short-circuit order. Only a refusal
         // formats diagnostics; the descriptor is the already acquired snapshot.
-        let reason = if ClapId::from_raw(parameter.id).is_none() {
-            Some("reserved_id")
-        } else if !seen.insert(parameter.id) {
-            Some("duplicate_id")
-        } else if parameter.name.is_empty() {
-            Some("empty_name")
-        } else if parameter.name.len() > 256 {
-            Some("name_bytes_exceed_256")
-        } else if parameter.name.chars().any(char::is_control) {
-            Some("name_contains_control")
-        } else if !parameter.min_value.is_finite() {
-            Some("min_nonfinite")
-        } else if !parameter.max_value.is_finite() {
-            Some("max_nonfinite")
-        } else if !parameter.default_value.is_finite() {
-            Some("default_nonfinite")
-        } else if !parameter.current_value.is_finite() {
-            Some("current_nonfinite")
-        } else if parameter.min_value > parameter.max_value {
-            Some("reversed_range")
-        } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.default_value) {
-            Some("default_out_of_range")
-        } else if !(parameter.min_value..=parameter.max_value).contains(&parameter.current_value) {
-            Some("current_out_of_range")
-        } else if parameter.enumeration && !parameter.stepped {
-            Some("enum_not_stepped")
-        } else if parameter.stepped {
-            [
-                parameter.min_value,
-                parameter.max_value,
-                parameter.default_value,
-                parameter.current_value,
-            ]
-            .into_iter()
-            .enumerate()
-            .find_map(|(field, value)| {
-                // Preserve field order and fractional-before-precision checks.
-                if value.fract() != 0.0 {
-                    Some(
-                        [
-                            "stepped_min_fractional",
-                            "stepped_max_fractional",
-                            "stepped_default_fractional",
-                            "stepped_current_fractional",
-                        ][field],
-                    )
-                } else if value.abs() > 9_007_199_254_740_992.0 {
-                    Some(
-                        [
-                            "stepped_min_precision_limit",
-                            "stepped_max_precision_limit",
-                            "stepped_default_precision_limit",
-                            "stepped_current_precision_limit",
-                        ][field],
-                    )
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
+        let row = super::clap_metadata::ParameterRow::from_descriptor(parameter);
+        let duplicate = ClapId::from_raw(parameter.id).is_some() && !seen.insert(parameter.id);
+        let reason = super::clap_metadata::parameter_invalid_reason(row, duplicate);
         if let Some(reason) = reason {
             // ASCII only: never echo a plugin-provided name, reread a native
             // field, or normalize float values to construct this error.
-            return Err(parameter_error_with_capture(invalid(format!(
-                "CLAP parameter metadata is invalid or ambiguous: index={index} native_id={} reason={reason} min_bits={:016X} max_bits={:016X} default_bits={:016X} current_bits={:016X}",
-                parameter.id,
-                parameter.min_value.to_bits(),
-                parameter.max_value.to_bits(),
-                parameter.default_value.to_bits(),
-                parameter.current_value.to_bits(),
-            )), capture, Some(index), Some(parameter)));
+            return Err(parameter_error_with_capture(
+                super::clap_metadata::ParameterFailure::new(index, row, reason).error(),
+                capture,
+                Some(index),
+                Some(parameter),
+            ));
         }
     }
     Ok(())

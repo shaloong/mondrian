@@ -11,6 +11,7 @@ mod clap_discovery;
 mod clap_gui_owner;
 mod clap_gui_requests;
 mod clap_main_services;
+mod clap_metadata;
 mod clap_note_input_contract;
 mod clap_note_input_metadata;
 pub use clap_discovery::probe_clap_note_input_contract;

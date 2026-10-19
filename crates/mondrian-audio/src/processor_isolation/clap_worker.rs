@@ -2094,14 +2094,10 @@ fn same_clap_parameter_structure(
 ) -> bool {
     actual.len() == expected.len()
         && actual.iter().zip(expected).all(|(a, e)| {
-            a.id == e.id
-                && a.min_value == e.min_value
-                && a.max_value == e.max_value
-                && a.default_value == e.default_value
-                && a.automatable == e.automatable
-                && a.stepped == e.stepped
-                && a.enumeration == e.enumeration
-                && a.read_only == e.read_only
+            super::clap_metadata::same_parameter_structure(
+                super::clap_metadata::ParameterRow::from_descriptor(a),
+                super::clap_metadata::ParameterRow::from_descriptor(e),
+            )
         })
 }
 
