@@ -4,6 +4,8 @@ use super::*;
 
 fn nested_charge_sum(runtime: &AudioProgramRuntime) -> (usize, usize) {
     let cursors = preflight_cursors(runtime);
+    let runtimes = crate::runtime::native_author::charge_test_controls::subtree_footprints(runtime);
+    assert_eq!(runtimes.len(), cursors.sessions.len());
     let mut parameters = 0_usize;
     let mut fixed = 0_usize;
     for cursor in &cursors.sessions {
@@ -12,8 +14,23 @@ fn nested_charge_sum(runtime: &AudioProgramRuntime) -> (usize, usize) {
             .unwrap()
             .current_resource_footprint()
             .unwrap();
+        let matching: Vec<_> = runtimes
+            .iter()
+            .filter(|(identity, _, _)| *identity == cursor.identity)
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "one inline layout per actual materialized Runtime"
+        );
+        let inline = matching[0].2;
+        assert!(inline > 0);
         parameters = parameters.checked_add(weights.parameter_event_bytes).unwrap();
-        fixed = fixed.checked_add(weights.fixed_resident_bytes).unwrap();
+        fixed = fixed
+            .checked_add(weights.fixed_resident_bytes)
+            .unwrap()
+            .checked_add(inline)
+            .unwrap();
     }
     (parameters, fixed)
 }
@@ -28,7 +45,7 @@ fn nested_charge_assert_aggregate(runtime: &AudioProgramRuntime, window_bytes: u
     assert_eq!(
         aggregate.fixed_resident_bytes,
         local_fixed.checked_add(window_bytes).unwrap(),
-        "same local charge adjustment applies to fixed residency, retaining source windows"
+        "local Session charges and independent Runtime inline slots retain exact source windows"
     );
 }
 
@@ -202,14 +219,15 @@ fn native_author_nested_repeated_preserved_charge_matches_materialized_locals() 
     );
     assert_eq!(initial_subtrees.len(), 3);
     let initial_root = fixture.inner.runtime.resource_root_identity();
-    let child_windows: Vec<_> = initial_subtrees.iter().filter(|(identity, _)| *identity != initial_root)
-        .map(|(identity, cached)| {
+    let child_windows: Vec<_> = initial_subtrees.iter().filter(|(identity, _, _)| *identity != initial_root)
+        .map(|(identity, cached, inline)| {
             let local = fixture.inner.runtime.find_resource_session(*identity).unwrap()
                 .current_resource_footprint().unwrap();
             assert_eq!(cached.parameter_event_bytes, local.parameter_event_bytes);
-            let windows = cached.fixed_resident_bytes.checked_sub(local.fixed_resident_bytes).unwrap();
+            let windows = cached.fixed_resident_bytes.checked_sub(local.fixed_resident_bytes).unwrap()
+                .checked_sub(*inline).unwrap();
             assert_eq!(windows, cached.media_window_bytes.checked_add(cached.nested_window_bytes).unwrap(),
-                "this child has no grandchildren, so its initial fixed residue is its actual source window");
+                "this child has no grandchildren; after its Session and inline slot, only its source window remains");
             (identity.session_id, windows)
         }).collect();
     assert_eq!(child_windows.len(), 2);
@@ -245,14 +263,14 @@ fn native_author_nested_repeated_preserved_charge_matches_materialized_locals() 
         for cursor in &after.sessions {
             let matching: Vec<_> = current_subtrees
                 .iter()
-                .filter(|(identity, _)| *identity == cursor.identity)
+                .filter(|(identity, _, _)| *identity == cursor.identity)
                 .collect();
             assert_eq!(
                 matching.len(),
                 1,
                 "one cached subtree for each actual materialized Session"
             );
-            let (identity, cached) = matching[0];
+            let (identity, cached, inline) = matching[0];
             if *identity == fixture.inner.runtime.resource_root_identity() {
                 assert_eq!(
                     *cached,
@@ -277,8 +295,9 @@ fn native_author_nested_repeated_preserved_charge_matches_materialized_locals() 
                     "child cached parameter component changes with its own scratch/charged owner"
                 );
                 assert_eq!(cached.fixed_resident_bytes,
-                    local.fixed_resident_bytes.checked_add(matching_windows[0].1).unwrap(),
-                    "child fixed cache changes by the same component while retaining its initial window charge");
+                    local.fixed_resident_bytes.checked_add(*inline).unwrap()
+                        .checked_add(matching_windows[0].1).unwrap(),
+                    "child fixed cache retains its independent inline slot and initial window charge");
             }
         }
         if start == 3 {
