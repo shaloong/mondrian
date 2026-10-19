@@ -31,6 +31,29 @@ impl NativeAudioReprepare {
     }
 }
 
+/// Read-only preparation facts, not an author/Source/native installation handle.
+/// All actual replacement owners remain private to the original held Runtime.
+#[derive(Debug)]
+pub struct NativeAudioRepreparePlanFacts {
+    identity: crate::AudioSessionCursorIdentity,
+    schedule: crate::PreparedAudioScheduleSummary,
+    resources: crate::AudioSessionResourceFootprint,
+}
+impl NativeAudioRepreparePlanFacts {
+    /// Actual newly allocated empty/unentered Session identity; no DSP permission.
+    pub const fn identity(&self) -> crate::AudioSessionCursorIdentity {
+        self.identity
+    }
+    /// Canonical schedule/PDC facts computed without creating processors.
+    pub const fn schedule(&self) -> crate::PreparedAudioScheduleSummary {
+        self.schedule
+    }
+    /// Original Session policy model for the private candidate, not whole-heap peak.
+    pub const fn resources(&self) -> crate::AudioSessionResourceFootprint {
+        self.resources
+    }
+}
+
 /// A refused capture leaves the original exact Session blocked.
 #[derive(Debug, thiserror::Error)]
 pub enum NativeAudioReprepareError {
@@ -49,6 +72,9 @@ pub enum NativeAudioReprepareError {
     /// A canonical prepared schedule could not identify this occurrence.
     #[error(transparent)]
     Compile(#[from] crate::AudioCompileError),
+    /// Original empty Session allocator refused the candidate schedule.
+    #[error(transparent)]
+    Execution(#[from] crate::AudioExecutionError),
     /// Frozen root resource policy refused the actual capture overlap.
     #[error(transparent)]
     Resources(#[from] AudioRuntimeBuildError),
@@ -67,6 +93,8 @@ pub enum NativeAudioReprepareError {
 enum CapturePhase {
     Servicing,
     Captured,
+    Preparing,
+    Prepared,
     Refused,
     Failed,
 }
@@ -90,11 +118,61 @@ pub(super) struct NativeReprepareAttempt {
     // this held charge even on refusal; no handle Drop can release it.
     held_fixed_bytes: usize,
     control_grant: usize,
+    prepared_factory: Option<Arc<dyn crate::AudioProcessorFactory>>,
+    prepared_plan: Option<Arc<PreparedAudioPlan>>,
+    prepared_session: Option<crate::render::PreparedAudioSessionStorage>,
+    destination: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    // Last: actual candidate/Factory/Plan/storage owners retire before credit.
+    plan_fee: Option<super::native_author_logical_fees::LogicalPlanFee>,
 }
 
 fn add(a: usize, b: usize) -> Result<usize, NativeAudioReprepareError> {
     a.checked_add(b)
         .ok_or_else(|| AudioRuntimeBuildError::InvalidResourceReplacement.into())
+}
+
+// The original Root grant/footprint (including H from the existing logical fee
+// scope) is the only authority. This pure preflight runs before any new Factory,
+// Plan, empty Session or fee-scope allocation; it cannot publish partial charges.
+fn check_prepare_overlap(
+    current: AudioRuntimeResourceFootprint,
+    held_logical: usize,
+    grant: AudioRuntimeResourceGrant,
+    factory_bound: usize,
+    session_bound: crate::AudioSessionResourceFootprint,
+) -> Result<usize, AudioRuntimeBuildError> {
+    let overflow = || AudioRuntimeBuildError::InvalidResourceReplacement;
+    let fixed = current
+        .fixed_resident_bytes
+        .checked_add(factory_bound)
+        .and_then(|bytes| bytes.checked_add(session_bound.fixed_resident_bytes))
+        .ok_or_else(overflow)?;
+    let logical = current
+        .prepared_logical_bytes
+        .checked_add(held_logical)
+        .and_then(|bytes| bytes.checked_add(session_bound.prepared_logical_bytes))
+        .ok_or_else(overflow)?;
+    for (category, required, granted) in [
+        (
+            AudioRuntimeResourceCategory::FixedResidentBytes,
+            fixed,
+            grant.max_fixed_resident_bytes,
+        ),
+        (
+            AudioRuntimeResourceCategory::PreparedLogicalBytes,
+            logical,
+            grant.max_prepared_logical_bytes,
+        ),
+    ] {
+        if required > granted {
+            return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                category,
+                required,
+                granted,
+            });
+        }
+    }
+    Ok(fixed)
 }
 
 impl AudioProgramRuntime {
@@ -196,6 +274,11 @@ impl AudioProgramRuntime {
             phase: CapturePhase::Servicing,
             held_fixed_bytes: reserved,
             control_grant,
+            prepared_factory: None,
+            prepared_plan: None,
+            prepared_session: None,
+            destination: None,
+            plan_fee: None,
         }));
         // This owner is installed BEFORE the first potentially destructive SDK
         // operation. Every error thereafter retains the actual attempt/charge.
@@ -294,6 +377,267 @@ impl AudioProgramRuntime {
         })
     }
 
+    /// Prepare a new execution-only Factory, canonical PDC schedule and empty
+    /// Session for this actual retained capture. No create, seed RPC, Enter,
+    /// author mutation or Source publication occurs. The current ticket remains
+    /// HOLD. A wide original PDC contract may conservatively exceed the Root
+    /// grant; no default budget is enlarged to admit this operation.
+    ///
+    /// Known codec/output/Factory owners and the original Session policy model
+    /// are reserved before allocation. Path/Arc prefixes, allocator internals,
+    /// cold error Strings and SDK storage remain outside a complete heap claim.
+    pub fn prepare_native_reprepare_plan(
+        &mut self,
+        operation: &NativeAudioReprepare,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<NativeAudioRepreparePlanFacts, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        self.native_reprepare_configuration(operation)?;
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        if attempt.phase != CapturePhase::Captured || attempt.prepared_factory.is_some() {
+            return Err(Error::Admission(
+                "restart Plan preparation already attempted",
+            ));
+        }
+        if !self
+            .native_installation
+            .verifier
+            .as_ref()
+            .is_some_and(|old| old.same_source(&destination))
+        {
+            return Err(Error::Admission(
+                "restart destination belongs to another Source",
+            ));
+        }
+        let selection = &attempt.selection;
+        self.session.validate_reprepare_capture(selection, cancellation)?;
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        let candidate = attempt.candidate.as_ref().unwrap();
+        let identity = crate::NativeConfigurationSeedTicket::from_candidate(candidate);
+        let index = attempt.selection.index;
+        let old_plan = self.session.shared_resource_plan();
+        let factory_bound = old_plan.schedule.processors[index]
+            .factory
+            .native_reprepare_factory_bound(identity, candidate.configuration.len())
+            .ok_or(Error::Admission(
+                "execution-only restart Factory bound is unavailable",
+            ))?;
+        let session_bound = old_plan
+            .native_reprepare_session_bound()
+            .map_err(AudioRuntimeBuildError::from)?;
+        // The existing lazy fee scope may allocate one AtomicUsize Arc payload;
+        // include that known payload before calling the original fee helper.
+        // Its std Arc prefix remains an explicit existing coverage boundary.
+        let fee_scope_bytes = if self.native_held_plan_fees.is_none() {
+            std::mem::size_of::<std::sync::atomic::AtomicUsize>()
+        } else {
+            0
+        };
+        let factory_and_fee_bound = add(factory_bound, fee_scope_bytes)?;
+        let fixed_reservation = add(factory_and_fee_bound, session_bound.fixed_resident_bytes)?;
+        let before_fixed = self.resource_footprint.fixed_resident_bytes;
+        let reserved_fixed = check_prepare_overlap(
+            self.resource_footprint,
+            self.held_native_plan_logical_bytes(),
+            self.resource_grant,
+            factory_and_fee_bound,
+            session_bound,
+        )?;
+        let old_logical = old_plan
+            .session_resource_footprint()
+            .map_err(AudioRuntimeBuildError::from)?
+            .prepared_logical_bytes;
+        let requested_logical = session_bound.prepared_logical_bytes;
+        let mut next = self.resource_footprint;
+        next.prepared_logical_bytes = next
+            .prepared_logical_bytes
+            .checked_sub(old_logical)
+            .and_then(|bytes| bytes.checked_add(requested_logical))
+            .ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        if self.native_author_installation_serial()?
+            != self.native_reprepare.attempt.as_ref().unwrap().serial
+        {
+            return Err(Error::Admission("Source changed before restart allocation"));
+        }
+        let next_held_fixed = add(
+            self.native_reprepare.attempt.as_ref().unwrap().held_fixed_bytes,
+            fixed_reservation,
+        )?;
+        // Do NOT call reserve_session: this is another empty Session, not another
+        // Runtime occurrence/inline state slot. The original Root remains sole
+        // authority; conservative reservations survive failed preparation.
+        self.resource_footprint.fixed_resident_bytes = reserved_fixed;
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        attempt.held_fixed_bytes = next_held_fixed;
+        attempt.phase = CapturePhase::Preparing;
+        attempt.destination = Some(destination);
+        let fee = self.prepare_native_plan_logical_fee(old_logical, requested_logical, next)?;
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+        attempt.plan_fee = Some(fee);
+        attempt.plan_fee.as_mut().unwrap().enroll()?;
+        let mut factory_peak = 0;
+        let result = {
+            let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+            let configuration = &attempt.candidate.as_ref().unwrap().configuration;
+            self.session.resource_plan().schedule.processors[index]
+                .factory
+                .reprepare_factory(identity, configuration, &mut |bytes| {
+                    factory_peak = factory_peak.max(bytes)
+                })
+        };
+        // Adopt a formed Factory BEFORE cap/cancel/Source checks. On Err its
+        // temporaries have already reported their peak; credit is not returned.
+        let factory_result = match result {
+            Ok(Some(factory)) => {
+                self.native_reprepare.attempt.as_mut().unwrap().prepared_factory = Some(factory);
+                Ok(())
+            }
+            Ok(None) => Err(Error::Admission("execution-only restart Factory refused")),
+            Err(error) => Err(Error::Processor(error)),
+        };
+        let actual_fixed = factory_peak
+            .checked_add(fee_scope_bytes)
+            .and_then(|bytes| bytes.checked_add(session_bound.fixed_resident_bytes))
+            .and_then(|bytes| bytes.checked_add(before_fixed))
+            .unwrap_or(usize::MAX);
+        if actual_fixed > self.resource_footprint.fixed_resident_bytes {
+            let extra = actual_fixed - self.resource_footprint.fixed_resident_bytes;
+            self.resource_footprint.fixed_resident_bytes = actual_fixed;
+            let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+            attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+        }
+        if let Err(error) = factory_result {
+            self.native_reprepare.attempt.as_mut().unwrap().phase = CapturePhase::Failed;
+            return Err(error);
+        }
+        self.check_resource_ceiling(
+            AudioRuntimeResourceCategory::FixedResidentBytes,
+            self.resource_footprint.fixed_resident_bytes,
+        )?;
+        if factory_peak > factory_bound {
+            return Err(Error::Admission(
+                "actual restart Factory peak exceeded reservation",
+            ));
+        }
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        if self.native_author_installation_serial()?
+            != self.native_reprepare.attempt.as_ref().unwrap().serial
+        {
+            return Err(Error::Admission(
+                "Source changed during restart Factory preparation",
+            ));
+        }
+        let factory = Arc::clone(
+            self.native_reprepare
+                .attempt
+                .as_ref()
+                .unwrap()
+                .prepared_factory
+                .as_ref()
+                .unwrap(),
+        );
+        let result = self.session.resource_plan().prepare_native_reprepare_plan(index, factory);
+        let plan = match result {
+            Ok(plan) => Arc::new(plan),
+            Err(error) => return Err(Error::Compile(error)),
+        };
+        self.native_reprepare.attempt.as_mut().unwrap().prepared_plan = Some(plan);
+        let plan = self.native_reprepare.attempt.as_ref().unwrap().prepared_plan.as_ref().unwrap();
+        let resources = plan.session_resource_footprint().map_err(AudioRuntimeBuildError::from)?;
+        // An unexpected actual model excess is retained in the original charge
+        // before refusal; no successful bound is inferred from a failed model.
+        if resources.prepared_logical_bytes > requested_logical {
+            self.resource_footprint.prepared_logical_bytes = self
+                .resource_footprint
+                .prepared_logical_bytes
+                .saturating_add(resources.prepared_logical_bytes - requested_logical);
+            return Err(Error::Admission(
+                "actual restart Plan exceeded logical reservation",
+            ));
+        }
+        if resources.fixed_resident_bytes > session_bound.fixed_resident_bytes {
+            let extra = resources.fixed_resident_bytes - session_bound.fixed_resident_bytes;
+            self.resource_footprint.fixed_resident_bytes =
+                self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+            let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+            attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+            return Err(Error::Admission(
+                "actual restart Session exceeded fixed reservation",
+            ));
+        }
+        // The real Plan is already retained. Refine the SAME enrolled fee to
+        // its checked actual policy amount before a future replacement can use
+        // the original retirement equation; no owner or fee is dropped here.
+        self.native_reprepare
+            .attempt
+            .as_mut()
+            .unwrap()
+            .plan_fee
+            .as_mut()
+            .unwrap()
+            .shrink_prepared_to(resources.prepared_logical_bytes)?;
+        let plan = self.native_reprepare.attempt.as_ref().unwrap().prepared_plan.as_ref().unwrap();
+        let storage = AudioRenderSession::allocate_storage(Arc::clone(plan))?;
+        self.native_reprepare.attempt.as_mut().unwrap().prepared_session = Some(storage);
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        let storage = attempt.prepared_session.as_ref().unwrap();
+        if !storage.is_empty_unentered() {
+            return Err(Error::Admission(
+                "restart storage is not empty and unentered",
+            ));
+        }
+        let facts = NativeAudioRepreparePlanFacts {
+            identity: storage.identity(),
+            schedule: storage.plan().schedule_summary(),
+            resources,
+        };
+        let mut actual_storage = 0_usize;
+        let observed = storage.visit_storage(&mut |owner| {
+            actual_storage = actual_storage
+                .checked_add(owner.layout().size())
+                .ok_or(crate::NativeHostLedgerError::ExtentOverflow)?;
+            Ok(())
+        });
+        let actual_storage = if observed.is_ok() {
+            actual_storage
+        } else {
+            usize::MAX
+        };
+        if actual_storage > session_bound.fixed_resident_bytes {
+            let extra = actual_storage - session_bound.fixed_resident_bytes;
+            self.resource_footprint.fixed_resident_bytes =
+                self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+            let attempt = self.native_reprepare.attempt.as_mut().unwrap();
+            attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+            return Err(Error::Admission(
+                "actual empty Session storage exceeded reservation",
+            ));
+        }
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
+        self.session.validate_reprepare_capture(&attempt.selection, cancellation)?;
+        if self.native_author_installation_serial()? != attempt.serial
+            || self.session.pending_reprepare_ticket() != Some(attempt.ticket)
+        {
+            return Err(Error::Admission(
+                "restart Source or ticket changed during preparation",
+            ));
+        }
+        self.native_reprepare.attempt.as_mut().unwrap().phase = CapturePhase::Prepared;
+        Ok(facts)
+    }
+
     /// Borrow only the current Runtime's retained captured bytes. No allocation,
     /// native call, author permission or physical-output evidence is granted.
     pub fn native_reprepare_configuration<'a>(
@@ -308,7 +652,13 @@ impl AudioProgramRuntime {
             .ok_or(Error::Admission("no retained restart capture"))?;
         if attempt.key != operation.key
             || operation.root != self.session.native_owner_identity()
-            || attempt.phase != CapturePhase::Captured
+            || !matches!(
+                attempt.phase,
+                CapturePhase::Captured
+                    | CapturePhase::Preparing
+                    | CapturePhase::Prepared
+                    | CapturePhase::Failed
+            )
             || self.session.pending_reprepare_ticket() != Some(attempt.ticket)
             || self.native_author_installation_serial()? != attempt.serial
         {
@@ -332,6 +682,72 @@ mod inline_admission_tests {
             prepared_logical_bytes: 11,
             ..AudioSessionResourceFootprint::default()
         }
+    }
+
+    #[test]
+    fn restart_prepare_overlap_admits_exact_root_policy_and_refuses_one_byte_or_overflow() {
+        let current = AudioRuntimeResourceFootprint {
+            runtime_occurrences: 1,
+            fixed_resident_bytes: 17,
+            prepared_logical_bytes: 23,
+            ..AudioRuntimeResourceFootprint::default()
+        };
+        let candidate = crate::AudioSessionResourceFootprint {
+            fixed_resident_bytes: 31,
+            prepared_logical_bytes: 37,
+            ..crate::AudioSessionResourceFootprint::default()
+        };
+        let held = 5;
+        let factory = 41;
+        let fixed = current.fixed_resident_bytes + factory + candidate.fixed_resident_bytes;
+        let logical = current.prepared_logical_bytes + held + candidate.prepared_logical_bytes;
+        assert_eq!(
+            check_prepare_overlap(
+                current,
+                held,
+                AudioRuntimeResourceGrant::new(1, fixed, logical),
+                factory,
+                candidate
+            )
+            .unwrap(),
+            fixed
+        );
+        assert!(
+            matches!(check_prepare_overlap(current, held, AudioRuntimeResourceGrant::new(1, fixed - 1, logical), factory, candidate),
+            Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded { category: AudioRuntimeResourceCategory::FixedResidentBytes, required, granted }) if required == fixed && granted == fixed - 1)
+        );
+        assert!(
+            matches!(check_prepare_overlap(current, held, AudioRuntimeResourceGrant::new(1, fixed, logical - 1), factory, candidate),
+            Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded { category: AudioRuntimeResourceCategory::PreparedLogicalBytes, required, granted }) if required == logical && granted == logical - 1)
+        );
+        assert!(matches!(
+            check_prepare_overlap(
+                current,
+                held,
+                AudioRuntimeResourceGrant::new(1, usize::MAX, usize::MAX),
+                usize::MAX,
+                candidate
+            ),
+            Err(AudioRuntimeBuildError::InvalidResourceReplacement)
+        ));
+        let mut overflowing = current;
+        overflowing.prepared_logical_bytes = usize::MAX;
+        assert!(matches!(
+            check_prepare_overlap(
+                overflowing,
+                held,
+                AudioRuntimeResourceGrant::new(1, usize::MAX, usize::MAX),
+                factory,
+                candidate
+            ),
+            Err(AudioRuntimeBuildError::InvalidResourceReplacement)
+        ));
+        assert_eq!(current.runtime_occurrences, 1);
+        assert_eq!(current.fixed_resident_bytes, 17);
+        assert_eq!(current.prepared_logical_bytes, 23);
+        assert_eq!(candidate.fixed_resident_bytes, 31);
+        // This is the production pure admission seam, not a native refusal or
+        // allocator-peak test. It creates no candidate, fee or Runtime owner.
     }
 
     #[test]

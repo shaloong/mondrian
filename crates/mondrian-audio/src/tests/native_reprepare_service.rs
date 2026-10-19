@@ -38,6 +38,30 @@ fn path(name: &str) -> PathBuf {
 #[test]
 #[ignore = "current production helper and owned CLAP mode7; actual Runtime/Source retained capture, not recovery"]
 fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
+    retained_restart_control(Preparation::CaptureOnly);
+}
+
+#[test]
+#[ignore = "current production helper and owned CLAP mode7; execution-only Factory/PDC/empty Session preparation, not recovery"]
+fn installed_clap_runtime_restart_prepares_pdc_without_publication_or_entry() {
+    retained_restart_control(Preparation::Ready);
+}
+
+#[test]
+#[ignore = "current production helper and owned CLAP mode7; rejected PDC candidate must preserve original held Runtime"]
+fn installed_clap_runtime_restart_pdc_refusal_keeps_capture_and_old_source_held() {
+    retained_restart_control(Preparation::RefusePdc);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Preparation {
+    CaptureOnly,
+    Ready,
+    RefusePdc,
+}
+
+fn retained_restart_control(preparation: Preparation) {
+    let prepare = preparation != Preparation::CaptureOnly;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, WaitForSingleObject,
@@ -55,7 +79,11 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
         max_block_frames: 4,
         processing_mode: AudioProcessingMode::Offline,
         processor_session_scratch_budget_bytes: 1024 * 1024,
-        public_output_lookahead_budget_frames: 1024,
+        public_output_lookahead_budget_frames: if preparation == Preparation::RefusePdc {
+            3
+        } else {
+            1024
+        },
         compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
     let mut state = vec![7];
@@ -292,9 +320,104 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
             runtime.service_native_reprepare(ticket, &cancellation),
             Err(NativeAudioReprepareError::Admission(_))
         ));
+        let retained_footprint = if prepare {
+            let canceled = ExecutionCancellationToken::new();
+            canceled.cancel();
+            assert!(matches!(
+                runtime.prepare_native_reprepare_plan(&operation, verifier.clone(), &canceled),
+                Err(NativeAudioReprepareError::Cancelled)
+            ));
+            let unrelated = AudioOwnerInstallationSource::new();
+            let (_, wrong_destination) = unrelated.register().unwrap();
+            assert!(matches!(
+                runtime.prepare_native_reprepare_plan(&operation, wrong_destination, &cancellation),
+                Err(NativeAudioReprepareError::Admission(_))
+            ));
+            assert_eq!(runtime.resource_footprint(), captured_footprint);
+            assert_eq!(cursors(&runtime), held);
+            let planned =
+                runtime.prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation);
+            if preparation == Preparation::RefusePdc {
+                assert!(matches!(
+                    planned,
+                    Err(NativeAudioReprepareError::Compile(
+                        AudioCompileError::PublicOutputLookaheadBudgetExceeded {
+                            required_frames: 7,
+                            budget_frames: 3
+                        }
+                    ))
+                ));
+            } else {
+                let facts = planned.expect(
+                    "actual retained capture must prepare the canonical PDC and empty Session",
+                );
+                assert_ne!(
+                    facts.identity().prepared_plan_id,
+                    held.session.unwrap().identity.prepared_plan_id
+                );
+                assert_ne!(
+                    facts.identity().session_id,
+                    held.session.unwrap().identity.session_id
+                );
+                assert_eq!(facts.schedule().public_output_lookahead_frames, 7);
+                assert_eq!(facts.schedule().processor_occurrence_count, 1);
+                assert_eq!(
+                    facts.schedule().processor_session_scratch_bytes,
+                    processor_session_bytes
+                );
+                assert_eq!(facts.schedule().sidechain_binding_count, 1);
+                assert!(
+                    facts.resources().compensation_delay_bytes
+                        <= render.compensation_delay_scratch_budget_bytes
+                );
+                assert_eq!(
+                    facts.resources().processor_session_bytes,
+                    processor_session_bytes
+                );
+            }
+            assert_eq!(
+                runtime.native_reprepare_configuration(&operation).unwrap(),
+                expected
+            );
+            assert_eq!(runtime.native_owner_lease(address).unwrap(), lease);
+            assert_eq!(runtime.observe_native_owner_object(lease).unwrap(), object);
+            verifier.validate(&claim).unwrap();
+            assert_eq!(
+                source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            assert_eq!(
+                cursors(&runtime),
+                held,
+                "prepare must not reset/Enter the installed Session"
+            );
+            let prepared = runtime.resource_footprint();
+            assert!(prepared.fixed_resident_bytes > captured_footprint.fixed_resident_bytes);
+            assert!(prepared.fixed_resident_bytes <= grant.max_fixed_resident_bytes);
+            assert_eq!(
+                prepared.runtime_occurrences,
+                captured_footprint.runtime_occurrences
+            );
+            assert_eq!(
+                prepared.processor_session_bytes,
+                captured_footprint.processor_session_bytes
+            );
+            assert_eq!(
+                prepared.compensation_delay_bytes,
+                captured_footprint.compensation_delay_bytes
+            );
+            assert!(matches!(
+                runtime.prepare_native_reprepare_plan(&operation, verifier.clone(), &cancellation),
+                Err(NativeAudioReprepareError::Admission(_))
+            ));
+            assert_eq!(runtime.resource_footprint(), prepared);
+            prepared
+        } else {
+            captured_footprint
+        };
         drop(operation);
-        // Handle Drop cannot release either parent candidate or child-held fee.
-        assert_eq!(runtime.resource_footprint(), captured_footprint);
+        // Handle Drop cannot release parent candidate/preparation or child fees.
+        assert_eq!(runtime.resource_footprint(), retained_footprint);
         assert_eq!(
             runtime.render_into(
                 AudioRenderRequest { start_sample: 8, frames: 4 },
@@ -320,9 +443,14 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
     let settled = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
     let mut exit = 0;
     let queried = unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut exit) };
+    let case = match preparation {
+        Preparation::CaptureOnly => "runtime-retained-clap-capture-only",
+        Preparation::Ready => "runtime-retained-clap-execution-prepare",
+        Preparation::RefusePdc => "runtime-retained-clap-pdc-refusal",
+    };
     println!(
         "{}",
-        serde_json::json!({"case":"runtime-retained-clap-capture-only", "native_pid":pid,
+        serde_json::json!({"case":case, "native_pid":pid,
         "alive_before_drop":alive,"post_drop_wait_status":settled,"exit_query_succeeded":queried!=0,"exit_code":exit,
         "media_quiescence_qualified":false,"canonical_author_or_plan_installed":false})
     );

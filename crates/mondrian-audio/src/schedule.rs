@@ -428,6 +428,114 @@ impl PreparedAudioPlan {
         })
     }
 
+    // Re-run the canonical schedule/PDC solver over this sole unchanged Program.
+    // The local resolver borrows existing immutable Factories, replacing exactly
+    // one occurrence; it never touches a catalog, native process or author state.
+    pub(crate) fn prepare_native_reprepare_plan(
+        &self,
+        index: usize,
+        replacement: Arc<dyn crate::AudioProcessorFactory>,
+    ) -> Result<Self, AudioCompileError> {
+        struct Retained<'a> {
+            old: &'a PreparedAudioSchedule,
+            selected: usize,
+            replacement: Arc<dyn crate::AudioProcessorFactory>,
+        }
+        impl AudioProcessorResolver for Retained<'_> {
+            fn prepare(
+                &self,
+                request: crate::AudioProcessorPrepareRequest<'_>,
+            ) -> Result<Arc<dyn crate::AudioProcessorFactory>, crate::AudioProcessorHostError>
+            {
+                let (index, old) = self
+                    .old
+                    .processors
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.occurrence == request.occurrence())
+                    .ok_or_else(|| {
+                        crate::AudioProcessorHostError::InvalidContract(
+                            "restart occurrence is absent from the installed schedule".to_owned(),
+                        )
+                    })?;
+                if index == self.selected {
+                    Ok(Arc::clone(&self.replacement))
+                } else {
+                    Ok(old.factory.shared_factory())
+                }
+            }
+        }
+        if index >= self.schedule.processors.len() || !self.schedule.notes.is_empty() {
+            return Err(AudioCompileError::InvalidPreparedGraph(
+                "restart Plan is outside the fixed root domain".to_owned(),
+            ));
+        }
+        let mut dependencies = AudioPreparationDependencies::default();
+        for contribution in &self.schedule.contributions {
+            let layout = contribution.channel_mixer.source_layout();
+            dependencies.insert_source(
+                contribution.semantic.edit_id,
+                layout,
+                resolve_channel_mapping(
+                    &contribution.semantic.channel_mapping,
+                    layout,
+                    self.contract.channel_layout,
+                )?,
+                contribution.source_algorithmic_latency_frames,
+                contribution.source_requires_state_entry,
+            )?;
+        }
+        let next = Self::prepare_with_dependencies(
+            Arc::clone(&self.program),
+            self.contract,
+            self.kernel_backend,
+            &dependencies,
+            &Retained { old: &self.schedule, selected: index, replacement },
+            None,
+        )?;
+        for (slot, (old, prepared)) in
+            self.schedule.processors.iter().zip(&next.schedule.processors).enumerate()
+        {
+            if old.occurrence != prepared.occurrence
+                || old.parameter_ids != prepared.parameter_ids
+                || old.factory.auxiliary_inputs() != prepared.factory.auxiliary_inputs()
+                || old.factory.auxiliary_outputs() != prepared.factory.auxiliary_outputs()
+                || old.factory.note_inputs() != prepared.factory.note_inputs()
+                || (slot != index && old.factory.contract() != prepared.factory.contract())
+            {
+                return Err(AudioCompileError::InvalidPreparedGraph(
+                    "restart changed fixed processor schema or ports".to_owned(),
+                ));
+            }
+        }
+        if next.schedule.processors.len() != self.schedule.processors.len() {
+            return Err(AudioCompileError::InvalidPreparedGraph(
+                "restart changed processor topology".to_owned(),
+            ));
+        }
+        Ok(next)
+    }
+
+    // A policy bound before PDC allocation: original node topology bounds all
+    // liveness slots; the original Render Contract bounds the delay-line bytes.
+    // This can conservatively refuse a wide contract under a smaller Root grant.
+    pub(crate) fn native_reprepare_session_bound(
+        &self,
+    ) -> Result<AudioSessionResourceFootprint, AudioResourceFootprintError> {
+        let mut summary = self.schedule.summary;
+        summary.scratch_slot_count = summary.node_count;
+        summary.compensation_delay_samples =
+            self.contract.compensation_delay_scratch_budget_bytes / std::mem::size_of::<f32>();
+        let mut bound = session_resource_footprint(
+            self.contract,
+            summary,
+            self.schedule.output_metadata_bytes()?,
+        )?;
+        bound.prepared_logical_bytes = Self::requested_base_logical_bytes(&self.program)
+            .map_err(|_| AudioResourceFootprintError::ExtentOverflow)?;
+        Ok(bound)
+    }
+
     /// Read immutable author targets only; no allocation or native query.
     /// Include VST even without Some so its cold refusal precedes dependency IO.
     /// Other formats keep their original refusal family.

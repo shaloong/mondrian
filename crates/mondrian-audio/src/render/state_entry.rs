@@ -16,6 +16,11 @@ impl PreparedAudioSessionStorage {
     ) -> Result<(), AudioProcessorFactoryStorageError> {
         self.session.visit_state_entry_storage(visitor)
     }
+    pub(crate) fn is_empty_unentered(&self) -> bool {
+        self.session.processor_host.state_entry_destination_empty()
+            && self.session.pending_reprepare_ticket.is_none()
+            && matches!(self.session.continuity, SessionContinuity::Unentered)
+    }
     pub(crate) fn validate_transfer(
         &self,
         current: &AudioRenderSession,
@@ -43,6 +48,14 @@ impl PreparedAudioSessionStorage {
 }
 
 impl AudioRenderSession {
+    pub(crate) fn validate_reprepare_capture(
+        &mut self,
+        selection: &crate::processor_host::native_reprepare::ReprepareSelection,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioReprepareError> {
+        self.processor_host
+            .validate_reprepare_capture(&self.plan.schedule, selection, cancellation)
+    }
     pub(crate) fn visit_state_entry_storage<'a>(
         &'a self,
         visitor: &mut dyn FnMut(Storage<'a>) -> Result<(), AudioProcessorFactoryStorageError>,

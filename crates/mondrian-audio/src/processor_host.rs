@@ -206,6 +206,33 @@ impl PreparedProcessorFactoryBinding {
         })
     }
 
+    pub(crate) fn shared_factory(&self) -> Arc<dyn AudioProcessorFactory> {
+        Arc::clone(&self.factory)
+    }
+
+    pub(crate) fn native_reprepare_factory_bound(
+        &self,
+        identity: crate::NativeConfigurationSeedTicket,
+        bytes: usize,
+    ) -> Option<usize> {
+        catch_unwind(AssertUnwindSafe(|| {
+            self.factory.native_reprepare_factory_bound(identity, bytes)
+        }))
+        .ok()
+        .flatten()
+    }
+
+    pub(crate) fn reprepare_factory(
+        &self,
+        identity: crate::NativeConfigurationSeedTicket,
+        bytes: &[u8],
+        report_peak: &mut dyn FnMut(usize),
+    ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
+        isolate_adapter_call("execution-only restart Factory", || {
+            self.factory.with_native_reprepare_configuration(identity, bytes, report_peak)
+        })
+    }
+
     fn create(
         &self,
         native_child_settlement: Option<&mondrian_core::NativeChildSettlementRegistrar>,
@@ -1380,6 +1407,80 @@ impl PreparedProcessorHost {
             }
         }
         failure.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn validate_reprepare_capture(
+        &mut self,
+        schedule: &PreparedAudioSchedule,
+        selection: &native_reprepare::ReprepareSelection,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioReprepareError> {
+        use crate::native_runtime_owner::NativeHostedBinding;
+        use crate::NativeAudioReprepareError as Error;
+        if self.instances.len() != schedule.processors.len()
+            || selection.index >= self.instances.len()
+        {
+            return Err(Error::Admission("restart Hosted shape changed"));
+        }
+        for (index, (instance, prepared)) in
+            self.instances.iter_mut().zip(&schedule.processors).enumerate()
+        {
+            if cancellation.is_canceled() {
+                return Err(Error::Cancelled);
+            }
+            if instance.native_author_outstanding.is_some()
+                || instance.native_editor_detached.is_some()
+                || instance.native_editor_attachment.is_some()
+                || instance.notes.is_some()
+            {
+                return Err(Error::Admission("restart author or editor work is pending"));
+            }
+            let NativeHostedBinding::Installed { lease, object } = instance.native_binding else {
+                if index != selection.index
+                    && !instance.processor.native_observations_supported()
+                    && prepared.factory.native_child_settlement_requirement()
+                        == mondrian_core::NativeChildSettlementRequirement::NotApplicable
+                    && isolate_adapter_call("restart peer recheck", || {
+                        instance.processor.preflight_reprepare()
+                    })?
+                    .is_none()
+                {
+                    continue;
+                }
+                return Err(Error::Admission("retained restart binding is unavailable"));
+            };
+            if index == selection.index && (lease != selection.lease || object != selection.object)
+            {
+                return Err(Error::Admission("retained restart object changed"));
+            }
+            let observed = isolate_adapter_call("restart prepared Source recheck", || {
+                instance.processor.preflight_native_observations(object)
+            })?;
+            if observed.object != Some(object)
+                || observed.editor_cleanup.is_some()
+                || instance.native_editor_attachment.is_some()
+            {
+                return Err(Error::Admission("restart native owner or editor changed"));
+            }
+            crate::native_audio_author_runtime::closed_source(observed.author.as_ref(), false)
+                .map_err(|_| Error::Admission("restart author source is not closed and empty"))?;
+            if index == selection.index {
+                if observed.pending_reprepare
+                    != Some(crate::NativeObservedRequest::Cohort(selection.cohort))
+                {
+                    return Err(Error::Admission("restart callback cohort changed"));
+                }
+                let cohort = isolate_adapter_call("restart captured cohort recheck", || {
+                    instance.processor.native_configuration_cohort()
+                })?;
+                if cohort != Some(selection.cohort) {
+                    return Err(Error::Cohort(cohort));
+                }
+            } else if observed.pending_reprepare.is_some() {
+                return Err(Error::Admission("another native restart is pending"));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn occurrence_count(&self) -> usize {
