@@ -995,7 +995,7 @@ fn assert_retained_parent_migration(
         old_lease.installed_root_serial()
     );
     assert_eq!(next_lease.editor_target().root_plan, next.prepared_plan_id);
-    let delivery = renderer.state.lock();
+    let mut delivery = renderer.state.lock();
     assert!(delivery.delivery.validate_native_owner(next_lease).is_ok());
     assert!(delivery.delivery.validate_native_owner(old_lease).is_err());
 }
