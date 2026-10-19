@@ -49,6 +49,29 @@ impl LogicalPlanFee {
         Ok(())
     }
 
+    /// Refine an enrolled prospective upper bound after the actual immutable
+    /// owner has been retained and its policy footprint checked. This changes
+    /// no owner, scope, old-role amount or grant and grants no installation.
+    /// The exclusive Prepared receipt still contributes all of `new` to H;
+    /// peer Drop can only remove its own separate contribution.
+    pub(super) fn shrink_prepared_to(
+        &mut self,
+        actual: usize,
+    ) -> Result<(), AudioRuntimeBuildError> {
+        if self.role != FeeRole::Prepared {
+            return Err(AudioRuntimeBuildError::StaleResourceAdmission);
+        }
+        if actual > self.new {
+            return Err(AudioRuntimeBuildError::InvalidResourceReplacement);
+        }
+        let released = self.new - actual;
+        if released != 0 {
+            self.scope.fetch_sub(released, Ordering::SeqCst);
+        }
+        self.new = actual;
+        Ok(())
+    }
+
     fn belongs_to(&self, scope: &Arc<AtomicUsize>) -> bool {
         Arc::ptr_eq(&self.scope, scope)
     }

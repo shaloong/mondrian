@@ -78,6 +78,64 @@ fn logical_fee_rejects_foreign_scope_stale_phase_and_invalid_projection_without_
 }
 
 #[test]
+fn logical_fee_refines_prepared_upper_bound_without_changing_scope_or_retirement_equation() {
+    let scope = Arc::new(AtomicUsize::new(0));
+    let mut fee = active_fee(&scope, 19, 31);
+    let peer = active_fee(&scope, 7, 11);
+    fee.shrink_prepared_to(23).unwrap();
+    assert!(fee.belongs_to(&scope));
+    assert_eq!((fee.old, fee.new), (19, 23));
+    assert_eq!(scope.load(Ordering::SeqCst), 23 + 11);
+    fee.shrink_prepared_to(23).unwrap();
+    assert_eq!(scope.load(Ordering::SeqCst), 23 + 11);
+    assert!(matches!(
+        fee.shrink_prepared_to(24),
+        Err(AudioRuntimeBuildError::InvalidResourceReplacement)
+    ));
+    assert_eq!((fee.old, fee.new), (19, 23));
+    assert_eq!(scope.load(Ordering::SeqCst), 23 + 11);
+    let current = 40;
+    let next = current - 19 + 23;
+    let combined = current + 23 + 11;
+    let transition = fee.checked_retirement(&scope, current, next, combined).unwrap();
+    fee.retire(transition);
+    assert_eq!(next + scope.load(Ordering::SeqCst), combined);
+    assert_eq!(scope.load(Ordering::SeqCst), 19 + 11);
+    assert!(matches!(
+        fee.shrink_prepared_to(0),
+        Err(AudioRuntimeBuildError::StaleResourceAdmission)
+    ));
+    assert_eq!((fee.old, fee.new), (19, 23));
+    assert_eq!(scope.load(Ordering::SeqCst), 19 + 11);
+    drop(fee);
+    assert_eq!(scope.load(Ordering::SeqCst), 11);
+    drop(peer);
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn logical_fee_refinement_allows_zero_but_rejects_inactive_without_mutation() {
+    let scope = Arc::new(AtomicUsize::new(0));
+    let mut inactive = LogicalPlanFee::inactive(Arc::clone(&scope), 0, 17);
+    assert!(matches!(
+        inactive.shrink_prepared_to(0),
+        Err(AudioRuntimeBuildError::StaleResourceAdmission)
+    ));
+    assert_eq!((inactive.old, inactive.new), (0, 17));
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+    drop(inactive);
+    let mut fee = active_fee(&scope, 0, 17);
+    fee.shrink_prepared_to(0).unwrap();
+    fee.shrink_prepared_to(0).unwrap();
+    assert_eq!((fee.old, fee.new), (0, 0));
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+    let transition = fee.checked_retirement(&scope, 41, 41, 41).unwrap();
+    fee.retire(transition);
+    drop(fee);
+    assert_eq!(scope.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn logical_fee_checked_overflow_rejects_before_any_role_rmw() {
     // Deliberately malformed scalar input exercises checked arithmetic only.
     // A valid Root can never enroll this impossible H; no wrapping enrollment
