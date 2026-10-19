@@ -3,7 +3,7 @@
 
 use super::*;
 
-pub(super) fn available_state() -> (AppState, Arc<parking_lot::Mutex<NativeHoldPlatformState>>) {
+pub(in crate::app) fn available_state() -> (AppState, Arc<parking_lot::Mutex<NativeHoldPlatformState>>) {
     let mut state = state_with_sequence(20);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
     let mut snapshot = audio_snapshot();
@@ -36,7 +36,7 @@ pub(super) fn available_state() -> (AppState, Arc<parking_lot::Mutex<NativeHoldP
     (state, output)
 }
 
-pub(super) fn install_builtin_source(
+pub(in crate::app) fn install_builtin_source(
     state: &mut AppState,
 ) -> std::sync::Weak<TimelineAudioPcmRenderer> {
     let mut sequence = state.active_sequence().expect("real Authoring Session").clone();
@@ -66,7 +66,7 @@ pub(super) fn install_builtin_source(
     weak
 }
 
-fn settle_builtin_binding(state: &mut AppState) {
+pub(in crate::app) fn settle_builtin_binding(state: &mut AppState) {
     // Settle the original binding job before the pure try_lock close guard.
     // A real BuiltIn owner has no native object; this is not a fake Closed DTO.
     let deadline = Instant::now() + Duration::from_secs(2);

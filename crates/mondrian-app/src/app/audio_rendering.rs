@@ -819,6 +819,7 @@ mod tests {
     use super::*;
 
     mod playing_host_fader_continuity;
+    mod host_output_fader_publication_contracts;
 
     #[derive(Debug, Default, Clone, Copy)]
     struct SettlementSnapshot {

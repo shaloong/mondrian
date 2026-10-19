@@ -3647,7 +3647,7 @@ fn audio_device_clock_observation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
 
     mod native_process_author_contracts {
@@ -3678,7 +3678,7 @@ mod tests {
         state
     }
 
-    fn play_ready(state: &mut AppState) {
+    pub(in crate::app) fn play_ready(state: &mut AppState) {
         state.play().expect("play");
         assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
         let demand = state
@@ -5901,12 +5901,12 @@ mod tests {
     // Positive notices below are emitted by the actual serial Media render
     // owner. The controlled platform adapter proves software callback state,
     // not hardware/DAC behavior, and exposes no alternate playback authority.
-    struct NativeHoldPlatformState {
+    pub(in crate::app) struct NativeHoldPlatformState {
         snapshot: RealtimeAudioOutputSnapshot,
         revision: u64,
         acknowledged: u64,
         auto_acknowledge: bool,
-        queued: usize,
+        pub(in crate::app) queued: usize,
     }
 
     struct NativeHoldPlatformOutput(Arc<parking_lot::Mutex<NativeHoldPlatformState>>);
@@ -5916,7 +5916,7 @@ mod tests {
 
     mod author_audio_admission_contracts;
     mod author_audio_reconciliation_contracts;
-    mod project_close_audio_contracts;
+    pub(in crate::app) mod project_close_audio_contracts;
     mod source_close_admission_contracts;
 
     mod native_settlement_queue_controls {
