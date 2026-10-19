@@ -24,7 +24,8 @@ impl NativeAudioReprepare {
         self.facts
     }
     /// Parent attempt Box, canonical-value Vec, decoded-state Vec and ledger peak.
-    /// Excludes child metadata reinspection and does not assert complete coverage.
+    /// Child metadata scratch is a separate admitted main-inline lane obligation,
+    /// not part of this parent-local snapshot. This is not complete peak coverage.
     pub const fn capture_local_peak(&self) -> crate::NativeHostLocalPeakSnapshot {
         self.local_peak
     }
@@ -103,10 +104,14 @@ impl AudioProgramRuntime {
     ///
     /// The reservation covers the existing request/capture/envelope byte-buffer
     /// policy and the parent attempt Box, canonical-value Vec, decoded state Vec
-    /// and local allocation-ledger storage. It is not a complete known-host
-    /// control peak: transient CLAP descriptor/port Vec/String owners from metadata
-    /// reinspection are not included. A full canonical reprepare consumer must
-    /// admit those additional owners before service, not after installation.
+    /// and local allocation-ledger storage. Successful and valid-schema-mismatch
+    /// CLAP metadata reinspection uses one borrowed scan scratch instead of
+    /// descriptor/port Vec/String containers; its actual layout is admitted in
+    /// the existing worker main-inline lane obligation, separate from this fee.
+    /// Cold error Strings, SDK storage and other owners still prevent a complete
+    /// known-host control-peak or whole-service zero-allocation claim. A full
+    /// canonical reprepare consumer must admit remaining owners before service,
+    /// not after installation.
     pub fn service_native_reprepare(
         &mut self,
         ticket: crate::AudioProcessorReprepareTicket,
