@@ -1,7 +1,7 @@
 # Native audio standard features
 
 Standards reviewed on 2026-10-10. Scoped product-capability notes include accepted
-updates through 2026-10-18. This document separates the
+updates through 2026-10-19. This document separates the
 negotiated product implementation from vendor APIs, unavailable services and
 remaining work. Qualification states the tested inputs, builds, platform and limits in
 [Native plugin compatibility and qualification](native-plugin-compatibility.md).
@@ -171,25 +171,35 @@ and old PCM may continue. Retained state-entry
 presentation is preserved only with matching actual Source and unchanged target
 witnesses. The original Media same-source control passes; an App nonempty-cache
 state-entry case remains source-reviewed only.
-Playing Host fader edits currently reconstruct Timeline/Runtime/native instances
-from authored state. A finite Windows owned CLAP mode0 control now passes at
-48 kHz/stereo: two complete 8192-frame PCM windows, three-frame delay/PDC,
-137 frames of actual software FIFO consumption, the public -6 dB fader action,
-8055 old frames retired, and complete two-second consuming cleanup. New PCM
-starts at the independently observed postcommit Engine anchor; the entire new
-window suffix is checked after the original quiescence acknowledgement clear.
-This deterministic software callback control does not verify the interval
-between consumption and that new anchor, physical/gapless output, the full UI
-pump or realtime scheduling. Mode0's finite history is PDC-recoverable.
-A separate owned mode12 control (latency0, finite echo/tail256) fails with
-`HISTORY_DISCONTINUITY`: actual A=20248 and completed F=65536 cover the full
-256-frame witness; both old PCM scaled by the new fader and the independent
-echo formula require .20961826 where the first new sample is .1400718. All
-65280 new frames outside that witness and the original consuming cleanup pass.
-This is a known finite history defect, not a successful compatibility result
-or proof of a particular private reset call. Generic DSP/tail preservation
-remains unsupported by the reconstruction contract; a retained execution path
-must define its actual processing seam and preserve original Source ownership.
+The previous playing Host fader policy reconstructed Timeline/Runtime/native
+instances from configuration at Engine anchor A. Its owned mode0 control passed
+finite three-frame PDC-recoverable PCM, but the zero-latency mode12 echo exposed
+`HISTORY_DISCONTINUITY`: at A=20248/F=65536, the first sample was .1400718 rather
+than .20961826; the full 256-frame witness, other 65280 frames and consuming
+cleanup distinguish the target failure. These are historical reconstruction
+results. The admitted static-fader case now uses the retained-F path below;
+configuration-only reconstruction is not a generic DSP-history recovery policy.
+
+The implemented replacement admits only a settled direct-root terminal static
+output fader, preserving the actual Session, epoch, native binding and old queued
+PCM. New Plan math begins at its actual processing frontier F through the one
+Source publication and original prepared author ticket. Engine A retains its
+original clock; prepublication binding checks prevent the later consumer's seek
+branch. Audio738 and Media audio_playback122 ordinary tests pass, including
+actual Runtime/frontier/lease controls and portable Source FIFO/refusal controls.
+App169 ordinary tests also pass, including the original native-hold refusal and
+four new BuiltIn/Unknown/prepublication controls. Matching normal Product and
+two real owned-CLAP gates pass with original180s/2s, empty stderr and clean Job
+settlement. One verifies dependent publication's author exclusion; the public
+action gate consumes all old queued PCM from C=137 to F=65536 unchanged, then
+checks every sample of eight new8192-frame windows through131072 and actual
+consumption of the first256 post-F frames against independent echo math.
+This finite Windows48k/stereo, mode12/history256/latency0 qualification preserves
+the same native UUID and DSP history, Session/epoch, Media anchor and FIFO.
+Queued latency remains; nonzero PDC, repeated updates, third-party history,
+physical/gapless output, full UI scheduling and realtime/performance are unqualified.
+See [ADR0011](../adr/0011-preserve-live-audio-state-at-the-processing-frontier.md)
+for admission, ownership and postcommit error boundaries.
 The current App test build retains 25 warnings; normal Product has 10. No
 strict-build qualification is granted.
 
