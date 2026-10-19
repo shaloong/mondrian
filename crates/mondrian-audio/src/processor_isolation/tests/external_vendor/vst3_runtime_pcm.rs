@@ -419,7 +419,7 @@ fn observe_runtime_pcm_inner(
                     if epoch == AudioContinuityEpoch::new(1)
                         && next_input_signal_sample.sample() == FRAMES as i64));
         }
-        output
+        (output, calls)
     };
     // New target failures must settle the exact authenticated child before they
     // escape. Existing observation selectors retain their original unwind path.
@@ -429,8 +429,8 @@ fn observe_runtime_pcm_inner(
         Ok(render_pcm())
     };
     drop(render_pcm);
-    let output = match result {
-        Ok(output) => output,
+    let (output, calls) = match result {
+        Ok(completed) => completed,
         Err(panic) => {
             let alive = unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) };
             drop(runtime);
