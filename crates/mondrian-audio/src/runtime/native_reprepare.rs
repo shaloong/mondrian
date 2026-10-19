@@ -304,7 +304,9 @@ fn check_prepare_overlap(
 
 // Additional one-owner child storage. The original lane already admits its
 // decoded/reply/staged buffers; this conservative Root credit is NOT borrowed
-// from the capture control grant. It remains until this Runtime retires.
+// from the capture control grant. Successful exact retirement normalizes this
+// transient peak; current committed seed attribution survives in the Root and
+// replaces the prior selected seed on a later successful restart.
 fn check_seed_overlap(
     current: AudioRuntimeResourceFootprint,
     grant: AudioRuntimeResourceGrant,
@@ -414,8 +416,9 @@ impl AudioProgramRuntime {
             .ok_or(Error::Admission("restart attempt serial exhausted"))?;
         let control_grant = add(CONFIGURATION_LIMIT, values_bytes)?;
         // The original Root footprint remains the sole fixed-policy authority.
-        // This conservative reservation is not credited until the actual Runtime
-        // retires; external handles own no allocations or releasable credit.
+        // Only exact successful installation retirement can normalize this
+        // conservative reservation; failure/abandonment keeps it until Runtime
+        // retirement. External handles own no allocations or releasable credit.
         let before_capture = self.resource_footprint;
         self.resource_footprint.fixed_resident_bytes = reserved_fixed;
         self.native_reprepare.attempt = Some(Box::new(NativeReprepareAttempt {
