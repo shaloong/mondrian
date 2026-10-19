@@ -162,7 +162,7 @@ impl AudioProgramRuntime {
         }
         // A retained restart owns an incompatible contract/capture overlap.
         // Do not allocate another handoff or foreign-rebind its exact old owner.
-        if self.native_reprepare.is_some() {
+        if self.native_reprepare.attempt.is_some() {
             return Err(AudioNativeOwnerError::OwnerUnavailable.into());
         }
         let old_root = self.session.native_owner_identity();

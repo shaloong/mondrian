@@ -23,7 +23,8 @@ impl NativeAudioReprepare {
     pub const fn configuration_identity(&self) -> crate::NativeConfigurationSeedTicket {
         self.facts
     }
-    /// Reported parent capture subset, including local ledger bookkeeping only.
+    /// Parent attempt Box, canonical-value Vec, decoded-state Vec and ledger peak.
+    /// Excludes child metadata reinspection and does not assert complete coverage.
     pub const fn capture_local_peak(&self) -> crate::NativeHostLocalPeakSnapshot {
         self.local_peak
     }
@@ -69,6 +70,14 @@ enum CapturePhase {
     Failed,
 }
 
+// These actual inline fields exist once in every Runtime, even before any
+// capture. Their complete layout is charged by reserve_session, not by the
+// later attempt Box/capture reservation.
+pub(super) struct NativeReprepareState {
+    pub(super) attempt: Option<Box<NativeReprepareAttempt>>,
+    pub(super) next_attempt: u64,
+}
+
 pub(super) struct NativeReprepareAttempt {
     key: NonZeroU64,
     ticket: crate::AudioProcessorReprepareTicket,
@@ -91,6 +100,13 @@ impl AudioProgramRuntime {
     /// Capture one exact retained CLAP restart under the original root grant.
     /// Caller must have quiesced physical output; this Audio-only API cannot
     /// manufacture Media quiescence. No author edit, seed or new Plan is installed.
+    ///
+    /// The reservation covers the existing request/capture/envelope byte-buffer
+    /// policy and the parent attempt Box, canonical-value Vec, decoded state Vec
+    /// and local allocation-ledger storage. It is not a complete known-host
+    /// control peak: transient CLAP descriptor/port Vec/String owners from metadata
+    /// reinspection are not included. A full canonical reprepare consumer must
+    /// admit those additional owners before service, not after installation.
     pub fn service_native_reprepare(
         &mut self,
         ticket: crate::AudioProcessorReprepareTicket,
@@ -100,7 +116,7 @@ impl AudioProgramRuntime {
         if cancellation.is_canceled() {
             return Err(Error::Cancelled);
         }
-        if self.native_reprepare.is_some() {
+        if self.native_reprepare.attempt.is_some() {
             return Err(Error::Admission(
                 "an actual restart attempt is already retained",
             ));
@@ -154,10 +170,11 @@ impl AudioProgramRuntime {
                 "constant-profile actual capacity exceeds reservation",
             ));
         }
-        let key = NonZeroU64::new(self.native_reprepare_next_attempt)
+        let key = NonZeroU64::new(self.native_reprepare.next_attempt)
             .ok_or(Error::Admission("restart attempt serial exhausted"))?;
-        self.native_reprepare_next_attempt = self
-            .native_reprepare_next_attempt
+        self.native_reprepare.next_attempt = self
+            .native_reprepare
+            .next_attempt
             .checked_add(1)
             .ok_or(Error::Admission("restart attempt serial exhausted"))?;
         let control_grant = add(CONFIGURATION_LIMIT, values_bytes)?;
@@ -165,7 +182,7 @@ impl AudioProgramRuntime {
         // This conservative reservation is not credited until the actual Runtime
         // retires; external handles own no allocations or releasable credit.
         self.resource_footprint.fixed_resident_bytes = reserved_fixed;
-        self.native_reprepare = Some(Box::new(NativeReprepareAttempt {
+        self.native_reprepare.attempt = Some(Box::new(NativeReprepareAttempt {
             key,
             ticket,
             serial,
@@ -177,14 +194,14 @@ impl AudioProgramRuntime {
         }));
         // This owner is installed BEFORE the first potentially destructive SDK
         // operation. Every error thereafter retains the actual attempt/charge.
-        let attempt = self.native_reprepare.as_ref().expect("retained service owner");
+        let attempt = self.native_reprepare.attempt.as_ref().expect("retained service owner");
         let result = self.session.service_native_reprepare(
             &attempt.selection,
             key,
             CONFIGURATION_LIMIT,
             control_grant,
         );
-        let attempt = self.native_reprepare.as_mut().expect("same exclusive Runtime");
+        let attempt = self.native_reprepare.attempt.as_mut().expect("same exclusive Runtime");
         match result {
             Ok(crate::NativeConfigurationControlOutcome::ReadyForInstall(candidate)) => {
                 attempt.candidate = Some(candidate);
@@ -203,7 +220,7 @@ impl AudioProgramRuntime {
                 return Err(error);
             }
         }
-        let attempt = self.native_reprepare.as_ref().expect("captured Runtime owner");
+        let attempt = self.native_reprepare.attempt.as_ref().expect("captured Runtime owner");
         let candidate =
             attempt.candidate.as_ref().expect("capture published no external authority");
         // Retain an upper charge before any fallible receipt construction. The
@@ -223,7 +240,7 @@ impl AudioProgramRuntime {
             })
             .and_then(|total| total.checked_add(std::mem::size_of::<NativeReprepareAttempt>()))
             .and_then(|total| total.checked_add(ledger_bytes));
-        let attempt = self.native_reprepare.as_mut().unwrap();
+        let attempt = self.native_reprepare.attempt.as_mut().unwrap();
         let held = reserved.max(actual_peak.unwrap_or(usize::MAX));
         self.resource_footprint.fixed_resident_bytes = self
             .resource_footprint
@@ -232,10 +249,10 @@ impl AudioProgramRuntime {
         attempt.held_fixed_bytes = held;
         let actual_peak = actual_peak.ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
         let remote = remote.ok_or(AudioRuntimeBuildError::InvalidResourceReplacement)?;
-        let attempt = self.native_reprepare.as_ref().unwrap();
+        let attempt = self.native_reprepare.attempt.as_ref().unwrap();
         let candidate = attempt.candidate.as_ref().unwrap();
         let mut ledger = NativeHostAllocationLedger::new(CAPTURE_OWNER_SLOTS, usize::MAX)?;
-        ledger.record(self.native_reprepare.as_ref().unwrap().host_allocation()?)?;
+        ledger.record(self.native_reprepare.attempt.as_ref().unwrap().host_allocation()?)?;
         ledger.record(attempt.selection.constants.host_allocation()?)?;
         ledger.record(candidate.configuration.host_allocation()?)?;
         let local_peak = ledger.finish()?;
@@ -281,6 +298,7 @@ impl AudioProgramRuntime {
         use NativeAudioReprepareError as Error;
         let attempt = self
             .native_reprepare
+            .attempt
             .as_ref()
             .ok_or(Error::Admission("no retained restart capture"))?;
         if attempt.key != operation.key
@@ -296,5 +314,97 @@ impl AudioProgramRuntime {
             .as_ref()
             .ok_or(Error::Admission("capture unavailable"))?
             .configuration)
+    }
+}
+
+#[cfg(test)]
+mod inline_admission_tests {
+    use super::*;
+
+    fn session(fixed: usize) -> AudioSessionResourceFootprint {
+        AudioSessionResourceFootprint {
+            fixed_resident_bytes: fixed,
+            prepared_logical_bytes: 11,
+            ..AudioSessionResourceFootprint::default()
+        }
+    }
+
+    #[test]
+    fn inline_slots_use_runtime_fixed_grant_once_per_occurrence() {
+        let sequence = SequenceId::new();
+        let output = ProgramOutputId::new();
+        let inline = std::mem::size_of::<NativeReprepareState>();
+        assert!(inline > 0);
+        let original = session(7);
+        let one = original.fixed_resident_bytes + inline;
+        let mut exact =
+            AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(2, 2 * one, 22));
+        for count in 1..=2 {
+            exact.reserve_session(sequence, output, original).unwrap();
+            assert_eq!(exact.footprint.runtime_occurrences, count);
+            assert_eq!(exact.footprint.fixed_resident_bytes, count * one);
+            assert_eq!(exact.footprint.prepared_logical_bytes, count * 11);
+        }
+        // A one-byte deficit is rejected at either the first occurrence or a
+        // second occurrence after a completed sibling. No partial ledger publish.
+        for count in 1..=2 {
+            let required = count * one;
+            let mut short = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(
+                2,
+                required - 1,
+                22,
+            ));
+            for _ in 1..count {
+                short.reserve_session(sequence, output, original).unwrap();
+            }
+            let before = short.footprint;
+            assert!(matches!(short.reserve_session(sequence, output, original),
+                Err(AudioRuntimeBuildError::ResourceGrantExceeded {
+                    category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                    sequence_id, output_id, required: actual, granted,
+                }) if sequence_id == sequence && output_id == output
+                    && actual == required && granted == required - 1));
+            assert_eq!(short.footprint, before);
+        }
+        assert_eq!(
+            original.fixed_resident_bytes, 7,
+            "the Session base is unchanged"
+        );
+    }
+
+    #[test]
+    fn inline_slot_overflow_and_session_replacement_keep_root_accounting() {
+        let sequence = SequenceId::new();
+        let output = ProgramOutputId::new();
+        let mut overflow = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::unbounded());
+        let before = overflow.footprint;
+        assert!(
+            matches!(overflow.reserve_session(sequence, output, session(usize::MAX)),
+            Err(AudioRuntimeBuildError::ResourceExtentOverflow {
+                category: AudioRuntimeResourceCategory::FixedResidentBytes, sequence_id, output_id,
+            }) if sequence_id == sequence && output_id == output)
+        );
+        assert_eq!(overflow.footprint, before);
+
+        let inline = std::mem::size_of::<NativeReprepareState>();
+        let old = session(7);
+        let next = session(13);
+        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::unbounded());
+        ledger.reserve_session(sequence, output, old).unwrap();
+        // Existing native/parameter replacement substitutes Session storage only;
+        // it must retain this independently owned Runtime slot in the Root total.
+        let replaced =
+            super::super::native_author_scope::replace_weights(ledger.footprint, old, next)
+                .unwrap();
+        assert_eq!(
+            replaced.fixed_resident_bytes,
+            next.fixed_resident_bytes + inline
+        );
+        assert_eq!(replaced.runtime_occurrences, 1);
+        assert_eq!(replaced.prepared_logical_bytes, next.prepared_logical_bytes);
+        assert_eq!(
+            ledger.footprint.fixed_resident_bytes,
+            old.fixed_resident_bytes + inline
+        );
     }
 }

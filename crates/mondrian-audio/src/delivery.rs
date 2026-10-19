@@ -299,6 +299,8 @@ impl AudioProgramDeliveryRuntime {
     }
 
     /// Capture the exact retained root restart; physical output quiescence is a caller precondition.
+    /// Uses Runtime's limited byte-buffer/parent-owner reservation; transient
+    /// native metadata Vec/String owners are not complete-control-peak qualified.
     pub fn service_native_reprepare(
         &mut self,
         ticket: crate::AudioProcessorReprepareTicket,

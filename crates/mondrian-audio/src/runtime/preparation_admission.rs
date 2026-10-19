@@ -142,8 +142,11 @@ mod tests {
     fn ancestor_and_completed_siblings_remain_charged_at_each_descendant() {
         let sequence = SequenceId::new();
         let output = ProgramOutputId::new();
-        let mut ledger =
-            AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(3, 15, 100));
+        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(
+            3,
+            15 + 3 * std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>(),
+            100,
+        ));
         let root = ledger.reserve_prepared_plan(sequence, output, 40).unwrap();
         let first = ledger.reserve_prepared_plan(sequence, output, 30).unwrap();
         ledger.complete_prepared_session(first, session(20, 5)).unwrap();
@@ -164,7 +167,10 @@ mod tests {
         ledger.complete_prepared_session(second, session(30, 5)).unwrap();
         ledger.complete_prepared_session(root, session(40, 5)).unwrap();
         assert_eq!(ledger.footprint.prepared_logical_bytes, 90);
-        assert_eq!(ledger.footprint.fixed_resident_bytes, 15);
+        assert_eq!(
+            ledger.footprint.fixed_resident_bytes,
+            15 + 3 * std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>()
+        );
         assert_eq!(ledger.footprint.runtime_occurrences, 3);
     }
 
@@ -172,24 +178,33 @@ mod tests {
     fn completion_cannot_enlarge_projection_or_publish_a_failed_fixed_charge() {
         let sequence = SequenceId::new();
         let output = ProgramOutputId::new();
-        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(1, 5, 40));
+        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(
+            1,
+            5 + std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>(),
+            40,
+        ));
         let reservation = ledger.reserve_prepared_plan(sequence, output, 40).unwrap();
         let before = ledger.footprint;
         assert!(ledger.complete_prepared_session(reservation, session(41, 0)).is_err());
         assert_eq!(ledger.footprint, before);
 
         // A fresh failed builder, rather than reusing the consumed receipt.
-        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(1, 5, 40));
+        let mut ledger = AudioRuntimeAdmissionLedger::new(AudioRuntimeResourceGrant::new(
+            1,
+            5 + std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>(),
+            40,
+        ));
         let reservation = ledger.reserve_prepared_plan(sequence, output, 40).unwrap();
         let before = ledger.footprint;
         assert!(matches!(
             ledger.complete_prepared_session(reservation, session(30, 6)),
             Err(AudioRuntimeBuildError::ResourceGrantExceeded {
                 category: AudioRuntimeResourceCategory::FixedResidentBytes,
-                required: 6,
-                granted: 5,
+                required,
+                granted,
                 ..
-            })
+            }) if required == 6 + std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>()
+                && granted == 5 + std::mem::size_of::<super::super::native_reprepare::NativeReprepareState>()
         ));
         assert_eq!(ledger.footprint, before);
     }

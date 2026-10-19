@@ -254,7 +254,7 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
         assert_eq!(
             cursors(&runtime),
             held,
-            "capture is not a reset or new Session"
+            "capture does not enter/reset Runtime cursors or replace its Session"
         );
         let captured_footprint = runtime.resource_footprint();
         assert!(captured_footprint.fixed_resident_bytes > original_footprint.fixed_resident_bytes);

@@ -126,7 +126,14 @@ impl AudioRuntimeAdmissionLedger {
             output_id,
             AudioRuntimeResourceFootprint {
                 runtime_occurrences: 1,
-                fixed_resident_bytes: session.fixed_resident_bytes,
+                fixed_resident_bytes: session
+                    .fixed_resident_bytes
+                    .checked_add(std::mem::size_of::<native_reprepare::NativeReprepareState>())
+                    .ok_or(AudioRuntimeBuildError::ResourceExtentOverflow {
+                        category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                        sequence_id,
+                        output_id,
+                    })?,
                 prepared_logical_bytes: session.prepared_logical_bytes,
                 render_scratch_bytes: session.render_scratch_bytes,
                 processor_session_bytes: session.processor_session_bytes,
@@ -352,8 +359,7 @@ pub struct AudioProgramRuntime {
     // receipts independently release them after their field drop glue retires.
     native_held_plan_fees: Option<Arc<std::sync::atomic::AtomicUsize>>,
     native_author_scope: Option<Box<native_author_scope::NativeAuthorScopeCohort>>,
-    native_reprepare: Option<Box<native_reprepare::NativeReprepareAttempt>>,
-    native_reprepare_next_attempt: u64,
+    native_reprepare: native_reprepare::NativeReprepareState,
 }
 
 impl AudioProgramRuntime {
@@ -718,7 +724,7 @@ impl AudioProgramRuntime {
         &mut self,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<crate::NativeAudioBindingPreparation, crate::AudioNativeOwnerError> {
-        if self.native_reprepare.is_some() {
+        if self.native_reprepare.attempt.is_some() {
             return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
         }
         if self.native_installation.verifier.is_none() {
@@ -1740,8 +1746,10 @@ impl AudioProgramRuntime {
                 native_diagnostic_cursor: 0,
                 native_held_plan_fees: None,
                 native_author_scope: None,
-                native_reprepare: None,
-                native_reprepare_next_attempt: 1,
+                native_reprepare: native_reprepare::NativeReprepareState {
+                    attempt: None,
+                    next_attempt: 1,
+                },
             })
         })();
         stack.remove(&sequence.id);
