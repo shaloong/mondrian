@@ -6,6 +6,10 @@ mod initial_parameter_values;
 mod initial_parameter_values_tests;
 mod native_author;
 mod parameter_observations;
+mod reprepare_payload;
+pub(super) use reprepare_payload::{
+    payload_with_reprepare_configuration, reprepare_codec_bound, reprepare_payload_output_bound,
+};
 #[cfg(all(test, target_os = "windows"))]
 mod startup_metadata_diagnostics;
 

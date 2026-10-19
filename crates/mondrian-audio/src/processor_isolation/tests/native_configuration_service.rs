@@ -568,10 +568,8 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let ids: Vec<_> = authored.parameters.keys().cloned().collect();
         let spec = configuration_spec(&catalog, &authored, render);
         let keys = auxiliary_keys(&spec);
-        let mut processor = IsolatedAudioProcessorFactory::prepare(spec)
-            .expect("factory")
-            .create(None)
-            .expect("same persistent child");
+        let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("factory");
+        let mut processor = factory.create(None).expect("same persistent child");
         let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
         let result = processor
             .service_native_configuration(NativeConfigurationControlRequest {
@@ -591,6 +589,46 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
             NonZeroU64::new(71).expect("token"),
             NativeConfigurationFormat::Vst3ComponentAndController,
         );
+        // The same original admitted Factory consumes the real component +
+        // controller envelope, without creating/probing a replacement worker.
+        let ticket = NativeConfigurationSeedTicket::from_candidate(&candidate);
+        let old_contract = factory.execution_contract();
+        let old_payload = factory.spec.preparation_payload.clone();
+        let bound = factory
+            .native_reprepare_factory_bound(ticket, candidate.configuration.len())
+            .expect("real flags8 candidate has a finite Factory bound");
+        let mut peak = 0;
+        let next = factory
+            .with_native_reprepare_configuration(ticket, &candidate.configuration, &mut |n| {
+                peak = peak.max(n)
+            })
+            .expect("actual VST3 execution-only Factory rebind")
+            .expect("flags8 component/controller format is supported");
+        assert_eq!(next.execution_contract().algorithmic_latency_frames(), 7);
+        assert_eq!(
+            next.execution_contract().tail(),
+            AudioProcessorTail::Finite(7)
+        );
+        assert_eq!(
+            next.execution_contract().session_scratch_bytes(),
+            old_contract.session_scratch_bytes()
+        );
+        assert_eq!(
+            next.execution_contract().requires_state_entry(),
+            old_contract.requires_state_entry()
+        );
+        assert_eq!(
+            next.execution_contract().realtime_capable(),
+            old_contract.realtime_capable()
+        );
+        assert_eq!(
+            next.execution_contract().offline_capable(),
+            old_contract.offline_capable()
+        );
+        assert!(peak > 0 && peak <= bound);
+        assert_eq!(factory.execution_contract(), old_contract);
+        assert_eq!(factory.spec.preparation_payload, old_payload);
+        drop(next);
         qualify_same_child_seed(&mut *processor, candidate, &keys, &ids, mode);
     }
 }

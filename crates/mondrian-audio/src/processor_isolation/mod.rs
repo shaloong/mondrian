@@ -545,11 +545,17 @@ impl IsolatedAudioProcessorFactory {
     ) -> bool {
         let old = self.spec.plugin_execution_contract;
         let next = identity.observed_contract;
-        identity.format == NativeConfigurationFormat::ClapState
-            && identity.configuration_bytes == configuration_bytes
+        matches!(
+            (identity.format, identity.serviced_cohort.request),
+            (
+                NativeConfigurationFormat::ClapState,
+                mondrian_core::NativeAudioReprepareRequest::ClapRestart
+            ) | (
+                NativeConfigurationFormat::Vst3ComponentAndController,
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 }
+            )
+        ) && identity.configuration_bytes == configuration_bytes
             && !identity.serviced_cohort.exhausted()
-            && identity.serviced_cohort.request
-                == mondrian_core::NativeAudioReprepareRequest::ClapRestart
             && self.spec.note_input_contract.ports.is_empty()
             && old.requires_state_entry() == next.requires_state_entry()
             && old.realtime_capable() == next.realtime_capable()
@@ -586,17 +592,43 @@ impl IsolatedAudioProcessorFactory {
                 "retained restart configuration digest changed",
             ));
         }
-        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())
-            .ok_or_else(|| {
-                invalid_contract("retained CLAP metadata exceeds the raw codec bound")
-            })?;
-        let preparation_payload = clap_worker::payload_with_reprepare_configuration(
-            &self.spec.preparation_payload,
-            configuration,
-            report_peak,
-        )?;
+        let n = self.spec.preparation_payload.len();
+        let codec = match identity.format {
+            NativeConfigurationFormat::ClapState => clap_worker::reprepare_codec_bound(n),
+            NativeConfigurationFormat::Vst3ComponentAndController => {
+                vst3_worker::reprepare_codec_bound(n)
+            }
+        }
+        .ok_or_else(|| {
+            invalid_contract(match identity.format {
+                NativeConfigurationFormat::ClapState => {
+                    "retained CLAP metadata exceeds the raw codec bound"
+                }
+                NativeConfigurationFormat::Vst3ComponentAndController => {
+                    "retained VST3 metadata exceeds the raw codec bound"
+                }
+            })
+        })?;
+        let preparation_payload = match identity.format {
+            NativeConfigurationFormat::ClapState => {
+                clap_worker::payload_with_reprepare_configuration(
+                    &self.spec.preparation_payload,
+                    configuration,
+                    report_peak,
+                )
+            }
+            NativeConfigurationFormat::Vst3ComponentAndController => {
+                vst3_worker::payload_with_reprepare_configuration(
+                    &self.spec.preparation_payload,
+                    configuration,
+                    report_peak,
+                )
+            }
+        }?;
         // Unlike prepare_inner this does not consume/probe new evidence or create
-        // a worker. Original immutable metadata already passed typed admission.
+        // a worker. For the concrete format, original immutable metadata passed
+        // its typed worker/catalog admission; this is not external JSON admission
+        // or a claim about arbitrary custom helper implementations.
         let spec = IsolatedAudioProcessorWorkerSpec {
             musical_time_reference: self.spec.musical_time_reference,
             helper_executable: self.spec.helper_executable.clone(),
@@ -767,11 +799,17 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         if !self.admits_reprepare_identity(identity, configuration_bytes) {
             return None;
         }
-        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())?;
-        let output = clap_worker::reprepare_payload_output_bound(
-            self.spec.preparation_payload.len(),
-            configuration_bytes,
-        )?;
+        let n = self.spec.preparation_payload.len();
+        let (codec, output) = match identity.format {
+            NativeConfigurationFormat::ClapState => (
+                clap_worker::reprepare_codec_bound(n)?,
+                clap_worker::reprepare_payload_output_bound(n, configuration_bytes)?,
+            ),
+            NativeConfigurationFormat::Vst3ComponentAndController => (
+                vst3_worker::reprepare_codec_bound(n)?,
+                vst3_worker::reprepare_payload_output_bound(n, configuration_bytes)?,
+            ),
+        };
         let clones = self
             .known_reprepare_factory_bytes()?
             .checked_sub(self.spec.preparation_payload.capacity())?;
@@ -2462,6 +2500,199 @@ mod note_spec_contracts {
         assert_eq!(after, before, "all eight non-state fields remain identical");
         assert_eq!(next.spec.helper_arguments, factory.spec.helper_arguments);
         assert_eq!(next.spec.render_contract, factory.spec.render_contract);
+        let public = factory
+            .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(public.execution_contract(), next.execution_contract());
+        assert_eq!(factory.spec.preparation_payload, old_payload);
+        assert_eq!(factory.execution_contract(), old_contract);
+    }
+
+    #[test]
+    fn vst3_execution_restart_factory_bound_and_rebind_require_exact_flags_and_contract() {
+        use sha2::{Digest, Sha256};
+        let mut spec = spec();
+        spec.plugin_execution_contract = AudioProcessorExecutionContract::new(
+            3,
+            crate::AudioProcessorTail::Finite(3),
+            true,
+            true,
+            true,
+            17,
+        )
+        .unwrap();
+        spec.preparation_payload = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 3, "main_audio_input": Vst3MainAudioInput::Present,
+            "event_bus_contract": Vst3EventBusContractV1::empty(),
+            "binary_path": "not-loaded.vst3", "class_id": "unchanged", "vendor": "",
+            "binary_sha256": vec![7;32], "state": [1,2],
+            "parameters": [], "parameter_ids": [],
+        }))
+        .unwrap();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let factory = IsolatedAudioProcessorFactory {
+            execution_contract: IsolatedAudioProcessorFactory::requested_execution_contract(
+                &spec, layout,
+            )
+            .unwrap(),
+            spec,
+            layout,
+            input_names: Vec::new(),
+            retained_create_test_hook: None,
+        };
+        // Manual storage/codec control only, not a native plugin or an installed
+        // lease. The ignored mode5/6 consumer supplies the actual candidate.
+        let old_payload = factory.spec.preparation_payload.clone();
+        let old_contract = factory.execution_contract();
+        let configuration = [255, 0, 9];
+        let identity = NativeConfigurationSeedTicket {
+            serviced_cohort: NativeRequestCohort::new(
+                1,
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 8 },
+            )
+            .unwrap(),
+            control_token: std::num::NonZeroU64::new(1).unwrap(),
+            observed_contract: AudioProcessorExecutionContract::new(
+                7,
+                crate::AudioProcessorTail::Finite(7),
+                true,
+                true,
+                true,
+                17,
+            )
+            .unwrap(),
+            format: NativeConfigurationFormat::Vst3ComponentAndController,
+            configuration_bytes: configuration.len(),
+            configuration_sha256: Sha256::digest(configuration).into(),
+        };
+        let (bound, counts) = measure_host_allocations_for_test(|| {
+            factory.native_reprepare_factory_bound(identity, configuration.len())
+        });
+        let bound = bound.unwrap();
+        assert_eq!(counts, [0; 4], "Factory bound is a pure read");
+        let codec = vst3_worker::reprepare_codec_bound(old_payload.len()).unwrap();
+        assert_eq!(
+            bound,
+            codec
+                + vst3_worker::reprepare_payload_output_bound(
+                    old_payload.len(),
+                    configuration.len()
+                )
+                .unwrap()
+                + factory.known_reprepare_factory_bytes().unwrap()
+                - factory.spec.preparation_payload.capacity()
+        );
+        let mut rejected = Vec::new();
+        for flags in [2, 9, u32::MAX] {
+            let mut wrong = identity;
+            wrong.serviced_cohort = NativeRequestCohort::new(
+                1,
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags },
+            )
+            .unwrap();
+            rejected.push(wrong);
+        }
+        let mut wrong = identity;
+        wrong.serviced_cohort.request =
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 0 };
+        rejected.push(wrong);
+        wrong = identity;
+        wrong.serviced_cohort.serial = u32::MAX;
+        rejected.push(wrong);
+        wrong = identity;
+        wrong.format = NativeConfigurationFormat::ClapState;
+        rejected.push(wrong);
+        wrong = identity;
+        wrong.serviced_cohort =
+            NativeRequestCohort::new(1, mondrian_core::NativeAudioReprepareRequest::ClapRestart)
+                .unwrap();
+        rejected.push(wrong);
+        wrong = identity;
+        wrong.configuration_bytes += 1;
+        rejected.push(wrong);
+        for contract in [
+            AudioProcessorExecutionContract::new(
+                0,
+                crate::AudioProcessorTail::None,
+                false,
+                true,
+                true,
+                17,
+            )
+            .unwrap(),
+            AudioProcessorExecutionContract::new(
+                7,
+                crate::AudioProcessorTail::Finite(7),
+                true,
+                false,
+                true,
+                17,
+            )
+            .unwrap(),
+            AudioProcessorExecutionContract::new(
+                7,
+                crate::AudioProcessorTail::Finite(7),
+                true,
+                true,
+                false,
+                17,
+            )
+            .unwrap(),
+            AudioProcessorExecutionContract::new(
+                7,
+                crate::AudioProcessorTail::Finite(7),
+                true,
+                true,
+                true,
+                18,
+            )
+            .unwrap(),
+        ] {
+            let mut wrong = identity;
+            wrong.observed_contract = contract;
+            rejected.push(wrong);
+        }
+        for wrong in rejected {
+            assert!(factory.native_reprepare_factory_bound(wrong, configuration.len()).is_none());
+            let mut queried = false;
+            assert!(factory
+                .with_native_reprepare_configuration(wrong, &configuration, &mut |_| queried = true)
+                .unwrap()
+                .is_none());
+            assert!(!queried);
+        }
+        wrong = identity;
+        wrong.configuration_sha256[0] ^= 1;
+        assert!(factory
+            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .is_err());
+        let mut peak = 0;
+        let next = factory
+            .rebind_execution_configuration(identity, &configuration, &mut |n| peak = peak.max(n))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next.spec.plugin_execution_contract,
+            identity.observed_contract
+        );
+        assert_eq!(
+            next.execution_contract(),
+            IsolatedAudioProcessorFactory::requested_execution_contract(&next.spec, next.layout)
+                .unwrap()
+        );
+        assert_eq!(
+            next.execution_contract().session_scratch_bytes(),
+            old_contract.session_scratch_bytes()
+        );
+        assert!(peak >= codec + next.known_reprepare_factory_bytes().unwrap());
+        assert!(peak <= bound);
+        let before: serde_json::Value = serde_json::from_slice(&old_payload).unwrap();
+        let mut after: serde_json::Value =
+            serde_json::from_slice(&next.spec.preparation_payload).unwrap();
+        assert_eq!(after["state"], serde_json::json!(configuration));
+        after["state"] = before["state"].clone();
+        assert_eq!(after, before, "all nine non-state fields remain identical");
         let public = factory
             .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
             .unwrap()
