@@ -209,12 +209,20 @@ impl AudioPlayback {
         {
             *admission = NativeReprepareAdmission::InFlight { generation };
         }
-        match self.render_queue.push(RenderWork::NativeReprepare(work)) {
+        match self.render_queue.try_push(RenderWork::NativeReprepare(work)) {
             Ok(()) => {
                 self.native_owner_binding_status = None;
                 Ok(true)
             }
-            Err(mut work) => {
+            Err(error) => {
+                let (mut work, reason) = match error {
+                    RenderQueuePushError::Busy(work) => {
+                        (work, AudioPcmNativeReprepareRefusal::ResourceAdmission)
+                    }
+                    RenderQueuePushError::Closed(work) => {
+                        (work, AudioPcmNativeReprepareRefusal::WorkerUnavailable)
+                    }
+                };
                 if let RenderWork::NativeReprepare(work) = &mut work {
                     work.terminal();
                 }
@@ -222,9 +230,11 @@ impl AudioPlayback {
                 if let Some(NativeControlHold::Reprepare { admission, .. }) =
                     &mut self.native_control_hold
                 {
-                    *admission = NativeReprepareAdmission::Unstarted;
+                    *admission = NativeReprepareAdmission::Refused;
                 }
-                Ok(false)
+                // The one physical acknowledgement has already been consumed.
+                // Report a real unsent refusal instead of a silent Unstarted wait.
+                Err(AudioPlaybackError::NativeReprepareQueueRefused(reason))
             }
         }
     }
@@ -1042,6 +1052,213 @@ mod tests {
             }
             drop(alias);
             assert!(tracker.seal());
+        }
+    }
+
+    // This provider is only placed in the actual queue; none of its foreign
+    // callbacks is allowed to execute in the mixed-frontier admission control.
+    struct QueuedAuthor(Arc<dyn AudioPcmRenderer>);
+    impl AudioPcmNativeAuthorHandoff for QueuedAuthor {
+        fn renderer(&self) -> &Arc<dyn AudioPcmRenderer> {
+            &self.0
+        }
+        fn proposal(&self) -> &mondrian_core::NativeAudioAuthorProposal {
+            panic!("queue-only author callback")
+        }
+        fn expected_target(&self) -> mondrian_core::NativeAudioEditorTarget {
+            panic!("queue-only author callback")
+        }
+        fn intent(&self) -> AudioPcmNativeAuthorHandoffIntent {
+            panic!("queue-only author callback")
+        }
+        fn continuity_policy(
+            &self,
+            _: &ExecutionCancellationToken,
+        ) -> Result<AudioPcmNativeAuthorHandoffContinuity, AudioPcmNativeAuthorHandoffRefusal>
+        {
+            panic!("queue-only author callback")
+        }
+        fn acknowledge(
+            &self,
+            _: &ExecutionCancellationToken,
+        ) -> AudioPcmNativeAuthorHandoffOutcome {
+            panic!("queue-only author callback")
+        }
+        fn apply(
+            &self,
+            _: AudioOwnerInstallationVerifier,
+            _: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+            _: &ExecutionCancellationToken,
+        ) -> AudioPcmNativeAuthorHandoffOutcome {
+            panic!("queue-only author callback")
+        }
+    }
+
+    fn fill_original_native_frontier(playback: &AudioPlayback, actual: &Arc<Renderer>) {
+        let current = playback.renderer.as_ref().unwrap();
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap();
+        let verifier = actual.owner_installation_verifier().unwrap();
+        for _ in 0..MAX_PENDING_NATIVE_EDITOR_WORK {
+            assert!(playback
+                .render_queue
+                .try_push(RenderWork::NativeEditor(Box::new(NativeEditorWork {
+                    renderer_id: current.materialization_id,
+                    renderer: actual.clone(),
+                    claim: claim.clone(),
+                    cancellation: ExecutionCancellationToken::new(),
+                    intent: mondrian_core::NativeAudioEditorControlIntent::ResolveAndOpen {
+                        locator: mondrian_core::NativeAudioEditorLocator {
+                            sequence: mondrian_core::SequenceId::new(),
+                            instance: actual.notice.instance_id,
+                            owner: mondrian_core::NativeAudioEditorOccurrenceOwner::Output(
+                                mondrian_core::ProgramOutputId::new()
+                            ),
+                            insertion: mondrian_core::NativeAudioEditorInsertion::PreFader,
+                        },
+                        title: mondrian_core::NativeAudioEditorTitle::new("queue only".into())
+                            .unwrap(),
+                    },
+                })))
+                .is_ok());
+        }
+        assert!(playback
+            .render_queue
+            .try_push(RenderWork::NativeObservations(NativeObservationWork {
+                generation: playback.generation,
+                renderer_id: current.materialization_id,
+                renderer: actual.clone(),
+                cancellation: ExecutionCancellationToken::new(),
+                installation_generation: Some(claim.generation()),
+                operation: NativeObservationOperation::Poll,
+            }))
+            .is_ok());
+        assert!(playback
+            .render_queue
+            .try_push(RenderWork::NativeOwnerBindings(NativeOwnerBindingWork {
+                generation: playback.generation,
+                renderer_id: current.materialization_id,
+                renderer: actual.clone(),
+                claim: claim.clone(),
+                verifier,
+                cancellation: ExecutionCancellationToken::new(),
+            }))
+            .is_ok());
+        assert!(playback
+            .render_queue
+            .try_push(RenderWork::NativeAuthorHandoff(Box::new(
+                native_author::NativeAuthorHandoffWork {
+                    generation: playback.generation,
+                    renderer_id: current.materialization_id,
+                    request: Box::new(QueuedAuthor(actual.clone())),
+                    source: playback.owner_installation.clone(),
+                    expected: claim,
+                    cancellation: ExecutionCancellationToken::new(),
+                    output_quiescent: false,
+                }
+            )))
+            .is_ok());
+        assert_eq!(playback.render_queue.state.lock().pending.len(), 5);
+        // The five native entries cannot take either reserved PCM position.
+        for start in [0, 4] {
+            assert!(playback
+                .render_queue
+                .try_push(RenderWork::Pcm(PcmRenderWork {
+                    generation: playback.generation,
+                    renderer_id: current.materialization_id,
+                    renderer: actual.clone(),
+                    request: AudioPcmRenderRequest {
+                        start_sample: start,
+                        frame_count: 4,
+                        sample_rate: playback.config.sample_rate,
+                        channel_layout: playback.config.channel_layout,
+                        continuity: AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(
+                            playback.generation
+                        )),
+                    },
+                    allow_window_silence: false,
+                    cancellation: ExecutionCancellationToken::new(),
+                }))
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn restart_queue_refusal_preserves_original_frontier_and_is_not_silent() {
+        let mut config = playback_config();
+        config.max_in_flight = 250;
+        assert_eq!(validate_config(config), Ok(()));
+        config.max_in_flight = 251;
+        assert_eq!(
+            validate_config(config),
+            Err(AudioPlaybackConfigError::ExceedsRetirementCapacity)
+        );
+        for closed in [false, true] {
+            let (mut playback, actual) = held();
+            // Keep the original producer alive and idle. Substitute only this
+            // test's queue so its actual typed entries cannot race a consumer.
+            // Restore it even after an assertion failure before normal cleanup.
+            let queue = Arc::new(RenderWorkQueue::new(
+                2,
+                playback.render_retirement_queue.clone(),
+                playback.foreign_owner_retirements.clone(),
+            ));
+            let original = std::mem::replace(&mut playback.render_queue, queue.clone());
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fill_original_native_frontier(&playback, &actual);
+                if closed {
+                    let pending = queue.stop();
+                    playback.handoff_retired_render_owners(pending, None);
+                }
+                let claim =
+                    playback.owner_installation.current_claim().unwrap().unwrap().generation();
+                let facts = Arc::new(Facts::default());
+                let reason = if closed {
+                    AudioPcmNativeReprepareRefusal::WorkerUnavailable
+                } else {
+                    AudioPcmNativeReprepareRefusal::ResourceAdmission
+                };
+                let error = playback
+                    .request_native_reprepare(playback.generation, request(&actual, &facts, 0))
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    AudioPlaybackError::NativeReprepareQueueRefused(reason)
+                );
+                assert!(
+                    error.to_string().contains(&format!("{reason:?}")),
+                    "the existing App error mapping can expose the actual refusal"
+                );
+                assert!(refused(&playback));
+                assert!(playback.render_blocked);
+                assert_eq!(
+                    playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+                    claim
+                );
+                assert!(!playback.finish_native_reprepare(playback.generation, anchor(0)).unwrap());
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while facts.drop_count.load(Ordering::SeqCst) == 0 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "original retirement must release unsent carrier"
+                    );
+                    thread::yield_now();
+                }
+                assert_eq!(facts.install.load(Ordering::SeqCst), 0);
+                assert!(!facts.entered_retirement.load(Ordering::Acquire));
+                assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+                assert_eq!(facts.drop_count.load(Ordering::SeqCst), 1);
+                assert!(facts.calls.lock().iter().all(|(_, id)| *id != thread::current().id()));
+                assert!(!playback.render_retirement_faulted.load(AtomicOrdering::Acquire));
+                if !closed {
+                    assert_eq!(queue.state.lock().pending.len(), 7);
+                }
+            }));
+            let pending = queue.stop();
+            playback.handoff_retired_render_owners(pending, None);
+            playback.render_queue = original;
+            if let Err(payload) = outcome {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 

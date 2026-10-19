@@ -68,7 +68,7 @@ const RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED: u8 = 3;
 const MAX_RETIRED_RENDER_OWNERS: usize = 256;
 // One FIFO and serial worker; PCM cannot consume the reserved control frontier.
 const MAX_PENDING_NATIVE_EDITOR_WORK: usize = 2;
-const MAX_PENDING_NATIVE_WORK: usize = MAX_PENDING_NATIVE_EDITOR_WORK + 4;
+const MAX_PENDING_NATIVE_WORK: usize = MAX_PENDING_NATIVE_EDITOR_WORK + 3;
 const RENDER_WORKER_TERMINAL_SCHEDULING_UNCONFIRMED: u8 = 4;
 /// Explicit producer stack reservation; native/CRT/kernel allocations are separate.
 pub const AUDIO_PLAYBACK_PRODUCER_STACK_BYTES: usize = 2 * 1024 * 1024;
@@ -345,6 +345,10 @@ pub enum AudioPlaybackError {
     /// The owned PCM render worker is no longer available.
     #[error("Audio Playback render execution is unavailable")]
     ExecutionUnavailable,
+    /// A proved restart was not sent because the original bounded queue refused it.
+    /// This terminal refusal retains the Source/HOLD without retrying installation.
+    #[error("native restart queue admission refused: {0:?}")]
+    NativeReprepareQueueRefused(AudioPcmNativeReprepareRefusal),
     /// Host fader publication needs a settled current Source and serial work.
     #[error("Host output fader publication requires settled audio work and native bindings")]
     HostOutputFaderBusy,
@@ -1251,6 +1255,18 @@ impl RenderWorkQueue {
         let mut state = self.state.lock();
         if state.stopped {
             return Err(RenderQueuePushError::Closed(work));
+        }
+        // Every native variant shares the original five-entry control frontier.
+        // Per-kind bounds below are additional limits, not separate reservations.
+        if !matches!(&work, RenderWork::Pcm(_))
+            && state
+                .pending
+                .iter()
+                .filter(|queued| !matches!(queued, RenderWork::Pcm(_)))
+                .count()
+                >= MAX_PENDING_NATIVE_WORK
+        {
+            return Err(RenderQueuePushError::Busy(work));
         }
         let limit = match &work {
             RenderWork::Pcm(_) => self.pcm_capacity,
