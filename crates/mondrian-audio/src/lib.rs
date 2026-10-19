@@ -133,5 +133,6 @@ pub use processor_isolation::clap_parameter_source::{
 };
 
 pub use runtime::native_reprepare::{
-    NativeAudioReprepare, NativeAudioReprepareError, NativeAudioRepreparePlanFacts,
+    NativeAudioReprepare, NativeAudioReprepareError, NativeAudioReprepareInstallReceipt,
+    NativeAudioRepreparePlanFacts,
 };

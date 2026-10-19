@@ -1,5 +1,6 @@
 //! Retained restart capture owned by the actual installed Runtime.
-//! This first consumer never commits a seed, publishes a Source or resumes DSP.
+//! Capture, preparation and one stopped same-child installation. Fresh Enter
+//! remains a separate operation; none of these receipts permits DSP.
 use super::*;
 use crate::processor_host::native_reprepare::ReprepareSelection;
 use crate::{NativeHostAllocationLedger, NativeHostAllocationOwner};
@@ -54,6 +55,31 @@ impl NativeAudioRepreparePlanFacts {
     }
 }
 
+/// Successful Source publication of a stopped replacement Session.
+/// This non-Clone receipt retains the old Session/Plan and claim until the caller
+/// drops it outside Runtime, metadata and Source guards. It grants no PCM entry.
+pub struct NativeAudioReprepareInstallReceipt {
+    claim: mondrian_core::AudioOwnerInstallationClaim,
+    identity: crate::AudioSessionCursorIdentity,
+    previous_epoch: Option<crate::AudioContinuityEpoch>,
+    // Contains the retired storage and the original logical fee LAST.
+    _retired: Box<NativeReprepareAttempt>,
+}
+impl NativeAudioReprepareInstallReceipt {
+    /// Actual newly published Source claim; no native binding is ready yet.
+    pub fn claim(&self) -> &mondrian_core::AudioOwnerInstallationClaim {
+        &self.claim
+    }
+    /// New empty/unentered Session, containing the retained actual processors.
+    pub const fn identity(&self) -> crate::AudioSessionCursorIdentity {
+        self.identity
+    }
+    /// Consumer must explicitly select a fresh epoch, never infer a resume.
+    pub const fn previous_epoch(&self) -> Option<crate::AudioContinuityEpoch> {
+        self.previous_epoch
+    }
+}
+
 /// A refused capture leaves the original exact Session blocked.
 #[derive(Debug, thiserror::Error)]
 pub enum NativeAudioReprepareError {
@@ -87,6 +113,9 @@ pub enum NativeAudioReprepareError {
     /// Another real native callback generation is pending.
     #[error("native restart cohort changed: {0:?}")]
     Cohort(Option<crate::NativeRequestCohort>),
+    /// Stopped child refused the one explicit seed command; no retry is implied.
+    #[error("native restart seed refused: {0:?}")]
+    Seed(crate::NativeConfigurationSeedRefusal),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +124,13 @@ enum CapturePhase {
     Captured,
     Preparing,
     Prepared,
+    // Written BEFORE the RPC. Lost reply does not prove it was not executed.
+    StageAttempted,
+    SeedStaged,
+    CommitAttempted,
+    // Written immediately after authenticated Accepted, before any postcheck.
+    SeedCommitted,
+    Installed,
     Refused,
     Failed,
 }
@@ -122,6 +158,9 @@ pub(super) struct NativeReprepareAttempt {
     prepared_plan: Option<Arc<PreparedAudioPlan>>,
     prepared_session: Option<crate::render::PreparedAudioSessionStorage>,
     destination: Option<mondrian_core::AudioOwnerInstallationVerifier>,
+    staged_seed: Option<crate::NativeConfigurationSeedReceipt>,
+    retired_claim: Option<mondrian_core::AudioOwnerInstallationClaim>,
+    retired_verifier: Option<mondrian_core::AudioOwnerInstallationVerifier>,
     // Last: actual candidate/Factory/Plan/storage owners retire before credit.
     plan_fee: Option<super::native_author_logical_fees::LogicalPlanFee>,
 }
@@ -171,6 +210,31 @@ fn check_prepare_overlap(
                 granted,
             });
         }
+    }
+    Ok(fixed)
+}
+
+// Additional one-owner child storage. The original lane already admits its
+// decoded/reply/staged buffers; this conservative Root credit is NOT borrowed
+// from the capture control grant. It remains until this Runtime retires.
+fn check_seed_overlap(
+    current: AudioRuntimeResourceFootprint,
+    grant: AudioRuntimeResourceGrant,
+    bytes: usize,
+) -> Result<usize, NativeAudioReprepareError> {
+    if bytes > CONFIGURATION_LIMIT {
+        return Err(NativeAudioReprepareError::Admission(
+            "restart seed exceeds capture policy",
+        ));
+    }
+    let fixed = add(current.fixed_resident_bytes, bytes)?;
+    if fixed > grant.max_fixed_resident_bytes {
+        return Err(AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+            category: AudioRuntimeResourceCategory::FixedResidentBytes,
+            required: fixed,
+            granted: grant.max_fixed_resident_bytes,
+        }
+        .into());
     }
     Ok(fixed)
 }
@@ -278,6 +342,9 @@ impl AudioProgramRuntime {
             prepared_plan: None,
             prepared_session: None,
             destination: None,
+            staged_seed: None,
+            retired_claim: None,
+            retired_verifier: None,
             plan_fee: None,
         }));
         // This owner is installed BEFORE the first potentially destructive SDK
@@ -639,6 +706,196 @@ impl AudioProgramRuntime {
         Ok(facts)
     }
 
+    /// Stage/commit the exact stopped child seed and publish its prepared Session
+    /// using the original one-shot Source authorization. Physical output must be
+    /// quiescent at the real Media caller; this Audio API supplies no such proof.
+    ///
+    /// A first Stage consumes the attempt even on transport error. Commit errors
+    /// are ambiguous and never retried: the child may already have committed.
+    /// Old Session/ticket, actual owners and conservative fees remain held on
+    /// every failure. Successful publication still requires explicit Fresh Enter.
+    /// Drop the returned retirement receipt outside all caller-held locks.
+    pub fn install_native_reprepare_plan(
+        &mut self,
+        operation: &NativeAudioReprepare,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<NativeAudioReprepareInstallReceipt, NativeAudioReprepareError> {
+        use NativeAudioReprepareError as Error;
+        if cancellation.is_canceled() {
+            return Err(Error::Cancelled);
+        }
+        self.native_reprepare_configuration(operation)?;
+        if self.native_reprepare.attempt.as_ref().unwrap().phase != CapturePhase::Prepared {
+            return Err(Error::Admission(
+                "restart installation already attempted or not prepared",
+            ));
+        }
+        let mut attempt = self.native_reprepare.attempt.take().unwrap();
+        let result: Result<_, Error> = (|| {
+            if self.session.pending_reprepare_ticket() != Some(attempt.ticket)
+                || self.session.native_owner_identity() != operation.root
+                || self.native_author_installation_serial()? != attempt.serial
+                || crate::NativeConfigurationSeedTicket::from_candidate(
+                    attempt.candidate.as_ref().unwrap(),
+                ) != operation.facts
+            {
+                return Err(Error::Admission("restart installation identity changed"));
+            }
+            self.session.validate_reprepare_capture(&attempt.selection, cancellation)?;
+            let old = self
+                .session
+                .current_resource_footprint()
+                .map_err(AudioRuntimeBuildError::from)?;
+            let storage = attempt
+                .prepared_session
+                .as_ref()
+                .ok_or(Error::Admission("restart Session was not prepared"))?;
+            let next =
+                storage.current_resource_footprint().map_err(AudioRuntimeBuildError::from)?;
+            let mut footprint =
+                super::native_author_scope::replace_weights(self.resource_footprint, old, next)?;
+            // Both old and new storage already have conservative Fixed credit.
+            // Do not release old storage under the CAS or charge new storage twice.
+            footprint.fixed_resident_bytes = self.resource_footprint.fixed_resident_bytes;
+            let seed = operation.facts;
+            let reserved = check_seed_overlap(
+                self.resource_footprint,
+                self.resource_grant,
+                seed.configuration_bytes,
+            )?;
+            let held = add(attempt.held_fixed_bytes, seed.configuration_bytes)?;
+            let destination = attempt
+                .destination
+                .as_ref()
+                .ok_or(Error::Admission("restart destination was not prepared"))?
+                .clone();
+            self.validate_native_plan_logical_fee(attempt.plan_fee.as_ref().unwrap())?;
+            // Precheck the actual C-old+A relation before the first seed command.
+            self.prepare_native_plan_fee_retirement(attempt.plan_fee.as_ref().unwrap(), footprint)?;
+            if cancellation.is_canceled() {
+                return Err(Error::Cancelled);
+            }
+            if self.native_author_installation_serial()? != attempt.serial {
+                return Err(Error::Admission("Source changed before seed stage"));
+            }
+            self.resource_footprint.fixed_resident_bytes = reserved;
+            attempt.held_fixed_bytes = held;
+            footprint.fixed_resident_bytes = reserved;
+            attempt.phase = CapturePhase::StageAttempted;
+            let outcome = self.session.stage_reprepare_seed(
+                &attempt.selection,
+                crate::NativeConfigurationSeedRequest {
+                    ticket: seed,
+                    configuration: &attempt.candidate.as_ref().unwrap().configuration,
+                    seed_capacity_grant_bytes: seed.configuration_bytes,
+                },
+            )?;
+            let staged = match outcome {
+                crate::NativeConfigurationSeedOutcome::Accepted(receipt) => {
+                    // Retain visible actual ownership before identity/cap checks.
+                    attempt.staged_seed = Some(receipt);
+                    if receipt.child_seed_capacity_bytes > seed.configuration_bytes {
+                        let extra = receipt.child_seed_capacity_bytes - seed.configuration_bytes;
+                        self.resource_footprint.fixed_resident_bytes =
+                            self.resource_footprint.fixed_resident_bytes.saturating_add(extra);
+                        attempt.held_fixed_bytes = attempt.held_fixed_bytes.saturating_add(extra);
+                    }
+                    receipt
+                }
+                crate::NativeConfigurationSeedOutcome::Refused(reason) => {
+                    return Err(Error::Seed(reason))
+                }
+            };
+            // Wire Refused carries no capacity: this does not claim visibility
+            // of rejected temporary allocator peaks or complete SDK heap usage.
+            self.check_resource_ceiling(
+                AudioRuntimeResourceCategory::FixedResidentBytes,
+                self.resource_footprint.fixed_resident_bytes,
+            )?;
+            if staged.ticket != seed || staged.child_seed_capacity_bytes > seed.configuration_bytes
+            {
+                return Err(Error::Admission(
+                    "actual staged seed exceeded its exact grant",
+                ));
+            }
+            attempt.phase = CapturePhase::SeedStaged;
+            self.session.validate_reprepare_capture(&attempt.selection, cancellation)?;
+            if cancellation.is_canceled() {
+                return Err(Error::Cancelled);
+            }
+            if self.native_author_installation_serial()? != attempt.serial {
+                return Err(Error::Admission("Source changed before seed commit"));
+            }
+            attempt.phase = CapturePhase::CommitAttempted;
+            let outcome = self.session.commit_reprepare_seed(&attempt.selection, seed)?;
+            match outcome {
+                crate::NativeConfigurationSeedOutcome::Accepted(receipt) => {
+                    // This MUST precede every late validation, cancellation or
+                    // CAS. An Err below can never grant a second Commit RPC.
+                    attempt.phase = CapturePhase::SeedCommitted;
+                    if receipt != staged {
+                        return Err(Error::Admission("committed seed receipt changed"));
+                    }
+                }
+                crate::NativeConfigurationSeedOutcome::Refused(reason) => {
+                    return Err(Error::Seed(reason))
+                }
+            }
+            let storage = attempt.prepared_session.as_mut().unwrap();
+            storage.validate_reprepare_transfer(
+                &mut self.session,
+                &attempt.selection,
+                seed.observed_contract,
+                cancellation,
+            )?;
+            if cancellation.is_canceled() {
+                return Err(Error::Cancelled);
+            }
+            if self.native_author_installation_serial()? != attempt.serial
+                || self.session.pending_reprepare_ticket() != Some(attempt.ticket)
+            {
+                return Err(Error::Admission(
+                    "Source or held ticket changed after seed commit",
+                ));
+            }
+            let retirement = self.prepare_native_plan_fee_retirement(
+                attempt.plan_fee.as_ref().unwrap(),
+                footprint,
+            )?;
+            let next_verifier = destination.clone();
+            let commit = authorization
+                .begin_commit(&destination)
+                .map_err(crate::AudioNativeOwnerError::from)?;
+            // No RPC, allocation, fallible work or retired owner Drop from here
+            // to commit. The actual Hosted records move once into empty storage.
+            storage.swap_retained(&mut self.session);
+            self.resource_footprint = footprint;
+            attempt.plan_fee.as_mut().unwrap().retire(retirement);
+            attempt.retired_verifier = self.native_installation.verifier.replace(next_verifier);
+            let claim = commit.commit();
+            attempt.retired_claim = self.native_installation.claim.replace(claim.clone());
+            attempt.phase = CapturePhase::Installed;
+            // Outside the Source guard; new Session remains Unentered.
+            self.refresh_native_entry_context();
+            Ok(claim)
+        })();
+        match result {
+            Ok(claim) => Ok(NativeAudioReprepareInstallReceipt {
+                claim,
+                identity: self.session.native_owner_identity(),
+                previous_epoch: attempt.ticket.continuity_epoch,
+                _retired: attempt,
+            }),
+            Err(error) => {
+                // Includes StageAttempted/CommitAttempted (unconfirmed) and
+                // SeedCommitted. None of these phases is retryable.
+                self.native_reprepare.attempt = Some(attempt);
+                Err(error)
+            }
+        }
+    }
+
     /// Borrow only the current Runtime's retained captured bytes. No allocation,
     /// native call, author permission or physical-output evidence is granted.
     pub fn native_reprepare_configuration<'a>(
@@ -658,6 +915,10 @@ impl AudioProgramRuntime {
                 CapturePhase::Captured
                     | CapturePhase::Preparing
                     | CapturePhase::Prepared
+                    | CapturePhase::StageAttempted
+                    | CapturePhase::SeedStaged
+                    | CapturePhase::CommitAttempted
+                    | CapturePhase::SeedCommitted
                     | CapturePhase::Failed
             )
             || self.session.pending_reprepare_ticket() != Some(attempt.ticket)
@@ -749,6 +1010,54 @@ mod inline_admission_tests {
         assert_eq!(candidate.fixed_resident_bytes, 31);
         // This is the production pure admission seam, not a native refusal or
         // allocator-peak test. It creates no candidate, fee or Runtime owner.
+    }
+
+    #[test]
+    fn restart_seed_overlap_uses_exact_root_fixed_credit_before_any_command() {
+        let current = AudioRuntimeResourceFootprint {
+            runtime_occurrences: 1,
+            fixed_resident_bytes: 17,
+            prepared_logical_bytes: 23,
+            ..AudioRuntimeResourceFootprint::default()
+        };
+        assert_eq!(
+            check_seed_overlap(current, AudioRuntimeResourceGrant::new(1, 23, 23), 6).unwrap(),
+            23
+        );
+        assert!(matches!(
+            check_seed_overlap(current, AudioRuntimeResourceGrant::new(1, 22, 23), 6),
+            Err(NativeAudioReprepareError::Resources(
+                AudioRuntimeBuildError::ResourceOverlapGrantExceeded {
+                    category: AudioRuntimeResourceCategory::FixedResidentBytes,
+                    required: 23,
+                    granted: 22,
+                }
+            ))
+        ));
+        assert_eq!(
+            check_seed_overlap(current, AudioRuntimeResourceGrant::new(1, 17, 23), 0).unwrap(),
+            17
+        );
+        let mut overflow = current;
+        overflow.fixed_resident_bytes = usize::MAX;
+        assert!(matches!(
+            check_seed_overlap(overflow, AudioRuntimeResourceGrant::unbounded(), 1),
+            Err(NativeAudioReprepareError::Resources(
+                AudioRuntimeBuildError::InvalidResourceReplacement
+            ))
+        ));
+        assert!(matches!(
+            check_seed_overlap(
+                current,
+                AudioRuntimeResourceGrant::unbounded(),
+                CONFIGURATION_LIMIT + 1
+            ),
+            Err(NativeAudioReprepareError::Admission(_))
+        ));
+        // Exact production pure preflight, not a native RPC refusal claim.
+        assert_eq!(current.fixed_resident_bytes, 17);
+        assert_eq!(current.prepared_logical_bytes, 23);
+        assert_eq!(current.runtime_occurrences, 1);
     }
 
     #[test]

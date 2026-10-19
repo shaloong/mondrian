@@ -1,4 +1,4 @@
-//! Exact retained CLAP capture admission. No seed, Plan or binding publication.
+//! Exact retained CLAP restart admission and stopped same-child seed commands.
 use super::*;
 use crate::native_runtime_owner::NativeHostedBinding;
 use crate::NativeAudioReprepareError as Error;
@@ -188,5 +188,154 @@ impl PreparedProcessorHost {
                 )
             },
         )?)
+    }
+}
+
+impl PreparedProcessorHost {
+    // Restart alone permits the selected latency/tail to differ. The ordinary
+    // author transfer validator remains exact and is not reused or relaxed.
+    pub(crate) fn validate_reprepare_transfer(
+        &mut self,
+        old: &PreparedAudioSchedule,
+        next: &PreparedAudioSchedule,
+        selection: &ReprepareSelection,
+        expected: crate::AudioProcessorExecutionContract,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), Error> {
+        if self.instances.len() != old.processors.len()
+            || old.processors.len() != next.processors.len()
+            || selection.index >= self.instances.len()
+        {
+            return Err(Error::Admission("restart transfer shape changed"));
+        }
+        for (index, (instance, (before, after))) in self
+            .instances
+            .iter_mut()
+            .zip(old.processors.iter().zip(&next.processors))
+            .enumerate()
+        {
+            let a = before.factory.contract();
+            let b = after.factory.contract();
+            if instance.occurrence != before.occurrence
+                || before.occurrence != after.occurrence
+                || before.parameter_ids != after.parameter_ids
+                || before.parameter_curves.len() != after.parameter_curves.len()
+                || before.parameter_curves.iter().zip(&after.parameter_curves).any(|(a, b)| match (
+                    a, b,
+                ) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => {
+                        !a.is_constant()
+                            || !b.is_constant()
+                            || a.constant_value().to_bits() != b.constant_value().to_bits()
+                    }
+                    _ => true,
+                })
+                || before.factory.auxiliary_inputs() != after.factory.auxiliary_inputs()
+                || before.factory.auxiliary_outputs() != after.factory.auxiliary_outputs()
+                || before.factory.note_inputs() != after.factory.note_inputs()
+                || instance.notes.is_some()
+                || instance.native_author_outstanding.is_some()
+                || instance.native_editor_attachment.is_some()
+                || instance.native_editor_detached.is_some()
+                || (index != selection.index && a != b)
+                || (index == selection.index
+                    && (b.algorithmic_latency_frames() != expected.algorithmic_latency_frames()
+                        || b.tail() != expected.tail()
+                        || a.requires_state_entry() != b.requires_state_entry()
+                        || a.realtime_capable() != b.realtime_capable()
+                        || a.offline_capable() != b.offline_capable()
+                        || a.session_scratch_bytes() != b.session_scratch_bytes()))
+            {
+                return Err(Error::Admission(
+                    "restart changed non-scheduling contract or owners",
+                ));
+            }
+            if cancellation.is_canceled() {
+                return Err(Error::Cancelled);
+            }
+            let NativeHostedBinding::Installed { lease, object } = instance.native_binding else {
+                if index != selection.index
+                    && !instance.processor.native_observations_supported()
+                    && before.factory.native_child_settlement_requirement()
+                        == mondrian_core::NativeChildSettlementRequirement::NotApplicable
+                    && isolate_adapter_call("restart transfer peer preflight", || {
+                        instance.processor.preflight_reprepare()
+                    })?
+                    .is_none()
+                {
+                    continue;
+                }
+                return Err(Error::Admission("restart transfer binding unavailable"));
+            };
+            if lease.address().root != selection.lease.address().root
+                || lease.address().local != selection.lease.address().local
+                || lease.installed_root_serial() != selection.lease.installed_root_serial()
+                || lease.address().occurrence != instance.occurrence
+                || (index == selection.index
+                    && (lease != selection.lease || object != selection.object))
+            {
+                return Err(Error::Admission("restart transfer owner changed"));
+            }
+            let observed = isolate_adapter_call("committed restart source recheck", || {
+                instance.processor.preflight_native_observations(object)
+            })?;
+            if observed.object != Some(object)
+                || observed.editor_cleanup.is_some()
+                || observed.pending_reprepare.is_some()
+            {
+                return Err(Error::Admission("committed restart has new pending work"));
+            }
+            crate::native_audio_author_runtime::closed_source(observed.author.as_ref(), false)
+                .map_err(|_| Error::Admission("restart author source is not closed and empty"))?;
+            if index == selection.index {
+                let cohort = isolate_adapter_call("committed restart cohort recheck", || {
+                    instance.processor.native_configuration_cohort()
+                })?;
+                if cohort.is_some() {
+                    return Err(Error::Cohort(cohort));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stage_reprepare_seed(
+        &mut self,
+        selection: &ReprepareSelection,
+        request: crate::NativeConfigurationSeedRequest<'_>,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, Error> {
+        let instance = self.restart_seed_instance(selection)?;
+        Ok(isolate_adapter_call("retained restart seed stage", || {
+            instance.processor.stage_native_configuration_seed(request)
+        })?)
+    }
+
+    pub(crate) fn commit_reprepare_seed(
+        &mut self,
+        selection: &ReprepareSelection,
+        ticket: crate::NativeConfigurationSeedTicket,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, Error> {
+        let instance = self.restart_seed_instance(selection)?;
+        Ok(isolate_adapter_call(
+            "retained restart seed commit",
+            || instance.processor.commit_native_configuration_seed(ticket),
+        )?)
+    }
+
+    fn restart_seed_instance(
+        &mut self,
+        selection: &ReprepareSelection,
+    ) -> Result<&mut HostedProcessorInstance, Error> {
+        let instance = self
+            .instances
+            .get_mut(selection.index)
+            .ok_or(Error::Admission("restart seed occurrence changed"))?;
+        if !matches!(instance.native_binding, NativeHostedBinding::Installed {lease,object}
+            if lease == selection.lease && object == selection.object)
+        {
+            return Err(Error::Admission("restart seed object changed"));
+        }
+        Ok(instance)
     }
 }

@@ -37,6 +37,41 @@ impl PreparedAudioSessionStorage {
             .processor_host
             .validate_state_entry_transfer(&current.plan.schedule, &self.plan().schedule)
     }
+    pub(crate) fn validate_reprepare_transfer(
+        &mut self,
+        current: &mut AudioRenderSession,
+        selection: &crate::processor_host::native_reprepare::ReprepareSelection,
+        expected: crate::AudioProcessorExecutionContract,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<(), crate::NativeAudioReprepareError> {
+        if !self.is_empty_unentered()
+            || self.identity().session_id == current.native_owner_identity().session_id
+            || self.plan().contract() != current.plan.contract()
+            || !std::ptr::eq(self.plan().program(), current.plan.program())
+        {
+            return Err(crate::NativeAudioReprepareError::Admission(
+                "restart destination is not the same Program's empty Session",
+            ));
+        }
+        // Inherit at installation, including a first real registrar attached
+        // after preparation. Propagate sticky/foreign failures before moving
+        // Hosted records; never mint another process owner or finish one here.
+        if let Some(registrar) = &current.native_child_settlement {
+            self.session.attach_native_child_settlement(registrar).map_err(|_| {
+                crate::NativeAudioReprepareError::Admission(
+                    "restart child settlement domain is unavailable",
+                )
+            })?;
+        }
+        current.processor_host.validate_reprepare_transfer(
+            &current.plan.schedule,
+            &self.plan().schedule,
+            selection,
+            expected,
+            cancellation,
+        )
+    }
+
     pub(crate) fn swap_retained(&mut self, current: &mut AudioRenderSession) {
         // All fallible checks and native acknowledgements preceded the final
         // guards. Whole Hosted records move; no plugin create/drop occurs here.
@@ -56,6 +91,21 @@ impl AudioRenderSession {
         self.processor_host
             .validate_reprepare_capture(&self.plan.schedule, selection, cancellation)
     }
+    pub(crate) fn stage_reprepare_seed(
+        &mut self,
+        selection: &crate::processor_host::native_reprepare::ReprepareSelection,
+        request: crate::NativeConfigurationSeedRequest<'_>,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, crate::NativeAudioReprepareError> {
+        self.processor_host.stage_reprepare_seed(selection, request)
+    }
+    pub(crate) fn commit_reprepare_seed(
+        &mut self,
+        selection: &crate::processor_host::native_reprepare::ReprepareSelection,
+        ticket: crate::NativeConfigurationSeedTicket,
+    ) -> Result<crate::NativeConfigurationSeedOutcome, crate::NativeAudioReprepareError> {
+        self.processor_host.commit_reprepare_seed(selection, ticket)
+    }
+
     pub(crate) fn visit_state_entry_storage<'a>(
         &'a self,
         visitor: &mut dyn FnMut(Storage<'a>) -> Result<(), AudioProcessorFactoryStorageError>,
