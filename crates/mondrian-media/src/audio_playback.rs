@@ -3022,10 +3022,10 @@ impl AudioPlayback {
         }
         self.consecutive_render_generation_failures = 0;
         self.render_blocked = self.native_control_hold.is_some();
-        let pcm_policy = if matches!(self.native_control_hold,
-            Some(NativeControlHold::Reprepare { admission, .. })
-                if admission != NativeReprepareAdmission::Unstarted)
-        {
+        let pcm_policy = if matches!(
+            self.native_control_hold,
+            Some(NativeControlHold::Reprepare { .. })
+        ) {
             PcmRetirementPolicy::PreserveNativeHold
         } else {
             PcmRetirementPolicy::FreshContinuity

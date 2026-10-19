@@ -796,6 +796,49 @@ mod tests {
     }
 
     #[test]
+    fn resume_before_restart_service_preserves_original_claim_and_native_control() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        facts.release_retirement.store(true, Ordering::Release);
+        let original = playback.owner_installation.current_claim().unwrap().unwrap().generation();
+        let control = playback.native_control_cancellation.clone();
+        playback.suspend(anchor(20)).unwrap();
+        let paused = playback.generation;
+        playback.reprime(anchor(20)).unwrap();
+        assert!(playback.generation > paused);
+        assert_eq!(
+            playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+            original
+        );
+        assert!(
+            !control.is_canceled(),
+            "Unstarted restart still owns its native control frontier"
+        );
+        assert!(matches!(
+            playback.native_control_hold,
+            Some(NativeControlHold::Reprepare {
+                admission: NativeReprepareAdmission::Unstarted,
+                ..
+            })
+        ));
+        assert!(!playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 0))
+            .unwrap());
+        pump(&mut playback, |p| {
+            p.native_control_output_retirement.is_some_and(|r| r.acknowledged)
+        });
+        assert!(playback
+            .finalize_native_control_anchor(playback.generation, anchor(20))
+            .unwrap());
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 0))
+            .unwrap());
+        pump(&mut playback, settled);
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn paused_output_ack_is_consumed_once_and_resources_settle_before_resume_entry() {
         let (mut playback, renderer) = held();
         let facts = Arc::new(Facts::default());
