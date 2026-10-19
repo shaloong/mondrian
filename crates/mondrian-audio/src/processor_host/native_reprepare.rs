@@ -334,13 +334,10 @@ impl PreparedProcessorHost {
         Ok(outcome)
     }
 
-    pub(crate) fn reprepare_seed_weights(
-        &self,
-        selection: &ReprepareSelection,
-    ) -> Result<(usize, usize), Error> {
+    pub(crate) fn reprepare_seed_weights(&self, index: usize) -> Result<(usize, usize), Error> {
         let selected = self
             .instances
-            .get(selection.index)
+            .get(index)
             .ok_or(Error::Admission("restart seed occurrence changed"))?;
         let total = self.instances.iter().try_fold(0_usize, |sum, instance| {
             sum.checked_add(instance.native_reprepare_seed_bytes)
@@ -363,5 +360,95 @@ impl PreparedProcessorHost {
             return Err(Error::Admission("restart seed object changed"));
         }
         Ok(instance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::processor_output_tests::{fixture, plan, OutputResolver};
+
+    fn hosts() -> (PreparedProcessorHost, PreparedProcessorHost) {
+        let sequence = fixture(mondrian_core::AudioChannelLayout::Mono);
+        let plan = plan(&sequence, &OutputResolver::default()).unwrap();
+        let mut current =
+            PreparedProcessorHost::allocate_storage(&plan.schedule, plan.contract()).unwrap();
+        current.populate_instances(&plan.schedule, None).unwrap();
+        let next =
+            PreparedProcessorHost::allocate_storage(&plan.schedule, plan.contract()).unwrap();
+        assert_eq!(
+            current.instances.len(),
+            2,
+            "actual portable Factory-created Hosted instances"
+        );
+        assert!(next.instances.is_empty());
+        (current, next)
+    }
+
+    // These controls model already recorded capacities in actual Hosted records.
+    // They do not run/acknowledge native commands, invent leases, or qualify two
+    // child processes. The real mode7 gate separately exercises Accepted writes.
+    #[test]
+    fn committed_seed_aggregation_preserves_peer_charges_across_hosted_transfer() {
+        let (mut current, mut next) = hosts();
+        assert_eq!(current.reprepare_seed_weights(0).unwrap(), (0, 0));
+        assert_eq!(current.reprepare_seed_weights(1).unwrap(), (0, 0));
+        let processors = [
+            std::ptr::from_ref(current.instances[0].processor.as_ref()).cast::<()>(),
+            std::ptr::from_ref(current.instances[1].processor.as_ref()).cast::<()>(),
+        ];
+        assert_ne!(processors[0], processors[1]);
+        current.instances[0].native_reprepare_seed_bytes = 5;
+        current.instances[1].native_reprepare_seed_bytes = 11;
+        assert_eq!(current.reprepare_seed_weights(0).unwrap(), (16, 5));
+        assert_eq!(current.reprepare_seed_weights(1).unwrap(), (16, 11));
+        // Replacing only A must preserve B's distinct committed owner charge.
+        current.instances[0].native_reprepare_seed_bytes = 7;
+        assert_eq!(current.reprepare_seed_weights(0).unwrap(), (18, 7));
+        assert_eq!(current.reprepare_seed_weights(1).unwrap(), (18, 11));
+        current.swap_state_entry_instances(&mut next);
+        assert!(current.instances.is_empty());
+        assert_eq!(next.instances.len(), 2);
+        for (instance, original) in next.instances.iter().zip(processors) {
+            assert_eq!(
+                std::ptr::from_ref(instance.processor.as_ref()).cast::<()>(),
+                original,
+                "the same processor Box and its capacity attribution move together"
+            );
+        }
+        assert_eq!(next.reprepare_seed_weights(0).unwrap(), (18, 7));
+        assert_eq!(next.reprepare_seed_weights(1).unwrap(), (18, 11));
+        assert!(matches!(
+            current.reprepare_seed_weights(0),
+            Err(Error::Admission("restart seed occurrence changed"))
+        ));
+    }
+
+    #[test]
+    fn committed_seed_aggregation_rejects_overflow_and_invalid_index_without_mutation() {
+        let (mut current, _) = hosts();
+        current.instances[0].native_reprepare_seed_bytes = usize::MAX;
+        current.instances[1].native_reprepare_seed_bytes = 1;
+        let before = [
+            current.instances[0].native_reprepare_seed_bytes,
+            current.instances[1].native_reprepare_seed_bytes,
+        ];
+        assert!(matches!(
+            current.reprepare_seed_weights(0),
+            Err(Error::Admission("committed seed owner extent overflow"))
+        ));
+        // The existing selected-index error still precedes aggregation overflow.
+        assert!(matches!(
+            current.reprepare_seed_weights(2),
+            Err(Error::Admission("restart seed occurrence changed"))
+        ));
+        assert_eq!(
+            [
+                current.instances[0].native_reprepare_seed_bytes,
+                current.instances[1].native_reprepare_seed_bytes
+            ],
+            before
+        );
+        assert_eq!(current.instances.len(), 2);
     }
 }

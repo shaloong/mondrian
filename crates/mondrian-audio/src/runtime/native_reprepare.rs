@@ -870,7 +870,7 @@ impl AudioProgramRuntime {
                 },
             )?;
             let (old_seeds, selected_seed) =
-                self.session.reprepare_seed_weights(&attempt.selection)?;
+                self.session.reprepare_seed_weights(attempt.selection.index)?;
             let next_seeds = old_seeds
                 .checked_sub(selected_seed)
                 .and_then(|bytes| bytes.checked_add(seed.configuration_bytes))
@@ -1019,7 +1019,8 @@ impl AudioProgramRuntime {
                 attempt.plan_fee.as_ref().unwrap(),
                 footprint,
             )?;
-            let (committed_seeds, _) = self.session.reprepare_seed_weights(&attempt.selection)?;
+            let (committed_seeds, _) =
+                self.session.reprepare_seed_weights(attempt.selection.index)?;
             let actual_extra = add(add(factory_bytes, committed_seeds)?, fee_scope)?;
             let final_footprint = normalized_restart_footprint(
                 attempt.before_capture,

@@ -93,9 +93,9 @@ impl AudioRenderSession {
     }
     pub(crate) fn reprepare_seed_weights(
         &self,
-        selection: &crate::processor_host::native_reprepare::ReprepareSelection,
+        index: usize,
     ) -> Result<(usize, usize), crate::NativeAudioReprepareError> {
-        self.processor_host.reprepare_seed_weights(selection)
+        self.processor_host.reprepare_seed_weights(index)
     }
 
     pub(crate) fn stage_reprepare_seed(
