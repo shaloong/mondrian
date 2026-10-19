@@ -322,7 +322,10 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         assert_eq!(state.project_author_generation(), author_generation);
         assert_eq!(state.authoring_history().unwrap().diagnostics(), history);
         assert!(state.native_audio_editor.is_none());
-        assert!(state.audio_playback.native_reprepare_pending_generation().is_none());
+        let AppAudioPlayback::Available(playback) = &state.audio_playback else {
+            panic!("the original Media remains available");
+        };
+        assert!(playback.native_reprepare_pending_generation().is_none());
         println!("owned restart E2E: old_generation={old_generation} pending={:?} fresh={generation} A={anchor} PDC=3->7 same_child={old_object:?}", pending);
         drop(renderer);
     }));
