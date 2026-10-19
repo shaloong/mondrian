@@ -7,7 +7,7 @@ use crate::app::parameter_gesture::{
 };
 use crate::app::playback::tests::play_ready;
 use crate::app::playback::tests::project_close_audio_contracts::{
-    available_state, install_builtin_source, settle_builtin_binding,
+    available_state, install_builtin_source, settle_builtin_binding, settle_current_builtin_binding,
 };
 use crate::app::playback::AppAudioPlayback;
 use crate::app::product_action::{AudioProductAction, ProductAction};
@@ -83,7 +83,10 @@ fn with_playing_builtin(
         let renderer = state.native_audio_renderer.as_ref().unwrap().upgrade().unwrap();
         let concrete = Arc::downgrade(&renderer);
         let erased: std::sync::Weak<dyn AudioPcmRenderer> = concrete;
-        assert!(state.audio_playback.matches_source_weak(&erased));
+        let AppAudioPlayback::Available(playback) = &state.audio_playback else {
+            panic!("actual Media Source");
+        };
+        assert!(playback.matches_source_weak(&erased));
         assert_eq!(
             renderer.host_output_fader_native_requirement().unwrap(),
             (Requirement::NotApplicable, false)
@@ -109,51 +112,6 @@ fn with_playing_builtin(
     );
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
-    }
-}
-
-// The original setup helper intentionally proves sample zero. Live edits can
-// legally advance Engine authority; settle their real current Source coordinate
-// without changing that existing helper's oracle or scheduling any PCM.
-fn settle_current_builtin_binding(state: &mut AppState) {
-    let before = state.audio_playback_snapshot();
-    let anchor = state
-        .authoritative_audio_anchor(
-            &state.playback_engine,
-            state.playback_engine.monotonic_high_water(),
-            "ordinary binding settle",
-        )
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        if let AppAudioPlayback::Available(playback) = &state.audio_playback {
-            if playback.native_owner_binding_status().is_some() {
-                break;
-            }
-        }
-        let poll = state.audio_playback.poll(AudioPlaybackMode::Idle, anchor).unwrap();
-        assert_eq!(poll.snapshot.in_flight, 0);
-        assert_eq!(poll.snapshot.next_start_sample, before.next_start_sample);
-        for event in poll.events {
-            assert!(
-                matches!(
-                    &event,
-                    mondrian_media::AudioPlaybackEvent::NativeOwnerBindingsObserved {
-                        status: mondrian_media::AudioPcmNativeOwnerBindingStatus::Unavailable(
-                            mondrian_media::AudioPcmNativeOwnerBindingRefusal::UnsupportedAdapter
-                        ),
-                        ..
-                    }
-                ),
-                "only the actual BuiltIn binding completion is expected: {event:?}"
-            );
-            state.handle_audio_playback_event(event, Instant::now()).unwrap();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "current BuiltIn binding did not settle"
-        );
-        std::thread::yield_now();
     }
 }
 

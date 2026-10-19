@@ -518,3 +518,48 @@ fn cancelled_project_open_refuses_a_source_reinstalled_through_public_play() {
     assert!(cleanup.all_resources_released(), "{cleanup:?}");
     assert!(weak.upgrade().is_none());
 }
+
+// The original setup helper intentionally proves sample zero. Live edits can
+// legally advance Engine authority; settle their real current Source coordinate
+// without changing that existing helper's oracle or scheduling any PCM.
+pub(in crate::app) fn settle_current_builtin_binding(state: &mut AppState) {
+    let before = state.audio_playback_snapshot();
+    let anchor = state
+        .authoritative_audio_anchor(
+            &state.playback_engine,
+            state.playback_engine.monotonic_high_water(),
+            "ordinary binding settle",
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let AppAudioPlayback::Available(playback) = &state.audio_playback {
+            if playback.native_owner_binding_status().is_some() {
+                break;
+            }
+        }
+        let poll = state.audio_playback.poll(AudioPlaybackMode::Idle, anchor).unwrap();
+        assert_eq!(poll.snapshot.in_flight, 0);
+        assert_eq!(poll.snapshot.next_start_sample, before.next_start_sample);
+        for event in poll.events {
+            assert!(
+                matches!(
+                    &event,
+                    mondrian_media::AudioPlaybackEvent::NativeOwnerBindingsObserved {
+                        status: mondrian_media::AudioPcmNativeOwnerBindingStatus::Unavailable(
+                            mondrian_media::AudioPcmNativeOwnerBindingRefusal::UnsupportedAdapter
+                        ),
+                        ..
+                    }
+                ),
+                "only the actual BuiltIn binding completion is expected: {event:?}"
+            );
+            state.handle_audio_playback_event(event, Instant::now()).unwrap();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "current BuiltIn binding did not settle"
+        );
+        std::thread::yield_now();
+    }
+}
