@@ -3,6 +3,8 @@ use super::*;
 use mondrian_core::{AudioOwnerInstallationSource, AudioRenderSessionId};
 use std::path::PathBuf;
 
+mod vst3;
+
 #[derive(Default, Debug, PartialEq, Eq)]
 struct Cursors {
     session: Option<AudioSessionCursorEvidence>,

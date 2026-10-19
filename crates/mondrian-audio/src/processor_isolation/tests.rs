@@ -968,7 +968,7 @@ fn vst3_sidechain_samples(index: u32, start: usize, frames: usize) -> Vec<f32> {
     fixture_sidechain_samples(if index == 1 { 11 } else { 7 }, start, frames)
 }
 
-fn vst3_sidechain_snapshot(gain: f64, mode: u32) -> Vec<u8> {
+pub(crate) fn vst3_sidechain_snapshot(gain: f64, mode: u32) -> Vec<u8> {
     let mut component = Vec::with_capacity(20);
     component.extend_from_slice(b"MSS1");
     component.extend_from_slice(&1_u32.to_le_bytes());

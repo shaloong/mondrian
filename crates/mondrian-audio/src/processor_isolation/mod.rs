@@ -49,6 +49,8 @@ mod worker;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::vst3_sidechain_snapshot;
 
 use crate::{
     AudioParameterEventBatch, AudioProcessingMode, AudioProcessor, AudioProcessorAudioIo,
