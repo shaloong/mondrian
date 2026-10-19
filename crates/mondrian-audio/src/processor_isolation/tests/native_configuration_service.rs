@@ -571,6 +571,10 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let factory = IsolatedAudioProcessorFactory::prepare(spec).expect("factory");
         let mut processor = factory.create(None).expect("same persistent child");
         let cohort = trigger_vst3_configuration(&mut *processor, &keys, &ids, mode);
+        let before_service = processor
+            .native_audio_object_observation()
+            .expect("actual retained object before configuration service")
+            .expect("VST3 object capability while the old cohort is held");
         let result = processor
             .service_native_configuration(NativeConfigurationControlRequest {
                 expected_cohort: cohort,
@@ -583,6 +587,13 @@ fn installed_vst3_configuration_seed_commit_preserves_new_profile_on_fresh_enter
         let NativeConfigurationControlOutcome::ReadyForInstall(candidate) = result else {
             panic!("actual candidate: {result:?}");
         };
+        assert_eq!(
+            processor
+                .native_audio_object_observation()
+                .expect("actual retained object after configuration service"),
+            Some(before_service),
+            "configuration service must retain the exact child and component incarnation"
+        );
         assert_candidate(
             &candidate,
             cohort,
@@ -816,6 +827,24 @@ fn qualify_same_child_seed(
     ids: &[ParameterId],
     mode: AudioProcessingMode,
 ) -> NativeConfigurationCandidate {
+    use crate::{
+        NativeAudioObjectBindOutcome, NativeAudioObjectBindRefusal, NativeAudioObjectBindRequest,
+    };
+
+    let mut vst3_binding =
+        if candidate.format == NativeConfigurationFormat::Vst3ComponentAndController {
+            let object = processor
+                .native_audio_object_observation()
+                .expect("actual post-service VST3 object")
+                .expect("VST3 object capability while the candidate is held");
+            assert_ne!(object.process_id().get(), std::process::id());
+            Some(NativeAudioObjectBindRequest {
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                expected_object: object,
+            })
+        } else {
+            None
+        };
     let ticket = NativeConfigurationSeedTicket::from_candidate(&candidate);
     let old = candidate.serviced_cohort.request;
     assert_eq!(
@@ -890,10 +919,60 @@ fn qualify_same_child_seed(
             .expect("duplicate commit is refused"),
         NativeConfigurationSeedOutcome::Refused(NativeConfigurationSeedRefusal::SeedNotStaged)
     );
+    if let Some(binding) = vst3_binding {
+        assert_eq!(
+            processor
+                .native_audio_object_observation()
+                .expect("actual committed VST3 object"),
+            Some(binding.expected_object),
+            "seed staging and commit must retain the post-service component incarnation"
+        );
+        let NativeAudioObjectBindOutcome::Bound(receipt) = processor
+            .bind_native_audio_object(binding)
+            .expect("committed component acknowledges its exact object")
+        else {
+            panic!("committed VST3 object must remain bindable before Fresh Enter");
+        };
+        assert_eq!(receipt.binding(), binding.binding);
+        assert_eq!(receipt.object(), binding.expected_object);
+    }
     // This explicitly starts fresh DSP. It never resumes the old cursor/history.
     // VST3 actually destroys/reloads its component twice from the installed seed.
     for anchor in [100, -101] {
         processor.enter_state(anchor).expect("new explicit continuity generation");
+        if let Some(previous) = vst3_binding {
+            let object = processor
+                .native_audio_object_observation()
+                .expect("actual VST3 object after Fresh Enter")
+                .expect("same live child's reloaded component");
+            assert_eq!(object.process_id(), previous.expected_object.process_id());
+            assert!(object.object_serial() > previous.expected_object.object_serial());
+            assert_eq!(
+                processor
+                    .bind_native_audio_object(previous)
+                    .expect("old component binding has a typed refusal"),
+                NativeAudioObjectBindOutcome::Refused(NativeAudioObjectBindRefusal::ObjectChanged)
+            );
+            let current = NativeAudioObjectBindRequest {
+                binding: mondrian_core::AudioProcessorBindingId::new(),
+                expected_object: object,
+            };
+            let NativeAudioObjectBindOutcome::Bound(receipt) = processor
+                .bind_native_audio_object(current)
+                .expect("same child remains bindable after refusing the old incarnation")
+            else {
+                panic!("actual fresh VST3 object must acknowledge its binding");
+            };
+            assert_eq!(receipt.binding(), current.binding);
+            assert_eq!(receipt.object(), object);
+            assert_eq!(
+                processor
+                    .native_audio_object_observation()
+                    .expect("actual bound child retained"),
+                Some(object)
+            );
+            vst3_binding = Some(current);
+        }
         for index in 0..3 {
             let start = anchor + index * 4;
             let mut audio = configuration_audio(keys);
