@@ -206,6 +206,19 @@ MNE3 stable capture produces fresh ordinary PCM; unannounced default-flag drift
 is refused on the same cohort/object with zero DSP calls. Post-Drop same-handle
 Exit0 is an OS observation, not proof of the original 100 ms graceful budget.
 
+The current Windows normal Product (dev opt1/debug2) and Audio libtest
+(opt1/debug0) pass four configuration gates and 739 ordinary Audio controls.
+The owned configuration gates use stereo/48 kHz/block4 without Notes or a musical
+reference. The new VST3 gate reproduces the old parent rejecting an actual committed
+3→7-frame contract, then passes supported closed-peer state-entry in Realtime
+and Offline after the parent cache is synchronized. Existing seed refusals and
+two fresh-Enter PCM checks remain; the new receipt, configuration bytes/digest,
+actual object and same-child new incarnation are checked. Original VST3
+retained/seed and CLAP seed regressions also pass, with empty stderr and original
+180s/2s Job settlement. This does not implement CLAP author state-entry or full
+canonical reprepare/PDC/Source installation, author Undo/save, old exit-failure
+closure, realtime/performance, third-party or other-platform qualification.
+
 The complete VST3/CLAP Worker Box header, including the fixed 32-by-2 event
 contract, now enters the original lane profile and sole Root FixedResident fee.
 Startup compares the actual dynamic Box layout before Ready; scoped lane checks
