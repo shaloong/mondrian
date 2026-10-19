@@ -2048,15 +2048,20 @@ struct StringGuiPermissionPhase {
   int action = 0, interactive = -1;
   int status[2]{};
   char before[2][128]{}, after[2][128]{};
+  int doubleStatus[2]{};
+  double doubleBefore[2]{}, doubleAfter[2]{};
 };
 struct StringGuiPermissionReceipt {
   int created = 0, destroyed = 0;
   int createStatus[2]{}, invalidStatus[4]{};
+  int createDoubleStatus[2]{};
   int phaseCount = 0;
   StringGuiPermissionPhase phases[4]{};
 };
 StringGuiPermissionReceipt stringGuiPermission;
 static_assert(std::is_trivially_copyable_v<StringGuiPermissionReceipt>);
+static_assert(sizeof(StringGuiPermissionPhase) == 568);
+static_assert(sizeof(StringGuiPermissionReceipt) == 2320);
 bool copyStringGuiValue(OfxParamHandle parameter, double time, char (&output)[128]) {
   char* value = nullptr;
   if (gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK || !value) { return false; }
@@ -2066,7 +2071,7 @@ bool copyStringGuiValue(OfxParamHandle parameter, double time, char (&output)[12
   std::memcpy(output, value, length + 1);
   return true;
 }
-bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
+bool stringGuiPermissionProbe(const std::string& action, const void* handle, bool doubles) {
   if (action == kOfxActionDestroyInstance) { ++stringGuiPermission.destroyed; return true; }
   const bool creating = action == kOfxActionCreateInstance;
   const bool beginning = action == kOfxActionBeginInstanceEdit;
@@ -2082,11 +2087,21 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
       gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
       gParamHost->paramGetHandle(parameters, "single", &plain, nullptr) != kOfxStatOK ||
       gParamHost->paramGetHandle(parameters, "multi", &timed, nullptr) != kOfxStatOK) { return false; }
+  OfxParamHandle doublePlain = nullptr, doubleTimed = nullptr;
+  if (doubles && (gParamHost->paramGetHandle(parameters, "writePlain", &doublePlain, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "writeTimed", &doubleTimed, nullptr) != kOfxStatOK)) { return false; }
   if (creating) {
     char first[128]{}, second[128]{};
     if (!copyStringGuiValue(plain, time, first) || !copyStringGuiValue(timed, time, second)) { return false; }
     stringGuiPermission.createStatus[0] = gParamHost->paramSetValue(plain, first);
     stringGuiPermission.createStatus[1] = gParamHost->paramSetValueAtTime(timed, time, second);
+    if (doubles) {
+      double firstDouble = 0.0, secondDouble = 0.0;
+      if (gParamHost->paramGetValueAtTime(doublePlain, time, &firstDouble) != kOfxStatOK ||
+          gParamHost->paramGetValueAtTime(doubleTimed, time, &secondDouble) != kOfxStatOK) { return false; }
+      stringGuiPermission.createDoubleStatus[0] = gParamHost->paramSetValue(doublePlain, firstDouble);
+      stringGuiPermission.createDoubleStatus[1] = gParamHost->paramSetValueAtTime(doubleTimed, time, secondDouble);
+    }
     return true;
   }
   if (stringGuiPermission.phaseCount >= 4) { return false; }
@@ -2096,6 +2111,8 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
   if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK ||
       gPropHost->propGetInt(properties, kOfxPropIsInteractive, 0, &phase.interactive) != kOfxStatOK ||
       !copyStringGuiValue(plain, time, phase.before[0]) || !copyStringGuiValue(timed, time, phase.before[1])) { return false; }
+  if (doubles && (gParamHost->paramGetValueAtTime(doublePlain, time, &phase.doubleBefore[0]) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(doubleTimed, time, &phase.doubleBefore[1]) != kOfxStatOK)) { return false; }
   if (beginning) {
     const std::string oversized(64 * 1024 + 1, 'x');
     stringGuiPermission.invalidStatus[0] = gParamHost->paramSetValue(plain, static_cast<const char*>(nullptr));
@@ -2108,6 +2125,12 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
   phase.status[0] = gParamHost->paramSetValue(plain, "plugin/plain");
   phase.status[1] = gParamHost->paramSetValueAtTime(timed, time, "plugin/timed");
   if (!copyStringGuiValue(plain, time, phase.after[0]) || !copyStringGuiValue(timed, time, phase.after[1])) { return false; }
+  if (doubles) {
+    phase.doubleStatus[0] = gParamHost->paramSetValue(doublePlain, 2.75);
+    phase.doubleStatus[1] = gParamHost->paramSetValueAtTime(doubleTimed, time, -3.0);
+    if (gParamHost->paramGetValueAtTime(doublePlain, time, &phase.doubleAfter[0]) != kOfxStatOK ||
+        gParamHost->paramGetValueAtTime(doubleTimed, time, &phase.doubleAfter[1]) != kOfxStatOK) { return false; }
+  }
   ++stringGuiPermission.phaseCount;
   // Record the old permission violation without failing Render/End prematurely.
   return true;
@@ -2267,7 +2290,8 @@ OfxStatus probeAction(const char* action, const void* handle,
     const OfxStatus gui = genericGuiProbe(operation, handle, in, selected);
     if (operation == kOfxActionBeginInstanceEdit || operation == kOfxActionEndInstanceEdit || gui != kOfxStatOK) { return gui; }
   }
-  if (selected == "string_gui_permission" && !stringGuiPermissionProbe(operation, handle)) { return kOfxStatFailed; }
+  if ((selected == "string_gui_permission" || selected == "render_parameter_permission") &&
+      !stringGuiPermissionProbe(operation, handle, selected == "render_parameter_permission")) { return kOfxStatFailed; }
   if (selected == "cancel_after_create" && operation == kOfxImageEffectActionRender &&
       !constructorActionReceipt("MONDRIAN_OPENFX_ACTUAL_RENDER_ENTERED")) { return kOfxStatFailed; }
   if (selected == "cooperative_abort" && operation == kOfxImageEffectActionRender) { return cooperativeAbortRender(handle, in); }
@@ -2587,7 +2611,7 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected.find("strings") == 0 && operation == kOfxImageEffectActionRender &&
       result == kOfxStatOK && !stringValues(handle, in, true)) { return kOfxStatFailed; }
 
-  if ((selected.find("strings") == 0 || selected == "string_gui_permission") && result == kOfxStatOK &&
+  if ((selected.find("strings") == 0 || selected == "string_gui_permission" || selected == "render_parameter_permission") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext) {
     const char* names[] = {"single", "multi", "existingFile", "newFile",
                            "existingDirectory", "newDirectory", "status", "rich"};
@@ -2600,7 +2624,7 @@ OfxStatus probeAction(const char* action, const void* handle,
       u8"Ready ✓", "{\\rtf1\\ansi hello}"};
     OfxParamSetHandle params = nullptr;
     if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return kOfxStatFailed; }
-    const int count = (selected == "strings_text" || selected == "string_gui_permission") ? 2 : selected == "strings_paths" ? 6 : 8;
+    const int count = (selected == "strings_text" || selected == "string_gui_permission" || selected == "render_parameter_permission") ? 2 : selected == "strings_paths" ? 6 : 8;
     for (int index = 0; index < count; ++index) {
       OfxPropertySetHandle props = nullptr;
       if (gParamHost->paramDefine(params, kOfxParamTypeString, names[index], &props) != kOfxStatOK ||
@@ -2610,6 +2634,18 @@ OfxStatus probeAction(const char* action, const void* handle,
           gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK) { return kOfxStatFailed; }
       if (index >= 2 && index <= 5 &&
           gPropHost->propSetInt(props, kOfxParamPropStringFilePathExists, 0, index % 2 == 0) != kOfxStatOK) { return kOfxStatFailed; }
+    }
+    // Independent constant targets leave the official Basic gain algorithm untouched.
+    if (selected == "render_parameter_permission") {
+      for (const char* name : {"writePlain", "writeTimed"}) {
+        OfxPropertySetHandle props = nullptr;
+        if (gParamHost->paramDefine(params, kOfxParamTypeDouble, name, &props) != kOfxStatOK ||
+            gPropHost->propSetString(props, kOfxParamPropDoubleType, 0, kOfxParamDoubleTypePlain) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropDefault, 0, 0.0) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropMin, 0, -4.0) != kOfxStatOK ||
+            gPropHost->propSetDouble(props, kOfxParamPropMax, 0, 4.0) != kOfxStatOK ||
+            gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) != kOfxStatOK) { return kOfxStatFailed; }
+      }
     }
   }
   if (operation == kOfxActionCreateInstance && result == kOfxStatOK) {
