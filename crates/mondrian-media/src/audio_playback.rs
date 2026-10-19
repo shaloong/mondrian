@@ -1,5 +1,6 @@
 //! Deep realtime Audio Playback scheduling Module.
 
+mod host_output_fader;
 mod native_author;
 mod native_child_settlement;
 use native_child_settlement::ForeignOwnerRetirementTracker;
@@ -339,6 +340,12 @@ pub enum AudioPlaybackError {
     /// The owned PCM render worker is no longer available.
     #[error("Audio Playback render execution is unavailable")]
     ExecutionUnavailable,
+    /// Host fader publication needs a settled current Source and serial work.
+    #[error("Host output fader publication requires settled audio work and native bindings")]
+    HostOutputFaderBusy,
+    /// A retained Host fader cannot publish over a different actual Source.
+    #[error("Host output fader publication belongs to a different audio Source")]
+    HostOutputFaderSourceChanged,
     /// The exact retained native attachment requires control-only cleanup.
     /// A normal seek/continuity entry cannot replace its still-retryable owner.
     #[error("native editor attachment cleanup is pending")]
@@ -5521,6 +5528,7 @@ fn validate_rendered_buffer(
 
 #[cfg(test)]
 mod tests {
+    mod host_output_fader_contracts;
     mod source_close_contracts {
         include!("audio_playback/source_close_tests.rs");
     }
