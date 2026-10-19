@@ -523,6 +523,37 @@ impl AudioProgramRuntime {
             matches!(source, RuntimeSource::Nested(nested) if nested.runtime.native_observations_supported()))
     }
 
+    /// Aggregate declarations from actual current factories and instance shapes.
+    /// Unknown, poisoned or held/prospective owners remain Unavailable. This
+    /// control-thread query may call an opaque factory getter under its existing
+    /// panic boundary. NotApplicable says nothing about DSP statefulness or
+    /// in-process native observations; callers must query those separately.
+    pub fn installed_native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        use mondrian_core::NativeChildSettlementRequirement as Requirement;
+        if self.native_author_scope.is_some()
+            || self.native_installation.prepared.is_some()
+            || self.held_native_plan_logical_bytes() != 0
+        {
+            return Requirement::Unavailable;
+        }
+        let mut aggregate = self.session.installed_native_child_settlement_requirement();
+        if aggregate == Requirement::Unavailable {
+            return aggregate;
+        }
+        for source in self.sources.entries.values() {
+            if let RuntimeSource::Nested(nested) = source {
+                match nested.runtime.installed_native_child_settlement_requirement() {
+                    Requirement::Unavailable => return Requirement::Unavailable,
+                    Requirement::Required => aggregate = Requirement::Required,
+                    Requirement::NotApplicable => {}
+                }
+            }
+        }
+        aggregate
+    }
+
     /// Poll one exact occurrence fairly on the sole non-RT serial control owner.
     /// Logs require no editor binding; actual parent/child transport still
     /// authenticates the producer. Other native queues remain unconsumed.

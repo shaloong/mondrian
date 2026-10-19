@@ -353,6 +353,15 @@ enum SessionContinuity {
 }
 
 impl AudioRenderSession {
+    pub(crate) fn installed_native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        if matches!(self.continuity, SessionContinuity::Poisoned { .. }) {
+            return mondrian_core::NativeChildSettlementRequirement::Unavailable;
+        }
+        self.processor_host.installed_native_child_settlement_requirement(&self.plan.schedule)
+    }
+
     pub(crate) fn validate_native_child_settlement_domain(
         &self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
@@ -2533,6 +2542,36 @@ mod native_child_settlement_tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn installed_child_requirement_reads_actual_factory_without_creating_or_binding() {
+        for requirement in [
+            Requirement::NotApplicable,
+            Requirement::Required,
+            Requirement::Unavailable,
+        ] {
+            let creates = Arc::new(AtomicUsize::new(0));
+            let plan = plan(requirement, false, creates.clone());
+            let session = AudioRenderSession::new(plan).unwrap();
+            assert_eq!(session.installed_native_child_settlement_requirement(), requirement);
+            assert_eq!(session.installed_native_child_settlement_requirement(), requirement);
+            assert_eq!(creates.load(Ordering::SeqCst), 1,
+                "capability observation cannot construct another instance");
+            assert!(session.native_child_settlement.is_none(),
+                "declaration observation does not acquire a settlement domain");
+        }
+    }
+
+    #[test]
+    fn installed_child_requirement_never_calls_missing_prospective_instances_not_applicable() {
+        let creates = Arc::new(AtomicUsize::new(0));
+        let plan = plan(Requirement::NotApplicable, false, creates.clone());
+        let prospective = AudioRenderSession::allocate_storage(plan).unwrap();
+        assert_eq!(prospective.session.installed_native_child_settlement_requirement(),
+            Requirement::Unavailable);
+        assert_eq!(creates.load(Ordering::SeqCst), 0,
+            "unpopulated owners are unknown, never filled by observation");
     }
 
     #[test]

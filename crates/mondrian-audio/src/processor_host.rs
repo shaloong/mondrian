@@ -1322,6 +1322,32 @@ impl PreparedProcessorHost {
         Ok(())
     }
 
+    pub(crate) fn installed_native_child_settlement_requirement(
+        &self,
+        schedule: &PreparedAudioSchedule,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        use mondrian_core::NativeChildSettlementRequirement as Requirement;
+        if self.instances.len() != schedule.processors.len() {
+            return Requirement::Unavailable;
+        }
+        let mut aggregate = Requirement::NotApplicable;
+        for (instance, prepared) in self.instances.iter().zip(&schedule.processors) {
+            if instance.occurrence != prepared.occurrence
+                || matches!(instance.continuity, HostedProcessorContinuity::Failed)
+            {
+                return Requirement::Unavailable;
+            }
+            // Use the original panic-isolated factory declaration, never the
+            // author format name, resolver default or absence of callbacks.
+            match prepared.factory.native_child_settlement_requirement() {
+                Requirement::Unavailable => return Requirement::Unavailable,
+                Requirement::Required => aggregate = Requirement::Required,
+                Requirement::NotApplicable => {}
+            }
+        }
+        aggregate
+    }
+
     pub(crate) fn bind_native_child_settlement(
         &mut self,
         schedule: &PreparedAudioSchedule,

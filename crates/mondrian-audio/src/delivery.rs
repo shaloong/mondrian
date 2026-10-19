@@ -98,6 +98,14 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.native_observations_supported()
     }
 
+    /// Actual current factory declarations, not an inferred native format or
+    /// statelessness capability. Intended for non-RT admission only.
+    pub fn installed_native_child_settlement_requirement(
+        &self,
+    ) -> mondrian_core::NativeChildSettlementRequirement {
+        self.runtime.installed_native_child_settlement_requirement()
+    }
+
     /// Drain one actual occurrence on the same serial native control lane.
     /// Delivery neither resets DSP nor introduces another observation store.
     pub fn poll_native_observations(
