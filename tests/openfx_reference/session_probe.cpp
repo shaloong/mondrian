@@ -2057,9 +2057,9 @@ struct StringGuiPermissionReceipt {
 };
 StringGuiPermissionReceipt stringGuiPermission;
 static_assert(std::is_trivially_copyable_v<StringGuiPermissionReceipt>);
-bool copyStringGuiValue(OfxParamHandle parameter, char (&output)[128]) {
+bool copyStringGuiValue(OfxParamHandle parameter, double time, char (&output)[128]) {
   char* value = nullptr;
-  if (gParamHost->paramGetValue(parameter, &value) != kOfxStatOK || !value) { return false; }
+  if (gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK || !value) { return false; }
   size_t length = 0;
   while (length < sizeof(output) && value[length] != '\0') { ++length; }
   if (length == sizeof(output)) { return false; }
@@ -2084,7 +2084,7 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
       gParamHost->paramGetHandle(parameters, "multi", &timed, nullptr) != kOfxStatOK) { return false; }
   if (creating) {
     char first[128]{}, second[128]{};
-    if (!copyStringGuiValue(plain, first) || !copyStringGuiValue(timed, second)) { return false; }
+    if (!copyStringGuiValue(plain, time, first) || !copyStringGuiValue(timed, time, second)) { return false; }
     stringGuiPermission.createStatus[0] = gParamHost->paramSetValue(plain, first);
     stringGuiPermission.createStatus[1] = gParamHost->paramSetValueAtTime(timed, time, second);
     return true;
@@ -2095,7 +2095,7 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
   OfxPropertySetHandle properties = nullptr;
   if (gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &properties) != kOfxStatOK ||
       gPropHost->propGetInt(properties, kOfxPropIsInteractive, 0, &phase.interactive) != kOfxStatOK ||
-      !copyStringGuiValue(plain, phase.before[0]) || !copyStringGuiValue(timed, phase.before[1])) { return false; }
+      !copyStringGuiValue(plain, time, phase.before[0]) || !copyStringGuiValue(timed, time, phase.before[1])) { return false; }
   if (beginning) {
     const std::string oversized(64 * 1024 + 1, 'x');
     stringGuiPermission.invalidStatus[0] = gParamHost->paramSetValue(plain, static_cast<const char*>(nullptr));
@@ -2107,7 +2107,7 @@ bool stringGuiPermissionProbe(const std::string& action, const void* handle) {
   // contaminating the timed setter's target. Freeze facts before host reapply.
   phase.status[0] = gParamHost->paramSetValue(plain, "plugin/plain");
   phase.status[1] = gParamHost->paramSetValueAtTime(timed, time, "plugin/timed");
-  if (!copyStringGuiValue(plain, phase.after[0]) || !copyStringGuiValue(timed, phase.after[1])) { return false; }
+  if (!copyStringGuiValue(plain, time, phase.after[0]) || !copyStringGuiValue(timed, time, phase.after[1])) { return false; }
   ++stringGuiPermission.phaseCount;
   // Record the old permission violation without failing Render/End prematurely.
   return true;
