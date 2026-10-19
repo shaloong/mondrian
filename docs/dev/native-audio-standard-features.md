@@ -196,8 +196,25 @@ checks every sample of eight new8192-frame windows through131072 and actual
 consumption of the first256 post-F frames against independent echo math.
 This finite Windows48k/stereo, mode12/history256/latency0 qualification preserves
 the same native UUID and DSP history, Session/epoch, Media anchor and FIFO.
-Queued latency remains; nonzero PDC, repeated updates, third-party history,
-physical/gapless output, full UI scheduling and realtime/performance are unqualified.
+An additional owned mode0/latency3 gate passes two public actions at F1=8192 and
+F2=16384 (execution8195/16387). All 96 windows cover [0,8192) at unity,
+[8192,16384) at -6dB and [16384,24576) at -12dB; actual FIFO consumption reaches
+16640 without clearing, rewinding or replacing the native object. Both actions
+retain the original Source/Session/epoch and install new claims/parent leases.
+App169 and the seven original native App regressions also pass, including the
+deliberately unresolved retained-alias negative control. All native gates retain
+original180s/2s and clean Job settlement.
+
+The repeat gate uses deterministic software counters, not continuous device
+timing: the former AudioDevice-only assertion correctly failed PhaseRegression
+when 8192 consumed frames spanned about509ms of wall time. The corrected control
+keeps that real converter call, accepts only AudioDevice/no-fallback or typed
+PhaseRegression above its bound, and requires the next action to preserve the
+actual clock result without Media recovery. Successful output does not identify
+which branch occurred. Its matched non-harness Product is test-profile opt0/
+debuginfo0; no production clock threshold changed. Queued latency, third-party
+history, continuous device clocks, physical/gapless output, full UI scheduling
+and realtime/performance remain unqualified.
 See [ADR0011](../adr/0011-preserve-live-audio-state-at-the-processing-frontier.md)
 for admission, ownership and postcommit error boundaries.
 The current App test build retains 25 warnings; normal Product has 10. No
