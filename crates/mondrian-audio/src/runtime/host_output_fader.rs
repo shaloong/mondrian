@@ -69,6 +69,7 @@ pub struct HostOutputFaderHandoffReceipt {
 impl AudioProgramRuntime {
     fn validate_host_fader_root(&self) -> Result<(), AudioHostFaderHandoffError> {
         if self.native_author_scope.is_some()
+            || self.native_reprepare.is_some()
             || self.native_installation.prepared.is_some()
             || self
                 .sources

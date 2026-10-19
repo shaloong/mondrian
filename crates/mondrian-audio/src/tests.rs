@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 #[path = "tests/continuity_evidence.rs"]
 mod continuity_evidence_tests;
 
+#[cfg(windows)]
+#[path = "tests/native_reprepare_service.rs"]
+mod native_reprepare_service;
+
 #[path = "tests/lookahead_limiter.rs"]
 mod lookahead_limiter_tests;
 

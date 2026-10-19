@@ -160,6 +160,11 @@ impl AudioProgramRuntime {
         if cancellation.is_canceled() {
             return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
         }
+        // A retained restart owns an incompatible contract/capture overlap.
+        // Do not allocate another handoff or foreign-rebind its exact old owner.
+        if self.native_reprepare.is_some() {
+            return Err(AudioNativeOwnerError::OwnerUnavailable.into());
+        }
         let old_root = self.session.native_owner_identity();
         let old_serial = self.native_author_installation_serial()?;
         if proposal.target().root_plan != old_root.prepared_plan_id

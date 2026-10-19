@@ -131,3 +131,5 @@ pub use native_factory_storage::{
 pub use processor_isolation::clap_parameter_source::{
     ClapParameterSource, ClapParameterSourceSnapshot,
 };
+
+pub use runtime::native_reprepare::{NativeAudioReprepare, NativeAudioReprepareError};

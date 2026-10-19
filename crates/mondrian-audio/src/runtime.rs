@@ -3,6 +3,7 @@ pub(crate) mod native_author;
 mod native_author_logical_fees;
 mod native_author_preflight;
 mod native_author_scope;
+pub(crate) mod native_reprepare;
 mod preparation_admission;
 
 use crate::dependency::{
@@ -71,7 +72,7 @@ impl AudioRuntimeResourceGrant {
 pub struct AudioRuntimeResourceFootprint {
     /// Generated mutable Runtime occurrences, not unique Sequence identities.
     pub runtime_occurrences: usize,
-    /// Aggregate fixed live residency.
+    /// Aggregate fixed residency, including retained restart capture reservations.
     pub fixed_resident_bytes: usize,
     /// Aggregate immutable prepared-plan logical bytes.
     pub prepared_logical_bytes: usize,
@@ -351,6 +352,8 @@ pub struct AudioProgramRuntime {
     // receipts independently release them after their field drop glue retires.
     native_held_plan_fees: Option<Arc<std::sync::atomic::AtomicUsize>>,
     native_author_scope: Option<Box<native_author_scope::NativeAuthorScopeCohort>>,
+    native_reprepare: Option<Box<native_reprepare::NativeReprepareAttempt>>,
+    native_reprepare_next_attempt: u64,
 }
 
 impl AudioProgramRuntime {
@@ -715,6 +718,9 @@ impl AudioProgramRuntime {
         &mut self,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<crate::NativeAudioBindingPreparation, crate::AudioNativeOwnerError> {
+        if self.native_reprepare.is_some() {
+            return Err(crate::AudioNativeOwnerError::OwnerUnavailable);
+        }
         if self.native_installation.verifier.is_none() {
             return Err(crate::AudioNativeOwnerError::UnregisteredRuntime);
         }
@@ -1734,6 +1740,8 @@ impl AudioProgramRuntime {
                 native_diagnostic_cursor: 0,
                 native_held_plan_fees: None,
                 native_author_scope: None,
+                native_reprepare: None,
+                native_reprepare_next_attempt: 1,
             })
         })();
         stack.remove(&sequence.id);

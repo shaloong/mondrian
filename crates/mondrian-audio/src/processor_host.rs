@@ -2,6 +2,7 @@
 
 pub(crate) mod host_output_fader;
 pub(crate) mod native_author;
+pub(crate) mod native_reprepare;
 mod note_ledger;
 mod notes;
 pub(crate) mod state_entry;

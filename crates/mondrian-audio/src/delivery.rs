@@ -298,6 +298,22 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.native_author_state_entry_required(proposal)
     }
 
+    /// Capture the exact retained root restart; physical output quiescence is a caller precondition.
+    pub fn service_native_reprepare(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::NativeAudioReprepare, crate::NativeAudioReprepareError> {
+        self.runtime.service_native_reprepare(ticket, cancellation)
+    }
+    /// Borrow current capture bytes without publishing a Plan, Source or author state.
+    pub fn native_reprepare_configuration<'a>(
+        &'a self,
+        operation: &crate::NativeAudioReprepare,
+    ) -> Result<&'a [u8], crate::NativeAudioReprepareError> {
+        self.runtime.native_reprepare_configuration(operation)
+    }
+
     /// Prepare a terminal static Host fader at the retained Session frontier.
     pub fn prepare_host_output_fader_handoff(
         &mut self,

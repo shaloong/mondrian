@@ -1308,6 +1308,59 @@ impl AudioRenderSession {
         Ok(())
     }
 
+    pub(crate) fn native_reprepare_lane_count(
+        &self,
+        ticket: crate::AudioProcessorReprepareTicket,
+    ) -> Result<usize, crate::NativeAudioReprepareError> {
+        use crate::NativeAudioReprepareError as Error;
+        if self.pending_reprepare_ticket != Some(ticket)
+            || self.native_owner_identity()
+                != (crate::AudioSessionCursorIdentity {
+                    prepared_plan_id: ticket.prepared_plan_id,
+                    session_id: ticket.session_id,
+                })
+            || self.has_notes()
+            || !matches!(self.continuity, SessionContinuity::Active { epoch, .. } if Some(epoch) == ticket.continuity_epoch)
+        {
+            return Err(Error::Admission(
+                "restart ticket is not this active root Session",
+            ));
+        }
+        self.plan
+            .schedule
+            .processors
+            .iter()
+            .find(|processor| processor.occurrence == ticket.occurrence)
+            .map(|processor| processor.parameter_ids.len())
+            .ok_or(Error::Admission("restart occurrence absent"))
+    }
+    pub(crate) fn inspect_native_reprepare(
+        &mut self,
+        ticket: crate::AudioProcessorReprepareTicket,
+        serial: std::num::NonZeroU64,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<
+        crate::processor_host::native_reprepare::ReprepareSelection,
+        crate::NativeAudioReprepareError,
+    > {
+        self.processor_host.inspect_native_reprepare(
+            &self.plan.schedule,
+            self.plan.program(),
+            ticket,
+            serial,
+            cancellation,
+        )
+    }
+    pub(crate) fn service_native_reprepare(
+        &mut self,
+        selected: &crate::processor_host::native_reprepare::ReprepareSelection,
+        token: std::num::NonZeroU64,
+        limit: usize,
+        grant: usize,
+    ) -> Result<crate::NativeConfigurationControlOutcome, crate::NativeAudioReprepareError> {
+        self.processor_host.service_native_reprepare(selected, token, limit, grant)
+    }
+
     /// Retained exact local ticket; other native pending markers remain unconsumed.
     pub fn pending_reprepare_ticket(&self) -> Option<crate::AudioProcessorReprepareTicket> {
         self.pending_reprepare_ticket
