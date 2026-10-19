@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Preserve live audio state at the processing frontier
@@ -19,7 +19,7 @@ input with the wrong state. Reweighting queued final PCM cannot recover arbitrar
 upstream signal or replace graph execution. Existing native-author Plan handoff
 also carries retained proposal and exact Ack permissions that Host edits lack.
 
-## Proposed decision
+## Decision
 
 Apply an admitted live Host math edit at the original Session's next processing
 frontier F. Retain already generated PCM, the Session, processor objects, delay
@@ -27,21 +27,44 @@ lines, epoch and exact cursors. Queued PCM keeps its original math; newly
 processed PCM uses the new immutable Plan. The receipt reports the actual F.
 This is bounded live control latency, not a new Timeline clock: Engine anchor A,
 author time, event offsets and explicit seek/re-entry semantics remain distinct.
+Normal author binding synchronization may still advance A at its actual observed
+time. F, watermarks and callback counts do not enter semantic Plan identity.
 
 The first capability is restricted to one direct-root terminal Program Output
 static fader with no post-fader processors or selected Notes. All other authored
 math, automation, processors and opaque configuration, routing, ports, PDC,
 media/source mappings, nested dependencies, audition and Render Contract must
-remain identical. Unsupported changes and unsettled native obligations retain
-explicit admission failures; they cannot borrow this capability.
+remain identical. The initial capability also requires no nested Runtime,
+active editor, in-flight PCM or native control work. The actual retained Session
+then supplies F without inventing a queue fence. Unsupported changes and
+unsettled native obligations retain explicit admission failures; they cannot
+borrow this capability.
 
 The existing prepared author Session ticket remains the sole transaction.
 Preparation validates the exact current Runtime/Source and real resource overlap
-before publication. A new Plan identity requires matching native leases, targets
-and the one Source claim; retaining a native object does not retain an old target.
-Author/history and Source publication must finish under their existing guards
-with only prevalidated infallible moves. No SDK call or native Ack is invented
-inside that final boundary. Presentation must follow the actual new claim.
+before publication. A new Plan identity requires matching parent leases, targets
+and the one Source claim. Pure Host math retains the actual native binding UUID,
+object and parameter source: the Worker does not encode the parent Plan address.
+It needs no foreign Bind, source consumption or native Ack. Parent targets still
+change with the Plan and installed serial; presentation must follow the actual
+new claim instead of relabeling an old observation.
+
+Keep the actual Runtime and metadata exclusively borrowed across dependent
+publication and the original infallible author ticket installation. Finish every
+fallible check before the Source CAS. That short guard swaps the prepared Plan,
+parent leases and claim, then ends before author mutation. The original Session
+API explicitly permits installation after dependent publication. Install the
+author once, obtain its now-current execution snapshot and update metadata before
+releasing the Runtime. No new DSP or target operation can observe the intermediate
+state through that Runtime. Source claim observation alone is not author or DSP
+permission. Do not hold an author execution read guard across its writer.
+
+No fallible business operation, cancellation reversal or SDK call follows the
+successful CAS. Retired Plan/factory owners move outside all Runtime, metadata
+and Source locks before destruction. Snapshot allocation and the original author
+retirement occur outside the Source guard on the control thread. This is not an
+arbitrary-panic rollback guarantee; a trusted author installation closure cannot
+reenter App state or treat an invariant panic as a recoverable refusal.
 
 Playback and Export keep the same compiler, Plan and Session math. A fresh export
 evaluates its accepted author snapshot through normal entry; it receives no live
@@ -50,11 +73,11 @@ second parameter model, routing bypass or native-name compatibility branch.
 
 ## Implementation gates
 
-1. Prove that preparing same-object bindings without a retained native proposal
-   preserves failure custody. The current initial-binding API revokes records;
-   it is not a usable atomic replacement preparation. Cancellation, partial Bind
-   and dropped preparations need an explicit original-owner outcome before any
-   author install. This gate is unresolved; no new Host handoff API is accepted.
+1. Prepare parent-only lease migration from actual installed records, checking
+   the original Source, identity, epoch and closed native sources. Preserve all
+   pending/held and unknown-capability refusals. Neither the initial-binding API
+   nor native-author foreign Bind preparation is a rollback-safe substitute;
+   those operations can change the child before graph publication.
 2. Define exact-shape math validation, current frontier evidence, resource overlap
    and one Source publication over the existing Session. Keep native-author
    proposal/cohort/Ack validation unchanged and separate from Host admission.
