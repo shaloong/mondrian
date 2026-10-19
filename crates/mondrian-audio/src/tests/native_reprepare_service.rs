@@ -49,7 +49,7 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
         )
         .expect("real mode7 catalog"),
     );
-    let render = AudioRenderContract {
+    let mut render = AudioRenderContract {
         sample_rate: 48_000,
         channel_layout: AudioChannelLayout::Stereo,
         max_block_frames: 4,
@@ -86,11 +86,18 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
     // Consume that same Spec without another validation worker or native probe.
     let metadata_factory = crate::processor_isolation::IsolatedAudioProcessorFactory::prepare(spec)
         .expect("existing native-probed preparation metadata");
-    assert_eq!(
-        crate::AudioProcessorFactory::execution_contract(metadata_factory.as_ref())
-            .algorithmic_latency_frames(),
-        3
+    let execution_contract =
+        crate::AudioProcessorFactory::execution_contract(metadata_factory.as_ref());
+    assert_eq!(execution_contract.algorithmic_latency_frames(), 3);
+    let processor_session_bytes = execution_contract.session_scratch_bytes();
+    let grant = AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 32 * 1024 * 1024);
+    assert!(
+        processor_session_bytes > 0 && processor_session_bytes <= grant.max_fixed_resident_bytes
     );
+    // The small probe allowance does not cover the real isolated worker's
+    // lane/stacks/control owners. This single-processor Runtime admits exactly
+    // its existing Factory contract, under the unchanged bounded Root grant.
+    render.processor_session_scratch_budget_bytes = processor_session_bytes;
     let detector =
         crate::AudioProcessorFactory::auxiliary_input_contract(metadata_factory.as_ref())
             .buses
@@ -110,7 +117,6 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
     let author_before = serde_json::to_value(&sequence).unwrap();
     let processors = IsolatedAudioProcessorResolver::new(catalog);
-    let grant = AudioRuntimeResourceGrant::new(1, 64 * 1024 * 1024, 32 * 1024 * 1024);
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
         &sequence,
         &[],
@@ -121,6 +127,11 @@ fn installed_clap_runtime_restart_capture_retains_exact_source_and_ticket() {
         grant,
     )
     .expect("actual original Runtime");
+    assert_eq!(
+        runtime.resource_footprint().processor_session_bytes,
+        processor_session_bytes,
+        "the sole native occurrence retains its exact Factory Session request"
+    );
     let source = AudioOwnerInstallationSource::new();
     let (registration, verifier) = source.register().unwrap();
     runtime.bind_native_owner_installation(verifier.clone()).unwrap();
