@@ -559,6 +559,66 @@ impl IsolatedAudioProcessorFactory {
         Some(bytes)
     }
 
+    fn rebind_execution_configuration(
+        &self,
+        identity: NativeConfigurationSeedTicket,
+        configuration: &[u8],
+        report_peak: &mut dyn FnMut(usize),
+    ) -> Result<Option<Arc<Self>>, AudioProcessorHostError> {
+        use sha2::{Digest, Sha256};
+        if !self.admits_reprepare_identity(identity, configuration.len()) {
+            return Ok(None);
+        }
+        if <[u8; 32]>::from(Sha256::digest(configuration)) != identity.configuration_sha256 {
+            return Err(invalid_contract(
+                "retained restart configuration digest changed",
+            ));
+        }
+        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())
+            .ok_or_else(|| {
+                invalid_contract("retained CLAP metadata exceeds the raw codec bound")
+            })?;
+        let preparation_payload = clap_worker::payload_with_reprepare_configuration(
+            &self.spec.preparation_payload,
+            configuration,
+            report_peak,
+        )?;
+        // Unlike prepare_inner this does not consume/probe new evidence or create
+        // a worker. Original immutable metadata already passed typed admission.
+        let spec = IsolatedAudioProcessorWorkerSpec {
+            musical_time_reference: self.spec.musical_time_reference,
+            helper_executable: self.spec.helper_executable.clone(),
+            helper_arguments: self.spec.helper_arguments.clone(),
+            dispatch_argument: self.spec.dispatch_argument.clone(),
+            preparation_payload,
+            preparation_evidence: PreparationEvidence::Unprobed,
+            plugin_execution_contract: identity.observed_contract,
+            auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
+            auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
+            note_input_contract: self.spec.note_input_contract.clone(),
+            parameter_ids: self.spec.parameter_ids.clone(),
+            render_contract: self.spec.render_contract,
+            startup_timeout: self.spec.startup_timeout,
+            state_entry_timeout: self.spec.state_entry_timeout,
+            operation_timeout: self.spec.operation_timeout,
+            native_lane: self.spec.native_lane,
+        };
+        let mut next = Self {
+            input_names: self.input_names.clone(),
+            spec,
+            execution_contract: self.execution_contract,
+            layout: self.layout,
+            #[cfg(test)]
+            retained_create_test_hook: self.retained_create_test_hook.clone(),
+        };
+        let actual = next.known_reprepare_factory_bytes().unwrap_or(usize::MAX);
+        report_peak(codec.saturating_add(actual));
+        next.execution_contract = Self::requested_execution_contract(&next.spec, next.layout)?;
+        // After this Arc forms there is no fallible query/cap check: the Runtime
+        // first adopts it, then checks actual peak/cancellation/Source identity.
+        Ok(Some(Arc::new(next)))
+    }
+
     /// Validate immutable preparation facts before a Plan retains this Factory.
     /// A fresh native probe supplies presentation metadata without an additional
     /// Worker; generic/manual specs retain the real validation launch and shutdown.
@@ -712,58 +772,8 @@ impl AudioProcessorFactory for IsolatedAudioProcessorFactory {
         configuration: &[u8],
         report_peak: &mut dyn FnMut(usize),
     ) -> Result<Option<Arc<dyn AudioProcessorFactory>>, AudioProcessorHostError> {
-        use sha2::{Digest, Sha256};
-        if !self.admits_reprepare_identity(identity, configuration.len()) {
-            return Ok(None);
-        }
-        if <[u8; 32]>::from(Sha256::digest(configuration)) != identity.configuration_sha256 {
-            return Err(invalid_contract(
-                "retained restart configuration digest changed",
-            ));
-        }
-        let codec = clap_worker::reprepare_codec_bound(self.spec.preparation_payload.len())
-            .ok_or_else(|| {
-                invalid_contract("retained CLAP metadata exceeds the raw codec bound")
-            })?;
-        let preparation_payload = clap_worker::payload_with_reprepare_configuration(
-            &self.spec.preparation_payload,
-            configuration,
-            report_peak,
-        )?;
-        // Unlike prepare_inner this does not consume/probe new evidence or create
-        // a worker. Original immutable metadata already passed typed admission.
-        let spec = IsolatedAudioProcessorWorkerSpec {
-            musical_time_reference: self.spec.musical_time_reference,
-            helper_executable: self.spec.helper_executable.clone(),
-            helper_arguments: self.spec.helper_arguments.clone(),
-            dispatch_argument: self.spec.dispatch_argument.clone(),
-            preparation_payload,
-            preparation_evidence: PreparationEvidence::Unprobed,
-            plugin_execution_contract: identity.observed_contract,
-            auxiliary_inputs: self.spec.auxiliary_inputs.clone(),
-            auxiliary_outputs: self.spec.auxiliary_outputs.clone(),
-            note_input_contract: self.spec.note_input_contract.clone(),
-            parameter_ids: self.spec.parameter_ids.clone(),
-            render_contract: self.spec.render_contract,
-            startup_timeout: self.spec.startup_timeout,
-            state_entry_timeout: self.spec.state_entry_timeout,
-            operation_timeout: self.spec.operation_timeout,
-            native_lane: self.spec.native_lane,
-        };
-        let mut next = Self {
-            input_names: self.input_names.clone(),
-            spec,
-            execution_contract: self.execution_contract,
-            layout: self.layout,
-            #[cfg(test)]
-            retained_create_test_hook: self.retained_create_test_hook.clone(),
-        };
-        let actual = next.known_reprepare_factory_bytes().unwrap_or(usize::MAX);
-        report_peak(codec.saturating_add(actual));
-        next.execution_contract = Self::requested_execution_contract(&next.spec, next.layout)?;
-        // After this Arc forms there is no fallible query/cap check: the Runtime
-        // first adopts it, then checks actual peak/cancellation/Source identity.
-        Ok(Some(Arc::new(next)))
+        self.rebind_execution_configuration(identity, configuration, report_peak)
+            .map(|factory| factory.map(|factory| factory as Arc<dyn AudioProcessorFactory>))
     }
 
     fn execution_contract(&self) -> AudioProcessorExecutionContract {
@@ -2308,6 +2318,145 @@ mod note_spec_contracts {
         max.limits.input_events = 4096;
         max.limits.output_ends = 4096;
         assert!(spec().with_note_input_contract(max).is_ok());
+    }
+
+    #[test]
+    fn execution_restart_factory_bound_and_rebind_preserve_fixed_metadata_and_old_owner() {
+        use sha2::{Digest, Sha256};
+        let mut spec = spec();
+        spec.plugin_execution_contract = AudioProcessorExecutionContract::new(
+            3,
+            crate::AudioProcessorTail::Finite(3),
+            true,
+            true,
+            true,
+            17,
+        )
+        .unwrap();
+        spec.helper_arguments.push(OsString::from("immutable-argument"));
+        spec.preparation_payload = serde_json::to_vec(&serde_json::json!({
+            "main_audio_input": clap_worker::ClapMainAudioInput::Present,
+            "main_audio_output_id": 0, "auxiliary_outputs": [],
+            "library_path": "unchanged.clap", "plugin_id": "unchanged",
+            "binary_sha256": vec![7;32], "state": [0,1],
+            "parameters": [], "parameter_ids": []
+        }))
+        .unwrap();
+        let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+        let factory = IsolatedAudioProcessorFactory {
+            execution_contract: IsolatedAudioProcessorFactory::requested_execution_contract(
+                &spec, layout,
+            )
+            .unwrap(),
+            spec,
+            layout,
+            input_names: Vec::new(),
+            retained_create_test_hook: None,
+        };
+        // Manual metadata fixture only. No worker/probe/native authority is
+        // claimed by this direct test construction or by the synthetic ticket.
+        let old_payload = factory.spec.preparation_payload.clone();
+        let old_contract = factory.execution_contract();
+        let configuration = [255, 0, 9];
+        let identity = NativeConfigurationSeedTicket {
+            serviced_cohort: NativeRequestCohort::new(
+                1,
+                mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+            )
+            .unwrap(),
+            control_token: std::num::NonZeroU64::new(1).unwrap(),
+            observed_contract: AudioProcessorExecutionContract::new(
+                7,
+                crate::AudioProcessorTail::Finite(7),
+                true,
+                true,
+                true,
+                17,
+            )
+            .unwrap(),
+            format: NativeConfigurationFormat::ClapState,
+            configuration_bytes: configuration.len(),
+            configuration_sha256: Sha256::digest(configuration).into(),
+        };
+        let (bound, counts) = measure_host_allocations_for_test(|| {
+            factory.native_reprepare_factory_bound(identity, configuration.len())
+        });
+        let bound = bound.unwrap();
+        assert_eq!(
+            counts, [0; 4],
+            "bound must not allocate, even for metadata ownership"
+        );
+        let codec = clap_worker::reprepare_codec_bound(old_payload.len()).unwrap();
+        let clones = factory.known_reprepare_factory_bytes().unwrap()
+            - factory.spec.preparation_payload.capacity();
+        assert_eq!(
+            bound,
+            codec
+                + clones
+                + clap_worker::reprepare_payload_output_bound(
+                    old_payload.len(),
+                    configuration.len()
+                )
+                .unwrap()
+        );
+        let mut wrong = identity;
+        wrong.configuration_sha256[0] ^= 1;
+        assert!(factory
+            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .is_err());
+        wrong = identity;
+        wrong.observed_contract = AudioProcessorExecutionContract::new(
+            7,
+            crate::AudioProcessorTail::Finite(7),
+            true,
+            false,
+            true,
+            17,
+        )
+        .unwrap();
+        assert!(factory.native_reprepare_factory_bound(wrong, configuration.len()).is_none());
+        assert!(factory
+            .with_native_reprepare_configuration(wrong, &configuration, &mut |_| {})
+            .unwrap()
+            .is_none());
+        let mut peak = 0;
+        let next = factory
+            .rebind_execution_configuration(identity, &configuration, &mut |bytes| {
+                peak = peak.max(bytes)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            next.execution_contract(),
+            IsolatedAudioProcessorFactory::requested_execution_contract(&next.spec, next.layout)
+                .unwrap()
+        );
+        assert_eq!(next.execution_contract().algorithmic_latency_frames(), 7);
+        assert_eq!(
+            next.execution_contract().tail(),
+            crate::AudioProcessorTail::Finite(7)
+        );
+        assert_eq!(
+            next.execution_contract().session_scratch_bytes(),
+            old_contract.session_scratch_bytes()
+        );
+        assert!(peak >= codec + next.known_reprepare_factory_bytes().unwrap());
+        assert!(peak <= bound);
+        let before: serde_json::Value = serde_json::from_slice(&old_payload).unwrap();
+        let mut after: serde_json::Value =
+            serde_json::from_slice(&next.spec.preparation_payload).unwrap();
+        assert_eq!(after["state"], serde_json::json!(configuration));
+        after["state"] = before["state"].clone();
+        assert_eq!(after, before, "all eight non-state fields remain identical");
+        assert_eq!(next.spec.helper_arguments, factory.spec.helper_arguments);
+        assert_eq!(next.spec.render_contract, factory.spec.render_contract);
+        let public = factory
+            .with_native_reprepare_configuration(identity, &configuration, &mut |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(public.execution_contract(), next.execution_contract());
+        assert_eq!(factory.spec.preparation_payload, old_payload);
+        assert_eq!(factory.execution_contract(), old_contract);
     }
 
     #[test]

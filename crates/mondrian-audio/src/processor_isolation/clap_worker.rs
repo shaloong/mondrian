@@ -3079,8 +3079,8 @@ mod tests {
             "\"parameters\":[]",
             "\"parameters\":[ {\"raw\": [1e99999,-0.0,1.2300]} ]",
         );
-        // The raw scanner must not decode a number/container merely to preserve
-        // this already-admitted immutable metadata fragment.
+        // Synthetic scanner stress, not typed-admitted CLAP parameter metadata:
+        // skipping raw numbers/containers must not decode their numeric values.
         let before: ClapRepreparePayload<'_> = serde_json::from_str(&payload).unwrap();
         let mut peak = 0;
         let output =
