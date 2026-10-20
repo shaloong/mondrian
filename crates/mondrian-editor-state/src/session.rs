@@ -253,6 +253,89 @@ impl AuthoringSession {
         }
         self.finish_admitted_sequence_gesture(gesture)
     }
+    // Terminal batches share this sole native group. Unlike an interactive
+    // action, a background first prefix must not implicitly finish another UI group.
+    pub(crate) fn begin_native_terminal_sequence_gesture(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+    ) -> Result<()> {
+        if self.sequence_gesture.is_some() {
+            return Err(session_error(
+                "begin_native_terminal_sequence_gesture",
+                "another author group is active",
+            ));
+        }
+        self.begin_native_sequence_gesture(gesture, sequence)
+    }
+
+    pub(crate) fn prepare_native_sequence_candidate(
+        &mut self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+        before: Sequence,
+        after: Sequence,
+    ) -> Result<Option<PreparedSequenceEdit>> {
+        if !self.native_sequence_gesture_is_current(gesture, sequence)
+            || before.id != sequence
+            || after.id != sequence
+        {
+            return Err(session_error(
+                "prepare_native_sequence_candidate",
+                "native author group is stale",
+            ));
+        }
+        let group = self.sequence_gesture.map(|active| active.group);
+        self.prepare_sequence_candidate("Edit native audio processors", before, after, group)
+    }
+
+    // The generic public install assumes synchronous exclusive Session custody.
+    // A terminal ticket crosses an asynchronous boundary and must re-admit first.
+    pub(crate) fn admit_prepared_native_sequence_candidate(
+        &self,
+        gesture: mondrian_core::AuthoringGestureId,
+        sequence: SequenceId,
+        expected_generation: AuthorGeneration,
+        before: &Sequence,
+        prepared: Option<&PreparedSequenceEdit>,
+    ) -> Result<()> {
+        if !self.native_sequence_gesture_is_current(gesture, sequence)
+            || self.author_generation != expected_generation
+            || before.id != sequence
+        {
+            return Err(session_error(
+                "commit_native_sequence_candidate",
+                "native author group or generation changed",
+            ));
+        }
+        let current = self.sequence(sequence).ok_or_else(|| {
+            session_error(
+                "commit_native_sequence_candidate",
+                "native author Sequence is absent",
+            )
+        })?;
+        if current.revision != before.revision || !current.author_state_eq_ignoring_revision(before)
+        {
+            return Err(session_error(
+                "commit_native_sequence_candidate",
+                "native author before/current changed",
+            ));
+        }
+        if let Some(prepared) = prepared {
+            if prepared.session_id != self.session_id
+                || prepared.expected_generation != expected_generation
+                || prepared.sequence_id != sequence
+                || prepared.group != self.sequence_gesture.map(|active| active.group)
+            {
+                return Err(session_error(
+                    "commit_native_sequence_candidate",
+                    "prepared native edit belongs to another group",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Open a validated document whose current generation is already durably saved.
     pub fn open_saved(
         document: ProjectDocument,

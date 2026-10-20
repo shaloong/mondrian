@@ -29,7 +29,10 @@ pub use session::{
 };
 
 /// Canonical native author gestures; execution/window origin remains a separate proof.
-pub use native_audio_authoring::{NativeAudioAuthorGesture, NativeAudioAuthorOwner};
+pub use native_audio_authoring::{
+    NativeAudioAuthorGesture, NativeAudioAuthorOwner, NativeAudioTerminalAuthorGroup,
+    NativeAudioTerminalAuthorMember, PreparedNativeAudioTerminalAuthorGroup,
+};
 
 /// Canonical author-generation commit fence; native source closure is separate.
 pub use author_execution_snapshot::{

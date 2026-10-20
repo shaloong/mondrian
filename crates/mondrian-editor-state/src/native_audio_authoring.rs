@@ -133,6 +133,146 @@ impl NativeAudioAuthorGesture {
     }
 }
 
+/// One canonical author target and terminal update supplied by the product.
+///
+/// These fields do not authenticate native origin, a Runtime frontier or Ack.
+#[derive(Debug, Clone)]
+pub struct NativeAudioTerminalAuthorMember {
+    /// Exact canonical Rack owner; execution occurrence admission is separate.
+    pub owner: NativeAudioAuthorOwner,
+    /// Authored Processor receiving this update.
+    pub processor_id: AudioProcessorInstanceId,
+    /// Pinned definition captured for that actual native source.
+    pub expected_definition: AudioProcessorDefinitionRef,
+    /// Schema-qualified operations and optional coherent opaque replacement.
+    pub update: NativeAudioAuthorUpdate,
+    /// Actual source finality, independently authenticated by the product.
+    pub completion: mondrian_core::NativeAudioAuthorCompletion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalAuthorTarget {
+    owner: NativeAudioAuthorOwner,
+    processor_id: AudioProcessorInstanceId,
+    definition: AudioProcessorDefinitionRef,
+}
+
+impl TerminalAuthorTarget {
+    fn of(member: &NativeAudioTerminalAuthorMember) -> Self {
+        Self {
+            owner: member.owner,
+            processor_id: member.processor_id,
+            definition: member.expected_definition.clone(),
+        }
+    }
+
+    fn same_author_target(&self, other: &Self) -> bool {
+        self.owner.rack_address() == other.owner.rack_address()
+            && self.processor_id == other.processor_id
+    }
+
+    fn admit(&self, session: &AuthoringSession, sequence: SequenceId) -> Result<()> {
+        self.owner.admit(session, sequence, self.processor_id, &self.definition)
+    }
+}
+
+#[derive(Debug)]
+struct FrozenTerminalAuthorMember {
+    target: TerminalAuthorTarget,
+    completion: mondrian_core::NativeAudioAuthorCompletion,
+    supplied_state: bool,
+}
+
+#[derive(Debug)]
+enum TerminalAuthorGroupPhase {
+    Collecting,
+    Prepared,
+    Published(Vec<FrozenTerminalAuthorMember>),
+    Finished,
+}
+
+/// Exclusive handle to the Session's existing native-pending Sequence group.
+///
+/// This owns only author admission and phase metadata. It neither retains a
+/// second Document/History nor proves a complete native frontier. Drop never
+/// finishes or cancels the Session group.
+#[derive(Debug)]
+pub struct NativeAudioTerminalAuthorGroup {
+    session_id: AuthoringSessionId,
+    sequence_id: SequenceId,
+    gesture_id: AuthoringGestureId,
+    expected_generation: crate::AuthorGeneration,
+    first: TerminalAuthorTarget,
+    phase: TerminalAuthorGroupPhase,
+}
+
+impl NativeAudioTerminalAuthorGroup {
+    /// Original Session lifetime; this is not an execution permission.
+    pub const fn session_id(&self) -> AuthoringSessionId {
+        self.session_id
+    }
+    /// Sole authored Sequence of this group.
+    pub const fn sequence_id(&self) -> SequenceId {
+        self.sequence_id
+    }
+    /// Existing History group identity, not a native Source receipt.
+    pub const fn gesture_id(&self) -> AuthoringGestureId {
+        self.gesture_id
+    }
+
+    fn admit(&self, session: &AuthoringSession) -> Result<()> {
+        if session.session_id() != self.session_id
+            || session.author_generation() != self.expected_generation
+            || !session.native_sequence_gesture_is_current(self.gesture_id, self.sequence_id)
+        {
+            return Err(native_error("terminal author group is stale or foreign"));
+        }
+        self.first.admit(session, self.sequence_id)
+    }
+}
+
+struct PreparedTerminalAuthorCandidate {
+    session_id: AuthoringSessionId,
+    sequence_id: SequenceId,
+    gesture_id: AuthoringGestureId,
+    expected_generation: crate::AuthorGeneration,
+    before: mondrian_timeline::Sequence,
+    members: Vec<FrozenTerminalAuthorMember>,
+    prepared: Option<crate::session::PreparedSequenceEdit>,
+}
+
+impl PreparedTerminalAuthorCandidate {
+    fn sequence(&self) -> &mondrian_timeline::Sequence {
+        match &self.prepared {
+            Some(prepared) => prepared
+                .candidate_sequences()
+                .iter()
+                .find(|sequence| sequence.id == self.sequence_id)
+                .expect("the original prepared edit retains its target Sequence"),
+            None => &self.before,
+        }
+    }
+}
+
+/// Owned, non-Clone private candidate for one frozen terminal member set.
+///
+/// Reuses the original prepared Sequence edit. NoChange retains the real before
+/// and group proof as well. Failed commit/discard preserves this custody; Drop
+/// never clears the Session's native-pending barrier.
+pub struct PreparedNativeAudioTerminalAuthorGroup {
+    candidate: Option<PreparedTerminalAuthorCandidate>,
+}
+
+impl PreparedNativeAudioTerminalAuthorGroup {
+    /// Borrow the unpublished candidate for canonical compilation.
+    ///
+    /// This is not a current AuthorExecutionSnapshot or native/Source authority.
+    /// Successful commit or discard consumes it and returns None thereafter.
+    pub fn candidate_sequence(&self) -> Option<&mondrian_timeline::Sequence> {
+        self.candidate.as_ref().map(PreparedTerminalAuthorCandidate::sequence)
+    }
+}
+
 impl AuthoringSession {
     /// Begin a group of native author edits after current author-target admission.
     ///
@@ -248,6 +388,298 @@ impl AuthoringSession {
         gesture.admit(self)?;
         self.cancel_sequence_gesture(gesture.gesture_id)
     }
+}
+
+impl AuthoringSession {
+    /// Admit the first real member and open only the original native barrier.
+    ///
+    /// The product authenticates source origin before calling. This validates
+    /// canonical target/schema/finality without publishing its trial Sequence.
+    pub fn begin_native_audio_terminal_group(
+        &mut self,
+        sequence_id: SequenceId,
+        first: NativeAudioTerminalAuthorMember,
+    ) -> Result<NativeAudioTerminalAuthorGroup> {
+        let target = TerminalAuthorTarget::of(&first);
+        target.admit(self, sequence_id)?;
+        let before = self
+            .sequence(sequence_id)
+            .ok_or_else(|| native_error("terminal author Sequence is absent"))?;
+        admit_terminal_finality(
+            before,
+            &target,
+            first.completion,
+            first.update.opaque_state.is_some(),
+        )?;
+        let mut trial = before.clone();
+        apply_terminal_member(&mut trial, first)?;
+        let gesture_id = AuthoringGestureId::new();
+        self.begin_native_terminal_sequence_gesture(gesture_id, sequence_id)?;
+        Ok(NativeAudioTerminalAuthorGroup {
+            session_id: self.session_id(),
+            sequence_id,
+            gesture_id,
+            expected_generation: self.author_generation(),
+            first: target,
+            phase: TerminalAuthorGroupPhase::Collecting,
+        })
+    }
+
+    /// Freeze all members into one unpublished, group-aware canonical candidate.
+    ///
+    /// Collecting may add peers before this call. All targets must belong to the
+    /// same Sequence, be unique and terminal, and include the first exact target.
+    /// Any error leaves Document/History/generation and the original barrier intact.
+    pub fn prepare_native_audio_terminal_group(
+        &mut self,
+        group: &mut NativeAudioTerminalAuthorGroup,
+        members: Vec<NativeAudioTerminalAuthorMember>,
+    ) -> Result<PreparedNativeAudioTerminalAuthorGroup> {
+        group.admit(self)?;
+        if !matches!(&group.phase, TerminalAuthorGroupPhase::Collecting) {
+            return Err(native_error("terminal author group is not collecting"));
+        }
+        let before = self
+            .sequence(group.sequence_id)
+            .cloned()
+            .ok_or_else(|| native_error("terminal author Sequence is absent"))?;
+        let mut after = before.clone();
+        let mut frozen = Vec::with_capacity(members.len());
+        for member in members {
+            let target = TerminalAuthorTarget::of(&member);
+            if frozen
+                .iter()
+                .any(|prior: &FrozenTerminalAuthorMember| prior.target.same_author_target(&target))
+            {
+                return Err(native_error("terminal author member is duplicated"));
+            }
+            target.admit(self, group.sequence_id)?;
+            let supplied_state = member.update.opaque_state.is_some();
+            admit_terminal_finality(&before, &target, member.completion, supplied_state)?;
+            frozen.push(FrozenTerminalAuthorMember {
+                target,
+                completion: member.completion,
+                supplied_state,
+            });
+            apply_terminal_member(&mut after, member)?;
+        }
+        admit_terminal_members(self, group, &before, &after, &frozen)?;
+        let prepared = self.prepare_native_sequence_candidate(
+            group.gesture_id,
+            group.sequence_id,
+            before.clone(),
+            after,
+        )?;
+        let ticket = PreparedNativeAudioTerminalAuthorGroup {
+            candidate: Some(PreparedTerminalAuthorCandidate {
+                session_id: self.session_id(),
+                sequence_id: group.sequence_id,
+                gesture_id: group.gesture_id,
+                expected_generation: self.author_generation(),
+                before,
+                members: frozen,
+                prepared,
+            }),
+        };
+        group.phase = TerminalAuthorGroupPhase::Prepared;
+        Ok(ticket)
+    }
+
+    /// Publish once after all asynchronous preparation has returned successfully.
+    ///
+    /// Rechecks the actual Session, group, generation, before/current and frozen
+    /// members before consuming anything. This does not atomically commit a
+    /// native Source; later Source failure retains the accepted Document/barrier.
+    pub fn commit_native_audio_terminal_group(
+        &mut self,
+        group: &mut NativeAudioTerminalAuthorGroup,
+        ticket: &mut PreparedNativeAudioTerminalAuthorGroup,
+    ) -> Result<Option<AuthoringCommit>> {
+        self.admit_native_audio_terminal_candidate(group, ticket)?;
+        let candidate = ticket.candidate.take().expect("admitted owned candidate");
+        let commit =
+            candidate.prepared.map(|prepared| self.install_prepared_sequence_edit(prepared));
+        group.expected_generation = self.author_generation();
+        group.phase = TerminalAuthorGroupPhase::Published(candidate.members);
+        Ok(commit)
+    }
+
+    /// Explicitly discard an unpublished candidate so real peers can join.
+    ///
+    /// The first anchor, Document and native barrier remain. A consumed, stale
+    /// or foreign ticket cannot unlock a different or later candidate.
+    pub fn discard_native_audio_terminal_candidate(
+        &mut self,
+        group: &mut NativeAudioTerminalAuthorGroup,
+        ticket: &mut PreparedNativeAudioTerminalAuthorGroup,
+    ) -> Result<()> {
+        self.admit_native_audio_terminal_candidate(group, ticket)?;
+        let retired = ticket.candidate.take().expect("admitted owned candidate");
+        group.phase = TerminalAuthorGroupPhase::Collecting;
+        drop(retired);
+        Ok(())
+    }
+
+    fn admit_native_audio_terminal_candidate(
+        &self,
+        group: &NativeAudioTerminalAuthorGroup,
+        ticket: &PreparedNativeAudioTerminalAuthorGroup,
+    ) -> Result<()> {
+        group.admit(self)?;
+        if !matches!(&group.phase, TerminalAuthorGroupPhase::Prepared) {
+            return Err(native_error(
+                "terminal author group has no frozen candidate",
+            ));
+        }
+        let candidate = ticket
+            .candidate
+            .as_ref()
+            .ok_or_else(|| native_error("terminal author candidate was already consumed"))?;
+        if candidate.session_id != group.session_id
+            || candidate.sequence_id != group.sequence_id
+            || candidate.gesture_id != group.gesture_id
+            || candidate.expected_generation != group.expected_generation
+        {
+            return Err(native_error(
+                "terminal author candidate belongs to another group",
+            ));
+        }
+        self.admit_prepared_native_sequence_candidate(
+            group.gesture_id,
+            group.sequence_id,
+            candidate.expected_generation,
+            &candidate.before,
+            candidate.prepared.as_ref(),
+        )?;
+        admit_terminal_members(
+            self,
+            group,
+            &candidate.before,
+            candidate.sequence(),
+            &candidate.members,
+        )
+    }
+
+    /// Finish the one original History group only after every actual native Ack.
+    ///
+    /// The product must prove those Acks and Source closure separately. This
+    /// method validates author custody only and performs no member state writes.
+    pub fn finish_native_audio_terminal_group(
+        &mut self,
+        group: &mut NativeAudioTerminalAuthorGroup,
+    ) -> Result<()> {
+        group.admit(self)?;
+        let TerminalAuthorGroupPhase::Published(members) = &group.phase else {
+            return Err(native_error("terminal author group was not published"));
+        };
+        let current = self
+            .sequence(group.sequence_id)
+            .ok_or_else(|| native_error("terminal author Sequence is absent"))?;
+        admit_terminal_members(self, group, current, current, members)?;
+        self.finish_native_sequence_gesture(group.gesture_id)?;
+        group.phase = TerminalAuthorGroupPhase::Finished;
+        Ok(())
+    }
+}
+
+fn apply_terminal_member(
+    sequence: &mut mondrian_timeline::Sequence,
+    member: NativeAudioTerminalAuthorMember,
+) -> Result<()> {
+    apply_audio_processor_rack_edit(
+        sequence,
+        &AudioProcessorRackEditRequest {
+            address: member.owner.rack_address(),
+            edit: AudioProcessorRackEdit::SetNativeAuthorState {
+                processor_id: member.processor_id,
+                expected_definition: member.expected_definition,
+                update: member.update,
+            },
+        },
+    )
+    .map(|_| ())
+    .map_err(native_error)
+}
+
+fn admit_terminal_finality(
+    before: &mondrian_timeline::Sequence,
+    target: &TerminalAuthorTarget,
+    completion: mondrian_core::NativeAudioAuthorCompletion,
+    supplied_state: bool,
+) -> Result<()> {
+    use mondrian_core::NativeAudioAuthorCompletion as Completion;
+    let processor = inspect_native_audio_authoring(
+        before,
+        &target.owner.rack_address(),
+        target.processor_id,
+        &target.definition,
+    )
+    .map_err(native_error)?;
+    match completion {
+        Completion::Nonterminal => Err(native_error("terminal author member is not terminal")),
+        Completion::CoherentConfiguration if !supplied_state => Err(native_error(
+            "terminal author member lacks coherent opaque state",
+        )),
+        Completion::ParametersOnly if supplied_state || processor.opaque_state.is_some() => Err(
+            native_error("parameter-only member cannot retain or replace opaque state"),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn admit_terminal_members(
+    session: &AuthoringSession,
+    group: &NativeAudioTerminalAuthorGroup,
+    before: &mondrian_timeline::Sequence,
+    after: &mondrian_timeline::Sequence,
+    members: &[FrozenTerminalAuthorMember],
+) -> Result<()> {
+    if members.is_empty()
+        || before.id != group.sequence_id
+        || after.id != group.sequence_id
+        || !members.iter().any(|member| member.target == group.first)
+    {
+        return Err(native_error(
+            "terminal author member set is empty or lacks its first target",
+        ));
+    }
+    for (index, member) in members.iter().enumerate() {
+        if members[..index]
+            .iter()
+            .any(|prior| prior.target.same_author_target(&member.target))
+        {
+            return Err(native_error("terminal author member is duplicated"));
+        }
+        member.target.admit(session, group.sequence_id)?;
+        admit_terminal_finality(
+            before,
+            &member.target,
+            member.completion,
+            member.supplied_state,
+        )?;
+        let current = inspect_native_audio_authoring(
+            after,
+            &member.target.owner.rack_address(),
+            member.target.processor_id,
+            &member.target.definition,
+        )
+        .map_err(native_error)?;
+        if member.completion == mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration
+            && current.opaque_state.is_none()
+        {
+            return Err(native_error(
+                "terminal author candidate lost coherent opaque state",
+            ));
+        }
+        if member.completion == mondrian_core::NativeAudioAuthorCompletion::ParametersOnly
+            && current.opaque_state.is_some()
+        {
+            return Err(native_error(
+                "parameter-only candidate contains opaque state",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn native_error(reason: impl std::fmt::Display) -> MondrianError {
@@ -1917,5 +2349,504 @@ mod tests {
         assert_eq!(actual, f.processor());
         assert!(actual.parameters[&f.parameter_ids[0]].automation.is_none());
         assert!(actual.opaque_state.is_none());
+    }
+
+    // Canonical Session controls only: no native Source, Runtime frontier or Ack
+    // is fabricated by these metadata fixtures.
+    fn terminal_member(
+        fixture: &Fixture,
+        owner: NativeAudioAuthorOwner,
+        processor_id: AudioProcessorInstanceId,
+        values: &[(usize, f64)],
+        state: Option<Vec<u8>>,
+        completion: mondrian_core::NativeAudioAuthorCompletion,
+    ) -> NativeAudioTerminalAuthorMember {
+        NativeAudioTerminalAuthorMember {
+            owner,
+            processor_id,
+            expected_definition: fixture.definition.clone(),
+            update: fixture.update(values, state),
+            completion,
+        }
+    }
+
+    fn terminal_peer(fixture: &mut Fixture) -> (NativeAudioAuthorOwner, AudioProcessorInstanceId) {
+        let mut peer = fixture.processor().clone();
+        peer.id = AudioProcessorInstanceId::new();
+        let id = peer.id;
+        let output_id =
+            fixture.session.sequence(fixture.sequence_id).unwrap().audio_program.outputs[0].id;
+        let owner = NativeAudioAuthorOwner::ChannelStrip {
+            owner: AudioChannelStripOwner::ProgramOutput { output_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        let request = AudioProcessorRackEditRequest {
+            address: owner.rack_address(),
+            edit: AudioProcessorRackEdit::Insert {
+                processor: peer,
+                placement: AudioProcessorRackPlacement::End,
+            },
+        };
+        fixture
+            .session
+            .edit_sequence(fixture.sequence_id, "prepare canonical peer", |sequence| {
+                apply_audio_processor_rack_edit(sequence, &request).map_err(native_error)
+            })
+            .expect("second canonical owner");
+        (owner, id)
+    }
+
+    #[test]
+    fn native_audio_terminal_group_prepares_and_publishes_members_once() {
+        use mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration as Coherent;
+        let mut f = Fixture::new(false);
+        let (peer_owner, peer_id) = terminal_peer(&mut f);
+        let a = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[(0, 0.4)],
+            Some(vec![3]),
+            Coherent,
+        );
+        let b = terminal_member(
+            &f,
+            peer_owner,
+            peer_id,
+            &[(1, 0.6)],
+            Some(vec![4]),
+            Coherent,
+        );
+        let original = f.session.document().clone();
+        let generation = f.session.author_generation();
+        let history = f.session.history().diagnostics();
+        let mut group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        assert_eq!(f.session.document(), &original);
+        assert_eq!(f.session.history().diagnostics(), history);
+        assert_eq!(f.session.author_generation(), generation);
+        assert!(f.session.has_pending_native_authoring());
+        let mut ticket =
+            f.session.prepare_native_audio_terminal_group(&mut group, vec![a, b]).unwrap();
+        assert_eq!(
+            f.session.document(),
+            &original,
+            "private candidate has not published A or B"
+        );
+        let candidate = ticket.candidate_sequence().unwrap();
+        for (owner, id, state) in [
+            (f.owner, f.processor_id, &[3_u8][..]),
+            (peer_owner, peer_id, &[4_u8][..]),
+        ] {
+            let processor =
+                inspect_native_audio_authoring(candidate, &owner.rack_address(), id, &f.definition)
+                    .unwrap();
+            assert_eq!(processor.opaque_state.as_ref().unwrap().as_slice(), state);
+        }
+        let commit = f
+            .session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.generation.get(), generation.get() + 1);
+        assert!(ticket.candidate_sequence().is_none());
+        assert_eq!(
+            f.session.history().diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        assert!(
+            f.session.snapshot().is_err(),
+            "accepted Document still waits for external Acks"
+        );
+        assert!(f.session.undo().is_err());
+        assert!(f.session.commit_native_audio_terminal_group(&mut group, &mut ticket).is_err());
+        let published = f.session.sequence(f.sequence_id).unwrap().clone();
+        let published_generation = f.session.author_generation();
+        // Product-side all-Ack proof is a precondition, not evidence supplied by this test.
+        f.session.finish_native_audio_terminal_group(&mut group).unwrap();
+        assert!(!f.session.has_pending_native_authoring());
+        assert!(f.session.finish_native_audio_terminal_group(&mut group).is_err());
+        assert_eq!(
+            f.session.author_generation(),
+            published_generation,
+            "finish never rewrites member state"
+        );
+        assert_eq!(
+            f.session.history().diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        f.session.undo().unwrap().unwrap();
+        assert!(
+            f.session.sequence(f.sequence_id).unwrap().author_state_eq_ignoring_revision(
+                original.sequences.sequence(f.sequence_id).unwrap()
+            )
+        );
+        f.session.redo().unwrap().unwrap();
+        assert!(f
+            .session
+            .sequence(f.sequence_id)
+            .unwrap()
+            .author_state_eq_ignoring_revision(&published));
+    }
+
+    #[test]
+    fn native_audio_terminal_group_rejects_invalid_member_sets_without_publication() {
+        use mondrian_core::NativeAudioAuthorCompletion as Completion;
+        let mut f = Fixture::new(false);
+        let (peer_owner, peer_id) = terminal_peer(&mut f);
+        let a = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[(0, 0.4)],
+            Some(vec![3]),
+            Completion::CoherentConfiguration,
+        );
+        let b = terminal_member(
+            &f,
+            peer_owner,
+            peer_id,
+            &[(1, 0.6)],
+            Some(vec![4]),
+            Completion::CoherentConfiguration,
+        );
+        let mut bad_schema = b.clone();
+        let mondrian_timeline::NativeAudioParameterOperation::Value { write } =
+            &mut bad_schema.update.parameters[0]
+        else {
+            unreachable!()
+        };
+        write.schema.schema_version += 1;
+        let mut nonterminal = b.clone();
+        nonterminal.completion = Completion::Nonterminal;
+        let mut foreign = b.clone();
+        foreign.processor_id = AudioProcessorInstanceId::new();
+        let original = f.session.document().clone();
+        let generation = f.session.author_generation();
+        let history = f.session.history().diagnostics();
+        let mut group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        for members in [
+            vec![],
+            vec![a.clone(), a.clone()],
+            vec![b.clone()],
+            vec![a.clone(), bad_schema],
+            vec![a.clone(), nonterminal],
+            vec![a.clone(), foreign],
+        ] {
+            assert!(f.session.prepare_native_audio_terminal_group(&mut group, members).is_err());
+            assert_eq!(f.session.document(), &original);
+            assert_eq!(f.session.author_generation(), generation);
+            assert_eq!(f.session.history().diagnostics(), history);
+            assert!(f.session.has_pending_native_authoring());
+        }
+        let ticket = f.session.prepare_native_audio_terminal_group(&mut group, vec![a, b]).unwrap();
+        assert!(
+            ticket.candidate_sequence().is_some(),
+            "invalid B did not publish or freeze A"
+        );
+        drop(ticket);
+        drop(group);
+        assert!(
+            f.session.has_pending_native_authoring(),
+            "Drop never invents native completion"
+        );
+        assert_eq!(f.session.document(), &original);
+    }
+
+    #[test]
+    fn native_audio_terminal_group_ticket_preserves_foreign_and_before_current_refusals() {
+        use mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration as Coherent;
+        let mut f = Fixture::new(false);
+        let a = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[(0, 0.4)],
+            Some(vec![3]),
+            Coherent,
+        );
+        let original = f.session.document().clone();
+        let mut other = AuthoringSession::new_unsaved(
+            original.clone(),
+            f.root.path().join("same-project-new-session.mdp"),
+            f.root.path().to_owned(),
+            f.session.asset_library().clone(),
+        )
+        .unwrap();
+        assert_eq!(other.author_generation(), f.session.author_generation());
+        assert_ne!(other.session_id(), f.session.session_id());
+        let mut group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        let mut ticket =
+            f.session.prepare_native_audio_terminal_group(&mut group, vec![a]).unwrap();
+        let foreign_history = other.history().diagnostics();
+        assert!(other.commit_native_audio_terminal_group(&mut group, &mut ticket).is_err());
+        assert!(other.discard_native_audio_terminal_candidate(&mut group, &mut ticket).is_err());
+        assert_eq!(other.document(), &original);
+        assert_eq!(other.history().diagnostics(), foreign_history);
+        assert!(!other.has_pending_native_authoring());
+        assert!(
+            ticket.candidate_sequence().is_some(),
+            "foreign refusal retains the original ticket"
+        );
+        let generation = f.session.author_generation();
+        let history = f.session.history().diagnostics();
+        // Existing fixture-only seam isolates the required before/current check
+        // even when an out-of-contract edit failed to advance the generation.
+        f.session
+            .document_mut_for_test_fixture()
+            .sequences
+            .sequence_mut(f.sequence_id)
+            .unwrap()
+            .name = "changed behind ticket".into();
+        let changed = f.session.document().clone();
+        assert!(f.session.commit_native_audio_terminal_group(&mut group, &mut ticket).is_err());
+        assert!(f
+            .session
+            .discard_native_audio_terminal_candidate(&mut group, &mut ticket)
+            .is_err());
+        assert_eq!(f.session.document(), &changed);
+        assert_eq!(f.session.author_generation(), generation);
+        assert_eq!(f.session.history().diagnostics(), history);
+        assert!(f.session.has_pending_native_authoring());
+        assert!(ticket.candidate_sequence().is_some());
+    }
+
+    #[test]
+    fn native_audio_terminal_group_discard_and_late_tickets_keep_new_candidate_frozen() {
+        use mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration as Coherent;
+        let mut f = Fixture::new(false);
+        let a = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[(0, 0.4)],
+            Some(vec![3]),
+            Coherent,
+        );
+        let original = f.session.document().clone();
+        let generation = f.session.author_generation();
+        let mut old_group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        let mut old = f
+            .session
+            .prepare_native_audio_terminal_group(&mut old_group, vec![a.clone()])
+            .unwrap();
+        f.session
+            .discard_native_audio_terminal_candidate(&mut old_group, &mut old)
+            .unwrap();
+        assert!(old.candidate_sequence().is_none());
+        assert!(f.session.has_pending_native_authoring());
+        let mut later = f
+            .session
+            .prepare_native_audio_terminal_group(&mut old_group, vec![a.clone()])
+            .unwrap();
+        assert!(f
+            .session
+            .discard_native_audio_terminal_candidate(&mut old_group, &mut old)
+            .is_err());
+        assert!(
+            later.candidate_sequence().is_some(),
+            "consumed ticket cannot thaw its successor"
+        );
+        // Explicit original Session cancellation makes the still-owned prepared
+        // ticket stale without a publication. A new original group has a new ID.
+        f.session.cancel_sequence_gesture(old_group.gesture_id()).unwrap();
+        let mut new_group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        let mut current =
+            f.session.prepare_native_audio_terminal_group(&mut new_group, vec![a]).unwrap();
+        assert!(f
+            .session
+            .commit_native_audio_terminal_group(&mut old_group, &mut later)
+            .is_err());
+        assert!(f
+            .session
+            .commit_native_audio_terminal_group(&mut new_group, &mut later)
+            .is_err());
+        assert!(f
+            .session
+            .discard_native_audio_terminal_candidate(&mut new_group, &mut later)
+            .is_err());
+        assert!(later.candidate_sequence().is_some());
+        assert!(current.candidate_sequence().is_some());
+        assert_eq!(f.session.document(), &original);
+        assert_eq!(f.session.author_generation(), generation);
+        assert!(f.session.has_pending_native_authoring());
+        f.session
+            .discard_native_audio_terminal_candidate(&mut new_group, &mut current)
+            .unwrap();
+        assert!(current.candidate_sequence().is_none());
+        assert!(
+            f.session.finish_native_audio_terminal_group(&mut new_group).is_err(),
+            "discard is not finish"
+        );
+        // Generation staleness is independent of equal-generation group IDs.
+        f.session.cancel_sequence_gesture(new_group.gesture_id()).unwrap();
+        f.session
+            .edit_sequence(f.sequence_id, "new author generation", |sequence| {
+                sequence.name = "newer canonical author".into();
+                Ok(())
+            })
+            .unwrap();
+        let newer = f.session.document().clone();
+        assert!(f
+            .session
+            .commit_native_audio_terminal_group(&mut old_group, &mut later)
+            .is_err());
+        assert_eq!(f.session.document(), &newer);
+        assert!(later.candidate_sequence().is_some());
+    }
+
+    #[test]
+    fn native_audio_terminal_group_nochange_keeps_barrier_until_one_finish() {
+        use mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration as Coherent;
+        let mut f = Fixture::new(false);
+        let a = terminal_member(&f, f.owner, f.processor_id, &[], Some(vec![1, 2]), Coherent);
+        let original = f.session.document().clone();
+        let generation = f.session.author_generation();
+        let history = f.session.history().diagnostics();
+        let mut group =
+            f.session.begin_native_audio_terminal_group(f.sequence_id, a.clone()).unwrap();
+        let mut ticket =
+            f.session.prepare_native_audio_terminal_group(&mut group, vec![a]).unwrap();
+        assert!(ticket
+            .candidate_sequence()
+            .unwrap()
+            .author_state_eq_ignoring_revision(f.session.sequence(f.sequence_id).unwrap()));
+        assert!(f
+            .session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .unwrap()
+            .is_none());
+        assert!(ticket.candidate_sequence().is_none());
+        assert_eq!(f.session.document(), &original);
+        assert_eq!(f.session.author_generation(), generation);
+        assert_eq!(f.session.history().diagnostics(), history);
+        assert!(f.session.snapshot().is_err());
+        assert!(f.session.undo().is_err());
+        assert!(f.session.has_pending_native_authoring());
+        f.session.finish_native_audio_terminal_group(&mut group).unwrap();
+        assert!(!f.session.has_pending_native_authoring());
+        assert_eq!(f.session.document(), &original);
+        assert_eq!(f.session.history().diagnostics(), history);
+        assert!(f.session.snapshot().is_ok());
+
+        let mut stale = Fixture::new(false);
+        let same = terminal_member(
+            &stale,
+            stale.owner,
+            stale.processor_id,
+            &[],
+            Some(vec![1, 2]),
+            Coherent,
+        );
+        let mut group = stale
+            .session
+            .begin_native_audio_terminal_group(stale.sequence_id, same.clone())
+            .unwrap();
+        let mut ticket = stale
+            .session
+            .prepare_native_audio_terminal_group(&mut group, vec![same])
+            .unwrap();
+        // The NoChange branch has no generic PreparedSequenceEdit; its own
+        // before/current proof must still survive until the asynchronous commit.
+        stale
+            .session
+            .document_mut_for_test_fixture()
+            .sequences
+            .sequence_mut(stale.sequence_id)
+            .unwrap()
+            .name = "later before/current".into();
+        let changed = stale.session.document().clone();
+        assert!(stale
+            .session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .is_err());
+        assert!(ticket.candidate_sequence().is_some());
+        assert_eq!(stale.session.document(), &changed);
+        assert!(stale.session.has_pending_native_authoring());
+    }
+
+    #[test]
+    fn native_audio_terminal_group_finality_distinguishes_absent_and_empty_state() {
+        use mondrian_core::NativeAudioAuthorCompletion as Completion;
+        let mut f = Fixture::new(false);
+        for (state, completion) in [
+            (Some(vec![3]), Completion::Nonterminal),
+            (None, Completion::CoherentConfiguration),
+            (None, Completion::ParametersOnly),
+        ] {
+            let a = terminal_member(&f, f.owner, f.processor_id, &[], state, completion);
+            let original = f.session.document().clone();
+            assert!(f.session.begin_native_audio_terminal_group(f.sequence_id, a).is_err());
+            assert_eq!(f.session.document(), &original);
+            assert!(!f.session.has_pending_native_authoring());
+        }
+        let ui = AuthoringGestureId::new();
+        f.session.begin_sequence_gesture(ui, f.sequence_id).unwrap();
+        let blocked = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[],
+            Some(vec![1, 2]),
+            Completion::CoherentConfiguration,
+        );
+        assert!(f.session.begin_native_audio_terminal_group(f.sequence_id, blocked).is_err());
+        assert!(
+            f.session.sequence_gesture_is_current(ui, f.sequence_id),
+            "background native begin cannot finish a UI group"
+        );
+        f.session.end_sequence_gesture(ui).unwrap();
+        let empty = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[],
+            Some(vec![]),
+            Completion::CoherentConfiguration,
+        );
+        let mut group = f
+            .session
+            .begin_native_audio_terminal_group(f.sequence_id, empty.clone())
+            .unwrap();
+        let mut ticket =
+            f.session.prepare_native_audio_terminal_group(&mut group, vec![empty]).unwrap();
+        f.session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            f.processor().opaque_state.as_ref().map(|bytes| bytes.len()),
+            Some(0)
+        );
+        f.session.finish_native_audio_terminal_group(&mut group).unwrap();
+
+        let mut stateless = Fixture::with_initial_configuration(false, None);
+        let value = terminal_member(
+            &stateless,
+            stateless.owner,
+            stateless.processor_id,
+            &[(0, 0.5)],
+            None,
+            Completion::ParametersOnly,
+        );
+        let mut group = stateless
+            .session
+            .begin_native_audio_terminal_group(stateless.sequence_id, value.clone())
+            .unwrap();
+        let mut ticket = stateless
+            .session
+            .prepare_native_audio_terminal_group(&mut group, vec![value])
+            .unwrap();
+        stateless
+            .session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .unwrap()
+            .unwrap();
+        assert!(stateless.processor().opaque_state.is_none());
+        stateless.session.finish_native_audio_terminal_group(&mut group).unwrap();
     }
 }
