@@ -3337,3 +3337,4 @@ fn app_owned_clap_project_close_releases_native_source_before_app_shutdown() {
 
 mod headless_native_author;
 mod project_state_roundtrip;
+mod headless_vst3_terminal_author;

@@ -59,7 +59,7 @@ fn unentered_owner(
     facts
 }
 
-fn initialize_nonzero_audio(
+pub(super) fn initialize_nonzero_audio(
     sequence: &mut Sequence,
     library: &Arc<AssetLibrary>,
     root: &std::path::Path,
