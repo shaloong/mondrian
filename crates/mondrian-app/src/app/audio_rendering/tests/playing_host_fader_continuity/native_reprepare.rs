@@ -413,7 +413,11 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
         let mut phase_consumed = 0;
         // Each group uses its actual Fresh anchor and actual appended extent.
         // Mode13's real callbacks, not a chosen window count, delimit the groups.
-        let assert_pcm = |capture: &CaptureState, first: usize, anchor: i64| {
+        let assert_pcm = |capture: &CaptureState,
+                          first: usize,
+                          anchor: i64,
+                          cycle: usize,
+                          phase: &str| {
             let windows = &capture.windows[first..];
             for (block, window) in windows.iter().enumerate() {
                 assert_eq!(window.clear_serial, windows[0].clear_serial);
@@ -430,7 +434,13 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                     }
                 }
             }
-            assert!(!capture.overflow);
+            assert!(
+                !capture.overflow,
+                "[DEBUG-clap-repeat-overflow] cycle={cycle} phase={phase} first={first} anchor={anchor}; windows={}/{} cleared={}/8 clear_serial={} queue={}/{} discards={:?} snapshot={:?}",
+                capture.windows.len(), scenario.capture_windows, capture.cleared.len(),
+                capture.clear_serial, capture.queue.len(), scenario.output_capacity,
+                capture.cleared, capture.snapshot
+            );
             assert_eq!(capture.activation_discarded, 0);
             windows.len() * scenario.chunk
         };
@@ -508,7 +518,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                             }
                             old_lease = Some(lease);
                             let capture = output.lock();
-                            let published = assert_pcm(&capture, phase_first, phase_anchor);
+                            let published = assert_pcm(&capture, phase_first, phase_anchor, cycle, "required");
                             assert!(published > 0);
                             assert_eq!(*start_sample, phase_anchor + published as i64);
                             let serial = capture.windows[phase_first].clear_serial;
@@ -634,7 +644,8 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                             );
                             assert_eq!(snapshot.media_anchor.unwrap().sample(), anchor);
                             let capture = output.lock();
-                            let published = assert_pcm(&capture, held_windows.unwrap(), anchor);
+                            let published =
+                                assert_pcm(&capture, held_windows.unwrap(), anchor, cycle, "fresh");
                             assert!(
                                 published >= scenario.watermark,
                                 "two complete Fresh public windows"
@@ -699,7 +710,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                             state.playback_engine.snapshot().state,
                             mondrian_playback::TransportState::Playing
                         );
-                        assert_pcm(&capture, phase_first, phase_anchor);
+                        assert_pcm(&capture, phase_first, phase_anchor, cycle, "before-consume");
                         // Only the actual active callback moves this explicit software clock.
                         // Filling/pumping/waiting never fabricates consumed device frames.
                         consumed_frames += scenario.chunk as u64;
