@@ -94,7 +94,7 @@ namespace MondrianOpenFx
     _properties.setIntProperty(kOfxParamHostPropSupportsChoiceAnimation, 0 );
     _properties.setIntProperty(kOfxParamHostPropSupportsStrChoice, 1);
     _properties.setIntProperty(kOfxParamHostPropSupportsStrChoiceAnimation, 0);
-    _properties.setIntProperty(kOfxParamHostPropSupportsBooleanAnimation, 0 );
+    _properties.setIntProperty(kOfxParamHostPropSupportsBooleanAnimation, 1 );
     _properties.setIntProperty(kOfxParamHostPropSupportsCustomAnimation, 0 );
     _properties.setIntProperty(kOfxParamHostPropMaxParameters, kMaxParameters);
     _properties.setIntProperty(kOfxParamHostPropMaxPages, 0);
