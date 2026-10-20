@@ -3242,7 +3242,7 @@ impl AudioPlayback {
     fn ensure_render_execution_available(&self) -> Result<(), AudioPlaybackError> {
         if self.render_execution_unavailable
             || self.shutdown_requested
-            || self.render_queue.batch_stopped()
+            || self.render_queue.batch_poisoned()
             || self.render_retirement_faulted.load(AtomicOrdering::Acquire)
             || self.render_worker.as_ref().is_none_or(JoinHandle::is_finished)
             || self.render_retirement_worker.as_ref().is_none_or(JoinHandle::is_finished)

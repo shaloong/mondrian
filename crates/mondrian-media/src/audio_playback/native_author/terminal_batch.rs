@@ -205,6 +205,9 @@ impl RenderWorkQueue {
     pub(in crate::audio_playback) fn batch_stopped(&self) -> bool {
         self.state.lock().stopped
     }
+    pub(in crate::audio_playback) fn batch_poisoned(&self) -> bool {
+        matches!(self.state.lock().author_batch, Lane::Poisoned(_))
+    }
     fn retire_matching(
         &self,
         identity: &AudioPcmNativeAuthorResumeKey,
@@ -324,6 +327,11 @@ impl AudioPlayback {
         let admitted = (|| {
             self.ensure_source_close_idle()?;
             self.ensure_render_execution_available()?;
+            // A normally stopped queue retains existing Inline/restart error
+            // precedence. Only this new batch admission treats it as unavailable.
+            if self.render_queue.batch_stopped() {
+                return Err(AudioPlaybackError::ExecutionUnavailable);
+            }
             let Some(renderer) = &self.renderer else {
                 return Ok(None);
             };
