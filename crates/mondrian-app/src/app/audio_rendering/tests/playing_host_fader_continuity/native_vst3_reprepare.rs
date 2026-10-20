@@ -12,6 +12,7 @@ const RESTART: Scenario = Scenario {
     chunk: 4,
     watermark: 8,
     capture_windows: 8,
+    capture_clears: 8,
     output_capacity: 16,
     lookahead: 3,
 };

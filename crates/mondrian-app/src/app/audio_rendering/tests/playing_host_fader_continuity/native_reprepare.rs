@@ -10,6 +10,7 @@ const RESTART: Scenario = Scenario {
     chunk: 4,
     watermark: 8,
     capture_windows: 8,
+    capture_clears: 8,
     output_capacity: 16,
     lookahead: 3,
 };
@@ -379,7 +380,15 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
 #[test]
 #[ignore = "current normal Product and owned CLAP mode13; two original App/Media restart cycles, software FIFO only"]
 fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
-    let scenario = Scenario { mode: 13, capture_windows: 16, ..RESTART };
+    // 2 startup clears + 4 per cycle + 2 reserved for a final pause/ack pair.
+    // Current consuming cleanup does not poll that ack, using at most one of
+    // the final two records. This bounds observations, not the output FIFO.
+    let scenario = Scenario {
+        mode: 13,
+        capture_windows: 16,
+        capture_clears: 2 + 4 * 2 + 2,
+        ..RESTART
+    };
     let mut configuration = vec![13];
     configuration.extend_from_slice(&0.5_f32.to_le_bytes());
     configuration.push(0);
@@ -436,8 +445,9 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
             }
             assert!(
                 !capture.overflow,
-                "[DEBUG-clap-repeat-overflow] cycle={cycle} phase={phase} first={first} anchor={anchor}; windows={}/{} cleared={}/8 clear_serial={} queue={}/{} discards={:?} snapshot={:?}",
+                "repeat capture overflow: cycle={cycle} phase={phase} first={first} anchor={anchor}; windows={}/{} cleared={}/{} clear_serial={} queue={}/{} discards={:?} snapshot={:?}",
                 capture.windows.len(), scenario.capture_windows, capture.cleared.len(),
+                scenario.capture_clears,
                 capture.clear_serial, capture.queue.len(), scenario.output_capacity,
                 capture.cleared, capture.snapshot
             );
@@ -761,6 +771,18 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
         pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
         "complete repeated restart cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
     );
+    if target.is_ok() {
+        let capture = output.lock();
+        assert!(
+            !capture.overflow,
+            "bounded capture observations include successful cleanup"
+        );
+        assert_eq!(
+            capture.cleared.len() as u64,
+            capture.clear_serial,
+            "every clear, including empty clears and cleanup, retains its observation"
+        );
+    }
     if let Err(payload) = target {
         std::panic::resume_unwind(payload);
     }

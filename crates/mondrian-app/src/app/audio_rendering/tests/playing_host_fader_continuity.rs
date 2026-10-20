@@ -33,6 +33,8 @@ struct Scenario {
     chunk: usize,
     watermark: usize,
     capture_windows: usize,
+    // Observation records only; independent of the output FIFO capacity.
+    capture_clears: usize,
     output_capacity: usize,
     lookahead: i64,
 }
@@ -42,6 +44,7 @@ const DELAY: Scenario = Scenario {
     chunk: 256,
     watermark: 8_192,
     capture_windows: 80,
+    capture_clears: 8,
     output_capacity: 16_384,
     lookahead: 3,
 };
@@ -50,6 +53,7 @@ const ECHO: Scenario = Scenario {
     chunk: 8_192,
     watermark: 65_536,
     capture_windows: 20,
+    capture_clears: 8,
     output_capacity: 96_000,
     lookahead: 0,
 };
@@ -127,7 +131,7 @@ impl CaptureState {
             clear_serial: 0,
             queue: VecDeque::with_capacity(scenario.output_capacity),
             windows: Vec::with_capacity(scenario.capture_windows),
-            cleared: Vec::with_capacity(8),
+            cleared: Vec::with_capacity(scenario.capture_clears),
             activation_discarded: 0,
             overflow: false,
         }
@@ -226,7 +230,7 @@ impl AudioOutputAdapter for CaptureOutput {
             clear_serial: state.clear_serial,
             frames: state.queue.len(),
         };
-        if state.cleared.len() == 8 {
+        if state.cleared.len() == state.scenario.capture_clears {
             state.overflow = true;
         } else {
             state.cleared.push(discard);
