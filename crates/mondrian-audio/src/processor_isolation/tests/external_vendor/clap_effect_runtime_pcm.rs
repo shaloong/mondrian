@@ -336,9 +336,87 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
             unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
             258
         );
-        runtime
-            .validate_native_author_source_closed(&cancel)
-            .expect("real cold Source closed; no callbacks discarded or acknowledged");
+        // Ready admits the real DSP role, not completion of its first idle
+        // flush. Service exactly one original installed-owner observation; it
+        // submits/joins the existing exclusive DSP flush, without PCM or Ack.
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        let batch = runtime
+            .poll_native_observations(&cancel)
+            .expect("one original cold owner Poll; actual typed errors remain failures");
+        let closed = runtime.validate_native_author_source_closed(&cancel);
+        let author = batch.as_ref().and_then(|batch| batch.author.as_ref());
+        let parameters = batch.as_ref().and_then(|batch| batch.parameters.as_ref());
+        let diagnostics = batch.as_ref().and_then(|batch| batch.diagnostics.as_ref());
+        // Keep the real DTO owned until after every check. Only bounded facts
+        // leave this consumer; opaque state bytes are never printed or copied.
+        let summary = json!({
+            "batch_present":batch.is_some(),
+            "author":author.map(|proposal| json!({
+                "target":format!("{:?}",proposal.target()),
+                "sequence":format!("{:?}",proposal.sequence()),
+                "revision":proposal.revision(), "callback_count":proposal.callbacks().len(),
+                "state_bytes":proposal.state().map(|state| state.len()),
+                "completion":format!("{:?}",proposal.completion()),
+                "open_parameter_edits":proposal.open_parameter_edits(),
+                "group_depth":proposal.group_depth()
+            })),
+            "parameters":parameters.map(|parameters| json!({
+                "target":format!("{:?}",parameters.target()),
+                "process_id":parameters.process_id().get(),
+                "object_serial":parameters.object_serial().get(),
+                "fact_count":parameters.facts().len()
+            })),
+            "diagnostic_records":diagnostics.map(|logs| logs.records().len()),
+            "diagnostic_loss":diagnostics.map(|logs| format!("{:?}",logs.loss())),
+            "attachment":batch.as_ref().and_then(|batch| batch.attachment.as_ref())
+                .map(|attachment| format!("{attachment:?}")),
+            "closed_result":format!("{closed:?}")
+        });
+        write_json(&case.evidence_directory, "cold-poll.json", summary.clone());
+        assert_eq!(owner(&runtime), cold);
+        assert_eq!(cold.installed_root_serial(), claim.generation());
+        let current = runtime.native_owner_installation_verifier().unwrap();
+        assert!(current.same_source(&verifier) && current.same_registration(&verifier));
+        current.validate(&claim).unwrap();
+        assert_eq!(
+            installation.current_claim().unwrap().unwrap().generation(),
+            claim.generation()
+        );
+        let mut cursors = Cursors::default();
+        runtime.visit_continuity_evidence(&mut cursors).unwrap();
+        assert_eq!((cursors.sessions.len(), cursors.processors.len()), (1, 1));
+        assert_eq!(
+            cursors.sessions[0].state,
+            AudioSessionCursorState::Unentered
+        );
+        assert_eq!(
+            cursors.processors[0].state,
+            AudioProcessorCursorState::Unentered
+        );
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            0,
+            "cold Poll cannot read/render PCM"
+        );
+        if let Some(parameters) = parameters {
+            assert_eq!(parameters.target(), cold.editor_target());
+            assert_eq!(parameters.process_id(), object.process_id());
+            assert_eq!(parameters.object_serial(), object.object_serial());
+        }
+        if let Some(logs) = diagnostics {
+            assert!(
+                !logs.loss().incomplete(),
+                "actual cold diagnostics loss: {summary}"
+            );
+        }
+        if let Some(proposal) = author {
+            assert_eq!(proposal.target(), cold.editor_target());
+            assert_eq!(proposal.sequence(), sequence.id);
+            panic!("COLD_AUTHOR_TRANSACTION_NOT_COVERED: actual proposal retained without Ack/install; {summary}");
+        }
+        // NoBatch is never a substitute for the independent current proof.
+        closed.unwrap_or_else(|error| panic!(
+            "real cold Source closed after exactly one owner Poll; actual typed cause: {error:?}; {summary}"));
         runtime
             .enter_state(AudioStateEntry {
                 epoch: AudioContinuityEpoch::new(1),
