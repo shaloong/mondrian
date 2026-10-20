@@ -2730,7 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn clap_transport_rejects_unrepresentable_beats_without_a_native_call() {
+    fn clap_transport_reports_beat_range_error_with_representable_seconds() {
         let music = mondrian_core::MusicalTimeReference::new(
             mondrian_core::TimelineTime::new(i64::MIN, 1).unwrap(),
             mondrian_core::TimelineTime::new(1, 3).unwrap(),
@@ -4762,7 +4762,7 @@ mod tests {
             self.activations.store(0, TestOrdering::SeqCst);
         }
     }
-    static LIFECYCLE_AUDITS: [LifecycleAudit; 11] = [const { LifecycleAudit::new() }; 11];
+    static LIFECYCLE_AUDITS: [LifecycleAudit; 12] = [const { LifecycleAudit::new() }; 12];
     static CALLBACK_COUNTS: [AtomicU32; 2] = [const { AtomicU32::new(0) }; 2];
     const INIT: u32 = 1;
     const CALLBACK: u32 = 2;
@@ -4777,6 +4777,7 @@ mod tests {
     const DEACTIVATE: u32 = 1024;
     const DESTROY: u32 = 2048;
     const BACKGROUND: u32 = 4096;
+    const FLUSH: u32 = 8192;
 
     impl LifecycleShared<'_> {
         fn check(&self, stage: u32, audio: bool) {
@@ -4814,6 +4815,42 @@ mod tests {
         }
     }
 
+    // Only case11 advertises Params. Its actual active flush callback and
+    // native start/process stages distinguish failure from consuming a request.
+    impl PluginMainThreadParams for LifecycleMain<'_> {
+        fn count(&self) -> u32 {
+            0
+        }
+        fn get_info(&self, _index: u32, _writer: &mut ParamInfoWriter) {}
+        fn get_value(&self, _id: ClapId) -> Option<f64> {
+            None
+        }
+        fn value_to_text(
+            &self,
+            _id: ClapId,
+            _value: f64,
+            _writer: &mut ParamDisplayWriter,
+        ) -> std::fmt::Result {
+            Err(std::fmt::Error)
+        }
+        fn text_to_value(&self, _id: ClapId, _text: &CStr) -> Option<f64> {
+            None
+        }
+        fn flush(&self, _input: &clack_plugin::prelude::InputEvents, _output: &mut OutputEvents) {
+            self.0.check(FLUSH, false);
+        }
+    }
+
+    impl<const CASE: usize> PluginAudioProcessorParams for LifecycleProcessor<'_, CASE> {
+        fn flush(
+            &mut self,
+            _input: &clack_plugin::prelude::InputEvents,
+            _output: &mut OutputEvents,
+        ) {
+            self.shared.check(FLUSH, true);
+        }
+    }
+
     impl<const CASE: usize> Plugin for LifecyclePlugin<CASE> {
         type Shared<'a> = LifecycleShared<'a>;
         type MainThread<'a> = LifecycleMain<'a>;
@@ -4829,6 +4866,9 @@ mod tests {
                 .register::<PluginTail>();
             if matches!(CASE, 8..=10) {
                 builder.register::<PluginState>();
+            }
+            if CASE == 11 {
+                builder.register::<PluginParams>();
             }
         }
     }
@@ -4978,6 +5018,13 @@ mod tests {
             _config: PluginConfig,
         ) -> Result<Self, PluginError> {
             shared.check(ACTIVATE, false);
+            if CASE == 11 {
+                let params = shared
+                    .host
+                    .get_extension::<clack_extensions::params::HostParams>()
+                    .ok_or(PluginError::Message("missing host params"))?;
+                params.request_flush(&shared.host);
+            }
             LIFECYCLE_AUDITS[CASE].activations.fetch_add(1, TestOrdering::SeqCst);
             shared.active.store(true, TestOrdering::SeqCst);
             Ok(Self {
@@ -5440,6 +5487,134 @@ mod tests {
             expected,
             "all lifecycle paths executed"
         );
+    }
+
+    #[test]
+    fn clap_beat_overflow_precedes_actual_sdk_start_process_and_flush_claim() {
+        let audit = &LIFECYCLE_AUDITS[11];
+        audit.clear();
+        let entry = PluginEntry::load_from_clack::<SinglePluginEntry<LifecyclePlugin<11>>>(
+            c"/test/beat-overflow",
+        )
+        .unwrap();
+        let render = AudioRenderContract {
+            sample_rate: 48_000,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Realtime,
+            channel_layout: AudioChannelLayout::Stereo,
+            processor_session_scratch_budget_bytes: 1024 * 1024,
+            public_output_lookahead_budget_frames: 1024,
+            compensation_delay_scratch_budget_bytes: 1024 * 1024,
+        };
+        // At sample0 this reference is exactly i64::MIN ticks. At sample-1
+        // seconds remain representable but the beat position is below i64::MIN.
+        let reference = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(1_i64 << 32, 1).unwrap(),
+            mondrian_core::TimelineTime::ONE,
+        )
+        .unwrap();
+        let request = IsolatedAudioProcessorWorkerPrepareRequest {
+            musical_time_reference: Some(reference),
+            auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
+            note_input_contract: crate::AudioProcessorNoteInputContract::default(),
+            native_lane: None,
+            payload: Vec::new(),
+            plugin_execution_contract: AudioProcessorExecutionContract::new(
+                3,
+                AudioProcessorTail::Finite(3),
+                true,
+                true,
+                false,
+                0,
+            )
+            .unwrap(),
+            auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
+            parameter_ids: Vec::new(),
+            render_contract: render,
+        };
+        #[cfg(windows)]
+        let native_main =
+            std::rc::Rc::new(vst3_host::window::WindowsEditorMainThread::initialize().unwrap());
+        let mut worker = prepare_loaded_on_main(
+            #[cfg(windows)]
+            native_main,
+            request,
+            entry,
+            c"org.mondrian.test.render-lifecycle",
+            None,
+            ClapMainAudioInput::Present,
+            0,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(audit.activations.load(TestOrdering::SeqCst), 1);
+        let flush_pending = |worker: &ClapWorker| {
+            worker
+                .instance
+                .access_shared_handler(|host| host.services.flush_requested.load(Ordering::Acquire))
+        };
+        assert!(
+            flush_pending(&worker),
+            "the actual plugin requested flush during activation"
+        );
+        worker.enter_state(-1).unwrap();
+        let auxiliary = AudioProcessorAuxiliaryInputContract::default();
+        let mut pcm = [0.25; 8];
+        let rejected = worker.process(
+            IsolatedAudioProcessorWorkerBlock::new(
+                -1,
+                4,
+                render,
+                &mut pcm,
+                &auxiliary,
+                &[],
+                &[],
+                &[],
+            )
+            .with_musical_time_reference(Some(reference)),
+        );
+        assert!(
+            matches!(rejected, Err(AudioProcessorHostError::Process(detail))
+            if detail == "CLAP signed musical position exceeds the beats representation")
+        );
+        assert_eq!(pcm, [0.25; 8]);
+        assert_eq!(worker.last_end, Some(-1));
+        assert_eq!(
+            audit.visited.load(TestOrdering::SeqCst) & (START | PROCESS | FLUSH),
+            0
+        );
+        assert!(
+            flush_pending(&worker),
+            "overflow cannot claim the real pending flush"
+        );
+        // Same prepared reference/instance, explicitly entered at its valid
+        // boundary, reaches the real ABI and consumes the request in process.
+        worker.enter_state(0).unwrap();
+        worker
+            .process(
+                IsolatedAudioProcessorWorkerBlock::new(
+                    0,
+                    4,
+                    render,
+                    &mut pcm,
+                    &auxiliary,
+                    &[],
+                    &[],
+                    &[],
+                )
+                .with_musical_time_reference(Some(reference)),
+            )
+            .unwrap();
+        assert_eq!(pcm, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5]);
+        assert_eq!(
+            audit.visited.load(TestOrdering::SeqCst) & (START | PROCESS),
+            START | PROCESS
+        );
+        assert!(!flush_pending(&worker));
+        assert_eq!(worker.last_end, Some(4));
+        drop(worker);
+        assert_eq!(audit.failures.load(TestOrdering::SeqCst), 0);
     }
 
     #[test]

@@ -91,7 +91,7 @@ impl DefaultPluginFactory for SidechainFixture {
         host: HostMainThreadHandle<'a>,
         shared: &'a Shared<'a>,
     ) -> Result<Main<'a>, PluginError> {
-        Ok(Main(shared, host, Cell::new(TimerFixtureState::Dormant)))
+        Ok(Main(shared, host, Cell::new(TimerFixtureState::Dormant), Cell::new(None)))
     }
 }
 
@@ -165,7 +165,94 @@ pub struct Main<'a>(
     &'a Shared<'a>,
     HostMainThreadHandle<'a>,
     Cell<TimerFixtureState>,
+    Cell<Option<BeatReference>>,
 );
+
+/// Mode11's independent expected reference, configured by the test state rather
+/// than copied from the transport being checked. No other mode consumes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BeatReference {
+    zero_numerator: i64,
+    zero_denominator: i64,
+    duration_numerator: i64,
+    duration_denominator: i64,
+}
+
+impl BeatReference {
+    const DEFAULT: Self = Self {
+        zero_numerator: -19,
+        zero_denominator: 7,
+        duration_numerator: 3,
+        duration_denominator: 4,
+    };
+
+    fn fields(self) -> [i64; 4] {
+        [
+            self.zero_numerator,
+            self.zero_denominator,
+            self.duration_numerator,
+            self.duration_denominator,
+        ]
+    }
+
+    fn read_optional(input: &mut impl Read) -> Result<Option<Self>, PluginError> {
+        let mut bytes = [0_u8; 32];
+        if input.read(&mut bytes[..1])? == 0 {
+            return Ok(None);
+        }
+        input.read_exact(&mut bytes[1..])?;
+        let mut extra = [0_u8; 1];
+        if input.read(&mut extra)? != 0 {
+            return Err(PluginError::Message("extra mode11 reference bytes"));
+        }
+        let mut fields = [0_i64; 4];
+        for (field, bytes) in fields.iter_mut().zip(bytes.chunks_exact(8)) {
+            *field = i64::from_le_bytes(bytes.try_into().expect("fixed eight-byte field"));
+        }
+        let [zero_numerator, zero_denominator, duration_numerator, duration_denominator] = fields;
+        if zero_denominator <= 0 || duration_numerator <= 0 || duration_denominator <= 0 {
+            return Err(PluginError::Message("invalid mode11 reference"));
+        }
+        Ok(Some(Self {
+            zero_numerator,
+            zero_denominator,
+            duration_numerator,
+            duration_denominator,
+        }))
+    }
+
+    fn tempo(self) -> f64 {
+        60.0 * self.duration_denominator as f64 / self.duration_numerator as f64
+    }
+
+    fn ticks(self, sample: i64, rate: u32) -> Result<i64, PluginError> {
+        // This independent fixture oracle admits only the finite test vectors
+        // whose complete ratio fits i128. It never calls the host's lowering.
+        let overflow = || PluginError::Message("mode11 oracle ratio overflow");
+        let difference = i128::from(sample)
+            .checked_mul(i128::from(self.zero_denominator))
+            .and_then(|value| value.checked_sub(i128::from(self.zero_numerator) * i128::from(rate)))
+            .ok_or_else(overflow)?;
+        let numerator = difference
+            .checked_mul(i128::from(self.duration_denominator))
+            .and_then(|value| value.checked_mul(1_i128 << 31))
+            .ok_or_else(overflow)?;
+        let denominator = i128::from(rate)
+            .checked_mul(i128::from(self.zero_denominator))
+            .and_then(|value| value.checked_mul(i128::from(self.duration_numerator)))
+            .filter(|value| *value > 0)
+            .ok_or_else(overflow)? as u128;
+        let magnitude = numerator.unsigned_abs();
+        let quotient = magnitude / denominator;
+        let remainder = magnitude % denominator;
+        let rounded = quotient
+            .checked_add(u128::from(remainder >= denominator - remainder))
+            .ok_or_else(overflow)?;
+        let signed = i128::try_from(rounded).map_err(|_| overflow())?;
+        let signed = if numerator < 0 { -signed } else { signed };
+        i64::try_from(signed).map_err(|_| overflow())
+    }
+}
 
 impl Main<'_> {
     fn timer_log(&self, message: &'static std::ffi::CStr) -> Result<(), PluginError> {
@@ -286,6 +373,13 @@ impl PluginStateImpl for Main<'_> {
         if self.0.mode.load(Ordering::Relaxed) == 13 {
             output.write_all(&[self.0.repeat_restart_count.load(Ordering::Relaxed)])?;
         }
+        if self.0.mode.load(Ordering::Relaxed) == 11 {
+            if let Some(reference) = self.3.get() {
+                for field in reference.fields() {
+                    output.write_all(&field.to_le_bytes())?;
+                }
+            }
+        }
         if self.0.restart_seen.load(Ordering::Relaxed)
             && self.0.configured_latency.load(Ordering::Relaxed) == 7 {
             match self.0.mode.load(Ordering::Relaxed) {
@@ -314,6 +408,8 @@ impl PluginStateImpl for Main<'_> {
         let repeat_restart_count = if bytes[0] == 13 {
             read_repeat_restart_count(input)?
         } else { 0 };
+        let reference = if bytes[0] == 11 { BeatReference::read_optional(input)? } else { None };
+        self.3.set(reference);
         self.0.repeat_restart_count.store(repeat_restart_count, Ordering::Relaxed);
         self.0.restart_seen.store(restart_seen, Ordering::Relaxed);
         self.0.mode.store(bytes[0], Ordering::Relaxed);
@@ -465,6 +561,7 @@ pub struct Processor<'a> {
     mode: u8,
     gain: f32,
     sample_rate: u32,
+    beat_reference: BeatReference,
 }
 
 impl PluginTailImpl for Processor<'_> {
@@ -479,7 +576,7 @@ impl PluginTailImpl for Processor<'_> {
 impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
     fn activate(
         _host: HostAudioProcessorHandle<'a>,
-        _main: &Main<'a>,
+        main: &Main<'a>,
         shared: &'a Shared<'a>,
         config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
@@ -510,6 +607,7 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         Ok(Self {
             shared,
             sample_rate: config.sample_rate as u32,
+            beat_reference: main.3.get().unwrap_or(BeatReference::DEFAULT),
             mix: vec![[0.0; 2]; config.max_frames_count as usize],
             delay: vec![[0.0; 2]; shared.delay_frames()],
             echo: (shared.mode.load(Ordering::Relaxed) == 12).then(|| Box::new(FiniteEcho::new())),
@@ -570,25 +668,56 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
             let samples = scaled / factor + if (scaled % factor).abs() * 2 >= factor { scaled.signum() } else { 0 };
             Some(i64::try_from(samples).map_err(|_| PluginError::Message("transport sample overflow"))?)
         } else if self.mode == 11 {
-            // Independent TEMPO-only ABI mode. No beat/bar/signature or playing
-            // facts exist; the reference has a 3/4-second quarter note (80 BPM).
-            let transport = process.transport.ok_or(PluginError::Message("missing tempo transport"))?;
-            let has_tempo = transport.flags.contains(TransportFlags::HAS_TEMPO);
-            let expected_flags = TransportFlags::HAS_SECONDS_TIMELINE
-                | if has_tempo { TransportFlags::HAS_TEMPO } else { TransportFlags::empty() };
-            if transport.flags != expected_flags || transport.header.time() != 0
-                || process.steady_time.is_some() || transport.song_pos_beats.to_bits() != 0
-                || transport.tempo != if has_tempo { 80.0 } else { 0.0 }
-                || transport.tempo_inc != 0.0 || transport.bar_start.to_bits() != 0
-                || transport.bar_number != 0 || transport.time_signature_numerator != 0
-                || transport.time_signature_denominator != 0 || transport.loop_start_beats.to_bits() != 0
-                || transport.loop_end_beats.to_bits() != 0 || transport.loop_start_seconds.to_bits() != 0
-                || transport.loop_end_seconds.to_bits() != 0
-            { return Err(PluginError::Message("invalid tempo-only transport facts")); }
-            let scaled = i128::from(transport.song_pos_seconds.to_bits()) * i128::from(self.sample_rate);
+            // Some carries exact beats and its explicit tempo; None remains
+            // seconds-only. Bar/meter/loop/playing facts are never inferred.
+            let transport =
+                process.transport.ok_or(PluginError::Message("missing musical transport"))?;
+            let scaled =
+                i128::from(transport.song_pos_seconds.to_bits()) * i128::from(self.sample_rate);
             let factor = 1_i128 << 31;
-            let samples = scaled / factor + if (scaled % factor).abs() * 2 >= factor { scaled.signum() } else { 0 };
-            Some(i64::try_from(samples).map_err(|_| PluginError::Message("tempo transport sample overflow"))?)
+            let samples = scaled / factor
+                + if (scaled % factor).abs() * 2 >= factor {
+                    scaled.signum()
+                } else {
+                    0
+                };
+            let sample = i64::try_from(samples)
+                .map_err(|_| PluginError::Message("musical transport sample overflow"))?;
+            let has_music = transport.flags.contains(TransportFlags::HAS_TEMPO);
+            let expected_flags = TransportFlags::HAS_SECONDS_TIMELINE
+                | if has_music {
+                    TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE
+                } else {
+                    TransportFlags::empty()
+                };
+            let expected_beats = if has_music {
+                self.beat_reference.ticks(sample, self.sample_rate)?
+            } else {
+                0
+            };
+            if transport.flags != expected_flags
+                || transport.header.time() != 0
+                || process.steady_time.is_some()
+                || transport.song_pos_beats.to_bits() != expected_beats
+                || transport.tempo
+                    != if has_music {
+                        self.beat_reference.tempo()
+                    } else {
+                        0.0
+                    }
+                || transport.tempo_inc != 0.0
+                || transport.bar_start.to_bits() != 0
+                || transport.bar_number != 0
+                || transport.time_signature_numerator != 0
+                || transport.time_signature_denominator != 0
+                || transport.loop_start_beats.to_bits() != 0
+                || transport.loop_end_beats.to_bits() != 0
+                || transport.loop_start_seconds.to_bits() != 0
+                || transport.loop_end_seconds.to_bits() != 0
+            {
+                return Err(PluginError::Message("invalid musical transport facts"));
+            }
+            Some(sample)
         } else { None };
         let mix = self
             .mix
@@ -785,6 +914,60 @@ mod repeat_restart_tests {
         assert_eq!(count.load(Ordering::Relaxed), 2);
         for end in [30, 31, i64::MAX] {
             assert!(!repeat_restart_boundary(&count, end));
+        }
+    }
+}
+
+#[cfg(test)]
+mod beat_reference_tests {
+    use super::*;
+
+    fn bytes(reference: BeatReference) -> Vec<u8> {
+        reference.fields().into_iter().flat_map(i64::to_le_bytes).collect()
+    }
+
+    #[test]
+    fn mode11_reference_accepts_only_empty_or_exact_valid_payload() {
+        assert_eq!(BeatReference::read_optional(&mut &[][..]).unwrap(), None);
+        let valid = bytes(BeatReference::DEFAULT);
+        assert_eq!(
+            BeatReference::read_optional(&mut valid.as_slice()).unwrap(),
+            Some(BeatReference::DEFAULT)
+        );
+        for length in 1..32 {
+            assert!(BeatReference::read_optional(&mut &valid[..length]).is_err());
+        }
+        let mut extra = valid.clone();
+        extra.push(0);
+        assert!(BeatReference::read_optional(&mut extra.as_slice()).is_err());
+        for index in 1..4 {
+            for invalid in [0_i64, -1] {
+                let mut invalid_bytes = valid.clone();
+                invalid_bytes[index * 8..index * 8 + 8].copy_from_slice(&invalid.to_le_bytes());
+                assert!(BeatReference::read_optional(&mut invalid_bytes.as_slice()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn mode11_reference_oracle_preserves_signed_large_origin_cancellation() {
+        assert_eq!(BeatReference::DEFAULT.tempo(), 80.0);
+        for rate in [44_100, 48_000] {
+            for sample in [-(1_i64 << 47), 1_i64 << 47] {
+                for offset in [-1, 1] {
+                    let expected = BeatReference {
+                        zero_numerator: sample - offset,
+                        zero_denominator: i64::from(rate),
+                        duration_numerator: 1,
+                        duration_denominator: i64::from(rate),
+                    };
+                    assert_eq!(
+                        expected.ticks(sample, rate).unwrap(),
+                        offset * (1_i64 << 31)
+                    );
+                    assert!(expected.ticks(sample, 0).is_err());
+                }
+            }
         }
     }
 }

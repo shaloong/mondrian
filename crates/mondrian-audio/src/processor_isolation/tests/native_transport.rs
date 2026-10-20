@@ -178,7 +178,7 @@ fn transport_samples(bus: usize, start: usize, frames: usize) -> Vec<f32> {
 
 #[cfg(windows)]
 #[test]
-#[ignore = "fresh normal Product and owned CLAP sidechain mode11; actual canonical Sequence tempo/Scope/retime/PDC"]
+#[ignore = "fresh normal Product and owned CLAP sidechain mode11; exact canonical beats/tempo/Scope/retime/PDC and bounded large-origin DSP"]
 fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
     use crate::{
         AudioContinuityEpoch, AudioContinuityEvidenceVisitor, AudioDecodedSource,
@@ -303,7 +303,7 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
                 processor_session_scratch_budget_bytes: 32 * 1024 * 1024,
                 ..test_render_contract()
             };
-            let mut sequence = Sequence::new("actual tempo-only Scope with retimed source");
+            let mut sequence = Sequence::new("actual musical Scope with retimed source");
             sequence.audio_program.musical_time_reference = with_music.then(|| {
                 MusicalTimeReference::new(
                     TimelineTime::new(-19, 7).unwrap(),
@@ -457,7 +457,147 @@ fn installed_clap_canonical_tempo_scope_retime_keeps_sequence_clock() {
             }
             println!(
                 "{}",
-                serde_json::json!({"case":"canonical-clap-tempo-only-scope-retime", "rate":rate,"music":with_music,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"beats_or_rt_qualified":false})
+                serde_json::json!({"case":"canonical-clap-musical-scope-retime", "rate":rate,"music":with_music,"bpm":if with_music {80}else{0},"source_speed":"3/2","scope_in_seconds":5,"native_pdc_frames":3,"total_lookahead_frames":6,"epochs":2,"actual_native_pids":cold.iter().map(|o|o.process_id().get()).collect::<Vec<_>>(),"beat_ticks_validated_in_actual_dsp":with_music,"note_or_rt_qualified":false})
+            );
+        }
+    }
+    // Additional bounded Product/SDK consumers keep the same exact selector.
+    // The private mode11 state records an independent expected reference; the
+    // native process rejects wrong beat bits, not merely different PCM tags.
+    for rate in [44_100, 48_000] {
+        let render = AudioRenderContract {
+            sample_rate: rate,
+            max_block_frames: 4,
+            processing_mode: AudioProcessingMode::Offline,
+            ..test_render_contract()
+        };
+        for start in [-17_i64, -(1_i64 << 47), 1_i64 << 47] {
+            // A negative sample is not itself a negative musical position.
+            // Put the zero after negative starts to cross beat zero in DSP.
+            let beat_offset = if start < 0 { -1 } else { 1 };
+            let reference = MusicalTimeReference::new(
+                TimelineTime::new(start - beat_offset, i64::from(rate)).unwrap(),
+                TimelineTime::new(1, i64::from(rate)).unwrap(),
+            )
+            .unwrap();
+            let mut state = vec![11];
+            state.extend_from_slice(&0.5_f32.to_le_bytes());
+            for field in [
+                reference.quarter_note_zero().numerator(),
+                reference.quarter_note_zero().denominator(),
+                reference.quarter_note_duration().numerator(),
+                reference.quarter_note_duration().denominator(),
+            ] {
+                state.extend_from_slice(&field.to_le_bytes());
+            }
+            assert_eq!(state.len(), 37);
+            let instance = catalog
+                .create_instance("org.mondrian.fixture.sidechain", render, Some(state))
+                .unwrap();
+            assert!(instance.parameters.is_empty());
+            let request = AudioProcessorPrepareRequest::new(
+                AudioProcessorOccurrence {
+                    instance_id: instance.id,
+                    owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                    insertion: AudioProcessorInsertionPoint::PreFader,
+                },
+                &instance.definition,
+                &instance.parameters,
+                instance.opaque_state.as_deref().map(Vec::as_slice),
+                render,
+            )
+            .with_musical_time_reference(Some(reference));
+            assert!(!request.note_input_requested());
+            let spec = catalog.resolve(request).unwrap();
+            assert_eq!(spec.musical_time_reference, Some(reference));
+            assert!(spec.note_input_contract.ports.is_empty());
+            assert_eq!(
+                spec.plugin_execution_contract.algorithmic_latency_frames(),
+                3
+            );
+            let keys: Vec<_> =
+                spec.auxiliary_inputs.buses.iter().map(|bus| bus.bus_key.clone()).collect();
+            assert_eq!(keys, ["clap.audio-input.11", "clap.audio-input.7"]);
+            let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+            let mut processor = factory.create(None).unwrap();
+            processor.enter_state(start).unwrap();
+            let object = processor.native_audio_object_observation().unwrap().unwrap();
+            assert_ne!(object.process_id().get(), std::process::id());
+            // SAFETY: observe only this actual owned child's post-Drop exit.
+            let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, object.process_id().get()) };
+            assert!(!raw.is_null());
+            let handle = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+            for entry in 0..2 {
+                let entry_start = start + 17 * entry;
+                if entry != 0 {
+                    processor.enter_state(entry_start).unwrap();
+                }
+                let mut offset = 0_usize;
+                for frames in [4, 4, 1] {
+                    let signal = entry_start + offset as i64;
+                    let mut io = NativeSidechainAudioIo {
+                        main: (0..frames).flat_map(|_| [1.0_f32, -1.0]).collect(),
+                        inputs: keys
+                            .iter()
+                            .map(|key| (key.clone(), vec![0.0; frames * 2]))
+                            .collect(),
+                    };
+                    let context = AudioProcessorProcessContext::new(
+                        AudioRenderRequest { start_sample: signal, frames },
+                        AudioSampleRate::new(rate).unwrap(),
+                        AudioChannelLayout::Stereo,
+                        AudioProcessingMode::Offline,
+                        AudioKernelBackend::ScalarReference,
+                    )
+                    .with_musical_time_reference(Some(reference));
+                    processor
+                        .process(
+                            context,
+                            &mut io,
+                            AudioParameterEventBatch::new(signal, frames, &[], &[], &[]),
+                        )
+                        .unwrap();
+                    for (frame, pair) in io.main.chunks_exact(2).enumerate() {
+                        let expected = if offset + frame < 3 {
+                            0.0
+                        } else {
+                            let source = entry_start + (offset + frame - 3) as i64;
+                            let gain = 0.5_f32
+                                + (source % 251) as f32 / 1024.0
+                                + (60.0 * f64::from(rate)) as f32 / 1024.0;
+                            2.0 * gain
+                        };
+                        assert_eq!(
+                            pair,
+                            [expected, -expected],
+                            "rate={rate} start={start} entry={entry} offset={offset} frame={frame}"
+                        );
+                    }
+                    assert_eq!(
+                        processor.native_audio_object_observation().unwrap(),
+                        Some(object)
+                    );
+                    offset += frames;
+                }
+                assert_eq!(offset, 9);
+            }
+            drop(processor);
+            assert_eq!(
+                unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2000) },
+                0
+            );
+            let mut code = u32::MAX;
+            assert_ne!(
+                unsafe { GetExitCodeProcess(handle.as_raw_handle().cast(), &mut code) },
+                0
+            );
+            assert_eq!(
+                code, 0,
+                "same observed OS exit; not the original 100ms verdict"
+            );
+            println!(
+                "{}",
+                serde_json::json!({"case":"bounded-clap-exact-beats-effect","rate":rate,"start":start,"ticks_per_quarter_note":1_u64<<31,"frames":[4,4,1],"entries":2,"actual_pid":object.process_id().get(),"canonical_scope_or_note_or_rt_qualified":false})
             );
         }
     }
