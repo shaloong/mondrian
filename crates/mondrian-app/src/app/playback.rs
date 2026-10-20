@@ -336,6 +336,13 @@ impl AppAudioPlayback {
         matches!(self, Self::Available(playback) if playback.has_retained_native_reprepare())
     }
 
+    fn native_reprepare_refused_generation(&self) -> Option<u64> {
+        match self {
+            Self::Available(playback) => playback.native_reprepare_refused_generation(),
+            Self::Unavailable { .. } => None,
+        }
+    }
+
     fn native_reprepare_pending_generation(&self) -> Option<u64> {
         match self {
             Self::Available(playback) => playback.native_reprepare_pending_generation(),
@@ -852,10 +859,45 @@ impl AppState {
         self.validate_audio_source_replacement_admission("project_audio_handoff", "Project handoff")
     }
 
+    // Only explicit ProjectClose can request a SourceClosed proof for a failed
+    // restart. The local generation is not a Closed or retirement permission.
+    fn validate_project_audio_close_admission(&self) -> mondrian_core::Result<()> {
+        let refused = self.audio_playback.native_reprepare_refused_generation();
+        if let Some(generation) = refused {
+            let ticket = self.playback_engine.native_audio_control_hold_ticket();
+            if self.audio_playback.native_control_hold_generation() != Some(generation)
+                || self.audio_playback.native_reprepare_pending_generation() != Some(generation)
+                || ticket.is_some_and(|ticket| {
+                    ticket.pending_generation() != generation
+                        || ticket.epoch() != self.playback_engine.snapshot().epoch
+                })
+            {
+                return Err(transport_action_error(
+                    "project_audio_handoff",
+                    "native author or editor work must settle before Project handoff",
+                ));
+            }
+        }
+        self.validate_audio_source_replacement_admission_for_close(
+            "project_audio_handoff",
+            "Project handoff",
+            refused,
+        )
+    }
+
     pub(super) fn validate_audio_source_replacement_admission(
         &self,
         action: &str,
         operation: &str,
+    ) -> mondrian_core::Result<()> {
+        self.validate_audio_source_replacement_admission_for_close(action, operation, None)
+    }
+
+    fn validate_audio_source_replacement_admission_for_close(
+        &self,
+        action: &str,
+        operation: &str,
+        refused_close: Option<u64>,
     ) -> mondrian_core::Result<()> {
         let cleanup_complete = self.audio_playback_snapshot().state
             == mondrian_media::AudioPlaybackState::EditorCleanupCompletePaused;
@@ -863,11 +905,20 @@ impl AppState {
             .native_audio_editor
             .as_ref()
             .is_some_and(|context| context.blocks_source_replacement())
-            || self.playback_engine.native_audio_control_hold_ticket().is_some()
+            || self
+                .playback_engine
+                .native_audio_control_hold_ticket()
+                .is_some_and(|ticket| Some(ticket.pending_generation()) != refused_close)
             || self.audio_playback.native_author_state_entry_target().is_some()
-            || self.audio_playback.native_reprepare_pending_generation().is_some()
+            || self
+                .audio_playback
+                .native_reprepare_pending_generation()
+                .is_some_and(|generation| Some(generation) != refused_close)
             || (!cleanup_complete
-                && (self.audio_playback.native_control_hold_generation().is_some()
+                && (self
+                    .audio_playback
+                    .native_control_hold_generation()
+                    .is_some_and(|generation| Some(generation) != refused_close)
                     || self.audio_playback.native_editor_cleanup_target().is_some()))
         {
             return Err(transport_action_error(
@@ -897,7 +948,7 @@ impl AppState {
     pub(super) fn begin_project_audio_close(
         &mut self,
     ) -> mondrian_core::Result<Option<mondrian_media::AudioPcmSourceCloseTicket>> {
-        self.validate_project_audio_handoff_admission()?;
+        self.validate_project_audio_close_admission()?;
         if !self.audio_playback.native_editor_source_available() {
             self.prepare_project_audio_handoff()?;
             return Ok(None);
@@ -1005,7 +1056,7 @@ impl AppState {
         &mut self,
         ticket: &mondrian_media::AudioPcmSourceCloseTicket,
     ) -> mondrian_core::Result<()> {
-        self.validate_project_audio_handoff_admission()?;
+        self.validate_project_audio_close_admission()?;
         // Recheck the current Timeline alias as well as Media's full claim.
         // Do not retain this temporary Arc across the original retirement.
         drop(self.project_audio_handoff_renderer()?);
