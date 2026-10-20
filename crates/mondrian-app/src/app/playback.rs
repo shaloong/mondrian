@@ -1644,6 +1644,13 @@ impl AppState {
                         .finalize_native_control_anchor(pending_generation, anchor)
                         .map_err(|error| transport_action_error("native_audio_hold_final", error))?
                     {
+                        // A terminal refusal still owes output/clock acknowledgement,
+                        // but a later rotation grants no new native service attempt.
+                        if self.audio_playback.native_reprepare_refused_generation()
+                            == Some(pending_generation)
+                        {
+                            return Ok(());
+                        }
                         // Construct the provider only for an actual available
                         // Playback. The API owns even rejected providers and
                         // retires them away from this caller thread.
