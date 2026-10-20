@@ -19,6 +19,8 @@ use mondrian_timeline::{
 use std::collections::BTreeMap;
 
 mod author_projection;
+#[cfg(test)]
+mod source_custody_contracts;
 mod terminal_author;
 
 /// One author transaction owns the App custody slot. Presentation is separate;
@@ -53,7 +55,12 @@ impl NativeAudioAuthorWork {
     pub(super) fn snapshot_current_for_source(
         &self,
         source: &std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>,
+        playback: &super::playback::AppAudioPlayback,
     ) -> bool {
+        let actual: std::sync::Weak<dyn mondrian_media::AudioPcmRenderer> = source.clone();
+        if !playback.matches_source_weak(&actual) {
+            return false;
+        }
         match self {
             Self::Single(work) => work.snapshot_current_for_source(source),
             Self::Terminal(work) => work.snapshot_current_for_source(source),
@@ -65,8 +72,14 @@ impl NativeAudioAuthorWork {
         target: Option<NativeAudioEditorTarget>,
         session: mondrian_editor_state::AuthoringSessionId,
         sequence: mondrian_core::SequenceId,
+        playback: &super::playback::AppAudioPlayback,
     ) -> Option<std::sync::Arc<super::audio_rendering::TimelineAudioPcmRenderer>> {
-        self.single()?.retained_state_entry_source(target, session, sequence)
+        let work = self.single()?;
+        let actual: std::sync::Weak<dyn mondrian_media::AudioPcmRenderer> = work.renderer.clone();
+        if !playback.matches_source_weak(&actual) {
+            return None;
+        }
+        work.retained_state_entry_source(target, session, sequence)
     }
 }
 
@@ -108,7 +121,7 @@ impl NativeAudioSingleAuthorWork {
         self.gesture.is_some() || self.outstanding.is_some()
     }
 
-    pub(super) fn snapshot_current_for_source(
+    fn snapshot_current_for_source(
         &self,
         source: &std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>,
     ) -> bool {
@@ -142,7 +155,7 @@ impl NativeAudioSingleAuthorWork {
 
     /// Source selection only. Media independently verifies the same Arc,
     /// registration and current claim before retaining state-entry work.
-    pub(super) fn retained_state_entry_source(
+    fn retained_state_entry_source(
         &self,
         target: Option<NativeAudioEditorTarget>,
         session: mondrian_editor_state::AuthoringSessionId,
@@ -151,13 +164,16 @@ impl NativeAudioSingleAuthorWork {
         if self.session_id != session || self.sequence_id != sequence {
             return None;
         }
-        let renderer = self.renderer.upgrade()?;
         if let Some(target) = target {
             let outstanding = self.outstanding.as_ref()?;
             if outstanding.proposal.target() != target && outstanding.installed != Some(target) {
                 return None;
             }
-        } else if !self.state_entry_accepted || !renderer.native_author_snapshot_current() {
+        } else if !self.state_entry_accepted {
+            return None;
+        }
+        let renderer = self.renderer.upgrade()?;
+        if target.is_none() && !renderer.native_author_snapshot_current() {
             return None;
         }
         Some(renderer)
@@ -594,10 +610,14 @@ impl AppState {
             ));
         }
         self.prepare_native_audio_editor_context(context.payload.clone())?;
+        // Capturing the historical surface identity admits only the canonical
+        // author prefix. This instantaneous liveness check grants no native
+        // permission. Queueing requires the actual Media slot before upgrading
+        // this Weak or constructing native work.
         let captured_renderer = context
             .surface_renderer
             .as_ref()
-            .filter(|renderer| renderer.upgrade().is_some())
+            .filter(|renderer| renderer.strong_count() != 0)
             .ok_or_else(|| failure("native editor's captured renderer has retired"))?
             .clone();
         if let Some(work) =
@@ -705,6 +725,14 @@ impl AppState {
             return Ok(());
         };
         if pending.queued {
+            return Ok(());
+        }
+        // Completion delivery can precede a worker-disconnected event in one
+        // poll. Only the actual slot, not that historical event, keeps a strong
+        // owner alive while this UI path temporarily upgrades its captured Weak.
+        let actual: std::sync::Weak<dyn mondrian_media::AudioPcmRenderer> = work.renderer.clone();
+        if !self.audio_playback.matches_source_weak(&actual) {
+            self.set_status_hint(AppMessage::new("native-editor-control-pending"), true);
             return Ok(());
         }
         let renderer = work

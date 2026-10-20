@@ -1734,7 +1734,9 @@ impl AppState {
                         .native_audio_author_work
                         .as_ref()
                         .zip(self.native_audio_renderer.as_ref())
-                        .is_some_and(|(work, source)| work.snapshot_current_for_source(source))
+                        .is_some_and(|(work, source)| {
+                            work.snapshot_current_for_source(source, &self.audio_playback)
+                        })
                 {
                     self.audio_playback_author_binding =
                         self.current_audio_playback_author_binding()?;
@@ -1949,7 +1951,9 @@ impl AppState {
                     .native_audio_author_work
                     .as_ref()
                     .zip(self.native_audio_renderer.as_ref())
-                    .is_some_and(|(work, source)| work.snapshot_current_for_source(source))
+                    .is_some_and(|(work, source)| {
+                        work.snapshot_current_for_source(source, &self.audio_playback)
+                    })
                 {
                     self.audio_playback_author_binding =
                         self.current_audio_playback_author_binding()?;
@@ -2378,10 +2382,12 @@ impl AppState {
     ) -> Option<PreparedTimelineAudioSource> {
         let target = self.audio_playback.native_author_state_entry_target();
         let session = self.authoring_session_id()?;
-        let renderer = self
-            .native_audio_author_work
-            .as_ref()?
-            .retained_state_entry_source(target, session, sequence)?;
+        let renderer = self.native_audio_author_work.as_ref()?.retained_state_entry_source(
+            target,
+            session,
+            sequence,
+            &self.audio_playback,
+        )?;
         let current = self.active_sequence().filter(|current| current.id == sequence)?;
         let audition = self.audio_monitoring.audition_overlay(session, current);
         if !renderer.same_presentation_execution(
