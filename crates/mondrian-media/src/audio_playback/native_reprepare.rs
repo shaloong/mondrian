@@ -513,6 +513,7 @@ mod tests {
     struct Renderer {
         verifier: Mutex<Option<AudioOwnerInstallationVerifier>>,
         verifier_reads: AtomicUsize,
+        source_closed_queries: Mutex<Vec<thread::ThreadId>>,
         late: Mutex<Option<Arc<LatePcm>>>,
         scope: Mutex<Option<mondrian_core::NativeChildSettlementRegistrar>>,
         notice: mondrian_core::NativeAudioReprepareNotice,
@@ -547,6 +548,13 @@ mod tests {
             _: &ExecutionCancellationToken,
         ) -> mondrian_core::Result<AudioPcmNativeOwnerBindingStatus> {
             Ok(AudioPcmNativeOwnerBindingStatus::Ready)
+        }
+        fn validate_native_author_source_closed(
+            &self,
+            _: &ExecutionCancellationToken,
+        ) -> mondrian_core::Result<()> {
+            self.source_closed_queries.lock().push(thread::current().id());
+            Ok(())
         }
         fn render(
             &self,
@@ -681,6 +689,7 @@ mod tests {
         Arc::new(Renderer {
             verifier: Mutex::new(None),
             verifier_reads: AtomicUsize::new(0),
+            source_closed_queries: Mutex::new(Vec::new()),
             late: Mutex::new(None),
             scope: Mutex::new(None),
             notice: mondrian_core::NativeAudioReprepareNotice {
@@ -862,6 +871,76 @@ mod tests {
             old
         );
         assert!(!playback.finish_native_reprepare(playback.generation, anchor(0)).unwrap());
+    }
+
+    #[test]
+    fn terminal_restart_refusal_can_query_actual_source_closed_before_clear() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        let caller = thread::current().id();
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap();
+        let native_cancel = playback.native_control_cancellation.clone();
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 1))
+            .unwrap());
+        pump(&mut playback, refused);
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+        assert!(playback.native_control_output_retirement.is_none());
+        assert!(renderer.source_closed_queries.lock().is_empty());
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let generation = playback.generation;
+            let ticket = playback
+                .request_source_close(&erased, anchor(20))
+                .expect("REFUSED_SOURCE_CLOSE must admit actual SourceClosed query");
+            assert_eq!(playback.generation, generation + 1, "one original Suspend");
+            assert!(refused(&playback));
+            assert!(!native_cancel.is_canceled());
+            assert!(playback.matches_source(&erased));
+            pump(&mut playback, |p| {
+                !matches!(
+                    p.source_close_status(&ticket).unwrap(),
+                    AudioPcmSourceCloseStatus::Pending
+                )
+            });
+            assert!(matches!(
+                playback.source_close_status(&ticket).unwrap(),
+                AudioPcmSourceCloseStatus::Closed
+            ));
+            assert!(refused(&playback), "Closed query alone cannot release HOLD");
+            assert!(renderer.verifier.lock().as_ref().unwrap().validate(&claim).is_ok());
+            let queries = renderer.source_closed_queries.lock();
+            assert_eq!(queries.len(), 1);
+            assert_ne!(queries[0], caller, "query uses the original producer");
+            assert_eq!(queries[0], facts.calls.lock()[0].1);
+            drop(queries);
+            let renders = renderer.requests.lock().len();
+            playback.finish_source_close(&ticket, anchor(20)).unwrap();
+            assert!(!playback.matches_source(&erased));
+            assert!(playback.native_control_hold.is_none());
+            assert!(playback.owner_installation.current_claim().unwrap().is_none());
+            assert!(matches!(
+                renderer.verifier.lock().as_ref().unwrap().validate(&claim),
+                Err(AudioOwnerInstallationError::NotInstalled)
+            ));
+            assert_eq!(renderer.requests.lock().len(), renders);
+            assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+            assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                playback.finish_source_close(&ticket, anchor(20)),
+                Err(AudioPlaybackError::SourceCloseSuperseded)
+            );
+        }));
+        drop((erased, renderer));
+        let cleanup = playback.shutdown_and_wait();
+        assert!(
+            cleanup.all_workers_terminated(),
+            "Source-close cleanup: {cleanup:?}"
+        );
+        if let Err(payload) = target {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     #[test]
