@@ -268,8 +268,17 @@ namespace MondrianOpenFx {
                                      const std::string& name,
                                      OFX::Host::Param::Descriptor& descriptor)
     : ParameterQueryInstance<OFX::Host::Param::ChoiceInstance>(descriptor, effect),
-      _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault))
+      _value(descriptor.getProperties().getIntProperty(kOfxParamPropDefault)),
+      _ordinalCount(descriptor.getProperties().getDimension(kOfxParamPropChoiceOption))
   {
+  }
+
+  void ChoiceParameter::setOption(int /*index*/) {
+    // The SDK's existing ChoiceOption notify hook calls this after every
+    // property mutation, including reset and a change later restored in-place.
+    const int count = getProperties().getDimension(kOfxParamPropChoiceOption);
+    if (count != _ordinalCount) { _effect->frameState().invalidChoiceDomain = true; }
+    _effect->frameState().admitsChoiceDomain(getName(), count);
   }
 
   OfxStatus ChoiceParameter::get(int& value)
@@ -282,6 +291,8 @@ namespace MondrianOpenFx {
 
   OfxStatus ChoiceParameter::get(OfxTime time, int& value)
   {
+    if (!_effect->frameState().admitsChoiceDomain(getName(),
+        getProperties().getDimension(kOfxParamPropChoiceOption))) { return kOfxStatErrValue; }
     if (_effect->frameState().curveParameter(getName())) {
       int result = 0;
       const auto status = curveNumbers<int, 1>(*_effect, getName(), 0, time, 0, {&result});

@@ -447,6 +447,8 @@ struct MondrianOpenFxSession {
         int current = 0;
         if ((value && value->kind != 4) || !std::isfinite(target) || std::trunc(target) != target ||
             target < 0 || target >= options || choice->get(current) != kOfxStatOK) { return 4; }
+        if (value && value->query_mode == 2 &&
+            !frame.admitsChoiceDomain(options, value->query, value->query_context)) { return 7; }
         updates.push_back({parameter, 4, {target}, current != target});
       } else if (numericLayout(type).kind >= 7) {
         const auto layout = numericLayout(type);
@@ -596,6 +598,7 @@ struct MondrianOpenFxSession {
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
     if (applied != 0) { return applied; }
     if (!accepted(instance->createInstanceAction())) { return 4; }
+    if (frame.invalidChoiceDomain) { failed = true; return 7; }
     return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
   }
 
@@ -1052,7 +1055,17 @@ static int renderSessionEntry(
       }
       ~DiagnosticBorrow() { frame.renderDiagnostic = nullptr; }
     } diagnosticBorrow(session->frame, diagnostic);
-    const int status = session->render(input, output, bytes, *info, parameters, count, *report, probe);
+    int status = session->render(input, output, bytes, *info, parameters, count, *report, probe);
+    // This single publication boundary also covers Identity/UserBlocked and
+    // EndSequenceRender. A plugin cannot publish by ignoring a query error.
+    if (session->frame.invalidChoiceDomain) {
+      session->failed = true;
+      if (status == 0) {
+        report->completion = MONDRIAN_OPENFX_RENDER_UNSET;
+        report->output_alpha = MONDRIAN_OPENFX_ALPHA_INVALID;
+        status = 7;
+      }
+    }
     const auto phase = probe.start();
     session->host.auxiliary().report(report->feedback);
     probe.finish(MONDRIAN_OPENFX_AUXILIARY_REPORT, phase);

@@ -22,6 +22,9 @@ use mondrian_effects::{
 #[path = "openfx_host/boolean_hold.rs"]
 mod boolean_hold;
 
+#[path = "openfx_host/choice_hold.rs"]
+mod choice_hold;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {

@@ -982,13 +982,14 @@ bool curveSourceLifecycle(const std::string& operation, const void* handle, OfxP
       (sampled ? derivative != -999.0 : std::abs(derivative - (endpoint - 1.0)/24.0) > 1e-14)) { return false; }
   return true;
 }
-// Bool animation is opt-in independently of the unchanged discrete defaults.
+// Bool and numeric-index Choice animation are independent of StrChoice/String.
 bool booleanAnimationCapabilities() {
   for (const char* name : {kOfxParamHostPropSupportsBooleanAnimation,
        kOfxParamHostPropSupportsChoiceAnimation, kOfxParamHostPropSupportsStrChoiceAnimation,
        kOfxParamHostPropSupportsStringAnimation, kOfxParamHostPropSupportsCustomAnimation}) {
     int value = -1;
-    const int expected = std::strcmp(name, kOfxParamHostPropSupportsBooleanAnimation) == 0 ? 1 : 0;
+    const int expected = std::strcmp(name, kOfxParamHostPropSupportsBooleanAnimation) == 0 ||
+        std::strcmp(name, kOfxParamHostPropSupportsChoiceAnimation) == 0 ? 1 : 0;
     if (gPropHost->propGetInt(gHost->host, name, 0, &value) != kOfxStatOK || value != expected) { return false; }
   }
   return true;
@@ -1057,6 +1058,104 @@ bool booleanHoldQueries(const std::string& operation, const void* handle, OfxPro
   return gPropHost->propGetDouble(in, kOfxPropTime, 0, &current) == kOfxStatOK &&
       gParamHost->paramSetValue(enabled, 1) == kOfxStatErrUnsupported &&
       gParamHost->paramSetValueAtTime(enabled, current, 1) == kOfxStatErrUnsupported;
+}
+bool choiceHoldMode(const std::string& selected) {
+  return selected == "choice_hold" || selected == "choice_hold_create_domain_drift" ||
+      selected == "choice_hold_render_domain_drift";
+}
+// Static options: labels/ranks never replace the original numeric identity.
+bool defineChoiceHold(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return false; }
+  const char* labels[] = {"Same", "Same", "Third"};
+  const int ranks[] = {2147483647, -2147483647 - 1, 0};
+  for (const char* name : {"mode", "fixed"}) {
+    OfxPropertySetHandle props = nullptr;
+    const bool animated = std::strcmp(name, "mode") == 0;
+    if (gParamHost->paramDefine(params, kOfxParamTypeChoice, name, &props) != kOfxStatOK ||
+        gPropHost->propSetString(props, kOfxPropLabel, 0, name) != kOfxStatOK ||
+        gPropHost->propSetInt(props, kOfxParamPropDefault, 0, animated ? 1 : 0) != kOfxStatOK ||
+        gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) != kOfxStatOK ||
+        gPropHost->propSetIntN(props, kOfxParamPropChoiceOrder, 3, ranks) != kOfxStatOK ||
+        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, animated) != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+bool changeChoicePresentation(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  const char* labels[] = {"Third", "Same", "Same"};
+  const int ranks[] = {0, 2147483647, -2147483647 - 1};
+  return gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) == kOfxStatOK &&
+      gParamHost->paramGetHandle(params, "mode", &parameter, &props) == kOfxStatOK &&
+      gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) == kOfxStatOK &&
+      gPropHost->propSetIntN(props, kOfxParamPropChoiceOrder, 3, ranks) == kOfxStatOK;
+}
+bool changeAndRestoreChoiceDomain(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  const char* labels[] = {"Same", "Same", "Third"};
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "mode", &parameter, &props) != kOfxStatOK) { return false; }
+  // Do not query the value during the transient domain change. Even a plugin
+  // ignoring every getter error must not publish pixels from this invocation.
+  return gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 2, labels) == kOfxStatOK &&
+      gPropHost->propSetStringN(props, kOfxParamPropChoiceOption, 3, labels) == kOfxStatOK;
+}
+bool choiceHoldQueries(const std::string& operation, const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr, fixed = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  int lifecycle = -1;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "mode", &parameter, &props) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "fixed", &fixed, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(fixed, 0.0, &lifecycle) != kOfxStatOK) { return false; }
+  const bool creating = operation == kOfxActionCreateInstance;
+  auto found = actions.find(handle);
+  if (!creating && found == actions.end()) { return false; }
+  const int phase = creating ? 0 : std::min(found->second.renders, 8);
+  if (operation == kOfxActionInstanceChanged) {
+    char* name = nullptr;
+    if (gPropHost->propGetString(in, kOfxPropName, 0, &name) != kOfxStatOK || !name) { return false; }
+    if (std::strcmp(name, "mode") == 0) { ++found->second.scaleChanges; }
+  }
+  if (lifecycle && operation == kOfxImageEffectActionRender) {
+    const int expectedChanges = phase < 2 ? 0 : phase < 4 ? 1 : phase < 6 ? 2 : phase < 8 ? 3 : 4;
+    if (found->second.scaleChanges != expectedChanges) { return false; }
+  }
+  const bool constant = lifecycle && (phase == 4 || phase == 5);
+  const bool sampled = (lifecycle && (phase == 6 || phase == 7)) || mode() == "choice_hold_render_domain_drift";
+  const int endpoint = !lifecycle || phase < 2 || phase == 8 ? 2 : 0;
+  int animating = -1;
+  if (gPropHost->propGetInt(props, kOfxParamPropIsAnimating, 0, &animating) != kOfxStatOK ||
+      animating != (constant ? 0 : 1)) { return false; }
+  for (double frame : {-6.0, -0.0, 0.0, 23.0, 24.0, 30.0}) {
+    int value = -999;
+    const bool unavailable = sampled && frame != 0.0;
+    const int expected = constant || sampled || frame < 24.0 ? 1 : endpoint;
+    if (gParamHost->paramGetValueAtTime(parameter, frame, &value) !=
+          (unavailable ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+        value != (unavailable ? -999 : expected)) { return false; }
+  }
+  unsigned int count = 999;
+  if (gParamHost->paramGetNumKeys(parameter, &count) !=
+        (sampled ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+      count != (sampled ? 999U : constant ? 0U : 2U) ||
+      (!constant && !sampled && !curveKeys(parameter))) { return false; }
+  int value = -999;
+  if (gParamHost->paramGetValueAtTime(parameter, std::numeric_limits<double>::quiet_NaN(), &value)
+        != kOfxStatErrValue || value != -999) { return false; }
+  double calculus = -999;
+  if (gParamHost->paramGetDerivative(parameter, 6.0, &calculus) != kOfxStatErrUnsupported || calculus != -999 ||
+      gParamHost->paramGetIntegral(parameter, 0.0, 24.0, &calculus) != kOfxStatErrUnsupported || calculus != -999) { return false; }
+  if (operation != kOfxImageEffectActionRender) { return true; }
+  double current = 0.0;
+  return gPropHost->propGetDouble(in, kOfxPropTime, 0, &current) == kOfxStatOK &&
+      gParamHost->paramSetValue(parameter, 0) == kOfxStatErrUnsupported &&
+      gParamHost->paramSetValueAtTime(parameter, current, 0) == kOfxStatErrUnsupported;
 }
 bool authorCurveQueries(const void* handle) {
   OfxParamSetHandle params = nullptr;
@@ -2435,6 +2534,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
       !booleanHoldQueries(operation, handle, in)) { return kOfxStatFailed; }
+  if (choiceHoldMode(selected) &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged ||
+       operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
+      !choiceHoldQueries(operation, handle, in)) { return kOfxStatFailed; }
   if (isCurveLifecycleMode(selected) &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
@@ -2687,6 +2790,16 @@ OfxStatus probeAction(const char* action, const void* handle,
     if (operation == kOfxImageEffectActionDescribeInContext && !defineBooleanHold(handle)) { return kOfxStatFailed; }
     if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "enabled")) { return kOfxStatFailed; }
   }
+  if (choiceHoldMode(selected) && result == kOfxStatOK) {
+    if (operation == kOfxActionDescribe && !booleanAnimationCapabilities()) { return kOfxStatFailed; }
+    if (operation == kOfxImageEffectActionDescribeInContext && !defineChoiceHold(handle)) { return kOfxStatFailed; }
+    // Same-count caption/rank edits are UI-only, never ordinal-domain drift.
+    if (selected == "choice_hold" && operation == kOfxActionCreateInstance && !changeChoicePresentation(handle)) { return kOfxStatFailed; }
+    if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "mode", true)) { return kOfxStatFailed; }
+    if (((selected == "choice_hold_create_domain_drift" && operation == kOfxActionCreateInstance) ||
+         (selected == "choice_hold_render_domain_drift" && operation == kOfxImageEffectActionRender)) &&
+        !changeAndRestoreChoiceDomain(handle)) { return kOfxStatFailed; }
+  }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
     return kOfxStatFailed;
@@ -2868,10 +2981,11 @@ OfxStatus probe(const char* action, const void* handle,
   }
   // This mode checks every Render in-process. Keep the existing 32-row receipt
   // bounded across its nine source-revision renders and expose pre-Create refusal.
-  if (mode() == "boolean_hold") {
+  if (mode() == "boolean_hold" || mode() == "choice_hold") {
     if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { observed = nullptr; }
     if (std::strcmp(action, kOfxActionCreateInstance) == 0) { observed = action; }
   }
+  if (choiceHoldMode(mode()) && std::strcmp(action, kOfxActionCreateInstance) == 0) { observed = action; }
   // These Describe-only modes must prove that Create was never entered. Keep
   // existing modes' receipt sequences unchanged.
   if (temporalClipAdmissionMode(mode()) && std::strcmp(action, kOfxActionCreateInstance) == 0) {

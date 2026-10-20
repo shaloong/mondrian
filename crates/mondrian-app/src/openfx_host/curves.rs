@@ -5,6 +5,9 @@ use mondrian_core::{
     AutomationQueryError, AutomationQueryTime, PreparedPropertyQuery, PropertyValue,
 };
 
+// Private query operation, distinct from animation key count (operation 3).
+const CHOICE_ORDINAL_DOMAIN_SIZE_QUERY: c_int = 6;
+
 pub(super) type NativeQuery = unsafe extern "C" fn(
     *const c_void,
     c_int,
@@ -64,6 +67,20 @@ impl CurveContext {
             .map_err(|error| invalid(error.to_string()))?;
         convert(property.static_value().clone(), kind)
             .map_err(|_| invalid("curve property does not match the SDK parameter kind"))?;
+        if kind == 4 {
+            let options = &property.descriptor.schema.enum_options;
+            if options.is_empty()
+                || options.len() > 4096
+                || options
+                    .iter()
+                    .enumerate()
+                    .any(|(index, option)| option.key != index.to_string())
+            {
+                return Err(invalid(
+                    "Choice curve domain must contain exact ordinal keys 0..N-1",
+                ));
+            }
+        }
         let strings = if kind == 5 {
             property
                 .descriptor
@@ -141,6 +158,16 @@ impl CurveContext {
                     return Err(11);
                 }
                 result.value[..values.len()].copy_from_slice(&values);
+            }
+            CHOICE_ORDINAL_DOMAIN_SIZE_QUERY => {
+                if self.kind != 4 {
+                    return Err(5);
+                }
+                let OpenFxParameterQueryMode::Curve { property, .. } = &self.source else {
+                    return Err(11);
+                };
+                result.key_count =
+                    property.descriptor.schema.enum_options.len().try_into().map_err(|_| 11)?;
             }
             3 => result.key_count = self.prepared.key_times().len().try_into().map_err(|_| 11)?,
             4 => {
@@ -497,5 +524,161 @@ mod tests {
         let binding = serde_json::json!({"value":{"kind":"double","value":1.0},
             "query_mode":{"mode":"constant","extra":0}});
         assert!(serde_json::from_value::<OpenFxParameterBinding>(binding).is_err());
+    }
+    #[test]
+    fn native_choice_hold_queries_preserve_indices_and_reject_nonhold() {
+        use mondrian_core::{automation::ParameterEnumOption, Keyframe};
+        let descriptor =
+            PropertyDescriptor::new("choice", "Choice", PropertyValue::Enum("1".into()))
+                .with_enum_options(
+                    [
+                        (0, "Same", i32::MAX),
+                        (1, "Same", i32::MIN),
+                        (2, "Third", 0),
+                    ]
+                    .map(|(index, label, rank)| {
+                        ParameterEnumOption::new(
+                            index.to_string(),
+                            label,
+                            format!("option.{index}"),
+                        )
+                        .with_display_rank(rank)
+                    })
+                    .to_vec(),
+                );
+        let mut property = AnimatedProperty::from_descriptor(descriptor);
+        for (at, value) in [(TimelineTime::ZERO, "1"), (TimelineTime::ONE, "2")] {
+            property
+                .set_exact_keyframe(Keyframe::from_preset(
+                    at,
+                    PropertyValue::Enum(value.into()),
+                    InterpolationType::Hold,
+                ))
+                .unwrap();
+        }
+        let before = property.clone();
+        for interpolation in [InterpolationType::Linear, InterpolationType::Bezier] {
+            assert!(property
+                .set_exact_keyframe(Keyframe::from_preset(
+                    TimelineTime::ZERO,
+                    PropertyValue::Enum("0".into()),
+                    interpolation
+                ))
+                .is_err());
+            assert_eq!(property, before);
+        }
+        for key in ["-1", "3", "Same"] {
+            assert!(property
+                .set_exact_keyframe(Keyframe::from_preset(
+                    TimelineTime::ZERO,
+                    PropertyValue::Enum(key.into()),
+                    InterpolationType::Hold
+                ))
+                .is_err());
+            assert_eq!(property, before);
+        }
+        let binding = OpenFxParameterBinding::curve(
+            OpenFxParameterValue::Choice(1),
+            property.clone(),
+            TimeScale::new(24, 1).unwrap(),
+        );
+        let context = CurveContext::prepare(&binding, 7).unwrap();
+        assert_eq!((context.kind, context.revision), (4, 7));
+        assert_eq!(
+            context
+                .answer(CHOICE_ORDINAL_DOMAIN_SIZE_QUERY, 0.0, 0.0, 0, 0)
+                .unwrap()
+                .1
+                .key_count,
+            3
+        );
+        // Generic Enum keys are broader than OFX ordinal Choice identity.
+        for keys in [["0", "2", "3"], ["1", "0", "2"], ["0", "01", "2"]] {
+            let mut descriptor = before.descriptor.clone();
+            descriptor.schema.enum_options =
+                keys.map(|key| ParameterEnumOption::new(key, key, key)).to_vec();
+            descriptor.schema.default_value = PropertyValue::Enum(keys[0].into());
+            let mut invalid = AnimatedProperty::from_descriptor(descriptor);
+            for (at, key) in [(TimelineTime::ZERO, keys[0]), (TimelineTime::ONE, keys[2])] {
+                invalid
+                    .set_exact_keyframe(Keyframe::from_preset(
+                        at,
+                        PropertyValue::Enum(key.into()),
+                        InterpolationType::Hold,
+                    ))
+                    .unwrap();
+            }
+            let invalid = OpenFxParameterBinding::curve(
+                OpenFxParameterValue::Choice(0),
+                invalid,
+                TimeScale::new(24, 1).unwrap(),
+            );
+            let original = invalid.clone();
+            assert!(CurveContext::prepare(&invalid, 9).is_err());
+            assert_eq!(invalid, original);
+        }
+
+        for (frame, index) in [(-6.0, 1), (-0.0, 1), (23.0, 1), (24.0, 2), (30.0, 2)] {
+            assert_eq!(
+                context.value_at(frame).unwrap(),
+                OpenFxParameterValue::Choice(index)
+            );
+        }
+        assert_eq!(context.answer(3, 0.0, 0.0, 0, 0).unwrap().1.key_count, 2);
+        assert_eq!(context.answer(4, 0.0, 0.0, 1, 0).unwrap().1.key_time, 24.0);
+        assert_eq!(context.answer(5, 23.0, 0.0, 0, 1).unwrap().1.key_index, 1);
+        for (operation, at, index, expected) in [
+            (0, f64::NAN, 0, 11),
+            (1, 6.0, 0, 5),
+            (2, 0.0, 0, 5),
+            (4, 0.0, 2, 10),
+        ] {
+            let mut output = NativeQueryResult::empty();
+            output.value = [-999.0; 4];
+            output.key_time = -999.0;
+            // SAFETY: the immutable context and local ABI output outlive this query.
+            assert_eq!(
+                unsafe {
+                    query(
+                        (&context as *const CurveContext).cast(),
+                        operation,
+                        at,
+                        24.0,
+                        index,
+                        0,
+                        &mut output,
+                    )
+                },
+                expected
+            );
+            assert_eq!(output.value, [-999.0; 4]);
+            assert_eq!(output.key_time, -999.0);
+        }
+        property
+            .set_exact_keyframe(Keyframe::from_preset(
+                TimelineTime::ONE,
+                PropertyValue::Enum("0".into()),
+                InterpolationType::Hold,
+            ))
+            .unwrap();
+        let changed = CurveContext::prepare(
+            &OpenFxParameterBinding::curve(
+                OpenFxParameterValue::Choice(1),
+                property,
+                TimeScale::new(24, 1).unwrap(),
+            ),
+            8,
+        )
+        .unwrap();
+        assert_eq!(changed.revision, 8);
+        assert_eq!(
+            changed.value_at(24.0).unwrap(),
+            OpenFxParameterValue::Choice(0)
+        );
+        assert_eq!(
+            context.value_at(24.0).unwrap(),
+            OpenFxParameterValue::Choice(2)
+        );
+        assert_eq!(context.source, binding.query_mode);
     }
 }

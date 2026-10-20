@@ -11,6 +11,8 @@
 #include <array>
 #include <algorithm>
 namespace MondrianOpenFx {
+  // Private canonical ordinal-domain query, not animation key count (3).
+  constexpr int kChoiceOrdinalDomainSizeQuery = 6;
   struct ParameterSource {
     int mode;
     MondrianOpenFxQuery query;
@@ -77,6 +79,23 @@ namespace MondrianOpenFx {
     bool outputAvailable = false;
     mutable std::atomic<size_t> imageHandles{0};
     bool invalidImageLifetime = false;
+    // A transient unsupported ordinal-domain change is terminal even if the
+    // plugin restores its options or ignores a failed value query.
+    mutable bool invalidChoiceDomain = false;
+    bool admitsChoiceDomain(int count, MondrianOpenFxQuery query, const void* context) const {
+      MondrianOpenFxQueryResult result{};
+      if (count < 1 || !query || !context ||
+          query(context, kChoiceOrdinalDomainSizeQuery, 0, 0, 0, 0, &result) != 0 ||
+          result.key_count != static_cast<unsigned int>(count)) {
+        invalidChoiceDomain = true;
+        return false;
+      }
+      return true;
+    }
+    bool admitsChoiceDomain(const std::string& name, int count) const {
+      const auto* source = curveParameter(name);
+      return !source || admitsChoiceDomain(count, source->query, source->context);
+    }
   };
   struct ParameterAssignment {
     FrameState& state;

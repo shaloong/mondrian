@@ -91,7 +91,7 @@ namespace MondrianOpenFx
     _properties.setIntProperty(kOfxImageEffectPropSetableFielding, 0);
     _properties.setIntProperty(kOfxParamHostPropSupportsCustomInteract, 0 );
     _properties.setIntProperty(kOfxParamHostPropSupportsStringAnimation, 0 );
-    _properties.setIntProperty(kOfxParamHostPropSupportsChoiceAnimation, 0 );
+    _properties.setIntProperty(kOfxParamHostPropSupportsChoiceAnimation, 1 );
     _properties.setIntProperty(kOfxParamHostPropSupportsStrChoice, 1);
     _properties.setIntProperty(kOfxParamHostPropSupportsStrChoiceAnimation, 0);
     _properties.setIntProperty(kOfxParamHostPropSupportsBooleanAnimation, 1 );
