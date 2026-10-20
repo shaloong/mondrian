@@ -308,8 +308,11 @@ impl IsolatedAudioProcessorSpecResolver for Vst3AudioProcessorSpecResolver {
         plugin
             .main_audio_input
             .validate_note_request(request.musical_time_reference(), &note_input_contract)?;
-        let native_lane =
-            native_worker_lane_profile_for_notes(&plugin.parameters, &note_input_contract)?;
+        let native_lane = native_worker_lane_profile_for_preparation(
+            &plugin.parameters,
+            &note_input_contract,
+            request.render_contract(),
+        )?;
         if !note_input_contract.ports.is_empty() && native_lane.is_none() {
             return Err(unavailable(
                 "VST3 Note input requires the scoped native lane",
@@ -469,7 +472,11 @@ impl IsolatedAudioProcessorWorkerFactory for Vst3AudioProcessorWorkerFactory {
     ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
         let payload = validated_preparation_payload(request)?;
         validate_note_preparation(request, &payload)?;
-        native_worker_lane_profile_for_notes(&payload.parameters, request.note_input_contract())
+        native_worker_lane_profile_for_preparation(
+            &payload.parameters,
+            request.note_input_contract(),
+            request.render_contract(),
+        )
     }
     fn prepare(
         &self,
@@ -493,13 +500,14 @@ impl Vst3AudioProcessorWorkerFactory {
         let payload = validated_preparation_payload(&request)?;
         validate_note_preparation(&request, &payload)?;
         if request.native_worker_lane_resources()
-            != native_worker_lane_profile_for_notes(
+            != native_worker_lane_profile_for_preparation(
                 &payload.parameters,
                 request.note_input_contract(),
+                request.render_contract(),
             )?
         {
             return Err(invalid(
-                "VST3 input storage request differs from prepared metadata",
+                "VST3 native storage request differs from prepared metadata",
             ));
         }
         // Reserve once before native load; charge actual capacity before Ready.
@@ -548,12 +556,18 @@ impl Vst3AudioProcessorWorkerFactory {
                 ))
             })?,
         );
-        let mut host = Vst3Host::builder()
+        let mut host_builder = Vst3Host::builder()
             .plugin_interfaces(product_plugin_interfaces())
             .sample_rate(f64::from(render.sample_rate))
             .block_size(render.max_block_frames)
             .input_channels(channels)
-            .output_channels(channels)
+            .output_channels(channels);
+        if request.native_worker_lane_resources().is_some() {
+            host_builder = host_builder
+                .processing_resource_bounds(processing_audio_buffer_bounds(render)?)
+                .load_preparation(vst3_host::host::PluginLoadPreparation::Deferred);
+        }
+        let mut host = host_builder
             .build()
             .map_err(|error| unavailable(format!("VST3 host creation failed: {error}")))?;
         let mut plugin = host
@@ -2464,6 +2478,40 @@ fn native_worker_lane_profile_for_notes(
         .transpose()
 }
 
+fn processing_audio_buffer_bounds(
+    render: crate::AudioRenderContract,
+) -> Result<vst3_host::audio::ProcessingResourceBounds, AudioProcessorHostError> {
+    let channels = match render.channel_layout {
+        AudioChannelLayout::Mono => 1,
+        AudioChannelLayout::Stereo => 2,
+        _ => return Err(invalid("VST3 channel layout is not admitted")),
+    };
+    let buses = vst3_host::audio::MAX_OBSERVED_AUDIO_BUSES;
+    let total = buses
+        .checked_mul(2)
+        .and_then(|count| count.checked_mul(channels))
+        .ok_or_else(|| invalid("VST3 audio-buffer channel bound overflowed"))?;
+    vst3_host::audio::ProcessingResourceBounds::new(buses, channels, total, render.max_block_frames)
+        .map_err(|error| invalid(format!("VST3 audio-buffer bounds are invalid: {error}")))
+}
+
+fn native_worker_lane_profile_for_preparation(
+    parameters: &[Vst3ParameterDescriptor],
+    notes: &crate::AudioProcessorNoteInputContract,
+    render: crate::AudioRenderContract,
+) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
+    native_worker_lane_profile_for_notes(parameters, notes)?
+        .map(|profile| {
+            let peak = processing_audio_buffer_bounds(render)?.host_buffer_peak_bytes().map_err(
+                |error| invalid(format!("VST3 audio-buffer request overflowed: {error}")),
+            )?;
+            profile
+                .with_processing_audio_buffer_peak_bytes(peak)
+                .map_err(AudioProcessorHostError::from)
+        })
+        .transpose()
+}
+
 pub(super) fn native_worker_lane_profile(
 ) -> Result<Option<crate::NativeWorkerLaneResourceProfile>, AudioProcessorHostError> {
     #[cfg(target_os = "windows")]
@@ -3048,16 +3096,72 @@ mod bus_contract_tests {
             .unwrap();
         assert_eq!(
             expected,
-            native_worker_lane_profile_for_parameters(&payload.parameters).unwrap()
+            native_worker_lane_profile_for_preparation(
+                &payload.parameters,
+                request.note_input_contract(),
+                request.render_contract(),
+            )
+            .unwrap()
         );
         #[cfg(target_os = "windows")]
         {
             assert_ne!(expected, request.native_lane);
-            assert!(
-                matches!(Vst3AudioProcessorWorkerFactory.prepare_native(request),
-                Err(AudioProcessorHostError::InvalidContract(message))
-                    if message == "VST3 input storage request differs from prepared metadata")
+            let prepared = expected.unwrap();
+            let peak = prepared.processing_audio_buffer_peak_bytes();
+            assert!(peak > 0);
+            let mut request = request;
+            let original_render = request.render_contract;
+            let mut larger_render = original_render;
+            larger_render.max_block_frames += 1;
+            let larger = native_worker_lane_profile_for_preparation(
+                &payload.parameters,
+                request.note_input_contract(),
+                larger_render,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(larger.processing_audio_buffer_peak_bytes() > peak);
+            assert_eq!(larger.owning_layouts(), prepared.owning_layouts());
+            assert_eq!(
+                larger.processor_input_storage(),
+                prepared.processor_input_storage()
             );
+            assert_eq!(
+                larger.adapter_note_input_storage(),
+                prepared.adapter_note_input_storage()
+            );
+            assert_eq!(
+                larger.additional_session_reservation_bytes()
+                    - prepared.additional_session_reservation_bytes(),
+                larger.processing_audio_buffer_peak_bytes() - peak,
+                "actual requested frames change only the existing peak obligation"
+            );
+            for wrong in [
+                None,
+                native_worker_lane_profile().unwrap(),
+                Some(prepared.with_processing_audio_buffer_peak_bytes(peak - 1).unwrap()),
+                Some(larger),
+            ] {
+                // A missing, old, one-byte-short or other-geometry profile must
+                // fail before even fingerprinting this nonexistent native path.
+                request.native_lane = wrong;
+                let refused = Vst3AudioProcessorWorkerFactory.prepare_native(
+                    IsolatedAudioProcessorWorkerPrepareRequest {
+                        musical_time_reference: request.musical_time_reference,
+                        native_lane: request.native_lane,
+                        payload: request.payload.clone(),
+                        plugin_execution_contract: request.plugin_execution_contract,
+                        auxiliary_inputs: request.auxiliary_inputs.clone(),
+                        auxiliary_outputs: request.auxiliary_outputs.clone(),
+                        note_input_contract: request.note_input_contract.clone(),
+                        parameter_ids: request.parameter_ids.clone(),
+                        render_contract: original_render,
+                    },
+                );
+                assert!(matches!(refused,
+                    Err(AudioProcessorHostError::InvalidContract(message))
+                        if message == "VST3 native storage request differs from prepared metadata"));
+            }
         }
         assert!(native_worker_lane_profile_for_parameters(&vec![
             payload.parameters[0].clone();
@@ -3753,10 +3857,13 @@ mod musical_effect_tests {
         let note_input_contract =
             derived_note_input_contract(&payload.event_bus_contract, Some(note_reference()), true)
                 .unwrap();
-        let expected =
-            native_worker_lane_profile_for_notes(&payload.parameters, &note_input_contract)
-                .unwrap()
-                .unwrap();
+        let expected = native_worker_lane_profile_for_preparation(
+            &payload.parameters,
+            &note_input_contract,
+            render(),
+        )
+        .unwrap()
+        .unwrap();
         let storage = expected.adapter_note_input_storage();
         let wrong = expected
             .with_adapter_note_input_storage(crate::NativeHostBufferLayout {
@@ -3797,7 +3904,7 @@ mod musical_effect_tests {
         };
         assert_eq!(
             error,
-            invalid("VST3 input storage request differs from prepared metadata")
+            invalid("VST3 native storage request differs from prepared metadata")
         );
     }
 

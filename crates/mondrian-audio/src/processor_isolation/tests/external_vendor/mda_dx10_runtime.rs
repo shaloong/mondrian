@@ -300,7 +300,7 @@ fn external_mda_dx10_vst3_captured_state_notes_without_media() {
 }
 
 #[test]
-#[ignore = "normal Product IPC18, official SDK mda DLL and outer native Job; finite rescan consumer, no native tuple/ID/RT qualification"]
+#[ignore = "normal Product IPC19, official SDK mda DLL and outer native Job; finite rescan consumer, no native tuple/ID/RT qualification"]
 fn external_mda_dx10_vst3_rescan_handoff_preserves_note_score_pcm() {
     use crate::{
         compile_audio_program, AudioCompileRequest, AudioExecutionError,

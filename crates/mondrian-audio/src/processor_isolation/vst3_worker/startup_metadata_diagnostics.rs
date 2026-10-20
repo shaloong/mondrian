@@ -519,8 +519,12 @@ fn native_startup_metadata_phase_observation() {
     let request = IsolatedAudioProcessorWorkerPrepareRequest {
         musical_time_reference: None,
         auxiliary_outputs: crate::AudioProcessorAuxiliaryOutputContract::default(),
-        native_lane: native_worker_lane_profile_for_parameters(&parameters)
-            .expect("known native lane layout"),
+        native_lane: native_worker_lane_profile_for_preparation(
+            &parameters,
+            &crate::AudioProcessorNoteInputContract::default(),
+            render,
+        )
+        .expect("known native lane layout"),
         payload: serde_json::to_vec(&Vst3Payload {
             schema_version: PAYLOAD_VERSION,
             main_audio_input,

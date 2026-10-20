@@ -154,7 +154,7 @@ fn prepare_gate() -> Box<dyn IsolatedAudioProcessorWorker> {
         ClapMainAudioInput::Present,
         0x201, // Actual fixed owned ABI output ID, independent of input ID0x101.
         &parameter_definitions(),
-        &[17, 19],
+        &[17, 18, 20],
     )
     .expect("BLOCKED until production restored-instance Note contract/capability is implemented");
     assert_eq!(

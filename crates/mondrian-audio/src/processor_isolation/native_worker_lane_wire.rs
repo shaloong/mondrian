@@ -20,6 +20,7 @@ pub(super) enum NativeWorkerLaneWire {
         control: [(u64, u64); 3],
         processor_input_storage: [u64; 2],
         adapter_note_input_storage: (u64, u64),
+        processing_audio_buffer_peak_bytes: u64,
     },
 }
 
@@ -60,6 +61,10 @@ impl NativeWorkerLaneWire {
         let control = profile.control_overlap();
         let (vectors, com_payloads) = profile.processor_input_storage();
         Ok(Self::Scoped {
+            processing_audio_buffer_peak_bytes: u64::try_from(
+                profile.processing_audio_buffer_peak_bytes(),
+            )
+            .map_err(|_| invalid())?,
             adapter_note_input_storage: capture_layouts([profile.adapter_note_input_storage()])?[0],
             processor_input_storage: [
                 u64::try_from(vectors).map_err(|_| invalid())?,
@@ -90,6 +95,7 @@ impl NativeWorkerLaneWire {
             control,
             processor_input_storage,
             adapter_note_input_storage,
+            processing_audio_buffer_peak_bytes,
         } = self
         else {
             return Ok(None);
@@ -115,6 +121,9 @@ impl NativeWorkerLaneWire {
             .with_processor_input_storage(
                 usize::try_from(processor_input_storage[0]).map_err(|_| invalid())?,
                 usize::try_from(processor_input_storage[1]).map_err(|_| invalid())?,
+            )?
+            .with_processing_audio_buffer_peak_bytes(
+                usize::try_from(processing_audio_buffer_peak_bytes).map_err(|_| invalid())?,
             )?,
         ))
     }
@@ -137,6 +146,7 @@ mod tests {
             control: [(0, 1); 3],
             processor_input_storage: [24, 64],
             adapter_note_input_storage: (0, 1),
+            processing_audio_buffer_peak_bytes: 0,
         };
         let profile = wire.clone().realize().unwrap().unwrap();
         assert_eq!(profile.processor_input_storage(), (24, 64));
@@ -150,6 +160,7 @@ mod tests {
             control: [(0, 1); 3],
             processor_input_storage: [u64::MAX, 1],
             adapter_note_input_storage: (0, 1),
+            processing_audio_buffer_peak_bytes: 0,
         }
         .realize()
         .is_err());
@@ -183,6 +194,7 @@ mod tests {
             control: [(0, 1); 3],
             processor_input_storage: [0, 0],
             adapter_note_input_storage: (0, 1),
+            processing_audio_buffer_peak_bytes: 0,
         };
         let profile = wire.clone().realize().unwrap().unwrap();
         assert_eq!(
@@ -227,6 +239,37 @@ mod note_backing_tests {
     use super::*;
 
     #[test]
+    fn native_lane_processing_buffer_peak_roundtrips_and_refuses_missing_or_overflow() {
+        let original = NativeWorkerLaneWire::Scoped {
+            owners: [(0, 1); 8],
+            control: [(0, 1); 3],
+            processor_input_storage: [24, 64],
+            adapter_note_input_storage: (16, 8),
+            processing_audio_buffer_peak_bytes: 4096,
+        };
+        let profile = original.clone().realize().unwrap().unwrap();
+        assert_eq!(profile.processing_audio_buffer_peak_bytes(), 4096);
+        assert_eq!(profile.known_storage_limit_bytes(), 24 + 64 + 16 + 4096);
+        assert_eq!(
+            NativeWorkerLaneWire::capture(Some(profile)).unwrap(),
+            original
+        );
+        let current = serde_json::to_value(&original).unwrap();
+        let mut old_shape = current.clone();
+        old_shape.as_object_mut().unwrap().remove("processing_audio_buffer_peak_bytes");
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(old_shape).is_err());
+        let mut overflow = current;
+        overflow["processing_audio_buffer_peak_bytes"] = serde_json::json!(u64::MAX);
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(overflow)
+            .unwrap()
+            .realize()
+            .is_err());
+        let mut unaccounted_inline = serde_json::json!({ "kind": "Inline" });
+        unaccounted_inline["processing_audio_buffer_peak_bytes"] = serde_json::json!(4096);
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(unaccounted_inline).is_err());
+    }
+
+    #[test]
     fn native_lane_note_backing_requires_new_shape_and_retains_typed_zero_alignment() {
         let alignment = std::mem::align_of::<vst3_host::PluginEvent>() as u64;
         let wire = NativeWorkerLaneWire::Scoped {
@@ -234,6 +277,7 @@ mod note_backing_tests {
             control: [(0, 1); 3],
             processor_input_storage: [0, 0],
             adapter_note_input_storage: (0, alignment),
+            processing_audio_buffer_peak_bytes: 0,
         };
         let profile = wire.clone().realize().unwrap().unwrap();
         assert_eq!(
@@ -263,6 +307,7 @@ mod note_backing_tests {
             control: [(0, 1); 3],
             processor_input_storage: [0, 0],
             adapter_note_input_storage: (0, 0),
+            processing_audio_buffer_peak_bytes: 0,
         };
         assert!(invalid.realize().is_err());
     }

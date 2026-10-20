@@ -1,0 +1,69 @@
+---
+status: accepted
+---
+
+# Restore native audio state before preparation
+
+## Problem
+
+The VST3 convenience loader prepares buffers at its internal 44.1 kHz/512-frame
+defaults before applying the Host configuration. Component state is restored
+later and can change the bus topology. Post-load metadata validation therefore
+cannot bound those earlier allocations. Applying the final Mono/Stereo channel
+limit to the default topology would also reject a component whose saved state
+legitimately restores a different layout.
+
+Checking only sample arrays misses inactive-bus pointer arrays, activation and
+arrangement inventories, meters, caller-owned buffers and old/new ProcessData
+overlap. A later storage visitor cannot provide admission before allocation.
+
+## Decision
+
+Add an explicit deferred load-preparation policy, separate from optional,
+immutable processing-resource bounds. The generic Eager policy remains the
+default. Deferred loading initializes and connects the same component/controller
+without preparing DSP buffers or activating default audio/event buses. It does
+not resubmit the component's current arrangements as a new host request.
+
+Mondrian restores state and uses its existing configuration operation. The first
+successful native setup precedes actual audio/event bus acknowledgements and
+ProcessData construction. Existing pending-input guards remain authoritative;
+deferred loading grants no permission to discard, replay or flush foreign input.
+No new Ready flag, state inventory, execution scheduler or native owner is added.
+The existing prepared-data/setup facts govern later operations.
+
+This follows the [VST3 processor lifecycle](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Workflow%2BDiagrams/Audio%2BProcessor%2BCall%2BSequence.html):
+state restoration is permitted before setup, while bus activation belongs after
+successful setup. The generic Eager ordering is not qualified by this decision.
+
+The SDK checks each actual allocation-driving count, channel total and frame
+extent. Its checked request uses actual owning-type layouts and a conservative
+buffer-family peak: `2P + 2A + Q + W + 2L + M`. P covers ProcessData and sample/
+pointer storage at F64 width; A covers audio activation vectors; Q covers owned
+and raw arrangement arrays; W is the consumer's single retained F32 bus-buffer
+set; L covers queried layouts; M is preallocated meter channel storage. Inactive
+caller samples and SDK pointer arrays remain included. Deferred meters have no
+valid channels until preparation succeeds and never grow during DSP callbacks.
+
+The original native lane profile carries this separate peak through strict IPC19
+and the existing parent Session scratch admission for retained creation. The
+child recomputes the same-binary preparation profile before binary access. This
+does not move discovery probes or manual Unprobed validation launches behind
+the canonical Root grant; those existing entry boundaries remain separate.
+Bounds are not a second grant.
+Fresh uses the same Host policy, drops the previous Plugin before new loading,
+and retains its one W; it does not invent two overlapping Plugin instances.
+
+## Migration and validation
+
+Implementation and qualification are in progress. Preserve the Eager/no-bounds
+33-bus, zero-channel, fallback and retained activation controls. Test default
+multichannel to saved Stereo restoration, real requested block size, failures
+before allocation, actual old/new overlap and exact parent admission. Re-run
+affected Note, initial-input, zero-input, MDA and retained Runtime/App controls.
+
+This request excludes other metadata, COM payloads, complete Arc allocations,
+plugin/module/OS heaps and physical memory commitment. It does not qualify full
+heap usage, realtime safety, other platforms or every SDK load path. Audio DAG,
+author state, Timeline semantics, project format and retirement authority remain
+unchanged. The current capability matrices remain the qualification authority.

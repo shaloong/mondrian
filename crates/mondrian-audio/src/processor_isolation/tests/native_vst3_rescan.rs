@@ -60,7 +60,7 @@ fn assert_captured_mode13(state: &[u8]) {
 }
 
 #[test]
-#[ignore = "current normal Product IPC18 and rebuilt owned initial-values mode13 DLL; no suffix or Runtime recovery qualification"]
+#[ignore = "current normal Product IPC19 and rebuilt owned initial-values mode13 DLL; no suffix or Runtime recovery qualification"]
 fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() {
     use NativeAudioAuthorDeliveryState as Delivery;
     use NativeAudioObservationConsumption as Consumption;
@@ -353,7 +353,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
 }
 
 #[test]
-#[ignore = "current normal Product IPC18 and owned initial-values mode14 DLL; no native counter or Runtime recovery qualification"]
+#[ignore = "current normal Product IPC19 and owned initial-values mode14 DLL; no native counter or Runtime recovery qualification"]
 fn installed_vst3_initial_input_crosses_product_poll_without_authored_lanes() {
     use NativeAudioAuthorDeliveryState as Delivery;
     use NativeAudioObservationConsumption as Consumption;
@@ -497,7 +497,7 @@ fn installed_vst3_initial_input_crosses_product_poll_without_authored_lanes() {
 }
 
 #[test]
-#[ignore = "current normal Product IPC18 and owned initial-values mode13 DLL; finite direct-root audio handoff, no Note/ticket/100ms/RT qualification"]
+#[ignore = "current normal Product IPC19 and owned initial-values mode13 DLL; finite direct-root audio handoff, no Note/ticket/100ms/RT qualification"]
 fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
     use crate::{
         compile_audio_program, AudioCompileRequest, AudioContinuityEpoch,

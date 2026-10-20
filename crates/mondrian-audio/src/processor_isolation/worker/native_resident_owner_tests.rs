@@ -314,18 +314,50 @@ fn resident_header_fee_enters_sole_root_fixed_grant_before_session_factory_creat
 fn adapter_note_backing_fee_enters_sole_root_grant_once_before_factory_create() {
     // Synthetic storage-fee control through the real canonical Root admission;
     // this is not a canonical VST Note processing or complete heap qualification.
+    let baseline = profile(measured(Layout::new::<ResidentWorker>()));
+    let backing = measured(Layout::array::<vst3_host::PluginEvent>(4096).unwrap());
+    assert_storage_fee_admission(
+        baseline,
+        baseline.with_adapter_note_input_storage(backing).unwrap(),
+        backing.bytes,
+    );
+}
+
+#[test]
+fn processing_audio_buffer_peak_enters_sole_root_grant_once_before_factory_create() {
+    // Compose with existing nonzero input and Note storage. This verifies the
+    // original canonical grant, not discovery/manual validation launch order.
+    let baseline = profile(measured(Layout::new::<ResidentWorker>()))
+        .with_processor_input_storage(64, 32)
+        .unwrap()
+        .with_adapter_note_input_storage(measured(
+            Layout::array::<vst3_host::PluginEvent>(16).unwrap(),
+        ))
+        .unwrap();
+    let peak = vst3_host::audio::ProcessingResourceBounds::new(32, 2, 128, 8)
+        .unwrap()
+        .host_buffer_peak_bytes()
+        .unwrap();
+    assert!(peak > 0);
+    assert_storage_fee_admission(
+        baseline,
+        baseline.with_processing_audio_buffer_peak_bytes(peak).unwrap(),
+        peak,
+    );
+}
+
+fn assert_storage_fee_admission(
+    baseline: NativeWorkerLaneResourceProfile,
+    charged: NativeWorkerLaneResourceProfile,
+    expected_delta: usize,
+) {
     let mut sequence = Sequence::new("known adapter Note backing");
     sequence.settings.audio_channel_layout = AudioChannelLayout::Mono;
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
         AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
     );
     let creates = Arc::new(AtomicUsize::new(0));
-    let baseline = profile(measured(Layout::new::<ResidentWorker>()));
-    let backing = measured(Layout::array::<vst3_host::PluginEvent>(4096).unwrap());
-    let resolver = ChargedResolver {
-        profile: baseline.with_adapter_note_input_storage(backing).unwrap(),
-        creates: Arc::clone(&creates),
-    };
+    let resolver = ChargedResolver { profile: charged, creates: Arc::clone(&creates) };
     let build = |resolver: &ChargedResolver, grant| {
         AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
             &sequence,
@@ -345,7 +377,7 @@ fn adapter_note_backing_fee_enters_sole_root_grant_once_before_factory_create() 
     let uncharged = build(&no_backing, unlimited).unwrap();
     assert_eq!(
         footprint.fixed_resident_bytes - uncharged.resource_footprint().fixed_resident_bytes,
-        backing.bytes
+        expected_delta
     );
     drop(uncharged);
     creates.store(0, Ordering::SeqCst);

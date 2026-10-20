@@ -537,7 +537,7 @@ mod installed {
             offer.main_audio_input(),
             offer.main_audio_output_id(),
             offer.parameters(),
-            &[17, 19],
+            &[17, 18, 20],
         )
         .unwrap()
     }

@@ -773,8 +773,12 @@ mod tests {
             .map(Vst3ParameterDescriptor::parameter_id)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        let native_lane =
-            native_worker_lane_profile_for_parameters(&registration.parameters).unwrap();
+        let native_lane = native_worker_lane_profile_for_preparation(
+            &registration.parameters,
+            &crate::AudioProcessorNoteInputContract::default(),
+            render,
+        )
+        .unwrap();
         let payload = Vst3Payload {
             schema_version: PAYLOAD_VERSION,
             main_audio_input: registration.main_audio_input,

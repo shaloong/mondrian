@@ -143,6 +143,7 @@ pub struct NativeWorkerLaneResourceProfile {
     adapter_note_input_storage: NativeHostBufferLayout,
     processor_input_vector_bytes: usize,
     processor_input_com_payload_bytes: usize,
+    processing_audio_buffer_peak_bytes: usize,
     known_storage_limit_bytes: usize,
     additional_session_reservation_bytes: usize,
 }
@@ -180,6 +181,7 @@ impl NativeWorkerLaneResourceProfile {
             adapter_note_input_storage: NativeHostBufferLayout { bytes: 0, alignment: 1 },
             processor_input_vector_bytes: 0,
             processor_input_com_payload_bytes: 0,
+            processing_audio_buffer_peak_bytes: 0,
             known_storage_limit_bytes: bytes,
             additional_session_reservation_bytes,
         })
@@ -269,6 +271,34 @@ impl NativeWorkerLaneResourceProfile {
             self.processor_input_vector_bytes,
             self.processor_input_com_payload_bytes,
         )
+    }
+
+    /// Reserve the adapter's declared audio-buffer family peak before native load.
+    /// This includes that family's temporary overlap, not COM, plugin heaps or
+    /// a complete SDK instance. Replacing the same request never charges twice.
+    pub fn with_processing_audio_buffer_peak_bytes(
+        mut self,
+        bytes: usize,
+    ) -> Result<Self, NativeWorkerLaneResourceError> {
+        let known = self
+            .known_storage_limit_bytes
+            .checked_sub(self.processing_audio_buffer_peak_bytes)
+            .and_then(|value| value.checked_add(bytes))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        let reserved = self
+            .additional_session_reservation_bytes
+            .checked_sub(self.processing_audio_buffer_peak_bytes)
+            .and_then(|value| value.checked_add(bytes))
+            .ok_or(NativeWorkerLaneResourceError::ExtentOverflow)?;
+        self.known_storage_limit_bytes = known;
+        self.additional_session_reservation_bytes = reserved;
+        self.processing_audio_buffer_peak_bytes = bytes;
+        Ok(self)
+    }
+
+    /// The independently identified audio-buffer-family ceiling, not live usage.
+    pub const fn processing_audio_buffer_peak_bytes(self) -> usize {
+        self.processing_audio_buffer_peak_bytes
     }
 
     /// Exact layouts used to construct this validated request.
@@ -432,6 +462,68 @@ mod note_backing_tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn processing_audio_buffer_peak_is_independent_replaceable_and_checked() {
+        let base = profile()
+            .with_processor_input_storage(24, 64)
+            .unwrap()
+            .with_adapter_note_input_storage(NativeHostBufferLayout { bytes: 16, alignment: 8 })
+            .unwrap();
+        assert_eq!(base.processing_audio_buffer_peak_bytes(), 0);
+        let prepared = base.with_processing_audio_buffer_peak_bytes(4096).unwrap();
+        assert_eq!(prepared.processing_audio_buffer_peak_bytes(), 4096);
+        assert_eq!(
+            prepared.known_storage_limit_bytes() - base.known_storage_limit_bytes(),
+            4096
+        );
+        assert_eq!(
+            prepared.additional_session_reservation_bytes()
+                - base.additional_session_reservation_bytes(),
+            4096
+        );
+        assert_eq!(
+            prepared.processor_input_storage(),
+            base.processor_input_storage()
+        );
+        assert_eq!(
+            prepared.adapter_note_input_storage(),
+            base.adapter_note_input_storage()
+        );
+        assert_eq!(prepared.owning_layouts(), base.owning_layouts());
+        assert_eq!(prepared.control_overlap(), base.control_overlap());
+        assert_eq!(
+            prepared.requested_stack_reservation_bytes(),
+            base.requested_stack_reservation_bytes()
+        );
+        assert_eq!(
+            prepared.with_processing_audio_buffer_peak_bytes(4096).unwrap(),
+            prepared
+        );
+        assert_eq!(
+            prepared.with_processing_audio_buffer_peak_bytes(0).unwrap(),
+            base
+        );
+        let smaller = prepared.with_processing_audio_buffer_peak_bytes(1024).unwrap();
+        assert_eq!(
+            smaller.additional_session_reservation_bytes()
+                - base.additional_session_reservation_bytes(),
+            1024
+        );
+        assert_eq!(
+            base.with_processing_audio_buffer_peak_bytes(usize::MAX),
+            Err(NativeWorkerLaneResourceError::ExtentOverflow)
+        );
+        let almost_full = profile()
+            .with_processing_audio_buffer_peak_bytes(
+                usize::MAX - profile().requested_stack_reservation_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            almost_full.with_processor_input_storage(1, 0),
+            Err(NativeWorkerLaneResourceError::ExtentOverflow)
+        );
     }
 
     #[test]
