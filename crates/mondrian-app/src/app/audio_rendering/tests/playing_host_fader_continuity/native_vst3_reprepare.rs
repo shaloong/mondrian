@@ -298,18 +298,6 @@ fn native_vst3_priming_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                         next_identity = Some(next);
                         installed = Some(*installed_generation);
                     }
-                    AudioPlaybackEvent::NativeObservationPollRefused { .. } => {
-                        let snapshot = state.audio_playback_snapshot();
-                        let facts = cursor_facts(state);
-                        let binding_status = match &state.audio_playback {
-                            AppAudioPlayback::Available(playback) => playback.native_owner_binding_status(),
-                            AppAudioPlayback::Unavailable { .. } => None,
-                        };
-                        panic!(
-                            "[DEBUG-vst3-native-observation] unexpected refusal={event:?}; snapshot={snapshot:?}; session={:?}; processor={:?}; old_generation={old_generation} pending={pending:?} installed={installed:?} fresh={fresh:?} Ready={fresh_ready} old_object={old_object:?} fresh_object={fresh_object:?} claim={:?} binding_status={binding_status:?}",
-                            facts.session, facts.processor, verifier.current_claim(),
-                        );
-                    }
                     AudioPlaybackEvent::NativeDiagnosticsObserved { .. } => {}
                     other => panic!("no editor/author/substitution/recovery side path: {other:?}"),
                 })
