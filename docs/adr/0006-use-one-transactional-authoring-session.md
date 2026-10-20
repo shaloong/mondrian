@@ -181,6 +181,8 @@ irreversible Source commit. Release the guard before Ack or owner retirement.
 Only the original producer and retirement paths may own this prepared storage
 while a future Media consumer waits for canonical publication; UI receives facts,
 not the prepared native owner. This cross-queue consumer is not implemented yet.
+An obsolete completion must transfer any remaining request owner to the existing
+retirement queue. Rejecting its identity never permits destruction on the UI path.
 
 ## Consequences
 
