@@ -476,7 +476,7 @@ fn run_deactivated_metadata_case(mode: DiagnosticMode) {
         None => (None, None),
     };
     // SAFETY: Root's frozen DLL lease and actual Job cover this native loader
-    // call; PluginEntry owns the library and outlives both complete instances.
+    // call; PluginEntry owns the library and outlives all selected complete instances.
     let entry = unsafe { PluginEntry::load(case.plugin.path.as_os_str()) }
         .expect("load actual leased CLAP entry");
     // The selector fixes the phases before A runs. In the legacy comparison,
