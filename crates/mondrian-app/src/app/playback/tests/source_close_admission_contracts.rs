@@ -10,7 +10,7 @@ use mondrian_audio::{
     AudioProcessorProcessContext, AudioProcessorResolver,
 };
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc, Mutex as ChannelMutex,
 };
 
@@ -24,6 +24,8 @@ struct BindingProbe {
     entries: AtomicUsize,
     processed: AtomicUsize,
     drop_count: AtomicUsize,
+    pending_reprepare: AtomicBool,
+    drop_thread: parking_lot::Mutex<Option<std::thread::ThreadId>>,
     binding_thread: parking_lot::Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
 }
 
@@ -110,6 +112,16 @@ impl AudioProcessor for BindingProcessor {
         Ok(None) // A real BuiltIn instance has no native object, not fake Closed facts.
     }
 
+    fn preflight_reprepare(
+        &mut self,
+    ) -> Result<Option<mondrian_audio::NativeObservedRequest>, AudioProcessorHostError> {
+        Ok(self.0.pending_reprepare.load(Ordering::Acquire).then_some(
+            mondrian_audio::NativeObservedRequest::RequestOnly(
+                mondrian_core::NativeAudioReprepareRequest::ClapRestart,
+            ),
+        ))
+    }
+
     fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
         self.0.entries.fetch_add(1, Ordering::AcqRel);
         panic!("source-close admission must not enter DSP")
@@ -128,6 +140,7 @@ impl AudioProcessor for BindingProcessor {
 
 impl Drop for BindingProcessor {
     fn drop(&mut self) {
+        *self.0.drop_thread.lock() = Some(std::thread::current().id());
         self.0.drop_count.fetch_add(1, Ordering::AcqRel);
         let _ = self.0.dropped.try_send(());
     }
@@ -163,6 +176,10 @@ struct BindingControl {
 }
 
 fn binding_control() -> BindingControl {
+    binding_control_with_restart(false)
+}
+
+fn binding_control_with_restart(restart: bool) -> BindingControl {
     let (mut state, output) = available_state();
     let (started_tx, started) = mpsc::sync_channel(1);
     let (release, release_rx) = mpsc::sync_channel(1);
@@ -177,6 +194,8 @@ fn binding_control() -> BindingControl {
         entries: AtomicUsize::new(0),
         processed: AtomicUsize::new(0),
         drop_count: AtomicUsize::new(0),
+        pending_reprepare: AtomicBool::new(restart),
+        drop_thread: parking_lot::Mutex::new(None),
         binding_thread: parking_lot::Mutex::new(None),
     });
     let release = ReleaseBinding(Some(release));
@@ -192,11 +211,22 @@ fn binding_control() -> BindingControl {
     state
         .synchronize_playback_authoring_binding()
         .expect("real Engine/author binding");
-    let source = state.audio_playback_renderer("source-close serial control").unwrap().unwrap();
-    let weak = Arc::downgrade(&source.renderer);
-    state
-        .commit_audio_playback("source-close serial control", audio_anchor(0), Some(source))
-        .expect("original Media Source and binding work");
+    let weak = if restart {
+        let sequence = state.active_sequence_id().unwrap();
+        state
+            .rename_sequence(sequence, "ordinary refused restart")
+            .expect("one real author transaction for the history guard");
+        assert_eq!(probe.created.load(Ordering::Acquire), 0);
+        state.play().expect("public play installs the actual Timeline Source");
+        state.native_audio_renderer.as_ref().unwrap().clone()
+    } else {
+        let source = state.audio_playback_renderer("source-close serial control").unwrap().unwrap();
+        let weak = Arc::downgrade(&source.renderer);
+        state
+            .commit_audio_playback("source-close serial control", audio_anchor(0), Some(source))
+            .expect("original Media Source and binding work");
+        weak
+    };
 
     BindingControl {
         state,
@@ -517,4 +547,311 @@ fn project_close_retains_fault_when_timeline_alias_is_lost_after_admission() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+#[derive(Default)]
+struct RefusedRestartProbe {
+    installs: AtomicUsize,
+    drops: AtomicUsize,
+    drop_thread: parking_lot::Mutex<Option<std::thread::ThreadId>>,
+}
+
+struct RefusedRestartProvider {
+    source: std::sync::Weak<dyn AudioPcmRenderer>,
+    probe: Arc<RefusedRestartProbe>,
+}
+
+impl mondrian_media::AudioPcmNativeReprepareHandoff for RefusedRestartProvider {
+    fn renderer(&self) -> &std::sync::Weak<dyn AudioPcmRenderer> {
+        &self.source
+    }
+
+    fn install(
+        &mut self,
+        _: mondrian_core::NativeAudioReprepareNotice,
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        _: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        _: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<
+        mondrian_core::AudioOwnerInstallationClaim,
+        mondrian_media::AudioPcmNativeReprepareRefusal,
+    > {
+        assert_eq!(self.probe.installs.fetch_add(1, Ordering::AcqRel), 0);
+        assert!(
+            destination.current_claim().is_ok(),
+            "actual original Source registration"
+        );
+        Err(mondrian_media::AudioPcmNativeReprepareRefusal::ProcessorRejected)
+    }
+
+    fn retire(&mut self) -> Result<(), mondrian_media::AudioPcmNativeReprepareRefusal> {
+        panic!("a refused model install has no installed receipt to retire")
+    }
+
+    fn settle(&mut self) -> Result<(), mondrian_media::AudioPcmNativeReprepareRefusal> {
+        panic!("a refused model install cannot settle or grant Fresh")
+    }
+}
+
+impl Drop for RefusedRestartProvider {
+    fn drop(&mut self) {
+        *self.probe.drop_thread.lock() = Some(std::thread::current().id());
+        self.probe.drops.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn close_after_real_refused_restart(paused: bool) {
+    let BindingControl {
+        mut state,
+        output,
+        probe,
+        started,
+        mut release,
+        dropped,
+        weak,
+    } = binding_control_with_restart(true);
+    let refused = Arc::new(RefusedRestartProbe::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("actual original binding work");
+        release.release();
+        let renderer = weak.upgrade().unwrap();
+        let verifier = renderer.owner_installation_verifier().unwrap();
+        let claim = verifier.current_claim().unwrap();
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let source = Arc::downgrade(&erased);
+        drop(erased);
+        drop(renderer);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut required = false;
+        let mut submitted = false;
+        let mut observed = false;
+        while !observed {
+            let now = state.playback_observation_instant_anchor;
+            let poll =
+                state.audio_playback.poll(AudioPlaybackMode::Preroll, audio_anchor(0)).unwrap();
+            assert_eq!(poll.snapshot.output.unwrap().buffered_frames, 0);
+            for event in poll.events {
+                match &event {
+                    AudioPlaybackEvent::NativeReprepareRequired { .. } => {
+                        assert!(!required);
+                        required = true;
+                    }
+                    AudioPlaybackEvent::NativeReprepareOutputQuiesced {
+                        pending_generation,
+                        ..
+                    } => {
+                        assert!(required && !submitted);
+                        let AppAudioPlayback::Available(playback) = &mut state.audio_playback
+                        else {
+                            unreachable!()
+                        };
+                        assert!(playback
+                            .finalize_native_control_anchor(*pending_generation, audio_anchor(0))
+                            .unwrap());
+                        // Replace only the ordinary model's handoff provider.
+                        // The actual Media token/Quiesced DTO is consumed first;
+                        // the same DTO still reaches the original App handler.
+                        // This is not the production native provider or a DLL test.
+                        assert!(playback
+                            .request_native_reprepare(
+                                *pending_generation,
+                                Box::new(RefusedRestartProvider {
+                                    source: source.clone(),
+                                    probe: refused.clone(),
+                                })
+                            )
+                            .unwrap());
+                        submitted = true;
+                    }
+                    AudioPlaybackEvent::NativeReprepareObserved { status, .. } => {
+                        assert!(submitted && !observed);
+                        assert_eq!(
+                            *status,
+                            mondrian_media::AudioPcmNativeReprepareStatus::Refused(
+                                mondrian_media::AudioPcmNativeReprepareRefusal::ProcessorRejected
+                            )
+                        );
+                        observed = true;
+                    }
+                    AudioPlaybackEvent::NativeOwnerBindingsObserved { .. } => {}
+                    other => panic!("unexpected ordinary restart event: {other:?}"),
+                }
+                state.handle_audio_playback_event(event, now).unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "real refused completion did not arrive"
+            );
+            std::thread::yield_now();
+        }
+        assert!(required && submitted);
+        assert_eq!(state.audio_playback_snapshot().in_flight, 0);
+        assert_eq!(refused.installs.load(Ordering::Acquire), 1);
+        assert_eq!(probe.entries.load(Ordering::Acquire), 0);
+        assert_eq!(probe.processed.load(Ordering::Acquire), 0);
+        assert_eq!(output.lock().queued, 0);
+        assert!(verifier.validate(&claim).is_ok());
+        let generation = state.audio_playback.native_reprepare_refused_generation().unwrap();
+        let old_ticket = state.playback_engine.native_audio_control_hold_ticket().unwrap();
+        assert_eq!(old_ticket.pending_generation(), generation);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::HoldingForNativeAudioControl
+        );
+        assert!(state.can_undo_action());
+        let before = state.playback_engine.snapshot();
+        let media = state.audio_playback_snapshot();
+        let history = state.authoring_history().unwrap().diagnostics();
+        let document = state.authoring.as_ref().unwrap().document().clone();
+        let output_id = state.active_sequence().unwrap().audio_program.outputs[0].id;
+        let fader = crate::app::product_action::ProductAction::Audio(
+            crate::app::product_action::AudioProductAction::EditChannelStrip(
+                mondrian_timeline::AudioChannelStripEditRequest {
+                    owner: mondrian_timeline::AudioChannelStripOwner::ProgramOutput { output_id },
+                    edit: mondrian_timeline::AudioChannelStripEdit::SetFaderDb { value: -6.0 },
+                },
+            ),
+        );
+        assert!(state.dispatch_action(fader.into_external_action()).is_err());
+        assert!(state.undo_timeline().is_err());
+        assert_eq!(state.playback_engine.snapshot(), before);
+        assert_eq!(state.audio_playback_snapshot(), media);
+        assert_eq!(state.authoring_history().unwrap().diagnostics(), history);
+        assert_eq!(state.authoring.as_ref().unwrap().document(), &document);
+        if paused {
+            state.pause().expect("public pause preserves the failed owner");
+            assert_eq!(
+                state.playback_engine.snapshot().state,
+                TransportState::Paused
+            );
+            assert!(state.playback_engine.native_audio_control_hold_ticket().is_none());
+        } else {
+            // A genuine Media output rotation leaves the old Engine ticket stale.
+            // Public ProjectClose must reject it before any clock, owner or
+            // persistence mutation; the next real ack repairs it via the handler.
+            state.audio_playback.suspend(audio_anchor(0)).unwrap();
+            let engine = state.playback_engine.snapshot();
+            let high_water = state.playback_engine.monotonic_high_water();
+            let projection = (
+                state.playback_observation_instant_anchor,
+                state.playback_observation_time_anchor,
+            );
+            let media = state.audio_playback_snapshot();
+            let output_before = {
+                let o = output.lock();
+                (o.revision, o.acknowledged, o.queued, o.snapshot)
+            };
+            assert_ne!(
+                Some(old_ticket.pending_generation()),
+                state.audio_playback.native_reprepare_refused_generation()
+            );
+            assert!(state.begin_project_close().is_err());
+            assert_eq!(state.playback_engine.snapshot(), engine);
+            assert_eq!(state.playback_engine.monotonic_high_water(), high_water);
+            assert_eq!(
+                (
+                    state.playback_observation_instant_anchor,
+                    state.playback_observation_time_anchor
+                ),
+                projection
+            );
+            assert_eq!(state.audio_playback_snapshot(), media);
+            assert_eq!(
+                {
+                    let o = output.lock();
+                    (o.revision, o.acknowledged, o.queued, o.snapshot)
+                },
+                output_before
+            );
+            assert!(state.pending_project_close.is_none() && state.project_close_fault.is_none());
+            assert_eq!(state.authoring_history().unwrap().diagnostics(), history);
+            assert_eq!(state.authoring.as_ref().unwrap().document(), &document);
+            assert!(verifier.validate(&claim).is_ok());
+        }
+        // Consume only the actual new output acknowledgement, without PCM or
+        // another admitted install. Refused remains Refused in both play goals.
+        let poll = state.audio_playback.poll(AudioPlaybackMode::Idle, audio_anchor(0)).unwrap();
+        let mut acknowledged = 0;
+        for event in poll.events {
+            assert!(matches!(
+                event,
+                AudioPlaybackEvent::NativeReprepareOutputQuiesced { .. }
+            ));
+            acknowledged += 1;
+            let now = state.playback_observation_instant_anchor;
+            state.handle_audio_playback_event(event, now).unwrap();
+        }
+        assert_eq!(acknowledged, 1);
+        assert!(state.audio_playback.native_reprepare_refused_generation().is_some());
+        if !paused {
+            assert_eq!(
+                state
+                    .playback_engine
+                    .native_audio_control_hold_ticket()
+                    .unwrap()
+                    .pending_generation(),
+                state.audio_playback.native_reprepare_refused_generation().unwrap()
+            );
+        }
+        state
+            .close_project()
+            .expect("public close consumes actual Timeline SourceClosed");
+        assert!(state.authoring.is_none() && state.native_audio_renderer.is_none());
+        assert!(state.audio_playback_author_binding.is_none());
+        assert!(!state.audio_playback.native_editor_source_available());
+        assert!(state.audio_playback.native_reprepare_refused_generation().is_none());
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Stopped
+        );
+        assert!(matches!(
+            verifier.current_claim(),
+            Err(mondrian_core::AudioOwnerInstallationError::NotInstalled)
+        ));
+        dropped
+            .recv_timeout(Duration::from_secs(2))
+            .expect("original Timeline processor retired");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while refused.drops.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "original provider retirement");
+            std::thread::yield_now();
+        }
+        assert!(weak.upgrade().is_none());
+        assert_eq!(refused.installs.load(Ordering::Acquire), 1);
+        assert_eq!(refused.drops.load(Ordering::Acquire), 1);
+        assert_ne!(
+            *refused.drop_thread.lock(),
+            Some(std::thread::current().id())
+        );
+        assert_eq!(probe.created.load(Ordering::Acquire), 1);
+        assert_eq!(probe.drop_count.load(Ordering::Acquire), 1);
+        assert_ne!(
+            probe.drop_thread.lock().expect("actual Timeline processor Drop thread"),
+            std::thread::current().id()
+        );
+        assert_eq!(probe.entries.load(Ordering::Acquire), 0);
+        assert_eq!(probe.processed.load(Ordering::Acquire), 0);
+        assert_eq!(output.lock().queued, 0);
+    }));
+    drop(release);
+    let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    assert!(
+        cleanup.all_resources_released(),
+        "REFUSED_CLOSE_CLEANUP_HOLD: {cleanup:?}"
+    );
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn project_close_retires_refused_timeline_restart_without_retry_or_pcm() {
+    close_after_real_refused_restart(false);
+}
+
+#[test]
+fn project_close_retires_paused_refused_timeline_restart_without_entering_pcm() {
+    close_after_real_refused_restart(true);
 }
