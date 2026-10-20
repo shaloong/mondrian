@@ -739,7 +739,12 @@ impl AuthoringSession {
         debug_assert_eq!(self.session_id, prepared.session_id);
         debug_assert_eq!(self.author_generation, prepared.expected_generation);
         let ready_history = self.history.ready_record_exclusive(prepared.history);
-        let (document, authoring_validation) = prepared.replacement.into_installation();
+        let (mut document, authoring_validation) = prepared.replacement.into_installation();
+        // An in-flight save may complete while a native candidate waits for
+        // publication. Its revision and timestamp are persistence evidence,
+        // outside the prepared author certificate and Sequence History.
+        document.document_revision = self.document.document_revision;
+        document.meta.updated_at = self.document.meta.updated_at;
         #[cfg(test)]
         observe_author_publication_attempt(self);
         let mut publication = self.execution_snapshot_owner.begin_publication();

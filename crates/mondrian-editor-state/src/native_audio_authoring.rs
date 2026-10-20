@@ -2490,6 +2490,119 @@ mod tests {
     }
 
     #[test]
+    fn native_audio_terminal_group_preserves_save_completion_during_preparation() {
+        use mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration as Coherent;
+        let mut f = Fixture::new(false);
+        // Capture the save snapshot before the native barrier opens; its later
+        // public completion remains legal while the group is pending.
+        let saving = f.session.snapshot().unwrap();
+        let original = f.session.sequence(f.sequence_id).unwrap().clone();
+        let history = f.session.history().diagnostics();
+        let member = terminal_member(
+            &f,
+            f.owner,
+            f.processor_id,
+            &[(0, 0.4)],
+            Some(vec![3]),
+            Coherent,
+        );
+        let mut group = f
+            .session
+            .begin_native_audio_terminal_group(f.sequence_id, member.clone())
+            .unwrap();
+        let mut ticket =
+            f.session.prepare_native_audio_terminal_group(&mut group, vec![member]).unwrap();
+        let saved_revision = saving.document.document_revision + 1;
+        let mut persisted_meta = saving.document.meta.clone();
+        persisted_meta.updated_at += chrono::Duration::seconds(1);
+        let saved_updated_at = persisted_meta.updated_at;
+        let saved_file = f.root.path().join("completed-save-as.mdp");
+        f.session
+            .mark_saved(
+                saving.generation,
+                saved_revision,
+                saving.asset_library_revision,
+                persisted_meta,
+                Some(saved_file.clone()),
+            )
+            .unwrap();
+        assert_eq!(f.session.author_generation(), saving.generation);
+        assert_eq!(f.session.sequence(f.sequence_id).unwrap(), &original);
+        assert_eq!(f.session.history().diagnostics(), history);
+        assert_eq!(f.session.document().document_revision, saved_revision);
+        assert_eq!(f.session.document().meta.updated_at, saved_updated_at);
+        assert_eq!(f.session.project_file(), saved_file.as_path());
+        assert_eq!(f.session.saved_generation(), Some(saving.generation));
+        assert!(!f.session.is_dirty());
+        assert!(f.session.has_pending_native_authoring());
+
+        let commit = f
+            .session
+            .commit_native_audio_terminal_group(&mut group, &mut ticket)
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.generation.get(), saving.generation.get() + 1);
+        assert!(ticket.candidate_sequence().is_none());
+        assert_eq!(f.session.document().document_revision, saved_revision);
+        assert_eq!(f.session.document().meta.updated_at, saved_updated_at);
+        assert_eq!(f.session.project_file(), saved_file.as_path());
+        assert_eq!(f.session.saved_generation(), Some(saving.generation));
+        assert!(f
+            .session
+            .manual_save_baseline_covers(saving.generation, saving.asset_library_revision));
+        assert!(!f
+            .session
+            .manual_save_baseline_covers(commit.generation, saving.asset_library_revision));
+        assert!(
+            f.session.is_dirty(),
+            "native publication is newer than the save"
+        );
+        assert_eq!(
+            f.session.history().diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        assert_eq!(
+            f.processor().parameters[&f.parameter_ids[0]]
+                .automation
+                .as_ref()
+                .unwrap()
+                .default_value
+                .to_bits(),
+            0.4_f64.to_bits()
+        );
+        assert_eq!(
+            f.processor().opaque_state.as_ref().unwrap().as_slice(),
+            &[3]
+        );
+        let published = f.session.sequence(f.sequence_id).unwrap().clone();
+        // Actual native Acks remain the product caller's precondition.
+        f.session.finish_native_audio_terminal_group(&mut group).unwrap();
+        f.session
+            .snapshot()
+            .expect("certificate still proves the published author state");
+        f.session.undo().unwrap().unwrap();
+        assert!(f
+            .session
+            .sequence(f.sequence_id)
+            .unwrap()
+            .author_state_eq_ignoring_revision(&original));
+        f.session.redo().unwrap().unwrap();
+        assert!(f
+            .session
+            .sequence(f.sequence_id)
+            .unwrap()
+            .author_state_eq_ignoring_revision(&published));
+        assert_eq!(
+            f.session.history().diagnostics().undo_entries,
+            history.undo_entries + 1
+        );
+        assert_eq!(f.session.document().document_revision, saved_revision);
+        assert_eq!(f.session.document().meta.updated_at, saved_updated_at);
+        assert_eq!(f.session.project_file(), saved_file.as_path());
+        assert_eq!(f.session.saved_generation(), Some(saving.generation));
+    }
+
+    #[test]
     fn native_audio_terminal_group_rejects_invalid_member_sets_without_publication() {
         use mondrian_core::NativeAudioAuthorCompletion as Completion;
         let mut f = Fixture::new(false);
