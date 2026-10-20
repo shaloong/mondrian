@@ -1,5 +1,5 @@
 //! Two real owned VST3 prefixes share one App author group and Media Source.
-//! The first four-frame Preroll window triggers mode13; output never activates.
+//! Each real four-frame Preroll window triggers mode13; output never activates.
 //! This qualifies joint author custody, not PCM samples or a physical device.
 #![cfg(windows)]
 use super::*;
@@ -34,7 +34,7 @@ fn initial_mode13() -> Vec<u8> {
     state
 }
 
-fn actual_rescan(proposal: &NativeAudioAuthorProposal, gain: &ParameterId) {
+fn actual_rescan(proposal: &NativeAudioAuthorProposal, gain: &ParameterId) -> u32 {
     assert!(proposal.terminal());
     assert_eq!(
         proposal.completion(),
@@ -66,8 +66,9 @@ fn actual_rescan(proposal: &NativeAudioAuthorProposal, gain: &ParameterId) {
     native.extend_from_slice(&13_u32.to_le_bytes());
     assert_eq!(&state[28..48], native.as_slice());
     assert_eq!(&state[52..72], native.as_slice());
+    let process_calls = u32::from_le_bytes(state[48..52].try_into().unwrap());
     assert!(
-        u32::from_le_bytes(state[48..52].try_into().unwrap()) >= 2,
+        process_calls >= 2,
         "actual PCM plus the original zero-sample author bridge"
     );
     assert_eq!(
@@ -75,11 +76,23 @@ fn actual_rescan(proposal: &NativeAudioAuthorProposal, gain: &ParameterId) {
         &0_u32.to_le_bytes(),
         "no wrong-thread controller operation"
     );
+    process_calls
 }
 
 #[test]
 #[ignore = "current normal Product and owned initial-values mode13 DLL; two real App terminal owners, software Preroll only, no PCM-sample/GUI/device qualification"]
 fn app_vst3_peer_terminal_author_publishes_one_frontier_and_closes_same_source() {
+    run_terminal_frontiers(1);
+}
+
+#[test]
+#[ignore = "current normal Product and owned initial-values mode13 DLL; two successive real dual-owner App frontiers, software Media Preroll authority only, no PCM-sample/Engine-clock/device qualification"]
+fn app_vst3_successive_terminal_frontiers_preserve_same_source_and_native_objects() {
+    run_terminal_frontiers(2);
+}
+
+fn run_terminal_frontiers(frontier_count: usize) {
+    assert!(matches!(frontier_count, 1 | 2));
     let deadline = Instant::now() + Duration::from_secs(30);
     let material = |name| {
         let path = std::path::PathBuf::from(
@@ -162,388 +175,466 @@ fn app_vst3_peer_terminal_author_publishes_one_frontier_and_closes_same_source()
         let erased: std::sync::Weak<dyn AudioPcmRenderer> = weak.clone();
         assert!(state.audio_playback.matches_source_weak(&erased));
         let renderer = weak.upgrade().expect("actual installed same Timeline Source");
-        let original_verifier = renderer.owner_installation_verifier().unwrap();
-        let original_claim = original_verifier.current_claim().unwrap();
-        original_verifier.validate(&original_claim).unwrap();
-        installed_verifier = Some(original_verifier.clone());
         let generation = state.audio_playback_snapshot().generation;
         let author_session = state.authoring.as_ref().unwrap().session_id();
-        let author_generation = state.authoring.as_ref().unwrap().author_generation();
-        let original_document =
-            serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
-        let initial_history = state.authoring.as_ref().unwrap().history().diagnostics();
+        let starting_author_generation = state.authoring.as_ref().unwrap().author_generation();
+        let starting_history = state.authoring.as_ref().unwrap().history().diagnostics();
         let sequence = state.active_sequence_id().unwrap();
         let mut renderer_id = None;
         let mut objects = BTreeMap::new();
         let mut parameter_targets = BTreeMap::new();
-        let mut members: BTreeMap<_, NativeAudioAuthorProposal> = BTreeMap::new();
-        let mut new_targets: BTreeMap<_, NativeAudioEditorTarget> = BTreeMap::new();
-        let mut new_generation = None;
-        let mut prepared_count = 0_usize;
-        let mut acknowledged_count = 0_usize;
-        let mut finished_count = 0_usize;
-        let mut priming = false;
-        loop {
-            assert!(
-                Instant::now() < deadline,
-                "joint App terminal author did not close within 30s"
-            );
-            assert!(state.native_audio_editor.is_none());
-            assert!(state.audio_playback.matches_source_weak(&erased));
-            let mode = if priming {
-                AudioPlaybackMode::Preroll
-            } else {
-                AudioPlaybackMode::Idle
-            };
-            let poll = state
-                .audio_playback
-                .poll(mode, audio_anchor(0))
-                .expect("original Media queue poll");
-            assert_eq!(poll.snapshot.generation, generation);
-            assert!(poll.snapshot.in_flight <= 1);
-            assert!(
-                poll.snapshot.next_start_sample <= 4,
-                "no second PCM request"
-            );
-            assert!(
-                !poll.snapshot.output.unwrap().active,
-                "no device activation"
-            );
-            assert!(output.lock().queued <= 4);
-            assert_eq!(poll.snapshot.render_generation_recovery_count, 0);
-            assert_eq!(poll.snapshot.render_substitution_count, 0);
-            for event in poll.events {
-                let mut prepared = false;
-                let mut acknowledged = false;
-                match &event {
-                    AudioPlaybackEvent::NativeOwnerBindingsObserved {
-                        renderer_id: actual,
-                        generation: observed,
-                        status,
-                    } => {
-                        assert_eq!(*observed, generation);
-                        assert_eq!(
-                            *status,
-                            mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready
-                        );
-                        assert!(renderer_id.is_none_or(|prior| prior == *actual));
-                        renderer_id = Some(*actual);
-                    }
-                    AudioPlaybackEvent::NativeParameterObservationsObserved {
-                        renderer_id: actual,
-                        generation: observed,
-                        observation,
-                    } => {
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert_eq!(*observed, generation);
-                        let target = observation.target();
-                        assert!(ids.contains(&target.instance));
-                        assert_eq!(target.root_plan, target.local_plan);
-                        assert_eq!(target.root_session, target.local_session);
-                        let object = (
-                            observation.process_id().get(),
-                            observation.object_serial().get(),
-                        );
-                        assert_ne!(object.0, std::process::id());
-                        if let Some(previous) = objects.insert(target.instance, object) {
+        let mut previous_members: BTreeMap<_, NativeAudioAuthorProposal> = BTreeMap::new();
+        let mut previous_targets: BTreeMap<_, NativeAudioEditorTarget> = BTreeMap::new();
+        let mut total_prepared = 0;
+        let mut total_acknowledged = 0;
+        let mut total_finished = 0;
+        for frontier in 0..frontier_count {
+            // The next authority is an explicit software Media Preroll request.
+            // It is not Engine/device time or output consumption: keeping the
+            // first four frames queued admits only the next real Continue window.
+            // Never insert Idle, Suspend, clear, or a second Enter between batches.
+            let authority = audio_anchor(i64::try_from(frontier).unwrap() * 4);
+            let expected_frames = (frontier + 1) * 4;
+            let expected_end = i64::try_from(expected_frames).unwrap();
+            let original_verifier = renderer.owner_installation_verifier().unwrap();
+            let original_claim = original_verifier.current_claim().unwrap();
+            original_verifier.validate(&original_claim).unwrap();
+            installed_verifier = Some(original_verifier.clone());
+            let author_generation = state.authoring.as_ref().unwrap().author_generation();
+            let original_document =
+                serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
+            let initial_history = state.authoring.as_ref().unwrap().history().diagnostics();
+            if frontier != 0 {
+                assert_eq!(previous_targets.len(), 2);
+                for target in previous_targets.values() {
+                    assert_eq!(target.installed_generation, original_claim.generation());
+                    assert_eq!(parameter_targets[&target.instance], *target);
+                }
+                renderer
+                    .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                    .expect("the complete previous frontier is closed before the next Preroll");
+            }
+            let mut members: BTreeMap<_, NativeAudioAuthorProposal> = BTreeMap::new();
+            let mut new_targets: BTreeMap<_, NativeAudioEditorTarget> = BTreeMap::new();
+            let mut new_generation = None;
+            let mut prepared_count = 0_usize;
+            let mut acknowledged_count = 0_usize;
+            let mut finished_count = 0_usize;
+            let mut priming = frontier != 0;
+            loop {
+                assert!(
+                    Instant::now() < deadline,
+                    "joint App terminal author did not close within 30s"
+                );
+                assert!(state.native_audio_editor.is_none());
+                assert!(state.audio_playback.matches_source_weak(&erased));
+                let mode = if priming {
+                    AudioPlaybackMode::Preroll
+                } else {
+                    AudioPlaybackMode::Idle
+                };
+                let poll =
+                    state.audio_playback.poll(mode, authority).expect("original Media queue poll");
+                assert_eq!(poll.snapshot.generation, generation);
+                assert!(poll.snapshot.in_flight <= 1);
+                assert!(
+                    poll.snapshot.next_start_sample <= expected_end,
+                    "no PCM request beyond this actual frontier"
+                );
+                assert!(
+                    !poll.snapshot.output.unwrap().active,
+                    "no device activation"
+                );
+                assert!(output.lock().queued <= expected_frames);
+                assert_eq!(poll.snapshot.render_generation_recovery_count, 0);
+                assert_eq!(poll.snapshot.render_substitution_count, 0);
+                for event in poll.events {
+                    let mut prepared = false;
+                    let mut acknowledged = false;
+                    match &event {
+                        AudioPlaybackEvent::NativeOwnerBindingsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            status,
+                        } => {
+                            assert_eq!(*observed, generation);
                             assert_eq!(
-                                previous, object,
-                                "same native incarnation across joint installation"
+                                *status,
+                                mondrian_media::AudioPcmNativeOwnerBindingStatus::Ready
                             );
+                            assert!(renderer_id.is_none_or(|prior| prior == *actual));
+                            renderer_id = Some(*actual);
                         }
-                        let fact = observation
-                            .facts()
-                            .iter()
-                            .rev()
-                            .find(|f| f.parameter == gain)
-                            .expect("actual Gain query");
-                        if target.continuity_epoch.is_some() {
-                            assert_eq!(fact.value_bits, Some(0.75_f64.to_bits()));
-                        }
-                        if prepared_count == 0 {
-                            original_verifier.validate(&original_claim).unwrap();
-                            assert_eq!(target.installed_generation, original_claim.generation());
-                        } else if target.installed_generation != original_claim.generation() {
-                            let actual = renderer.owner_installation_verifier().unwrap();
-                            let claim = actual.current_claim().unwrap();
-                            actual.validate(&claim).unwrap();
-                            assert_eq!(target.installed_generation, claim.generation());
-                            assert!(new_generation.is_none_or(|prior| prior == claim.generation()));
-                            new_generation = Some(claim.generation());
-                            let original = members
-                                .get(&target.instance)
-                                .expect("actual original peer")
-                                .target();
-                            assert_eq!(target.root_session, original.root_session);
-                            assert_eq!(target.local_session, original.local_session);
-                            assert_eq!(target.continuity_epoch, original.continuity_epoch);
-                            assert_ne!(target.root_plan, original.root_plan);
-                            assert_ne!(target.binding, original.binding);
-                            if let Some(previous) = new_targets.insert(target.instance, target) {
-                                assert_eq!(previous, target);
-                            }
-                            installed_verifier = Some(actual);
-                        }
-                        parameter_targets.insert(target.instance, target);
-                    }
-                    AudioPlaybackEvent::NativeAuthorProposalObserved {
-                        renderer_id: actual,
-                        generation: observed,
-                        proposal,
-                    } => {
-                        assert!(
-                            priming,
-                            "mode13 must not be replaced with a fabricated startup callback"
-                        );
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert_eq!(*observed, generation);
-                        assert_eq!(proposal.sequence(), sequence);
-                        let target = proposal.target();
-                        assert!(ids.contains(&target.instance));
-                        assert!(objects.contains_key(&target.instance));
-                        assert_eq!(target.root_plan, target.local_plan);
-                        assert_eq!(target.root_session, target.local_session);
-                        assert_eq!(target.installed_generation, original_claim.generation());
-                        assert!(target.continuity_epoch.is_some());
-                        actual_rescan(proposal, &gain);
-                        if let Some(previous) = members.get(&target.instance) {
-                            assert!(previous.same_retained_proposal(proposal));
-                        } else {
-                            assert_eq!(
-                                prepared_count, 0,
-                                "no late peer silently joins a published frontier"
+                        AudioPlaybackEvent::NativeParameterObservationsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            observation,
+                        } => {
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            let target = observation.target();
+                            assert!(ids.contains(&target.instance));
+                            assert_eq!(target.root_plan, target.local_plan);
+                            assert_eq!(target.root_session, target.local_session);
+                            let object = (
+                                observation.process_id().get(),
+                                observation.object_serial().get(),
                             );
-                            // Author delivery suppresses optional presentation
-                            // queries. The cold DTO authenticates the object, not
-                            // a future Enter binding/epoch. The actual proposal
-                            // is projected from that Hosted owner after PCM.
-                            let cold = parameter_targets.get(&target.instance).unwrap();
-                            assert_eq!(target.root_plan, cold.root_plan);
-                            assert_eq!(target.root_session, cold.root_session);
-                            assert_eq!(target.local_session, cold.local_session);
-                            assert_eq!(target.installed_generation, cold.installed_generation);
-                            members.insert(target.instance, proposal.as_ref().clone());
-                        }
-                    }
-                    AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared {
-                        renderer_id: actual,
-                        generation: observed,
-                        proposal,
-                        ..
-                    } => {
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert_eq!(*observed, generation);
-                        assert_eq!(
-                            members.len(),
-                            2,
-                            "actual preparation covers both retained native peers"
-                        );
-                        assert!(members.values().any(|p| p.same_retained_proposal(proposal)));
-                        assert!(state.authoring.as_ref().unwrap().has_pending_native_authoring());
-                        assert_eq!(
-                            serde_json::to_value(state.authoring.as_ref().unwrap().document())
-                                .unwrap(),
-                            original_document
-                        );
-                        assert_eq!(
-                            state.authoring.as_ref().unwrap().author_generation(),
-                            author_generation
-                        );
-                        prepared_count += 1;
-                        assert_eq!(prepared_count, 1);
-                        prepared = true;
-                    }
-                    AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
-                        renderer_id: actual,
-                        generation: observed,
-                        proposal,
-                        status,
-                        ..
-                    } => {
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert_eq!(*observed, generation);
-                        assert!(members.values().any(|p| p.same_retained_proposal(proposal)));
-                        match status {
-                            Status::Refused(AuthorRefusal::AuthorStatePending)
-                                if prepared_count == 0 =>
-                            {
-                                // Missing/unpolled peer is an expected failed attempt.
-                                // It must not publish one member or erase the real group.
+                            assert_ne!(object.0, std::process::id());
+                            if let Some(previous) = objects.insert(target.instance, object) {
                                 assert_eq!(
-                                    serde_json::to_value(
-                                        state.authoring.as_ref().unwrap().document()
-                                    )
-                                    .unwrap(),
-                                    original_document
-                                );
-                                assert_eq!(
-                                    state.authoring.as_ref().unwrap().author_generation(),
-                                    author_generation
+                                    previous, object,
+                                    "same native incarnation across joint installation"
                                 );
                             }
-                            Status::Acknowledged { target }
-                            | Status::InstalledAwaitingAcknowledgement { target } => {
-                                assert_eq!(prepared_count, 1);
-                                let original = members.get(&target.instance).unwrap().target();
-                                assert_eq!(target.root_session, original.root_session);
-                                assert_eq!(target.local_session, original.local_session);
-                                assert_eq!(target.continuity_epoch, original.continuity_epoch);
-                                assert_ne!(target.root_plan, original.root_plan);
-                                assert_eq!(target.root_plan, target.local_plan);
-                                assert_ne!(target.binding, original.binding);
+                            let fact = observation
+                                .facts()
+                                .iter()
+                                .rev()
+                                .find(|f| f.parameter == gain)
+                                .expect("actual Gain query");
+                            if target.continuity_epoch.is_some() {
+                                assert_eq!(fact.value_bits, Some(0.75_f64.to_bits()));
+                            }
+                            if prepared_count == 0 {
+                                original_verifier.validate(&original_claim).unwrap();
+                                assert_eq!(
+                                    target.installed_generation,
+                                    original_claim.generation()
+                                );
+                            } else if target.installed_generation != original_claim.generation() {
                                 let actual = renderer.owner_installation_verifier().unwrap();
                                 let claim = actual.current_claim().unwrap();
                                 actual.validate(&claim).unwrap();
-                                assert_ne!(claim.generation(), original_claim.generation());
                                 assert_eq!(target.installed_generation, claim.generation());
                                 assert!(
                                     new_generation.is_none_or(|prior| prior == claim.generation())
                                 );
                                 new_generation = Some(claim.generation());
-                                installed_verifier = Some(actual);
-                                if matches!(status, Status::Acknowledged { .. }) {
-                                    acknowledged_count += 1;
-                                    assert_eq!(acknowledged_count, 1, "one all-member Ack outcome");
-                                    acknowledged = true;
+                                let original = members
+                                    .get(&target.instance)
+                                    .expect("actual original peer")
+                                    .target();
+                                assert_eq!(target.root_session, original.root_session);
+                                assert_eq!(target.local_session, original.local_session);
+                                assert_eq!(target.continuity_epoch, original.continuity_epoch);
+                                assert_ne!(target.root_plan, original.root_plan);
+                                assert_ne!(target.binding, original.binding);
+                                if let Some(previous) = new_targets.insert(target.instance, target)
+                                {
+                                    assert_eq!(previous, target);
                                 }
+                                installed_verifier = Some(actual);
                             }
-                            other => panic!("joint author operation refused: {other:?}"),
+                            parameter_targets.insert(target.instance, target);
                         }
-                    }
-                    AudioPlaybackEvent::NativeDiagnosticsObserved {
-                        renderer_id: actual,
-                        generation: observed,
-                        batch,
-                    } => {
-                        assert_eq!(Some(*actual), renderer_id);
-                        assert_eq!(*observed, generation);
-                        assert!(!batch.loss().incomplete());
-                    }
-                    other => panic!("joint NoGUI control admitted unexpected event: {other:?}"),
-                }
-                state
-                    .handle_audio_playback_event(event, Instant::now())
-                    .expect("original App event dispatcher");
-                let author = state.authoring.as_ref().unwrap();
-                assert_eq!(author.session_id(), author_session);
-                assert!(state.native_audio_editor.is_none());
-                if prepared {
-                    assert_eq!(
-                        author.author_generation().get(),
-                        author_generation.get().checked_add(1).unwrap()
-                    );
-                    assert_eq!(
-                        author.history().diagnostics().undo_entries,
-                        initial_history.undo_entries + 1
-                    );
-                    assert!(
-                        author.has_pending_native_authoring(),
-                        "accepted Document still waits for native Acks"
-                    );
-                    for id in ids {
-                        let current = state.active_sequence().unwrap().audio_program.outputs[0]
-                            .strip
-                            .pre_fader
-                            .processors
-                            .iter()
-                            .find(|p| p.id == id)
-                            .unwrap();
-                        assert_eq!(
-                            current.parameters[&gain]
-                                .automation
+                        AudioPlaybackEvent::NativeAuthorProposalObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            proposal,
+                        } => {
+                            assert!(
+                                priming,
+                                "mode13 must not be replaced with a fabricated startup callback"
+                            );
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert_eq!(proposal.sequence(), sequence);
+                            let target = proposal.target();
+                            assert!(ids.contains(&target.instance));
+                            assert!(objects.contains_key(&target.instance));
+                            assert_eq!(target.root_plan, target.local_plan);
+                            assert_eq!(target.root_session, target.local_session);
+                            assert_eq!(target.installed_generation, original_claim.generation());
+                            assert!(target.continuity_epoch.is_some());
+                            let process_calls = actual_rescan(proposal, &gain);
+                            if let Some(previous) = previous_members.get(&target.instance) {
+                                assert_eq!(
+                                    target, previous_targets[&target.instance],
+                                    "the second prefix starts at the first actual post-Ack target"
+                                );
+                                assert!(!previous.same_retained_proposal(proposal));
+                                assert!(proposal.revision() > previous.revision());
+                                assert!(
+                                    process_calls > actual_rescan(previous, &gain),
+                                    "a second actual native process/save, not a replay of .75"
+                                );
+                            }
+                            if let Some(previous) = members.get(&target.instance) {
+                                assert!(previous.same_retained_proposal(proposal));
+                            } else {
+                                assert_eq!(
+                                    prepared_count, 0,
+                                    "no late peer silently joins a published frontier"
+                                );
+                                // Author delivery suppresses optional presentation
+                                // queries. The cold DTO authenticates the object, not
+                                // a future Enter binding/epoch. The actual proposal
+                                // is projected from that Hosted owner after PCM.
+                                let cold = parameter_targets.get(&target.instance).unwrap();
+                                assert_eq!(target.root_plan, cold.root_plan);
+                                assert_eq!(target.root_session, cold.root_session);
+                                assert_eq!(target.local_session, cold.local_session);
+                                assert_eq!(target.installed_generation, cold.installed_generation);
+                                members.insert(target.instance, proposal.as_ref().clone());
+                            }
+                        }
+                        AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared {
+                            renderer_id: actual,
+                            generation: observed,
+                            proposal,
+                            ..
+                        } => {
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert_eq!(
+                                members.len(),
+                                2,
+                                "actual preparation covers both retained native peers"
+                            );
+                            assert!(members.values().any(|p| p.same_retained_proposal(proposal)));
+                            assert!(state
+                                .authoring
                                 .as_ref()
                                 .unwrap()
-                                .default_value
-                                .to_bits(),
-                            0.75_f64.to_bits()
+                                .has_pending_native_authoring());
+                            assert_eq!(
+                                serde_json::to_value(state.authoring.as_ref().unwrap().document())
+                                    .unwrap(),
+                                original_document
+                            );
+                            assert_eq!(
+                                state.authoring.as_ref().unwrap().author_generation(),
+                                author_generation
+                            );
+                            prepared_count += 1;
+                            assert_eq!(prepared_count, 1);
+                            prepared = true;
+                        }
+                        AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            proposal,
+                            status,
+                            ..
+                        } => {
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert!(members.values().any(|p| p.same_retained_proposal(proposal)));
+                            match status {
+                                Status::Refused(AuthorRefusal::AuthorStatePending)
+                                    if prepared_count == 0 =>
+                                {
+                                    // Missing/unpolled peer is an expected failed attempt.
+                                    // It must not publish one member or erase the real group.
+                                    assert_eq!(
+                                        serde_json::to_value(
+                                            state.authoring.as_ref().unwrap().document()
+                                        )
+                                        .unwrap(),
+                                        original_document
+                                    );
+                                    assert_eq!(
+                                        state.authoring.as_ref().unwrap().author_generation(),
+                                        author_generation
+                                    );
+                                }
+                                Status::Acknowledged { target }
+                                | Status::InstalledAwaitingAcknowledgement { target } => {
+                                    assert_eq!(prepared_count, 1);
+                                    let original = members.get(&target.instance).unwrap().target();
+                                    assert_eq!(target.root_session, original.root_session);
+                                    assert_eq!(target.local_session, original.local_session);
+                                    assert_eq!(target.continuity_epoch, original.continuity_epoch);
+                                    assert_ne!(target.root_plan, original.root_plan);
+                                    assert_eq!(target.root_plan, target.local_plan);
+                                    assert_ne!(target.binding, original.binding);
+                                    let actual = renderer.owner_installation_verifier().unwrap();
+                                    let claim = actual.current_claim().unwrap();
+                                    actual.validate(&claim).unwrap();
+                                    assert_ne!(claim.generation(), original_claim.generation());
+                                    assert_eq!(target.installed_generation, claim.generation());
+                                    assert!(new_generation
+                                        .is_none_or(|prior| prior == claim.generation()));
+                                    new_generation = Some(claim.generation());
+                                    installed_verifier = Some(actual);
+                                    if matches!(status, Status::Acknowledged { .. }) {
+                                        acknowledged_count += 1;
+                                        assert_eq!(
+                                            acknowledged_count, 1,
+                                            "one all-member Ack outcome"
+                                        );
+                                        acknowledged = true;
+                                    }
+                                }
+                                other => panic!("joint author operation refused: {other:?}"),
+                            }
+                        }
+                        AudioPlaybackEvent::NativeDiagnosticsObserved {
+                            renderer_id: actual,
+                            generation: observed,
+                            batch,
+                        } => {
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert!(!batch.loss().incomplete());
+                        }
+                        other => panic!("joint NoGUI control admitted unexpected event: {other:?}"),
+                    }
+                    state
+                        .handle_audio_playback_event(event, Instant::now())
+                        .expect("original App event dispatcher");
+                    let author = state.authoring.as_ref().unwrap();
+                    assert_eq!(author.session_id(), author_session);
+                    assert!(state.native_audio_editor.is_none());
+                    if prepared {
+                        assert_eq!(
+                            author.author_generation().get(),
+                            author_generation.get().checked_add(1).unwrap()
                         );
                         assert_eq!(
-                            current.opaque_state.as_ref().unwrap().as_slice(),
-                            members[&id].state().unwrap().as_slice()
+                            author.history().diagnostics().undo_entries,
+                            initial_history.undo_entries + 1
+                        );
+                        assert!(
+                            author.has_pending_native_authoring(),
+                            "accepted Document still waits for native Acks"
+                        );
+                        for id in ids {
+                            let current = state.active_sequence().unwrap().audio_program.outputs[0]
+                                .strip
+                                .pre_fader
+                                .processors
+                                .iter()
+                                .find(|p| p.id == id)
+                                .unwrap();
+                            assert_eq!(
+                                current.parameters[&gain]
+                                    .automation
+                                    .as_ref()
+                                    .unwrap()
+                                    .default_value
+                                    .to_bits(),
+                                0.75_f64.to_bits()
+                            );
+                            assert_eq!(
+                                current.opaque_state.as_ref().unwrap().as_slice(),
+                                members[&id].state().unwrap().as_slice()
+                            );
+                        }
+                    } else if prepared_count == 0 {
+                        assert_eq!(author.author_generation(), author_generation);
+                        assert_eq!(author.history().diagnostics(), initial_history);
+                    } else {
+                        assert_eq!(
+                            author.author_generation().get(),
+                            author_generation.get().checked_add(1).unwrap()
+                        );
+                        assert_eq!(
+                            author.history().diagnostics().undo_entries,
+                            initial_history.undo_entries + 1
                         );
                     }
-                } else if prepared_count == 0 {
-                    assert_eq!(author.author_generation(), author_generation);
-                    assert_eq!(author.history().diagnostics(), initial_history);
-                } else {
-                    assert_eq!(
-                        author.author_generation().get(),
-                        author_generation.get().checked_add(1).unwrap()
-                    );
-                    assert_eq!(
-                        author.history().diagnostics().undo_entries,
-                        initial_history.undo_entries + 1
+                    if acknowledged {
+                        assert!(!author.has_pending_native_authoring());
+                        finished_count += 1;
+                        assert_eq!(finished_count, 1);
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "original event handler exceeded total work budget"
                     );
                 }
-                if acknowledged {
-                    assert!(!author.has_pending_native_authoring());
-                    finished_count += 1;
+                // This is the existing shared pump's retry tail, not a second
+                // candidate/installation driver. Busy retirement custody may persist.
+                state
+                    .retry_native_audio_terminal_author()
+                    .expect("original retained-work retry");
+                if !priming && renderer_id.is_some() && objects.len() == 2 {
+                    assert_ne!(
+                        objects[&ids[0]].0, objects[&ids[1]].0,
+                        "independent native children"
+                    );
+                    renderer
+                        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                        .expect("actual cold frontier is closed before its first PCM");
+                    assert_eq!(output.lock().queued, 0);
+                    priming = true;
+                }
+                if acknowledged_count == 1 && new_targets.len() == 2 {
+                    assert_eq!(prepared_count, 1);
                     assert_eq!(finished_count, 1);
+                    assert_eq!(members.len(), 2);
+                    assert_eq!(
+                        output.lock().queued,
+                        expected_frames,
+                        "complete Preroll windows remain queued without fabricated consumption"
+                    );
+                    let snapshot = state.audio_playback_snapshot();
+                    assert_eq!(snapshot.in_flight, 0);
+                    assert_eq!(snapshot.next_start_sample, expected_end);
+                    assert_eq!(snapshot.generation, generation);
+                    assert!(!snapshot.output.unwrap().active);
+                    assert_eq!(
+                        new_targets[&ids[0]].root_plan,
+                        new_targets[&ids[1]].root_plan
+                    );
+                    assert_eq!(
+                        new_targets[&ids[0]].installed_generation,
+                        new_targets[&ids[1]].installed_generation
+                    );
+                    assert_ne!(new_generation, Some(original_claim.generation()));
+                    let author = state.authoring.as_ref().unwrap();
+                    assert!(!author.has_pending_native_authoring());
+                    assert_eq!(
+                        author.history().diagnostics().pending_entries,
+                        initial_history.pending_entries
+                    );
+                    renderer
+                        .validate_native_author_source_closed(&ExecutionCancellationToken::new())
+                        .expect("all actual retained prefixes acknowledged on the complete Root");
+                    for original in members.values() {
+                        assert!(matches!(
+                            renderer
+                                .control_native_editor(
+                                    Intent::Close { target: original.target() },
+                                    &ExecutionCancellationToken::new()
+                                )
+                                .unwrap(),
+                            Outcome::Refused(EditorRefusal::NotInstalled)
+                        ));
+                    }
+                    assert!(Instant::now() < deadline);
+                    break;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "original event handler exceeded total work budget"
-                );
+                std::thread::yield_now();
             }
-            // This is the existing shared pump's retry tail, not a second
-            // candidate/installation driver. Busy retirement custody may persist.
-            state
-                .retry_native_audio_terminal_author()
-                .expect("original retained-work retry");
-            if !priming && renderer_id.is_some() && objects.len() == 2 {
-                assert_ne!(
-                    objects[&ids[0]].0, objects[&ids[1]].0,
-                    "independent native children"
-                );
-                renderer
-                    .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-                    .expect("actual cold frontier is closed before its first PCM");
-                assert_eq!(output.lock().queued, 0);
-                priming = true;
-            }
-            if acknowledged_count == 1 && new_targets.len() == 2 {
-                assert_eq!(prepared_count, 1);
-                assert_eq!(finished_count, 1);
-                assert_eq!(members.len(), 2);
-                assert_eq!(output.lock().queued, 4, "one real complete Preroll window");
-                let snapshot = state.audio_playback_snapshot();
-                assert_eq!(snapshot.in_flight, 0);
-                assert_eq!(snapshot.next_start_sample, 4);
-                assert!(!snapshot.output.unwrap().active);
-                assert_eq!(
-                    new_targets[&ids[0]].root_plan,
-                    new_targets[&ids[1]].root_plan
-                );
-                assert_eq!(
-                    new_targets[&ids[0]].installed_generation,
-                    new_targets[&ids[1]].installed_generation
-                );
-                assert_ne!(new_generation, Some(original_claim.generation()));
-                let author = state.authoring.as_ref().unwrap();
-                assert!(!author.has_pending_native_authoring());
-                assert_eq!(
-                    author.history().diagnostics().pending_entries,
-                    initial_history.pending_entries
-                );
-                renderer
-                    .validate_native_author_source_closed(&ExecutionCancellationToken::new())
-                    .expect("all actual retained prefixes acknowledged on the complete Root");
-                for original in members.values() {
-                    assert!(matches!(
-                        renderer
-                            .control_native_editor(
-                                Intent::Close { target: original.target() },
-                                &ExecutionCancellationToken::new()
-                            )
-                            .unwrap(),
-                        Outcome::Refused(EditorRefusal::NotInstalled)
-                    ));
-                }
-                assert!(Instant::now() < deadline);
-                break;
-            }
-            std::thread::yield_now();
+            total_prepared += prepared_count;
+            total_acknowledged += acknowledged_count;
+            total_finished += finished_count;
+            previous_members = members;
+            previous_targets = new_targets;
         }
+        assert_eq!(total_prepared, frontier_count);
+        assert_eq!(total_acknowledged, frontier_count);
+        assert_eq!(total_finished, frontier_count);
+        let author = state.authoring.as_ref().unwrap();
+        assert_eq!(author.session_id(), author_session);
+        assert_eq!(
+            author.author_generation().get(),
+            starting_author_generation
+                .get()
+                .checked_add(u64::try_from(frontier_count).unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            author.history().diagnostics().undo_entries,
+            starting_history.undo_entries + frontier_count
+        );
+        assert!(!author.has_pending_native_authoring());
+        assert_eq!(state.audio_playback_snapshot().generation, generation);
+        assert!(state.audio_playback.matches_source_weak(&erased));
+        assert!(Instant::now() < deadline);
     }));
     let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
     let clean = cleanup.all_resources_released()
