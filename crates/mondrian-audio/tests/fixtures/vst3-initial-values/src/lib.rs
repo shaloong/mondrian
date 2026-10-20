@@ -525,7 +525,10 @@ impl IAudioProcessorTrait for GainProcessor {
             if !self.deferred.restored.load(Ordering::Relaxed) {
                 return self.deferred.reject(1);
             }
-            if rate != 48_000.0 || (*setup).maxSamplesPerBlock != 4 {
+            if rate != 48_000.0
+                || (*setup).maxSamplesPerBlock != 4
+                || (*setup).processMode != ProcessModes_::kOffline as i32
+            {
                 return self.deferred.reject(2);
             }
             if self.deferred.violations.load(Ordering::Relaxed) != 0 {

@@ -1344,10 +1344,11 @@ fn installed_vst3_deferred_restore_bounds_first_native_setup_and_preserves_event
         .output_channels(2)
         .processing_resource_bounds(ProcessingResourceBounds::new(32, 2, 128, 4).unwrap())
         .load_preparation(PluginLoadPreparation::Deferred)
+        .initial_process_mode(ProcessMode::Offline)
         .build()
         .unwrap();
     let mut plugin = host
-        .load_plugin_class(binary, "61921CF43A2B4A68AE5AE08241D85E22")
+        .load_plugin_class(&binary, "61921CF43A2B4A68AE5AE08241D85E22")
         .expect("deferred native load does not prepare its default six-channel audio buses");
     let cold = preparation_audit(&plugin);
     assert_ne!(cold.instance, 0);
@@ -1401,7 +1402,7 @@ fn installed_vst3_deferred_restore_bounds_first_native_setup_and_preserves_event
             violations: 0,
             signal_calls: 0,
         },
-        "all actual audio/event ACKs follow the first requested 48k/4-frame setup",
+        "all actual audio/event ACKs follow the first requested Offline/48k/4-frame setup",
     );
     let layout = plugin.audio_bus_layout().unwrap();
     assert_eq!(
@@ -1450,4 +1451,43 @@ fn installed_vst3_deferred_restore_bounds_first_native_setup_and_preserves_event
     plugin.stop_processing().unwrap();
     let finished = preparation_audit(&plugin);
     assert_eq!(finished, PreparationAudit { signal_calls: 2, ..restored });
+    drop(plugin);
+
+    // The opt-in guard is independent of the builder. Its unchanged default
+    // Realtime must fail the actual native setup, rather than silently becoming
+    // Offline or passing because the final DSP happens to produce valid PCM.
+    let mut default_host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(4)
+        .input_channels(2)
+        .output_channels(2)
+        .processing_resource_bounds(ProcessingResourceBounds::new(32, 2, 128, 4).unwrap())
+        .load_preparation(PluginLoadPreparation::Deferred)
+        .build()
+        .unwrap();
+    let mut default_plugin = default_host
+        .load_plugin_class(&binary, "61921CF43A2B4A68AE5AE08241D85E22")
+        .unwrap();
+    let default_cold = preparation_audit(&default_plugin);
+    assert_ne!(default_cold.instance, 0);
+    assert_eq!(
+        default_cold,
+        PreparationAudit { instance: default_cold.instance, ..cold }
+    );
+    assert!(matches!(
+        default_plugin.load_state(&state),
+        Err(vst3_host::Error::InterfaceError(message))
+            if message.contains("Failed to setup processing"),
+    ));
+    assert_eq!(
+        preparation_audit(&default_plugin),
+        PreparationAudit {
+            instance: default_cold.instance,
+            audio_acks: 0,
+            event_acks: 0,
+            violations: 2,
+            ..restored
+        },
+        "the refused first native mode remains sticky without ACK, activation or DSP",
+    );
 }
