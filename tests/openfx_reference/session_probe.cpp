@@ -982,6 +982,82 @@ bool curveSourceLifecycle(const std::string& operation, const void* handle, OfxP
       (sampled ? derivative != -999.0 : std::abs(derivative - (endpoint - 1.0)/24.0) > 1e-14)) { return false; }
   return true;
 }
+// Bool animation is opt-in independently of the unchanged discrete defaults.
+bool booleanAnimationCapabilities() {
+  for (const char* name : {kOfxParamHostPropSupportsBooleanAnimation,
+       kOfxParamHostPropSupportsChoiceAnimation, kOfxParamHostPropSupportsStrChoiceAnimation,
+       kOfxParamHostPropSupportsStringAnimation, kOfxParamHostPropSupportsCustomAnimation}) {
+    int value = -1;
+    const int expected = std::strcmp(name, kOfxParamHostPropSupportsBooleanAnimation) == 0 ? 1 : 0;
+    if (gPropHost->propGetInt(gHost->host, name, 0, &value) != kOfxStatOK || value != expected) { return false; }
+  }
+  return true;
+}
+bool defineBooleanHold(const void* handle) {
+  OfxParamSetHandle params = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK) { return false; }
+  for (const char* name : {"enabled", "fixed"}) {
+    OfxPropertySetHandle props = nullptr;
+    if (gParamHost->paramDefine(params, kOfxParamTypeBoolean, name, &props) != kOfxStatOK ||
+        gPropHost->propSetString(props, kOfxPropLabel, 0, name) != kOfxStatOK ||
+        gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 0) != kOfxStatOK ||
+        gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, std::strcmp(name, "enabled") == 0) != kOfxStatOK) { return false; }
+  }
+  return true;
+}
+bool booleanHoldQueries(const std::string& operation, const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle enabled = nullptr, fixed = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  int lifecycle = -1;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "enabled", &enabled, &props) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "fixed", &fixed, nullptr) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(fixed, 0.0, &lifecycle) != kOfxStatOK) { return false; }
+  const bool creating = operation == kOfxActionCreateInstance;
+  auto found = actions.find(handle);
+  if (!creating && found == actions.end()) { return false; }
+  const int phase = creating ? 0 : std::min(found->second.renders, 8);
+  if (operation == kOfxActionInstanceChanged) {
+    char* name = nullptr;
+    if (gPropHost->propGetString(in, kOfxPropName, 0, &name) != kOfxStatOK || !name) { return false; }
+    if (std::strcmp(name, "enabled") == 0) { ++found->second.scaleChanges; }
+  }
+  if (lifecycle && operation == kOfxImageEffectActionRender) {
+    const int expectedChanges = phase < 2 ? 0 : phase < 4 ? 1 : phase < 6 ? 2 : phase < 8 ? 3 : 4;
+    if (found->second.scaleChanges != expectedChanges) { return false; }
+  }
+  const bool constant = lifecycle && (phase == 4 || phase == 5);
+  const bool sampled = lifecycle && (phase == 6 || phase == 7);
+  const bool endpoint = !lifecycle || phase < 2 || phase == 8;
+  int animating = -1;
+  if (gPropHost->propGetInt(props, kOfxParamPropIsAnimating, 0, &animating) != kOfxStatOK ||
+      animating != (constant ? 0 : 1)) { return false; }
+  for (double frame : {-6.0, -0.0, 0.0, 23.0, 24.0, 30.0}) {
+    int value = -999;
+    const bool unavailable = sampled && frame != 0.0;
+    if (gParamHost->paramGetValueAtTime(enabled, frame, &value) !=
+          (unavailable ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+        value != (unavailable ? -999 : endpoint && frame >= 24.0 ? 1 : 0)) { return false; }
+  }
+  unsigned int count = 999;
+  if (gParamHost->paramGetNumKeys(enabled, &count) !=
+        (sampled ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+      count != (sampled ? 999U : constant ? 0U : 2U) ||
+      (!constant && !sampled && !curveKeys(enabled))) { return false; }
+  int value = -999;
+  if (gParamHost->paramGetValueAtTime(enabled, std::numeric_limits<double>::quiet_NaN(), &value)
+        != kOfxStatErrValue || value != -999) { return false; }
+  // There is no Boolean derivative/integral contract. Failure must preserve output.
+  double calculus = -999;
+  if (gParamHost->paramGetDerivative(enabled, 6.0, &calculus) != kOfxStatErrUnsupported || calculus != -999 ||
+      gParamHost->paramGetIntegral(enabled, 0.0, 24.0, &calculus) != kOfxStatErrUnsupported || calculus != -999) { return false; }
+  if (operation != kOfxImageEffectActionRender) { return true; }
+  double current = 0.0;
+  return gPropHost->propGetDouble(in, kOfxPropTime, 0, &current) == kOfxStatOK &&
+      gParamHost->paramSetValue(enabled, 1) == kOfxStatErrUnsupported &&
+      gParamHost->paramSetValueAtTime(enabled, current, 1) == kOfxStatErrUnsupported;
+}
 bool authorCurveQueries(const void* handle) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle scale = nullptr;
@@ -2234,6 +2310,8 @@ OfxStatus probeAction(const char* action, const void* handle,
     }
   }
   if (selected == "aux_describe_load_failure" && operation == kOfxActionLoad) { return kOfxStatFailed; }
+  if (selected == "boolean_hold" && operation == kOfxActionDescribe &&
+      !booleanAnimationCapabilities()) { return kOfxStatFailed; }
   if (selected == "host_properties_readonly" && operation == kOfxActionDescribe &&
       !readonlyHostProperties(gHost)) { return kOfxStatFailed; }
   if (selected == "host_parameter_limit" && operation == kOfxActionDescribe &&
@@ -2355,6 +2433,10 @@ OfxStatus probeAction(const char* action, const void* handle,
           selected == "curve_group_interpolation_authoring" ? AuthorHistoryEdit::Interpolation :
           selected == "curve_reset_authoring" ? AuthorHistoryEdit::Reset :
           AuthorHistoryEdit::Time)) { return kOfxStatFailed; }
+  if (selected == "boolean_hold" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged ||
+       operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
+      !booleanHoldQueries(operation, handle, in)) { return kOfxStatFailed; }
   if (isCurveLifecycleMode(selected) &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionBeginInstanceChanged ||
        operation == kOfxActionInstanceChanged || operation == kOfxActionEndInstanceChanged ||
@@ -2600,6 +2682,10 @@ OfxStatus probeAction(const char* action, const void* handle,
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
   if ((isCurveLifecycleMode(selected) || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
+  if (selected == "boolean_hold" && result == kOfxStatOK) {
+    if (operation == kOfxImageEffectActionDescribeInContext && !defineBooleanHold(handle)) { return kOfxStatFailed; }
+    if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "enabled")) { return kOfxStatFailed; }
+  }
   if ((selected == "compound" || selected == "compound_author" || selected == "compound_constant_animatable" || selected == "compound_frame_sample" || selected == "canonical_curves") && result == kOfxStatOK &&
       operation == kOfxImageEffectActionDescribeInContext && !defineCompounds(handle)) {
     return kOfxStatFailed;
@@ -2778,6 +2864,12 @@ OfxStatus probe(const char* action, const void* handle,
   for (const char* known : {kOfxActionLoad, kOfxActionDescribe,
        kOfxImageEffectActionDescribeInContext, kOfxActionUnload, kOfxImageEffectActionRender}) {
     if (std::strcmp(action, known) == 0) { observed = known; break; }
+  }
+  // This mode checks every Render in-process. Keep the existing 32-row receipt
+  // bounded across its nine source-revision renders and expose pre-Create refusal.
+  if (mode() == "boolean_hold") {
+    if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { observed = nullptr; }
+    if (std::strcmp(action, kOfxActionCreateInstance) == 0) { observed = action; }
   }
   // These Describe-only modes must prove that Create was never entered. Keep
   // existing modes' receipt sequences unchanged.

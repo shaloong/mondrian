@@ -19,6 +19,9 @@ use mondrian_effects::{
     EffectNodeExt, LutPreparationCache, PreparedEffectProgram,
 };
 
+#[path = "openfx_host/boolean_hold.rs"]
+mod boolean_hold;
+
 fn constant_parameters<const N: usize>(
     values: [(String, OpenFxParameterValue); N],
 ) -> BTreeMap<String, OpenFxParameterBinding> {

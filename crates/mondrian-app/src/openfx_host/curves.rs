@@ -382,6 +382,117 @@ mod tests {
     }
 
     #[test]
+    fn native_boolean_hold_queries_preserve_keys_and_reject_nonhold() {
+        use mondrian_core::Keyframe;
+        let mut property = AnimatedProperty::from_descriptor(PropertyDescriptor::new(
+            "boolean",
+            "Boolean",
+            PropertyValue::Bool(false),
+        ));
+        for (at, value) in [(TimelineTime::ZERO, false), (TimelineTime::ONE, true)] {
+            property
+                .set_exact_keyframe(Keyframe::from_preset(
+                    at,
+                    PropertyValue::Bool(value),
+                    InterpolationType::Hold,
+                ))
+                .expect("canonical Hold key");
+        }
+        let before = property.clone();
+        for interpolation in [InterpolationType::Linear, InterpolationType::Bezier] {
+            assert!(
+                property
+                    .set_exact_keyframe(Keyframe::from_preset(
+                        TimelineTime::ZERO,
+                        PropertyValue::Bool(true),
+                        interpolation,
+                    ))
+                    .is_err(),
+                "non-Hold Boolean keys are unsupported"
+            );
+            assert_eq!(property, before);
+        }
+        let binding = OpenFxParameterBinding::curve(
+            OpenFxParameterValue::Boolean(false),
+            property.clone(),
+            TimeScale::new(24, 1).expect("frame grid"),
+        );
+        let context = CurveContext::prepare(&binding, 7).expect("Boolean snapshot");
+        assert_eq!((context.kind, context.revision), (2, 7));
+        assert_eq!(context.answer(3, 0.0, 0.0, 0, 0).unwrap().1.key_count, 2);
+        for (frame, value) in [
+            (-6.0, false),
+            (-0.0, false),
+            (23.0, false),
+            (24.0, true),
+            (30.0, true),
+        ] {
+            assert_eq!(
+                context.value_at(frame).unwrap(),
+                OpenFxParameterValue::Boolean(value)
+            );
+        }
+        assert_eq!(context.answer(4, 0.0, 0.0, 1, 0).unwrap().1.key_time, 24.0);
+        assert_eq!(context.answer(5, 23.0, 0.0, 0, 1).unwrap().1.key_index, 1);
+        for (operation, at, index, expected) in [
+            (0, f64::NAN, 0, 11),
+            (1, 6.0, 0, 5),
+            (2, 0.0, 0, 5),
+            (4, 0.0, 2, 10),
+        ] {
+            let mut output = NativeQueryResult::empty();
+            output.value = [-999.0; 4];
+            output.key_time = -999.0;
+            // SAFETY: the immutable context and local ABI output outlive this call.
+            assert_eq!(
+                unsafe {
+                    query(
+                        (&context as *const CurveContext).cast(),
+                        operation,
+                        at,
+                        24.0,
+                        index,
+                        0,
+                        &mut output,
+                    )
+                },
+                expected
+            );
+            assert_eq!(output.value, [-999.0; 4]);
+            assert_eq!(output.key_time, -999.0);
+        }
+        property
+            .set_exact_keyframe(Keyframe::from_preset(
+                TimelineTime::ONE,
+                PropertyValue::Bool(false),
+                InterpolationType::Hold,
+            ))
+            .unwrap();
+        let changed = CurveContext::prepare(
+            &OpenFxParameterBinding::curve(
+                OpenFxParameterValue::Boolean(false),
+                property,
+                TimeScale::new(24, 1).unwrap(),
+            ),
+            8,
+        )
+        .unwrap();
+        assert_eq!(changed.revision, 8);
+        assert_eq!(
+            changed.value_at(24.0).unwrap(),
+            OpenFxParameterValue::Boolean(false)
+        );
+        assert_eq!(
+            context.value_at(24.0).unwrap(),
+            OpenFxParameterValue::Boolean(true)
+        );
+        assert_eq!(
+            context.source, binding.query_mode,
+            "the native snapshot retained its original source"
+        );
+    }
+
+    #[test]
     fn binding_wire_rejects_unknown_mode_fields() {
         let binding = serde_json::json!({"value":{"kind":"double","value":1.0},
             "query_mode":{"mode":"constant","extra":0}});
