@@ -96,9 +96,12 @@ impl Materials {
         assert!(registration.auxiliary_inputs.buses.is_empty());
         assert_eq!(registration.event_bus_contract.inputs.len(), 2);
         assert!(registration.event_bus_contract.outputs.is_empty());
-        assert_eq!(registration.event_bus_contract.inputs[0].channel_count, 16);
-        assert!(registration.event_bus_contract.inputs[0].host_active);
-        assert!(!registration.event_bus_contract.inputs[1].host_active);
+        assert_eq!(
+            registration.event_bus_contract.inputs.as_slice()[0].channel_count,
+            16
+        );
+        assert!(registration.event_bus_contract.inputs.as_slice()[0].host_active);
+        assert!(!registration.event_bus_contract.inputs.as_slice()[1].host_active);
         registration
     }
     fn authored(
@@ -636,7 +639,7 @@ fn factory(
     outputs: u32,
     input: bool,
     nan_call: u32,
-) -> IsolatedAudioProcessorFactory {
+) -> Arc<IsolatedAudioProcessorFactory> {
     use crate::{AudioProcessorFactory, AudioProcessorNoteInputContract};
     use mondrian_timeline::audio::AudioProcessorDefinitionRef;
     let registration = materials.probe(render, outputs, input, nan_call);
