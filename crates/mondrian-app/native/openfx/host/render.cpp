@@ -874,6 +874,7 @@ static int describe(MondrianOpenFx::Host& host, const char* binary, const char* 
         const auto& doubleType = parameter->getDoubleType();
         if (doubleType == kOfxParamDoubleTypePlain) { info.double_type = 0; }
         else if (doubleType == kOfxParamDoubleTypeScale) { info.double_type = 1; }
+        else if (layout.kind == 1 && doubleType == kOfxParamDoubleTypeAngle) { info.double_type = 2; }
         else { return 7; }
       }
       const char* names[] = {kOfxParamPropDefault, kOfxParamPropMin, kOfxParamPropMax,

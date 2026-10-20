@@ -246,6 +246,8 @@ pub enum OpenFxDoubleType {
     Plain,
     /// A multiplicative scale.
     Scale,
+    /// An unwrapped scalar angle; native values are always degrees.
+    Angle,
 }
 
 /// One declared choice key, caption and optional rank in native option order.
@@ -976,6 +978,7 @@ unsafe fn decode_native_parameter(
         1 | 7 | 8 => Some(match raw.double_type {
             0 => OpenFxDoubleType::Plain,
             1 => OpenFxDoubleType::Scale,
+            2 if raw.kind == 1 => OpenFxDoubleType::Angle,
             _ => return Err("unsupported OpenFX Double interpretation".to_owned()),
         }),
         _ if raw.double_type == -1 => None,
@@ -1398,6 +1401,8 @@ fn validate_description(
                         | OpenFxParameterValue::Double3(_)
                 );
                 if parameter.double_type.is_some() != needs_semantic
+                    || (parameter.double_type == Some(OpenFxDoubleType::Angle)
+                        && !matches!(value, OpenFxParameterValue::Double(_)))
                     || parameter.numeric_channels.len() != arity
                 {
                     return Err(invalid(
@@ -1534,6 +1539,109 @@ pub(crate) mod shared_frame_tests {
             .err(),
             Some(2)
         );
+    }
+
+    #[test]
+    fn scalar_angle_description_preserves_raw_units_and_rejects_compound_or_forged_semantics() {
+        let mut raw = NativeParameterInfo {
+            name: c"angle".as_ptr(),
+            name_length: 5,
+            label: c"Angle".as_ptr(),
+            label_length: 5,
+            hint: c"Unwrapped degrees".as_ptr(),
+            hint_length: 17,
+            kind: 1,
+            preferred_interpolation: 1,
+            double_type: 2,
+            default_value: [350.0; 4],
+            minimum: [-1440.0; 4],
+            maximum: [1440.0; 4],
+            display_minimum: [-720.0; 4],
+            display_maximum: [720.0; 4],
+            can_animate: 1,
+            secret: 0,
+            enabled: 1,
+            choices: core::ptr::null(),
+            choice_count: 0,
+            string_default: core::ptr::null(),
+            string_default_length: 0,
+            string_mode: 0,
+            string_file_path_exists: -1,
+        };
+        // SAFETY: all text points to the exact declared static byte extents;
+        // this scalar has no native choices or string-value storage.
+        let decode = |raw: &NativeParameterInfo| unsafe { decode_native_parameter(raw) };
+        let parameter = decode(&raw).expect("native scalar Angle code2");
+        assert_eq!(parameter.double_type, Some(OpenFxDoubleType::Angle));
+        assert_eq!(parameter.default_value, OpenFxParameterValue::Double(350.0));
+        assert_eq!(
+            parameter.numeric_channels[0],
+            OpenFxNumericChannel {
+                minimum: -1440.0,
+                maximum: 1440.0,
+                display_minimum: -720.0,
+                display_maximum: 720.0,
+            }
+        );
+        let description = OpenFxFilterDescription {
+            identifier: "test.angle".into(),
+            label: "Angle".into(),
+            parameters: vec![parameter],
+        };
+        validate_description(&description, "test.angle").unwrap();
+        for (semantic, code, tag) in [
+            (OpenFxDoubleType::Plain, 0, "plain"),
+            (OpenFxDoubleType::Scale, 1, "scale"),
+            (OpenFxDoubleType::Angle, 2, "angle"),
+        ] {
+            raw.double_type = code;
+            assert_eq!(decode(&raw).unwrap().double_type, Some(semantic));
+            assert_eq!(
+                serde_json::to_value(semantic).unwrap(),
+                serde_json::json!(tag)
+            );
+        }
+        raw.double_type = 2;
+        for native_kind in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] {
+            raw.kind = native_kind;
+            assert!(
+                decode(&raw).is_err(),
+                "Angle is scalar Double only, kind={native_kind}"
+            );
+        }
+        raw.kind = 1;
+        for code in [-1, 3, i32::MAX] {
+            raw.double_type = code;
+            assert!(decode(&raw).is_err());
+        }
+        for tag in ["time", "absolute_time", "x", "y", "xy", "unknown"] {
+            assert!(serde_json::from_value::<OpenFxDoubleType>(serde_json::json!(tag)).is_err());
+        }
+        for value in [
+            OpenFxParameterValue::Double2([350.0, 370.0]),
+            OpenFxParameterValue::Double3([350.0, 360.0, 370.0]),
+        ] {
+            let mut forged = description.clone();
+            let arity = value.numeric_layout().unwrap().0;
+            forged.parameters[0].default_value = value;
+            forged.parameters[0].numeric_channels =
+                vec![description.parameters[0].numeric_channels[0].clone(); arity];
+            let roundtrip: OpenFxFilterDescription =
+                serde_json::from_slice(&serde_json::to_vec(&forged).unwrap()).unwrap();
+            assert!(
+                validate_description(&roundtrip, "test.angle").is_err(),
+                "JSON cannot bypass scalar-only admission"
+            );
+        }
+        for value in [-1080.0, 370.0, 1080.0] {
+            let mut unwrapped = description.clone();
+            unwrapped.parameters[0].default_value = OpenFxParameterValue::Double(value);
+            validate_description(&unwrapped, "test.angle").unwrap();
+            assert_eq!(
+                unwrapped.parameters[0].default_value,
+                OpenFxParameterValue::Double(value)
+            );
+        }
     }
 
     #[test]

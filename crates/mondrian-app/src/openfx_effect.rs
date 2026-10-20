@@ -23,9 +23,9 @@ use sha2::{Digest, Sha256};
 
 use crate::openfx_adapter::OpenFxBinaryInspection;
 use crate::openfx_host::{
-    observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices, OpenFxFilterDescription,
-    OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding, OpenFxParameterValue,
-    OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
+    observe_openfx_filter_with_checkpoint, OpenFxDescribeNotices, OpenFxDoubleType,
+    OpenFxFilterDescription, OpenFxFilterSession, OpenFxHostError, OpenFxParameterBinding,
+    OpenFxParameterValue, OpenFxRenderTiming, OpenFxStringMode, OPENFX_MAX_STRING_BYTES,
 };
 
 /// A selected Filter cannot be represented by the admitted visual effect contract.
@@ -545,8 +545,17 @@ fn build_definition(
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| OpenFxEffectRegistrationError::Schema(error.to_string()))?;
-                descriptor =
-                    descriptor.with_channel_numeric_contracts(ParameterUnit::Unitless, numeric);
+                let unit = if parameter.double_type == Some(OpenFxDoubleType::Angle) {
+                    if !matches!(parameter.default_value, OpenFxParameterValue::Double(_)) {
+                        return Err(OpenFxEffectRegistrationError::Schema(
+                            "only scalar OpenFX Angle parameters are supported".to_owned(),
+                        ));
+                    }
+                    ParameterUnit::Degrees
+                } else {
+                    ParameterUnit::Unitless
+                };
+                descriptor = descriptor.with_channel_numeric_contracts(unit, numeric);
             }
             descriptor.validate().map_err(|error| {
                 OpenFxEffectRegistrationError::Schema(format!(
@@ -841,6 +850,119 @@ mod tests {
             ))
         ));
         assert!(mondrian_effects::effect_definition(&effect_type).is_none());
+    }
+
+    #[test]
+    fn scalar_angle_definition_keeps_degrees_ranges_and_unwrapped_author_values() {
+        use crate::openfx_host::{OpenFxNumericChannel, OpenFxParameterDescription};
+        let identifier = "test.mondrian.openfx.angle.bridge";
+        let inspection = OpenFxBinaryInspection {
+            binary_path: PathBuf::from("C:/selected/Angle.ofx"),
+            binary_sha256: "d".repeat(64),
+            plugins: vec![OpenFxPluginDescriptor {
+                identifier: identifier.into(),
+                api_version: 1,
+                version_major: 1,
+                version_minor: 0,
+            }],
+        };
+        let description = OpenFxFilterDescription {
+            identifier: identifier.into(),
+            label: "Angle".into(),
+            parameters: vec![OpenFxParameterDescription {
+                name: "angle".into(),
+                label: "Angle".into(),
+                hint: "Unwrapped degrees".into(),
+                default_value: OpenFxParameterValue::Double(350.0),
+                choices: Vec::new(),
+                preferred_interpolation: mondrian_core::automation::ParameterInterpolation::Linear,
+                double_type: Some(OpenFxDoubleType::Angle),
+                string_mode: None,
+                numeric_channels: vec![OpenFxNumericChannel {
+                    minimum: -1440.0,
+                    maximum: 1440.0,
+                    display_minimum: -720.0,
+                    display_maximum: 720.0,
+                }],
+                can_animate: true,
+                secret: false,
+                enabled: true,
+            }],
+        };
+        let kind = effect_type_for_filter(&inspection, identifier).unwrap();
+        let definition = build_definition(
+            Path::new("C:/selected/mondrian.exe"),
+            &inspection,
+            description.clone(),
+            &kind,
+        )
+        .unwrap();
+        register_effect_definition(definition).unwrap();
+        let mut effect = instantiate_effect_node(kind.clone()).unwrap();
+        let mut property = effect.properties.iter().next().unwrap().1.clone();
+        let id = property.descriptor.parameter_id().clone();
+        assert_eq!(property.descriptor.schema.unit, ParameterUnit::Degrees);
+        assert_eq!(property.static_value(), &PropertyValue::Double(350.0));
+        let numeric = &property.descriptor.schema.numeric.as_ref().unwrap()[0];
+        assert_eq!(
+            numeric.hard_range,
+            ParameterNumericRange::new(-1440.0, 1440.0).unwrap()
+        );
+        assert_eq!(
+            numeric.soft_range,
+            ParameterNumericRange::new(-720.0, 720.0).unwrap()
+        );
+        for value in [-1080.0, 370.0, 1080.0] {
+            effect.set_static_value_by_parameter(&id, PropertyValue::Double(value)).unwrap();
+            assert_eq!(
+                effect.evaluate_parameter(&id, TimelineTime::ZERO),
+                Some(PropertyValue::Double(value))
+            );
+        }
+        let before = effect.properties.clone();
+        assert!(effect
+            .set_static_value_by_parameter(&id, PropertyValue::Double(1441.0))
+            .is_err());
+        assert_eq!(
+            effect.properties, before,
+            "hard-range refusal cannot clamp or mutate"
+        );
+        for (time, value) in [(TimelineTime::ZERO, 350.0), (TimelineTime::ONE, 370.0)] {
+            property
+                .set_exact_keyframe(mondrian_core::Keyframe::from_preset(
+                    time,
+                    PropertyValue::Double(value),
+                    mondrian_core::InterpolationType::Linear,
+                ))
+                .unwrap();
+        }
+        effect.properties.upsert(property);
+        assert_eq!(
+            effect.evaluate_parameter(&id, TimelineTime::new(1, 2).unwrap()),
+            Some(PropertyValue::Double(360.0))
+        );
+        let restored: mondrian_effects::EffectNode =
+            serde_json::from_slice(&serde_json::to_vec(&effect).unwrap()).unwrap();
+        assert_eq!(restored.properties, effect.properties);
+        for value in [
+            OpenFxParameterValue::Double2([350.0, 370.0]),
+            OpenFxParameterValue::Double3([350.0, 360.0, 370.0]),
+        ] {
+            let mut forged = description.clone();
+            let arity = value.numeric_layout().unwrap().0;
+            forged.parameters[0].default_value = value;
+            forged.parameters[0].numeric_channels =
+                vec![description.parameters[0].numeric_channels[0].clone(); arity];
+            assert!(matches!(
+                build_definition(
+                    Path::new("C:/selected/mondrian.exe"),
+                    &inspection,
+                    forged,
+                    &kind
+                ),
+                Err(OpenFxEffectRegistrationError::Schema(_))
+            ));
+        }
     }
 
     #[test]
