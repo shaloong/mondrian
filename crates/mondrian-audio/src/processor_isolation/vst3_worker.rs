@@ -1253,7 +1253,7 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
             observe_active_audio_inputs(plugin, self.render.channel_layout)?;
         if main_audio_input != self.payload.main_audio_input
             || inputs != self.auxiliary_inputs
-            || parameter_descriptors(plugin)? != self.payload.parameters
+            || !retained_parameters_match(plugin, &self.payload.parameters)?
             || Vst3EventBusContractV1::observe(plugin)? != self.payload.event_bus_contract
         {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
@@ -1914,6 +1914,58 @@ fn audio_inputs_from_metadata(
     Ok((main_audio_input, result))
 }
 
+/// Compare the stopped retained component without collecting a second inventory.
+/// The existing main-inline query slot is reused. Validation remains after the
+/// complete census, so a later invalid field still precedes an earlier mismatch.
+fn retained_parameters_match(
+    plugin: &Plugin,
+    admitted: &[Vst3ParameterDescriptor],
+) -> Result<bool, AudioProcessorHostError> {
+    let mut frame = vst3_host::controller_parameters::ControllerParameterQueryFrame::default();
+    let mut valid = true;
+    let mut matches = true;
+    let count = plugin
+        .visit_parameters_bounded(MAX_PARAMETERS, &mut frame, &mut |index, observed| {
+            valid &= retained_parameter_fields_valid(
+                observed.title_utf16(),
+                observed.default_normalized(),
+                observed.step_count(),
+            );
+            matches &= admitted.get(index).is_some_and(|expected| {
+                observed.id() == expected.id
+                    && observed.title_matches(&expected.name)
+                    // Preserve the descriptor's numeric PartialEq, including ±0.
+                    && observed.default_normalized() == expected.default_normalized
+                    && observed.step_count() == expected.step_count
+                    && observed.can_automate() == expected.can_automate
+                    && observed.is_read_only() == expected.read_only
+                    && observed.flags() == expected.flags
+            });
+            // The legacy descriptor discards current values and units. The SDK
+            // still queries each successful row's value, without new validation.
+        })
+        .map_err(|error| invalid(format!("VST3 parameter query failed: {error}")))?;
+    if !valid {
+        return Err(invalid("VST3 parameter metadata is invalid"));
+    }
+    Ok(matches && count == admitted.len())
+}
+
+fn retained_parameter_fields_valid(title: &[u16; 128], default: f64, steps: i32) -> bool {
+    if !default.is_finite() || !(0.0..=1.0).contains(&default) || steps < 0 {
+        return false;
+    }
+    let mut bytes = 0;
+    for scalar in char::decode_utf16(title.iter().copied().take_while(|code| *code != 0)) {
+        let scalar = scalar.unwrap_or(char::REPLACEMENT_CHARACTER);
+        bytes += scalar.len_utf8();
+        if bytes > 256 || scalar.is_control() {
+            return false;
+        }
+    }
+    bytes != 0
+}
+
 pub(super) fn parameter_descriptors(
     plugin: &Plugin,
 ) -> Result<Vec<Vst3ParameterDescriptor>, AudioProcessorHostError> {
@@ -2518,6 +2570,57 @@ impl Vst3Worker {
         }
         drop(retired_seed);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retained_parameter_contracts {
+    use super::*;
+
+    fn descriptor(title: &[u16; 128], default: f64, steps: i32) -> Vst3ParameterDescriptor {
+        let end = title.iter().position(|code| *code == 0).unwrap_or(title.len());
+        Vst3ParameterDescriptor {
+            id: 7,
+            name: String::from_utf16_lossy(&title[..end]),
+            default_normalized: default,
+            step_count: steps,
+            can_automate: true,
+            read_only: false,
+            flags: 1,
+        }
+    }
+
+    #[test]
+    fn retained_parameter_validation_preserves_owned_lossy_text_and_field_rules() {
+        let mut titles = vec![
+            [0; 128],
+            [b'a' as u16; 128],
+            [0x00E9; 128], // Exactly 256 UTF-8 bytes, without a terminating NUL.
+            [0x20AC; 128], // 384 bytes: character count is not the text bound.
+            [0xD800; 128], // The old conversion replaces unpaired surrogates.
+            std::array::from_fn(|i| if i % 2 == 0 { 0xD83D } else { 0xDE00 }),
+        ];
+        let mut title = [0x00E9; 128];
+        title[127] = 0xD800; // Lossy replacement makes 257 UTF-8 bytes.
+        titles.push(title);
+        title = [0xD800; 128];
+        title[0] = b'G' as u16;
+        title[1] = 0;
+        title[2] = b'\n' as u16; // Everything after the first NUL is ignored.
+        titles.push(title);
+        title[1] = b'\n' as u16;
+        titles.push(title);
+        for title in &titles {
+            for default in [-0.0, 0.0, 0.5, 1.0, -0.5, 1.5, f64::NAN, f64::INFINITY] {
+                for steps in [-1, 0, i32::MAX] {
+                    assert_eq!(
+                        retained_parameter_fields_valid(title, default, steps),
+                        validate_parameter(&descriptor(title, default, steps)).is_ok(),
+                        "borrowed validation must preserve the original descriptor rules",
+                    );
+                }
+            }
+        }
     }
 }
 
