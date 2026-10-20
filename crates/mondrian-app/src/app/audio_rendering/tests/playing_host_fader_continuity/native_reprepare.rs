@@ -453,6 +453,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
             let mut held_windows = None;
             let mut quiesced = false;
             let mut installed = None;
+            let mut settled_claim = None;
             let mut next_identity = None;
             let mut old_lease = None;
             let mut fresh = None;
@@ -566,6 +567,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                             assert_eq!(Some(capture.windows.len()), held_windows,
                                 "install and real retirement grant no PCM while Unentered");
                             installed = Some(*installed_generation);
+                            settled_claim = Some(next_claim);
                             next_identity = Some(next);
                         }
                         AudioPlaybackEvent::NativeDiagnosticsObserved { .. } => {}
@@ -650,7 +652,16 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                             );
                             let lease = actual_native_lease(&renderer, &facts);
                             assert_ne!(lease.binding(), old_lease.unwrap().binding());
-                            assert_eq!(lease.installed_root_serial(), installed.unwrap());
+                            // Settled identifies the Unentered installation. The original
+                            // Media Fresh reprime publishes a newer claim on the same Source.
+                            let fresh_claim = verifier.current_claim().unwrap();
+                            assert_eq!(verifier.validate(&fresh_claim), Ok(()));
+                            assert_eq!(lease.installed_root_serial(), fresh_claim.generation());
+                            assert!(fresh_claim.generation() > installed.unwrap());
+                            assert_eq!(
+                                verifier.validate(settled_claim.as_ref().unwrap()),
+                                Err(mondrian_core::AudioOwnerInstallationError::Superseded)
+                            );
                             let observed = renderer
                                 .state
                                 .lock()
@@ -668,7 +679,7 @@ fn native_clap_repeated_restart_preserves_same_source_and_fresh_pdc_pcm() {
                                 Some(AudioPcmNativeOwnerBindingStatus::Ready)
                             );
                             assert!(playback.native_reprepare_pending_generation().is_none());
-                            claim = verifier.current_claim().unwrap();
+                            claim = fresh_claim;
                             identity = next_identity.unwrap();
                             generation = new_generation;
                             phase_first = held_windows.unwrap();
