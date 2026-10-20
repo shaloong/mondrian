@@ -293,7 +293,11 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
             .lock()
             .delivery
             .poll_native_observations(cancellation)
-            .map_err(|error| audio_render_error("native_audio_diagnostics", error.to_string()))
+            .map_err(|error| {
+                #[cfg(test)]
+                println!("[DEBUG-vst3-native-observation] error={error:?}");
+                audio_render_error("native_audio_diagnostics", error.to_string())
+            })
     }
 
     fn owner_installation_verifier(&self) -> Option<mondrian_core::AudioOwnerInstallationVerifier> {
