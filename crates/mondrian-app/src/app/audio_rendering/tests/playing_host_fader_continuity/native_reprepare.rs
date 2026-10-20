@@ -39,12 +39,34 @@ fn assert_restart_windows(output: &CaptureState, first: usize, anchor: i64) {
 #[test]
 #[ignore = "current normal Product and owned CLAP sidechain mode7; actual App/Media queues and software output, no physical DAC"]
 fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
+    run_native_restart_control(&[]);
+}
+
+pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
+    // Each explicit seek can clear immediately and again at its real output ack.
+    // These extra bounded records are observations, never more FIFO or PCM.
+    let scenario = Scenario {
+        capture_clears: RESTART
+            .capture_clears
+            .checked_add(seek_frames.len().checked_mul(2).unwrap())
+            .unwrap(),
+        ..RESTART
+    };
     let mut configuration = vec![7];
     configuration.extend_from_slice(&0.5_f32.to_le_bytes());
     configuration.push(0);
     let (_directory, mut state, output, _) =
-        native_fader_fixture_with_configuration(RESTART, Some(configuration));
+        native_fader_fixture_with_configuration(scenario, Some(configuration));
     let target = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !seek_frames.is_empty() {
+            assert_eq!(
+                state.active_sequence().unwrap().settings.frame_rate,
+                Rational::FPS_25
+            );
+        }
+        // The actual WAV fixture is 48kHz at 25fps: an independent exact target.
+        let expected_seek_anchor =
+            seek_frames.last().map(|frame| frame.checked_mul(1_920).unwrap());
         let document = state.authoring.as_ref().unwrap().document().clone();
         let author_generation = state.project_author_generation();
         let history = state.authoring_history().unwrap().diagnostics();
@@ -83,6 +105,7 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         let mut consumed_old = false;
         let mut fresh = None;
         let mut fresh_video_ready = false;
+        let mut seeks_applied = seek_frames.is_empty();
         loop {
             state
                 .pump_audio_output_clocked_for_test(&mut || tick, &mut |state, event| match event {
@@ -224,6 +247,87 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                     }
                 })
                 .expect("original App poll/handler/provider/retirement queue");
+            if pending.is_some() && !seeks_applied {
+                // Media publishes output quiescence before it handles render
+                // completions. The poll which first reports Required therefore
+                // cannot have acknowledged this newly created hold yet.
+                assert!(!quiesced && installed.is_none());
+                for &frame in seek_frames {
+                    let old_ticket = state
+                        .playback_engine
+                        .native_audio_control_hold_ticket()
+                        .expect("actual held Engine ticket before public seek");
+                    let old_demand = state.playback_engine.frame_demand().unwrap().identity();
+                    let previous = state.audio_playback_snapshot().generation;
+                    {
+                        // Pure transport intent must not wait for native work.
+                        // A regression taking this same Runtime lock fails under
+                        // the original outer Job deadline, not a fake latency limit.
+                        let busy_runtime = renderer.state.lock();
+                        state.seek(frame).expect("public seek retains the same native work");
+                        drop(busy_runtime);
+                    }
+                    pending = Some(previous.checked_add(1).unwrap());
+                    assert_eq!(state.audio_playback_snapshot().generation, pending.unwrap());
+                    assert_eq!(state.current_frame(), frame);
+                    assert_eq!(
+                        state.playback_engine.snapshot().state,
+                        mondrian_playback::TransportState::HoldingForNativeAudioControl
+                    );
+                    assert_eq!(
+                        state
+                            .playback_engine
+                            .native_audio_control_hold_ticket()
+                            .unwrap()
+                            .pending_generation(),
+                        pending.unwrap()
+                    );
+                    assert_ne!(state.playback_engine.snapshot().epoch, old_ticket.epoch());
+                    assert!(state.native_audio_renderer.as_ref().unwrap().ptr_eq(&weak));
+                    assert_eq!(
+                        verifier.current_claim().unwrap().generation(),
+                        old_claim.generation()
+                    );
+                    assert!(verifier.validate(&old_claim).is_ok());
+                    assert_eq!(cursor_facts(&state).session.unwrap().identity, old_identity);
+                    // Public seek reanchors the real observation projection.
+                    // Refresh only the inactive software callback at that instant;
+                    // no active PCM consumption or transport coordinate is invented.
+                    tick = state.playback_observation_instant_anchor;
+                    {
+                        let mut capture = output.lock();
+                        assert!(!capture.snapshot.active && capture.queue.is_empty());
+                        assert_eq!(capture.windows.len(), 2);
+                        let active_consumed = capture.snapshot.active_callback_consumed_frames;
+                        assert_eq!(
+                            capture.callback(INACTIVE_CALLBACK_FRAMES, tick),
+                            vec![[0.0; 2]; INACTIVE_CALLBACK_FRAMES]
+                        );
+                        assert_eq!(
+                            capture.snapshot.active_callback_consumed_frames,
+                            active_consumed
+                        );
+                    }
+                    let snapshot = state.playback_engine.snapshot();
+                    assert!(!state
+                        .observe_frame_delivery_candidate_with_receipt(
+                            mondrian_playback::FrameDeliveryCandidate::for_demand(
+                                old_demand,
+                                mondrian_playback::FrameDeliveryKind::Ready
+                            ),
+                            tick
+                        )
+                        .accepted());
+                    assert_eq!(state.playback_engine.snapshot(), snapshot);
+                    let mut old_completion = state.playback_engine.clone();
+                    let now = old_completion.monotonic_high_water();
+                    assert!(!old_completion
+                        .finalize_native_audio_control_hold(old_ticket, None, now)
+                        .expect("superseded original-epoch ticket"));
+                    assert_eq!(old_completion.snapshot(), snapshot);
+                }
+                seeks_applied = true;
+            }
             let snapshot = state.audio_playback_snapshot();
             assert_eq!(snapshot.render_substitution_count, 0);
             assert_eq!(snapshot.render_generation_recovery_count, 0);
@@ -243,6 +347,14 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
                     )
                     .unwrap();
                 assert_eq!(snapshot.next_start_sample, anchor.sample());
+                if let Some(expected) = expected_seek_anchor {
+                    assert!(seeks_applied);
+                    assert_eq!(
+                        anchor.sample(),
+                        expected,
+                        "latest public seek owns the Fresh target"
+                    );
+                }
                 assert!(anchor.sample() >= 0 && (anchor.sample() as usize + 15) < SOURCE_FRAMES);
                 fresh = Some((snapshot.generation, anchor.sample()));
             }
@@ -336,6 +448,7 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
             Some(old_object),
             "same actual child PID and native load incarnation"
         );
+        assert!(seeks_applied);
         let (generation, anchor) = fresh.unwrap();
         let facts = cursor_facts(&state);
         assert_eq!(facts.session.unwrap().identity, new_identity.unwrap());
@@ -372,6 +485,15 @@ fn native_clap_restart_installs_same_source_and_enters_fresh_pdc_pcm() {
         pause.is_ok() && audio.all_workers_terminated() && cleanup.all_resources_released(),
         "complete owned restart cleanup: pause={pause:?}, audio={audio:?}, app={cleanup:?}"
     );
+    if target.is_ok() && !seek_frames.is_empty() {
+        let capture = output.lock();
+        assert!(
+            !capture.overflow,
+            "the complete bounded observation includes cleanup"
+        );
+        assert!(capture.cleared.len() <= scenario.capture_clears);
+        assert!(!capture.snapshot.active && capture.queue.is_empty());
+    }
     if let Err(payload) = target {
         std::panic::resume_unwind(payload);
     }
