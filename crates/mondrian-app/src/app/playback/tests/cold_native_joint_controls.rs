@@ -499,10 +499,13 @@ fn app_owned_vst3_ready_delivery_does_not_authorize_missing_editor() {
         Some("native-editor-no-view")
     );
     assert!(state
-        .native_audio_editor
+        .native_audio_author_work
         .as_ref()
-        .expect("original refused editor context")
-        .retained_state_entry_source(None, payload.session_id, payload.sequence_id)
+        .and_then(|work| work.retained_state_entry_source(
+            None,
+            payload.session_id,
+            payload.sequence_id
+        ))
         .is_none());
     for id in parameter_ids {
         assert!(state.native_audio_parameter_presentation(&payload, &id).is_none());

@@ -906,6 +906,10 @@ impl AppState {
             .as_ref()
             .is_some_and(|context| context.blocks_source_replacement())
             || self
+                .native_audio_author_work
+                .as_ref()
+                .is_some_and(|work| work.blocks_source_replacement())
+            || self
                 .playback_engine
                 .native_audio_control_hold_ticket()
                 .is_some_and(|ticket| Some(ticket.pending_generation()) != refused_close)
@@ -1072,6 +1076,7 @@ impl AppState {
         self.audio_playback_author_binding = None;
         self.audio_monitoring.clear_meter();
         self.native_audio_editor = None;
+        self.native_audio_author_work = None;
         Ok(())
     }
 
@@ -1107,6 +1112,7 @@ impl AppState {
         self.audio_playback_author_binding = None;
         self.audio_monitoring.clear_meter();
         self.native_audio_editor = None;
+        self.native_audio_author_work = None;
         Ok(())
     }
 
@@ -1721,10 +1727,10 @@ impl AppState {
                 let acknowledged = self.observe_native_audio_author_handoff(*proposal, status)?;
                 if acknowledged
                     && self
-                        .native_audio_renderer
+                        .native_audio_author_work
                         .as_ref()
-                        .and_then(std::sync::Weak::upgrade)
-                        .is_some_and(|renderer| renderer.native_author_snapshot_current())
+                        .zip(self.native_audio_renderer.as_ref())
+                        .is_some_and(|(work, source)| work.snapshot_current_for_source(source))
                 {
                     self.audio_playback_author_binding =
                         self.current_audio_playback_author_binding()?;
@@ -2335,7 +2341,7 @@ impl AppState {
         let target = self.audio_playback.native_author_state_entry_target();
         let session = self.authoring_session_id()?;
         let renderer = self
-            .native_audio_editor
+            .native_audio_author_work
             .as_ref()?
             .retained_state_entry_source(target, session, sequence)?;
         let current = self.active_sequence().filter(|current| current.id == sequence)?;
