@@ -8,7 +8,8 @@ use mondrian_audio::{
 use mondrian_core::{ExecutionCancellationToken, NativeAudioAuthorProposal, ParameterId};
 use mondrian_media::{
     AudioPcmNativeAuthorHandoffContinuity as Continuity,
-    AudioPcmNativeAuthorHandoffStatus as Status, AudioPcmRenderer,
+    AudioPcmNativeAuthorHandoffStatus as Status,
+    AudioPcmNativeAuthorTerminalBatchStatus as BatchStatus, AudioPcmRenderer,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -260,6 +261,10 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
         let mut pending: Option<NativeAudioAuthorProposal> = None;
         let mut proposals = 0_usize;
         let mut acknowledgements = 0_usize;
+        let mut prepared_events = 0_usize;
+        let mut batch_acknowledgements = 0_usize;
+        let mut finished_groups = 0_usize;
+        let mut publication_generation = None;
         loop {
             assert!(
                 Instant::now() < deadline,
@@ -287,6 +292,8 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
             assert_eq!(output.lock().queued, 0);
             for event in poll.events {
                 let mut delivered = None;
+                let mut prepared_delivery = false;
+                let mut terminal_acknowledged = false;
                 match &event {
                     AudioPlaybackEvent::NativeOwnerBindingsObserved {
                         renderer_id: actual,
@@ -313,9 +320,15 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
                         assert_eq!(target.root_session, root_session);
                         assert_eq!(target.local_session, local_session);
                         assert!(target.continuity_epoch.is_none());
-                        let claim = verifier.current_claim().unwrap();
-                        assert!(verifier.validate(&claim).is_ok());
-                        assert_eq!(target.installed_generation, claim.generation());
+                        // Authenticate the first target before Prepare. A
+                        // previously delivered old DTO remains historical after
+                        // the producer legitimately publishes its new claim.
+                        if prepared_events == 0 || parameter_target != Some(target) {
+                            let actual = renderer.owner_installation_verifier().unwrap();
+                            let claim = actual.current_claim().unwrap();
+                            assert!(actual.validate(&claim).is_ok());
+                            assert_eq!(target.installed_generation, claim.generation());
+                        }
                         let object = (observation.process_id(), observation.object_serial());
                         assert!(native_object.is_none_or(|prior| prior == object));
                         native_object = Some(object);
@@ -336,7 +349,8 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
                             .unwrap();
                         assert_eq!(value.value_bits, Some((-6.0_f64).to_bits()));
                         assert_eq!(value.name.as_deref(), Some("Gain Out"));
-                        parameter_target = Some(target);
+                        // Retain the original proposal's authenticated target.
+                        parameter_target.get_or_insert(target);
                     }
                     AudioPlaybackEvent::NativeAuthorProposalObserved {
                         renderer_id: actual,
@@ -351,17 +365,92 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
                             native_object.is_some(),
                             "actual parameter DTO authenticates the native incarnation"
                         );
-                        let claim = verifier.current_claim().unwrap();
-                        assert!(verifier.validate(&claim).is_ok());
-                        assert_eq!(proposal.target().installed_generation, claim.generation());
+                        assert_eq!(
+                            proposal.target().installed_generation,
+                            initial_claim.generation()
+                        );
                         assert!(proposal.target().continuity_epoch.is_none());
                         if let Some(prior) = &pending {
                             assert!(prior.same_retained_proposal(proposal));
                         } else {
+                            assert_eq!(prepared_events, 0, "one original retained frontier");
+                            let claim = verifier.current_claim().unwrap();
+                            assert!(verifier.validate(&claim).is_ok());
+                            assert_eq!(claim.generation(), initial_claim.generation());
                             proposals = proposals.checked_add(1).unwrap();
                             pending = Some(proposal.as_ref().clone());
                         }
                         delivered = Some(proposal.as_ref().clone());
+                    }
+                    AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared {
+                        renderer_id: actual,
+                        generation: observed,
+                        proposal,
+                        ..
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert!(pending
+                            .as_ref()
+                            .expect("actual proposal precedes Prepare")
+                            .same_retained_proposal(proposal));
+                        assert!(proposal.terminal());
+                        assert!(state.authoring.as_ref().unwrap().has_pending_native_authoring());
+                        prepared_events = prepared_events.checked_add(1).unwrap();
+                        assert_eq!(prepared_events, 1, "one accepted preparation");
+                        prepared_delivery = true;
+                    }
+                    AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                        renderer_id: actual,
+                        generation: observed,
+                        proposal,
+                        status,
+                        ..
+                    } => {
+                        assert_eq!(Some(*actual), renderer_id);
+                        assert_eq!(*observed, generation);
+                        assert_eq!(prepared_events, 1);
+                        let original = pending.as_ref().expect("actual proposal precedes install");
+                        assert!(original.same_retained_proposal(proposal));
+                        assert!(state.authoring.as_ref().unwrap().has_pending_native_authoring());
+                        match status {
+                            BatchStatus::Acknowledged { target }
+                            | BatchStatus::InstalledAwaitingAcknowledgement { target } => {
+                                assert_eq!(target.instance, instance_id);
+                                assert_eq!(target.root_session, root_session);
+                                assert_eq!(target.local_session, local_session);
+                                assert!(target.continuity_epoch.is_none());
+                                assert_ne!(target.root_plan, original.target().root_plan);
+                                assert_eq!(target.root_plan, target.local_plan);
+                                assert_ne!(target.binding, original.target().binding);
+                                let cursors = unentered(&renderer, instance_id);
+                                assert_eq!(
+                                    target.root_plan,
+                                    cursors.session.unwrap().identity.prepared_plan_id
+                                );
+                                assert_eq!(
+                                    target.local_plan,
+                                    cursors.processor.unwrap().identity.prepared_plan_id
+                                );
+                                let actual = renderer.owner_installation_verifier().unwrap();
+                                let claim = actual.current_claim().unwrap();
+                                assert!(actual.validate(&claim).is_ok());
+                                assert_ne!(claim.generation(), initial_claim.generation());
+                                assert_eq!(target.installed_generation, claim.generation());
+                                installed_verifier = Some(actual);
+                                if matches!(status, BatchStatus::Acknowledged { .. }) {
+                                    acknowledgements = acknowledgements.checked_add(1).unwrap();
+                                    batch_acknowledgements =
+                                        batch_acknowledgements.checked_add(1).unwrap();
+                                    assert_eq!(batch_acknowledgements, 1);
+                                    terminal_acknowledged = true;
+                                    pending = None;
+                                }
+                            }
+                            BatchStatus::Refused(reason) => {
+                                panic!("actual headless terminal batch refused: {reason:?}")
+                            }
+                        }
                     }
                     AudioPlaybackEvent::NativeAuthorHandoffObserved {
                         renderer_id: actual,
@@ -415,6 +504,33 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
                     state.native_audio_editor.is_none(),
                     "headless author work cannot create a GUI context"
                 );
+                let author = state.authoring.as_ref().unwrap();
+                if prepared_delivery {
+                    assert!(
+                        author.has_pending_native_authoring(),
+                        "published group awaits real Ack"
+                    );
+                    let after = author.author_generation();
+                    assert!(
+                        after == before || after.get() == before.get().checked_add(1).unwrap(),
+                        "one canonical commit, including legitimate NoChange"
+                    );
+                    assert!(publication_generation.replace(after).is_none());
+                } else if let Some(published) = publication_generation {
+                    assert_eq!(
+                        author.author_generation(),
+                        published,
+                        "no second canonical publication"
+                    );
+                }
+                if terminal_acknowledged {
+                    assert!(
+                        !author.has_pending_native_authoring(),
+                        "real Ack finishes the same group"
+                    );
+                    finished_groups = finished_groups.checked_add(1).unwrap();
+                    assert_eq!(finished_groups, 1);
+                }
                 if let Some(proposal) = delivered {
                     assert!(state.audio_playback.matches_source_weak(&erased));
                     let current = unentered(&renderer, instance_id);
@@ -466,8 +582,18 @@ fn app_ring_out_headless_startup_author_handoff_closes_before_first_dsp() {
                 assert!(!state.authoring.as_ref().unwrap().has_pending_native_authoring());
                 renderer.validate_native_author_source_closed(&ExecutionCancellationToken::new())
                     .expect("actual SourceClosed after original Authoring/install/native acknowledgement");
-                let claim = verifier.current_claim().unwrap();
-                assert!(verifier.validate(&claim).is_ok());
+                assert_eq!(prepared_events, 1);
+                assert_eq!(
+                    batch_acknowledgements, 1,
+                    "new terminal protocol actually completes"
+                );
+                assert_eq!(finished_groups, 1);
+                assert!(publication_generation.is_some());
+                let actual = renderer.owner_installation_verifier().unwrap();
+                let claim = actual.current_claim().unwrap();
+                assert!(actual.validate(&claim).is_ok());
+                assert_ne!(claim.generation(), initial_claim.generation());
+                installed_verifier = Some(actual);
                 assert!(Instant::now() < deadline);
                 break;
             }
