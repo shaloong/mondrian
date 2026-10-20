@@ -184,6 +184,13 @@ not the prepared native owner. This cross-queue consumer is not implemented yet.
 An obsolete completion must transfer any remaining request owner to the existing
 retirement queue. Rejecting its identity never permits destruction on the UI path.
 
+The App's single accepted author work slot is independent of its editor surface.
+It retains the captured weak Source, original gesture, prefix and execution
+snapshot; removing presentation never discards that custody. Only a matching
+surface may follow its receipts. Successful SourceClose clears both slots;
+failed author operations preserve the Session barrier. New-prefix admission
+still uses the existing GUI path until the terminal consumer is integrated.
+
 ## Consequences
 
 - A command error cannot leave a half-edited canonical Project that is later
