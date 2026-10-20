@@ -14,6 +14,8 @@ pub use child_diagnostic::{
 pub(super) mod pump;
 pub(super) mod question;
 pub(super) mod question_budget;
+#[cfg(windows)]
+mod retirement_wait;
 #[cfg(any(test, feature = "validation"))]
 pub use diagnostic::OpenFxRenderDiagnostic;
 pub use diagnostic::OpenFxRenderPhase;
@@ -1422,7 +1424,18 @@ impl OpenFxFilterSession {
                 .record(close_observation::Stage::ParentClosedObserved, 0);
             loop {
                 if let Some(observed) = observe_retirement_exit(deadline, Instant::now, || {
-                    exit_queries.observe(|| self.process.child.try_wait())
+                    #[cfg(windows)]
+                    {
+                        retirement_wait::wait_for_exit(
+                            &mut self.process.child,
+                            deadline.saturating_duration_since(Instant::now()),
+                            &mut exit_queries,
+                        )
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        exit_queries.observe(|| self.process.child.try_wait())
+                    }
                 })? {
                     self.process.close_trace.record(
                         close_observation::Stage::ParentOsExitObserved,
@@ -1431,6 +1444,7 @@ impl OpenFxFilterSession {
                     self.process.confirmed_exit();
                     return observed.graceful;
                 }
+                #[cfg(not(windows))]
                 thread::sleep(Duration::from_millis(1));
             }
         })();
@@ -3327,6 +3341,47 @@ mod process_retirement_tests {
             )
             .expect("idempotent settlement");
         assert!(owner.child.try_wait().expect("actual child exit retained").is_some());
+    }
+
+    #[test]
+    #[ignore = "requires actual outer owner Job; existing held-child fixture only"]
+    fn resident_event_wait_keeps_held_child_then_observes_same_natural_exit() {
+        let (mut owner, directory) = sleeping_owner();
+        let pid = owner.child.id();
+        let mut queries = close_observation::ExitQueryProbe::default();
+        assert!(
+            retirement_wait::wait_for_exit(&mut owner.child, Duration::ZERO, &mut queries)
+                .expect("finite held-child timeout")
+                .is_none()
+        );
+        assert_eq!(owner.state, ProcessState::Running);
+        assert_eq!(owner.child.id(), pid);
+        assert!(owner.child.try_wait().expect("timeout did not kill the child").is_none());
+        request_natural_exit(&directory);
+        // The existing fixture uses this five-second exit boundary; this is not
+        // a new product shutdown budget or an exit-performance qualification.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let observed = loop {
+            if let Some(observed) = observe_retirement_exit(deadline, Instant::now, || {
+                retirement_wait::wait_for_exit(
+                    &mut owner.child,
+                    deadline.saturating_duration_since(Instant::now()),
+                    &mut queries,
+                )
+            })
+            .expect("same borrowed handle waits only until the original fixture deadline")
+            {
+                break observed;
+            }
+        };
+        assert_eq!(owner.child.id(), pid);
+        assert_eq!(observed.status.code(), Some(7));
+        owner.confirmed_exit();
+        assert!(
+            matches!(observed.graceful, Err(OpenFxHostError::WorkerFailed(detail))
+            if detail == observed.status.to_string())
+        );
+        assert_settled_idempotent(&mut owner);
     }
 
     #[test]
