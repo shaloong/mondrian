@@ -498,6 +498,10 @@ fn app_owned_vst3_ready_delivery_does_not_authorize_missing_editor() {
         state.status_hint().map(|(message, _)| message.id),
         Some("native-editor-no-view")
     );
+    assert!(
+        state.native_audio_editor.is_some(),
+        "original refused editor context"
+    );
     assert!(state
         .native_audio_author_work
         .as_ref()
