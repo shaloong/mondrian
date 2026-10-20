@@ -81,13 +81,13 @@ namespace MondrianOpenFx {
     bool invalidImageLifetime = false;
     // A transient unsupported ordinal-domain change is terminal even if the
     // plugin restores its options or ignores a failed value query.
-    mutable bool invalidChoiceDomain = false;
+    mutable std::atomic<bool> invalidChoiceDomain{false};
     bool admitsChoiceDomain(int count, MondrianOpenFxQuery query, const void* context) const {
       MondrianOpenFxQueryResult result{};
       if (count < 1 || !query || !context ||
           query(context, kChoiceOrdinalDomainSizeQuery, 0, 0, 0, 0, &result) != 0 ||
           result.key_count != static_cast<unsigned int>(count)) {
-        invalidChoiceDomain = true;
+        invalidChoiceDomain.store(true, std::memory_order_relaxed);
         return false;
       }
       return true;

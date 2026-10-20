@@ -277,7 +277,7 @@ namespace MondrianOpenFx {
     // The SDK's existing ChoiceOption notify hook calls this after every
     // property mutation, including reset and a change later restored in-place.
     const int count = getProperties().getDimension(kOfxParamPropChoiceOption);
-    if (count != _ordinalCount) { _effect->frameState().invalidChoiceDomain = true; }
+    if (count != _ordinalCount) { _effect->frameState().invalidChoiceDomain.store(true, std::memory_order_relaxed); }
     _effect->frameState().admitsChoiceDomain(getName(), count);
   }
 

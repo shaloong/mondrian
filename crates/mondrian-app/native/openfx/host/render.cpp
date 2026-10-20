@@ -598,7 +598,7 @@ struct MondrianOpenFxSession {
     const int applied = applyParameters(parameters, count, false, kOfxChangeUserEdited, false);
     if (applied != 0) { return applied; }
     if (!accepted(instance->createInstanceAction())) { return 4; }
-    if (frame.invalidChoiceDomain) { failed = true; return 7; }
+    if (frame.invalidChoiceDomain.load(std::memory_order_relaxed)) { failed = true; return 7; }
     return admitsCpu(*instance) && admitsIndependentFrames(*instance) ? 0 : 7;
   }
 
@@ -1058,7 +1058,7 @@ static int renderSessionEntry(
     int status = session->render(input, output, bytes, *info, parameters, count, *report, probe);
     // This single publication boundary also covers Identity/UserBlocked and
     // EndSequenceRender. A plugin cannot publish by ignoring a query error.
-    if (session->frame.invalidChoiceDomain) {
+    if (session->frame.invalidChoiceDomain.load(std::memory_order_relaxed)) {
       session->failed = true;
       if (status == 0) {
         report->completion = MONDRIAN_OPENFX_RENDER_UNSET;
