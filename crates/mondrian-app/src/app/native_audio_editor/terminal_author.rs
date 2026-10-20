@@ -205,9 +205,10 @@ impl AppState {
             let renderer = self
                 .native_audio_renderer
                 .as_ref()
-                .filter(|r| r.upgrade().is_some())
                 .ok_or_else(|| failure("native author captured Source retired"))?
                 .clone();
+            // Match the actual slot before any upgrade; a stale Weak probe
+            // must never make the UI the last native renderer owner.
             let actual: Weak<dyn mondrian_media::AudioPcmRenderer> = renderer.clone();
             if !self.audio_playback.matches_source_weak(&actual) {
                 return Err(failure(
