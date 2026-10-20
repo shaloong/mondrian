@@ -58,17 +58,17 @@ cleanup 的查询/kill/wait 记录，另记最后一个认证 Child Mapping 的�
 解码器148项纯字节控制通过。原预算不变；不是插件退出时限或性能资格。
 
 当前配对的非 harness Product/集成测试为 test-profile opt0/debuginfo0。
-单次新 fixed-canvas 仍在原 shutdown 处 DeadlineExceeded；三帧 direct 断言已到，
-raw 独立显示23条完整动作至 Unload return0，后置 Rust 动作断言与 Graph 未到。
-native Drop 约48.11ms结束、inner 约50.82ms返回；同PID/TID的最后 Mapping
-在19.4µs后进入析构。35次原查询全为 None，末次约99.16ms、最大查询窗口2.8µs。
-graceful 约100.69ms超时后，原 cleanup 首查询仍 pending，kill 返回 Ok，随后
-wait 于约108.48ms观察 exit1，未调用 post-refused-kill 查询。原门保持 FAIL，
-180秒/2秒 Job 回收完整。该记录区分了实际清理分支，不能证明自然退出或 kill
-与退出的因果；Mapping 入口之后的 UnmapViewOfFile 与两个 file CloseHandle
-尚无完成时点。该 worker 直接返回 main，早于UI/graphics/应用日志初始化，
-未找到这一返回路径上的额外应用等待。资源释放和进程尾部根因仍开放；UTC退出事实不能拼成QPC期限，不推断
-TLS/CRT/加载器或 OS 根因，不授旧失败关闭、全关闭时限、第三方或跨平台资格。
+原同 Child 事件等待已替代 Windows 轮询，仍有无 trace 的 fixed-canvas 原门和
+Choice 正向第二次 shutdown 报 DeadlineExceeded，不能用新等待方式宣布根因关闭。
+2026-10-21 一次无 debugger 的 schema5 fixed-canvas 完整原门通过：direct 与
+retained Graph 两个真实 resident 均自然 exit0，graceful 分别约90.54/74.18ms；
+inner 返回到父观察 OS exit 分别约71.23/60.82ms，cleanup 均已结算且无 kill/wait。
+这只是有仪器化的有限样本，不是性能基准、长期上界或旧 FAIL 的替代结果。
+另一个 debugger 样本认证同 resident 正常 CRT 到 LdrShutdownProcess 返回并自然
+exit0，但父观察已迟于原期限，整门仍 FAIL。不得拼接两样本来归因耗时。
+worker 直接返回 main，早于 UI/graphics/应用日志初始化；未发现额外 App shutdown。
+Rust/CRT/导入模块的退出职责尚未定位到具体耗时原因，不授共同根因修复、全关闭
+时限、第三方、性能或跨平台资格。原 shared100ms 与180秒/2秒 Job 预算保持。
 
 2026-10-18 Windows x64：`bed1d101` 在提交既有参数来源后、插件回调前更新实例
 `IsAnimating`，与常量/CurrentFrame/Curve 查询共用来源权威。修复前真实 CreateInstance
@@ -259,8 +259,8 @@ authoring transaction/Undo/save；worker中局部赋值不能替代这个闭环�
 | P02 | Double2D/Double3D | 实现tuple atomic、f64default/min/max/displayrange、canonicalcurvecomponent；空间/time语义不支持 | `NumericTupleParameter`; `decode_native_parameter`; `PropertyValue::DoubleVec*` | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S05 |
 | P03 | Integer2D/Integer3D | 实现tuple integer、拒绝fraction/out-of-range/default错误；integerinterp canonical规则 | 同P02 | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h) |
 | P04 | RGB/RGBA | 实现unmanaged f64tuple/default/曲线；swatch不是nativeColour API实现 | 同P02；`DoubleRgb/DoubleColor` | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h) |
-| P05 | Boolean | 已启用 Boolean/Hold；Windows owned有限闭环已验：九轮同current来源/queries/keys/revision/通知/像素、两次显式关闭、七帧正反seek、五帧共享Graph及非动画曲线Create前status4拒绝。106普通OFX与另206项受影响App控制通过；原shared100ms及180s/Job2s不变。旧退出根因、Graph独立自然关闭、第三方/长期/其它平台仍未验 | `BooleanParameter`; hostflags；descriptionvalidation；同Child事件等待 | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S06 |
-| P06 | Choice | 常量实现：numericindex为identity、labels允许重复、rankorder/defaultchecked；ChoiceAnimation=false | `ChoiceParameter`; nativechoiceinfo；`PropertyValue::Enum` | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S06 |
+| P05 | Boolean | 已启用 Boolean/Hold；Windows owned有限闭环已验：九轮同current来源/queries/keys/revision/通知/像素、两次显式关闭、七帧正反seek、五帧共享Graph及非动画曲线Create前status4拒绝。107普通OFX与另206项受影响App控制通过；Choice候选上原两门回归通过，原shared100ms及180s/Job2s不变。旧退出根因、Boolean Graph独立自然关闭、第三方/长期/其它平台仍未验 | `BooleanParameter`; hostflags；descriptionvalidation；同Child事件等待 | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S06 |
+| P06 | Choice | 部分：已启用固定ordinal域/Hold，keys必须精确0..N−1；同count重复labels/rank只是呈现。非动画曲线status4、描述/Create/Render域漂移status7四原生拒绝门已验，count A→B→A也使session失效。正向九轮查询/通知/像素、首次关闭及七帧seek已过，但第二关闭DeadlineExceeded、Graph未到，完整闭环未验。原常量完整门已验；动态options刷新仍属P21 | `ChoiceParameter`; 既有Curve.schema冻结N/private op6；session sticky atomic fault；Create/统一发布前拒绝 | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S06 |
 | P07 | StrChoice，1.5 | 常量实现UTF-8stablekey/ranklabel/default；HostsupportsStrChoice=true但animation=false | `StrChoiceParameter`; `PropertyEnumOption` | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S06 |
 | P08 | String single/multiline/file/directory | 实现常量与typedresourcecontract；path存在/新文件/UTF-8规则bounded、pack/Undo/save由资源事务资格验收；StringAnimation=false | `StringParameter`; `OpenFxStringMode`; `ParameterResourceContract` | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h) |
 | P09 | String label / rich-text | 原始description可读取mode；canonical注册明确拒绝，未提供readonlylabel/RTFcontrol | `build_definition` Stringguard | [released Params](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxParam.h)；S05 |
