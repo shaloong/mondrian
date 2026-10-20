@@ -195,6 +195,8 @@ mod surge_instrument_runtime;
 // Steady native bypass through the public Runtime/Graph; finite real-plugin case.
 mod ring_out_runtime_pcm;
 
+mod clap_effect_runtime_pcm;
+
 #[test]
 #[ignore = "external hash-bound vendor case, current helper and frozen outer native Job required"]
 fn external_clap_opaque_state_native_bypass_pcm() {
