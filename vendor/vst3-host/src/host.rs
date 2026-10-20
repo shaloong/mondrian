@@ -44,6 +44,7 @@ pub struct Vst3Host {
     pub(crate) config: AudioConfig,
     pub(crate) processing_resource_bounds: Option<crate::audio::ProcessingResourceBounds>,
     pub(crate) load_preparation: PluginLoadPreparation,
+    pub(crate) initial_process_mode: crate::plugin::ProcessMode,
     /// Custom plugin scan paths
     pub(crate) custom_paths: Vec<PathBuf>,
     /// Whether to use process isolation for plugin loading
@@ -304,6 +305,7 @@ impl Vst3Host {
         // Load the plugin implementation directly - it will handle path resolution
         let mut plugin_impl = if self.processing_resource_bounds.is_some()
             || self.load_preparation == PluginLoadPreparation::Deferred
+            || self.initial_process_mode != crate::plugin::ProcessMode::Realtime
         {
             crate::internal::plugin_impl::PluginImpl::load_with_preparation(
                 path,
@@ -312,6 +314,7 @@ impl Vst3Host {
                 self.config,
                 self.processing_resource_bounds,
                 self.load_preparation,
+                self.initial_process_mode,
             )?
         } else {
             match class_id {
@@ -485,6 +488,7 @@ impl Default for Vst3Host {
             config: AudioConfig::default(),
             processing_resource_bounds: None,
             load_preparation: PluginLoadPreparation::Eager,
+            initial_process_mode: crate::plugin::ProcessMode::Realtime,
             custom_paths: Vec::new(),
             use_process_isolation: false,
             scan_default_paths: true,
@@ -507,6 +511,7 @@ pub struct Vst3HostBuilder {
     config: AudioConfig,
     processing_resource_bounds: Option<crate::audio::ProcessingResourceBounds>,
     load_preparation: PluginLoadPreparation,
+    initial_process_mode: crate::plugin::ProcessMode,
     custom_paths: Vec<PathBuf>,
     use_process_isolation: bool,
     scan_default_paths: bool,
@@ -543,6 +548,17 @@ impl Vst3HostBuilder {
     /// Deferred loading performs no default bus ACK, arrangement echo or setup.
     pub fn load_preparation(mut self, preparation: PluginLoadPreparation) -> Self {
         self.load_preparation = preparation;
+        self
+    }
+
+    /// Select the mode supplied to the first native processing setup.
+    ///
+    /// Defaults to realtime. This seeds each loaded plugin's existing mode before
+    /// eager preparation or a deferred state restore; it does not itself prepare
+    /// or start processing. Later mode changes still use `Plugin::set_process_mode`.
+    /// Non-realtime initial modes are unavailable in the standalone SDK helper.
+    pub fn initial_process_mode(mut self, mode: crate::plugin::ProcessMode) -> Self {
+        self.initial_process_mode = mode;
         self
     }
 
@@ -666,6 +682,14 @@ impl Vst3HostBuilder {
     /// `1.0 / sampleRate` generate NaN coefficients, and a `time_signature(4, 3)` built a host
     /// whose transport every runtime setter refuses.
     pub fn build(self) -> Result<Vst3Host> {
+        if self.use_process_isolation
+            && self.initial_process_mode != crate::plugin::ProcessMode::Realtime
+        {
+            return Err(Error::InvalidParameter(
+                "non-realtime initial processing modes are unavailable in the standalone isolation helper"
+                    .to_owned(),
+            ));
+        }
         if self.use_process_isolation && self.load_preparation == PluginLoadPreparation::Deferred {
             return Err(Error::ProcessingResources(
                 crate::error::ProcessingResourceError::UnsupportedBackend,
@@ -715,6 +739,7 @@ impl Vst3HostBuilder {
             config: self.config,
             processing_resource_bounds: self.processing_resource_bounds,
             load_preparation: self.load_preparation,
+            initial_process_mode: self.initial_process_mode,
             custom_paths: self.custom_paths,
             use_process_isolation: self.use_process_isolation,
             scan_default_paths: self.scan_default_paths,
@@ -888,6 +913,44 @@ mod tests {
             Vst3Host::default().plugin_interfaces,
             PluginInterfaceSupport::default()
         );
+    }
+
+    #[test]
+    fn initial_process_mode_builder_preserves_default_and_refuses_unsupported_helper() {
+        use crate::plugin::ProcessMode;
+        assert_eq!(
+            Vst3Host::default().initial_process_mode,
+            ProcessMode::Realtime
+        );
+        assert_eq!(
+            Vst3HostBuilder::default()
+                .build()
+                .unwrap()
+                .initial_process_mode,
+            ProcessMode::Realtime
+        );
+        assert!(Vst3HostBuilder::default()
+            .initial_process_mode(ProcessMode::Realtime)
+            .with_process_isolation(true)
+            .build()
+            .is_ok());
+        for mode in [ProcessMode::Offline, ProcessMode::Prefetch] {
+            let host = Vst3HostBuilder::default()
+                .initial_process_mode(mode)
+                .build()
+                .unwrap();
+            assert_eq!(host.initial_process_mode, mode);
+            assert_eq!(host.load_preparation, PluginLoadPreparation::Eager);
+            assert!(host.processing_resource_bounds.is_none());
+            assert!(matches!(
+                Vst3HostBuilder::default()
+                    .initial_process_mode(mode)
+                    .with_process_isolation(true)
+                    .build(),
+                Err(Error::InvalidParameter(message))
+                    if message == "non-realtime initial processing modes are unavailable in the standalone isolation helper"
+            ));
+        }
     }
 
     #[test]

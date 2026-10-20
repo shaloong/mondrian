@@ -1417,6 +1417,7 @@ impl PluginImpl {
         }
     }
     fn finish_load_preparation(&mut self) -> Result<()> {
+        self.validate_process_mode(self.process_mode)?;
         if self.load_preparation == crate::host::PluginLoadPreparation::Deferred {
             return Ok(());
         }
@@ -1462,6 +1463,7 @@ impl PluginImpl {
             None,
             None,
             crate::host::PluginLoadPreparation::Eager,
+            crate::plugin::ProcessMode::Realtime,
         )
     }
 
@@ -1472,6 +1474,7 @@ impl PluginImpl {
         config: crate::audio::AudioConfig,
         bounds: Option<crate::audio::ProcessingResourceBounds>,
         preparation: crate::host::PluginLoadPreparation,
+        initial_process_mode: crate::plugin::ProcessMode,
     ) -> Result<Self> {
         if let Some(bounds) = bounds {
             bounds.frames(config.block_size)?;
@@ -1483,6 +1486,7 @@ impl PluginImpl {
             Some(config),
             bounds,
             preparation,
+            initial_process_mode,
         )
     }
 
@@ -1493,6 +1497,7 @@ impl PluginImpl {
         processing: Option<crate::audio::AudioConfig>,
         bounds: Option<crate::audio::ProcessingResourceBounds>,
         preparation: crate::host::PluginLoadPreparation,
+        initial_process_mode: crate::plugin::ProcessMode,
     ) -> Result<Self> {
         let native_editor_owner = crate::plugin::NativeEditorAttachmentOwner::issue()?;
         let requested_class_id = requested_class_id
@@ -1786,7 +1791,7 @@ impl PluginImpl {
                 time_sig_numerator: processing.map_or(4, |config| config.time_sig_numerator),
                 time_sig_denominator: processing.map_or(4, |config| config.time_sig_denominator),
                 playing: true,
-                process_mode: crate::plugin::ProcessMode::Realtime,
+                process_mode: initial_process_mode,
                 process_context_requirements,
                 prefetchable_support,
                 sample_size,
@@ -2035,6 +2040,27 @@ impl PluginImpl {
             crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
             crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
         }
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn validate_process_mode(&self, mode: crate::plugin::ProcessMode) -> Result<()> {
+        if mode == crate::plugin::ProcessMode::Prefetch {
+            match self.prefetchable_support {
+                Some(value)
+                    if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
+                        || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
+                {
+                    return Err(Error::Other(
+                        "plugin currently reports that prefetch processing is unsupported"
+                            .to_string(),
+                    ));
+                }
+                // A processor without IPrefetchableSupport predates the policy interface. Keep
+                // the legacy behaviour and let setupProcessing accept or reject kPrefetch.
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::unnecessary_cast)]
@@ -3327,22 +3353,7 @@ impl PluginInternal for PluginImpl {
                 "cannot set process mode while processing".to_string(),
             ));
         }
-        if mode == crate::plugin::ProcessMode::Prefetch {
-            match self.prefetchable_support {
-                Some(value)
-                    if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
-                        || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-                {
-                    return Err(Error::Other(
-                        "plugin currently reports that prefetch processing is unsupported"
-                            .to_string(),
-                    ));
-                }
-                // A processor without IPrefetchableSupport predates the policy interface. Keep
-                // the legacy behaviour and let setupProcessing accept or reject kPrefetch.
-                _ => {}
-            }
-        }
+        self.validate_process_mode(mode)?;
         // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
         let was_active = self.is_active;
         if was_active {
@@ -12539,6 +12550,7 @@ mod restored_audio_activation_tests {
         event_default_active: bool,
         arrangement_queries: usize,
         lifecycle: Vec<(&'static str, i32)>,
+        setup_modes: Vec<i32>,
         restored_audio_channels: Option<i32>,
         setups: usize,
         dsp_calls: usize,
@@ -12709,6 +12721,7 @@ mod restored_audio_activation_tests {
             assert!(!p.active && !p.processing);
             p.lifecycle
                 .push(("setup", unsafe { (*setup).maxSamplesPerBlock }));
+            p.setup_modes.push(unsafe { (*setup).processMode });
             p.setups += 1;
             p.setup_result
         }
@@ -12772,6 +12785,21 @@ mod restored_audio_activation_tests {
             preparation: crate::host::PluginLoadPreparation,
             bounds: Option<crate::audio::ProcessingResourceBounds>,
         ) -> Self {
+            Self::with_initial_mode(
+                inputs,
+                outputs,
+                preparation,
+                bounds,
+                crate::plugin::ProcessMode::Offline,
+            )
+        }
+        fn with_initial_mode(
+            inputs: Vec<bool>,
+            outputs: Vec<bool>,
+            preparation: crate::host::PluginLoadPreparation,
+            bounds: Option<crate::audio::ProcessingResourceBounds>,
+            initial_process_mode: crate::plugin::ProcessMode,
+        ) -> Self {
             let activation = if preparation == crate::host::PluginLoadPreparation::Deferred {
                 BusActivationState::default()
             } else {
@@ -12799,6 +12827,7 @@ mod restored_audio_activation_tests {
                 event_default_active: false,
                 arrangement_queries: 0,
                 lifecycle: Vec::with_capacity(64),
+                setup_modes: Vec::with_capacity(64),
                 restored_audio_channels: None,
                 setups: 0,
                 dsp_calls: 0,
@@ -12841,7 +12870,7 @@ mod restored_audio_activation_tests {
                 time_sig_numerator: 4,
                 time_sig_denominator: 4,
                 playing: true,
-                process_mode: crate::plugin::ProcessMode::Offline,
+                process_mode: initial_process_mode,
                 process_context_requirements: None,
                 prefetchable_support: None,
                 sample_size: ProcessingSampleSize::F32,
@@ -13274,6 +13303,99 @@ mod restored_audio_activation_tests {
         assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
         assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
     }
+    #[test]
+    fn initial_process_mode_reaches_first_setup_without_eager_deferred_preparation() {
+        use crate::host::PluginLoadPreparation::{Deferred, Eager};
+        use crate::plugin::ProcessMode;
+        for (mode, native_mode) in [
+            (ProcessMode::Realtime, ProcessModes_::kRealtime as i32),
+            (ProcessMode::Offline, ProcessModes_::kOffline as i32),
+            (ProcessMode::Prefetch, ProcessModes_::kPrefetch as i32),
+        ] {
+            let mut f = Fixture::with_initial_mode(vec![true], vec![true], Deferred, None, mode);
+            f.plugin.finish_load_preparation().unwrap();
+            assert!(f.probe.lock().unwrap().setup_modes.is_empty());
+            assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+            assert!(f.plugin.process_data.is_none());
+            f.restore(vec![true], vec![true]).unwrap();
+            assert_eq!(f.probe.lock().unwrap().setup_modes, [native_mode]);
+            assert_eq!(f.plugin.process_mode, mode);
+            assert!(!f.plugin.is_active && !f.plugin.is_processing);
+            f.plugin.set_process_mode(mode).unwrap();
+            assert_eq!(
+                f.probe.lock().unwrap().setup_modes,
+                [native_mode, native_mode]
+            );
+            assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+        }
+        let f =
+            Fixture::with_initial_mode(vec![true], vec![true], Eager, None, ProcessMode::default());
+        assert_eq!(
+            f.probe.lock().unwrap().setup_modes,
+            [ProcessModes_::kRealtime as i32]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unnecessary_cast)]
+    fn initial_prefetch_mode_preserves_existing_capability_and_error_precedence() {
+        use crate::host::PluginLoadPreparation::Deferred;
+        use crate::plugin::ProcessMode;
+        for support in [
+            ePrefetchableSupport_::kIsNeverPrefetchable as u32,
+            ePrefetchableSupport_::kIsNotYetPrefetchable as u32,
+        ] {
+            let mut f = Fixture::with_initial_mode(
+                vec![true],
+                vec![true],
+                Deferred,
+                None,
+                ProcessMode::Prefetch,
+            );
+            f.plugin.prefetchable_support = Some(support);
+            assert!(matches!(
+                f.plugin.finish_load_preparation(),
+                Err(Error::Other(message))
+                    if message == "plugin currently reports that prefetch processing is unsupported"
+            ));
+            assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+            assert!(f.plugin.process_data.is_none());
+            assert!(!f.plugin.is_active && !f.plugin.is_processing);
+            f.plugin.process_mode = ProcessMode::Realtime;
+            f.plugin.pending_param_changes.push(ParameterChange {
+                id: 7,
+                sample_offset: 0,
+                value: 0.5,
+            });
+            assert!(matches!(
+                f.plugin.set_process_mode(ProcessMode::Prefetch),
+                Err(Error::PendingParameterDelivery)
+            ));
+            assert_eq!(f.plugin.process_mode, ProcessMode::Realtime);
+            assert_eq!(f.plugin.pending_param_changes.len(), 1);
+            assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+            f.plugin.pending_param_changes.clear();
+            assert!(matches!(
+                f.plugin.set_process_mode(ProcessMode::Prefetch),
+                Err(Error::Other(message))
+                    if message == "plugin currently reports that prefetch processing is unsupported"
+            ));
+            assert_eq!(f.plugin.process_mode, ProcessMode::Realtime);
+            assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+        }
+        let mut f = Fixture::new(vec![true], vec![true]);
+        f.plugin.start_processing().unwrap();
+        f.plugin.prefetchable_support = Some(ePrefetchableSupport_::kIsNeverPrefetchable as u32);
+        let previous_mode = f.plugin.process_mode;
+        let previous_setups = f.probe.lock().unwrap().setups;
+        assert!(matches!(
+            f.plugin.set_process_mode(ProcessMode::Prefetch),
+            Err(Error::Other(message)) if message == "cannot set process mode while processing"
+        ));
+        assert_eq!(f.plugin.process_mode, previous_mode);
+        assert_eq!(f.probe.lock().unwrap().setups, previous_setups);
+    }
+
     #[test]
     fn deferred_processing_prepares_saved_shape_before_first_event_and_audio_ack() {
         use crate::audio::ProcessingResourceBounds;
