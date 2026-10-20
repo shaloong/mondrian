@@ -19,6 +19,56 @@ use mondrian_timeline::{
 use std::collections::BTreeMap;
 
 mod author_projection;
+mod terminal_author;
+
+/// One author transaction owns the App custody slot. Presentation is separate;
+/// single-owner gestures and a terminal frontier cannot coexist here.
+pub(super) enum NativeAudioAuthorWork {
+    Single(NativeAudioSingleAuthorWork),
+    Terminal(Box<terminal_author::TerminalAuthorWork>),
+}
+
+impl NativeAudioAuthorWork {
+    fn single(&self) -> Option<&NativeAudioSingleAuthorWork> {
+        match self {
+            Self::Single(work) => Some(work),
+            Self::Terminal(_) => None,
+        }
+    }
+
+    fn single_mut(&mut self) -> Option<&mut NativeAudioSingleAuthorWork> {
+        match self {
+            Self::Single(work) => Some(work),
+            Self::Terminal(_) => None,
+        }
+    }
+
+    pub(super) fn blocks_source_replacement(&self) -> bool {
+        match self {
+            Self::Single(work) => work.blocks_source_replacement(),
+            Self::Terminal(work) => work.blocks_source_replacement(),
+        }
+    }
+
+    pub(super) fn snapshot_current_for_source(
+        &self,
+        source: &std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>,
+    ) -> bool {
+        match self {
+            Self::Single(work) => work.snapshot_current_for_source(source),
+            Self::Terminal(work) => work.snapshot_current_for_source(source),
+        }
+    }
+
+    pub(super) fn retained_state_entry_source(
+        &self,
+        target: Option<NativeAudioEditorTarget>,
+        session: mondrian_editor_state::AuthoringSessionId,
+        sequence: mondrian_core::SequenceId,
+    ) -> Option<std::sync::Arc<super::audio_rendering::TimelineAudioPcmRenderer>> {
+        self.single()?.retained_state_entry_source(target, session, sequence)
+    }
+}
 
 pub(super) struct NativeAudioEditorProductContext {
     payload: AudioNativeEditorPayload,
@@ -36,7 +86,7 @@ pub(super) struct NativeAudioEditorProductContext {
 /// Custody of the already accepted single author transaction, independent of
 /// whether its editor surface is still present. This Weak selects the captured
 /// Source; it does not issue an installation claim or keep a native owner alive.
-pub(super) struct NativeAudioAuthorWork {
+pub(super) struct NativeAudioSingleAuthorWork {
     session_id: mondrian_editor_state::AuthoringSessionId,
     sequence_id: mondrian_core::SequenceId,
     renderer: std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>,
@@ -53,7 +103,7 @@ struct NativeAudioEditorPendingAuthor {
     queued: bool,
 }
 
-impl NativeAudioAuthorWork {
+impl NativeAudioSingleAuthorWork {
     pub(super) fn blocks_source_replacement(&self) -> bool {
         self.gesture.is_some() || self.outstanding.is_some()
     }
@@ -419,9 +469,13 @@ impl AppState {
                 (
                     context.attachment_target.is_some(),
                     context.queued.is_some()
-                        || self.native_audio_author_work.as_ref().is_some_and(|work| {
-                            work.matches_surface(context) && work.outstanding.is_some()
-                        }),
+                        || self
+                            .native_audio_author_work
+                            .as_ref()
+                            .and_then(NativeAudioAuthorWork::single)
+                            .is_some_and(|work| {
+                                work.matches_surface(context) && work.outstanding.is_some()
+                            }),
                 )
             })
     }
@@ -435,6 +489,7 @@ impl AppState {
         let author_outstanding = self.native_audio_editor.as_ref().is_some_and(|context| {
             self.native_audio_author_work
                 .as_ref()
+                .and_then(NativeAudioAuthorWork::single)
                 .is_some_and(|work| work.matches_surface(context) && work.outstanding.is_some())
         });
         if let Some(context) = &mut self.native_audio_editor {
@@ -485,9 +540,16 @@ impl AppState {
         &mut self,
         proposal: mondrian_core::NativeAudioAuthorProposal,
     ) -> Result<()> {
+        if matches!(&self.native_audio_author_work, Some(NativeAudioAuthorWork::Terminal(work)) if work.blocks_source_replacement())
+        {
+            return Err(failure(
+                "terminal native author work requires its original delivery route",
+            ));
+        }
         if let Some(pending) = self
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .and_then(|work| work.outstanding.as_ref())
         {
             if pending.proposal.same_retained_proposal(&proposal) {
@@ -505,7 +567,11 @@ impl AppState {
         if context.target.is_none()
             && context.surface_renderer.is_none()
             && context.attachment_target.is_none()
-            && self.native_audio_author_work.as_ref().is_none_or(|work| work.gesture.is_none())
+            && self
+                .native_audio_author_work
+                .as_ref()
+                .and_then(NativeAudioAuthorWork::single)
+                .is_none_or(|work| work.gesture.is_none())
             && matches!(
                 &context.queued,
                 Some(Intent::ResolveAndOpen { locator, .. }) if *locator == context.locator
@@ -534,7 +600,8 @@ impl AppState {
             .filter(|renderer| renderer.upgrade().is_some())
             .ok_or_else(|| failure("native editor's captured renderer has retired"))?
             .clone();
-        if let Some(work) = &self.native_audio_author_work
+        if let Some(work) =
+            self.native_audio_author_work.as_ref().and_then(NativeAudioAuthorWork::single)
             && let Some(gesture) = &work.gesture
             && (gesture.session_id() != context.payload.session_id
                 || gesture.sequence_id() != context.payload.sequence_id
@@ -567,7 +634,11 @@ impl AppState {
         )?;
         let payload = context.payload.clone();
         let owner = context.owner;
-        let gesture = self.native_audio_author_work.as_ref().and_then(|work| work.gesture.clone());
+        let gesture = self
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .and_then(|work| work.gesture.clone());
         let author =
             self.authoring.as_mut().ok_or_else(|| failure("native author Session closed"))?;
         let gesture = match gesture {
@@ -581,15 +652,21 @@ impl AppState {
         };
         // Begin has already installed the sole Session barrier. Retain its
         // handle BEFORE update, whose validation may still fail.
-        if self.native_audio_author_work.as_ref().is_none_or(|work| work.gesture.is_none()) {
-            self.native_audio_author_work = Some(NativeAudioAuthorWork {
-                session_id: payload.session_id,
-                sequence_id: payload.sequence_id,
-                renderer: captured_renderer,
-                gesture: Some(gesture.clone()),
-                outstanding: None,
-                state_entry_accepted: false,
-            });
+        if self
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .is_none_or(|work| work.gesture.is_none())
+        {
+            self.native_audio_author_work =
+                Some(NativeAudioAuthorWork::Single(NativeAudioSingleAuthorWork {
+                    session_id: payload.session_id,
+                    sequence_id: payload.sequence_id,
+                    renderer: captured_renderer,
+                    gesture: Some(gesture.clone()),
+                    outstanding: None,
+                    state_entry_accepted: false,
+                }));
         }
         let commit = self
             .authoring
@@ -602,6 +679,7 @@ impl AppState {
         // Store the accepted prefix before later compilation or binding.
         self.native_audio_author_work
             .as_mut()
+            .and_then(NativeAudioAuthorWork::single_mut)
             .ok_or_else(|| failure("native author work disappeared"))?
             .outstanding = Some(NativeAudioEditorPendingAuthor {
             proposal,
@@ -618,7 +696,9 @@ impl AppState {
 
     fn queue_native_audio_author_handoff(&mut self) -> Result<()> {
         use mondrian_media::AudioPcmNativeAuthorHandoffIntent as Intent;
-        let Some(work) = self.native_audio_author_work.as_ref() else {
+        let Some(work) =
+            self.native_audio_author_work.as_ref().and_then(NativeAudioAuthorWork::single)
+        else {
             return Ok(());
         };
         let Some(pending) = &work.outstanding else {
@@ -656,6 +736,7 @@ impl AppState {
             let work = self
                 .native_audio_author_work
                 .as_mut()
+                .and_then(NativeAudioAuthorWork::single_mut)
                 .ok_or_else(|| failure("native author work disappeared"))?;
             let pending = work
                 .outstanding
@@ -666,6 +747,7 @@ impl AppState {
         let work = self
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .ok_or_else(|| failure("native author work disappeared"))?;
         let pending = work
             .outstanding
@@ -692,7 +774,10 @@ impl AppState {
             .audio_playback
             .request_native_audio_author_handoff(request)
             .map_err(failure)?;
-        if let Some(work) = &mut self.native_audio_author_work
+        if let Some(work) = self
+            .native_audio_author_work
+            .as_mut()
+            .and_then(NativeAudioAuthorWork::single_mut)
             && let Some(pending) = &mut work.outstanding
         {
             pending.queued = queued;
@@ -709,7 +794,11 @@ impl AppState {
         status: mondrian_media::AudioPcmNativeAuthorHandoffStatus,
     ) -> Result<bool> {
         use mondrian_media::AudioPcmNativeAuthorHandoffStatus as Status;
-        let Some(work) = &mut self.native_audio_author_work else {
+        let Some(work) = self
+            .native_audio_author_work
+            .as_mut()
+            .and_then(NativeAudioAuthorWork::single_mut)
+        else {
             return Ok(false);
         };
         let Some(pending) = &mut work.outstanding else {
@@ -797,7 +886,7 @@ mod attachment_continuity_contracts {
         pending_open_with_parameter(false)
     }
 
-    fn pending_open_with_parameter(
+    pub(super) fn pending_open_with_parameter(
         with_parameter: bool,
     ) -> (
         tempfile::TempDir,
@@ -1198,7 +1287,7 @@ mod attachment_continuity_contracts {
     // These ordinary controls exercise actual Session/Timeline custody through
     // the App handlers. Their Core target/status DTOs model already-admitted
     // Media results; they do not certify a native object, install or ACK.
-    fn opened_author() -> (
+    pub(super) fn opened_author() -> (
         tempfile::TempDir,
         AppState,
         mondrian_core::NativeAudioAuthorProposal,
@@ -1240,7 +1329,11 @@ mod attachment_continuity_contracts {
         state
             .observe_native_audio_author_proposal(proposal.clone())
             .expect("original App admission and compilation; no Media source was installed");
-        let work = state.native_audio_author_work.as_ref().unwrap();
+        let work = state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap();
         assert!(work.gesture.is_some());
         assert!(work.outstanding.as_ref().unwrap().proposal.same_retained_proposal(&proposal));
         assert!(!work.outstanding.as_ref().unwrap().queued);
@@ -1260,6 +1353,7 @@ mod attachment_continuity_contracts {
         let gesture = state
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .unwrap()
             .gesture
             .as_ref()
@@ -1269,6 +1363,7 @@ mod attachment_continuity_contracts {
         let selected = state
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .unwrap()
             .retained_state_entry_source(
                 Some(proposal.target()),
@@ -1281,7 +1376,11 @@ mod attachment_continuity_contracts {
         assert!(state
             .observe_native_audio_author_handoff(proposal.clone(), ack(proposal.target()))
             .unwrap());
-        let work = state.native_audio_author_work.as_ref().unwrap();
+        let work = state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap();
         assert_eq!(work.gesture.as_ref().unwrap().gesture_id(), gesture);
         assert!(work.outstanding.is_none());
         assert!(work.blocks_source_replacement());
@@ -1328,6 +1427,7 @@ mod attachment_continuity_contracts {
             state
                 .native_audio_author_work
                 .as_ref()
+                .and_then(NativeAudioAuthorWork::single)
                 .unwrap()
                 .outstanding
                 .as_ref()
@@ -1339,7 +1439,13 @@ mod attachment_continuity_contracts {
         let context = state.native_audio_editor.as_ref().unwrap();
         assert_eq!(context.target, target);
         assert_eq!(context.attachment_target, attachment);
-        assert!(state.native_audio_author_work.as_ref().unwrap().gesture.is_some());
+        assert!(state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap()
+            .gesture
+            .is_some());
     }
 
     #[test]
@@ -1348,6 +1454,7 @@ mod attachment_continuity_contracts {
         let gesture = state
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .unwrap()
             .gesture
             .as_ref()
@@ -1368,7 +1475,11 @@ mod attachment_continuity_contracts {
                 )
             )
             .unwrap());
-        let work = state.native_audio_author_work.as_ref().unwrap();
+        let work = state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap();
         assert_eq!(work.gesture.as_ref().unwrap().gesture_id(), gesture);
         assert!(work.outstanding.as_ref().unwrap().proposal.same_retained_proposal(&proposal));
         assert!(work.blocks_source_replacement());
@@ -1384,6 +1495,7 @@ mod attachment_continuity_contracts {
             let original = state
                 .native_audio_author_work
                 .as_ref()
+                .and_then(NativeAudioAuthorWork::single)
                 .unwrap()
                 .gesture
                 .as_ref()
@@ -1425,7 +1537,11 @@ mod attachment_continuity_contracts {
                 error.to_string().contains("another captured owner"),
                 "{error:?}"
             );
-            let work = state.native_audio_author_work.as_ref().unwrap();
+            let work = state
+                .native_audio_author_work
+                .as_ref()
+                .and_then(NativeAudioAuthorWork::single)
+                .unwrap();
             assert_eq!(
                 work.gesture.as_ref().unwrap().gesture_id(),
                 original.gesture_id()
@@ -1471,6 +1587,7 @@ mod attachment_continuity_contracts {
         let work = state
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .expect("begin custody survives update error");
         assert!(work.gesture.is_some());
         assert!(work.outstanding.is_none());
@@ -1501,6 +1618,7 @@ mod attachment_continuity_contracts {
         assert!(state
             .native_audio_author_work
             .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
             .unwrap()
             .outstanding
             .as_ref()
@@ -1529,7 +1647,11 @@ mod attachment_continuity_contracts {
         assert!(state
             .observe_native_audio_author_handoff(terminal.clone(), ack(terminal.target()))
             .is_err());
-        let work = state.native_audio_author_work.as_ref().unwrap();
+        let work = state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap();
         assert!(work.gesture.is_some());
         assert!(work.outstanding.as_ref().unwrap().proposal.same_retained_proposal(&terminal));
     }
@@ -1558,7 +1680,11 @@ mod attachment_continuity_contracts {
         assert!(state
             .observe_native_audio_author_handoff(terminal.clone(), ack(terminal.target()))
             .unwrap());
-        let work = state.native_audio_author_work.as_ref().unwrap();
+        let work = state
+            .native_audio_author_work
+            .as_ref()
+            .and_then(NativeAudioAuthorWork::single)
+            .unwrap();
         assert!(work.gesture.is_none());
         assert!(work.outstanding.is_none());
         assert!(
@@ -1611,14 +1737,15 @@ mod attachment_continuity_contracts {
             let mut surface = context();
             surface.attachment_target = None;
             state.native_audio_editor = Some(surface);
-            state.native_audio_author_work = Some(NativeAudioAuthorWork {
-                session_id: state.authoring_session_id().unwrap(),
-                sequence_id,
-                renderer: state.native_audio_renderer.clone().unwrap(),
-                gesture: None,
-                outstanding: None,
-                state_entry_accepted: true,
-            });
+            state.native_audio_author_work =
+                Some(NativeAudioAuthorWork::Single(NativeAudioSingleAuthorWork {
+                    session_id: state.authoring_session_id().unwrap(),
+                    sequence_id,
+                    renderer: state.native_audio_renderer.clone().unwrap(),
+                    gesture: None,
+                    outstanding: None,
+                    state_entry_accepted: true,
+                }));
             // No native processor is modeled: this is the original registered
             // builtin Source/Media Closed or clear boundary, not native proof.
             if serial_close {

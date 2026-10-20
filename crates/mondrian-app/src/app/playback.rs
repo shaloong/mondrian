@@ -195,7 +195,10 @@ impl AppAudioPlayback {
         }
     }
 
-    fn matches_source_weak(&self, renderer: &std::sync::Weak<dyn AudioPcmRenderer>) -> bool {
+    pub(super) fn matches_source_weak(
+        &self,
+        renderer: &std::sync::Weak<dyn AudioPcmRenderer>,
+    ) -> bool {
         match self {
             Self::Available(playback) => playback.matches_source_weak(renderer),
             Self::Unavailable { .. } => false,
@@ -1352,6 +1355,7 @@ impl AppState {
             observer(self, &event);
             self.handle_audio_playback_event(event, clock())?;
         }
+        self.retry_native_audio_terminal_author()?;
         if self.audio_playback.native_reprepare_pending_generation()
             == Some(poll.snapshot.generation)
             && self.is_playing()
@@ -1915,8 +1919,42 @@ impl AppState {
                 self.publish_native_audio_diagnostics(*batch);
                 Ok(())
             }
-            AudioPlaybackEvent::NativeAuthorProposalObserved { proposal, .. } => {
-                self.observe_native_audio_author_proposal(*proposal)
+            AudioPlaybackEvent::NativeAuthorProposalObserved {
+                renderer_id,
+                generation,
+                proposal,
+            } => self.observe_native_audio_author_delivery(renderer_id, generation, *proposal),
+            AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared {
+                renderer_id,
+                generation,
+                proposal,
+                key,
+            } => {
+                self.observe_native_audio_terminal_prepared(renderer_id, generation, *proposal, key)
+            }
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                renderer_id,
+                generation,
+                proposal,
+                key,
+                status,
+            } => {
+                if self.observe_native_audio_terminal_status(
+                    renderer_id,
+                    generation,
+                    *proposal,
+                    key,
+                    status,
+                )? && self
+                    .native_audio_author_work
+                    .as_ref()
+                    .zip(self.native_audio_renderer.as_ref())
+                    .is_some_and(|(work, source)| work.snapshot_current_for_source(source))
+                {
+                    self.audio_playback_author_binding =
+                        self.current_audio_playback_author_binding()?;
+                }
+                Ok(())
             }
             AudioPlaybackEvent::NativeObservationPollRefused {
                 renderer_id,
@@ -2415,7 +2453,7 @@ impl AppState {
         }
     }
 
-    fn current_audio_playback_author_binding(
+    pub(super) fn current_audio_playback_author_binding(
         &self,
     ) -> mondrian_core::Result<Option<AudioPlaybackAuthorBinding>> {
         let Some((session_id, sequence)) = self.authoring_session_id().zip(self.active_sequence())
