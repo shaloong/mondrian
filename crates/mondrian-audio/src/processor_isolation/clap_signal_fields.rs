@@ -191,6 +191,8 @@ impl ClapSignalFields<'_> {
                 expected_channels[index][channel] = pcm.as_mut_ptr();
             }
         }
+        // Complete checked seconds/beat lowering before entering the native
+        // audio role: an error cannot start DSP or consume a flush request.
         let transport = clap_transport(
             block.start_sample(),
             block.sample_rate(),

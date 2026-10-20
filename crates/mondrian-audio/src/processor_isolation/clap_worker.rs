@@ -61,6 +61,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, ThreadId};
 
+#[path = "clap_worker/beat_position.rs"]
+mod beat_position;
 #[path = "clap_worker/native_author.rs"]
 mod native_author;
 #[path = "clap_worker/parameter_observations.rs"]
@@ -2337,16 +2339,28 @@ pub(super) fn clap_transport(
     reference: Option<mondrian_core::MusicalTimeReference>,
 ) -> Result<TransportEvent, AudioProcessorHostError> {
     let tempo = crate::processor::musical_tempo(reference)?;
+    let seconds = clap_seconds_position(start_sample, sample_rate)?;
+    let beats = reference
+        .map(|reference| beat_position::position(start_sample, sample_rate, reference))
+        .transpose()
+        .map_err(|error| match error {
+            beat_position::BeatPositionError::ZeroSampleRate => {
+                invalid("CLAP transport sample rate is zero")
+            }
+            beat_position::BeatPositionError::OutOfRange => AudioProcessorHostError::Process(
+                "CLAP signed musical position exceeds the beats representation".to_owned(),
+            ),
+        })?;
     Ok(TransportEvent {
         header: EventHeader::new_core(0, EventFlags::empty()),
         flags: TransportFlags::HAS_SECONDS_TIMELINE
             | if tempo.is_some() {
-                TransportFlags::HAS_TEMPO
+                TransportFlags::HAS_TEMPO | TransportFlags::HAS_BEATS_TIMELINE
             } else {
                 TransportFlags::empty()
             },
-        song_pos_seconds: clap_seconds_position(start_sample, sample_rate)?,
-        song_pos_beats: BeatTime::from_bits(0),
+        song_pos_seconds: seconds,
+        song_pos_beats: beats.unwrap_or(BeatTime::from_bits(0)),
         tempo: tempo.unwrap_or(0.0),
         tempo_inc: 0.0,
         loop_start_beats: BeatTime::from_bits(0),
@@ -2679,7 +2693,7 @@ mod tests {
     }
 
     #[test]
-    fn clap_transport_music_advertises_only_seconds_and_explicit_finite_tempo() {
+    fn clap_transport_music_advertises_exact_beats_and_explicit_finite_tempo() {
         use mondrian_core::{MusicalTimeReference, TimelineTime};
         for rate in [44_100, 48_000] {
             for sample in [-120_007, -1, 0, 99_317] {
@@ -2695,12 +2709,17 @@ mod tests {
                     let actual = clap_transport(sample, rate, Some(music)).unwrap();
                     assert_eq!(
                         actual.flags,
-                        TransportFlags::HAS_SECONDS_TIMELINE | TransportFlags::HAS_TEMPO
+                        TransportFlags::HAS_SECONDS_TIMELINE
+                            | TransportFlags::HAS_TEMPO
+                            | TransportFlags::HAS_BEATS_TIMELINE
                     );
                     assert_eq!(actual.song_pos_seconds, old.song_pos_seconds);
                     assert_eq!(actual.tempo, 80.0);
                     assert_eq!(actual.tempo_inc, 0.0);
-                    assert_eq!(actual.song_pos_beats.to_bits(), 0);
+                    assert_eq!(
+                        actual.song_pos_beats,
+                        beat_position::position(sample, rate, music).unwrap()
+                    );
                     assert_eq!(actual.bar_start.to_bits(), 0);
                     assert_eq!(actual.bar_number, 0);
                     assert_eq!(actual.time_signature_numerator, 0);
@@ -2708,6 +2727,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn clap_transport_rejects_unrepresentable_beats_without_a_native_call() {
+        let music = mondrian_core::MusicalTimeReference::new(
+            mondrian_core::TimelineTime::new(i64::MIN, 1).unwrap(),
+            mondrian_core::TimelineTime::new(1, 3).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            clap_transport(0, 48_000, Some(music)),
+            Err(AudioProcessorHostError::Process(detail))
+                if detail == "CLAP signed musical position exceeds the beats representation"
+        ));
+        let seconds_only = clap_transport(0, 48_000, None).unwrap();
+        assert_eq!(seconds_only.flags, TransportFlags::HAS_SECONDS_TIMELINE);
+        assert_eq!(seconds_only.song_pos_seconds.to_bits(), 0);
+        assert_eq!(seconds_only.song_pos_beats.to_bits(), 0);
     }
 
     struct SidechainPlugin<const CASE: u8>;
