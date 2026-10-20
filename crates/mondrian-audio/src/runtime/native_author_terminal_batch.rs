@@ -308,8 +308,9 @@ impl AudioProgramRuntime {
     }
 
     /// Recheck under the caller's original Runtime mutex, then acquire its real
-    /// canonical commit guard. SDK calls, allocation and cancellation checks all
-    /// precede acquire. The returned guard remains alive for the adapter's same
+    /// canonical commit guard. SDK calls and allocation precede acquire; one
+    /// final atomic cancellation check follows it before Source commit. The
+    /// returned guard remains alive for the adapter's same
     /// metadata publication; it must end before native Ack or owner retirement.
     /// A failed acquire/Source CAS leaves prepared and every prefix with its owner.
     pub fn install_native_author_terminal_batch_with_commit_guard<G>(
@@ -372,6 +373,11 @@ impl AudioProgramRuntime {
             return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
         }
         let guard = acquire()?;
+        // Acquiring a real author fence may block or cancel this work. The
+        // Source CAS, not the preceding SDK preflight, is the irreversible seam.
+        if cancellation.is_canceled() {
+            return Err(NativeAudioAuthorAdmissionError::Cancelled.into());
+        }
         let commit = authorization.begin_commit(&prepared.destination)?;
         let mut cursor = 0;
         self.swap_parameter_plans(std::slice::from_mut(&mut prepared.local), &mut cursor);

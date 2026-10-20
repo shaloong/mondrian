@@ -257,6 +257,7 @@ fn terminal_batch_final_recheck_guard_and_partial_ack_keep_original_custody() {
         registry: Arc<PreflightRegistry>,
         calls: [usize; 3],
         alive: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
     }
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -266,10 +267,54 @@ fn terminal_batch_final_recheck_guard_and_partial_ack_keep_original_custody() {
                 "all native observations/Bind/create precede the canonical guard"
             );
             self.alive.store(0, Ordering::Relaxed);
+            self.drops.fetch_add(1, Ordering::Relaxed);
         }
     }
     let alive = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
     let registry = Arc::clone(&f.owned.registry);
+    let cancelled_in_acquire = ExecutionCancellationToken::new();
+    let retained: Vec<_> = f.probes.iter().map(|probe| probe.lock().unwrap().retained).collect();
+    let error = match f.owned.inner.runtime.install_native_author_terminal_batch_with_commit_guard(
+        &mut prepared,
+        &mut authorization,
+        &cancelled_in_acquire,
+        || {
+            alive.store(1, Ordering::Relaxed);
+            cancelled_in_acquire.cancel();
+            Ok(Guard {
+                calls: registry.calls.snapshot(),
+                registry: Arc::clone(&registry),
+                alive: Arc::clone(&alive),
+                drops: Arc::clone(&drops),
+            })
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("cancellation in acquire cannot cross the Source CAS"),
+    };
+    assert!(matches!(
+        error,
+        NativeAudioParameterHandoffError::Admission(NativeAudioAuthorAdmissionError::Cancelled)
+    ));
+    assert_eq!(alive.load(Ordering::Relaxed), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(preflight_cursors(&f.owned.inner.runtime), before);
+    assert_eq!(
+        f.owned.inner.source.current_claim().unwrap().unwrap().generation(),
+        claim.generation()
+    );
+    for member in &f.members {
+        assert!(prepared.installed_target(member).is_none());
+    }
+    for (probe, old) in f.probes.iter().zip(retained) {
+        let probe = probe.lock().unwrap();
+        assert_eq!(probe.retained, old);
+        assert_eq!((probe.ack_attempts, probe.accepted_acks), (0, 0));
+    }
+    // Reuse this very prepared owner and unconsumed original authorization with
+    // the original uncancelled token. No compensating Bind/Ack or new Source.
+
     let (installed, guard) = f
         .owned
         .inner
@@ -284,6 +329,7 @@ fn terminal_batch_final_recheck_guard_and_partial_ack_keep_original_custody() {
                     calls: registry.calls.snapshot(),
                     registry,
                     alive: Arc::clone(&alive),
+                    drops: Arc::clone(&drops),
                 })
             },
         )
@@ -296,6 +342,7 @@ fn terminal_batch_final_recheck_guard_and_partial_ack_keep_original_custody() {
     assert!(prepared.installed_target(&forged_equal(&f.members[0])).is_none());
     drop(guard);
     assert_eq!(alive.load(Ordering::Relaxed), 0);
+    assert_eq!(drops.load(Ordering::Relaxed), 2);
     let probe_for = |member: &mondrian_core::NativeAudioAuthorProposal| {
         f.probes
             .iter()
