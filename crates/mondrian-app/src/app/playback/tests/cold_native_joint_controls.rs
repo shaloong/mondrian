@@ -3327,4 +3327,5 @@ fn app_owned_clap_project_close_releases_native_source_before_app_shutdown() {
         "PROJECT_CLOSE_NATIVE_CUSTODY_BEFORE_APP_SHUTDOWN: claim={claim_before_app_shutdown:?}, media_source_available={source_available_before_app_shutdown}, renderer_released={renderer_released_before_app_shutdown}, project_released={project_released_before_app_shutdown}");
 }
 
+mod headless_native_author;
 mod project_state_roundtrip;
