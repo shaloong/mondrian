@@ -54,6 +54,16 @@ Bounds are not a second grant.
 Fresh uses the same Host policy, drops the previous Plugin before new loading,
 and retains its one W; it does not invent two overlapping Plugin instances.
 
+Cold and Fresh first validate class, buses, parameters and events, then use the
+original native start and compare exact latency/tail before publishing Ready or
+installing the Fresh Plugin. No process/PCM call occurs before that comparison.
+The old Eager load implicitly activated before validation; Deferred exposed that
+activation-dependent latency was being compared too early. The deliberate error
+order is now static metadata, native start, then execution facts. The official
+[call sequence](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Workflow%2BDiagrams/Audio%2BProcessor%2BCall%2BSequence.html)
+permits these UI queries in Processing. No extra activation API or state owner is
+introduced, and failed matching remains terminal with the original hold/fees.
+
 ## Migration and validation
 
 Implementation and qualification are in progress. Preserve the Eager/no-bounds
@@ -67,3 +77,8 @@ plugin/module/OS heaps and physical memory commitment. It does not qualify full
 heap usage, realtime safety, other platforms or every SDK load path. Audio DAG,
 author state, Timeline semantics, project format and retirement authority remain
 unchanged. The current capability matrices remain the qualification authority.
+
+Initial processing mode is a separate existing gap: cold/Fresh restore prepares
+with the SDK's default Realtime mode before the Worker sets Offline. The current
+rate/block-size qualification does not certify the first setup's mode. A later
+initial-mode input must follow the same load body without preparing default buses.

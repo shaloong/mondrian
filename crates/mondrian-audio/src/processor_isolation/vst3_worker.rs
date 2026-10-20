@@ -601,7 +601,8 @@ impl Vst3AudioProcessorWorkerFactory {
             &plugin,
             &payload.parameters,
         );
-        let input_names = validate_loaded(&mut plugin, &registration, render.channel_layout)?;
+        let input_names =
+            prepare_loaded_metadata(&mut plugin, &registration, render.channel_layout)?;
         #[cfg(all(test, target_os = "windows"))]
         startup_metadata_diagnostics::observe("after_validate", &plugin, &payload.parameters);
         let buffers = plugin
@@ -610,6 +611,7 @@ impl Vst3AudioProcessorWorkerFactory {
         plugin
             .start_processing()
             .map_err(|error| unavailable(format!("VST3 processing start failed: {error}")))?;
+        validate_started_execution(&plugin, registration.execution_contract)?;
         #[cfg(all(test, target_os = "windows"))]
         startup_metadata_diagnostics::observe(
             "after_start_processing",
@@ -1742,7 +1744,7 @@ impl VstSignalFields<'_> {
     }
 }
 
-fn validate_loaded(
+fn prepare_loaded_metadata(
     plugin: &mut Plugin,
     registration: &Vst3PluginRegistration,
     channel_layout: AudioChannelLayout,
@@ -1762,17 +1764,6 @@ fn validate_loaded(
     if metadata.contract != registration.auxiliary_inputs {
         return Err(invalid("VST3 auxiliary bus contract changed since probe"));
     }
-    let tail = match plugin.tail_samples() {
-        0 => AudioProcessorTail::None,
-        u32::MAX => AudioProcessorTail::Infinite,
-        frames => AudioProcessorTail::Finite(frames as usize),
-    };
-    if plugin.latency_samples() as usize
-        != registration.execution_contract.algorithmic_latency_frames()
-        || tail != registration.execution_contract.tail()
-    {
-        return Err(invalid("VST3 latency or tail changed since contract probe"));
-    }
     let parameters = parameter_descriptors(plugin)?;
     if parameters != registration.parameters {
         return Err(invalid(
@@ -1783,6 +1774,28 @@ fn validate_loaded(
         return Err(invalid("VST3 event-bus contract changed since probe"));
     }
     Ok(metadata.names)
+}
+
+/// Read activated execution facts after the original native start, before any
+/// Ready publication or process call. Deferred load has no earlier activation.
+fn validate_started_execution(
+    plugin: &Plugin,
+    contract: AudioProcessorExecutionContract,
+) -> Result<(), AudioProcessorHostError> {
+    if !plugin.is_processing() {
+        return Err(invalid("VST3 execution validation requires native start"));
+    }
+    let tail = match plugin.tail_samples() {
+        0 => AudioProcessorTail::None,
+        u32::MAX => AudioProcessorTail::Infinite,
+        frames => AudioProcessorTail::Finite(frames as usize),
+    };
+    if plugin.latency_samples() as usize != contract.algorithmic_latency_frames()
+        || tail != contract.tail()
+    {
+        return Err(invalid("VST3 latency or tail changed since contract probe"));
+    }
+    Ok(())
 }
 
 /// Compare stopped, already activated buses without collecting another inventory.
@@ -2658,7 +2671,7 @@ impl Vst3Worker {
         fresh.set_process_mode(mode).map_err(|error| {
             AudioProcessorHostError::StateEntry(format!("VST3 state-entry mode failed: {error}"))
         })?;
-        validate_loaded(
+        prepare_loaded_metadata(
             &mut fresh,
             &Vst3PluginRegistration {
                 class_id: self.payload.class_id.clone(),
@@ -2676,6 +2689,7 @@ impl Vst3Worker {
         fresh.start_processing().map_err(|error| {
             AudioProcessorHostError::StateEntry(format!("VST3 state-entry start failed: {error}"))
         })?;
+        validate_started_execution(&fresh, self.contract)?;
         let fresh_owner = fresh.native_editor_attachment_owner();
         // Install before inspecting callbacks. Refused fresh source/cohorts stay
         // on this actual object rather than being dropped/reloaded to erase them.
