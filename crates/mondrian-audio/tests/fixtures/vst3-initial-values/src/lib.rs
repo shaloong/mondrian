@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::{ptr, slice};
 
 use std::thread::{self, ThreadId};
@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 14).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 15).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -117,8 +117,87 @@ unsafe fn write_audit(stream: *mut IBStream, bytes: &[u8]) -> tresult {
     }
 }
 
+// Selected only by a dedicated SDK test process. Absent this opt-in, all old
+// modes retain their original stereo/event-free declarations and state bytes.
+struct DeferredLayoutAudit {
+    enabled: bool,
+    instance: u64,
+    restored: AtomicBool,
+    setup_calls: AtomicU32,
+    first_frames: AtomicU32,
+    first_rate: AtomicU64,
+    audio_acks: AtomicU32,
+    event_acks: AtomicU32,
+    arrangement_acks: AtomicU32,
+    component_active: AtomicBool,
+    violations: AtomicU32,
+    signal_calls: AtomicU32,
+}
+
+impl DeferredLayoutAudit {
+    fn new() -> Self {
+        static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
+        let enabled = std::env::var_os("MONDRIAN_VST3_INITIAL_VALUES_DEFERRED_LAYOUT")
+            .is_some_and(|value| value == "1");
+        Self {
+            enabled,
+            instance: if enabled {
+                NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed)
+            } else {
+                0
+            },
+            restored: AtomicBool::new(false),
+            setup_calls: AtomicU32::new(0),
+            first_frames: AtomicU32::new(0),
+            first_rate: AtomicU64::new(0),
+            audio_acks: AtomicU32::new(0),
+            event_acks: AtomicU32::new(0),
+            arrangement_acks: AtomicU32::new(0),
+            component_active: AtomicBool::new(false),
+            violations: AtomicU32::new(0),
+            signal_calls: AtomicU32::new(0),
+        }
+    }
+
+    fn audio_channels(&self) -> i32 {
+        if self.enabled && !self.restored.load(Ordering::Relaxed) {
+            6
+        } else {
+            2
+        }
+    }
+
+    fn reject(&self, reason: u32) -> tresult {
+        self.violations.fetch_or(reason, Ordering::Relaxed);
+        kResultFalse
+    }
+
+    fn bytes(&self) -> [u8; 64] {
+        let mut bytes = [0; 64];
+        bytes[..4].copy_from_slice(b"MDF1");
+        bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.instance.to_le_bytes());
+        bytes[16..20]
+            .copy_from_slice(&u32::from(self.restored.load(Ordering::Relaxed)).to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.audio_channels().to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.setup_calls.load(Ordering::Relaxed).to_le_bytes());
+        bytes[28..32].copy_from_slice(&self.first_frames.load(Ordering::Relaxed).to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.first_rate.load(Ordering::Relaxed).to_le_bytes());
+        bytes[40..44].copy_from_slice(&self.audio_acks.load(Ordering::Relaxed).to_le_bytes());
+        bytes[44..48].copy_from_slice(&self.event_acks.load(Ordering::Relaxed).to_le_bytes());
+        bytes[48..52].copy_from_slice(&self.arrangement_acks.load(Ordering::Relaxed).to_le_bytes());
+        bytes[52..56].copy_from_slice(
+            &u32::from(self.component_active.load(Ordering::Relaxed)).to_le_bytes(),
+        );
+        bytes[56..60].copy_from_slice(&self.violations.load(Ordering::Relaxed).to_le_bytes());
+        bytes[60..64].copy_from_slice(&self.signal_calls.load(Ordering::Relaxed).to_le_bytes());
+        bytes
+    }
+}
+
 struct GainProcessor {
     mode: AtomicU32,
+    deferred: DeferredLayoutAudit,
     active_buses: AtomicU32,
     process_calls: AtomicUsize,
     host: RefCell<Option<ComPtr<IHostApplication>>>,
@@ -145,6 +224,7 @@ impl GainProcessor {
             gain: AtomicU64::new(0.5f64.to_bits()),
             sample_rate: AtomicU64::new(0),
             mode: AtomicU32::new(0),
+            deferred: DeferredLayoutAudit::new(),
             active_buses: AtomicU32::new(0),
             process_calls: AtomicUsize::new(0),
             host: RefCell::new(None),
@@ -222,6 +302,11 @@ impl IComponentTrait for GainProcessor {
             && matches!(dir, BusDirections_::kInput | BusDirections_::kOutput)
         {
             1
+        } else if self.deferred.enabled
+            && mediaType == MediaTypes_::kEvent
+            && dir == BusDirections_::kInput
+        {
+            1
         } else {
             0
         }
@@ -240,7 +325,11 @@ impl IComponentTrait for GainProcessor {
         let bus = &mut *output;
         bus.mediaType = media_type;
         bus.direction = direction;
-        bus.channelCount = 2;
+        bus.channelCount = if media_type == MediaTypes_::kEvent {
+            16
+        } else {
+            self.deferred.audio_channels()
+        };
         copy_wstring("Main", &mut bus.name);
         bus.busType = BusTypes_::kMain as BusType;
         bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
@@ -265,6 +354,18 @@ impl IComponentTrait for GainProcessor {
         if index < 0 || index >= self.getBusCount(media_type, direction) {
             return kInvalidArgument;
         }
+        if self.deferred.enabled {
+            if self.deferred.setup_calls.load(Ordering::Relaxed) == 0
+                || self.deferred.violations.load(Ordering::Relaxed) != 0
+            {
+                return self.deferred.reject(4);
+            }
+            if media_type == MediaTypes_::kEvent {
+                self.deferred.event_acks.fetch_add(1, Ordering::Relaxed);
+                return kResultOk;
+            }
+            self.deferred.audio_acks.fetch_add(1, Ordering::Relaxed);
+        }
         let bit = 1
             << (index
                 + if direction == BusDirections_::kOutput {
@@ -281,7 +382,16 @@ impl IComponentTrait for GainProcessor {
     }
 
     unsafe fn setActive(&self, state: TBool) -> tresult {
-        let _ = state;
+        if self.deferred.enabled {
+            if state != 0
+                && (self.deferred.setup_calls.load(Ordering::Relaxed) == 0
+                    || !self.deferred.restored.load(Ordering::Relaxed)
+                    || self.deferred.violations.load(Ordering::Relaxed) != 0)
+            {
+                return self.deferred.reject(8);
+            }
+            self.deferred.component_active.store(state != 0, Ordering::Relaxed);
+        }
         kResultOk
     }
 
@@ -289,6 +399,14 @@ impl IComponentTrait for GainProcessor {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
+        if self.deferred.enabled {
+            if mode != 15 {
+                return kResultFalse;
+            }
+            self.deferred.restored.store(true, Ordering::Relaxed);
+        } else if mode == 15 {
+            return kResultFalse;
+        }
         self.gain.store(gain.to_bits(), Ordering::Release);
         self.mode.store(mode, Ordering::Release);
         kResultOk
@@ -303,10 +421,14 @@ impl IComponentTrait for GainProcessor {
         if result != kResultOk {
             return result;
         }
-        write_audit(
+        let result = write_audit(
             state,
             &(self.process_calls.load(Ordering::Relaxed) as u32).to_le_bytes(),
-        )
+        );
+        if result != kResultOk || !self.deferred.enabled {
+            return result;
+        }
+        write_audit(state, &self.deferred.bytes())
     }
 }
 
@@ -318,6 +440,14 @@ impl IAudioProcessorTrait for GainProcessor {
         outputs: *mut SpeakerArrangement,
         num_outs: i32,
     ) -> tresult {
+        if self.deferred.enabled {
+            if !self.deferred.restored.load(Ordering::Relaxed)
+                || self.deferred.violations.load(Ordering::Relaxed) != 0
+            {
+                return self.deferred.reject(16);
+            }
+            self.deferred.arrangement_acks.fetch_add(1, Ordering::Relaxed);
+        }
         let count = self.getBusCount(MediaTypes_::kAudio, BusDirections_::kInput);
         if num_ins != count || num_outs != 1 || inputs.is_null() || outputs.is_null() {
             return kResultFalse;
@@ -342,7 +472,11 @@ impl IAudioProcessorTrait for GainProcessor {
         match dir as BusDirections {
             BusDirections_::kInput => {
                 if index >= 0 && index < self.getBusCount(MediaTypes_::kAudio, dir) {
-                    *arr = SpeakerArr::kStereo;
+                    *arr = if self.deferred.audio_channels() == 6 {
+                        SpeakerArr::k51
+                    } else {
+                        SpeakerArr::kStereo
+                    };
                     kResultOk
                 } else {
                     kInvalidArgument
@@ -350,7 +484,11 @@ impl IAudioProcessorTrait for GainProcessor {
             }
             BusDirections_::kOutput => {
                 if index == 0 {
-                    *arr = SpeakerArr::kStereo;
+                    *arr = if self.deferred.audio_channels() == 6 {
+                        SpeakerArr::k51
+                    } else {
+                        SpeakerArr::kStereo
+                    };
                     kResultOk
                 } else {
                     kInvalidArgument
@@ -377,6 +515,23 @@ impl IAudioProcessorTrait for GainProcessor {
             return kInvalidArgument;
         }
         let rate = (*setup).sampleRate;
+        if self.deferred.enabled {
+            if self.deferred.setup_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.deferred.first_rate.store(rate.to_bits(), Ordering::Relaxed);
+                self.deferred
+                    .first_frames
+                    .store((*setup).maxSamplesPerBlock as u32, Ordering::Relaxed);
+            }
+            if !self.deferred.restored.load(Ordering::Relaxed) {
+                return self.deferred.reject(1);
+            }
+            if rate != 48_000.0 || (*setup).maxSamplesPerBlock != 4 {
+                return self.deferred.reject(2);
+            }
+            if self.deferred.violations.load(Ordering::Relaxed) != 0 {
+                return kResultFalse;
+            }
+        }
         if !rate.is_finite() || rate <= 0.0 {
             return kInvalidArgument;
         }
@@ -415,6 +570,14 @@ impl IAudioProcessorTrait for GainProcessor {
             return kInvalidArgument;
         }
         let data = &*data;
+        if self.deferred.enabled
+            && (!self.deferred.restored.load(Ordering::Relaxed)
+                || self.deferred.setup_calls.load(Ordering::Relaxed) == 0
+                || !self.deferred.component_active.load(Ordering::Relaxed)
+                || self.deferred.violations.load(Ordering::Relaxed) != 0)
+        {
+            return self.deferred.reject(32);
+        }
         if data.numSamples == 0 {
             // A real parameter-only Process may omit audio buses entirely.
             // Keep the old one-bus form legal too; never dereference PCM here.
@@ -464,6 +627,9 @@ impl IAudioProcessorTrait for GainProcessor {
             || data.outputs.is_null()
         {
             return kInvalidArgument;
+        }
+        if self.deferred.enabled && data.numSamples != 4 {
+            return self.deferred.reject(32);
         }
         let input = &*data.inputs;
         let output = &*data.outputs;
@@ -515,6 +681,9 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         self.gain.store(gain.to_bits(), Ordering::Relaxed);
         self.process_calls.fetch_add(1, Ordering::Relaxed);
+        if self.deferred.enabled {
+            self.deferred.signal_calls.fetch_add(1, Ordering::Relaxed);
+        }
         kResultOk
     }
 
@@ -664,7 +833,7 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
-        if mode == 14 {
+        if matches!(mode, 14 | 15) {
             self.mode.set(mode);
             return self.restore_mode14_value();
         }
@@ -692,7 +861,7 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
-        if mode == 14 {
+        if matches!(mode, 14 | 15) {
             self.mode.set(mode);
             return self.restore_mode14_value();
         }

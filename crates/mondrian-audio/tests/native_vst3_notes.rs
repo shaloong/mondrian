@@ -1272,3 +1272,182 @@ fn installed_vst3_anchored_note_list_retains_real_com_lifetime_and_closes_betwee
         plugin.stop_processing().unwrap();
     }
 }
+
+#[test]
+#[ignore = "rebuilt owned initial-values DLL with process-exclusive deferred-layout opt-in; SDK only, no Product/Discovery/RT/whole-heap qualification"]
+fn installed_vst3_deferred_restore_bounds_first_native_setup_and_preserves_event_channels() {
+    use vst3_host::audio::{AudioBusConfig, ProcessTimelineContext, ProcessingResourceBounds};
+    use vst3_host::host::PluginLoadPreparation;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct PreparationAudit {
+        instance: u64,
+        restored: u32,
+        channels: u32,
+        setups: u32,
+        first_frames: u32,
+        first_rate: u64,
+        audio_acks: u32,
+        event_acks: u32,
+        arrangement_acks: u32,
+        active: u32,
+        violations: u32,
+        signal_calls: u32,
+    }
+    fn preparation_audit(plugin: &Plugin) -> PreparationAudit {
+        // Existing synchronous state API on the control thread; no worker,
+        // idle RPC, counter service or authored-input drain is introduced.
+        let bytes = plugin.save_state().expect("actual same-component preparation audit");
+        assert_eq!(&bytes[..16], b"VST3HOST_STATE\0\0");
+        assert_eq!(u32_at(&bytes, 16), 1);
+        let component_len = u32_at(&bytes, 20) as usize;
+        let controller_len = u32_at(&bytes, 24) as usize;
+        assert_eq!((component_len, controller_len), (88, 44));
+        assert_eq!(bytes.len(), 28 + component_len + controller_len);
+        let component = &bytes[28..28 + component_len];
+        assert_eq!(&component[..4], b"MIV1");
+        assert_eq!(u32_at(component, 4), 1);
+        let body = &component[24..];
+        assert_eq!(&body[..4], b"MDF1");
+        assert_eq!(u32_at(body, 4), 1);
+        PreparationAudit {
+            instance: u64::from_le_bytes(body[8..16].try_into().unwrap()),
+            restored: u32_at(body, 16),
+            channels: u32_at(body, 20),
+            setups: u32_at(body, 24),
+            first_frames: u32_at(body, 28),
+            first_rate: u64::from_le_bytes(body[32..40].try_into().unwrap()),
+            audio_acks: u32_at(body, 40),
+            event_acks: u32_at(body, 44),
+            arrangement_acks: u32_at(body, 48),
+            active: u32_at(body, 52),
+            violations: u32_at(body, 56),
+            signal_calls: u32_at(body, 60),
+        }
+    }
+
+    // The caller sets this before starting the dedicated test process. Never
+    // mutate a running libtest process's environment to select native behavior.
+    assert_eq!(
+        std::env::var_os("MONDRIAN_VST3_INITIAL_VALUES_DEFERRED_LAYOUT").as_deref(),
+        Some(std::ffi::OsStr::new("1")),
+    );
+    let binary = PathBuf::from(
+        std::env::var_os("MONDRIAN_VST3_INITIAL_VALUES_TEST_PLUGIN")
+            .expect("explicit rebuilt owned initial-values DLL"),
+    );
+    assert!(binary.is_absolute() && binary.is_file());
+    let mut host = Vst3Host::builder()
+        .sample_rate(48_000.0)
+        .block_size(4)
+        .input_channels(2)
+        .output_channels(2)
+        .processing_resource_bounds(ProcessingResourceBounds::new(32, 2, 128, 4).unwrap())
+        .load_preparation(PluginLoadPreparation::Deferred)
+        .build()
+        .unwrap();
+    let mut plugin = host
+        .load_plugin_class(binary, "61921CF43A2B4A68AE5AE08241D85E22")
+        .expect("deferred native load does not prepare its default six-channel audio buses");
+    let cold = preparation_audit(&plugin);
+    assert_ne!(cold.instance, 0);
+    assert_eq!(
+        cold,
+        PreparationAudit {
+            instance: cold.instance,
+            restored: 0,
+            channels: 6,
+            setups: 0,
+            first_frames: 0,
+            first_rate: 0,
+            audio_acks: 0,
+            event_acks: 0,
+            arrangement_acks: 0,
+            active: 0,
+            violations: 0,
+            signal_calls: 0,
+        },
+        "load cannot silently set up, acknowledge or activate the default-wide component",
+    );
+    let mut component = b"MIV1".to_vec();
+    component.extend_from_slice(&1_u32.to_le_bytes());
+    component.extend_from_slice(&0.375_f64.to_le_bytes());
+    component.extend_from_slice(&15_u32.to_le_bytes());
+    let mut state = b"VST3HOST_STATE\0\0".to_vec();
+    state.extend_from_slice(&1_u32.to_le_bytes());
+    state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    state.extend_from_slice(&(component.len() as u32).to_le_bytes());
+    state.extend_from_slice(&component);
+    state.extend_from_slice(&component);
+    // Restore really changes the component to stereo. The separate controller
+    // emits .75 through the original performEdit callback; no setter supplies it.
+    plugin
+        .load_state(&state)
+        .expect("restore precedes the first actual native setup");
+    let restored = preparation_audit(&plugin);
+    assert_eq!(
+        restored,
+        PreparationAudit {
+            instance: cold.instance,
+            restored: 1,
+            channels: 2,
+            setups: 1,
+            first_frames: 4,
+            first_rate: 48_000_f64.to_bits(),
+            audio_acks: 2,
+            event_acks: 1,
+            arrangement_acks: 0,
+            active: 0,
+            violations: 0,
+            signal_calls: 0,
+        },
+        "all actual audio/event ACKs follow the first requested 48k/4-frame setup",
+    );
+    let layout = plugin.audio_bus_layout().unwrap();
+    assert_eq!(
+        layout.inputs,
+        [AudioBusConfig { channel_count: 2, active: true }]
+    );
+    assert_eq!(
+        layout.outputs,
+        [AudioBusConfig { channel_count: 2, active: true }]
+    );
+    let events = plugin.native_event_bus_info().unwrap();
+    assert!(events.outputs.is_empty());
+    assert_eq!(events.inputs.len(), 1);
+    assert_eq!(events.inputs[0].role, NativeEventBusRole::Main);
+    assert_eq!(events.inputs[0].channel_count, 16);
+    assert!(events.inputs[0].default_active && events.inputs[0].host_active);
+    assert!(
+        plugin.create_bus_audio_buffers(5).is_err(),
+        "the admitted audio block bound remains four"
+    );
+    assert_eq!(
+        preparation_audit(&plugin),
+        restored,
+        "a refused caller buffer cannot prepare or ACK"
+    );
+    plugin.start_processing().unwrap();
+    for start in [73, 77] {
+        plugin
+            .set_process_timeline_context(ProcessTimelineContext {
+                sample_position: start,
+                sample_rate: 48_000,
+            })
+            .unwrap();
+        let mut buffers = plugin.create_bus_audio_buffers(4).unwrap();
+        for channel in &mut buffers.inputs[0].channels {
+            channel.fill(1.0);
+        }
+        for channel in &mut buffers.outputs[0].channels {
+            channel.fill(99.0);
+        }
+        plugin
+            .process_bus_audio(&mut buffers)
+            .expect("original controller input reaches real stereo DSP");
+        assert_eq!(buffers.outputs[0].channels, [vec![0.75; 4], vec![0.75; 4]]);
+    }
+    plugin.stop_processing().unwrap();
+    let finished = preparation_audit(&plugin);
+    assert_eq!(finished, PreparationAudit { signal_calls: 2, ..restored });
+}
