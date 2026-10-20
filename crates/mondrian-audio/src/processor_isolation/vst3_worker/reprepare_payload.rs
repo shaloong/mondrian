@@ -15,6 +15,8 @@ struct Metadata<'a> {
     #[serde(borrow)]
     main_audio_input: &'a RawValue,
     #[serde(borrow)]
+    audio_output_count: &'a RawValue,
+    #[serde(borrow)]
     event_bus_contract: &'a RawValue,
     #[serde(borrow)]
     binary_path: &'a RawValue,
@@ -32,9 +34,10 @@ struct Metadata<'a> {
     parameter_ids: &'a RawValue,
 }
 
-const FIELD_NAMES: [&str; 10] = [
+const FIELD_NAMES: [&str; 11] = [
     "schema_version",
     "main_audio_input",
+    "audio_output_count",
     "event_bus_contract",
     "binary_path",
     "class_id",
@@ -58,7 +61,7 @@ const FIELD_NAME_BYTES: usize = {
 // reusable Vec as an iterative nesting stack, and escaped root keys reuse it.
 // A requested-layout envelope of 16*(N+K) covers that input-sized scratch and
 // cold single-layer escaped-key/Display diagnostics. K is derived from these
-// TEN names: four bytes per name byte for the expected-field list plus 512 for
+// ELEVEN names: four bytes per name byte for the expected-field list plus 512 for
 // fixed prefixes, punctuation and numeric locations. This is not allocator/SDK
 // telemetry. Output and owning Factory clones are admitted separately.
 pub(in crate::processor_isolation) fn reprepare_codec_bound(n: usize) -> Option<usize> {
@@ -78,7 +81,7 @@ pub(in crate::processor_isolation) fn reprepare_payload_output_bound(
         return None;
     }
     // At most three decimal digits and a comma per byte, plus all old raw
-    // fragments, ten quoted keys/colons/commas, braces, [] and default null.
+    // fragments, eleven quoted keys/colons/commas, braces, [] and default null.
     configuration_bytes
         .checked_mul(4)?
         .checked_add(n)?
@@ -100,6 +103,14 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
     }
     let view: Metadata<'_> = serde_json::from_slice(payload)
         .map_err(|error| invalid(format!("invalid retained VST3 metadata: {error}")))?;
+    let version: u32 = serde_json::from_str(view.schema_version.get())
+        .map_err(|error| invalid(format!("invalid retained VST3 version: {error}")))?;
+    if version != super::PAYLOAD_VERSION {
+        return Err(invalid("unsupported retained VST3 worker payload version"));
+    }
+    let output_count: u8 = serde_json::from_str(view.audio_output_count.get())
+        .map_err(|error| invalid(format!("invalid retained VST3 output count: {error}")))?;
+    super::validate_audio_output_count(output_count)?;
     // Original Option fields admit both absent and null. The old state is never
     // decoded/allocated; absent vendor re-emits null just like the typed codec.
     let _old_state = view.state;
@@ -111,9 +122,10 @@ pub(in crate::processor_isolation) fn payload_with_reprepare_configuration(
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             use serde::ser::SerializeStruct;
             let v = self.metadata;
-            let mut object = serializer.serialize_struct("Vst3Payload", 10)?;
+            let mut object = serializer.serialize_struct("Vst3Payload", FIELD_NAMES.len())?;
             object.serialize_field("schema_version", v.schema_version)?;
             object.serialize_field("main_audio_input", v.main_audio_input)?;
+            object.serialize_field("audio_output_count", v.audio_output_count)?;
             object.serialize_field("event_bus_contract", v.event_bus_contract)?;
             object.serialize_field("binary_path", v.binary_path)?;
             object.serialize_field("class_id", v.class_id)?;
@@ -139,6 +151,7 @@ mod tests {
         serde_json::to_string(&super::super::Vst3Payload {
             schema_version: super::super::PAYLOAD_VERSION,
             main_audio_input: super::super::Vst3MainAudioInput::Present,
+            audio_output_count: 3,
             event_bus_contract: super::super::Vst3EventBusContractV1::empty(),
             binary_path: std::env::current_exe().unwrap(),
             class_id: "00112233445566778899aabbccddeeff".to_owned(),
@@ -152,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn vst3_reprepare_raw_codec_preserves_ten_field_fragments_and_option_defaults() {
+    fn vst3_reprepare_raw_codec_preserves_eleven_field_fragments_and_option_defaults() {
         let payload = test_payload().replace(
             "\"parameters\":[]",
             "\"parameters\":[ {\"raw\": [1e99999,-0.0,1.2300]} ]",
@@ -170,6 +183,7 @@ mod tests {
             [
                 v.schema_version.get().to_owned(),
                 v.main_audio_input.get().to_owned(),
+                v.audio_output_count.get().to_owned(),
                 v.event_bus_contract.get().to_owned(),
                 v.binary_path.get().to_owned(),
                 v.class_id.get().to_owned(),
@@ -219,7 +233,13 @@ mod tests {
             payload.replacen("{", "{\"v\\u0065ndor\":null,", 1),
             payload.replacen("{", "{\"vendor\":null,", 1),
             payload.replacen("{", "{\"state\":null,", 1),
-            payload.replace("\"schema_version\":3,", ""),
+            payload.replacen("{", "{\"audio_output_count\":3,", 1),
+            payload.replace("\"schema_version\":4", "\"schema_version\":3"),
+            payload.replace("\"schema_version\":4", "\"schema_version\":5"),
+            payload.replace("\"audio_output_count\":3", "\"audio_output_count\":0"),
+            payload.replace("\"audio_output_count\":3", "\"audio_output_count\":33"),
+            payload.replace("\"audio_output_count\":3", "\"audio_output_count\":256"),
+            payload.replace("\"schema_version\":4,", ""),
             "[]".to_owned(),
         ] {
             let mut peak = 0;
@@ -237,7 +257,7 @@ mod tests {
             let missing = serde_json::to_vec(&value).unwrap();
             assert!(payload_with_reprepare_configuration(&missing, &[8], &mut |_| {}).is_err());
         }
-        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":3,", "");
+        let first = payload.replacen("{", "{\"extra\":0,", 1).replace("\"schema_version\":4,", "");
         let error =
             payload_with_reprepare_configuration(first.as_bytes(), &[8], &mut |_| {}).unwrap_err();
         assert!(

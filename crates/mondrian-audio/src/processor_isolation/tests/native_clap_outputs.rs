@@ -304,7 +304,7 @@ fn clap_output_metadata_is_revalidated_after_configuration_without_reinterpretin
 }
 
 #[test]
-fn native_output_seed_keeps_concrete_identity_and_vst3_refuses_unimplemented_auxiliary_outputs() {
+fn native_output_seed_keeps_concrete_identity_and_vst3_refuses_unverified_output_payload() {
     let output_contract = outputs(AudioChannelLayout::Mono);
     let payload = ClapPayload {
         main_audio_input: ClapMainAudioInput::Absent,
@@ -339,7 +339,8 @@ fn native_output_seed_keeps_concrete_identity_and_vst3_refuses_unimplemented_aux
     };
     assert!(
         matches!(super::super::Vst3AudioProcessorWorkerFactory.prepare(request),
-        Err(AudioProcessorHostError::Unavailable(detail)) if detail=="VST3 auxiliary outputs are not supported by this adapter")
+        Err(AudioProcessorHostError::InvalidContract(detail))
+            if detail.starts_with("invalid VST3 worker payload:"))
     );
 }
 
