@@ -2060,10 +2060,21 @@ fn qualify_native_discrete_filter(string_choice: bool) {
     )
     .expect("resident choice worker");
     let worker = resident.worker_process_id();
+    // This fixture's calculus refusal control requires a real sampled source.
+    // Omitted parameters and the later canonical Graph are true Constants.
+    let sampled_control = |mut values: BTreeMap<String, OpenFxParameterBinding>| {
+        values.insert(
+            "scaleR".into(),
+            OpenFxParameterBinding::current_frame(OpenFxParameterValue::Double(1.0)),
+        );
+        values
+    };
     for index in [None, Some(0), Some(2), Some(1), None] {
-        let values = index
-            .map(|value| constant_parameters([("mode".into(), native_value(value))]))
-            .unwrap_or_default();
+        let values = sampled_control(
+            index
+                .map(|value| constant_parameters([("mode".into(), native_value(value))]))
+                .unwrap_or_default(),
+        );
         let output = resident
             .render(&timing, &values, &input, &mut || Ok(()))
             .expect("resident choice edit");
@@ -2089,7 +2100,10 @@ fn qualify_native_discrete_filter(string_choice: bool) {
         let output = resident
             .render(
                 &timing,
-                &constant_parameters([("calculus".into(), OpenFxParameterValue::Double(value))]),
+                &sampled_control(constant_parameters([(
+                    "calculus".into(),
+                    OpenFxParameterValue::Double(value),
+                )])),
                 &input,
                 &mut || Ok(()),
             )
@@ -2108,7 +2122,10 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             &inspection,
             identifier,
             &timing,
-            &constant_parameters([("mode".to_owned(), native_value(value))]),
+            &sampled_control(constant_parameters([(
+                "mode".to_owned(),
+                native_value(value),
+            )])),
             &input,
         )
         .expect("native choice");
@@ -2137,7 +2154,7 @@ fn qualify_native_discrete_filter(string_choice: bool) {
             &inspection,
             identifier,
             &timing,
-            &constant_parameters([("mode".to_owned(), value)]),
+            &sampled_control(constant_parameters([("mode".to_owned(), value)])),
             &input
         )
         .is_err());

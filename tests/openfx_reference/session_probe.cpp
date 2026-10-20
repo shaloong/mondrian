@@ -842,7 +842,7 @@ bool stringValues(const void* handle, OfxPropertySetHandle in, bool render) {
 
 // Exercise the actual varargs suite, including interval overflow whose product
 // is still representable. Outputs must survive every rejected request.
-bool staticCalculus(const void* handle) {
+bool staticCalculus(const void* handle, OfxPropertySetHandle in) {
   OfxParamSetHandle params = nullptr;
   OfxParamHandle parameter = nullptr;
   double current = 0.0;
@@ -872,10 +872,27 @@ bool staticCalculus(const void* handle) {
         gParamHost->paramGetIntegral(parameter, invalid, 0.0, &result) != kOfxStatErrValue || result != -999.0 ||
         gParamHost->paramGetIntegral(parameter, 0.0, invalid, &result) != kOfxStatErrValue || result != -999.0) { return false; }
   }
-  if (gParamHost->paramGetHandle(params, "scaleR", &parameter, nullptr) != kOfxStatOK) { return false; }
-  double result = -999.0;
-  return gParamHost->paramGetDerivative(parameter, 0.0, &result) == kOfxStatErrMissingHostFeature && result == -999.0 &&
-         gParamHost->paramGetIntegral(parameter, 0.0, 1.0, &result) == kOfxStatErrMissingHostFeature && result == -999.0;
+  OfxPropertySetHandle properties = nullptr;
+  double time = 0.0, value = -999.0;
+  int animating = -1;
+  if (gParamHost->paramGetHandle(params, "scaleR", &parameter, &properties) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(parameter, time, &value) != kOfxStatOK ||
+      gPropHost->propGetInt(properties, kOfxParamPropIsAnimating, 0, &animating) != kOfxStatOK ||
+      (animating != 0 && animating != 1)) { return false; }
+  // Direct requests explicitly supply CurrentFrame; the canonical Graph
+  // supplies Constant. Verify the reported state against both time queries
+  // and calculus, rather than accepting either status for one source.
+  double offTime = -999.0, derivative = -999.0, integral = -999.0;
+  const double otherTime = time == 0.0 ? 1.0 : 0.0;
+  if (animating == 0) {
+    return gParamHost->paramGetValueAtTime(parameter, otherTime, &offTime) == kOfxStatOK && offTime == value &&
+        gParamHost->paramGetDerivative(parameter, 0.0, &derivative) == kOfxStatOK && derivative == 0.0 &&
+        gParamHost->paramGetIntegral(parameter, 0.0, 1.0, &integral) == kOfxStatOK && integral == value;
+  }
+  return gParamHost->paramGetValueAtTime(parameter, otherTime, &offTime) == kOfxStatErrMissingHostFeature && offTime == -999.0 &&
+      gParamHost->paramGetDerivative(parameter, 0.0, &derivative) == kOfxStatErrMissingHostFeature && derivative == -999.0 &&
+      gParamHost->paramGetIntegral(parameter, 0.0, 1.0, &integral) == kOfxStatErrMissingHostFeature && integral == -999.0;
 }
 // These controls are declared non-animatable in the owned Choice fixtures.
 // Other finite times must see the same immutable authored snapshot.
@@ -2968,7 +2985,7 @@ OfxStatus probeAction(const char* action, const void* handle,
       gPropHost->propSetDouble(props, kOfxParamPropMax, 0, std::numeric_limits<double>::max());
       gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0);
     } else if (operation == kOfxImageEffectActionRender &&
-               (!staticCalculus(handle) || !staticQueries(handle, in, selected != "choice"))) { return kOfxStatFailed; }
+               (!staticCalculus(handle, in) || !staticQueries(handle, in, selected != "choice"))) { return kOfxStatFailed; }
   }
   return result;
 }
