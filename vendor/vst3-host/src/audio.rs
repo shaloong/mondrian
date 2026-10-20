@@ -161,6 +161,114 @@ pub struct NativeAudioBusInfoSet {
     pub outputs: Vec<NativeAudioBusInfo>,
 }
 
+/// Fixed per-direction capacity of the bounded stopped audio-bus observation.
+/// The legacy owned audio-bus APIs retain their existing policies.
+pub const MAX_OBSERVED_AUDIO_BUSES: usize = 32;
+
+/// Native declaration facts used by the retained audio configuration consumer.
+/// Names and native default-active flags are not bus identity or current host ACKs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeAudioBusConstraint {
+    /// Declared purpose, never inferred from channel count.
+    pub role: AudioBusRole,
+    /// Positive channel count returned by the component.
+    pub channel_count: usize,
+}
+
+/// One control owner's reusable output slot and bounded three-stage observations.
+/// No plugin-sized allocation, activation, cache or install authority is created.
+pub struct AudioBusQueryFrame {
+    pub(crate) info: vst3::Steinberg::Vst::BusInfo,
+    pub(crate) native_inputs: [NativeAudioBusConstraint; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) native_outputs: [NativeAudioBusConstraint; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) layout_inputs: [AudioBusConfig; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) layout_outputs: [AudioBusConfig; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) input_arrangements: [SpeakerArrangement; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) output_arrangements: [SpeakerArrangement; MAX_OBSERVED_AUDIO_BUSES],
+    pub(crate) native_input_count: usize,
+    pub(crate) native_output_count: usize,
+    pub(crate) layout_input_count: usize,
+    pub(crate) layout_output_count: usize,
+    pub(crate) input_arrangement_count: usize,
+    pub(crate) output_arrangement_count: usize,
+}
+
+impl Default for AudioBusQueryFrame {
+    fn default() -> Self {
+        Self {
+            // SAFETY: BusInfo is integer-only SDK POD with a fixed UTF-16 array.
+            info: unsafe { std::mem::zeroed() },
+            native_inputs: [NativeAudioBusConstraint {
+                role: AudioBusRole::Main,
+                channel_count: 0,
+            }; MAX_OBSERVED_AUDIO_BUSES],
+            native_outputs: [NativeAudioBusConstraint {
+                role: AudioBusRole::Main,
+                channel_count: 0,
+            }; MAX_OBSERVED_AUDIO_BUSES],
+            layout_inputs: [AudioBusConfig {
+                channel_count: 0,
+                active: false,
+            }; MAX_OBSERVED_AUDIO_BUSES],
+            layout_outputs: [AudioBusConfig {
+                channel_count: 0,
+                active: false,
+            }; MAX_OBSERVED_AUDIO_BUSES],
+            input_arrangements: [SpeakerArrangement::from_raw(0); MAX_OBSERVED_AUDIO_BUSES],
+            output_arrangements: [SpeakerArrangement::from_raw(0); MAX_OBSERVED_AUDIO_BUSES],
+            native_input_count: 0,
+            native_output_count: 0,
+            layout_input_count: 0,
+            layout_output_count: 0,
+            input_arrangement_count: 0,
+            output_arrangement_count: 0,
+        }
+    }
+}
+
+impl AudioBusQueryFrame {
+    pub(crate) fn observation(&self) -> AudioBusObservationRef<'_> {
+        AudioBusObservationRef {
+            native_inputs: &self.native_inputs[..self.native_input_count],
+            native_outputs: &self.native_outputs[..self.native_output_count],
+            layout_inputs: &self.layout_inputs[..self.layout_input_count],
+            layout_outputs: &self.layout_outputs[..self.layout_output_count],
+            input_arrangements: &self.input_arrangements[..self.input_arrangement_count],
+            output_arrangements: &self.output_arrangements[..self.output_arrangement_count],
+        }
+    }
+}
+
+/// Borrow of all three successful stages in native direction/index order.
+/// Layout activity is the same owner's retained activation ACK, not GetActive.
+/// This view is observation only; it does not validate a host's canonical shape.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioBusObservationRef<'a> {
+    /// Native input declarations in direction-local index order.
+    pub native_inputs: &'a [NativeAudioBusConstraint],
+    /// Native output declarations in direction-local index order.
+    pub native_outputs: &'a [NativeAudioBusConstraint],
+    /// Existing ProcessData input channels and same-owner activation ACKs.
+    pub layout_inputs: &'a [AudioBusConfig],
+    /// Existing ProcessData output channels and same-owner activation ACKs.
+    pub layout_outputs: &'a [AudioBusConfig],
+    /// Fresh input arrangements, with legacy zero-initialized/status-ignored queries.
+    pub input_arrangements: &'a [SpeakerArrangement],
+    /// Fresh output arrangements, independently enumerated after the inputs.
+    pub output_arrangements: &'a [SpeakerArrangement],
+}
+
+/// Original SDK error with the stage needed by existing host diagnostics.
+#[derive(Debug)]
+pub enum AudioBusObservationError {
+    /// Native declaration census, including stopped/control-owner admission.
+    Metadata(crate::Error),
+    /// Current ProcessData layout or its bounded extent.
+    Layout(crate::Error),
+    /// Fresh arrangement census or its bounded extent.
+    Arrangements(crate::Error),
+}
+
 /// Maximum number of event buses in each native direction, checked before allocation.
 pub const MAX_NATIVE_EVENT_BUSES: usize = 32;
 

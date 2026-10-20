@@ -1458,6 +1458,19 @@ pub(crate) trait PluginInternal: Send {
             "bus-aware audio processing is not supported for this plugin".to_string(),
         ))
     }
+    /// Query stopped native declarations, cached layout and fresh arrangements.
+    /// Each actual direction count is independently bounded before enumeration.
+    fn observe_audio_buses_bounded<'a>(
+        &self,
+        _frame: &'a mut crate::audio::AudioBusQueryFrame,
+    ) -> std::result::Result<
+        crate::audio::AudioBusObservationRef<'a>,
+        crate::audio::AudioBusObservationError,
+    > {
+        Err(crate::audio::AudioBusObservationError::Metadata(
+            Error::Other("bounded native audio-bus observation is unsupported".to_owned()),
+        ))
+    }
     /// Query native roles and names from this loaded component.
     fn native_audio_bus_info(&self) -> Result<crate::audio::NativeAudioBusInfoSet>;
     /// Same-instance, owning-thread census. Remote backends must not infer this from discovery.
@@ -2952,6 +2965,28 @@ impl Plugin {
                 crate::error::NativeEventError::UnsupportedBackend,
             ))?
             .visit_native_event_bus_constraints(visitor)
+    }
+
+    /// Observe stopped native declarations, cached layout, then fresh arrangements.
+    /// A complete borrowed view is returned only after all three stages succeed.
+    /// Each count is bounded to 32 before its loop. Caller-owned fixed storage
+    /// replaces metadata containers; cold errors, native calls and other owners
+    /// are separate from this observation storage guarantee.
+    pub fn observe_audio_buses_bounded<'a>(
+        &self,
+        frame: &'a mut crate::audio::AudioBusQueryFrame,
+    ) -> std::result::Result<
+        crate::audio::AudioBusObservationRef<'a>,
+        crate::audio::AudioBusObservationError,
+    > {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| {
+                crate::audio::AudioBusObservationError::Metadata(Error::Other(
+                    "Plugin not initialized".to_owned(),
+                ))
+            })?
+            .observe_audio_buses_bounded(frame)
     }
 
     /// Return every audio bus's current channel count and activation state.

@@ -2738,6 +2738,141 @@ impl PluginInternal for PluginImpl {
             .process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
     }
 
+    fn observe_audio_buses_bounded<'a>(
+        &self,
+        frame: &'a mut crate::audio::AudioBusQueryFrame,
+    ) -> std::result::Result<
+        crate::audio::AudioBusObservationRef<'a>,
+        crate::audio::AudioBusObservationError,
+    > {
+        use crate::audio::{
+            AudioBusObservationError as Stage, AudioBusRole, NativeAudioBusConstraint,
+            SpeakerArrangement, MAX_OBSERVED_AUDIO_BUSES,
+        };
+        if self.is_processing {
+            return Err(Stage::Metadata(Error::Other(
+                "cannot query native bus metadata while processing".to_owned(),
+            )));
+        }
+        self.ensure_control_thread("native audio-bus metadata")
+            .map_err(Stage::Metadata)?;
+        let metadata = |direction: i32,
+                        info: &mut BusInfo,
+                        rows: &mut [NativeAudioBusConstraint; MAX_OBSERVED_AUDIO_BUSES]|
+         -> Result<usize> {
+            // SAFETY: live control-owner component and direction-local native index.
+            let count = unsafe { self.component.getBusCount(kAudio as i32, direction) };
+            if !(0..=MAX_OBSERVED_AUDIO_BUSES as i32).contains(&count) {
+                return Err(Error::InterfaceError(
+                    "native audio-bus count exceeds the limit".to_owned(),
+                ));
+            }
+            for index in 0..count {
+                // Preserve the original fresh POD output for every native query.
+                *info = unsafe { std::mem::zeroed() };
+                let status = unsafe {
+                    self.component
+                        .getBusInfo(kAudio as i32, direction, index, info)
+                };
+                if status != kResultOk
+                    || info.mediaType != kAudio as i32
+                    || info.direction != direction
+                    || info.channelCount <= 0
+                {
+                    return Err(Error::InterfaceError(format!(
+                        "invalid native audio-bus metadata at index {index}"
+                    )));
+                }
+                let role = match info.busType {
+                    value if value == BusTypes_::kMain as i32 => AudioBusRole::Main,
+                    value if value == BusTypes_::kAux as i32 => AudioBusRole::Auxiliary,
+                    _ => {
+                        return Err(Error::InterfaceError(
+                            "unknown native audio-bus role".to_owned(),
+                        ))
+                    }
+                };
+                rows[index as usize] = NativeAudioBusConstraint {
+                    role,
+                    channel_count: info.channelCount as usize,
+                };
+                // Names/default-active flags have no retained constraint consumer.
+                // Omitting their local conversion changes no native call or error.
+            }
+            Ok(count as usize)
+        };
+        frame.native_input_count =
+            metadata(kInput as i32, &mut frame.info, &mut frame.native_inputs)
+                .map_err(Stage::Metadata)?;
+        frame.native_output_count =
+            metadata(kOutput as i32, &mut frame.info, &mut frame.native_outputs)
+                .map_err(Stage::Metadata)?;
+
+        // The second stage is exactly the current ProcessData and retained ACKs;
+        // it must not issue another native count, Info or activation call.
+        let data = self.process_data.as_ref().ok_or_else(|| {
+            Stage::Layout(Error::Other("Process data not initialized".to_owned()))
+        })?;
+        let layout = |buses: &[AudioBusBuffers],
+                      active: &[bool],
+                      rows: &mut [AudioBusConfig; MAX_OBSERVED_AUDIO_BUSES]|
+         -> Result<usize> {
+            if buses.len() > MAX_OBSERVED_AUDIO_BUSES {
+                return Err(Error::InterfaceError(
+                    "cached audio-bus count exceeds the limit".to_owned(),
+                ));
+            }
+            for (index, bus) in buses.iter().enumerate() {
+                rows[index] = AudioBusConfig {
+                    channel_count: bus.numChannels.max(0) as usize,
+                    active: active.get(index).copied().unwrap_or(false),
+                };
+            }
+            Ok(buses.len())
+        };
+        frame.layout_input_count = layout(
+            &data.input_bus_buffers,
+            &self.bus_activation.audio_inputs,
+            &mut frame.layout_inputs,
+        )
+        .map_err(Stage::Layout)?;
+        frame.layout_output_count = layout(
+            &data.output_bus_buffers,
+            &self.bus_activation.audio_outputs,
+            &mut frame.layout_outputs,
+        )
+        .map_err(Stage::Layout)?;
+
+        let arrangements = |direction: i32,
+                            rows: &mut [SpeakerArrangement; MAX_OBSERVED_AUDIO_BUSES]|
+         -> Result<usize> {
+            // This is the original fresh census, independent of both earlier extents.
+            let count = unsafe { self.component.getBusCount(kAudio as i32, direction) };
+            if !(0..=MAX_OBSERVED_AUDIO_BUSES as i32).contains(&count) {
+                return Err(Error::InterfaceError(
+                    "audio-bus arrangement count exceeds the limit".to_owned(),
+                ));
+            }
+            for index in 0..count {
+                let mut arrangement = 0u64;
+                // The legacy API deliberately ignores status, including a failed
+                // call that wrote a value. Do not synthesize a new query error.
+                unsafe {
+                    self.processor
+                        .getBusArrangement(direction, index, &mut arrangement);
+                }
+                rows[index as usize] = SpeakerArrangement::from_raw(arrangement);
+            }
+            Ok(count as usize)
+        };
+        frame.input_arrangement_count = arrangements(kInput as i32, &mut frame.input_arrangements)
+            .map_err(Stage::Arrangements)?;
+        frame.output_arrangement_count =
+            arrangements(kOutput as i32, &mut frame.output_arrangements)
+                .map_err(Stage::Arrangements)?;
+        Ok(frame.observation())
+    }
+
     fn native_audio_bus_info(&self) -> Result<crate::audio::NativeAudioBusInfoSet> {
         use crate::audio::{AudioBusRole, NativeAudioBusInfo, NativeAudioBusInfoSet};
         const MAX_AUDIO_BUSES: i32 = 32;
@@ -8842,6 +8977,9 @@ mod controller_presentation_tests;
 mod parameter_metadata_tests;
 
 #[cfg(test)]
+mod audio_bus_observation_tests;
+
+#[cfg(test)]
 #[allow(clippy::unnecessary_cast)]
 mod checked_native_note_tests {
     use super::*;
@@ -12710,6 +12848,30 @@ mod restored_audio_activation_tests {
         assert_eq!(after.retirement_lineage(), witness.retirement_lineage() + 2);
         assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
         assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn bounded_audio_bus_observation_preserves_owned_three_stage_query_order() {
+        let mut f = Fixture::new(vec![true, false], vec![true]);
+        super::audio_bus_observation_tests::query_order(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn bounded_audio_bus_observation_caps_each_actual_direction_before_iteration() {
+        let mut f = Fixture::new(vec![true; 32], vec![true; 32]);
+        super::audio_bus_observation_tests::bounds(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn bounded_audio_bus_observation_preserves_stage_errors_and_cached_ack_facts() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::audio_bus_observation_tests::errors_and_cached_facts(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn bounded_audio_bus_observation_is_control_owned_and_avoids_metadata_containers() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::audio_bus_observation_tests::owner_and_allocations(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
     }
     #[test]
     fn compatible_parameter_metadata_preserves_owned_query_and_skip_semantics() {
