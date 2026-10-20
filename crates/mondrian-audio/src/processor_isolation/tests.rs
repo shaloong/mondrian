@@ -1746,6 +1746,8 @@ mod native_vst3_note_worker;
 mod native_vst3_rescan;
 #[cfg(target_os = "windows")]
 mod native_vst3_zero_input_runtime;
+#[cfg(target_os = "windows")]
+mod native_vst3_outputs;
 
 mod native_clap_restart;
 mod native_restart;
