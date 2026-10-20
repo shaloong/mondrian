@@ -300,6 +300,10 @@ mod note_backing_tests {
                 processor_input_storage: [u64; 2],
             },
         }
+        // Historical bytes contain neither the later Note backing field nor
+        // the processing peak. Keep both old/current decoder assertions.
+        legacy.as_object_mut().unwrap().remove("processing_audio_buffer_peak_bytes");
+        assert!(serde_json::from_value::<NativeWorkerLaneWire>(legacy.clone()).is_err());
         assert!(serde_json::from_value::<V15>(legacy).is_ok());
         assert!(serde_json::from_value::<V15>(current).is_err());
         let invalid = NativeWorkerLaneWire::Scoped {
