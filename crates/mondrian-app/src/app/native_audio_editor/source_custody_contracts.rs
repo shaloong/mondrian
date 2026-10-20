@@ -160,3 +160,62 @@ fn native_author_queue_without_media_slot_retains_uncompiled_original_prefix() {
     assert!(snapshot.enter_commit().is_ok());
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
 }
+
+#[test]
+fn native_author_dead_surface_weak_refuses_before_session_admission() {
+    let (_directory, mut state, proposal, renderer) = opened_author();
+    let captured = state
+        .native_audio_editor
+        .as_ref()
+        .unwrap()
+        .surface_renderer
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert!(
+        captured.strong_count() > 0,
+        "fixture liveness only, not native permission"
+    );
+    assert!(!state.project_audio_source_is_current());
+    assert!(state.native_audio_author_work.is_none());
+    let author = state.authoring.as_ref().unwrap();
+    let session = author.session_id();
+    let document = serde_json::to_value(author.document()).unwrap();
+    let generation = author.author_generation();
+    let history = author.history().diagnostics();
+    let snapshot = author.execution_snapshot();
+
+    drop(renderer);
+    assert_eq!(captured.strong_count(), 0);
+    let error = state.observe_native_audio_author_proposal(proposal.clone()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        failure("native editor's captured renderer has retired").to_string()
+    );
+    assert!(state.native_audio_author_work.is_none());
+    let context = state.native_audio_editor.as_ref().unwrap();
+    assert!(Weak::ptr_eq(
+        context.surface_renderer.as_ref().unwrap(),
+        &captured
+    ));
+    assert_eq!(context.target, Some(proposal.target()));
+    let author = state.authoring.as_mut().unwrap();
+    assert_eq!(author.session_id(), session);
+    assert_eq!(serde_json::to_value(author.document()).unwrap(), document);
+    assert_eq!(author.author_generation(), generation);
+    assert_eq!(author.history().diagnostics(), history);
+    assert!(snapshot.enter_commit().is_ok());
+    // A no-change edit still requires the original native-pending barrier to
+    // be clear; absence of a Document delta alone would not prove this.
+    author
+        .edit_sequence(
+            proposal.sequence(),
+            "Dead surface did not begin a group",
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(serde_json::to_value(author.document()).unwrap(), document);
+    assert_eq!(author.author_generation(), generation);
+    assert_eq!(author.history().diagnostics(), history);
+    assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
+}
