@@ -358,6 +358,12 @@ impl SupervisedAudioWorker {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(debug_assertions)]
+        if std::env::var_os("MONDRIAN_PLUGIN_LAB_CHILD_STDERR").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            command.stderr(Stdio::inherit());
+        }
         #[cfg(windows)]
         configure_background_worker_start(&mut command);
         // Preflight the actual nonce, path and complete metadata before any
