@@ -87,10 +87,17 @@ struct Owner {
     generation: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeldDisposition {
+    Retain,
+    Discard,
+}
+
 #[derive(Clone, Copy)]
 struct Held {
     pending_generation: u64,
     awaiting_completions: usize,
+    disposition: HeldDisposition,
 }
 
 pub(crate) struct PcmJournal {
@@ -188,7 +195,11 @@ impl PcmJournal {
         awaiting_completions: usize,
     ) -> Result<(), AudioRetainedPcmError> {
         self.validate_owner(renderer_id, generation)?;
-        self.held = Some(Held { pending_generation, awaiting_completions });
+        self.held = Some(Held {
+            pending_generation,
+            awaiting_completions,
+            disposition: self.held.map_or(HeldDisposition::Retain, |held| held.disposition),
+        });
         Ok(())
     }
 
@@ -230,6 +241,15 @@ impl PcmJournal {
         self.completed_end = None;
     }
 
+    /// Retire held PCM without erasing any popped old completion obligation.
+    /// Only a later fresh `begin` permits retaining PCM again.
+    pub(crate) fn discard_held_suffix(&mut self) {
+        self.invalidate_suffix();
+        if let Some(held) = &mut self.held {
+            held.disposition = HeldDisposition::Discard;
+        }
+    }
+
     /// Move an already validated complete owner; no PCM/slot allocation occurs.
     pub(crate) fn record(
         &mut self,
@@ -239,6 +259,9 @@ impl PcmJournal {
         pcm: AudioBuffer,
     ) -> Result<(), AudioRetainedPcmError> {
         self.validate_owner(renderer_id, generation)?;
+        if self.held.is_some_and(|held| held.disposition == HeldDisposition::Discard) {
+            return Err(AudioRetainedPcmError::CoverageUnavailable);
+        }
         if request.sample_rate != self.sample_rate.hz()
             || request.continuity.generation().get() != generation
             || request.channel_layout != self.channel_layout
@@ -299,6 +322,9 @@ impl PcmJournal {
         }
         if requested_start.rate() != self.sample_rate {
             return Err(AudioRetainedPcmError::ContractMismatch);
+        }
+        if held.disposition == HeldDisposition::Discard {
+            return Err(AudioRetainedPcmError::CoverageUnavailable);
         }
         let first = self.window(0).ok_or(AudioRetainedPcmError::CoverageUnavailable)?;
         let end = self.completed_end.ok_or(AudioRetainedPcmError::CoverageUnavailable)?;
@@ -623,5 +649,97 @@ mod tests {
                 .expect_err("invalid complete head"),
             AudioRetainedPcmError::CoverageUnavailable
         );
+    }
+
+    #[test]
+    fn pcm_journal_discard_preserves_two_old_obligations_across_repeated_seeks_and_reordering() {
+        let (mut journal, owner) = journal(3, 48);
+        journal.record(owner, 7, request(0, 4), pcm(0, 4)).unwrap();
+        journal.hold(owner, 7, 8, 2).unwrap();
+        for pending in [9, 10] {
+            journal.discard_held_suffix();
+            journal.advance_pending_generation(owner, pending);
+            assert!(journal.expects_old_completion(owner, 7));
+            assert!(journal.old_work_unsettled());
+            assert_eq!(journal.sample_bytes, 0);
+            assert_eq!(journal.completed_end, None);
+        }
+        // Two valid old window shapes arrive after discard, in reverse order.
+        for (ordinal, start) in [8, 4].into_iter().enumerate() {
+            assert_eq!(
+                journal.record(owner, 7, request(start, 4), pcm(start, 4)),
+                Err(AudioRetainedPcmError::CoverageUnavailable)
+            );
+            journal.settle_old_completion();
+            assert_eq!(journal.old_work_unsettled(), ordinal == 0);
+            assert_eq!(journal.len, 0);
+            assert_eq!(journal.completed_end, None);
+        }
+        assert!(!journal.expects_old_completion(owner, 7));
+        assert_eq!(
+            journal.visit(owner, 10, AudioSamplePosition::new(0, rate()), |_| panic!(
+                "discarded"
+            )),
+            Err(AudioRetainedPcmError::CoverageUnavailable)
+        );
+        // Even error invalidation or a new held output generation cannot undo seek.
+        journal.invalidate_suffix();
+        journal.advance_pending_generation(owner, 11);
+        journal.hold(owner, 7, 11, 0).unwrap();
+        assert_eq!(
+            journal.record(owner, 7, request(12, 4), pcm(12, 4)),
+            Err(AudioRetainedPcmError::CoverageUnavailable)
+        );
+        journal.begin(Some(owner), 12);
+        let mut fresh = request(40, 4);
+        fresh.continuity = AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(12));
+        journal.record(owner, 12, fresh, pcm(40, 4)).unwrap();
+        journal.hold(owner, 12, 13, 0).unwrap();
+        let evidence =
+            journal.visit(owner, 13, AudioSamplePosition::new(40, rate()), |_| {}).unwrap();
+        assert_eq!(evidence.source_generation, 12);
+        assert_eq!(evidence.completed_end.sample(), 44);
+    }
+
+    #[test]
+    fn pcm_journal_discard_error_and_deferred_settlement_do_not_restore_coverage() {
+        let (mut journal, owner) = journal(2, 32);
+        journal.record(owner, 7, request(0, 4), pcm(0, 4)).unwrap();
+        journal.hold(owner, 7, 8, 2).unwrap();
+        journal.discard_held_suffix();
+        // Media invalidates the suffix on an old error, but a deferred outcome
+        // has no PCM. Each still consumes exactly its original obligation.
+        journal.invalidate_suffix();
+        journal.settle_old_completion();
+        assert!(journal.expects_old_completion(owner, 7));
+        journal.advance_pending_generation(owner, 9);
+        journal.discard_held_suffix();
+        journal.settle_old_completion();
+        assert!(!journal.old_work_unsettled());
+        assert_eq!(
+            journal.visit(owner, 9, AudioSamplePosition::new(0, rate()), |_| panic!(
+                "discarded"
+            )),
+            Err(AudioRetainedPcmError::CoverageUnavailable)
+        );
+        assert_eq!(journal.sample_bytes, 0);
+        assert_eq!(journal.completed_end, None);
+    }
+
+    #[test]
+    fn pcm_journal_nonseek_invalidation_still_accepts_a_later_complete_suffix() {
+        let (mut journal, owner) = journal(2, 32);
+        journal.record(owner, 7, request(0, 4), pcm(0, 4)).unwrap();
+        journal.hold(owner, 7, 8, 1).unwrap();
+        journal.invalidate_suffix();
+        journal.record(owner, 7, request(4, 4), pcm(4, 4)).unwrap();
+        journal.settle_old_completion();
+        let evidence = journal
+            .visit(owner, 8, AudioSamplePosition::new(4, rate()), |window| {
+                assert_eq!(window.pcm.samples, [4.0, 5.0, 6.0, 7.0]);
+            })
+            .unwrap();
+        assert_eq!(evidence.retained_start.sample(), 4);
+        assert_eq!(evidence.completed_end.sample(), 8);
     }
 }

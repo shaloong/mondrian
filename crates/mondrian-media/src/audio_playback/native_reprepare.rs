@@ -118,6 +118,46 @@ impl AudioPlayback {
         )
     }
 
+    /// Move only the retained restart's PCM/output intent to the caller's anchor.
+    ///
+    /// Stale, refused, canceled or absent holds return `false`. Source-close,
+    /// execution, coordinate, continuity and output preflight retain their typed
+    /// errors. Success advances the PCM generation once and requires a new
+    /// output acknowledgement; the original install/retire/settle work, claim and
+    /// native cancellation remain unchanged. No Runtime getter or native call
+    /// occurs here. Actual installation and Fresh entry still revalidate there.
+    pub fn seek_native_reprepare(
+        &mut self,
+        pending_generation: u64,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        self.ensure_source_close_idle()?;
+        self.ensure_render_execution_available()?;
+        if pending_generation != self.generation
+            || !matches!(self.native_control_hold,
+                Some(NativeControlHold::Reprepare { admission, .. })
+                    if admission != NativeReprepareAdmission::Refused)
+            || self.renderer.is_none()
+            || self.native_control_cancellation.is_canceled()
+            || self.owner_installation.current_claim()?.is_none()
+        {
+            return Ok(false);
+        }
+        self.validate_reprime_anchor_pure(anchor)?;
+        self.validate_reprime_output()?;
+        let renderer = self.renderer.as_ref().expect("checked retained Source");
+        renderer.continuity_model.validate_fresh_entry(anchor)?;
+        self.reprime_prevalidated(
+            anchor,
+            false,
+            self.renderer.clone(),
+            PcmRetirementPolicy::PreserveNativeHold,
+        )?;
+        self.pcm_journal.discard_held_suffix();
+        self.render_blocked = true;
+        Ok(true)
+    }
+
     fn current_reprepare_output(&self, proof: NativeReprepareOutputRetired) -> bool {
         proof.generation == self.generation
             && self
@@ -459,8 +499,21 @@ mod tests {
             self.calls.lock().push((name, thread::current().id()));
         }
     }
+    struct LatePcm {
+        entered: AtomicBool,
+        release: AtomicBool,
+        outcome: u8,
+    }
+    struct ReleaseLate(Arc<LatePcm>);
+    impl Drop for ReleaseLate {
+        fn drop(&mut self) {
+            self.0.release.store(true, Ordering::Release);
+        }
+    }
     struct Renderer {
         verifier: Mutex<Option<AudioOwnerInstallationVerifier>>,
+        verifier_reads: AtomicUsize,
+        late: Mutex<Option<Arc<LatePcm>>>,
         scope: Mutex<Option<mondrian_core::NativeChildSettlementRegistrar>>,
         notice: mondrian_core::NativeAudioReprepareNotice,
         restarted: AtomicBool,
@@ -478,6 +531,7 @@ mod tests {
             Ok(())
         }
         fn owner_installation_verifier(&self) -> Option<AudioOwnerInstallationVerifier> {
+            self.verifier_reads.fetch_add(1, Ordering::SeqCst);
             self.verifier.lock().clone()
         }
         fn bind_owner_installation(
@@ -499,7 +553,36 @@ mod tests {
             request: AudioPcmRenderRequest,
             _: &ExecutionCancellationToken,
         ) -> mondrian_core::Result<AudioPcmRenderOutcome> {
-            self.requests.lock().push(request);
+            let ordinal = {
+                let mut requests = self.requests.lock();
+                let ordinal = requests.len();
+                requests.push(request);
+                ordinal
+            };
+            let late = self.late.lock().clone();
+            if let Some(late) = late
+                && ordinal == 1
+            {
+                late.entered.store(true, Ordering::Release);
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !late.release.load(Ordering::Acquire) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test must release actual old render"
+                    );
+                    thread::yield_now();
+                }
+                return match late.outcome {
+                    0 => Ok(AudioPcmRenderOutcome::Rendered(AudioBuffer::silent(
+                        request.sample_rate,
+                        request.channel_layout,
+                        request.frame_count,
+                    ))),
+                    1 => Err(mondrian_core::MondrianError::Cancelled),
+                    2 => Ok(AudioPcmRenderOutcome::DeferredForReprepare(self.notice)),
+                    _ => unreachable!(),
+                };
+            }
             Ok(if self.restarted.load(Ordering::Acquire) {
                 AudioPcmRenderOutcome::Rendered(AudioBuffer::silent(
                     request.sample_rate,
@@ -597,6 +680,8 @@ mod tests {
     fn renderer() -> Arc<Renderer> {
         Arc::new(Renderer {
             verifier: Mutex::new(None),
+            verifier_reads: AtomicUsize::new(0),
+            late: Mutex::new(None),
             scope: Mutex::new(None),
             notice: mondrian_core::NativeAudioReprepareNotice {
                 instance_id: mondrian_core::AudioProcessorInstanceId::new(),
@@ -1353,5 +1438,391 @@ mod tests {
         assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
         assert_eq!(facts.drop_count.load(Ordering::SeqCst), 1);
         drop(return_queue.stop());
+    }
+
+    #[test]
+    fn seek_restart_preserves_install_and_settle_through_retirement_and_settled_output_rotations() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        let _release = Release(facts.clone());
+        let admitted = playback.generation;
+        let old_proof = match playback.native_control_hold.unwrap() {
+            NativeControlHold::Reprepare {
+                phase: NativeRepreparePhase::OutputRetired(p), ..
+            } => p,
+            _ => unreachable!(),
+        };
+        assert!(playback
+            .request_native_reprepare(admitted, request(&renderer, &facts, 0))
+            .unwrap());
+        pump(&mut playback, |_| {
+            facts.entered_retirement.load(Ordering::Acquire)
+        });
+        let installed = playback.owner_installation.current_claim().unwrap().unwrap().generation();
+        assert!(playback.current_reprepare_output(old_proof));
+        let native_cancel = playback.native_control_cancellation.clone();
+        let requests = renderer.requests.lock().len();
+        for target in [20, 40] {
+            let previous = playback.generation;
+            let old_pcm_cancel = playback.generation_cancellation.clone();
+            let reads = renderer.verifier_reads.load(Ordering::SeqCst);
+            assert!(playback.seek_native_reprepare(previous, anchor(target)).unwrap());
+            assert_eq!(
+                renderer.verifier_reads.load(Ordering::SeqCst),
+                reads,
+                "pure PCM seek never obtains the Runtime verifier"
+            );
+            assert_eq!(playback.generation, previous + 1);
+            assert_eq!(playback.next_start_sample, target);
+            assert!(old_pcm_cancel.is_canceled());
+            assert!(!native_cancel.is_canceled());
+            assert!(
+                matches!(playback.native_control_hold, Some(NativeControlHold::Reprepare {
+                phase: NativeRepreparePhase::WaitingOutput,
+                admission: NativeReprepareAdmission::InFlight { generation }, ..
+            }) if generation == admitted)
+            );
+            assert_eq!(
+                playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+                installed
+            );
+            assert!(!playback.current_reprepare_output(old_proof));
+            assert!(!playback.finish_native_reprepare(admitted, anchor(0)).unwrap());
+            assert!(!playback
+                .request_native_reprepare(playback.generation, request(&renderer, &facts, 0))
+                .unwrap());
+        }
+        facts.release_retirement.store(true, Ordering::Release);
+        pump(&mut playback, settled);
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 1);
+        assert_eq!(renderer.requests.lock().len(), requests);
+        let before = playback.generation;
+        assert!(playback.seek_native_reprepare(before, anchor(80)).unwrap());
+        assert_eq!(playback.generation, before + 1);
+        assert!(settled(&playback));
+        assert!(!playback.finish_native_reprepare(before, anchor(40)).unwrap());
+        assert!(!playback.finish_native_reprepare(playback.generation, anchor(80)).unwrap());
+        pump(&mut playback, |p| {
+            p.native_control_output_retirement.is_some_and(|r| r.acknowledged)
+        });
+        let current = playback.generation;
+        assert!(playback.finalize_native_control_anchor(current, anchor(80)).unwrap());
+        let current_proof = match playback.native_control_hold.unwrap() {
+            NativeControlHold::Reprepare {
+                phase: NativeRepreparePhase::OutputRetired(p), ..
+            } => p,
+            _ => unreachable!(),
+        };
+        assert!(playback.current_reprepare_output(current_proof));
+        assert!(playback.finish_native_reprepare(current, anchor(80)).unwrap());
+        let fresh = playback.generation;
+        pump(&mut playback, |_| renderer.requests.lock().len() > requests);
+        assert_eq!(renderer.requests.lock()[requests].start_sample, 80);
+        assert_eq!(
+            renderer.requests.lock()[requests].continuity,
+            AudioPcmContinuity::Enter(AudioPcmRenderGeneration::new(fresh))
+        );
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn seek_restart_discards_actual_late_success_error_and_deferred_without_recovery_or_revival() {
+        for outcome in 0..3 {
+            let (output, _) = super::super::tests::fake_output();
+            let mut playback = AudioPlayback::with_output(playback_config(), output).unwrap();
+            let late = Arc::new(LatePcm {
+                entered: AtomicBool::new(false),
+                release: AtomicBool::new(false),
+                outcome,
+            });
+            let _release = ReleaseLate(late.clone());
+            let renderer = renderer();
+            *renderer.late.lock() = Some(late.clone());
+            playback
+                .prepare(
+                    anchor(0),
+                    renderer.clone(),
+                    AudioPcmContinuityModel::GenerationState,
+                )
+                .unwrap();
+            playback.poll(AudioPlaybackMode::Preroll, anchor(0)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !late.entered.load(Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual second old render must be popped before HOLD"
+                );
+                thread::yield_now();
+            }
+            let poll = playback.poll(AudioPlaybackMode::Preroll, anchor(0)).unwrap();
+            assert_eq!(
+                poll.events
+                    .iter()
+                    .filter(|e| matches!(e, AudioPlaybackEvent::NativeReprepareRequired { .. }))
+                    .count(),
+                1
+            );
+            assert!(playback.pcm_journal.old_work_unsettled());
+            let source_generation = renderer.requests.lock()[0].continuity.generation().get();
+            let renderer_id = playback.renderer.as_ref().unwrap().materialization_id;
+            for target in [20, 40] {
+                assert!(playback
+                    .seek_native_reprepare(playback.generation, anchor(target))
+                    .unwrap());
+                assert!(playback
+                    .pcm_journal
+                    .expects_old_completion(renderer_id, source_generation));
+                assert_eq!(
+                    playback.visit_native_retained_pcm(playback.generation, anchor(0), |_| panic!(
+                        "unsettled"
+                    )),
+                    Err(crate::AudioRetainedPcmError::OldWorkUnsettled)
+                );
+            }
+            let current = playback.generation;
+            late.release.store(true, Ordering::Release);
+            pump(&mut playback, |p| !p.pcm_journal.old_work_unsettled());
+            assert_eq!(
+                playback.generation, current,
+                "old completion is not another restart or recovery"
+            );
+            assert!(!playback.pcm_journal.expects_old_completion(renderer_id, source_generation));
+            assert_eq!(
+                playback.visit_native_retained_pcm(current, anchor(0), |_| panic!("discarded")),
+                Err(crate::AudioRetainedPcmError::CoverageUnavailable)
+            );
+            assert_eq!(renderer.requests.lock().len(), 2);
+            assert!(matches!(
+                playback.native_control_hold,
+                Some(NativeControlHold::Reprepare {
+                    admission: NativeReprepareAdmission::Unstarted,
+                    ..
+                })
+            ));
+            let snapshot = playback.snapshot(AudioPlaybackMode::Preroll);
+            assert_eq!(snapshot.output.unwrap().buffered_frames, 0);
+            assert_eq!(snapshot.render_generation_recovery_count, 0);
+            assert_eq!(snapshot.render_substitution_count, 0);
+            assert_eq!(snapshot.underrun_recovery_count, 0);
+            drop(renderer);
+            assert!(playback.shutdown_and_wait().all_workers_terminated());
+        }
+    }
+
+    #[test]
+    fn seek_restart_stale_refused_canceled_and_invalid_preflight_leave_the_held_owner_unchanged() {
+        let (mut playback, renderer) = held();
+        let original = playback.generation;
+        let hold = playback.native_control_hold;
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap().generation();
+        let old_pcm_cancel = playback.generation_cancellation.clone();
+        assert!(!playback.seek_native_reprepare(original - 1, anchor(20)).unwrap());
+        assert_eq!(
+            playback.seek_native_reprepare(original, anchor(-1)),
+            Err(AudioPlaybackError::NegativeSampleAnchor)
+        );
+        let wrong_grid =
+            AudioSamplePosition::new(20, mondrian_core::AudioSampleRate::new(999).unwrap());
+        assert!(matches!(
+            playback.seek_native_reprepare(original, wrong_grid),
+            Err(AudioPlaybackError::InvalidSampleAnchor(
+                AudioTimeError::RateMismatch { .. }
+            ))
+        ));
+        playback.renderer.as_mut().unwrap().continuity_model =
+            AudioPcmContinuityModel::GenerationStateFromOrigin(anchor(0));
+        assert_eq!(
+            playback.seek_native_reprepare(original, anchor(20)),
+            Err(AudioPlaybackError::FreshEntryOriginMismatch {
+                required: anchor(0),
+                actual: anchor(20)
+            })
+        );
+        playback.renderer.as_mut().unwrap().continuity_model =
+            AudioPcmContinuityModel::GenerationState;
+        playback.generation = u64::MAX;
+        assert_eq!(
+            playback.seek_native_reprepare(u64::MAX, anchor(20)),
+            Err(AudioPlaybackError::CoordinateOverflow)
+        );
+        playback.generation = original;
+        assert_eq!(playback.native_control_hold, hold);
+        assert_eq!(playback.next_start_sample, 0);
+        assert!(!old_pcm_cancel.is_canceled());
+        assert_eq!(
+            playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+            claim
+        );
+        assert_eq!(
+            playback.visit_native_retained_pcm(original, anchor(0), |_| panic!("no complete PCM")),
+            Err(crate::AudioRetainedPcmError::CoverageUnavailable)
+        );
+        let facts = Arc::new(Facts::default());
+        assert!(playback
+            .request_native_reprepare(original, request(&renderer, &facts, 1))
+            .unwrap());
+        pump(&mut playback, refused);
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert!(!playback.seek_native_reprepare(original, anchor(20)).unwrap());
+        assert_eq!(playback.generation, original);
+        playback.clear_source(anchor(0)).unwrap();
+        assert!(!playback.seek_native_reprepare(playback.generation, anchor(20)).unwrap());
+        drop(renderer);
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+
+        let (mut canceled, renderer) = held();
+        let original = canceled.generation;
+        canceled.native_control_cancellation.cancel();
+        assert!(!canceled.seek_native_reprepare(original, anchor(20)).unwrap());
+        assert_eq!(canceled.generation, original);
+        drop(renderer);
+        assert!(canceled.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn seek_restart_intent_does_not_authorize_a_replaced_runtime_registration() {
+        let (mut playback, renderer) = held();
+        let old = playback.owner_installation.current_claim().unwrap().unwrap();
+        let original_verifier = renderer.owner_installation_verifier().unwrap();
+        let (_, replacement) = playback.owner_installation.register().unwrap();
+        *renderer.verifier.lock() = Some(replacement);
+        let reads = renderer.verifier_reads.load(Ordering::SeqCst);
+        assert!(playback.seek_native_reprepare(playback.generation, anchor(20)).unwrap());
+        assert_eq!(renderer.verifier_reads.load(Ordering::SeqCst), reads);
+        assert_eq!(
+            original_verifier.validate(&old),
+            Ok(()),
+            "Source claim alone is not Runtime permission"
+        );
+        pump(&mut playback, |p| {
+            p.native_control_output_retirement.is_some_and(|r| r.acknowledged)
+        });
+        let current = playback.generation;
+        assert!(playback.finalize_native_control_anchor(current, anchor(20)).unwrap());
+        let facts = Arc::new(Facts::default());
+        assert!(playback
+            .request_native_reprepare(current, request(&renderer, &facts, 0))
+            .unwrap());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut result = None;
+        while !refused(&playback) {
+            assert!(
+                Instant::now() < deadline,
+                "original producer must reject the replacement"
+            );
+            for event in playback.poll(AudioPlaybackMode::Preroll, anchor(20)).unwrap().events {
+                if let AudioPlaybackEvent::NativeReprepareObserved { status, .. } = event {
+                    assert!(result.replace(status).is_none());
+                }
+            }
+            thread::yield_now();
+        }
+        assert_eq!(
+            result,
+            Some(AudioPcmNativeReprepareStatus::Refused(
+                AudioPcmNativeReprepareRefusal::Superseded
+            ))
+        );
+        assert_eq!(facts.install.load(Ordering::SeqCst), 0);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            playback.owner_installation.current_claim().unwrap().unwrap().generation(),
+            old.generation()
+        );
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Preroll).output.unwrap().buffered_frames,
+            0
+        );
+        assert!(!playback.finish_native_reprepare(current, anchor(20)).unwrap());
+    }
+
+    #[test]
+    fn seek_restart_retains_source_close_and_closed_execution_error_precedence() {
+        let (output, _) = super::super::tests::fake_output();
+        let mut playback = AudioPlayback::with_output(playback_config(), output).unwrap();
+        let renderer = renderer();
+        renderer.restarted.store(true, Ordering::Release);
+        playback
+            .prepare(
+                anchor(0),
+                renderer.clone(),
+                AudioPcmContinuityModel::GenerationState,
+            )
+            .unwrap();
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let _ticket = playback.request_source_close(&erased, anchor(0)).unwrap();
+        let before = playback.generation;
+        assert_eq!(
+            playback.seek_native_reprepare(before, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        );
+        assert_eq!(playback.generation, before);
+        drop(erased);
+        drop(renderer);
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+
+        let (mut closed, renderer) = held();
+        closed.begin_shutdown();
+        let before = closed.generation;
+        assert_eq!(
+            closed.seek_native_reprepare(before, anchor(20)),
+            Err(AudioPlaybackError::ExecutionUnavailable)
+        );
+        assert_eq!(closed.generation, before);
+        drop(renderer);
+        assert!(closed.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn seek_restart_paused_unstarted_and_waiting_intent_settles_without_entering_pcm() {
+        let (mut playback, renderer) = held();
+        let requests = renderer.requests.lock().len();
+        let native_cancel = playback.native_control_cancellation.clone();
+        playback.suspend(anchor(20)).unwrap();
+        for target in [40, 60] {
+            let before = playback.generation;
+            assert!(playback.seek_native_reprepare(before, anchor(target)).unwrap());
+            assert_eq!(playback.generation, before + 1);
+            assert!(matches!(
+                playback.native_control_hold,
+                Some(NativeControlHold::Reprepare {
+                    phase: NativeRepreparePhase::WaitingOutput,
+                    admission: NativeReprepareAdmission::Unstarted,
+                    ..
+                })
+            ));
+        }
+        let current = playback.generation;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !playback.native_control_output_retirement.is_some_and(|r| r.acknowledged) {
+            assert!(Instant::now() < deadline);
+            playback.poll(AudioPlaybackMode::Idle, anchor(60)).unwrap();
+            thread::yield_now();
+        }
+        assert!(playback.finalize_native_control_anchor(current, anchor(60)).unwrap());
+        let facts = Arc::new(Facts::default());
+        facts.release_retirement.store(true, Ordering::Release);
+        assert!(playback
+            .request_native_reprepare(current, request(&renderer, &facts, 0))
+            .unwrap());
+        while !settled(&playback) {
+            assert!(Instant::now() < deadline);
+            playback.poll(AudioPlaybackMode::Idle, anchor(60)).unwrap();
+            thread::yield_now();
+        }
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 1);
+        assert_eq!(playback.generation, current);
+        assert_eq!(playback.next_start_sample, 60);
+        assert_eq!(renderer.requests.lock().len(), requests);
+        assert!(!native_cancel.is_canceled());
+        assert_eq!(
+            playback.snapshot(AudioPlaybackMode::Idle).output.unwrap().buffered_frames,
+            0
+        );
+        drop(renderer);
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
     }
 }
