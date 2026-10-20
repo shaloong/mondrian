@@ -3199,8 +3199,8 @@ mod control_timeout_worker_lifecycle {
                 let path = staging.path().to_owned();
                 let response = path.join("response.json");
                 match case {
-                    0 => std::fs::write(&response, br#"{"kind":"list_v4","schema_version":4,"descriptors":[]}"#).unwrap(),
-                    1 => std::fs::write(&response, br#"{"kind":"probe_v4","schema_version":4,"main_audio_input":"present","input_names":[],"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
+                    0 => std::fs::write(&response, br#"{"kind":"list_v5","schema_version":5,"descriptors":[]}"#).unwrap(),
+                    1 => std::fs::write(&response, br#"{"kind":"probe_v5","schema_version":5,"main_audio_input":"present","audio_output_count":1,"input_names":[],"event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},"class_id":"0123456789ABCDEF0123456789ABCDEF","vendor":null,"latency_frames":0,"tail_frames":0,"parameters":[],"current_values":[],"captured_state":null,"auxiliary_buses":[]}"#).unwrap(),
                     2 => {},
                     3 => std::fs::write(&response, b"not valid JSON").unwrap(),
                     4 => std::fs::write(&response, vec![b' '; 512 * 1024 + 1]).unwrap(),
