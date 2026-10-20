@@ -1059,3 +1059,6 @@ fn vst_rescan_selected_singleton_preserves_all_native_peer_admission_guards() {
     assert_eq!(peer.lock().unwrap().entries, 1);
     drop(prepared);
 }
+
+#[path = "native_author_terminal_batch.rs"]
+mod terminal_batch_controls;

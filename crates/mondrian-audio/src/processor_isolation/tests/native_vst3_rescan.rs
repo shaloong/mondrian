@@ -1019,6 +1019,16 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
 #[test]
 #[ignore = "current normal Product IPC19 and owned initial-values mode13 DLL; two real pending owners preserve single-selected refusal, not a joint handoff qualification"]
 fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
+    run_terminal_peer_contract(false);
+}
+
+#[test]
+#[ignore = "current normal Product IPC19 and owned initial-values mode13 DLL; finite terminal same-Root batch, two exact ACKs and preserved PCM, not App/GUI/RT/100ms qualification"]
+fn installed_vst3_runtime_terminal_batch_installs_joint_frontier_and_acknowledges_each_owner() {
+    run_terminal_peer_contract(true);
+}
+
+fn run_terminal_peer_contract(install_batch: bool) {
     use crate::{
         compile_audio_program, AudioCompileRequest, AudioContinuityEpoch,
         AudioNativeProcessorAddress, AudioProcessorCursorState, AudioProgramRuntime,
@@ -1050,9 +1060,30 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
         sequence: &Sequence,
         proposal: &NativeAudioAuthorProposal,
     ) -> [NativeAudioAuthorProgram; 1] {
-        // Only the selected, actually delivered prefix is a candidate. The
-        // unrelated pending peer is never silently folded into its permission.
+        programs_for(sequence, std::slice::from_ref(proposal))
+    }
+    fn programs_for(
+        sequence: &Sequence,
+        proposals: &[NativeAudioAuthorProposal],
+    ) -> [NativeAudioAuthorProgram; 1] {
         let mut candidate = sequence.clone();
+        for proposal in proposals {
+            apply_proposal(&mut candidate, proposal);
+        }
+        [NativeAudioAuthorProgram {
+            sequence: candidate.id,
+            program: Arc::new(
+                compile_audio_program(
+                    &candidate,
+                    AudioCompileRequest::program(candidate.audio_program.outputs[0].id),
+                )
+                .unwrap(),
+            ),
+        }]
+    }
+    fn apply_proposal(candidate: &mut Sequence, proposal: &NativeAudioAuthorProposal) {
+        // Only actually delivered prefixes enter this one private candidate.
+        // A singleton still never silently folds in its unrelated pending peer.
         let current = candidate.audio_program.outputs[0]
             .strip
             .pre_fader
@@ -1099,17 +1130,7 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
                 },
             },
         };
-        assert!(apply_audio_processor_rack_edit(&mut candidate, &request).unwrap().changed);
-        [NativeAudioAuthorProgram {
-            sequence: candidate.id,
-            program: Arc::new(
-                compile_audio_program(
-                    &candidate,
-                    AudioCompileRequest::program(candidate.audio_program.outputs[0].id),
-                )
-                .unwrap(),
-            ),
-        }]
+        assert!(apply_audio_processor_rack_edit(candidate, &request).unwrap().changed);
     }
 
     let material = |name| {
@@ -1198,6 +1219,7 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
     let root = runtime.resource_root_identity();
     let cold = cursors(&runtime);
     let leases_for = |runtime: &AudioProgramRuntime, evidence: &Cursors| {
+        let root = runtime.resource_root_identity();
         evidence
             .processors
             .iter()
@@ -1300,7 +1322,7 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
     let peer = leases[1 - selected_index];
     assert_ne!(selected.target().instance, peer.editor_target().instance);
     let programs = program_for(&sequence, &selected);
-    let (_, destination) = source.register().unwrap();
+    let (destination_registration, destination) = source.register().unwrap();
     let error = match runtime.prepare_native_author_parameter_handoff(
         &programs,
         &selected,
@@ -1364,9 +1386,176 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
         assert!(repeated.same_retained_proposal(original));
     }
     unchanged(&mut runtime);
-    // No Stage/Commit, Source publication, Ack, second Enter or second PCM is
-    // attempted. This protects the single-selected boundary; it is not a joint
-    // author acceptance or headless App compatibility result.
+    // The original negative gate stops here. Its false branch still attempts
+    // no Source publication, Ack, second Enter or second PCM.
+    if install_batch {
+        let members = [selected.clone(), other.clone()];
+        let joint = programs_for(&sequence, &members);
+        for invalid in [
+            Vec::new(),
+            vec![selected.clone(), selected.clone()],
+            vec![selected.clone()],
+        ] {
+            assert!(
+                runtime
+                    .prepare_native_author_terminal_batch(
+                        &joint,
+                        &invalid,
+                        destination.clone(),
+                        &cancel
+                    )
+                    .is_err(),
+                "empty/duplicate/omitted member never publishes"
+            );
+            unchanged(&mut runtime);
+        }
+        let mut prepared = runtime
+            .prepare_native_author_terminal_batch(&joint, &members, destination.clone(), &cancel)
+            .expect("all real retained members jointly prepare one canonical Plan");
+        for member in &members {
+            assert!(prepared.installed_target(member).is_none());
+        }
+        unchanged(&mut runtime);
+        let reservation =
+            source.reserve_install(&destination_registration, Some(&initial_claim)).unwrap();
+        let mut authorization = source.authorize_runtime_installation(reservation).unwrap();
+        let acquire_failure = runtime.install_native_author_terminal_batch_with_commit_guard(
+            &mut prepared,
+            &mut authorization,
+            &cancel,
+            || Err::<(), _>(crate::AudioNativeOwnerError::OwnerUnavailable.into()),
+        );
+        assert!(matches!(
+            acquire_failure,
+            Err(NativeAudioParameterHandoffError::Owner(_))
+        ));
+        for member in &members {
+            assert!(prepared.installed_target(member).is_none());
+        }
+        unchanged(&mut runtime);
+        // A plain local guard models only the callback lifetime. It confers no
+        // canonical author permission; this real-module gate exercises Audio.
+        struct Guard<'a>(&'a std::cell::Cell<bool>);
+        impl Drop for Guard<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let guarded = std::cell::Cell::new(false);
+        let (installed, guard) = runtime
+            .install_native_author_terminal_batch_with_commit_guard(
+                &mut prepared,
+                &mut authorization,
+                &cancel,
+                || {
+                    guarded.set(true);
+                    Ok(Guard(&guarded))
+                },
+            )
+            .expect("one original Source CAS publishes the whole frontier");
+        assert!(guarded.get());
+        assert_eq!(
+            installed.continuity,
+            crate::NativeAudioParameterHandoffContinuity::Preserved
+        );
+        assert_ne!(installed.claim.generation(), initial_claim.generation());
+        for member in &members {
+            assert!(prepared.installed_target(member).is_some());
+        }
+        drop(guard); // No actual object RPC/Ack/retirement while this guard lives.
+        assert!(!guarded.get());
+        let after = cursors(&runtime);
+        let installed_leases = leases_for(&runtime, &after);
+        assert_eq!(runtime.resource_root_identity().session_id, root.session_id);
+        assert_ne!(
+            runtime.resource_root_identity().prepared_plan_id,
+            root.prepared_plan_id
+        );
+        assert_eq!(after.sessions[0].state, before.sessions[0].state);
+        for (old, current) in before.processors.iter().zip(&after.processors) {
+            assert_eq!(current.identity.session_id, old.identity.session_id);
+            assert_eq!(current.occurrence, old.occurrence);
+            assert_eq!(current.state, old.state);
+        }
+        for (index, old) in leases.iter().enumerate() {
+            assert!(
+                runtime.observe_native_owner_object(*old).is_err(),
+                "old installed target is stale"
+            );
+            assert_eq!(
+                runtime.observe_native_owner_object(installed_leases[index]).unwrap(),
+                objects[index]
+            );
+        }
+        for member in &members {
+            let current = installed_leases
+                .iter()
+                .find(|lease| lease.editor_target().instance == member.target().instance)
+                .unwrap();
+            assert_eq!(
+                prepared.installed_target(member),
+                Some(current.editor_target())
+            );
+        }
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            installed.claim.generation()
+        );
+        assert_eq!(media.reads.load(Ordering::Relaxed), reads);
+        let first_ack = runtime
+            .acknowledge_native_author_parameter_handoff(&selected, &cancel)
+            .expect("only this exact first retained source confirms its own ACK");
+        assert_eq!(Some(first_ack.target), prepared.installed_target(&selected));
+        let cancelled = ExecutionCancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            runtime.acknowledge_native_author_parameter_handoff(&other, &cancelled),
+            Err(NativeAudioParameterHandoffError::Admission(
+                NativeAudioAuthorAdmissionError::Cancelled
+            ))
+        ));
+        assert_eq!(
+            source.current_claim().unwrap().unwrap().generation(),
+            installed.claim.generation()
+        );
+        assert_eq!(cursors(&runtime), after);
+        let mut held = [93.0; 8];
+        assert!(
+            matches!(
+                runtime.render_into(AudioRenderRequest { start_sample: 4, frames: 4 }, &mut held),
+                Err(crate::AudioExecutionError::NativeAuthorPending(_))
+            ),
+            "unacknowledged member still owns HOLD"
+        );
+        assert_eq!(held, [93.0; 8]);
+        assert_eq!(cursors(&runtime), after);
+        assert_eq!(media.reads.load(Ordering::Relaxed), reads);
+        let second_ack = runtime
+            .acknowledge_native_author_parameter_handoff(&other, &cancel)
+            .expect("retry only the remaining member, never re-install/re-ACK the first");
+        assert_eq!(Some(second_ack.target), prepared.installed_target(&other));
+        assert_eq!(second_ack.claim.generation(), installed.claim.generation());
+        runtime
+            .validate_native_author_source_closed(&cancel)
+            .expect("both genuine original prefixes are confirmed; no invented empty proof");
+        assert_eq!(cursors(&runtime), after);
+        // Every new target remains an observation from the owning prepared
+        // records; no separate target Vec survives its fee/owner retirement.
+        drop(prepared);
+        let mut resumed = [93.0; 8];
+        runtime
+            .render_into(
+                AudioRenderRequest { start_sample: 4, frames: 4 },
+                &mut resumed,
+            )
+            .expect("one continued epoch produces full joint canonical PCM");
+        let expected: Vec<_> = INPUT[4..8]
+            .iter()
+            .flatten()
+            .map(|sample| sample * 0.75_f32 * 0.75_f32)
+            .collect();
+        assert_eq!(resumed.as_slice(), expected.as_slice());
+    }
     drop(runtime);
     // Both post-Drop OS-exit observations share one two-second deadline. This
     // neither bounds the preceding Drop nor proves the native 100ms exit gate.

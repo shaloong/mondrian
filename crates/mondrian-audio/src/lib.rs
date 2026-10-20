@@ -115,7 +115,8 @@ mod native_diagnostic_projection;
 pub use runtime::native_author::{
     NativeAudioAuthorProgram, NativeAudioParameterHandoffContinuity,
     NativeAudioParameterHandoffError, NativeAudioParameterHandoffReceipt,
-    PreparedNativeAudioParameterHandoff,
+    NativeAudioTerminalBatchInstallReceipt, PreparedNativeAudioParameterHandoff,
+    PreparedNativeAudioTerminalBatch,
 };
 
 pub use runtime::host_output_fader::{

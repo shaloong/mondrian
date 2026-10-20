@@ -439,6 +439,58 @@ impl AudioProgramDeliveryRuntime {
         Ok(receipt)
     }
 
+    /// Prepare an authenticated finite terminal frontier without changing the submitted window.
+    /// The caller retains one same-Source prepared owner through Ack and retirement.
+    pub fn prepare_native_author_terminal_batch(
+        &mut self,
+        programs: &[crate::NativeAudioAuthorProgram],
+        proposals: &[mondrian_core::NativeAudioAuthorProposal],
+        destination: mondrian_core::AudioOwnerInstallationVerifier,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<crate::PreparedNativeAudioTerminalBatch, crate::NativeAudioParameterHandoffError>
+    {
+        self.runtime.prepare_native_author_terminal_batch(
+            programs,
+            proposals,
+            destination,
+            cancellation,
+        )
+    }
+
+    /// Publish the same prepared, preserved frontier once; no new window or native Ack.
+    pub fn install_native_author_terminal_batch(
+        &mut self,
+        prepared: &mut crate::PreparedNativeAudioTerminalBatch,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<
+        crate::NativeAudioTerminalBatchInstallReceipt,
+        crate::NativeAudioParameterHandoffError,
+    > {
+        self.runtime
+            .install_native_author_terminal_batch(prepared, authorization, cancellation)
+    }
+
+    /// Recheck first, then hold the adapter's canonical guard through bounded publication.
+    /// Neither preparation nor preserved publication changes the submitted window.
+    pub fn install_native_author_terminal_batch_with_commit_guard<G>(
+        &mut self,
+        prepared: &mut crate::PreparedNativeAudioTerminalBatch,
+        authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        cancellation: &ExecutionCancellationToken,
+        acquire: impl FnOnce() -> Result<G, crate::NativeAudioParameterHandoffError>,
+    ) -> Result<
+        (crate::NativeAudioTerminalBatchInstallReceipt, G),
+        crate::NativeAudioParameterHandoffError,
+    > {
+        self.runtime.install_native_author_terminal_batch_with_commit_guard(
+            prepared,
+            authorization,
+            cancellation,
+            acquire,
+        )
+    }
+
     /// Retry only exact native Ack on the same installed Runtime and delivery.
     /// No author, Plan, scratch, PDC or sample cursor changes occur.
     pub fn acknowledge_native_author_parameter_handoff(

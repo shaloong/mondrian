@@ -5,6 +5,12 @@
 //! actual current Sessions, admits their overlap against the frozen root grant,
 //! and moves only already validated owners at the existing Source boundary.
 
+#[path = "native_author_terminal_batch.rs"]
+mod terminal_batch;
+pub use terminal_batch::{
+    NativeAudioTerminalBatchInstallReceipt, PreparedNativeAudioTerminalBatch,
+};
+
 use super::native_author_logical_fees::LogicalPlanFee;
 use super::native_author_scope::{replace_runtime_weights, replace_weights};
 use super::*;
