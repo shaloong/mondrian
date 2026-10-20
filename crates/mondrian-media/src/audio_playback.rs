@@ -11387,6 +11387,8 @@ mod tests {
     }
 
     mod native_author_media_contracts {
+        mod stale_retirement;
+
         use super::*;
         use mondrian_core::{
             NativeAudioAuthorBoundaryFacts, NativeAudioAuthorCallback, NativeAudioAuthorProposal,

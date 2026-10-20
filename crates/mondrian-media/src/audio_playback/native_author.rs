@@ -262,6 +262,12 @@ impl AudioPlayback {
     ) {
         let identity = (completion.generation, completion.renderer_id);
         if self.native_author_handoff_in_flight != Some(identity) {
+            if let Some(work) = completion.into_retired_work() {
+                self.handoff_retired_render_owners(
+                    VecDeque::from([RenderWork::NativeAuthorHandoff(work)]),
+                    None,
+                );
+            }
             return;
         }
         self.native_author_handoff_in_flight = None;
@@ -270,6 +276,12 @@ impl AudioPlayback {
             .as_ref()
             .is_some_and(|renderer| renderer.materialization_id == completion.renderer_id)
         {
+            if let Some(work) = completion.into_retired_work() {
+                self.handoff_retired_render_owners(
+                    VecDeque::from([RenderWork::NativeAuthorHandoff(work)]),
+                    None,
+                );
+            }
             return;
         }
         let outcome = match completion.result {
