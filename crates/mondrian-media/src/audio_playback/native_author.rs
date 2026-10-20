@@ -4,6 +4,12 @@
 
 use super::*;
 
+pub(super) mod terminal_batch;
+pub use terminal_batch::{
+    AudioPcmNativeAuthorHandoffMode, AudioPcmNativeAuthorResumeKey,
+    AudioPcmNativeAuthorTerminalBatchOutcome, AudioPcmNativeAuthorTerminalBatchStatus,
+};
+
 /// Exact refusal keeps the actual retained source delivery outstanding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPcmNativeAuthorHandoffRefusal {
@@ -49,6 +55,46 @@ pub enum AudioPcmNativeAuthorHandoffIntent {
 /// The provider must prove exact private retained delivery, all shared Scope
 /// materializations, canonical generation, actual owners and original grant.
 pub trait AudioPcmNativeAuthorHandoff: Send + Sync + 'static {
+    /// Frozen metadata selects a queue protocol, never native/author permission.
+    fn mode(&self) -> AudioPcmNativeAuthorHandoffMode {
+        AudioPcmNativeAuthorHandoffMode::Inline
+    }
+    /// Prepare the complete terminal direct-root, actually Preserved frontier.
+    /// Only the producer calls this. Keep its owned preparation in this provider;
+    /// success does not publish canonical data or grant Source installation.
+    fn prepare_terminal_batch(
+        &mut self,
+        _destination: AudioOwnerInstallationVerifier,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> Result<(), AudioPcmNativeAuthorHandoffRefusal> {
+        Err(AudioPcmNativeAuthorHandoffRefusal::UnsupportedAdapter)
+    }
+    /// Consume the already prepared frontier after real canonical publication.
+    /// SDK checks precede the actual author's commit guard and Source CAS.
+    /// After CAS, every Ack refusal/cancellation must return InstalledAwaiting;
+    /// retain the new claim and retry only remaining members. Acknowledged may
+    /// return only after taking/dropping the preparation on this producer,
+    /// outside all guards. Copy its actual installed anchor target before Drop.
+    fn apply_prepared_terminal_batch(
+        &mut self,
+        _authorization: &mut mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> AudioPcmNativeAuthorTerminalBatchOutcome {
+        AudioPcmNativeAuthorTerminalBatchOutcome::Refused(
+            AudioPcmNativeAuthorHandoffRefusal::UnsupportedAdapter,
+        )
+    }
+    /// Retry only the same installed frontier's still-unacknowledged members.
+    /// This never prepares, publishes a Source or repeats a successful Ack.
+    fn acknowledge_terminal_batch(
+        &mut self,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> AudioPcmNativeAuthorTerminalBatchOutcome {
+        AudioPcmNativeAuthorTerminalBatchOutcome::Refused(
+            AudioPcmNativeAuthorHandoffRefusal::UnsupportedAdapter,
+        )
+    }
+
     /// Actual captured renderer owner; metadata alone cannot substitute for it.
     fn renderer(&self) -> &Arc<dyn AudioPcmRenderer>;
     /// Shared exact source proposal accepted by the canonical author adapter.
@@ -135,6 +181,7 @@ pub(super) struct NativeAuthorHandoffWork {
     pub(super) expected: AudioOwnerInstallationClaim,
     pub(super) cancellation: ExecutionCancellationToken,
     pub(super) output_quiescent: bool,
+    pub(super) continuation: Option<Box<terminal_batch::Continuation>>,
 }
 
 pub(super) struct NativeAuthorHandoffCompletion {
@@ -205,7 +252,15 @@ impl AudioPlayback {
         &mut self,
         request: Box<dyn AudioPcmNativeAuthorHandoff>,
     ) -> Result<bool, AudioPlaybackError> {
+        let mode = request.mode();
+        if mode == AudioPcmNativeAuthorHandoffMode::TerminalBatch {
+            return self.request_terminal_author_batch(request);
+        }
         self.ensure_render_execution_available()?;
+        if self.render_queue.batch_busy() {
+            self.handoff_retired_author_request(request);
+            return Ok(false);
+        }
         let Some(renderer) = &self.renderer else {
             return Ok(false);
         };
@@ -231,6 +286,7 @@ impl AudioPlayback {
             source: Arc::clone(&self.owner_installation),
             expected,
             cancellation: self.native_control_cancellation.clone(),
+            continuation: None,
             output_quiescent: matches!(self.native_control_hold,Some(NativeControlHold::AuthorStateEntry {
                 target,phase:AuthorStateEntryPhase::OutputRetired {..}
                     | AuthorStateEntryPhase::InstalledAwaitingAck {..},
@@ -450,6 +506,7 @@ pub(super) fn complete_native_author_handoff(
                     pending: VecDeque::from([RenderWork::NativeAuthorHandoff(work)]),
                     renderers: VecDeque::new(),
                     errors: VecDeque::new(),
+                    native_author_requests: VecDeque::new(),
                 },
             );
             NativeAuthorHandoffCompletionResult::Finished(outcome)

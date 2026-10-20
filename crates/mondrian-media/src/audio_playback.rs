@@ -11,10 +11,13 @@ mod native_child_settlement;
 use native_child_settlement::ForeignOwnerRetirementTracker;
 mod source_close;
 mod state_entry;
+use native_author::terminal_batch as author_batch;
 pub use native_author::{
     AudioPcmNativeAuthorHandoff, AudioPcmNativeAuthorHandoffContinuity,
-    AudioPcmNativeAuthorHandoffIntent, AudioPcmNativeAuthorHandoffOutcome,
-    AudioPcmNativeAuthorHandoffRefusal, AudioPcmNativeAuthorHandoffStatus,
+    AudioPcmNativeAuthorHandoffIntent, AudioPcmNativeAuthorHandoffMode,
+    AudioPcmNativeAuthorHandoffOutcome, AudioPcmNativeAuthorHandoffRefusal,
+    AudioPcmNativeAuthorHandoffStatus, AudioPcmNativeAuthorResumeKey,
+    AudioPcmNativeAuthorTerminalBatchOutcome, AudioPcmNativeAuthorTerminalBatchStatus,
 };
 pub use source_close::{AudioPcmSourceCloseStatus, AudioPcmSourceCloseTicket};
 use state_entry::AuthorStateEntryPhase;
@@ -943,6 +946,21 @@ pub enum AudioPlaybackEvent {
         /// Explicit cancellation or adapter refusal, never a render fault.
         reason: AudioNativeObservationPollRefusal,
     },
+    /// Producer-owned complete preparation; only immutable anchor/key cross UI.
+    NativeAuthorTerminalBatchPrepared {
+        renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+        generation: u64,
+        proposal: Box<mondrian_core::NativeAudioAuthorProposal>,
+        key: AudioPcmNativeAuthorResumeKey,
+    },
+    /// Historical result for the exact parked/resumed terminal frontier.
+    NativeAuthorTerminalBatchObserved {
+        renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+        generation: u64,
+        proposal: Box<mondrian_core::NativeAudioAuthorProposal>,
+        key: AudioPcmNativeAuthorResumeKey,
+        status: AudioPcmNativeAuthorTerminalBatchStatus,
+    },
     /// Same-source author Plan plus native acknowledgement settled on the serial worker.
     NativeAuthorHandoffObserved {
         /// Actual source renderer materialization.
@@ -1148,6 +1166,7 @@ struct PcmRenderWork {
 enum RenderCompletion {
     NativeReprepare(native_reprepare::NativeReprepareCompletion),
     NativeAuthorHandoff(Box<native_author::NativeAuthorHandoffCompletion>),
+    NativeAuthorTerminalBatch(author_batch::Completion),
     Pcm(PcmRenderCompletion),
     NativeEditor(Box<NativeEditorCompletion>),
     NativeObservations {
@@ -1210,6 +1229,7 @@ enum RenderQueuePushError {
 
 struct RenderQueueState {
     pending: VecDeque<RenderWork>,
+    author_batch: author_batch::Lane,
     stopped: bool,
 }
 
@@ -1234,6 +1254,7 @@ impl RenderWorkQueue {
             state: Mutex::new(RenderQueueState {
                 pending: VecDeque::with_capacity(pcm_capacity + MAX_PENDING_NATIVE_WORK),
                 stopped: false,
+                author_batch: author_batch::Lane::Vacant,
             }),
             #[cfg(test)]
             completion_publications: std::sync::atomic::AtomicUsize::new(0),
@@ -1264,7 +1285,16 @@ impl RenderWorkQueue {
                 .iter()
                 .filter(|queued| !matches!(queued, RenderWork::Pcm(_)))
                 .count()
+                + state.author_batch.outside_pending()
                 >= MAX_PENDING_NATIVE_WORK
+        {
+            return Err(RenderQueuePushError::Busy(work));
+        }
+        if state.author_batch.busy()
+            && matches!(
+                &work,
+                RenderWork::NativeAuthorHandoff(_) | RenderWork::NativeReprepare(_)
+            )
         {
             return Err(RenderQueuePushError::Busy(work));
         }
@@ -1287,6 +1317,11 @@ impl RenderWorkQueue {
             return Err(RenderQueuePushError::Busy(work));
         }
         debug_assert!(state.pending.len() < state.pending.capacity());
+        if let RenderWork::NativeAuthorHandoff(work) = &work
+            && let Some(batch) = &work.continuation
+        {
+            state.author_batch = author_batch::Lane::Queued(batch.identity.clone());
+        }
         state.pending.push_back(work);
         self.wake.notify_one();
         Ok(())
@@ -1296,6 +1331,11 @@ impl RenderWorkQueue {
         let mut state = self.state.lock();
         loop {
             if let Some(work) = state.pending.pop_front() {
+                if let RenderWork::NativeAuthorHandoff(work) = &work
+                    && let Some(batch) = &work.continuation
+                {
+                    state.author_batch = author_batch::Lane::Active(batch.identity.clone());
+                }
                 return Some(work);
             }
             if state.stopped {
@@ -1307,10 +1347,13 @@ impl RenderWorkQueue {
 
     fn take_pending(&self) -> VecDeque<RenderWork> {
         let mut state = self.state.lock();
-        std::mem::replace(
+        let mut pending = std::mem::replace(
             &mut state.pending,
             VecDeque::with_capacity(self.pcm_capacity + MAX_PENDING_NATIVE_WORK),
-        )
+        );
+        author_batch::drain_parked(&mut state, &mut pending);
+        author_batch::retiring_queued(&mut state, &pending);
+        pending
     }
 
     fn take_pending_preserving_native_controls(
@@ -1323,7 +1366,7 @@ impl RenderWorkQueue {
         let count = state.pending.len();
         // A bounded cold-control retirement owner, not a PCM sample allocation.
         // Rotate each original entry once so kept controls retain FIFO order.
-        let mut retired = VecDeque::with_capacity(count);
+        let mut retired = VecDeque::with_capacity(count + usize::from(state.author_batch.parked()));
         for _ in 0..count {
             let Some(work) = state.pending.pop_front() else {
                 break;
@@ -1347,19 +1390,31 @@ impl RenderWorkQueue {
                 };
             let restart = matches!(&work, RenderWork::NativeReprepare(work)
                 if work.preserve_for_slot(renderer_id, installed_generation));
-            if editor || suspended_control || restart {
+            let batch =
+                author_batch::preserve_work(&work, renderer_id, installed_generation, policy);
+            if editor || suspended_control || restart || batch {
                 state.pending.push_back(work);
             } else {
                 retired.push_back(work);
             }
         }
+        author_batch::drain_unpreserved(
+            &mut state,
+            &mut retired,
+            renderer_id,
+            installed_generation,
+            policy,
+        );
+        author_batch::retiring_queued(&mut state, &retired);
         retired
     }
 
     fn stop(&self) -> VecDeque<RenderWork> {
         let mut state = self.state.lock();
         state.stopped = true;
-        let pending = std::mem::take(&mut state.pending);
+        let mut pending = std::mem::take(&mut state.pending);
+        author_batch::drain_parked(&mut state, &mut pending);
+        author_batch::retiring_queued(&mut state, &pending);
         self.wake.notify_all();
         pending
     }
@@ -1488,11 +1543,15 @@ struct RetiredRenderOwners {
     pending: VecDeque<RenderWork>,
     renderers: VecDeque<Arc<dyn AudioPcmRenderer>>,
     errors: VecDeque<mondrian_core::MondrianError>,
+    native_author_requests: VecDeque<Box<dyn AudioPcmNativeAuthorHandoff>>,
 }
 
 impl RetiredRenderOwners {
     fn is_empty(&self) -> bool {
-        self.pending.is_empty() && self.renderers.is_empty() && self.errors.is_empty()
+        self.pending.is_empty()
+            && self.renderers.is_empty()
+            && self.errors.is_empty()
+            && self.native_author_requests.is_empty()
     }
 
     fn owner_units(&self) -> usize {
@@ -1500,6 +1559,7 @@ impl RetiredRenderOwners {
             .len()
             .saturating_add(self.renderers.len())
             .saturating_add(self.errors.len())
+            .saturating_add(self.native_author_requests.len())
     }
 
     fn merge(&mut self, mut other: Self) -> Result<(), Self> {
@@ -1509,6 +1569,7 @@ impl RetiredRenderOwners {
         self.pending.append(&mut other.pending);
         self.renderers.append(&mut other.renderers);
         self.errors.append(&mut other.errors);
+        self.native_author_requests.append(&mut other.native_author_requests);
         Ok(())
     }
 }
@@ -1596,13 +1657,24 @@ fn retire_render_owners(
 ) -> ForeignOwnerRetirementEvidence {
     let mut evidence = ForeignOwnerRetirementEvidence::default();
     while let Some(work) = retired.pending.pop_front() {
+        let ticket = author_batch::retirement_ticket(&work);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match work {
+            RenderWork::NativeReprepare(work) => {
+                native_reprepare::retire_work(work, queue, tracker)
+            }
+            work => drop(work),
+        }));
+        author_batch::finish_retirement(ticket, result.is_ok());
+        if let Err(payload) = result {
+            evidence.panics = evidence.panics.saturating_add(1);
+            if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                evidence.owner_abandonments = evidence.owner_abandonments.saturating_add(1);
+            }
+        }
+    }
+    while let Some(request) = retired.native_author_requests.pop_front() {
         if let Err(payload) =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match work {
-                RenderWork::NativeReprepare(work) => {
-                    native_reprepare::retire_work(work, queue, tracker)
-                }
-                work => drop(work),
-            }))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(request)))
         {
             evidence.panics = evidence.panics.saturating_add(1);
             if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -2464,7 +2536,12 @@ impl AudioPlayback {
         enqueue_retired_render_owners(
             &self.render_retirement_queue,
             &self.foreign_owner_retirements,
-            RetiredRenderOwners { pending, renderers, errors: VecDeque::new() },
+            RetiredRenderOwners {
+                pending,
+                renderers,
+                errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
+            },
         );
     }
 
@@ -2819,12 +2896,17 @@ impl AudioPlayback {
             let policy = if matches!(
                 self.native_control_hold,
                 Some(NativeControlHold::Reprepare { .. })
-            ) {
+            ) || self.render_queue.batch_busy()
+            {
                 PcmRetirementPolicy::PreserveNativeHold
             } else {
                 PcmRetirementPolicy::FreshContinuity
             };
             return self.reprime_with_policy(anchor, policy);
+        }
+        if self.render_queue.batch_busy() {
+            self.handoff_retired_render_owners(VecDeque::new(), Some(renderer));
+            return Err(AudioOwnerInstallationError::Superseded.into());
         }
         if let Err(error) = continuity_model.validate_fresh_entry(anchor) {
             self.handoff_retired_render_owners(VecDeque::new(), Some(renderer));
@@ -3034,6 +3116,11 @@ impl AudioPlayback {
         self.validate_reprime_anchor_pure(anchor)?;
         self.ensure_render_execution_available()?;
         self.validate_reprime_output()?;
+        if self.render_queue.batch_busy()
+            && matches!(pcm_policy, PcmRetirementPolicy::FreshContinuity)
+        {
+            return Err(AudioOwnerInstallationError::Superseded.into());
+        }
         if matches!(
             self.native_control_hold,
             Some(
@@ -3160,6 +3247,7 @@ impl AudioPlayback {
     fn ensure_render_execution_available(&self) -> Result<(), AudioPlaybackError> {
         if self.render_execution_unavailable
             || self.shutdown_requested
+            || self.render_queue.batch_stopped()
             || self.render_retirement_faulted.load(AtomicOrdering::Acquire)
             || self.render_worker.as_ref().is_none_or(JoinHandle::is_finished)
             || self.render_retirement_worker.as_ref().is_none_or(JoinHandle::is_finished)
@@ -4047,6 +4135,10 @@ impl AudioPlayback {
                 RenderCompletion::Pcm(completion) => completion,
                 RenderCompletion::NativeReprepare(completion) => {
                     self.accept_native_reprepare_completion(completion, &mut events);
+                    continue;
+                }
+                RenderCompletion::NativeAuthorTerminalBatch(completion) => {
+                    self.accept_terminal_author_completion(completion, &mut events);
                     continue;
                 }
                 RenderCompletion::NativeAuthorHandoff(completion) => {
@@ -5047,6 +5139,10 @@ fn retire_render_completion(
     // data. New variants or local payload fields require this boundary review.
     // Pure PCM/DTO storage must not consume foreign retirement capacity.
     let work = match completion {
+        RenderCompletion::NativeAuthorTerminalBatch(completion) => {
+            completion.retire_parked();
+            None
+        }
         RenderCompletion::NativeReprepare(completion) => {
             drop(completion);
             None
@@ -5139,6 +5235,7 @@ fn retire_render_completion(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::new(),
                                 errors: VecDeque::from([error]),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                     }
@@ -5178,6 +5275,7 @@ fn retire_render_completion(
                 pending: VecDeque::from([work]),
                 renderers: VecDeque::new(),
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             },
         );
     }
@@ -5262,6 +5360,18 @@ fn run_render_worker(
                 continue;
             }
             RenderWork::NativeAuthorHandoff(work) => {
+                if work.continuation.is_some() {
+                    match author_batch::run(work, worker_queue, completion_tx) {
+                        author_batch::RunOutcome::Continue => continue,
+                        author_batch::RunOutcome::Stopped => return RENDER_WORKER_TERMINAL_NORMAL,
+                        author_batch::RunOutcome::Panicked(true) => {
+                            return RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                        }
+                        author_batch::RunOutcome::Panicked(false) => {
+                            return RENDER_WORKER_TERMINAL_PANICKED
+                        }
+                    }
+                }
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     native_author::execute_native_author_handoff(&work)
                 }));
@@ -5277,6 +5387,7 @@ fn run_render_worker(
                                 pending: VecDeque::from([RenderWork::NativeAuthorHandoff(work)]),
                                 renderers: VecDeque::new(),
                                 errors: VecDeque::new(),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -5335,6 +5446,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::new(),
                                 errors: VecDeque::from([error]),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         Outcome::Refused(Refusal::ProcessorRejected)
@@ -5347,6 +5459,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::from([renderer]),
                                 errors: VecDeque::new(),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -5363,6 +5476,7 @@ fn run_render_worker(
                         pending: VecDeque::new(),
                         renderers: VecDeque::from([renderer]),
                         errors: VecDeque::new(),
+                        native_author_requests: VecDeque::new(),
                     },
                 );
                 if !publish_render_completion(
@@ -5416,6 +5530,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::new(),
                                 errors: VecDeque::from([error]),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         NativeObservationCompletion::Refused(
@@ -5430,6 +5545,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::from([renderer]),
                                 errors: VecDeque::new(),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -5446,6 +5562,7 @@ fn run_render_worker(
                         pending: VecDeque::new(),
                         renderers: VecDeque::from([renderer]),
                         errors: VecDeque::new(),
+                        native_author_requests: VecDeque::new(),
                     },
                 );
                 if !publish_render_completion(
@@ -5506,6 +5623,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::new(),
                                 errors: VecDeque::from([error]),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         AudioPcmNativeOwnerBindingStatus::Unavailable(
@@ -5520,6 +5638,7 @@ fn run_render_worker(
                                 pending: VecDeque::new(),
                                 renderers: VecDeque::from([renderer]),
                                 errors: VecDeque::new(),
+                                native_author_requests: VecDeque::new(),
                             },
                         );
                         return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
@@ -5536,6 +5655,7 @@ fn run_render_worker(
                         pending: VecDeque::new(),
                         renderers: VecDeque::from([renderer]),
                         errors: VecDeque::new(),
+                        native_author_requests: VecDeque::new(),
                     },
                 );
                 if !publish_render_completion(
@@ -5571,6 +5691,7 @@ fn run_render_worker(
                 pending: VecDeque::new(),
                 renderers: VecDeque::from([renderer]),
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             },
         );
         let result = match rendered {
@@ -5628,6 +5749,7 @@ fn stabilize_render_result(
                     pending: VecDeque::new(),
                     renderers: VecDeque::new(),
                     errors: VecDeque::from([error]),
+                    native_author_requests: VecDeque::new(),
                 },
             );
             RenderCompletionResult::Failed("audio renderer returned an execution error".to_owned())
@@ -7051,6 +7173,7 @@ mod tests {
                     dropped: Arc::clone(&dropped),
                 }) as Arc<dyn AudioPcmRenderer>]),
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             },
         );
 
@@ -7129,6 +7252,7 @@ mod tests {
                 pending: VecDeque::new(),
                 renderers,
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             })
             .is_ok());
         for _ in 0..config.max_in_flight {
@@ -7176,6 +7300,7 @@ mod tests {
                     })
                     .collect(),
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             },
         );
         assert_eq!(
@@ -7194,6 +7319,7 @@ mod tests {
                     dropped: Arc::clone(&rejected_dropped),
                 }) as Arc<dyn AudioPcmRenderer>]),
                 errors: VecDeque::new(),
+                native_author_requests: VecDeque::new(),
             },
         );
         assert!(
@@ -11388,6 +11514,7 @@ mod tests {
 
     mod native_author_media_contracts {
         mod stale_retirement;
+        mod terminal_batch;
 
         use super::*;
         use mondrian_core::{
