@@ -288,6 +288,17 @@ fn canonical_graph_preserves_unwrapped_angle_degrees_across_seeks() {
     let inspection = cpu_contract_probe("angle");
     let (mut effect, property) = angle_effect(&inspection);
     effect.properties.upsert(linear(property, 370.0));
+    let source_path = effect
+        .properties
+        .iter()
+        .find(|(_, property)| property.descriptor.display_name == "Angle source oracle")
+        .expect("existing native test oracle property")
+        .0
+        .to_owned();
+    effect
+        .properties
+        .set_static_value(&source_path, PropertyValue::Int(5))
+        .expect("explicit Graph Curve oracle, independent of queried native flags");
     let authored = effect.properties.clone();
     let program = PreparedEffectProgram::prepare_hierarchical_with_frame_context(
         std::slice::from_ref(&effect),
@@ -332,8 +343,8 @@ fn canonical_graph_preserves_unwrapped_angle_degrees_across_seeks() {
         let graph = program
             .evaluate(TimelineTime::new(frame, 24).unwrap())
             .expect("canonical authored Angle evaluation");
-        // The graph supplies its evaluated Constant snapshot, rather than
-        // pretending the compiled worker receives the native Curve source.
+        // The adapter retains the enabled animated canonical property as a
+        // complete native Curve, alongside its evaluated current value.
         let output = retained
             .apply_compiled_rgba_f32(
                 input.view(),
@@ -361,8 +372,11 @@ fn product_worker_rejects_unadmitted_double_semantics_before_create() {
     let mode = std::env::var("MONDRIAN_OPENFX_SESSION_PROBE_MODE").expect("mode");
     assert!(matches!(mode.as_str(), "angle_time" | "angle_compound"));
     let inspection = cpu_contract_probe(&mode);
+    let error = describe_openfx_filter(product_executable(), &inspection, IDENTIFIER)
+        .expect_err("unadmitted Double semantics must fail Describe");
     assert!(
-        matches!(describe_openfx_filter(product_executable(), &inspection, IDENTIFIER), Err(OpenFxHostError::WorkerFailed(detail)) if detail == "native status 7")
+        matches!(&error, OpenFxHostError::WorkerFailed(detail) if detail == "native status 7: "),
+        "unexpected Describe refusal: {error:?}"
     );
     let all = action_rows(&directory);
     let rows = all.values().flatten().collect::<Vec<_>>();
