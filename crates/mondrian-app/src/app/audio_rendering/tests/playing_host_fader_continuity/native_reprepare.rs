@@ -492,6 +492,7 @@ pub(super) fn run_native_restart_control(seek_frames: &[i64]) {
             "the complete bounded observation includes cleanup"
         );
         assert!(capture.cleared.len() <= scenario.capture_clears);
+        assert_eq!(capture.cleared.len() as u64, capture.clear_serial);
         assert!(!capture.snapshot.active && capture.queue.is_empty());
     }
     if let Err(payload) = target {
