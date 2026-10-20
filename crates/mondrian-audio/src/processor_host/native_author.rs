@@ -197,6 +197,7 @@ fn admit_parameter_native_source(
     context: &ParameterNativeBindingContext<'_>,
     proposals: &[NativeAudioAuthorProposal],
     program: &crate::CompiledAudioProgram,
+    terminal_revision: bool,
 ) -> Result<
     Option<(
         crate::AudioNativeProcessorOwnerLease,
@@ -277,6 +278,9 @@ fn admit_parameter_native_source(
         .map_err(|reason| pending(lease, Reason::DeliveryRefused(reason)))?;
     if let Some(failure) = author.source.failure() {
         return Err(pending(lease, Reason::SourceFailure(failure)));
+    }
+    if terminal_revision && selected && author.source.revision() < proposal.revision() {
+        return Err(pending(lease, Reason::OutstandingDelivery));
     }
     if author.source.publishing() {
         return Err(pending(lease, Reason::PendingCallbacks));
@@ -416,7 +420,7 @@ impl PreparedProcessorHost {
             if context.cancellation.is_canceled() {
                 return Err(NativeAudioAuthorAdmissionError::Cancelled);
             }
-            admit_parameter_native_source(instance, &context, proposals, program)?;
+            admit_parameter_native_source(instance, &context, proposals, program, true)?;
         }
         Ok(())
     }
@@ -459,7 +463,7 @@ impl PreparedProcessorHost {
                 return Err(NativeAudioAuthorAdmissionError::Cancelled);
             }
             let Some((lease, object)) =
-                admit_parameter_native_source(instance, &context, proposals, program)?
+                admit_parameter_native_source(instance, &context, proposals, program, false)?
             else {
                 continue;
             };
@@ -532,7 +536,8 @@ impl PreparedProcessorHost {
             if context.cancellation.is_canceled() {
                 return Err(NativeAudioAuthorAdmissionError::Cancelled);
             }
-            let admitted = admit_parameter_native_source(instance, &context, proposals, program)?;
+            let admitted =
+                admit_parameter_native_source(instance, &context, proposals, program, true)?;
             let record = prepared.records.iter().find(|record| record.index == index);
             let Some((lease, object)) = admitted else {
                 if record.is_some() {
@@ -887,5 +892,236 @@ impl PreparedProcessorHost {
             return Ok((lease.editor_target(), observation));
         }
         Err(AudioNativeOwnerError::OwnerUnavailable.into())
+    }
+}
+
+#[cfg(test)]
+mod terminal_source_revision_tests {
+    use super::*;
+    use std::num::NonZeroU32;
+    use std::sync::Mutex;
+
+    struct Snapshot(Arc<Mutex<crate::NativeAudioObservations>>);
+    impl AudioProcessor for Snapshot {
+        fn poll_native_observations(
+            &mut self,
+            _: crate::NativeAudioObservationConsumption,
+        ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
+            unreachable!()
+        }
+        fn process(
+            &mut self,
+            _: crate::AudioProcessorProcessContext,
+            _: &mut dyn AudioProcessorAudioIo,
+            _: crate::AudioParameterEventBatch<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn terminal_final_source_rejects_revision_below_its_exact_retained_delivery() {
+        // Portable same-object ABI model, not native DLL or author permission.
+        let root = crate::AudioSessionCursorIdentity {
+            prepared_plan_id: mondrian_core::AudioPreparedPlanId::new(),
+            session_id: mondrian_core::AudioRenderSessionId::new(),
+        };
+        let next = crate::AudioSessionCursorIdentity {
+            prepared_plan_id: mondrian_core::AudioPreparedPlanId::new(),
+            ..root
+        };
+        let occurrence = crate::AudioProcessorOccurrence {
+            instance_id: mondrian_core::AudioProcessorInstanceId::new(),
+            owner: crate::AudioProcessorOccurrenceOwner::Output(
+                mondrian_core::ProgramOutputId::new(),
+            ),
+            insertion: crate::AudioProcessorInsertionPoint::PreFader,
+        };
+        let epoch = crate::AudioContinuityEpoch::new(7);
+        let address = crate::AudioNativeProcessorAddress {
+            root,
+            local: root,
+            occurrence,
+            epoch: Some(epoch),
+        };
+        let serial = NonZeroU64::new(9).unwrap();
+        let binding = mondrian_core::AudioProcessorBindingId::new();
+        let lease = crate::AudioNativeProcessorOwnerLease::issue(address, binding, serial);
+        let object = crate::NativeAudioObjectObservation::new(
+            NonZeroU32::new(123).unwrap(),
+            NonZeroU64::new(1).unwrap(),
+        );
+        let request = crate::NativeAudioObjectBindRequest { binding, expected_object: object };
+        let sequence = mondrian_core::SequenceId::new();
+        let proposal = NativeAudioAuthorProposal::project(
+            lease.editor_target(),
+            sequence,
+            5,
+            mondrian_core::NativeAudioAuthorBoundaryFacts {
+                completion: mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration,
+                open_parameter_edits: 0,
+                group_depth: 0,
+            },
+            vec![mondrian_core::NativeAudioAuthorCallback::DirtyChanged(
+                false,
+            )],
+            Some(vec![1]),
+        )
+        .unwrap();
+        let source = crate::NativeAudioAuthorSourceStatus {
+            revision: 4,
+            pending_events: 0,
+            pending_parameter_observations: 0,
+            pending_dsp_feedback_values: 0,
+            open_parameter_edits: 0,
+            group_depth: 0,
+            failure: None,
+            parameter_flush_pending: false,
+            publishing: false,
+        };
+        source.validate().unwrap(); // Legal source shape alone misses the relation.
+        let observation = Arc::new(Mutex::new(crate::NativeAudioObservations {
+            object: Some(object),
+            author: Some(crate::NativeAudioAuthorObservation {
+                source,
+                delivery: crate::NativeAudioAuthorDeliveryState::AwaitingAcknowledgement {
+                    binding: request,
+                    revision: 5,
+                    request_cohort: None,
+                },
+            }),
+            ..Default::default()
+        }));
+        let instance = HostedProcessorInstance {
+            occurrence,
+            processor: Box::new(Snapshot(Arc::clone(&observation))),
+            continuity: HostedProcessorContinuity::Active { epoch, next_sample: 4 },
+            notes: None,
+            native_binding: NativeHostedBinding::Installed { lease, object },
+            native_author_outstanding: Some(NativeHostedAuthorDelivery::new(
+                proposal.clone(),
+                None,
+            )),
+            native_reprepare_seed_bytes: 0,
+            native_editor_detached: None,
+            native_editor_attachment: None,
+        };
+        let mut host = PreparedProcessorHost {
+            musical_time_reference: None,
+            instances: vec![instance],
+            entry_binding: None,
+            parameter_events: ProcessorParameterEventScratch::new(0, 0),
+            render_contract: AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 4,
+                processing_mode: crate::AudioProcessingMode::Offline,
+                processor_session_scratch_budget_bytes: 1024,
+                public_output_lookahead_budget_frames: 0,
+                compensation_delay_scratch_budget_bytes: 0,
+            },
+            maximum_parameter_lanes: 0,
+            parameter_event_capacity: 0,
+            session_scratch_bytes: 0,
+            auxiliary_pcm: Vec::new(),
+            sidechain_frame_db: Vec::new(),
+            sidechain_gains: Vec::new(),
+            prepared_notes: Vec::new(),
+        };
+        let fresh_request = crate::NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            expected_object: object,
+        };
+        let prepared = PreparedParameterNativeBindings {
+            current: root,
+            records: vec![PreparedParameterNativeBinding {
+                index: 0,
+                prior_lease: lease,
+                object,
+                address: crate::AudioNativeProcessorAddress { root: next, local: next, ..address },
+                receipt: crate::NativeAudioObjectBindReceipt::acknowledge(fresh_request, object)
+                    .unwrap(),
+            }],
+        };
+        let cancel = ExecutionCancellationToken::new();
+        let context = ParameterNativeBindingContext {
+            current_root: root,
+            current_local: root,
+            next_root: next,
+            next_local: next,
+            installed_serial: serial,
+            proposal: &proposal,
+            cancellation: &cancel,
+        };
+        let strip = crate::plan::CompiledChannelStrip {
+            input_trim_db: 0.0,
+            pre_fader: crate::plan::CompiledRack::default(),
+            fader_db: 0.0,
+            fader_automation: None,
+            post_fader: crate::plan::CompiledRack::default(),
+        };
+        let program = crate::CompiledAudioProgram {
+            musical_time_reference: None,
+            output_id: match occurrence.owner {
+                crate::AudioProcessorOccurrenceOwner::Output(id) => id,
+                _ => unreachable!(),
+            },
+            contributions: Vec::new(),
+            processing_scopes: Default::default(),
+            transitions: Vec::new(),
+            track_channels: Default::default(),
+            buses: Default::default(),
+            bus_order: Vec::new(),
+            output: strip,
+            routes: Vec::new(),
+            sidechain_routes: Vec::new(),
+            note_lanes: Vec::new(),
+        };
+        // Prove all old common shape/object/binding/delivery gates pass, so the
+        // new final rejection is specifically the source/delivery revision edge.
+        assert!(admit_parameter_native_source(
+            &mut host.instances[0],
+            &context,
+            std::slice::from_ref(&proposal),
+            &program,
+            false
+        )
+        .unwrap()
+        .is_some());
+        let error = host
+            .validate_terminal_author_bindings(
+                &prepared,
+                context,
+                std::slice::from_ref(&proposal),
+                &program,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            NativeAudioAuthorAdmissionError::Pending {
+                reason: crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
+                ..
+            }
+        ));
+        for revision in [5, 6] {
+            observation.lock().unwrap().author.as_mut().unwrap().source.revision = revision;
+            host.validate_terminal_author_bindings(
+                &prepared,
+                context,
+                std::slice::from_ref(&proposal),
+                &program,
+            )
+            .unwrap();
+        }
+        assert!(host.instances[0]
+            .native_author_outstanding
+            .as_ref()
+            .unwrap()
+            .same_retained_proposal(&proposal));
+        assert!(matches!(host.instances[0].native_binding,
+            NativeHostedBinding::Installed { lease: current, object: actual } if current == lease && actual == object));
     }
 }
