@@ -105,13 +105,19 @@ impl Materials {
         &self,
         render: AudioRenderContract,
         case: u8,
+        nan_call: u32,
     ) -> (Sequence, AudioProcessorInstanceId) {
         let instance = self
             .catalog
             .create_instance(
                 CLASS,
                 render,
-                Some(configuration(3, render.channel_count() as u32, false, 0)),
+                Some(configuration(
+                    3,
+                    render.channel_count() as u32,
+                    false,
+                    nan_call,
+                )),
             )
             .unwrap();
         assert!(instance.parameters.is_empty());
@@ -338,6 +344,7 @@ struct Child {
     object: NativeAudioObjectObservation,
     handle: OwnedHandle,
     audit: Option<(PathBuf, usize)>,
+    active: u32,
 }
 impl Child {
     fn observe(object: NativeAudioObjectObservation, directory: Option<&std::path::Path>) -> Self {
@@ -360,7 +367,7 @@ impl Child {
             assert!(prefix <= BOUND);
             (path, prefix)
         });
-        Self { object, handle, audit }
+        Self { object, handle, audit, active: 6 }
     }
     fn finish(self, rate: u32, calls: &[NativeCall], tuples: &[[u8; 48]]) {
         assert_eq!(
@@ -395,7 +402,7 @@ impl Child {
                 (4, bytes.len(), 7, self.object.process_id().get(), 1)
             );
             assert_ne!(u64::from_le_bytes(bytes[24..32].try_into().unwrap()), 0);
-            assert_eq!((u32_at(32), u32_at(36)), (1, 6));
+            assert_eq!((u32_at(32), u32_at(36)), (1, self.active));
             assert_eq!(
                 u64::from_le_bytes(bytes[40..48].try_into().unwrap()),
                 f64::from(rate).to_bits()
@@ -486,7 +493,7 @@ fn installed_vst3_mne7_outputs_canonical_routes_ports_fanout_and_native_pdc_with
                 4
             };
             for case in 0..count {
-                let (sequence, id) = materials.authored(render, case);
+                let (sequence, id) = materials.authored(render, case, 0);
                 let authored = serde_json::to_value(&sequence).unwrap();
                 for partition in [&[4_usize][..], &[3, 2, 4]] {
                     let resolves = Arc::new(AtomicUsize::new(0));
@@ -621,4 +628,368 @@ fn installed_vst3_mne7_outputs_canonical_routes_ports_fanout_and_native_pdc_with
             }
         }
     }
+}
+
+fn factory(
+    materials: &Materials,
+    render: AudioRenderContract,
+    outputs: u32,
+    input: bool,
+    nan_call: u32,
+) -> IsolatedAudioProcessorFactory {
+    use crate::{AudioProcessorFactory, AudioProcessorNoteInputContract};
+    use mondrian_timeline::audio::AudioProcessorDefinitionRef;
+    let registration = materials.probe(render, outputs, input, nan_call);
+    let definition = AudioProcessorDefinitionRef::Vst3 {
+        class_id: registration.class_id.clone(),
+        vendor: registration.vendor.clone(),
+        schema_version: 1,
+        binary_sha256: Some(registration.binary_sha256),
+    };
+    let resolver =
+        Vst3AudioProcessorSpecResolver::new(materials.helper.clone(), [registration]).unwrap();
+    let state = configuration(outputs, render.channel_count() as u32, input, nan_call);
+    let parameters = std::collections::BTreeMap::new();
+    let spec = resolver
+        .resolve(
+            AudioProcessorPrepareRequest::new(
+                AudioProcessorOccurrence {
+                    instance_id: AudioProcessorInstanceId::new(),
+                    owner: AudioProcessorOccurrenceOwner::Output(ProgramOutputId::new()),
+                    insertion: AudioProcessorInsertionPoint::PreFader,
+                },
+                &definition,
+                &parameters,
+                Some(&state),
+                render,
+            )
+            .with_note_input_requested(true)
+            .with_musical_time_reference(Some(reference(render.sample_rate))),
+        )
+        .unwrap();
+    let factory = IsolatedAudioProcessorFactory::prepare(spec).unwrap();
+    assert_eq!(factory.execution_contract().algorithmic_latency_frames(), 3);
+    assert_ne!(
+        factory.note_input_contract(),
+        AudioProcessorNoteInputContract::default()
+    );
+    let contract = factory.auxiliary_output_contract();
+    assert_eq!(contract.buses.len(), outputs as usize - 1);
+    for (index, bus) in contract.buses.iter().enumerate() {
+        assert_eq!(bus.bus_key, format!("vst3.audio-output.{}", index + 1));
+        assert_eq!(bus.channel_layout, render.channel_layout);
+    }
+    factory
+}
+struct Io {
+    layout: AudioChannelLayout,
+    main: Vec<f32>,
+    auxiliary: Vec<(String, Vec<f32>)>,
+    notes: Vec<crate::AudioNoteEvent>,
+}
+impl Io {
+    fn new(
+        render: AudioRenderContract,
+        outputs: usize,
+        start: usize,
+        frames: usize,
+        input: bool,
+    ) -> Self {
+        use crate::{AudioNoteEvent, AudioNoteEventKind};
+        let mut main = vec![99.0; frames * render.channel_count()];
+        if input {
+            for (offset, pair) in main.chunks_exact_mut(render.channel_count()).enumerate() {
+                for (channel, sample) in pair.iter_mut().enumerate() {
+                    *sample = (start + offset + 1) as f32 * if channel == 0 { 1.0 } else { -2.0 };
+                }
+            }
+        }
+        let notes = [0_usize, 3, 4, 8]
+            .into_iter()
+            .filter(|sample| (start..start + frames).contains(sample))
+            .map(|sample| {
+                let (on, id, velocity) = match sample {
+                    0 => (true, 0, 0.5),
+                    3 => (false, 0, 0.125),
+                    4 => (true, 1, 0.25),
+                    8 => (false, 1, 0.125),
+                    _ => unreachable!(),
+                };
+                AudioNoteEvent {
+                    sample_offset: (sample - start) as u32,
+                    kind: if on {
+                        AudioNoteEventKind::On
+                    } else {
+                        AudioNoteEventKind::Off
+                    },
+                    port_index: 0,
+                    channel: 3,
+                    key: 61,
+                    native_note_id: id,
+                    velocity,
+                }
+            })
+            .collect();
+        Self {
+            layout: render.channel_layout,
+            main,
+            auxiliary: (1..outputs)
+                .map(|index| {
+                    (
+                        format!("vst3.audio-output.{index}"),
+                        vec![99.0; frames * render.channel_count()],
+                    )
+                })
+                .collect(),
+            notes,
+        }
+    }
+}
+impl AudioProcessorAudioIo for Io {
+    fn note_events(&self) -> &[crate::AudioNoteEvent] {
+        &self.notes
+    }
+    fn main_layout(&self) -> AudioChannelLayout {
+        self.layout
+    }
+    fn frames(&self) -> usize {
+        self.main.len() / self.layout.channel_count()
+    }
+    fn main_interleaved(&mut self) -> &mut [f32] {
+        &mut self.main
+    }
+    fn auxiliary_output(&mut self, key: &str) -> Option<crate::AudioProcessorOutputBus<'_>> {
+        let layout = self.layout;
+        let frames = self.frames();
+        self.auxiliary.iter_mut().find(|(name, _)| name == key).map(|(name, pcm)| {
+            crate::AudioProcessorOutputBus {
+                bus_key: name,
+                channel_layout: layout,
+                frames,
+                interleaved: pcm,
+            }
+        })
+    }
+    fn auxiliary_input(&self, _: &str) -> Option<AudioProcessorInputBus<'_>> {
+        None
+    }
+    fn main_and_auxiliary_input(&mut self, _: &str) -> Option<AudioProcessorMainAndInputBuses<'_>> {
+        None
+    }
+}
+fn process_io(
+    processor: &mut dyn crate::AudioProcessor,
+    render: AudioRenderContract,
+    start: usize,
+    io: &mut Io,
+) -> Result<(), AudioProcessorHostError> {
+    let frames = io.frames();
+    let context = crate::AudioProcessorProcessContext::new(
+        AudioRenderRequest { start_sample: start as i64, frames },
+        AudioSampleRate::new(render.sample_rate).unwrap(),
+        render.channel_layout,
+        render.processing_mode,
+        AudioKernelBackend::ScalarReference,
+    )
+    .with_musical_time_reference(Some(reference(render.sample_rate)));
+    processor.process(
+        context,
+        io,
+        crate::AudioParameterEventBatch::new(start as i64, frames, &[], &[], &[]),
+    )
+}
+#[test]
+#[ignore = "fresh normal Product and MNE7; actual mono/stereo/present/32-output Ready plus per-bus literal native PCM and complete audit"]
+fn installed_vst3_mne7_outputs_product_covers_present_input_mono_and_32_bus_storage() {
+    use crate::AudioProcessorFactory;
+    const ABSENT_L: [f32; 14] = [
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0, 0.0, 0.0,
+    ];
+    const ABSENT_R: [f32; 14] = [
+        0.0, 0.0, 0.0, -0.125, -0.125, -0.125, 0.0, -0.0625, -0.0625, -0.0625, -0.0625, 0.0, 0.0,
+        0.0,
+    ];
+    const PRESENT_L: [f32; 14] = [
+        0.0, 0.0, 0.0, 0.5, 0.75, 1.0, 1.0, 1.375, 1.625, 1.875, 2.125, 2.25, 2.5, 2.75,
+    ];
+    const PRESENT_R: [f32; 14] = [
+        0.0, 0.0, 0.0, -0.625, -1.125, -1.625, -2.0, -2.5625, -3.0625, -3.5625, -4.0625, -4.5,
+        -5.0, -5.5,
+    ];
+    let materials = Materials::load();
+    for rate in [44_100, 48_000] {
+        for (outputs, layout, input) in [
+            (3, AudioChannelLayout::Stereo, true),
+            (32, AudioChannelLayout::Mono, true),
+            (32, AudioChannelLayout::Stereo, false),
+            (1, AudioChannelLayout::Mono, false),
+        ] {
+            let render = render(rate, layout);
+            let factory = factory(&materials, render, outputs, input, 0);
+            let mut processor = factory.create(None).expect("actual bounded complete-output Ready");
+            let object = processor.native_audio_object_observation().unwrap().unwrap();
+            let mut child = Child::observe(object, Some(&materials.directory));
+            child.active = if input { 7 } else { 6 };
+            processor.enter_state(0).unwrap();
+            let mut calls = Vec::new();
+            let mut tuples = Vec::new();
+            let mut start = 0;
+            for frames in [3_usize, 2, 4, 3, 2] {
+                let mut io = Io::new(render, outputs as usize, start, frames, input);
+                process_io(processor.as_mut(), render, start, &mut io).unwrap();
+                for (index, pcm) in std::iter::once((0, &io.main))
+                    .chain(io.auxiliary.iter().enumerate().map(|(i, (_, pcm))| (i + 1, pcm)))
+                {
+                    // Independent arithmetic expression, unlike the native bit encoder.
+                    let factor =
+                        (if index % 2 == 0 { 1.0 } else { -1.0 }) / 2_f32.powi(index as i32);
+                    for (offset, pair) in pcm.chunks_exact(render.channel_count()).enumerate() {
+                        for (channel, &actual) in pair.iter().enumerate() {
+                            let literal = match (input, channel) {
+                                (false, 0) => ABSENT_L,
+                                (false, _) => ABSENT_R,
+                                (true, 0) => PRESENT_L,
+                                (true, _) => PRESENT_R,
+                            };
+                            let value = literal[start + offset] * factor;
+                            assert_eq!(
+                                actual.to_bits(),
+                                if value == 0.0 {
+                                    0.0_f32.to_bits()
+                                } else {
+                                    value.to_bits()
+                                },
+                                "outputs={outputs} bus={index} channel={channel} sample={}",
+                                start + offset
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    processor.native_audio_object_observation().unwrap(),
+                    Some(object)
+                );
+                append_expected(&mut calls, &mut tuples, start, frames);
+                start += frames;
+            }
+            assert_eq!(start, TOTAL);
+            assert_eq!(tuples.len(), 4);
+            drop(processor);
+            child.finish(rate, &calls, &tuples);
+        }
+    }
+}
+#[test]
+#[ignore = "fresh normal Product and MNE7; actual cold restored count mismatch on create, not activation or retained topology drift"]
+fn installed_vst3_mne7_outputs_product_refuses_cold_native_shape_drift() {
+    use crate::{AudioProcessorFactory, NativeConfigurationFormat};
+    let materials = Materials::load();
+    let render = render(48_000, AudioChannelLayout::Stereo);
+    let factory = factory(&materials, render, 3, false, 0);
+    let mut original = factory.create(None).unwrap();
+    let object = original.native_audio_object_observation().unwrap().unwrap();
+    let child = Child::observe(object, Some(&materials.directory));
+    let seeded = factory
+        .with_native_configuration_seed(
+            NativeConfigurationFormat::Vst3ComponentAndController,
+            &configuration(2, 2, false, 0),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        seeded.auxiliary_output_contract(),
+        factory.auxiliary_output_contract()
+    );
+    assert_eq!(seeded.execution_contract(), factory.execution_contract());
+    let error = seeded
+        .create(None)
+        .err()
+        .expect("actual two native outputs cannot satisfy original three-output Ready");
+    assert!(
+        matches!(error,AudioProcessorHostError::WorkerFailed {operation:"startup",detail}
+        if detail=="invalid audio processor execution contract: VST3 audio output count changed since probe")
+    );
+    assert_eq!(
+        original.native_audio_object_observation().unwrap(),
+        Some(object)
+    );
+    drop(original);
+    child.finish(48_000, &[], &[]);
+}
+#[test]
+#[ignore = "fresh normal Product and MNE7; last unrouted Aux NaN after successful native priming must poison without publishing a public window"]
+fn installed_vst3_mne7_outputs_unrouted_aux_nan_never_publishes_a_partial_window() {
+    let materials = Materials::load();
+    let render = render(48_000, AudioChannelLayout::Stereo);
+    // Only Main has an authored route. The native Aux2 still has its actual
+    // same-slot storage and writes NaN only on callback2 after complete DSP.
+    let (sequence, id) = materials.authored(render, 0, 2);
+    let resolves = Arc::new(AtomicUsize::new(0));
+    let processors = IsolatedAudioProcessorResolver::new(materials.catalog.clone());
+    let mut runtime = AudioProgramRuntime::build_with_processor_resolver_and_resource_grant(
+        &sequence,
+        &[],
+        &NoMedia(resolves.clone()),
+        &processors,
+        render,
+        None,
+        AudioRuntimeResourceGrant::new(usize::MAX, usize::MAX, usize::MAX),
+    )
+    .unwrap();
+    let source = install(&mut runtime);
+    let object = runtime.observe_native_owner_object(owner(&runtime, id)).unwrap();
+    let child = Child::observe(object, None);
+    runtime
+        .enter_state(AudioStateEntry {
+            epoch: AudioContinuityEpoch::new(1),
+            start_sample: 0,
+        })
+        .unwrap();
+    let mut pcm = [99.0; 8];
+    let error = runtime
+        .render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm)
+        .unwrap_err();
+    assert!(
+        matches!(error,AudioExecutionError::ProcessorHost(AudioProcessorHostError::WorkerFailed {
+        operation:"block processing",detail
+    }) if detail.contains("VST3 output contains invalid extents or nonfinite PCM"))
+    );
+    assert_eq!(
+        pcm, [0.0; 8],
+        "finite Main and Aux1 from the failed call never become public PCM"
+    );
+    let mut evidence = Cursors::default();
+    runtime.visit_continuity_evidence(&mut evidence).unwrap();
+    assert_eq!(evidence.processors.len(), 1);
+    assert!(matches!(
+        evidence.processors[0].state,
+        AudioProcessorCursorState::Failed
+    ));
+    for _ in 0..2 {
+        pcm.fill(99.0);
+        assert!(matches!(
+            runtime.render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm),
+            Err(AudioExecutionError::ProcessorHost(
+                AudioProcessorHostError::PoisonedInstance
+            ))
+        ));
+        assert_eq!(
+            pcm, [0.0; 8],
+            "a poisoned public window cannot retry or leak its old valid prefix"
+        );
+    }
+    assert_eq!(resolves.load(Ordering::SeqCst), 0);
+    drop(runtime);
+    // Terminal worker failure may be killed before MNA4 termination; this gate
+    // claims settlement and non-publication, never complete failed-tail tuples.
+    assert_eq!(
+        unsafe { WaitForSingleObject(child.handle.as_raw_handle().cast(), 2_000) },
+        0
+    );
+    let mut exit = u32::MAX;
+    assert_ne!(
+        unsafe { GetExitCodeProcess(child.handle.as_raw_handle().cast(), &mut exit) },
+        0
+    );
+    drop(source);
 }
