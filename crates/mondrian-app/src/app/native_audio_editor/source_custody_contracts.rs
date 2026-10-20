@@ -79,6 +79,8 @@ fn native_author_retained_source_requires_exact_current_media_slot() {
     let concrete = Arc::downgrade(&renderer_a);
     let old: Weak<dyn AudioPcmRenderer> = concrete;
     assert!(!state.audio_playback.matches_source_weak(&old));
+    // The original settlement domain must also observe these test aliases retire.
+    drop((renderer_a, renderer_b));
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
     assert!(other.shutdown_audio_playback_and_wait().all_workers_terminated());
 }
@@ -102,6 +104,7 @@ fn native_author_snapshot_rejects_live_global_weak_without_media_slot() {
         "historical identity and metadata alone still pass the old helper"
     );
     assert!(!work.snapshot_current_for_source(&global, &state.audio_playback));
+    drop(renderer);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
 }
 
@@ -158,6 +161,7 @@ fn native_author_queue_without_media_slot_retains_uncompiled_original_prefix() {
     assert_eq!(author.author_generation(), generation);
     assert_eq!(author.history().diagnostics(), history);
     assert!(snapshot.enter_commit().is_ok());
+    drop(renderer);
     assert!(state.shutdown_audio_playback_and_wait().all_workers_terminated());
 }
 
