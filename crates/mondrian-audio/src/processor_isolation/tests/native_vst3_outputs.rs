@@ -970,6 +970,7 @@ fn installed_vst3_mne7_outputs_unrouted_aux_nan_never_publishes_a_partial_window
     ));
     for _ in 0..2 {
         pcm.fill(99.0);
+        let before = pcm;
         assert!(matches!(
             runtime.render_into(AudioRenderRequest { start_sample: 0, frames: 4 }, &mut pcm),
             Err(AudioExecutionError::ProcessorHost(
@@ -977,8 +978,8 @@ fn installed_vst3_mne7_outputs_unrouted_aux_nan_never_publishes_a_partial_window
             ))
         ));
         assert_eq!(
-            pcm, [0.0; 8],
-            "a poisoned public window cannot retry or leak its old valid prefix"
+            pcm, before,
+            "terminal preflight refuses before admitted rendering and preserves every caller sample"
         );
     }
     assert_eq!(resolves.load(Ordering::SeqCst), 0);
