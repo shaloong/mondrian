@@ -1421,6 +1421,19 @@ pub(crate) trait PluginInternal: Send {
     }
     fn get_parameter(&self, id: u32) -> Result<f64>;
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
+    /// Compatibility metadata scan: one deferred drain, skipped failed INFO
+    /// rows, and dense success indices. The raw native count is bounded before
+    /// enumeration; no callback can stop later queries via a returned error.
+    fn visit_parameters_bounded(
+        &self,
+        _maximum: usize,
+        _frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        _visitor: &mut dyn FnMut(usize, crate::controller_parameters::ControllerParameterRef<'_>),
+    ) -> Result<usize> {
+        Err(Error::Other(
+            "bounded parameter metadata is unsupported".to_owned(),
+        ))
+    }
     /// Visit exact native metadata/current values without setters or feedback drain.
     /// The supplied frame is reused; count is rejected before enumeration.
     fn visit_controller_parameters_bounded(
@@ -2177,6 +2190,24 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .get_all_parameters()
+    }
+
+    /// Visit legacy-compatible parameter metadata using one borrowed SDK slot.
+    ///
+    /// Runs on the control owner and drains deferred setters once before query.
+    /// Missing controllers and negative counts are empty; failed INFO rows are
+    /// skipped. Successful rows still query the current normalized value once,
+    /// without validating it or allocating an owned parameter inventory.
+    pub fn visit_parameters_bounded(
+        &self,
+        maximum: usize,
+        frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        visitor: &mut dyn FnMut(usize, crate::controller_parameters::ControllerParameterRef<'_>),
+    ) -> Result<usize> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_owned()))?
+            .visit_parameters_bounded(maximum, frame, visitor)
     }
 
     /// Borrow every current native controller parameter on the control owner.

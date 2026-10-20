@@ -1082,6 +1082,12 @@ mod data_exchange_storage_contracts {
         assert!(!trace.overflow, "actual allocator journal overflowed");
         (result, trace)
     }
+    pub(crate) fn measure_host_allocator_operations_for_test<T>(
+        operation: impl FnOnce() -> T,
+    ) -> (T, usize) {
+        let (value, trace) = capture(operation);
+        (value, trace.len)
+    }
     #[test]
     #[ignore = "requires existing owned MNE1 SDK DLL; Rust host allocator success-path observation only"]
     fn native_event_constraint_census_has_no_rust_host_allocator_operations() {
@@ -1358,3 +1364,6 @@ mod data_exchange_storage_contracts {
         assert_eq!((sink.len, sink.bytes), (0, 0));
     }
 }
+
+#[cfg(test)]
+pub(crate) use data_exchange_storage_contracts::measure_host_allocator_operations_for_test;

@@ -2640,6 +2640,43 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn visit_parameters_bounded(
+        &self,
+        maximum: usize,
+        frame: &mut crate::controller_parameters::ControllerParameterQueryFrame,
+        visitor: &mut dyn FnMut(usize, crate::controller_parameters::ControllerParameterRef<'_>),
+    ) -> Result<usize> {
+        self.ensure_control_thread("bounded parameter metadata")?;
+        self.drain_deferred_controller_sync();
+        let Some(controller) = self.controller.as_ref() else {
+            return Ok(0);
+        };
+        // SAFETY: the actual controller is on its verified control owner. INFO
+        // writes only this reused SDK POD slot; the row borrow cannot escape.
+        unsafe {
+            let raw_count = controller.getParameterCount();
+            if raw_count < 0 {
+                return Ok(0);
+            }
+            if raw_count as usize > maximum {
+                return Err(Error::InvalidParameter(
+                    "native parameter count exceeds admitted bound".to_owned(),
+                ));
+            }
+            let mut dense = 0;
+            for index in 0..raw_count {
+                *frame = crate::controller_parameters::ControllerParameterQueryFrame::default();
+                if controller.getParameterInfo(index, &mut frame.info) != kResultOk {
+                    continue;
+                }
+                frame.value = controller.getParamNormalized(frame.info.id);
+                visitor(dense, frame.observation());
+                dense += 1;
+            }
+            Ok(dense)
+        }
+    }
+
     fn get_all_parameters(&self) -> Result<Vec<Parameter>> {
         self.drain_deferred_controller_sync();
         let mut params = Vec::new();
@@ -8802,6 +8839,9 @@ mod initial_parameter_input_tests;
 mod controller_presentation_tests;
 
 #[cfg(test)]
+mod parameter_metadata_tests;
+
+#[cfg(test)]
 #[allow(clippy::unnecessary_cast)]
 mod checked_native_note_tests {
     use super::*;
@@ -12670,6 +12710,16 @@ mod restored_audio_activation_tests {
         assert_eq!(after.retirement_lineage(), witness.retirement_lineage() + 2);
         assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
         assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn compatible_parameter_metadata_preserves_owned_query_and_skip_semantics() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::parameter_metadata_tests::compatibility(&mut f.plugin);
+    }
+    #[test]
+    fn compatible_parameter_metadata_bounds_actual_count_without_allocating_rows() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::parameter_metadata_tests::bounds_and_allocations(&mut f.plugin);
     }
     #[test]
     fn original_bounded_value_query_does_not_gain_presentation_calls_or_drain() {

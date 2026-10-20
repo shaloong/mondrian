@@ -51,6 +51,16 @@ impl<'a> ControllerParameterRef<'a> {
     pub fn flags(self) -> u32 {
         self.frame.info.flags as u32
     }
+    /// Legacy owned metadata's standard automation flag projection.
+    pub fn can_automate(self) -> bool {
+        self.frame.info.flags & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kCanAutomate
+            != 0
+    }
+    /// Legacy owned metadata's standard read-only flag projection.
+    pub fn is_read_only(self) -> bool {
+        self.frame.info.flags & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsReadOnly
+            != 0
+    }
     /// Current controller value; the consumer must validate finiteness and range.
     pub fn normalized(self) -> f64 {
         self.frame.value
