@@ -38,8 +38,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use vst3_host::audio::{
-    AudioBusLayout, AudioBusRole, BusArrangements, BusAudioBuffers, BusDirection, MediaType,
-    NativeAudioBusInfoSet, SpeakerArrangement,
+    AudioBusLayout, AudioBusObservationError, AudioBusObservationRef, AudioBusQueryFrame,
+    AudioBusRole, BusArrangements, BusAudioBuffers, BusDirection, MediaType, NativeAudioBusInfoSet,
+    SpeakerArrangement,
 };
 use vst3_host::plugin::{Plugin, ProcessMode};
 use vst3_host::{PluginEvent, PluginEventData, Vst3Host};
@@ -1249,11 +1250,12 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
                 "VST3 legal configuration activation failed: {error}"
             ))
         })?;
-        let (main_audio_input, inputs) =
-            observe_active_audio_inputs(plugin, self.render.channel_layout)?;
-        if main_audio_input != self.payload.main_audio_input
-            || inputs != self.auxiliary_inputs
-            || !retained_parameters_match(plugin, &self.payload.parameters)?
+        if !retained_audio_inputs_match(
+            plugin,
+            self.render.channel_layout,
+            self.payload.main_audio_input,
+            &self.auxiliary_inputs,
+        )? || !retained_parameters_match(plugin, &self.payload.parameters)?
             || Vst3EventBusContractV1::observe(plugin)? != self.payload.event_bus_contract
         {
             return Ok(Outcome::CapabilityRefused(Refusal::MetadataChanged));
@@ -1769,27 +1771,115 @@ fn validate_loaded(
     Ok(metadata.names)
 }
 
-/// Read already activated bus facts without mutating native bus activation.
-fn observe_active_audio_inputs(
-    plugin: &mut Plugin,
+/// Compare stopped, already activated buses without collecting another inventory.
+fn retained_audio_inputs_match(
+    plugin: &Plugin,
     channel_layout: AudioChannelLayout,
-) -> Result<(Vst3MainAudioInput, AudioProcessorAuxiliaryInputContract), AudioProcessorHostError> {
-    let metadata = plugin
-        .native_audio_bus_info()
-        .map_err(|error| invalid(format!("VST3 active bus metadata failed: {error}")))?;
-    let layout = plugin
-        .audio_bus_layout()
-        .map_err(|error| invalid(format!("VST3 active bus layout failed: {error}")))?;
-    let arrangements = plugin
-        .bus_arrangements()
-        .map_err(|error| invalid(format!("VST3 active arrangements failed: {error}")))?;
-    let contract = audio_inputs_from_metadata(&metadata, &layout, &arrangements, channel_layout)?;
-    if layout.inputs.iter().chain(&layout.outputs).any(|bus| !bus.active) {
+    admitted_main: Vst3MainAudioInput,
+    admitted_auxiliary: &AudioProcessorAuxiliaryInputContract,
+) -> Result<bool, AudioProcessorHostError> {
+    let mut frame = AudioBusQueryFrame::default();
+    let observed = plugin.observe_audio_buses_bounded(&mut frame).map_err(|error| match error {
+        AudioBusObservationError::Metadata(error) => {
+            invalid(format!("VST3 active bus metadata failed: {error}"))
+        }
+        AudioBusObservationError::Layout(error) => {
+            invalid(format!("VST3 active bus layout failed: {error}"))
+        }
+        AudioBusObservationError::Arrangements(error) => {
+            invalid(format!("VST3 active arrangements failed: {error}"))
+        }
+    })?;
+    audio_bus_observation_matches(&observed, channel_layout, admitted_main, admitted_auxiliary)
+}
+
+fn audio_bus_observation_matches(
+    observed: &AudioBusObservationRef<'_>,
+    channel_layout: AudioChannelLayout,
+    admitted_main: Vst3MainAudioInput,
+    admitted_auxiliary: &AudioProcessorAuxiliaryInputContract,
+) -> Result<bool, AudioProcessorHostError> {
+    // All three SDK stages must finish before domain validation. Preserve the
+    // cold contract's shape errors before inactivity, then compare identity.
+    let speaker_layout = match channel_layout {
+        AudioChannelLayout::Mono => SpeakerArrangement::MONO,
+        AudioChannelLayout::Stereo => SpeakerArrangement::STEREO,
+        _ => return Err(invalid("VST3 audio channel layout is unsupported")),
+    };
+    if observed.native_inputs.len() > 32
+        || observed.native_outputs.len() != 1
+        || observed.layout_inputs.len() != observed.native_inputs.len()
+        || observed.layout_outputs.len() != observed.native_outputs.len()
+        || observed.input_arrangements.len() != observed.native_inputs.len()
+        || observed.output_arrangements.len() != observed.native_outputs.len()
+    {
+        return Err(invalid("VST3 requires bounded inputs and one main output"));
+    }
+    for (native, prepared, speakers) in [
+        (
+            observed.native_inputs,
+            observed.layout_inputs,
+            observed.input_arrangements,
+        ),
+        (
+            observed.native_outputs,
+            observed.layout_outputs,
+            observed.output_arrangements,
+        ),
+    ] {
+        for (index, ((bus, prepared), arrangement)) in
+            native.iter().zip(prepared).zip(speakers).enumerate()
+        {
+            let role = if index == 0 {
+                AudioBusRole::Main
+            } else {
+                AudioBusRole::Auxiliary
+            };
+            if bus.role != role
+                || bus.channel_count != channel_layout.channel_count()
+                || prepared.channel_count != bus.channel_count
+                || *arrangement != speaker_layout
+            {
+                return Err(invalid(
+                    "VST3 native bus role, channel count or speaker arrangement is invalid",
+                ));
+            }
+        }
+    }
+    if observed
+        .layout_inputs
+        .iter()
+        .chain(observed.layout_outputs)
+        .any(|bus| !bus.active)
+    {
         return Err(invalid(
             "VST3 retained activation left an admitted bus inactive",
         ));
     }
-    Ok(contract)
+    let main = if observed.native_inputs.is_empty() {
+        Vst3MainAudioInput::Absent
+    } else {
+        Vst3MainAudioInput::Present
+    };
+    let offset = main.port_offset();
+    // Cold preparation admitted these exact keys/layouts. Reconstruct their
+    // scalar identity here without allocating keys, a Vec, or a validation set.
+    Ok(main == admitted_main
+        && admitted_auxiliary.buses.len() == observed.native_inputs.len() - offset
+        && admitted_auxiliary.buses.iter().enumerate().all(|(index, bus)| {
+            canonical_audio_input_key_matches(&bus.bus_key, index + offset)
+                && bus.channel_layout == channel_layout
+        }))
+}
+
+fn canonical_audio_input_key_matches(key: &str, index: usize) -> bool {
+    let Some(suffix) = key.strip_prefix("vst3.audio-input.") else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        && (suffix.len() == 1 || !suffix.starts_with('0'))
+        && suffix.parse::<usize>() == Ok(index)
 }
 
 /// Read roles from the actual restored component and activate admitted audio ports.
@@ -2396,6 +2486,7 @@ pub(super) fn native_worker_lane_profile(
                 super::native_worker_processing::NativeDspDispatch<'static>,
                 crate::NativeAudioObservations,
                 vst3_host::controller_parameters::ControllerParameterQueryFrame,
+                AudioBusQueryFrame,
                 initial_parameter_values::InitialParameterFrame,
                 parameter_observations::ParameterPresentationFrame,
             )>()),
@@ -2627,7 +2718,279 @@ mod retained_parameter_contracts {
 #[cfg(test)]
 mod bus_contract_tests {
     use super::*;
-    use vst3_host::audio::{AudioBusConfig, NativeAudioBusInfo};
+    use vst3_host::audio::{AudioBusConfig, NativeAudioBusConstraint, NativeAudioBusInfo};
+
+    fn assert_borrowed_matches_owned(
+        native: &NativeAudioBusInfoSet,
+        layout: &AudioBusLayout,
+        arrangements: &BusArrangements,
+        channels: AudioChannelLayout,
+        admitted_main: Vst3MainAudioInput,
+        admitted_auxiliary: &AudioProcessorAuxiliaryInputContract,
+    ) {
+        let owned = audio_inputs_from_metadata(native, layout, arrangements, channels).and_then(
+            |(main, auxiliary)| {
+                if layout.inputs.iter().chain(&layout.outputs).any(|bus| !bus.active) {
+                    return Err(invalid(
+                        "VST3 retained activation left an admitted bus inactive",
+                    ));
+                }
+                Ok(main == admitted_main && &auxiliary == admitted_auxiliary)
+            },
+        );
+        let scalar = |buses: &[NativeAudioBusInfo]| {
+            buses
+                .iter()
+                .map(|bus| NativeAudioBusConstraint {
+                    role: bus.role,
+                    channel_count: bus.channel_count,
+                })
+                .collect::<Vec<_>>()
+        };
+        let inputs = scalar(&native.inputs);
+        let outputs = scalar(&native.outputs);
+        let observed = AudioBusObservationRef {
+            native_inputs: &inputs,
+            native_outputs: &outputs,
+            layout_inputs: &layout.inputs,
+            layout_outputs: &layout.outputs,
+            input_arrangements: &arrangements.inputs,
+            output_arrangements: &arrangements.outputs,
+        };
+        assert_eq!(
+            audio_bus_observation_matches(&observed, channels, admitted_main, admitted_auxiliary),
+            owned,
+            "borrowed shape, activation and identity must preserve the cold owned contract",
+        );
+    }
+
+    #[test]
+    fn retained_vst3_bus_comparison_preserves_owned_shape_activation_and_identity() {
+        for channels in [
+            AudioChannelLayout::Mono,
+            AudioChannelLayout::Stereo,
+            AudioChannelLayout::discrete(2).unwrap(),
+        ] {
+            for count in [0, 1, 3, 32, 33] {
+                let speakers = if channels == AudioChannelLayout::Mono {
+                    SpeakerArrangement::MONO
+                } else {
+                    SpeakerArrangement::STEREO
+                };
+                let main = if count == 0 {
+                    Vst3MainAudioInput::Absent
+                } else {
+                    Vst3MainAudioInput::Present
+                };
+                let auxiliary = AudioProcessorAuxiliaryInputContract {
+                    buses: (main.port_offset()..count)
+                        .map(|index| AudioProcessorAuxiliaryInputBusContract {
+                            bus_key: format!("vst3.audio-input.{index}"),
+                            channel_layout: channels,
+                        })
+                        .collect(),
+                };
+                for change in 0..20 {
+                    let info = NativeAudioBusInfo {
+                        role: AudioBusRole::Main,
+                        name: "Display name is not bus identity".to_owned(),
+                        channel_count: channels.channel_count(),
+                        default_active: false,
+                    };
+                    let mut native = NativeAudioBusInfoSet {
+                        inputs: (0..count)
+                            .map(|index| NativeAudioBusInfo {
+                                role: if index == 0 {
+                                    AudioBusRole::Main
+                                } else {
+                                    AudioBusRole::Auxiliary
+                                },
+                                ..info.clone()
+                            })
+                            .collect(),
+                        outputs: vec![info],
+                    };
+                    let config = AudioBusConfig {
+                        channel_count: channels.channel_count(),
+                        active: true,
+                    };
+                    let mut layout =
+                        AudioBusLayout { inputs: vec![config; count], outputs: vec![config] };
+                    let mut arrangements = BusArrangements {
+                        inputs: vec![speakers; count],
+                        outputs: vec![speakers],
+                    };
+                    let mut admitted_main = main;
+                    let mut admitted = auxiliary.clone();
+                    match change {
+                        0 => {}
+                        1 => native.outputs[0].role = AudioBusRole::Auxiliary,
+                        2 => native.outputs[0].channel_count += 1,
+                        3 => layout.outputs[0].channel_count += 1,
+                        4 => arrangements.outputs[0] = SpeakerArrangement::STEREO_SURROUND,
+                        5 => {
+                            layout.inputs.push(config);
+                        }
+                        6 => {
+                            arrangements.inputs.push(speakers);
+                        }
+                        7 => {
+                            native.outputs.clear();
+                        }
+                        8 => {
+                            native.outputs.push(native.outputs[0].clone());
+                        }
+                        9 => layout.outputs[0].active = false,
+                        10 => {
+                            // Shape error must beat inactivity and identity mismatch.
+                            native.outputs[0].role = AudioBusRole::Auxiliary;
+                            layout.outputs[0].active = false;
+                            admitted_main = Vst3MainAudioInput::Absent;
+                        }
+                        11 => {
+                            admitted_main = if main == Vst3MainAudioInput::Present {
+                                Vst3MainAudioInput::Absent
+                            } else {
+                                Vst3MainAudioInput::Present
+                            }
+                        }
+                        12 => {
+                            admitted.buses.push(AudioProcessorAuxiliaryInputBusContract {
+                                bus_key: "vst3.audio-input.31".to_owned(),
+                                channel_layout: channels,
+                            });
+                        }
+                        13 => {
+                            admitted.buses.pop();
+                        }
+                        14 if count > 0 => native.inputs[0].role = AudioBusRole::Auxiliary,
+                        15 if count > 0 => layout.inputs[count - 1].active = false,
+                        16 if count > 1 => native.inputs[1].role = AudioBusRole::Main,
+                        17 if !admitted.buses.is_empty() => {
+                            admitted.buses[0].bus_key = "vst3.audio-input.01".to_owned()
+                        }
+                        18 if !admitted.buses.is_empty() => {
+                            admitted.buses[0].channel_layout =
+                                AudioChannelLayout::discrete(channels.channel_count_u8()).unwrap()
+                        }
+                        19 => {
+                            native.outputs[0].name.clear();
+                            native.outputs[0].default_active = true;
+                        }
+                        _ => {}
+                    }
+                    assert_borrowed_matches_owned(
+                        &native,
+                        &layout,
+                        &arrangements,
+                        channels,
+                        admitted_main,
+                        &admitted,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_vst3_bus_keys_require_exact_canonical_native_indices() {
+        for index in [0, 1, 31, usize::MAX] {
+            assert!(canonical_audio_input_key_matches(
+                &format!("vst3.audio-input.{index}"),
+                index
+            ));
+        }
+        for key in [
+            "vst3.audio-input.",
+            "vst3.audio-input.01",
+            "vst3.audio-input.+1",
+            "vst3.audio-input.-1",
+            "vst3.audio-input. 1",
+            "vst3.audio-input.1 ",
+            "vst3.audio-input.１",
+            "vst3.audio-input.١",
+            "vst3.audio-input.2",
+            "vst3.audio-input.184467440737095516160",
+            "vst3.audio-input.1\0",
+            "VST3.audio-input.1",
+        ] {
+            assert!(
+                !canonical_audio_input_key_matches(key, 1),
+                "noncanonical key: {key:?}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retained_vst3_bus_scratch_is_charged_once_in_original_main_inline() {
+        use std::alloc::Layout;
+        let profile = native_worker_lane_profile_for_parameters(&[Vst3ParameterDescriptor {
+            id: 0,
+            name: "Gain".to_owned(),
+            default_normalized: 0.5,
+            step_count: 0,
+            can_automate: true,
+            read_only: false,
+            flags: 1,
+        }])
+        .unwrap()
+        .expect("Windows scoped lane");
+        let original = Layout::new::<(
+            super::super::native_worker_ingress::NativeCommandIngress<'static>,
+            super::super::worker::WorkerProcessContext<'static>,
+            super::super::native_worker_processing::NativeDspDispatch<'static>,
+            crate::NativeAudioObservations,
+            vst3_host::controller_parameters::ControllerParameterQueryFrame,
+            initial_parameter_values::InitialParameterFrame,
+            parameter_observations::ParameterPresentationFrame,
+        )>();
+        let current = Layout::new::<(
+            super::super::native_worker_ingress::NativeCommandIngress<'static>,
+            super::super::worker::WorkerProcessContext<'static>,
+            super::super::native_worker_processing::NativeDspDispatch<'static>,
+            crate::NativeAudioObservations,
+            vst3_host::controller_parameters::ControllerParameterQueryFrame,
+            AudioBusQueryFrame,
+            initial_parameter_values::InitialParameterFrame,
+            parameter_observations::ParameterPresentationFrame,
+        )>();
+        assert_eq!(profile.owning_layouts().main_inline, native_layout(current));
+        let mut old_owners = profile.owning_layouts();
+        old_owners.main_inline = native_layout(original);
+        let (vectors, com) = profile.processor_input_storage();
+        assert!(
+            vectors > 0 && com > 0,
+            "retain the actual processor-input backing"
+        );
+        let before = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+            old_owners,
+            profile.control_overlap(),
+        )
+        .unwrap()
+        .with_adapter_note_input_storage(profile.adapter_note_input_storage())
+        .unwrap()
+        .with_processor_input_storage(vectors, com)
+        .unwrap();
+        let delta = current.size().checked_sub(original.size()).unwrap();
+        assert!(
+            delta > 0,
+            "charge the actual tuple layout, including padding"
+        );
+        assert_eq!(
+            profile.known_storage_limit_bytes() - before.known_storage_limit_bytes(),
+            delta
+        );
+        assert_eq!(
+            profile.additional_session_reservation_bytes()
+                - before.additional_session_reservation_bytes(),
+            delta
+        );
+        assert_eq!(
+            profile.requested_stack_reservation_bytes(),
+            before.requested_stack_reservation_bytes()
+        );
+    }
 
     #[test]
     fn preparation_specific_input_request_is_validated_before_binary_access() {
