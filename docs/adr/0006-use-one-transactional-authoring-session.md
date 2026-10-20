@@ -172,6 +172,16 @@ after every admitted prefix has actually been acknowledged. The first consumer
 is limited to terminal, direct-root, same-object handoffs whose actual Runtime
 policy permits preserved execution; broader installation remains separate work.
 
+Audio's owned terminal batch retains the original native prefixes, prepared
+storage and admission receipts through one Source installation and each actual
+acknowledgement. Its preparation and final peer checks grant no canonical
+publication permission. SDK calls and allocation precede the caller's commit
+guard; cancellation is checked again after acquiring that guard, before the
+irreversible Source commit. Release the guard before Ack or owner retirement.
+Only the original producer and retirement paths may own this prepared storage
+while a future Media consumer waits for canonical publication; UI receives facts,
+not the prepared native owner. This cross-queue consumer is not implemented yet.
+
 ## Consequences
 
 - A command error cannot leave a half-edited canonical Project that is later
