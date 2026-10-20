@@ -281,3 +281,31 @@ fn product_worker_rejects_curves_for_nonanimatable_boolean_parameters() {
         .iter()
         .any(|row| row == "OfxActionUnload return attempted=0 accepted=0 status=0 complete=1"));
 }
+
+#[test]
+#[ignore = "requires current Product, SessionProbe mode boolean_hold and the existing schema5 close observation env"]
+fn product_worker_zero_render_shutdown_observes_original_exit_deadline() {
+    let inspection = cpu_contract_probe("boolean_hold");
+    let format = mondrian_effects::EffectValueFormat::new(
+        mondrian_effects::EffectWorkingPrecision::Float32,
+        mondrian_effects::EffectColorDomain::SceneLinearRgb,
+        mondrian_core::ColorFrameAlpha::StraightFloat,
+    );
+    let mut session = OpenFxFilterSession::prepare(
+        product_executable(),
+        &inspection,
+        IDENTIFIER,
+        3,
+        5,
+        format,
+        &mut || Ok(()),
+    )
+    .expect("same lazy Product session without native instance creation");
+    let worker = session.worker_process_id();
+    assert!(worker > 0);
+    println!("boolean-hold-zero-render-worker-pid={worker}");
+    // No Render: the ordinary session still owns its mappings and control pump.
+    // This contrast cannot identify an exit cause or close any rendered failure.
+    session.shutdown().expect("zero-render owner obeys the original exit deadline");
+    assert_eq!(session.worker_process_id(), worker);
+}
