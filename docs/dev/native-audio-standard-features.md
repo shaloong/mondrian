@@ -1,7 +1,7 @@
 # Native audio standard features
 
 Standards reviewed on 2026-10-10. Scoped product-capability notes include accepted
-updates through 2026-10-19. This document separates the
+updates through 2026-10-20. This document separates the
 negotiated product implementation from vendor APIs, unavailable services and
 remaining work. Qualification states the tested inputs, builds, platform and limits in
 [Native plugin compatibility and qualification](native-plugin-compatibility.md).
@@ -418,7 +418,13 @@ Host-owned preparation payload/state/descriptors/Vec capacities, bus buffers and
 old/candidate coexistence must be accurately admitted, with shared Arc
 allocations counted once. Worker-lane storage now reports its actual fixed
 slots/roles, reader and DSP stack reservations and bounded control overlap;
-this is a known subset, not the entire native host. Complete nested SDK, COM,
+this is a known subset, not the entire native host. Windows VST3 cold/Fresh now
+adds optional geometry bounds and U=2P+2A+Q+W+2L+M for the known audio-buffer
+family through that same profile. Deferred loading restores before preparation;
+exact latency/tail is checked after native start and before Ready/Fresh install.
+SDK401/Audio770/App181 and 27 native exact controls pass within the conditions in
+the qualification matrix. Discovery/manual validation Root admission and the
+first restore setup mode remain separate gaps. Complete nested SDK, COM,
 state, descriptor and message lifetimes still require owning visitors and
 incremental old/new/temporary peak admission. Bounded shared mappings alone
 do not describe that full memory footprint. Unknown third-party heap/RSS and

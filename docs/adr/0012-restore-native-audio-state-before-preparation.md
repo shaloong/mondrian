@@ -66,11 +66,16 @@ introduced, and failed matching remains terminal with the original hold/fees.
 
 ## Migration and validation
 
-Implementation and qualification are in progress. Preserve the Eager/no-bounds
-33-bus, zero-channel, fallback and retained activation controls. Test default
-multichannel to saved Stereo restoration, real requested block size, failures
-before allocation, actual old/new overlap and exact parent admission. Re-run
-affected Note, initial-input, zero-input, MDA and retained Runtime/App controls.
+Finite Windows qualification is complete for this buffer family: SDK401,
+Audio770 and App181 ordinary controls, plus 27 native exact controls (ten SDK,
+sixteen Audio/Product and one App). Eager/no-bounds 33-bus, zero-channel and
+fallback controls remain passing. The real DLL default-six-channel to saved
+Stereo case, first 48k/4-frame setup, Event16, original Note/initial-input/zero
+paths and real MDA rescan pass. The actual Runtime latency failure turns green
+under its unchanged assertions after the activation-phase correction; seed and
+App regressions pass. Resource tests cover checked geometry, actual overlap and
+exact/one-byte-short parent admission. These are finite functional conditions,
+not release-performance or complete-heap acceptance.
 
 This request excludes other metadata, COM payloads, complete Arc allocations,
 plugin/module/OS heaps and physical memory commitment. It does not qualify full
