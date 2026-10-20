@@ -2090,7 +2090,7 @@ impl Plugin {
         else {
             return Ok(());
         };
-        let needed = channels.max(2);
+        let needed = if channels == 0 { 2 } else { channels };
         let bounded = self
             .internal
             .as_ref()

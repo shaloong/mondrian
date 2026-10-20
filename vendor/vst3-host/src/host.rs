@@ -347,9 +347,10 @@ impl Vst3Host {
         let levels = if let Some(bounds) = self.processing_resource_bounds {
             let mut levels = crate::audio::processing_resources::reserved_levels(bounds)?;
             if let Some(Some(channels)) = plugin_impl.prepared_meter_channels() {
+                let channels = if channels == 0 { 2 } else { channels };
                 levels
                     .channels
-                    .resize(channels.max(2), crate::audio::ChannelLevel::default());
+                    .resize(channels, crate::audio::ChannelLevel::default());
             }
             levels
         } else if self.load_preparation == PluginLoadPreparation::Deferred {

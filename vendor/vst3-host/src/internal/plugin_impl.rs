@@ -12536,6 +12536,7 @@ mod restored_audio_activation_tests {
         setup_result: tresult,
         audio_info_failure: bool,
         audio_channels: i32,
+        event_default_active: bool,
         arrangement_queries: usize,
         lifecycle: Vec<(&'static str, i32)>,
         restored_audio_channels: Option<i32>,
@@ -12595,7 +12596,7 @@ mod restored_audio_activation_tests {
                 if direction != kInput as i32 || index != 0 {
                     return kResultFalse;
                 }
-                false
+                p.event_default_active
             } else {
                 let Some(&value) = usize::try_from(index).ok().and_then(|i| defaults.get(i)) else {
                     return kResultFalse;
@@ -12795,6 +12796,7 @@ mod restored_audio_activation_tests {
                 setup_result: kResultOk,
                 audio_info_failure: false,
                 audio_channels: 2,
+                event_default_active: false,
                 arrangement_queries: 0,
                 lifecycle: Vec::with_capacity(64),
                 restored_audio_channels: None,
@@ -13278,7 +13280,11 @@ mod restored_audio_activation_tests {
         use crate::host::PluginLoadPreparation::Deferred;
         let bounds = ProcessingResourceBounds::new(1, 2, 4, 4).unwrap();
         let mut f = Fixture::with_preparation(vec![true], vec![true], Deferred, Some(bounds));
-        f.probe.lock().unwrap().audio_channels = 4; // Default is outside the final saved-state bounds.
+        {
+            let mut probe = f.probe.lock().unwrap();
+            probe.audio_channels = 4; // Default is outside the final saved-state bounds.
+            probe.event_default_active = true;
+        }
         let original = f.plugin.component.as_ptr();
         let initial =
             unsafe { PluginImpl::initial_load_buses(&f.plugin.component, Deferred, Some(bounds)) }
@@ -13302,7 +13308,7 @@ mod restored_audio_activation_tests {
             [
                 ("set_state", 0),
                 ("setup", 4),
-                ("event_ack", 0),
+                ("event_ack", 1),
                 ("audio_ack", 1),
                 ("audio_ack", 1),
             ]
@@ -13311,6 +13317,7 @@ mod restored_audio_activation_tests {
             f.plugin.bus_activation.event_inputs[0].channel_count, 16,
             "event channels do not inherit the audio channel cap"
         );
+        assert!(f.plugin.bus_activation.event_inputs[0].active);
         assert_eq!(f.plugin.prepared_meter_channels(), Some(Some(2)));
         let event_owner = f.plugin.bus_activation.event_inputs.as_ptr();
         f.probe.lock().unwrap().lifecycle.clear();
@@ -13405,6 +13412,31 @@ mod restored_audio_activation_tests {
     fn processing_resource_bounds_apply_to_public_caller_buffers_and_cached_meters() {
         let f = Fixture::new(vec![true], vec![true]);
         super::processing_resource_tests::caller_and_meter(f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+
+        let bounds = crate::audio::ProcessingResourceBounds::new(1, 2, 4, 4).unwrap();
+        let mut f = Fixture::new(vec![true], vec![true]);
+        f.plugin.processing_resource_bounds = Some(bounds);
+        let mut plugin = super::processing_resource_tests::wrap(f.plugin, bounds);
+        let meter_owner = {
+            let levels = plugin.audio_levels.lock().unwrap();
+            (levels.channels.as_ptr(), levels.channels.capacity())
+        };
+        // Each control rebuilds real cached ProcessData from this COM component.
+        // Mono stays mono; only zero outputs use the legacy stereo fallback.
+        for (channels, expected_meter_channels) in [(1, 1), (0, 2), (2, 2), (1, 1)] {
+            f.probe.lock().unwrap().audio_channels = channels;
+            plugin
+                .set_process_mode(crate::plugin::ProcessMode::Offline)
+                .unwrap();
+            let levels = plugin.audio_levels.lock().unwrap();
+            assert_eq!(levels.channels.len(), expected_meter_channels);
+            assert_eq!(
+                (levels.channels.as_ptr(), levels.channels.capacity()),
+                meter_owner,
+                "cached layout synchronization preserves the one admitted meter Vec"
+            );
+        }
         assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
     }
     #[test]
