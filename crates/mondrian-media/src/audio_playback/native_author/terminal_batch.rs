@@ -124,10 +124,15 @@ impl Lane {
     }
 }
 
-pub(in crate::audio_playback) fn preserve_work(
-    work: &RenderWork,
+// Only called under the original queue lock: queued/parked Work cannot change
+// its expected claim until pop/resume takes that same lock. The active worker
+// releases every Source guard before parking, so this queue -> short Source
+// metadata read has no reverse Source-guard -> queue acquisition. No renderer,
+// Runtime or native callback belongs here. This preserves custody, not authority.
+fn preserve_author_work(
+    work: &NativeAuthorHandoffWork,
     renderer: Option<mondrian_core::AudioPcmRendererMaterializationId>,
-    installed: Option<std::num::NonZeroU64>,
+    source: &Arc<mondrian_core::AudioOwnerInstallationSource>,
     policy: PcmRetirementPolicy,
 ) -> bool {
     matches!(
@@ -135,7 +140,22 @@ pub(in crate::audio_playback) fn preserve_work(
         PcmRetirementPolicy::Suspend
             | PcmRetirementPolicy::PreserveNativeHold
             | PcmRetirementPolicy::BeginNativeHold
-    ) && matches!(work, RenderWork::NativeAuthorHandoff(w) if w.continuation.is_some() && Some(w.renderer_id)==renderer && Some(w.expected.generation())==installed)
+    ) && work.continuation.is_some()
+        && Some(work.renderer_id) == renderer
+        && Arc::ptr_eq(&work.source, source)
+        && source
+            .current_claim()
+            .ok()
+            .flatten()
+            .is_some_and(|claim| claim.generation() == work.expected.generation())
+}
+pub(in crate::audio_playback) fn preserve_work(
+    work: &RenderWork,
+    renderer: Option<mondrian_core::AudioPcmRendererMaterializationId>,
+    source: &Arc<mondrian_core::AudioOwnerInstallationSource>,
+    policy: PcmRetirementPolicy,
+) -> bool {
+    matches!(work, RenderWork::NativeAuthorHandoff(w) if preserve_author_work(w, renderer, source, policy))
 }
 pub(in crate::audio_playback) fn drain_parked(
     state: &mut RenderQueueState,
@@ -166,19 +186,11 @@ pub(in crate::audio_playback) fn drain_unpreserved(
     state: &mut RenderQueueState,
     retired: &mut VecDeque<RenderWork>,
     renderer: Option<mondrian_core::AudioPcmRendererMaterializationId>,
-    installed: Option<std::num::NonZeroU64>,
+    source: &Arc<mondrian_core::AudioOwnerInstallationSource>,
     policy: PcmRetirementPolicy,
 ) {
     let keep = match &state.author_batch {
-        Lane::Parked(w) => {
-            matches!(
-                policy,
-                PcmRetirementPolicy::Suspend
-                    | PcmRetirementPolicy::PreserveNativeHold
-                    | PcmRetirementPolicy::BeginNativeHold
-            ) && Some(w.renderer_id) == renderer
-                && Some(w.expected.generation()) == installed
-        }
+        Lane::Parked(w) => preserve_author_work(w, renderer, source, policy),
         _ => true,
     };
     if !keep {

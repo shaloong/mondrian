@@ -1360,6 +1360,7 @@ impl RenderWorkQueue {
         &self,
         renderer_id: Option<mondrian_core::AudioPcmRendererMaterializationId>,
         installed_generation: Option<std::num::NonZeroU64>,
+        source: &Arc<mondrian_core::AudioOwnerInstallationSource>,
         policy: PcmRetirementPolicy,
     ) -> VecDeque<RenderWork> {
         let mut state = self.state.lock();
@@ -1383,28 +1384,22 @@ impl RenderWorkQueue {
                             && Some(work.claim.generation()) == installed_generation
                     }
                     RenderWork::NativeAuthorHandoff(work) => {
-                        Some(work.renderer_id) == renderer_id
+                        work.continuation.is_none()
+                            && Some(work.renderer_id) == renderer_id
                             && Some(work.expected.generation()) == installed_generation
                     }
                     _ => false,
                 };
             let restart = matches!(&work, RenderWork::NativeReprepare(work)
                 if work.preserve_for_slot(renderer_id, installed_generation));
-            let batch =
-                author_batch::preserve_work(&work, renderer_id, installed_generation, policy);
+            let batch = author_batch::preserve_work(&work, renderer_id, source, policy);
             if editor || suspended_control || restart || batch {
                 state.pending.push_back(work);
             } else {
                 retired.push_back(work);
             }
         }
-        author_batch::drain_unpreserved(
-            &mut state,
-            &mut retired,
-            renderer_id,
-            installed_generation,
-            policy,
-        );
+        author_batch::drain_unpreserved(&mut state, &mut retired, renderer_id, source, policy);
         author_batch::retiring_queued(&mut state, &retired);
         retired
     }
@@ -3546,6 +3541,7 @@ impl AudioPlayback {
             self.render_queue.take_pending_preserving_native_controls(
                 previous_renderer_id,
                 preserved_installation_generation,
+                &self.owner_installation,
                 pcm_policy,
             )
         } else {
@@ -4765,6 +4761,7 @@ impl AudioPlayback {
                 .ok()
                 .flatten()
                 .map(|claim| claim.generation()),
+            &self.owner_installation,
             PcmRetirementPolicy::PreserveNativeHold,
         );
         self.canceled_render_count =

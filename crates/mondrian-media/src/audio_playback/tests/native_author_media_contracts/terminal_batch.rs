@@ -9,6 +9,8 @@ struct Control {
     published: AtomicBool,
     prepare_entered: AtomicBool,
     prepare_gate: AtomicBool,
+    install_entered: AtomicBool,
+    install_gate: AtomicBool,
     refuse_install: AtomicBool,
     fail_second_ack: AtomicBool,
     panic_prepared_drop: AtomicBool,
@@ -148,6 +150,15 @@ impl AudioPcmNativeAuthorHandoff for BatchRequest {
     ) -> AudioPcmNativeAuthorTerminalBatchOutcome {
         assert!(self.prepared.is_some());
         assert!(self.installed.is_none());
+        self.control.install_entered.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.control.install_gate.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            !self.control.install_gate.load(Ordering::Acquire),
+            "bounded install gate"
+        );
         if !self.control.published.load(Ordering::Acquire)
             || self.control.refuse_install.load(Ordering::Acquire)
         {
@@ -264,6 +275,7 @@ fn with_case(
         body(&mut playback, &renderer, target, &c)
     }));
     c.prepare_gate.store(false, Ordering::Release);
+    c.install_gate.store(false, Ordering::Release);
     c.retire_gate.store(false, Ordering::Release);
     drop(renderer);
     let evidence = playback.shutdown_and_wait();
@@ -566,6 +578,145 @@ fn terminal_batch_suspend_and_post_cas_cancel_preserve_prepared_without_republis
         assert_eq!(c.acks[0].load(Ordering::Acquire), 1);
         assert_eq!(c.acks[1].load(Ordering::Acquire), 0);
         assert!(c.prepared_drops.lock().is_empty());
+    });
+}
+
+// Forward the original software output unchanged, except for one bounded
+// deactivate barrier. No callback acknowledgement or claim is manufactured.
+struct InstallDuringDeactivate {
+    inner: Box<dyn AudioOutputAdapter>,
+    queue: Arc<RenderWorkQueue>,
+    source: Arc<mondrian_core::AudioOwnerInstallationSource>,
+    old: std::num::NonZeroU64,
+    control: Arc<Control>,
+    armed: AtomicBool,
+}
+impl AudioOutputAdapter for InstallDuringDeactivate {
+    fn shutdown_signal(&self) -> Option<Arc<AtomicBool>> {
+        self.inner.shutdown_signal()
+    }
+    fn poll(&mut self) -> Option<RealtimeAudioOutputEvent> {
+        self.inner.poll()
+    }
+    fn enqueue(&mut self, b: &AudioBuffer) -> Result<(), RealtimeAudioOutputEnqueueError> {
+        self.inner.enqueue(b)
+    }
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+    fn validate_deactivation(&self) -> Result<(), RealtimeAudioOutputControlError> {
+        self.inner.validate_deactivation()
+    }
+    fn deactivate(
+        &self,
+    ) -> Result<Option<RealtimeAudioOutputQuiescenceToken>, RealtimeAudioOutputControlError> {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            // reprime has already captured the old claim before this call.
+            assert_eq!(
+                self.source.current_claim().unwrap().unwrap().generation(),
+                self.old
+            );
+            assert!(self.control.install_entered.load(Ordering::Acquire));
+            self.control.install_gate.store(false, Ordering::Release);
+            spin_until(|| {
+                let state = self.queue.state.lock();
+                matches!(&state.author_batch, Lane::Parked(w)
+                    if w.expected.generation() != self.old)
+            });
+            assert_eq!(self.control.installs.load(Ordering::Acquire), 1);
+            assert_eq!(self.control.acks[0].load(Ordering::Acquire), 1);
+            assert_eq!(self.control.acks[1].load(Ordering::Acquire), 0);
+        }
+        self.inner.deactivate()
+    }
+    fn is_quiescent(
+        &self,
+        t: RealtimeAudioOutputQuiescenceToken,
+    ) -> Result<bool, RealtimeAudioOutputControlError> {
+        self.inner.is_quiescent(t)
+    }
+    fn activate_after_discard(
+        &self,
+        t: RealtimeAudioOutputQuiescenceToken,
+        frames: usize,
+    ) -> Result<(), RealtimeAudioOutputControlError> {
+        self.inner.activate_after_discard(t, frames)
+    }
+    fn buffered_frames(&self) -> usize {
+        self.inner.buffered_frames()
+    }
+    fn capacity_frames(&self) -> Option<usize> {
+        self.inner.capacity_frames()
+    }
+    fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
+        self.inner.snapshot()
+    }
+    fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        self.inner.shutdown_and_wait()
+    }
+    fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
+        self.inner.set_device_selection(selection)
+    }
+    fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        self.inner.device_selection()
+    }
+    #[cfg(feature = "validation")]
+    fn request_controlled_recycle(
+        &self,
+        expected: u64,
+    ) -> Result<(), AudioPlaybackValidationError> {
+        self.inner.request_controlled_recycle(expected)
+    }
+}
+
+#[test]
+fn terminal_batch_suspend_across_own_cas_retains_same_prepared_and_remaining_ack() {
+    with_case(false, |p, r, t, c| {
+        assert!(p.request_native_author_handoff(request(r, t, c)).unwrap());
+        let k = key(&event(p));
+        let address = box_address(p);
+        let old = p.owner_installation.current_claim().unwrap().unwrap().generation();
+        c.published.store(true, Ordering::Release);
+        c.fail_second_ack.store(true, Ordering::Release);
+        c.install_gate.store(true, Ordering::Release);
+        assert!(p.resume_native_author_handoff(&k).unwrap());
+        spin_until(|| c.install_entered.load(Ordering::Acquire));
+        let inner = p.output.take().unwrap();
+        p.output = OwnedAudioOutput::new(Box::new(InstallDuringDeactivate {
+            inner,
+            queue: p.render_queue.clone(),
+            source: p.owner_installation.clone(),
+            old,
+            control: c.clone(),
+            armed: AtomicBool::new(true),
+        }));
+        p.suspend(sample_position(0)).unwrap();
+        assert_eq!(
+            box_address(p),
+            address,
+            "same prepared owner survives Suspend"
+        );
+        let installed = p.owner_installation.current_claim().unwrap().unwrap().generation();
+        assert_ne!(installed, old);
+        assert!(c.prepared_drops.lock().is_empty());
+        assert!(c.request_drops.lock().is_empty());
+        let partial = event(p);
+        assert!(matches!(partial,
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                status: AudioPcmNativeAuthorTerminalBatchStatus::InstalledAwaitingAcknowledgement { target }, ..
+            } if target.installed_generation == installed));
+        let next = key(&partial);
+        c.fail_second_ack.store(false, Ordering::Release);
+        assert!(p.resume_native_author_handoff(&next).unwrap());
+        assert!(matches!(event(p),
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                status: AudioPcmNativeAuthorTerminalBatchStatus::Acknowledged { target }, ..
+            } if target.installed_generation == installed));
+        assert_eq!(c.prepares.load(Ordering::Acquire), 1);
+        assert_eq!(c.installs.load(Ordering::Acquire), 1);
+        assert_eq!(c.acks[0].load(Ordering::Acquire), 1);
+        assert_eq!(c.acks[1].load(Ordering::Acquire), 1);
+        assert_eq!(c.prepared_drops.lock().len(), 1);
     });
 }
 
