@@ -1,13 +1,28 @@
 //! Finite third-party CLAP PCM through the original canonical Runtime/DAG.
 //! No native-bypass precision, algorithm, tail, Note inventory or RT oracle.
 
-use super::*;
-use crate::{
-    AudioContinuityEpoch, AudioProcessorCursorState, AudioProcessorFactory, AudioProcessorResolver,
-    AudioRuntimeResourceGrant, AudioSessionCursorState, AudioStateEntry,
+use super::audio::{
+    probe_clap_plugin_registration, AudioContinuityEpoch, AudioProcessingMode,
+    AudioProcessorCursorState, AudioProcessorFactory, AudioProcessorHostError,
+    AudioProcessorPrepareRequest, AudioProcessorResolver, AudioProcessorTail, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceGrant, AudioSessionCursorState,
+    AudioStateEntry, ClapMainAudioInput, ClapParameterDescriptor,
+    DiscoveredClapAudioProcessorSpecResolver, IsolatedAudioProcessorResolver,
 };
-use mondrian_core::{AudioOwnerInstallationSource, TimelineTime};
+use super::external_vendor_support::*;
+use mondrian_core::{
+    AssetId, AudioChannelLayout, AudioOwnerInstallationSource, AudioSourceComponentId,
+    ExecutionCancellationToken, TimelineTime,
+};
 use mondrian_timeline::{Clip, Sequence};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::fs;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, WaitForSingleObject};
 
 const RUNTIME_CASE_ENV: &str = "MONDRIAN_EXTERNAL_CLAP_RUNTIME_PCM_CASE";
 const RUNTIME_CASE_HASH_ENV: &str = "MONDRIAN_EXTERNAL_CLAP_RUNTIME_PCM_CASE_SHA256";
@@ -219,7 +234,8 @@ fn external_clap_effect_runtime_renders_finite_nonzero_pcm() {
         // schedule sums actual Factory scratch, then Root admits that actual
         // Session footprint before allocate_storage/populate creates a child.
         processor_session_scratch_budget_bytes: GRANT.max_fixed_resident_bytes,
-        ..test_render_contract()
+        public_output_lookahead_budget_frames: 1024,
+        compensation_delay_scratch_budget_bytes: 1024 * 1024,
     };
     let actual = probe_clap_plugin_registration(
         &helper.path,

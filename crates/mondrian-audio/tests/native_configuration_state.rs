@@ -602,3 +602,14 @@ fn reference_transport(origin: usize) -> TransportEvent {
         time_signature_denominator: 0,
     }
 }
+
+// The Runtime control is a separate harness; its SDK-reference neighbours keep
+// their own assertions and qualification. No production test API is introduced.
+#[cfg(windows)]
+use mondrian_audio as audio;
+#[cfg(windows)]
+#[path = "support/clap_effect_runtime_pcm.rs"]
+mod clap_effect_runtime_pcm;
+#[cfg(windows)]
+#[path = "support/external_vendor_support.rs"]
+mod external_vendor_support;
