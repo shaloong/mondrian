@@ -22,6 +22,7 @@ const MAIN_AUDIT_ENV: &str = "MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR";
 const CONFIG_BYTES: usize = 12;
 const ADMISSION_CONFIG_BYTES: usize = 16;
 const SERVICE_CONFIG_BYTES: usize = 20;
+const MULTI_CONFIG_BYTES: usize = 20;
 const TRACE_ENV: &str = "MONDRIAN_VST3_EVENT_ADMISSION_TRACE";
 const TRACE_BYTES: u64 = 16 * 1024;
 const CALL_BYTES: usize = 16;
@@ -65,6 +66,45 @@ pub(super) fn create_instance(cid: TUID) -> Option<vst3::ComPtr<FUnknown>> {
     }
 }
 
+// MNE7 is opt-in only. Every legacy branch and state byte remains independent.
+#[derive(Clone, Copy)]
+struct MultiOutput {
+    shape: u32,
+    nan_call: u32,
+}
+impl MultiOutput {
+    fn decode(shape: u32, nan_call: u32) -> Option<Self> {
+        let value = Self { shape, nan_call };
+        ((shape & !0x1ffff) == 0
+            && (1..=32).contains(&value.outputs())
+            && matches!(value.channels(), 1 | 2)
+            && nan_call <= MAIN_MAX_CALLS as u32)
+            .then_some(value)
+    }
+    fn outputs(self) -> usize {
+        (self.shape & 0xff) as usize
+    }
+    fn channels(self) -> usize {
+        ((self.shape >> 8) & 0xff) as usize
+    }
+    fn input(self) -> bool {
+        self.shape & 0x10000 != 0
+    }
+    fn output_mask(self) -> u32 {
+        if self.outputs() == 32 {
+            u32::MAX
+        } else {
+            (1_u32 << self.outputs()) - 1
+        }
+    }
+    fn arrangement(self) -> SpeakerArrangement {
+        if self.channels() == 1 {
+            SpeakerArr::kMono
+        } else {
+            SpeakerArr::kStereo
+        }
+    }
+}
 #[derive(Clone, Copy)]
 struct Config {
     fail_call: u32,
@@ -78,6 +118,7 @@ struct Config {
     // MNE3 input-only first-stop command: 0 stable, 1 retain, 2 flip default.
     // Normal getState preserves current component configuration, not commands.
     service_action: Option<u32>,
+    multi_output: Option<MultiOutput>,
 }
 impl Config {
     const fn legacy(fail_call: u32) -> Self {
@@ -88,11 +129,14 @@ impl Config {
             retain_events: false,
             auxiliary_default: None,
             service_action: None,
+            multi_output: None,
         }
     }
     fn encode(self) -> ([u8; SERVICE_CONFIG_BYTES], usize) {
         let mut bytes = [0; SERVICE_CONFIG_BYTES];
-        let (magic, version, len) = if self.zero_audio_input {
+        let (magic, version, len) = if self.multi_output.is_some() {
+            (b"MNE7", 7_u32, MULTI_CONFIG_BYTES)
+        } else if self.zero_audio_input {
             (b"MNE6", 6_u32, CONFIG_BYTES)
         } else if self.retain_events {
             (b"MNE5", 5_u32, CONFIG_BYTES)
@@ -114,6 +158,10 @@ impl Config {
         if let Some(action) = self.service_action {
             bytes[16..20].copy_from_slice(&action.to_le_bytes());
         }
+        if let Some(multi) = self.multi_output {
+            bytes[12..16].copy_from_slice(&multi.shape.to_le_bytes());
+            bytes[16..20].copy_from_slice(&multi.nan_call.to_le_bytes());
+        }
         (bytes, len)
     }
 }
@@ -129,12 +177,33 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let fail_call = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
     let retain_events = &bytes[..4] == b"MNE5" && version == 5;
-    let zero_audio_input = &bytes[..4] == b"MNE6" && version == 6;
-    let main_only = (&bytes[..4] == b"MNE4" && version == 4) || retain_events || zero_audio_input;
+    let multi_output = if &bytes[..4] == b"MNE7" && version == 7 {
+        if stream.read(bytes[12..].as_mut_ptr().cast(), 8, &mut read) != kResultOk || read != 8 {
+            return None;
+        }
+        let value = MultiOutput::decode(
+            u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+        )?;
+        let mut extra = [0_u8; 1];
+        let result = stream.read(extra.as_mut_ptr().cast(), 1, &mut read);
+        if !matches!(result, kResultOk | kResultFalse) || read != 0 {
+            return None;
+        }
+        Some(value)
+    } else {
+        None
+    };
+    let zero_audio_input = (&bytes[..4] == b"MNE6" && version == 6)
+        || multi_output.is_some_and(|multi| !multi.input());
+    let main_only = (&bytes[..4] == b"MNE4" && version == 4)
+        || retain_events
+        || zero_audio_input
+        || multi_output.is_some();
     if fail_call > if main_only { MAIN_MAX_CALLS } else { MAX_CALLS } as u32 {
         return None;
     }
-    if zero_audio_input {
+    if zero_audio_input && multi_output.is_none() {
         let mut extra = [0_u8; 1];
         let result = stream.read(extra.as_mut_ptr().cast(), 1, &mut read);
         if !matches!(result, kResultOk | kResultFalse) || read != 0 {
@@ -157,7 +226,7 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
         }
     }
     let (auxiliary_default, service_action) = match (&bytes[..4], version) {
-        (b"MNE1", 1) | (b"MNE4", 4) | (b"MNE5", 5) | (b"MNE6", 6) => (None, None),
+        (b"MNE1", 1) | (b"MNE4", 4) | (b"MNE5", 5) | (b"MNE6", 6) | (b"MNE7", 7) => (None, None),
         (b"MNE2", 2) => {
             if stream.read(bytes[12..].as_mut_ptr().cast(), 4, &mut read) != kResultOk || read != 4
             {
@@ -194,6 +263,7 @@ unsafe fn read_config(stream: *mut IBStream) -> Option<Config> {
         retain_events,
         auxiliary_default,
         service_action,
+        multi_output,
     })
 }
 unsafe fn write_bytes(stream: *mut IBStream, bytes: &[u8]) -> tresult {
@@ -283,7 +353,7 @@ impl MainAuditOutput {
         max_frames: u32,
         audit: &Audit,
     ) -> std::io::Result<()> {
-        if !matches!(mode, 4 | 6) || thread::current().id() != self.control_thread {
+        if !matches!(mode, 4 | 6 | 7) || thread::current().id() != self.control_thread {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
         let length = MAIN_AUDIT_HEADER_BYTES
@@ -459,6 +529,8 @@ struct Audit {
     event_count: usize,
     incomplete: bool,
     voices: [Voice; 16],
+    multi_delay: [[f32; 2]; 3],
+    multi_position: usize,
 }
 impl Audit {
     fn new() -> Self {
@@ -469,6 +541,8 @@ impl Audit {
             event_count: 0,
             incomplete: false,
             voices: [EMPTY_VOICE; 16],
+            multi_delay: [[0.0; 2]; 3],
+            multi_position: 0,
         }
     }
     // Only an explicit MNE4 restore grows these same owners, on control. Build
@@ -533,6 +607,9 @@ struct NoteProcessor {
     admission_mode: AtomicBool,
     main_only: AtomicBool,
     zero_audio_input: AtomicBool,
+    multi_shape: AtomicU32,
+    multi_nan_call: AtomicU32,
+    multi_active_outputs: AtomicU32,
     retain_mode: AtomicBool,
     retained_input: Mutex<Option<ComPtr<IEventList>>>,
     retain_queries: AtomicU32,
@@ -563,6 +640,15 @@ impl NoteProcessor {
                 .then(|| self.auxiliary_default.load(Ordering::Relaxed)),
             // A configuration read is not a checkpoint of a queued test command.
             service_action: self.service_mode.load(Ordering::Relaxed).then_some(0),
+            multi_output: self.multi_output(),
+        }
+    }
+    fn multi_output(&self) -> Option<MultiOutput> {
+        let shape = self.multi_shape.load(Ordering::Relaxed);
+        if shape == 0 {
+            None
+        } else {
+            MultiOutput::decode(shape, self.multi_nan_call.load(Ordering::Relaxed))
         }
     }
     // Only the joined control-side getState/terminate path queries and releases
@@ -625,6 +711,9 @@ impl NoteProcessor {
             admission_mode: AtomicBool::new(false),
             main_only: AtomicBool::new(false),
             zero_audio_input: AtomicBool::new(false),
+            multi_shape: AtomicU32::new(0),
+            multi_nan_call: AtomicU32::new(0),
+            multi_active_outputs: AtomicU32::new(0),
             retain_mode: AtomicBool::new(false),
             retained_input: Mutex::new(None),
             retain_queries: AtomicU32::new(0),
@@ -670,7 +759,9 @@ impl IPluginBaseTrait for NoteProcessor {
                 if output
                     .record(
                         self.instance,
-                        if self.zero_audio_input.load(Ordering::Relaxed) {
+                        if self.multi_output().is_some() {
+                            7
+                        } else if self.zero_audio_input.load(Ordering::Relaxed) {
                             6
                         } else {
                             4
@@ -709,7 +800,9 @@ impl IComponentTrait for NoteProcessor {
             (MediaTypes_::kAudio, BusDirections_::kInput) => {
                 i32::from(!self.zero_audio_input.load(Ordering::Relaxed))
             }
-            (MediaTypes_::kAudio, BusDirections_::kOutput) => 1,
+            (MediaTypes_::kAudio, BusDirections_::kOutput) => {
+                self.multi_output().map_or(1, |multi| multi.outputs() as i32)
+            }
             (MediaTypes_::kEvent, BusDirections_::kInput) => 2,
             _ => 0,
         }
@@ -728,7 +821,7 @@ impl IComponentTrait for NoteProcessor {
         out.mediaType = media;
         out.direction = direction;
         out.channelCount = if media == MediaTypes_::kAudio as MediaType {
-            2
+            self.multi_output().map_or(2, |multi| multi.channels() as i32)
         } else {
             16
         };
@@ -745,7 +838,13 @@ impl IComponentTrait for NoteProcessor {
         } else {
             BusTypes_::kAux
         }) as BusType;
+        if self.multi_output().is_some() && media == MediaTypes_::kAudio as MediaType {
+            copy_wstring(&format!("MNE7 PCM {index}"), &mut out.name);
+        }
         out.flags = if index == 0
+            || (self.multi_output().is_some()
+                && media == MediaTypes_::kAudio as MediaType
+                && direction == BusDirections_::kOutput as BusDirection)
             || (media == MediaTypes_::kEvent as MediaType
                 && index == 1
                 && self.auxiliary_default.load(Ordering::Relaxed))
@@ -790,6 +889,21 @@ impl IComponentTrait for NoteProcessor {
         if index < 0 || index >= self.getBusCount(media, direction) {
             return kInvalidArgument;
         }
+        if self.multi_output().is_some()
+            && media == MediaTypes_::kAudio as MediaType
+            && direction == BusDirections_::kOutput as BusDirection
+        {
+            let output_bit = 1_u32 << index;
+            if state != 0 {
+                self.multi_active_outputs.fetch_or(output_bit, Ordering::Relaxed);
+            } else {
+                self.multi_active_outputs.fetch_and(!output_bit, Ordering::Relaxed);
+            }
+            // The original MNA4 AudioOut bit continues to describe Main.
+            if index != 0 {
+                return kResultOk;
+            }
+        }
         let bit = if media == MediaTypes_::kEvent as MediaType {
             4 << index
         } else if direction == BusDirections_::kInput as BusDirection {
@@ -812,7 +926,10 @@ impl IComponentTrait for NoteProcessor {
         let Some(config) = read_config(stream) else {
             return kInvalidArgument;
         };
-        if (config.zero_audio_input || self.zero_audio_input.load(Ordering::Relaxed))
+        if (config.zero_audio_input
+            || config.multi_output.is_some()
+            || self.zero_audio_input.load(Ordering::Relaxed)
+            || self.multi_output().is_some())
             && (self.active.load(Ordering::Acquire) || self.processing.load(Ordering::Acquire))
         {
             return kResultFalse;
@@ -855,6 +972,19 @@ impl IComponentTrait for NoteProcessor {
         *output = main_audit;
         *current_trace = trace;
         audit.voices = [EMPTY_VOICE; 16];
+        if config.multi_output.is_some() || self.multi_output().is_some() {
+            audit.multi_delay = [[0.0; 2]; 3];
+            audit.multi_position = 0;
+            self.multi_active_outputs.store(0, Ordering::Relaxed);
+        }
+        self.multi_shape.store(
+            config.multi_output.map_or(0, |multi| multi.shape),
+            Ordering::Relaxed,
+        );
+        self.multi_nan_call.store(
+            config.multi_output.map_or(0, |multi| multi.nan_call),
+            Ordering::Relaxed,
+        );
         self.main_only.store(config.main_only, Ordering::Relaxed);
         self.zero_audio_input.store(config.zero_audio_input, Ordering::Relaxed);
         if config.zero_audio_input {
@@ -953,6 +1083,24 @@ impl IAudioProcessorTrait for NoteProcessor {
         output: *mut SpeakerArrangement,
         outputs: i32,
     ) -> tresult {
+        if let Some(multi) = self.multi_output() {
+            let inputs_ok = if multi.input() {
+                inputs == 1 && !input.is_null() && *input == multi.arrangement()
+            } else {
+                inputs == 0
+            };
+            return if inputs_ok
+                && outputs == multi.outputs() as i32
+                && !output.is_null()
+                && slice::from_raw_parts(output, multi.outputs())
+                    .iter()
+                    .all(|arr| *arr == multi.arrangement())
+            {
+                kResultTrue
+            } else {
+                kResultFalse
+            };
+        }
         let zero_input = self.zero_audio_input.load(Ordering::Relaxed);
         if (if zero_input {
             inputs != 0
@@ -973,6 +1121,16 @@ impl IAudioProcessorTrait for NoteProcessor {
         index: i32,
         out: *mut SpeakerArrangement,
     ) -> tresult {
+        if let Some(multi) = self.multi_output() {
+            if out.is_null()
+                || index < 0
+                || index >= self.getBusCount(MediaTypes_::kAudio, direction)
+            {
+                return kInvalidArgument;
+            }
+            *out = multi.arrangement();
+            return kResultOk;
+        }
         if out.is_null()
             || index != 0
             || (direction == BusDirections_::kInput as BusDirection
@@ -995,7 +1153,11 @@ impl IAudioProcessorTrait for NoteProcessor {
         }
     }
     unsafe fn getLatencySamples(&self) -> u32 {
-        0
+        if self.multi_output().is_some() {
+            3
+        } else {
+            0
+        }
     }
     unsafe fn getTailSamples(&self) -> u32 {
         0
@@ -1078,6 +1240,8 @@ impl IAudioProcessorTrait for NoteProcessor {
         }
         let data = &*data;
         let admission = self.admission_mode.load(Ordering::Relaxed);
+        let multi = self.multi_output();
+        let channels = multi.map_or(2, |multi| multi.channels());
         let zero_input = self.zero_audio_input.load(Ordering::Relaxed);
         let active = self.active_buses.load(Ordering::Relaxed);
         if !self.processing.load(Ordering::Acquire)
@@ -1098,25 +1262,40 @@ impl IAudioProcessorTrait for NoteProcessor {
             } else {
                 data.numInputs != 1 || data.inputs.is_null()
             })
-            || data.numOutputs != 1
+            || data.numOutputs != multi.map_or(1, |multi| multi.outputs() as i32)
+            || multi.is_some_and(|multi| {
+                self.multi_active_outputs.load(Ordering::Relaxed) != multi.output_mask()
+            })
             || data.outputs.is_null()
         {
             return kInvalidArgument;
         }
         let output = &*data.outputs;
-        if output.numChannels != 2 || output.__field0.channelBuffers32.is_null() {
+        if output.numChannels != channels as i32 || output.__field0.channelBuffers32.is_null() {
             return kInvalidArgument;
         }
         let inputs: &[*mut f32] = if zero_input {
             &[]
         } else {
             let input = &*data.inputs;
-            if input.numChannels != 2 || input.__field0.channelBuffers32.is_null() {
+            if input.numChannels != channels as i32 || input.__field0.channelBuffers32.is_null() {
                 return kInvalidArgument;
             }
-            slice::from_raw_parts(input.__field0.channelBuffers32, 2)
+            slice::from_raw_parts(input.__field0.channelBuffers32, channels)
         };
-        let outputs = slice::from_raw_parts(output.__field0.channelBuffers32, 2);
+        let outputs = slice::from_raw_parts(output.__field0.channelBuffers32, channels);
+        if let Some(multi) = multi {
+            for output in slice::from_raw_parts(data.outputs, multi.outputs()) {
+                if output.numChannels != channels as i32
+                    || output.__field0.channelBuffers32.is_null()
+                    || slice::from_raw_parts(output.__field0.channelBuffers32, channels)
+                        .iter()
+                        .any(|p| p.is_null())
+                {
+                    return kInvalidArgument;
+                }
+            }
+        }
         if inputs.iter().chain(outputs).any(|pointer| pointer.is_null()) {
             return kInvalidArgument;
         }
@@ -1164,6 +1343,52 @@ impl IAudioProcessorTrait for NoteProcessor {
         if self.fail_call.load(Ordering::Relaxed) == (call_index + 1) as u32 {
             audit.calls[call_index].result = kResultFalse;
             return kResultFalse;
+        }
+        if let Some(multi) = multi {
+            let buses = slice::from_raw_parts(data.outputs, multi.outputs());
+            let mut next = first;
+            for frame in 0..data.numSamples as usize {
+                while next < first + count && audit.events[next].offset == frame as i32 {
+                    let note = audit.events[next];
+                    if !audit.apply(note) {
+                        return kInvalidArgument;
+                    }
+                    next += 1;
+                }
+                let voice: f32 = audit.voices.iter().map(|voice| voice.value).sum();
+                let position = audit.multi_position;
+                let delayed = audit.multi_delay[position];
+                for channel in 0..channels {
+                    let input = if inputs.is_empty() {
+                        0.0
+                    } else {
+                        *inputs[channel].add(frame)
+                    };
+                    if !input.is_finite() {
+                        return kInvalidArgument;
+                    }
+                    let voice = if channel == 0 { voice } else { -voice * 0.5 };
+                    audit.multi_delay[position][channel] = voice + input * 0.25;
+                }
+                // ONE sample advance, outside the output-bus/channel loops.
+                audit.multi_position = (position + 1) % 3;
+                for (index, bus) in buses.iter().enumerate() {
+                    let factor =
+                        f32::from_bits(((127 - index as u32) << 23) | ((index as u32 & 1) << 31));
+                    let pointers = slice::from_raw_parts(bus.__field0.channelBuffers32, channels);
+                    for channel in 0..channels {
+                        let value = delayed[channel] * factor;
+                        *pointers[channel].add(frame) = if value == 0.0 { 0.0 } else { value };
+                    }
+                }
+            }
+            if multi.nan_call == (call_index + 1) as u32 {
+                let bus = &buses[multi.outputs() - 1];
+                *(*bus.__field0.channelBuffers32.add(channels - 1))
+                    .add(data.numSamples as usize - 1) = f32::NAN;
+            }
+            audit.calls[call_index].result = kResultOk;
+            return kResultOk;
         }
         if admission {
             if count != 0 {

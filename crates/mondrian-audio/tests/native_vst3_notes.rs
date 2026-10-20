@@ -568,6 +568,9 @@ fn main_configuration(fail: u32) -> Vec<u8> {
 // This is a complete physical record, not a globally unique DLL-static serial.
 // A truncated/overwritten/missing record never counts as successful evidence.
 fn main_file_audits(bytes: &[u8]) -> Vec<Audit> {
+    main_file_audits_with_shape(bytes, 4, 7)
+}
+fn main_file_audits_with_shape(bytes: &[u8], mode: u32, active: u32) -> Vec<Audit> {
     let mut records = Vec::new();
     let mut offset = 0;
     while offset < bytes.len() {
@@ -576,7 +579,7 @@ fn main_file_audits(bytes: &[u8]) -> Vec<Audit> {
         assert_eq!(&body[..4], b"MNA4");
         assert_eq!(u32_at(body, 4), 4);
         let length = u32_at(body, 8) as usize;
-        assert_eq!(u32_at(body, 12), 4);
+        assert_eq!(u32_at(body, 12), mode);
         assert_eq!(u32_at(body, 16), std::process::id());
         assert_eq!(
             u32_at(body, 20),
@@ -586,8 +589,8 @@ fn main_file_audits(bytes: &[u8]) -> Vec<Audit> {
         assert_eq!(u32_at(body, 32), 1, "audit must be complete");
         assert_eq!(
             u32_at(body, 36),
-            7,
-            "Audio in/out + Main Event; Aux stayed inactive"
+            active,
+            "exact Main audio/event activation; auxiliary audio slots are checked by MNE7 ProcessData"
         );
         let instance = u64::from_le_bytes(body[24..32].try_into().unwrap());
         assert_ne!(instance, 0);
@@ -1490,4 +1493,324 @@ fn installed_vst3_deferred_restore_bounds_first_native_setup_and_preserves_event
         },
         "the refused first native mode remains sticky without ACK, activation or DSP",
     );
+}
+
+// MNE7 uses the existing integration target, independent expected PCM and the
+// original bounded MNA4 lifecycle. These are SDK-only native controls.
+fn mne7_configuration(outputs: u32, channels: u32, input: bool, nan_call: u32) -> Vec<u8> {
+    let mut component = b"MNE7".to_vec();
+    for value in [
+        7_u32,
+        0,
+        outputs | (channels << 8) | (u32::from(input) << 16),
+        nan_call,
+    ] {
+        component.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut state = b"VST3HOST_STATE\0\0".to_vec();
+    for value in [1_u32, 20, 20] {
+        state.extend_from_slice(&value.to_le_bytes());
+    }
+    state.extend_from_slice(&component);
+    state.extend_from_slice(&component);
+    state
+}
+fn mne7_sdk_case(
+    rate: u32,
+    outputs: usize,
+    channels: usize,
+    input: bool,
+    scoped: bool,
+    some: bool,
+    partitions: &[usize],
+) {
+    use vst3_host::audio::{
+        AudioBusRole, ProcessMusicalReference, ProcessTimelineContext, SpeakerArrangement,
+    };
+    const ABSENT_L: [f32; 14] = [
+        0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0, 0.0, 0.0,
+    ];
+    const ABSENT_R: [f32; 14] = [
+        0.0, 0.0, 0.0, -0.125, -0.125, -0.125, 0.0, -0.0625, -0.0625, -0.0625, -0.0625, 0.0, 0.0,
+        0.0,
+    ];
+    const PRESENT_L: [f32; 14] = [
+        0.0, 0.0, 0.0, 0.5, 0.75, 1.0, 1.0, 1.375, 1.625, 1.875, 2.125, 2.25, 2.5, 2.75,
+    ];
+    const PRESENT_R: [f32; 14] = [
+        0.0, 0.0, 0.0, -0.625, -1.125, -1.625, -2.0, -2.5625, -3.0625, -3.5625, -4.0625, -4.5,
+        -5.0, -5.5,
+    ];
+    // Literal dyadics, independent of the fixture's exponent/sign bit encoder.
+    const FACTORS: [f32; 32] = [
+        1.0,
+        -0.5,
+        0.25,
+        -0.125,
+        1.0 / 16.0,
+        -1.0 / 32.0,
+        1.0 / 64.0,
+        -1.0 / 128.0,
+        1.0 / 256.0,
+        -1.0 / 512.0,
+        1.0 / 1024.0,
+        -1.0 / 2048.0,
+        1.0 / 4096.0,
+        -1.0 / 8192.0,
+        1.0 / 16384.0,
+        -1.0 / 32768.0,
+        1.0 / 65536.0,
+        -1.0 / 131072.0,
+        1.0 / 262144.0,
+        -1.0 / 524288.0,
+        1.0 / 1048576.0,
+        -1.0 / 2097152.0,
+        1.0 / 4194304.0,
+        -1.0 / 8388608.0,
+        1.0 / 16777216.0,
+        -1.0 / 33554432.0,
+        1.0 / 67108864.0,
+        -1.0 / 134217728.0,
+        1.0 / 268435456.0,
+        -1.0 / 536870912.0,
+        1.0 / 1073741824.0,
+        -1.0 / 2147483648.0,
+    ];
+    let directory = PathBuf::from(std::env::var_os("MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR").unwrap());
+    assert!(directory.is_absolute() && directory.is_dir());
+    let path = directory.join(format!("mne7-{}.audit", std::process::id()));
+    let prefix = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or_else(|e| {
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
+        0
+    });
+    assert!(prefix <= 2 * 1024 * 1024);
+    let mut host = Vst3Host::builder()
+        .sample_rate(f64::from(rate))
+        .block_size(4)
+        .input_channels(2)
+        .output_channels(2)
+        .build()
+        .unwrap();
+    let mut plugin = host.load_plugin_class(fixture(), CLASS).unwrap();
+    let state = mne7_configuration(outputs as u32, channels as u32, input, 0);
+    plugin.load_state(&state).expect("explicit inactive MNE7 restore");
+    assert_eq!(plugin.save_state().unwrap(), state);
+    for (bad_outputs, bad_channels) in [(0, 2), (33, 2), (3, 0), (3, 3)] {
+        assert!(plugin
+            .load_state(&mne7_configuration(bad_outputs, bad_channels, input, 0))
+            .is_err());
+        assert_eq!(
+            plugin.save_state().unwrap(),
+            state,
+            "malformed shape cannot mutate the same object"
+        );
+    }
+    let audio = plugin.native_audio_bus_info().unwrap();
+    assert_eq!(audio.inputs.len(), usize::from(input));
+    assert_eq!(audio.outputs.len(), outputs);
+    for (index, bus) in audio.outputs.iter().enumerate() {
+        assert_eq!(
+            bus.role,
+            if index == 0 {
+                AudioBusRole::Main
+            } else {
+                AudioBusRole::Auxiliary
+            }
+        );
+        assert_eq!(bus.channel_count, channels);
+        assert!(bus.default_active);
+    }
+    if input {
+        assert_eq!(audio.inputs[0].channel_count, channels);
+    }
+    let events = plugin.native_event_bus_info().unwrap();
+    assert_eq!(events.inputs.len(), 2);
+    assert!(events.outputs.is_empty());
+    assert_eq!(events.inputs[0].role, NativeEventBusRole::Main);
+    assert_eq!(events.inputs[1].role, NativeEventBusRole::Auxiliary);
+    assert_eq!(
+        events
+            .inputs
+            .iter()
+            .map(|b| (b.channel_count, b.host_active))
+            .collect::<Vec<_>>(),
+        [(16, true), (16, false)]
+    );
+    plugin.set_process_mode(ProcessMode::Offline).unwrap();
+    let arrangement = if channels == 1 {
+        SpeakerArrangement::MONO
+    } else {
+        SpeakerArrangement::STEREO
+    };
+    let ins = if input { vec![arrangement] } else { Vec::new() };
+    plugin.set_bus_arrangements(&ins, &vec![arrangement; outputs]).unwrap();
+    let actual = plugin.bus_arrangements().unwrap();
+    assert_eq!(actual.inputs, ins);
+    assert_eq!(actual.outputs, vec![arrangement; outputs]);
+    if input {
+        plugin.set_bus_active(MediaType::Audio, BusDirection::Input, 0, true).unwrap();
+    }
+    for index in 0..outputs {
+        plugin
+            .set_bus_active(MediaType::Audio, BusDirection::Output, index as i32, true)
+            .unwrap();
+    }
+    // Actually exercise an auxiliary ACK, then recreate the complete SDK shape.
+    plugin
+        .set_bus_active(
+            MediaType::Audio,
+            BusDirection::Output,
+            (outputs - 1) as i32,
+            false,
+        )
+        .unwrap();
+    assert!(!plugin.audio_bus_layout().unwrap().outputs[outputs - 1].active);
+    plugin
+        .set_bus_active(
+            MediaType::Audio,
+            BusDirection::Output,
+            (outputs - 1) as i32,
+            true,
+        )
+        .unwrap();
+    let layout = plugin.audio_bus_layout().unwrap();
+    assert!(layout.outputs.iter().all(|b| b.active && b.channel_count == channels));
+    assert_eq!(plugin.latency_samples(), 3);
+    plugin.start_processing().unwrap();
+    let events = [
+        note(true, 0, 0, 10, 0.5),
+        note(false, 0, 3, 10, 0.125),
+        note(true, 0, 4, 11, 0.25),
+        note(false, 0, 8, 11, 0.125),
+    ];
+    let mut calls = Vec::new();
+    let mut tuples = Vec::new();
+    let mut start = 0;
+    for &frames in partitions {
+        let timeline = ProcessTimelineContext { sample_position: start as i64, sample_rate: rate };
+        if some {
+            plugin
+                .set_process_musical_timeline_context(
+                    timeline,
+                    ProcessMusicalReference::new(-3, i64::from(rate), 1024, i64::from(rate))
+                        .unwrap(),
+                )
+                .unwrap();
+        } else {
+            plugin.set_process_timeline_context(timeline).unwrap();
+        }
+        let mut pcm = plugin.create_bus_audio_buffers(frames).unwrap();
+        assert_eq!(pcm.inputs.len(), usize::from(input));
+        assert_eq!(
+            pcm.outputs.len(),
+            outputs,
+            "unrouted buses still have actual SDK slots"
+        );
+        if input {
+            for (channel, samples) in pcm.inputs[0].channels.iter_mut().enumerate() {
+                for (frame, sample) in samples.iter_mut().enumerate() {
+                    *sample = (start + frame + 1) as f32 * if channel == 0 { 1.0 } else { -2.0 };
+                }
+            }
+        }
+        for bus in &mut pcm.outputs {
+            for channel in &mut bus.channels {
+                channel.fill(99.0);
+            }
+        }
+        let local = events
+            .iter()
+            .filter(|e| (start..start + frames).contains(&(e.sample_offset as usize)))
+            .map(|e| {
+                let mut e = e.clone();
+                e.sample_offset -= start as i32;
+                e
+            })
+            .collect::<Vec<_>>();
+        invoke(&mut plugin, &mut pcm, &local, scoped).unwrap();
+        for chunk in (0..frames).step_by(4) {
+            let count = (frames - chunk).min(4);
+            let first = tuples.len();
+            let call = calls.len() as u32 + 1;
+            for event in &events {
+                if (start + chunk..start + chunk + count).contains(&(event.sample_offset as usize))
+                {
+                    let mut expected = event.clone();
+                    if some {
+                        expected.ppq_position = (f64::from(event.sample_offset) + 3.0) / 1024.0;
+                    }
+                    tuples.push(expected_tuple(
+                        call,
+                        &expected,
+                        event.sample_offset - (start + chunk) as i32,
+                    ));
+                }
+            }
+            calls.push((count as i32, 0, first as u32, (tuples.len() - first) as u32));
+        }
+        for (index, bus) in pcm.outputs.iter().enumerate() {
+            assert!(bus.active);
+            assert_eq!(bus.channels.len(), channels);
+            for (channel, samples) in bus.channels.iter().enumerate() {
+                let expected = match (input, channel) {
+                    (false, 0) => &ABSENT_L,
+                    (false, _) => &ABSENT_R,
+                    (true, 0) => &PRESENT_L,
+                    (true, _) => &PRESENT_R,
+                };
+                for (frame, &actual) in samples.iter().enumerate() {
+                    let value = expected[start + frame] * FACTORS[index];
+                    assert_eq!(
+                        actual.to_bits(),
+                        if value == 0.0 {
+                            0.0_f32.to_bits()
+                        } else {
+                            value.to_bits()
+                        },
+                        "bus={index} channel={channel} sample={}",
+                        start + frame
+                    );
+                }
+            }
+        }
+        start += frames;
+    }
+    assert_eq!(start, 14);
+    assert_eq!(tuples.len(), 4, "three output buses cannot replay Notes");
+    plugin.stop_processing().unwrap();
+    drop(plugin);
+    let bytes = std::fs::read(path).unwrap();
+    assert!(bytes.len() >= prefix && bytes.len() <= 2 * 1024 * 1024);
+    let records = main_file_audits_with_shape(&bytes[prefix..], 7, if input { 7 } else { 6 });
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sample_rate_bits, f64::from(rate).to_bits());
+    assert_eq!(records[0].max_frames, 4);
+    assert_eq!(records[0].calls, calls);
+    assert_eq!(records[0].events, tuples);
+}
+#[test]
+#[ignore = "rebuilt owned MNE7 and existing absolute audit directory; SDK three-output latency/Note oracle only"]
+fn installed_vst3_mne7_outputs_preserve_native_shape_latency_pcm_and_note_history() {
+    for rate in [44_100, 48_000] {
+        for scoped in [false, true] {
+            for some in [false, true] {
+                for partitions in [&[14_usize][..], &[3, 2, 4, 5], &[1; 14]] {
+                    mne7_sdk_case(rate, 3, 2, false, scoped, some, partitions);
+                }
+            }
+        }
+    }
+}
+#[test]
+#[ignore = "rebuilt owned MNE7 and existing absolute audit directory; actual mono/present/stereo/32-output SDK shape, no Product max-bus claim"]
+fn installed_vst3_mne7_outputs_cover_mono_present_input_and_32_bus_storage() {
+    for rate in [44_100, 48_000] {
+        for scoped in [false, true] {
+            for (outputs, channels, input) in
+                [(3, 1, false), (32, 1, true), (3, 2, true), (32, 2, false)]
+            {
+                mne7_sdk_case(rate, outputs, channels, input, scoped, true, &[3, 2, 4, 5]);
+            }
+        }
+    }
 }
