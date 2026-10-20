@@ -507,7 +507,14 @@ fn terminal_batch_lost_completion_and_stop_during_prepare_retire_original_owners
                 drop(old);
             }
             c.prepare_gate.store(false, Ordering::Release);
-            spin_until(|| !c.request_drops.lock().is_empty());
+            // The request Drop body runs before its prepared field Drop. Wait
+            // for complete original retirement, not merely Drop entry.
+            spin_until(|| {
+                !c.request_drops.lock().is_empty()
+                    && c.prepared_drops.lock().len() == 1
+                    && !p.render_queue.batch_busy()
+            });
+            assert_eq!(c.request_drops.lock().len(), 1);
             assert_eq!(c.prepared_drops.lock().len(), 1);
             assert_eq!(c.installs.load(Ordering::Acquire), 0);
             assert!(p.render_queue.batch_stopped());
