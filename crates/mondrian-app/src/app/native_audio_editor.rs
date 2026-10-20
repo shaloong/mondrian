@@ -1587,7 +1587,13 @@ mod attachment_continuity_contracts {
             let mut state = AppState::with_audio_processor_resolver(std::sync::Arc::new(
                 mondrian_audio::BuiltInAudioProcessorResolver,
             ));
-            let sequence = mondrian_timeline::Sequence::new("Settled author custody close");
+            let mut sequence = mondrian_timeline::Sequence::new("Settled author custody close");
+            sequence.audio_program.outputs[0].strip.pre_fader.processors.push(
+                mondrian_timeline::audio::AudioProcessorInstance::built_in(
+                    mondrian_timeline::audio::BUILTIN_GAIN_DEFINITION_ID,
+                    1,
+                ),
+            );
             let sequence_id = sequence.id;
             state.test_set_sequence(Some(sequence));
             state.test_set_asset_library(Some(library));
