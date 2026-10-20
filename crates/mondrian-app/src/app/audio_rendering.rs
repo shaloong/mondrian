@@ -1,5 +1,6 @@
 use super::*;
 mod host_output_fader;
+mod native_author_terminal_batch;
 #[cfg(any(test, feature = "validation"))]
 use mondrian_audio::BuiltInAudioProcessorResolver;
 use mondrian_audio::{
@@ -617,6 +618,18 @@ impl TimelineAudioPcmRenderer {
         output_id: mondrian_core::ProgramOutputId,
     ) -> AudioCompileRequest {
         AudioCompileRequest { output_id, audition: self.audition.clone() }
+    }
+
+    /// Original producer owns the complete preparation across canonical publication.
+    /// The shared host slot contains only the actual committed author snapshot.
+    pub(super) fn native_author_terminal_batch_request(
+        self: &Arc<Self>,
+        anchor: mondrian_core::NativeAudioAuthorProposal,
+        proposals: Arc<[mondrian_core::NativeAudioAuthorProposal]>,
+        programs: Arc<[mondrian_audio::NativeAudioAuthorProgram]>,
+        publication: Arc<Mutex<Option<Arc<mondrian_editor_state::AuthorExecutionSnapshot>>>>,
+    ) -> Box<dyn mondrian_media::AudioPcmNativeAuthorHandoff> {
+        native_author_terminal_batch::request(self, anchor, proposals, programs, publication)
     }
 
     pub(super) fn native_author_handoff_request(
