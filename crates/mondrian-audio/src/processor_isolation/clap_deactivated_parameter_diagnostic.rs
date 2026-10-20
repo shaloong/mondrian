@@ -310,9 +310,30 @@ struct Binding {
 struct DiagnosticCase {
     schema_version: u32,
     plugin: Binding,
-    opaque_state: Binding,
+    #[serde(default)]
+    opaque_state: Option<Binding>,
     plugin_id: String,
     expected_reported_parameter_count: u32,
+}
+
+#[derive(Clone, Copy)]
+enum DiagnosticMode {
+    Unseeded,
+    OriginalSeedComparison,
+}
+
+impl DiagnosticMode {
+    fn state_binding(self, case: &DiagnosticCase) -> Result<Option<&Binding>, &'static str> {
+        match self {
+            Self::Unseeded if case.opaque_state.is_none() => Ok(None),
+            Self::Unseeded => Err("unseeded diagnostic requires no opaque state"),
+            Self::OriginalSeedComparison => case
+                .opaque_state
+                .as_ref()
+                .map(Some)
+                .ok_or("legacy two-instance diagnostic requires opaque state"),
+        }
+    }
 }
 
 fn require_actual_job() {
@@ -405,6 +426,16 @@ fn evidence_available(phase: &Result<DeactivatedParameterList, AudioProcessorHos
 #[test]
 #[ignore = "explicit hash-bound deactivated metadata case and frozen native Job required"]
 fn native_clap_deactivated_same_call_metadata_observations() {
+    run_deactivated_metadata_case(DiagnosticMode::OriginalSeedComparison);
+}
+
+#[test]
+#[ignore = "explicit hash-bound unseeded metadata case and frozen native Job required"]
+fn native_clap_unseeded_deactivated_same_call_metadata_observations() {
+    run_deactivated_metadata_case(DiagnosticMode::Unseeded);
+}
+
+fn run_deactivated_metadata_case(mode: DiagnosticMode) {
     require_actual_job();
     let case_path = PathBuf::from(std::env::var_os(CASE_ENV).expect("explicit diagnostic case"));
     let expected_case_hash = std::env::var(CASE_HASH_ENV).expect("explicit diagnostic case hash");
@@ -429,33 +460,50 @@ fn native_clap_deactivated_same_call_metadata_observations() {
     assert!(
         !case.plugin_id.is_empty() && case.plugin_id.len() <= 256 && !case.plugin_id.contains('\0')
     );
+    let state_binding = mode.state_binding(&case).expect("explicit diagnostic phase contract");
     let plugin_lease = lease_binding(&case.plugin, MAX_CLAP_BINARY_BYTES);
-    let mut state_lease = lease_binding(&case.opaque_state, MAX_CAPTURED_STATE_BYTES as u64);
-    let mut seed = Vec::with_capacity(case.opaque_state.bytes as usize);
-    Read::by_ref(&mut state_lease)
-        .take(MAX_CAPTURED_STATE_BYTES as u64 + 1)
-        .read_to_end(&mut seed)
-        .expect("read original bounded opaque state");
-    assert_eq!(seed.len() as u64, case.opaque_state.bytes);
+    let (state_lease, seed) = match state_binding {
+        Some(binding) => {
+            let mut state_lease = lease_binding(binding, MAX_CAPTURED_STATE_BYTES as u64);
+            let mut seed = Vec::with_capacity(binding.bytes as usize);
+            Read::by_ref(&mut state_lease)
+                .take(MAX_CAPTURED_STATE_BYTES as u64 + 1)
+                .read_to_end(&mut seed)
+                .expect("read original bounded opaque state");
+            assert_eq!(seed.len() as u64, binding.bytes);
+            (Some(state_lease), Some(seed))
+        }
+        None => (None, None),
+    };
     // SAFETY: Root's frozen DLL lease and actual Job cover this native loader
     // call; PluginEntry owns the library and outlives both complete instances.
     let entry = unsafe { PluginEntry::load(case.plugin.path.as_os_str()) }
         .expect("load actual leased CLAP entry");
-    // Two predeclared phases. A semantic refusal never selects or suppresses B.
+    // The selector fixes the phases before A runs. In the legacy comparison,
+    // A's semantic refusal never selects or suppresses the fresh seeded B.
     let phase_a = deactivated_parameters(&entry, &case.plugin_id, None, true);
-    let phase_b = deactivated_parameters(&entry, &case.plugin_id, Some(&seed), true);
+    let phase_b = seed
+        .as_deref()
+        .map(|seed| deactivated_parameters(&entry, &case.plugin_id, Some(seed), true));
     drop(entry);
+    let phases = match &phase_b {
+        Some(phase_b) => serde_json::json!([
+            phase_json("fresh_unseeded", &phase_a),
+            phase_json("fresh_original_seed", phase_b)
+        ]),
+        None => serde_json::json!([phase_json("fresh_unseeded", &phase_a)]),
+    };
     let output = serde_json::json!({
         "schema_version": 1,
         "consumer": "windows_audio_test_pe_deactivated_metadata",
         "compatibility_qualified": false,
         "real_plugin_native_exact_counts_qualified": false,
-        "plugin_sha256": case.plugin.sha256,
-        "opaque_state_sha256": case.opaque_state.sha256,
-        "plugin_id": case.plugin_id,
-        "same_loaded_library_two_fresh_instances": true,
+        "plugin_sha256": &case.plugin.sha256,
+        "opaque_state_sha256": state_binding.map(|binding| &binding.sha256),
+        "plugin_id": &case.plugin_id,
+        "same_loaded_library_two_fresh_instances": phase_b.is_some(),
         "host_parameter_rescan_flags": "unavailable_not_observed",
-        "phases": [phase_json("fresh_unseeded", &phase_a), phase_json("fresh_original_seed", &phase_b)],
+        "phases": phases,
     });
     let output = serde_json::to_vec(&output).expect("serialize owned exact-bit observations");
     assert!(
@@ -472,10 +520,10 @@ fn native_clap_deactivated_same_call_metadata_observations() {
     drop(stdout);
     // Root retains raw output regardless of the original result's eventual 101.
     assert!(
-        evidence_available(&phase_a) && evidence_available(&phase_b),
+        evidence_available(&phase_a) && phase_b.as_ref().is_none_or(evidence_available),
         "diagnostic evidence unavailable/truncated"
     );
-    for phase in [&phase_a, &phase_b] {
+    for phase in std::iter::once(&phase_a).chain(phase_b.iter()) {
         let phase = phase.as_ref().expect("original setup result");
         assert_eq!(
             phase.capture.as_ref().unwrap().reported_count,
@@ -486,6 +534,57 @@ fn native_clap_deactivated_same_call_metadata_observations() {
     drop(state_lease);
     drop(plugin_lease);
     drop(case_lease);
+}
+
+#[test]
+fn deactivated_case_schema_and_selector_require_explicit_seed_mode() {
+    // Schema/selector controls only: these bindings are never leased or loaded.
+    let base = serde_json::json!({
+        "schema_version": 1,
+        "plugin": {
+            "path": "C:/diagnostic/plugin.clap",
+            "bytes": 1,
+            "sha256": "ab".repeat(32)
+        },
+        "plugin_id": "org.mondrian.test.deactivated-parameter-capture",
+        "expected_reported_parameter_count": 3
+    });
+    for state in [None, Some(serde_json::Value::Null)] {
+        let mut input = base.clone();
+        if let Some(state) = state {
+            input["opaque_state"] = state;
+        }
+        let case: DiagnosticCase = serde_json::from_value(input).unwrap();
+        assert!(matches!(
+            DiagnosticMode::Unseeded.state_binding(&case),
+            Ok(None)
+        ));
+        assert!(matches!(
+            DiagnosticMode::OriginalSeedComparison.state_binding(&case),
+            Err("legacy two-instance diagnostic requires opaque state")
+        ));
+    }
+    let mut seeded = base.clone();
+    seeded["opaque_state"] = serde_json::json!({
+        "path": "C:/diagnostic/state.bin", "bytes": 2, "sha256": "cd".repeat(32)
+    });
+    let case: DiagnosticCase = serde_json::from_value(seeded.clone()).unwrap();
+    let binding = DiagnosticMode::OriginalSeedComparison.state_binding(&case).unwrap().unwrap();
+    assert!(std::ptr::eq(binding, case.opaque_state.as_ref().unwrap()));
+    assert!(matches!(
+        DiagnosticMode::Unseeded.state_binding(&case),
+        Err("unseeded diagnostic requires no opaque state")
+    ));
+    let mut unknown = base.clone();
+    unknown["unknown"] = true.into();
+    assert!(serde_json::from_value::<DiagnosticCase>(unknown).is_err());
+    for malformed in [serde_json::json!(false), serde_json::json!({"bytes": 2})] {
+        let mut input = base.clone();
+        input["opaque_state"] = malformed;
+        assert!(serde_json::from_value::<DiagnosticCase>(input).is_err());
+    }
+    seeded["opaque_state"]["unknown"] = true.into();
+    assert!(serde_json::from_value::<DiagnosticCase>(seeded).is_err());
 }
 
 mod owned_abi_controls {
