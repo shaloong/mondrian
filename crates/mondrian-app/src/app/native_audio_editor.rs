@@ -18,6 +18,8 @@ use mondrian_timeline::{
 };
 use std::collections::BTreeMap;
 
+mod author_projection;
+
 pub(super) struct NativeAudioEditorProductContext {
     payload: AudioNativeEditorPayload,
     locator: NativeAudioEditorLocator,
@@ -427,13 +429,6 @@ impl AppState {
         &mut self,
         proposal: mondrian_core::NativeAudioAuthorProposal,
     ) -> Result<()> {
-        use mondrian_core::{
-            NativeAudioAuthorCallback as Callback, NativeAudioParameterCallbackPhase as Phase,
-        };
-        use mondrian_timeline::{
-            AudioAutomationTarget, NativeAudioAuthorUpdate, NativeAudioParameterWrite,
-            NativeAudioParameterWriteMode,
-        };
         let Some(context) = self.native_audio_editor.as_ref() else {
             return Ok(());
         };
@@ -488,138 +483,14 @@ impl AppState {
             &context.payload.definition,
         )
         .map_err(failure)?;
-        let mut parameters = Vec::with_capacity(proposal.callbacks().len());
-        let mut references = processor
-            .parameters
-            .iter()
-            .map(|(id, parameter)| {
-                (
-                    id.clone(),
-                    parameter.automation.as_ref().map(|curve| !curve.keyframes.is_empty()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for callback in proposal.callbacks() {
-            match callback {
-                Callback::ParameterReferencesCleared { parameter, flags } => {
-                    if flags & !7 != 0 {
-                        return Err(failure("native clear flags changed"));
-                    }
-                    // Modulation-only clear is an explicit NoChange: this
-                    // current canonical model has no host modulation binding.
-                    if flags & 3 != 0 {
-                        references.insert(parameter.clone(), None);
-                        parameters.push(
-                            mondrian_timeline::NativeAudioParameterOperation::ClearAutomation {
-                                parameter_id: parameter.clone(),
-                            },
-                        );
-                    }
-                }
-                Callback::ParameterValuesRescanned { kind, values } => {
-                    // Actual get_value facts refresh only an existing unkeyed
-                    // reference. No key is created, keyed playback remains the
-                    // sole curve, and a preceding Clear remains absent.
-                    if kind.refreshes_values() {
-                        for (id, bits) in values {
-                            let schema = context
-                                .schemas
-                                .get(id)
-                                .ok_or_else(|| failure("rescan schema changed"))?;
-                            let parameter = processor
-                                .parameters
-                                .get(id)
-                                .filter(|actual| actual.schema == *schema)
-                                .ok_or_else(|| failure("rescan parameter changed"))?;
-                            if references.get(id) != Some(&Some(false)) {
-                                continue;
-                            }
-                            let value = f64::from_bits(*bits);
-                            if !value.is_finite() {
-                                return Err(failure("rescan value is not finite"));
-                            }
-                            parameters.push(
-                                mondrian_timeline::NativeAudioParameterOperation::from(
-                                    NativeAudioParameterWrite {
-                                        schema: Box::new(parameter.schema.clone()),
-                                        value,
-                                        mode: NativeAudioParameterWriteMode::Unkeyed,
-                                    },
-                                ),
-                            );
-                        }
-                    }
-                }
-                Callback::Parameter { parameter: id, phase, value_bits }
-                | Callback::ParameterAtExecution { parameter: id, phase, value_bits, .. } => {
-                    let schema = context.schemas.get(id).ok_or_else(|| {
-                        failure("native callback lacks its pinned parameter schema")
-                    })?;
-                    let parameter = processor
-                        .parameters
-                        .get(id)
-                        .filter(|actual| actual.schema == *schema)
-                        .ok_or_else(|| failure("native parameter schema changed"))?;
-                    if *phase != Phase::Value {
-                        continue;
-                    }
-                    let value = value_bits
-                        .map(f64::from_bits)
-                        .filter(|value| value.is_finite())
-                        .ok_or_else(|| {
-                            failure("native value is not a finite definition-domain scalar")
-                        })?;
-                    let mode = if let Callback::ParameterAtExecution { position, .. } = callback {
-                        let target = AudioAutomationTarget::ProcessorParameter {
-                            rack: context.payload.address,
-                            processor_id: context.payload.processor_id,
-                            parameter_id: id.clone(),
-                        };
-                        NativeAudioParameterWriteMode::AtOwnerTime {
-                            position: mondrian_timeline::audio_automation_execution_time(
-                                sequence,
-                                &target,
-                                *position,
-                                context.payload.occurrence,
-                            )
-                            .map_err(failure)?,
-                        }
-                    } else if references.get(id).is_none_or(|state| state != &Some(true)) {
-                        NativeAudioParameterWriteMode::Unkeyed
-                    } else {
-                        let target = AudioAutomationTarget::ProcessorParameter {
-                            rack: context.payload.address,
-                            processor_id: context.payload.processor_id,
-                            parameter_id: id.clone(),
-                        };
-                        NativeAudioParameterWriteMode::AtOwnerTime {
-                            position: mondrian_timeline::audio_automation_author_time(
-                                sequence,
-                                &target,
-                                context.payload.sequence_time,
-                                context.payload.occurrence,
-                            )
-                            .map_err(failure)?,
-                        }
-                    };
-                    references.insert(
-                        id.clone(),
-                        Some(matches!(
-                            mode,
-                            NativeAudioParameterWriteMode::AtOwnerTime { .. }
-                        )),
-                    );
-                    parameters.push(mondrian_timeline::NativeAudioParameterOperation::from(
-                        NativeAudioParameterWrite {
-                            schema: Box::new(parameter.schema.clone()),
-                            value,
-                            mode,
-                        },
-                    ));
-                }
-                Callback::DirtyChanged(_) | Callback::GroupStarted | Callback::GroupFinished => {}
-            }
-        }
+        let update = author_projection::project_update(
+            sequence,
+            context.owner,
+            processor,
+            Some(&context.schemas),
+            &proposal,
+            Some(context.payload.sequence_time),
+        )?;
         let payload = context.payload.clone();
         let owner = context.owner;
         let gesture = context.gesture.clone();
@@ -633,10 +504,6 @@ impl AppState {
                 payload.processor_id,
                 payload.definition.clone(),
             )?,
-        };
-        let update = NativeAudioAuthorUpdate {
-            parameters,
-            opaque_state: proposal.state().cloned(),
         };
         let commit = author.update_native_audio_gesture(&gesture, update)?;
         // Publish the actual pending author handle immediately after admission.
