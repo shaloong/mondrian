@@ -118,6 +118,16 @@ impl AudioPlayback {
         )
     }
 
+    /// Current terminal refusal, without querying Runtime or granting closure.
+    /// An explicit SourceClosed query must still authenticate the actual owner.
+    pub fn native_reprepare_refused_generation(&self) -> Option<u64> {
+        matches!(
+            self.native_control_hold,
+            Some(NativeControlHold::Reprepare { admission: NativeReprepareAdmission::Refused, .. })
+        )
+        .then_some(self.generation)
+    }
+
     /// Move only the retained restart's PCM/output intent to the caller's anchor.
     ///
     /// Stale, refused, canceled or absent holds return `false`. Source-close,
@@ -514,6 +524,7 @@ mod tests {
         verifier: Mutex<Option<AudioOwnerInstallationVerifier>>,
         verifier_reads: AtomicUsize,
         source_closed_queries: Mutex<Vec<thread::ThreadId>>,
+        refuse_source_close: AtomicBool,
         late: Mutex<Option<Arc<LatePcm>>>,
         scope: Mutex<Option<mondrian_core::NativeChildSettlementRegistrar>>,
         notice: mondrian_core::NativeAudioReprepareNotice,
@@ -554,7 +565,13 @@ mod tests {
             _: &ExecutionCancellationToken,
         ) -> mondrian_core::Result<()> {
             self.source_closed_queries.lock().push(thread::current().id());
-            Ok(())
+            if self.refuse_source_close.load(Ordering::Acquire) {
+                Err(source_close::refusal(
+                    "portable Source still has a native obligation",
+                ))
+            } else {
+                Ok(())
+            }
         }
         fn render(
             &self,
@@ -690,6 +707,7 @@ mod tests {
             verifier: Mutex::new(None),
             verifier_reads: AtomicUsize::new(0),
             source_closed_queries: Mutex::new(Vec::new()),
+            refuse_source_close: AtomicBool::new(false),
             late: Mutex::new(None),
             scope: Mutex::new(None),
             notice: mondrian_core::NativeAudioReprepareNotice {
@@ -934,13 +952,260 @@ mod tests {
         }));
         drop((erased, renderer));
         let cleanup = playback.shutdown_and_wait();
+        if let Err(payload) = target {
+            if !cleanup.all_workers_terminated() {
+                eprintln!("Source-close cleanup after target failure: {cleanup:?}");
+            }
+            std::panic::resume_unwind(payload);
+        }
         assert!(
             cleanup.all_workers_terminated(),
             "Source-close cleanup: {cleanup:?}"
         );
-        if let Err(payload) = target {
-            std::panic::resume_unwind(payload);
-        }
+    }
+
+    #[test]
+    fn refused_restart_close_keeps_query_errors_cancel_and_clear_failures_held() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 1))
+            .unwrap());
+        pump(&mut playback, refused);
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap();
+        let control = playback.native_control_cancellation.clone();
+        let renders = renderer.requests.lock().len();
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        assert_eq!(
+            playback.native_reprepare_refused_generation(),
+            Some(playback.generation)
+        );
+        renderer.refuse_source_close.store(true, Ordering::Release);
+        let first = playback.request_source_close(&erased, anchor(20)).unwrap();
+        pump(&mut playback, |p| {
+            !matches!(
+                p.source_close_status(&first).unwrap(),
+                AudioPcmSourceCloseStatus::Pending
+            )
+        });
+        assert!(matches!(
+            playback.source_close_status(&first).unwrap(),
+            AudioPcmSourceCloseStatus::Refused(mondrian_core::MondrianError::ActionNotExecuted {
+                action, reason
+            }) if action == "native_author_source_closed"
+                && reason == "portable Source still has a native obligation"
+        ));
+        assert_eq!(
+            playback.finish_source_close(&first, anchor(20)),
+            Err(AudioPlaybackError::SourceCloseNotClosed)
+        );
+        assert!(refused(&playback));
+        assert!(renderer.verifier.lock().as_ref().unwrap().validate(&claim).is_ok());
+        playback.cancel_source_close(&first).unwrap();
+        let generation = playback.generation;
+        assert!(
+            matches!(
+                playback.request_source_close(&erased, anchor(20)),
+                Err(AudioPlaybackError::SourceClosePending)
+            ),
+            "the old Suspend output obligation is not a new close's exception"
+        );
+        assert_eq!(playback.generation, generation);
+        pump(&mut playback, |p| {
+            p.native_control_output_retirement.is_some_and(|r| r.acknowledged)
+        });
+        assert!(playback.finalize_native_control_anchor(generation, anchor(20)).unwrap());
+        renderer.refuse_source_close.store(false, Ordering::Release);
+        let second = playback.request_source_close(&erased, anchor(20)).unwrap();
+        assert_eq!(
+            playback.cancel_source_close(&first),
+            Err(AudioPlaybackError::SourceCloseSuperseded)
+        );
+        assert_eq!(
+            playback.finish_source_close(&first, anchor(20)),
+            Err(AudioPlaybackError::SourceCloseSuperseded)
+        );
+        pump(&mut playback, |p| {
+            !matches!(
+                p.source_close_status(&second).unwrap(),
+                AudioPcmSourceCloseStatus::Pending
+            )
+        });
+        assert!(matches!(
+            playback.source_close_status(&second).unwrap(),
+            AudioPcmSourceCloseStatus::Closed
+        ));
+        let own = playback.native_control_output_retirement.unwrap();
+        let mut foreign = own;
+        foreign.generation -= 1;
+        playback.native_control_output_retirement = Some(foreign);
+        assert_eq!(
+            playback.finish_source_close(&second, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        );
+        playback.native_control_output_retirement = Some(own);
+        let token = playback.quiescence_token.take().expect("actual software output token");
+        assert_eq!(
+            playback.finish_source_close(&second, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        );
+        playback.quiescence_token = Some(token);
+        assert_eq!(
+            playback.finish_source_close(&second, anchor(-1)),
+            Err(AudioPlaybackError::NegativeSampleAnchor)
+        );
+        assert!(matches!(
+            playback.source_close_status(&second).unwrap(),
+            AudioPcmSourceCloseStatus::Closed
+        ));
+        assert!(refused(&playback));
+        assert!(playback.matches_source(&erased));
+        assert!(!control.is_canceled());
+        assert!(renderer.verifier.lock().as_ref().unwrap().validate(&claim).is_ok());
+        assert_eq!(
+            renderer.requests.lock().len(),
+            renders,
+            "no Enter or retry PCM"
+        );
+        assert_eq!(renderer.source_closed_queries.lock().len(), 2);
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+        playback.finish_source_close(&second, anchor(20)).unwrap();
+        assert_eq!(playback.native_reprepare_refused_generation(), None);
+        drop((erased, renderer));
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn refused_restart_close_query_rejects_a_replaced_runtime_registration() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 1))
+            .unwrap());
+        pump(&mut playback, refused);
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap();
+        let original = renderer.owner_installation_verifier().unwrap();
+        let (_, replacement) = playback.owner_installation.register().unwrap();
+        let reason = replacement.validate(&claim).unwrap_err().to_string();
+        *renderer.verifier.lock() = Some(replacement);
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let ticket = playback.request_source_close(&erased, anchor(20)).unwrap();
+        pump(&mut playback, |p| {
+            !matches!(
+                p.source_close_status(&ticket).unwrap(),
+                AudioPcmSourceCloseStatus::Pending
+            )
+        });
+        assert!(matches!(
+            playback.source_close_status(&ticket).unwrap(),
+            AudioPcmSourceCloseStatus::Refused(mondrian_core::MondrianError::ActionNotExecuted {
+                action, reason: actual
+            }) if action == "native_author_source_closed" && actual == &reason
+        ));
+        assert!(renderer.source_closed_queries.lock().is_empty());
+        assert_eq!(
+            playback.finish_source_close(&ticket, anchor(20)),
+            Err(AudioPlaybackError::SourceCloseNotClosed)
+        );
+        assert!(refused(&playback));
+        assert!(playback.matches_source(&erased));
+        assert_eq!(original.validate(&claim), Ok(()));
+        playback.cancel_source_close(&ticket).unwrap();
+        assert!(playback.render_blocked);
+        drop((erased, renderer));
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn source_close_still_refuses_unstarted_inflight_and_settled_restarts() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        let _release = Release(facts.clone());
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let generation = playback.generation;
+        assert_eq!(playback.native_reprepare_refused_generation(), None);
+        assert!(matches!(
+            playback.request_source_close(&erased, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        ));
+        assert!(playback
+            .request_native_reprepare(generation, request(&renderer, &facts, 0))
+            .unwrap());
+        pump(&mut playback, |_| {
+            facts.entered_retirement.load(Ordering::Acquire)
+        });
+        assert_eq!(playback.native_reprepare_refused_generation(), None);
+        assert!(matches!(
+            playback.request_source_close(&erased, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        ));
+        facts.release_retirement.store(true, Ordering::Release);
+        pump(&mut playback, settled);
+        assert_eq!(playback.native_reprepare_refused_generation(), None);
+        assert!(matches!(
+            playback.request_source_close(&erased, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        ));
+        assert_eq!(playback.generation, generation);
+        assert!(renderer.source_closed_queries.lock().is_empty());
+        assert_eq!(facts.install.load(Ordering::SeqCst), 1);
+        assert_eq!(facts.settle.load(Ordering::SeqCst), 1);
+        drop((erased, renderer));
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
+    }
+
+    #[test]
+    fn refused_restart_close_preserves_pending_author_and_execution_guards() {
+        let (mut playback, renderer) = held();
+        let facts = Arc::new(Facts::default());
+        assert!(playback
+            .request_native_reprepare(playback.generation, request(&renderer, &facts, 1))
+            .unwrap());
+        pump(&mut playback, refused);
+        let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+        let generation = playback.generation;
+        let claim = playback.owner_installation.current_claim().unwrap().unwrap();
+        // An actual owned, not-yet-queued author carrier remains an obligation.
+        // Its queue-only callbacks must not execute or fabricate author permission.
+        playback.native_author_state_entry_request =
+            Some(Box::new(native_author::NativeAuthorHandoffWork {
+                generation,
+                renderer_id: playback.renderer.as_ref().unwrap().materialization_id,
+                request: Box::new(QueuedAuthor(renderer.clone())),
+                source: playback.owner_installation.clone(),
+                expected: claim.clone(),
+                cancellation: ExecutionCancellationToken::new(),
+                output_quiescent: false,
+            }));
+        assert!(matches!(
+            playback.request_source_close(&erased, anchor(20)),
+            Err(AudioPlaybackError::SourceClosePending)
+        ));
+        let work = playback.native_author_state_entry_request.take().unwrap();
+        playback.handoff_retired_render_owners(
+            VecDeque::from([RenderWork::NativeAuthorHandoff(work)]),
+            None,
+        );
+        // The existing execution preflight remains stronger than this read-only
+        // terminal hold fact; reporting Refused does not certify a live worker.
+        playback.render_execution_unavailable = true;
+        assert_eq!(
+            playback.native_reprepare_refused_generation(),
+            Some(generation)
+        );
+        assert!(matches!(
+            playback.request_source_close(&erased, anchor(20)),
+            Err(AudioPlaybackError::ExecutionUnavailable)
+        ));
+        playback.render_execution_unavailable = false;
+        assert_eq!(playback.generation, generation);
+        assert!(refused(&playback));
+        assert!(playback.source_close_admission.is_none());
+        assert!(renderer.source_closed_queries.lock().is_empty());
+        assert!(renderer.verifier.lock().as_ref().unwrap().validate(&claim).is_ok());
+        drop((erased, renderer));
+        assert!(playback.shutdown_and_wait().all_workers_terminated());
     }
 
     #[test]
@@ -1192,6 +1457,12 @@ mod tests {
                     p.render_retirement_faulted.load(AtomicOrdering::Acquire)
                 });
                 assert_eq!(facts.settle.load(Ordering::SeqCst), 0);
+                let erased: Arc<dyn AudioPcmRenderer> = renderer.clone();
+                assert!(matches!(
+                    playback.request_source_close(&erased, anchor(20)),
+                    Err(AudioPlaybackError::ExecutionUnavailable)
+                ));
+                assert!(renderer.source_closed_queries.lock().is_empty());
             } else {
                 pump(&mut playback, refused);
             }

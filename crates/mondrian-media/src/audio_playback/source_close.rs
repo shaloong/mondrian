@@ -69,14 +69,14 @@ impl AudioPlayback {
         &self,
         finishing: Option<&AudioPcmSourceCloseTicket>,
     ) -> Result<(), AudioPlaybackError> {
-        let completed_cleanup = matches!(
+        let terminal_hold = matches!(
             self.native_control_hold,
             Some(NativeControlHold::EditorCleanupCompletePaused(_))
-        );
-        // A completed cleanup record survives Suspend. Only this close epoch's
-        // newly issued output obligation can pass to original clear_source;
+        ) || self.native_reprepare_refused_generation().is_some();
+        // Completed cleanup and terminal restart refusal survive Suspend. Only
+        // this close epoch's new output obligation can pass to clear_source;
         // old output retirement must already be settled before request.
-        let own_suspend_retirement = completed_cleanup
+        let own_suspend_retirement = terminal_hold
             && finishing.is_some_and(|ticket| {
                 self.native_control_output_retirement.is_some_and(|retirement| {
                     retirement.generation == ticket.generation
@@ -84,7 +84,7 @@ impl AudioPlayback {
                 })
             });
         if self.native_editor_attachment.is_some()
-            || matches!(self.native_control_hold, Some(hold) if !matches!(hold, NativeControlHold::EditorCleanupCompletePaused(_)))
+            || (self.native_control_hold.is_some() && !terminal_hold)
             || (self.native_control_output_retirement.is_some() && !own_suspend_retirement)
             || self.native_author_handoff_in_flight.is_some()
             || self.native_author_state_entry_request.is_some()
@@ -138,7 +138,8 @@ impl AudioPlayback {
 
     /// Queue one source-closed query for the exact actual installed Source.
     ///
-    /// Existing native author/editor obligations refuse before retirement.
+    /// Active native author/editor/restart obligations refuse before retirement.
+    /// A terminal restart refusal permits this query, never implies Closed.
     /// One original Suspend cancels PCM/ordinary observations, keeping the
     /// Source claim and native-control token. This does not drain or Ack.
     /// The caller handles an actually absent Source without calling this method.
