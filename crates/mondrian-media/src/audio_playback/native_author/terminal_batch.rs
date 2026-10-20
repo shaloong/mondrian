@@ -11,16 +11,32 @@ pub enum AudioPcmNativeAuthorHandoffMode {
 
 /// Host-only association. Clones grant no author, Source or native permission.
 #[derive(Debug, Clone)]
-pub struct AudioPcmNativeAuthorResumeKey(Arc<()>);
+pub struct AudioPcmNativeAuthorResumeKey {
+    handoff: Arc<()>,
+    phase: u64,
+}
 impl PartialEq for AudioPcmNativeAuthorResumeKey {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.handoff, &other.handoff) && self.phase == other.phase
     }
 }
 impl Eq for AudioPcmNativeAuthorResumeKey {}
 impl AudioPcmNativeAuthorResumeKey {
     fn new() -> Self {
-        Self(Arc::new(()))
+        Self { handoff: Arc::new(()), phase: 0 }
+    }
+
+    /// Whether this is the immediately next parked phase of that same actual
+    /// queued handoff. A duplicate, skipped phase or another attempt is false.
+    /// Nonparked terminal results retain their submitted key instead. Neither
+    /// relationship grants Source, author publication or native permission.
+    pub fn continues(&self, previous: &Self) -> bool {
+        Arc::ptr_eq(&self.handoff, &previous.handoff)
+            && previous.phase.checked_add(1) == Some(self.phase)
+    }
+
+    fn advance(&mut self) {
+        self.phase = self.phase.checked_add(1).expect("native author phase exhausted");
     }
 }
 
@@ -320,10 +336,24 @@ impl AudioPlayback {
             },
         );
     }
+    /// Queue one terminal batch and retain its exact initial attempt identity.
+    /// Busy or inapplicable metadata returns None after original retirement;
+    /// an execution/Source error is typed. No key alone authorizes publication.
+    pub fn request_native_author_terminal_batch(
+        &mut self,
+        request: Box<dyn AudioPcmNativeAuthorHandoff>,
+    ) -> Result<Option<AudioPcmNativeAuthorResumeKey>, AudioPlaybackError> {
+        if request.mode() != AudioPcmNativeAuthorHandoffMode::TerminalBatch {
+            self.handoff_retired_author_request(request);
+            return Ok(None);
+        }
+        self.request_terminal_author_batch(request)
+    }
+
     pub(in crate::audio_playback) fn request_terminal_author_batch(
         &mut self,
         request: Box<dyn AudioPcmNativeAuthorHandoff>,
-    ) -> Result<bool, AudioPlaybackError> {
+    ) -> Result<Option<AudioPcmNativeAuthorResumeKey>, AudioPlaybackError> {
         let admitted = (|| {
             self.ensure_source_close_idle()?;
             self.ensure_render_execution_available()?;
@@ -362,14 +392,12 @@ impl AudioPlayback {
             Ok(Some(v)) => v,
             other => {
                 self.handoff_retired_author_request(request);
-                return other.map(|_| false);
+                return other.map(|_| None);
             }
         };
         let target = request.expected_target();
-        let continuation = Some(Box::new(Continuation::new(
-            &self.render_queue,
-            request.as_ref(),
-        )));
+        let continuation = Box::new(Continuation::new(&self.render_queue, request.as_ref()));
+        let key = continuation.key.clone();
         let work = Box::new(NativeAuthorHandoffWork {
             generation: self.generation,
             renderer_id,
@@ -378,17 +406,17 @@ impl AudioPlayback {
             expected,
             cancellation: self.native_control_cancellation.clone(),
             output_quiescent: false,
-            continuation,
+            continuation: Some(continuation),
         });
         match self.render_queue.try_push(RenderWork::NativeAuthorHandoff(work)) {
             Ok(()) => {
                 self.native_author_handoff_in_flight = Some((self.generation, renderer_id));
                 self.begin_native_author_hold(target, None);
-                Ok(true)
+                Ok(Some(key))
             }
             Err(RenderQueuePushError::Busy(work)) => {
                 self.handoff_retired_render_owners(VecDeque::from([work]), None);
-                Ok(false)
+                Ok(None)
             }
             Err(RenderQueuePushError::Closed(work)) => {
                 self.handoff_retired_render_owners(VecDeque::from([work]), None);
@@ -657,7 +685,15 @@ pub(in crate::audio_playback) fn run(
     sender: &mpsc::Sender<RenderCompletion>,
 ) -> RunOutcome {
     let identity = work.continuation.as_ref().unwrap().identity.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&mut work)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let result = execute(&mut work);
+        if matches!(result, Execution::Park(_)) {
+            // Only the original serial Work advances this attempt's phase.
+            // Overflow follows the same poison/custody boundary as execution.
+            work.continuation.as_mut().unwrap().key.advance();
+        }
+        result
+    }));
     let result = match result {
         Ok(r) => r,
         Err(payload) => {
@@ -679,9 +715,6 @@ pub(in crate::audio_playback) fn run(
         Execution::Park(s) => s,
         Execution::Finish(s) => Some(s),
     };
-    if parked {
-        work.continuation.as_mut().unwrap().key = AudioPcmNativeAuthorResumeKey::new();
-    }
     let c = work.continuation.as_ref().unwrap();
     let completion = Completion {
         identity: identity.clone(),

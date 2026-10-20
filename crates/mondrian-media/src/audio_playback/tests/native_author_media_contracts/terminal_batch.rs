@@ -9,6 +9,7 @@ struct Control {
     published: AtomicBool,
     prepare_entered: AtomicBool,
     prepare_gate: AtomicBool,
+    refuse_prepare: AtomicBool,
     install_entered: AtomicBool,
     install_gate: AtomicBool,
     refuse_install: AtomicBool,
@@ -141,6 +142,9 @@ impl AudioPcmNativeAuthorHandoff for BatchRequest {
         if cancel.is_canceled() {
             return Err(AudioPcmNativeAuthorHandoffRefusal::Cancelled);
         }
+        if self.control.refuse_prepare.load(Ordering::Acquire) {
+            return Err(AudioPcmNativeAuthorHandoffRefusal::AuthorStatePending);
+        }
         Ok(())
     }
     fn apply_prepared_terminal_batch(
@@ -216,6 +220,14 @@ fn request(
         None,
     )
     .unwrap();
+    request_with_proposal(renderer, target, c, proposal)
+}
+fn request_with_proposal(
+    renderer: &Arc<Renderer>,
+    target: Target,
+    c: &Arc<Control>,
+    proposal: NativeAudioAuthorProposal,
+) -> Box<dyn AudioPcmNativeAuthorHandoff> {
     Box::new(BatchRequest {
         renderer: renderer.clone(),
         erased: renderer.clone(),
@@ -311,19 +323,24 @@ fn terminal_batch_same_box_prepares_then_installs_after_one_real_resume() {
         let retired = p.render_retirement_worker.as_ref().unwrap().thread().id();
         let req = request(r, t, c);
         let original = req.proposal().clone();
-        assert!(p.request_native_author_handoff(req).unwrap());
+        let submitted =
+            p.request_native_author_terminal_batch(req).unwrap().expect("actual queued key");
         let first = event(p);
         assert!(
             matches!(&first,AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared{proposal,..} if proposal.same_retained_proposal(&original))
         );
         assert!(p.native_author_state_entry_request.is_none());
         let k = key(&first);
+        assert!(k.continues(&submitted));
+        assert!(!k.continues(&k), "duplicate phase does not advance");
+        assert!(!submitted.continues(&k), "backward phase is not accepted");
         assert_eq!(c.prepares.load(Ordering::Acquire), 1);
         assert_eq!(c.installs.load(Ordering::Acquire), 0);
         assert!(c.prepared_drops.lock().is_empty());
         c.published.store(true, Ordering::Release);
         assert!(p.resume_native_author_handoff(&k).unwrap());
         let last = event(p);
+        assert_eq!(key(&last), k, "nonparked Ack retains the submitted phase");
         assert!(
             matches!(last,AudioPlaybackEvent::NativeAuthorTerminalBatchObserved{status:AudioPcmNativeAuthorTerminalBatchStatus::Acknowledged{target},..} if target.installed_generation!=t.installed_generation)
         );
@@ -355,6 +372,8 @@ fn terminal_batch_no_cas_retry_and_partial_ack_keep_prepared_new_claim_and_fresh
         let refusal = event(p);
         let k1 = key(&refusal);
         assert_ne!(k0, k1);
+        assert!(k1.continues(&k0));
+        assert!(!k1.continues(&k1));
         assert_eq!(address, box_address(p));
         assert!(matches!(
             refusal,
@@ -376,6 +395,8 @@ fn terminal_batch_no_cas_retry_and_partial_ack_keep_prepared_new_claim_and_fresh
         let partial = event(p);
         let k2 = key(&partial);
         assert_ne!(k1, k2);
+        assert!(k2.continues(&k1));
+        assert!(!k2.continues(&k0), "skipped phase is not adjacent");
         assert_eq!(box_address(p), address);
         let claim = p.owner_installation.current_claim().unwrap().unwrap().generation();
         assert_ne!(claim, t.installed_generation);
@@ -403,6 +424,84 @@ fn terminal_batch_no_cas_retry_and_partial_ack_keep_prepared_new_claim_and_fresh
             p.owner_installation.current_claim().unwrap().unwrap().generation(),
             claim
         );
+    });
+}
+
+#[test]
+fn terminal_batch_typed_submission_distinguishes_same_anchor_attempts_and_terminal_results() {
+    with_case(false, |p, r, t, c| {
+        c.refuse_prepare.store(true, Ordering::Release);
+        let first = request(r, t, c);
+        let anchor = first.proposal().clone();
+        let submitted = p
+            .request_native_author_terminal_batch(first)
+            .unwrap()
+            .expect("actual first submission");
+        let refused = event(p);
+        assert_eq!(
+            key(&refused),
+            submitted,
+            "nonparked failed Prepare keeps its initial key"
+        );
+        assert!(!key(&refused).continues(&submitted));
+        assert!(matches!(&refused,
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved { proposal, status:
+                AudioPcmNativeAuthorTerminalBatchStatus::Refused(AudioPcmNativeAuthorHandoffRefusal::AuthorStatePending), .. }
+            if proposal.same_retained_proposal(&anchor)));
+        spin_until(|| !p.render_queue.batch_busy());
+        assert_eq!(c.request_drops.lock().len(), 1);
+        assert_eq!(c.prepared_drops.lock().len(), 1);
+        c.refuse_prepare.store(false, Ordering::Release);
+        let second = request_with_proposal(r, t, c, anchor.clone());
+        let next_submission = p
+            .request_native_author_terminal_batch(second)
+            .unwrap()
+            .expect("actual second submission");
+        assert_ne!(next_submission, submitted);
+        assert!(!next_submission.continues(&submitted));
+        let prepared = event(p);
+        let k = key(&prepared);
+        assert!(k.continues(&next_submission));
+        assert!(
+            !k.continues(&submitted),
+            "same anchor does not merge distinct attempts"
+        );
+        assert!(!key(&refused).continues(&next_submission));
+        assert_ne!(
+            key(&refused),
+            next_submission,
+            "old terminal refusal cannot discard new attempt"
+        );
+        assert!(matches!(&prepared,
+            AudioPlaybackEvent::NativeAuthorTerminalBatchPrepared { proposal, .. }
+            if proposal.same_retained_proposal(&anchor)));
+        let address = box_address(p);
+        assert!(matches!(
+            p.resume_native_author_handoff(&submitted),
+            Err(AudioPlaybackError::OwnerInstallation(
+                AudioOwnerInstallationError::Superseded
+            ))
+        ));
+        assert_eq!(box_address(p), address);
+        c.published.store(true, Ordering::Release);
+        assert!(p.resume_native_author_handoff(&k).unwrap());
+        let acknowledged = event(p);
+        assert_eq!(
+            key(&acknowledged),
+            k,
+            "final Ack is same phase, not another Park"
+        );
+        assert!(matches!(
+            acknowledged,
+            AudioPlaybackEvent::NativeAuthorTerminalBatchObserved {
+                status: AudioPcmNativeAuthorTerminalBatchStatus::Acknowledged { .. },
+                ..
+            }
+        ));
+        assert_eq!(c.prepares.load(Ordering::Acquire), 2);
+        assert_eq!(c.installs.load(Ordering::Acquire), 1);
+        assert_eq!(c.acks[0].load(Ordering::Acquire), 1);
+        assert_eq!(c.acks[1].load(Ordering::Acquire), 1);
     });
 }
 

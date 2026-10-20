@@ -254,7 +254,7 @@ impl AudioPlayback {
     ) -> Result<bool, AudioPlaybackError> {
         let mode = request.mode();
         if mode == AudioPcmNativeAuthorHandoffMode::TerminalBatch {
-            return self.request_terminal_author_batch(request);
+            return self.request_terminal_author_batch(request).map(|key| key.is_some());
         }
         self.ensure_render_execution_available()?;
         if self.render_queue.batch_busy() {
