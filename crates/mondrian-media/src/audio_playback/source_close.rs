@@ -265,6 +265,7 @@ impl AudioPlayback {
                     pending: VecDeque::new(),
                     renderers: VecDeque::new(),
                     errors: VecDeque::from([error]),
+                    native_author_requests: VecDeque::new(),
                 },
             );
         }
