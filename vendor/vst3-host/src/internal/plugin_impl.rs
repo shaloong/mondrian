@@ -204,6 +204,8 @@ pub struct PluginImpl {
 
     // Host data structures
     process_data: Option<Box<HostProcessData>>,
+    processing_resource_bounds: Option<crate::audio::ProcessingResourceBounds>,
+    load_preparation: crate::host::PluginLoadPreparation,
     component_handler: Option<ComWrapper<ComponentHandler>>,
     connection: Option<ConnectionPair>,
 
@@ -273,6 +275,10 @@ pub struct PluginImpl {
     // Thread which initialized the component/controller. Lifecycle-sensitive restart handling
     // and controller cache refresh must return to this thread.
     control_thread: ThreadId,
+}
+
+pub(crate) fn host_process_data_layout() -> std::alloc::Layout {
+    std::alloc::Layout::new::<HostProcessData>()
 }
 
 // Processing data structure
@@ -435,6 +441,61 @@ fn restore_process_audio_io(process_data: &mut ProcessData, saved: Option<SavedP
         process_data.inputs = saved.inputs;
         process_data.outputs = saved.outputs;
     }
+}
+
+fn build_typed_sample_buffers_bounded<T: Default>(
+    bounds: crate::audio::ProcessingResourceBounds,
+    block_size: usize,
+    input_buses: &[AudioBusBuffers],
+    input_active: &[bool],
+    output_buses: &[AudioBusBuffers],
+    output_active: &[bool],
+) -> Result<TypedSampleBuffers<T>> {
+    use crate::audio::processing_resources::{add, samples, vector};
+    bounds.frames(block_size)?;
+    bounds.buses(input_buses.len())?;
+    bounds.buses(output_buses.len())?;
+    let mut declared = 0;
+    for bus in input_buses.iter().chain(output_buses) {
+        let channels = bus.numChannels.max(0) as usize;
+        bounds.channels(channels)?;
+        declared = add(declared, channels)?;
+        bounds.total(declared)?;
+    }
+    let side =
+        |buses: &[AudioBusBuffers], active: &[bool]| -> Result<(Vec<Vec<T>>, SendChannelPtrs<T>)> {
+            let mut active_channels = 0;
+            for (i, bus) in buses.iter().enumerate() {
+                if active.get(i).copied().unwrap_or(false) {
+                    active_channels = add(active_channels, bus.numChannels.max(0) as usize)?;
+                }
+            }
+            let mut buffers = samples(active_channels, block_size)?;
+            let mut pointers = vector(buses.len())?;
+            let mut next = 0;
+            for (i, bus) in buses.iter().enumerate() {
+                let channels = bus.numChannels.max(0) as usize;
+                let mut row = vector(channels)?;
+                for _ in 0..channels {
+                    if active.get(i).copied().unwrap_or(false) {
+                        row.push(buffers[next].as_mut_ptr());
+                        next += 1;
+                    } else {
+                        row.push(ptr::null_mut());
+                    }
+                }
+                pointers.push(row);
+            }
+            Ok((buffers, SendChannelPtrs(pointers)))
+        };
+    let (inputs, input_channel_ptrs) = side(input_buses, input_active)?;
+    let (outputs, output_channel_ptrs) = side(output_buses, output_active)?;
+    Ok(TypedSampleBuffers {
+        inputs,
+        outputs,
+        input_channel_ptrs,
+        output_channel_ptrs,
+    })
 }
 
 fn build_typed_sample_buffers<T: Default + Clone>(
@@ -1281,6 +1342,100 @@ impl PluginImpl {
             .find(|mapping| mapping.unit_id == unit_id)
     }
 
+    fn bounded_audio_bus_layout(
+        &self,
+        bounds: crate::audio::ProcessingResourceBounds,
+    ) -> Result<AudioBusLayout> {
+        let data = self
+            .process_data
+            .as_ref()
+            .ok_or_else(|| Error::Other("Process data not initialized".to_owned()))?;
+        bounds.buses(data.input_bus_buffers.len())?;
+        bounds.buses(data.output_bus_buffers.len())?;
+        let mut total = 0;
+        for bus in data
+            .input_bus_buffers
+            .iter()
+            .chain(&data.output_bus_buffers)
+        {
+            let channels = bus.numChannels.max(0) as usize;
+            bounds.channels(channels)?;
+            total = crate::audio::processing_resources::add(total, channels)?;
+            bounds.total(total)?;
+        }
+        let side = |buses: &[AudioBusBuffers], active: &[bool]| -> Result<Vec<AudioBusConfig>> {
+            let mut result = crate::audio::processing_resources::vector(buses.len())?;
+            for (index, bus) in buses.iter().enumerate() {
+                result.push(AudioBusConfig {
+                    channel_count: bus.numChannels.max(0) as usize,
+                    active: active.get(index).copied().unwrap_or(false),
+                });
+            }
+            Ok(result)
+        };
+        Ok(AudioBusLayout {
+            inputs: side(&data.input_bus_buffers, &self.bus_activation.audio_inputs)?,
+            outputs: side(&data.output_bus_buffers, &self.bus_activation.audio_outputs)?,
+        })
+    }
+
+    fn bounded_bus_arrangements(
+        &self,
+        bounds: crate::audio::ProcessingResourceBounds,
+    ) -> Result<crate::audio::BusArrangements> {
+        let side = |direction: i32| -> Result<Vec<crate::audio::SpeakerArrangement>> {
+            let count = unsafe { self.component.getBusCount(kAudio as i32, direction) };
+            let mut result =
+                crate::audio::processing_resources::vector(bounds.native_buses(count)?)?;
+            for index in 0..count {
+                let mut arrangement = 0u64;
+                unsafe {
+                    self.processor
+                        .getBusArrangement(direction, index, &mut arrangement);
+                }
+                result.push(crate::audio::SpeakerArrangement::from_raw(arrangement));
+            }
+            Ok(result)
+        };
+        Ok(crate::audio::BusArrangements {
+            inputs: side(kInput as i32)?,
+            outputs: side(kOutput as i32)?,
+        })
+    }
+
+    unsafe fn initial_load_buses(
+        component: &ComPtr<IComponent>,
+        preparation: crate::host::PluginLoadPreparation,
+        bounds: Option<crate::audio::ProcessingResourceBounds>,
+    ) -> Result<BusActivationState> {
+        if preparation == crate::host::PluginLoadPreparation::Deferred {
+            Ok(BusActivationState::default())
+        } else if bounds.is_some() {
+            Self::activate_default_buses_with_bounds(component, bounds)
+        } else {
+            Self::activate_default_buses(component)
+        }
+    }
+    fn finish_load_preparation(&mut self) -> Result<()> {
+        if self.load_preparation == crate::host::PluginLoadPreparation::Deferred {
+            return Ok(());
+        }
+        unsafe {
+            self.negotiate_default_bus_arrangements()?;
+        }
+        if let Err(error) = self.setup_processing() {
+            if matches!(&error, Error::ProcessingResources(_)) {
+                return Err(error);
+            }
+            log::warn!("setupProcessing failed at load ({error}); deferring to start_processing");
+        } else if let Err(error) = self.activate() {
+            log::warn!(
+                "Component activation failed at load ({error}); deferring to start_processing"
+            );
+        }
+        Ok(())
+    }
+
     /// Load a VST3 plugin from the given path
     pub fn load(path: &std::path::Path, interfaces: crate::PluginInterfaceSupport) -> Result<Self> {
         Self::load_with_class(path, None, interfaces)
@@ -1299,6 +1454,45 @@ impl PluginImpl {
         path: &std::path::Path,
         requested_class_id: Option<&str>,
         interfaces: crate::PluginInterfaceSupport,
+    ) -> Result<Self> {
+        Self::load_with_config(
+            path,
+            requested_class_id,
+            interfaces,
+            None,
+            None,
+            crate::host::PluginLoadPreparation::Eager,
+        )
+    }
+
+    pub(crate) fn load_with_preparation(
+        path: &std::path::Path,
+        requested_class_id: Option<&str>,
+        interfaces: crate::PluginInterfaceSupport,
+        config: crate::audio::AudioConfig,
+        bounds: Option<crate::audio::ProcessingResourceBounds>,
+        preparation: crate::host::PluginLoadPreparation,
+    ) -> Result<Self> {
+        if let Some(bounds) = bounds {
+            bounds.frames(config.block_size)?;
+        }
+        Self::load_with_config(
+            path,
+            requested_class_id,
+            interfaces,
+            Some(config),
+            bounds,
+            preparation,
+        )
+    }
+
+    fn load_with_config(
+        path: &std::path::Path,
+        requested_class_id: Option<&str>,
+        interfaces: crate::PluginInterfaceSupport,
+        processing: Option<crate::audio::AudioConfig>,
+        bounds: Option<crate::audio::ProcessingResourceBounds>,
+        preparation: crate::host::PluginLoadPreparation,
     ) -> Result<Self> {
         let native_editor_owner = crate::plugin::NativeEditorAttachmentOwner::issue()?;
         let requested_class_id = requested_class_id
@@ -1419,7 +1613,7 @@ impl PluginImpl {
 
             // Establish the component's declared default bus state while it is inactive.
             log::debug!("Step 6: Activating default buses...");
-            let bus_activation = Self::activate_default_buses(&component)?;
+            let bus_activation = Self::initial_load_buses(&component, preparation, bounds)?;
             log::debug!("Default buses activated");
 
             // Get processor interface
@@ -1585,12 +1779,12 @@ impl PluginImpl {
                 compatibility,
                 is_active: false,
                 is_processing: false,
-                sample_rate: 44100.0,
-                block_size: 512,
+                sample_rate: processing.map_or(44100.0, |config| config.sample_rate),
+                block_size: processing.map_or(512, |config| config.block_size),
                 applied_setup: None,
-                tempo: 120.0,
-                time_sig_numerator: 4,
-                time_sig_denominator: 4,
+                tempo: processing.map_or(120.0, |config| config.tempo),
+                time_sig_numerator: processing.map_or(4, |config| config.time_sig_numerator),
+                time_sig_denominator: processing.map_or(4, |config| config.time_sig_denominator),
                 playing: true,
                 process_mode: crate::plugin::ProcessMode::Realtime,
                 process_context_requirements,
@@ -1605,6 +1799,8 @@ impl PluginImpl {
                 dirty_caches: DirtyCaches::default(),
                 unit_cache: Mutex::new(None),
                 process_data: None,
+                processing_resource_bounds: bounds,
+                load_preparation: preparation,
                 component_handler: Some(component_handler),
                 connection: initialized.take_connection(),
                 pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
@@ -1641,25 +1837,7 @@ impl PluginImpl {
             // Give the processor its own currently-advertised arrangements before the first
             // setup. A refusal is legitimate (the plugin keeps its layout); other failures are
             // surfaced instead of being silently discarded.
-            plugin.negotiate_default_bus_arrangements()?;
-
-            // VST3 lifecycle: `setupProcessing` and bus activation require an INACTIVE
-            // component, and a plugin sizes its DSP buffers when it goes active, from the
-            // ProcessSetup it was last given. So set up first, activate second — activating an
-            // un-set-up component hands it whatever defaults it was born with.
-            //
-            // Both are best-effort here, and neither failure fails the load: this runs at the
-            // internal default configuration (the host applies its real sample rate and block
-            // size immediately after load), the plugin remains fully inspectable either way, and
-            // `start_processing` re-runs both with the real settings and reports a genuine
-            // failure there.
-            if let Err(e) = plugin.setup_processing() {
-                log::warn!("setupProcessing failed at load ({e}); deferring to start_processing");
-            } else if let Err(e) = plugin.activate() {
-                log::warn!(
-                    "Component activation failed at load ({e}); deferring to start_processing"
-                );
-            }
+            plugin.finish_load_preparation()?;
 
             log::info!("=== PLUGIN LOADING COMPLETE ===");
             log::info!(
@@ -1885,8 +2063,19 @@ impl PluginImpl {
 
     unsafe fn negotiate_default_bus_arrangements(&self) -> Result<()> {
         let arrangements = self.bus_arrangements()?;
-        let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
-        let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
+        let raw = |rows: &[crate::audio::SpeakerArrangement]| -> Result<Vec<u64>> {
+            if self.processing_resource_bounds.is_some() {
+                let mut result = crate::audio::processing_resources::vector(rows.len())?;
+                for row in rows {
+                    result.push(row.raw());
+                }
+                Ok(result)
+            } else {
+                Ok(rows.iter().map(|row| row.raw()).collect())
+            }
+        };
+        let mut inputs = raw(&arrangements.inputs)?;
+        let mut outputs = raw(&arrangements.outputs)?;
         let result = self.processor.setBusArrangements(
             inputs.as_mut_ptr(),
             inputs.len() as i32,
@@ -1932,7 +2121,20 @@ impl PluginImpl {
         // The old ProcessData may remain owned, but is unusable until a complete retry.
         self.applied_setup = None;
         self.bus_activation.event_readiness = None;
-        reconcile_audio_bus_activation(&self.component, &mut self.bus_activation)?;
+        if let Some(bounds) = self.processing_resource_bounds {
+            bounds.frames(self.block_size)?;
+        }
+        if self.load_preparation == crate::host::PluginLoadPreparation::Eager {
+            if let Some(bounds) = self.processing_resource_bounds {
+                reconcile_audio_bus_activation_with_bounds(
+                    &self.component,
+                    &mut self.bus_activation,
+                    Some(bounds),
+                )?;
+            } else {
+                reconcile_audio_bus_activation(&self.component, &mut self.bus_activation)?;
+            }
+        }
 
         unsafe {
             // Set up processing
@@ -1951,6 +2153,22 @@ impl PluginImpl {
                 )));
             }
 
+            if self.load_preparation == crate::host::PluginLoadPreparation::Deferred {
+                if self.process_data.is_none() {
+                    let (inputs, outputs) = Self::activate_default_event_buses(&self.component)?;
+                    self.bus_activation.event_inputs = inputs;
+                    self.bus_activation.event_outputs = outputs;
+                }
+                if let Some(bounds) = self.processing_resource_bounds {
+                    reconcile_audio_bus_activation_with_bounds(
+                        &self.component,
+                        &mut self.bus_activation,
+                        Some(bounds),
+                    )?;
+                } else {
+                    reconcile_audio_bus_activation(&self.component, &mut self.bus_activation)?;
+                }
+            }
             // Create process data
             self.create_process_data()?;
             self.applied_setup = Some(self.current_setup());
@@ -2077,6 +2295,13 @@ impl PluginImpl {
         let output_bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
         data.input_bus_buffers.clear();
         data.output_bus_buffers.clear();
+        if let Some(bounds) = self.processing_resource_bounds {
+            let inputs = bounds.native_buses(input_bus_count)?;
+            let outputs = bounds.native_buses(output_bus_count)?;
+            data.input_bus_buffers = crate::audio::processing_resources::vector(inputs)?;
+            data.output_bus_buffers = crate::audio::processing_resources::vector(outputs)?;
+        }
+        let mut declared = 0;
 
         let channel_count = |direction: i32, bus_idx: i32| {
             let mut bus_info: BusInfo = std::mem::zeroed();
@@ -2104,11 +2329,23 @@ impl PluginImpl {
         for bus_idx in 0..input_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
             bus.numChannels = channel_count(kInput as i32, bus_idx);
+            if let Some(bounds) = self.processing_resource_bounds {
+                let count = bus.numChannels.max(0) as usize;
+                bounds.channels(count)?;
+                declared = crate::audio::processing_resources::add(declared, count)?;
+                bounds.total(declared)?;
+            }
             data.input_bus_buffers.push(bus);
         }
         for bus_idx in 0..output_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
             bus.numChannels = channel_count(kOutput as i32, bus_idx);
+            if let Some(bounds) = self.processing_resource_bounds {
+                let count = bus.numChannels.max(0) as usize;
+                bounds.channels(count)?;
+                declared = crate::audio::processing_resources::add(declared, count)?;
+                bounds.total(declared)?;
+            }
             data.output_bus_buffers.push(bus);
         }
 
@@ -2117,13 +2354,24 @@ impl PluginImpl {
 
         match &mut data.sample_buffers {
             HostSampleBuffers::F32(samples) => {
-                *samples = build_typed_sample_buffers(
-                    self.block_size,
-                    &data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
-                    &data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
-                );
+                *samples = if let Some(bounds) = self.processing_resource_bounds {
+                    build_typed_sample_buffers_bounded(
+                        bounds,
+                        self.block_size,
+                        &data.input_bus_buffers,
+                        &self.bus_activation.audio_inputs,
+                        &data.output_bus_buffers,
+                        &self.bus_activation.audio_outputs,
+                    )?
+                } else {
+                    build_typed_sample_buffers(
+                        self.block_size,
+                        &data.input_bus_buffers,
+                        &self.bus_activation.audio_inputs,
+                        &data.output_bus_buffers,
+                        &self.bus_activation.audio_outputs,
+                    )
+                };
                 for (bus, pointers) in data
                     .input_bus_buffers
                     .iter_mut()
@@ -2148,13 +2396,24 @@ impl PluginImpl {
                 }
             }
             HostSampleBuffers::F64(samples) => {
-                *samples = build_typed_sample_buffers(
-                    self.block_size,
-                    &data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
-                    &data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
-                );
+                *samples = if let Some(bounds) = self.processing_resource_bounds {
+                    build_typed_sample_buffers_bounded(
+                        bounds,
+                        self.block_size,
+                        &data.input_bus_buffers,
+                        &self.bus_activation.audio_inputs,
+                        &data.output_bus_buffers,
+                        &self.bus_activation.audio_outputs,
+                    )?
+                } else {
+                    build_typed_sample_buffers(
+                        self.block_size,
+                        &data.input_bus_buffers,
+                        &self.bus_activation.audio_inputs,
+                        &data.output_bus_buffers,
+                        &self.bus_activation.audio_outputs,
+                    )
+                };
                 for (bus, pointers) in data
                     .input_bus_buffers
                     .iter_mut()
@@ -2332,6 +2591,23 @@ impl PluginImpl {
 }
 
 impl PluginInternal for PluginImpl {
+    fn processing_resource_bounds(&self) -> Option<crate::audio::ProcessingResourceBounds> {
+        self.processing_resource_bounds
+    }
+    fn prepared_meter_channels(&self) -> Option<Option<usize>> {
+        if self.processing_resource_bounds.is_none()
+            && self.load_preparation == crate::host::PluginLoadPreparation::Eager
+        {
+            return None;
+        }
+        Some(if self.applied_setup == Some(self.current_setup()) {
+            self.process_data
+                .as_ref()
+                .map(|data| data.sample_buffers.output_channel_count())
+        } else {
+            None
+        })
+    }
     fn visit_retained_host_created_storage(
         &mut self,
         visitor: &mut dyn crate::host_storage::HostStorageVisitor,
@@ -2883,9 +3159,13 @@ impl PluginInternal for PluginImpl {
         }
         self.ensure_control_thread("native audio-bus metadata")?;
         let component = &self.component;
-        let side = |direction: i32| -> Result<Vec<NativeAudioBusInfo>> {
+        let mut total = 0;
+        let mut side = |direction: i32| -> Result<Vec<NativeAudioBusInfo>> {
             // SAFETY: live owning-thread component; output storage is valid for the SDK call.
             let count = unsafe { component.getBusCount(kAudio as i32, direction) };
+            if let Some(bounds) = self.processing_resource_bounds {
+                bounds.native_buses(count)?;
+            }
             if !(0..=MAX_AUDIO_BUSES).contains(&count) {
                 return Err(Error::InterfaceError(
                     "native audio-bus count exceeds the limit".to_string(),
@@ -2916,6 +3196,12 @@ impl PluginInternal for PluginImpl {
                         ))
                     }
                 };
+                if let Some(bounds) = self.processing_resource_bounds {
+                    let channels = info.channelCount as usize;
+                    bounds.channels(channels)?;
+                    total = crate::audio::processing_resources::add(total, channels)?;
+                    bounds.total(total)?;
+                }
                 result.push(NativeAudioBusInfo {
                     role,
                     name: crate::internal::utils::vst_string_to_string(&info.name),
@@ -2971,7 +3257,11 @@ impl PluginInternal for PluginImpl {
     }
 
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
-        self.current_audio_bus_layout()
+        if let Some(bounds) = self.processing_resource_bounds {
+            self.bounded_audio_bus_layout(bounds)
+        } else {
+            self.current_audio_bus_layout()
+        }
     }
 
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
@@ -2988,6 +3278,9 @@ impl PluginInternal for PluginImpl {
             return Err(Error::Other(
                 "cannot reconfigure while processing".to_string(),
             ));
+        }
+        if let Some(bounds) = self.processing_resource_bounds {
+            bounds.frames(block_size)?;
         }
         self.bus_activation.event_readiness = None;
         // VST3 requires the component to be inactive when setupProcessing is called.
@@ -3080,6 +3373,9 @@ impl PluginInternal for PluginImpl {
     }
 
     fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        if let Some(bounds) = self.processing_resource_bounds {
+            return self.bounded_bus_arrangements(bounds);
+        }
         use crate::audio::SpeakerArrangement;
         unsafe {
             let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -3112,8 +3408,30 @@ impl PluginInternal for PluginImpl {
                 "cannot set bus arrangements while processing".to_string(),
             ));
         }
-        let mut in_raw: Vec<u64> = inputs.iter().map(|a| a.raw()).collect();
-        let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
+        if let Some(bounds) = self.processing_resource_bounds {
+            bounds.buses(inputs.len())?;
+            bounds.buses(outputs.len())?;
+            let mut total = 0;
+            for row in inputs.iter().chain(outputs) {
+                let channels = row.channel_count();
+                bounds.channels(channels)?;
+                total = crate::audio::processing_resources::add(total, channels)?;
+                bounds.total(total)?;
+            }
+        }
+        let raw = |rows: &[crate::audio::SpeakerArrangement]| -> Result<Vec<u64>> {
+            if self.processing_resource_bounds.is_some() {
+                let mut result = crate::audio::processing_resources::vector(rows.len())?;
+                for row in rows {
+                    result.push(row.raw());
+                }
+                Ok(result)
+            } else {
+                Ok(rows.iter().map(|row| row.raw()).collect())
+            }
+        };
+        let mut in_raw = raw(inputs)?;
+        let mut out_raw = raw(outputs)?;
         self.bus_activation.event_readiness = None;
         unsafe {
             // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -3209,6 +3527,10 @@ impl PluginInternal for PluginImpl {
                     "bus index {bus_index} out of range for {media_type:?} {direction:?} \
                      bus (count {count})"
                 )));
+            }
+
+            if let Some(bounds) = self.processing_resource_bounds {
+                bounds.native_buses(count)?;
             }
 
             let was_active = self.is_active;
@@ -3772,8 +4094,15 @@ impl PluginInternal for PluginImpl {
                 self.is_active = false;
             }
 
-            let apply_result = if flags.io_changed() {
-                match Self::activate_default_buses(&self.component) {
+            let apply_result = if flags.io_changed()
+                && self.load_preparation == crate::host::PluginLoadPreparation::Deferred
+            {
+                self.setup_processing()
+            } else if flags.io_changed() {
+                match Self::activate_default_buses_with_bounds(
+                    &self.component,
+                    self.processing_resource_bounds,
+                ) {
                     Ok(activation) => {
                         self.bus_activation = activation;
                         self.negotiate_default_bus_arrangements()
@@ -4903,12 +5232,33 @@ impl PluginImpl {
 
     #[allow(clippy::unnecessary_cast)]
     unsafe fn activate_default_buses(component: &ComPtr<IComponent>) -> Result<BusActivationState> {
-        let read_and_activate = |media: i32, direction: i32| -> Result<Vec<bool>> {
+        Self::activate_default_buses_with_bounds(component, None)
+    }
+
+    unsafe fn activate_default_buses_with_bounds(
+        component: &ComPtr<IComponent>,
+        bounds: Option<crate::audio::ProcessingResourceBounds>,
+    ) -> Result<BusActivationState> {
+        let mut total = 0;
+        let mut read_and_activate = |media: i32, direction: i32| -> Result<Vec<bool>> {
             let count = component.getBusCount(media, direction);
-            let mut states = Vec::with_capacity(count.max(0) as usize);
+            let mut states = if let Some(bounds) = bounds {
+                crate::audio::processing_resources::vector(bounds.native_buses(count)?)?
+            } else {
+                Vec::with_capacity(count.max(0) as usize)
+            };
             for index in 0..count {
                 let mut info: BusInfo = std::mem::zeroed();
-                let active = component.getBusInfo(media, direction, index, &mut info) == kResultOk
+                let status = component.getBusInfo(media, direction, index, &mut info);
+                if let Some(bounds) = bounds {
+                    if status == kResultOk {
+                        let channels = info.channelCount.max(0) as usize;
+                        bounds.channels(channels)?;
+                        total = crate::audio::processing_resources::add(total, channels)?;
+                        bounds.total(total)?;
+                    }
+                }
+                let active = status == kResultOk
                     && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
                 if active {
                     let result = component.activateBus(media, direction, index, 1);
@@ -4924,6 +5274,21 @@ impl PluginImpl {
             Ok(states)
         };
 
+        let audio_inputs = read_and_activate(kAudio as i32, kInput as i32)?;
+        let audio_outputs = read_and_activate(kAudio as i32, kOutput as i32)?;
+        let (event_inputs, event_outputs) = Self::activate_default_event_buses(component)?;
+        Ok(BusActivationState {
+            audio_inputs,
+            audio_outputs,
+            event_inputs,
+            event_outputs,
+            event_readiness: None,
+        })
+    }
+
+    unsafe fn activate_default_event_buses(
+        component: &ComPtr<IComponent>,
+    ) -> Result<(Vec<EventBusActivation>, Vec<EventBusActivation>)> {
         let read_events =
             |direction: crate::audio::BusDirection| -> Result<Vec<EventBusActivation>> {
                 let native_direction = event_direction(direction);
@@ -4965,13 +5330,10 @@ impl PluginImpl {
                 }
                 Ok(states)
             };
-        Ok(BusActivationState {
-            audio_inputs: read_and_activate(kAudio as i32, kInput as i32)?,
-            audio_outputs: read_and_activate(kAudio as i32, kOutput as i32)?,
-            event_inputs: read_events(crate::audio::BusDirection::Input)?,
-            event_outputs: read_events(crate::audio::BusDirection::Output)?,
-            event_readiness: None,
-        })
+        Ok((
+            read_events(crate::audio::BusDirection::Input)?,
+            read_events(crate::audio::BusDirection::Output)?,
+        ))
     }
 
     /// Get or create controller (handles both single-component and separate controller)
@@ -5060,15 +5422,33 @@ fn reconcile_audio_bus_activation(
     component: &ComPtr<IComponent>,
     activation: &mut BusActivationState,
 ) -> Result<()> {
+    reconcile_audio_bus_activation_with_bounds(component, activation, None)
+}
+
+fn reconcile_audio_bus_activation_with_bounds(
+    component: &ComPtr<IComponent>,
+    activation: &mut BusActivationState,
+    bounds: Option<crate::audio::ProcessingResourceBounds>,
+) -> Result<()> {
     let side = |direction: i32, retained: &[bool]| -> Result<Vec<bool>> {
         // SAFETY: caller owns the live component and enforces inactive/stopped setup.
         let native_count = unsafe { component.getBusCount(kAudio as i32, direction) };
-        let count = usize::try_from(native_count)
-            .map_err(|_| Error::InterfaceError("negative native audio-bus count".to_string()))?;
-        let mut states = Vec::new();
-        states.try_reserve_exact(count).map_err(|_| {
-            Error::InterfaceError("could not reserve audio-bus activation state".to_string())
-        })?;
+        let count = if let Some(bounds) = bounds {
+            bounds.native_buses(native_count)?
+        } else {
+            usize::try_from(native_count)
+                .map_err(|_| Error::InterfaceError("negative native audio-bus count".to_string()))?
+        };
+        let mut states = if bounds.is_some() {
+            crate::audio::processing_resources::vector(count)?
+        } else {
+            Vec::new()
+        };
+        if bounds.is_none() {
+            states.try_reserve_exact(count).map_err(|_| {
+                Error::InterfaceError("could not reserve audio-bus activation state".to_string())
+            })?;
+        }
         for index in 0..native_count {
             let active = if let Some(&active) = retained.get(index as usize) {
                 active
@@ -5077,9 +5457,14 @@ fn reconcile_audio_bus_activation(
                 // unreadable BusInfo means inactive. Channel/arrangement validation
                 // remains with its existing consumers, including prepare_buffers' fallback.
                 let mut info: BusInfo = unsafe { std::mem::zeroed() };
-                (unsafe { component.getBusInfo(kAudio as i32, direction, index, &mut info) })
-                    == kResultOk
-                    && info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0
+                let status =
+                    unsafe { component.getBusInfo(kAudio as i32, direction, index, &mut info) };
+                if let Some(bounds) = bounds {
+                    if status == kResultOk {
+                        bounds.channels(info.channelCount.max(0) as usize)?;
+                    }
+                }
+                status == kResultOk && info.flags & BusInfo_::BusFlags_::kDefaultActive as u32 != 0
             };
             // Both true and false policies need a fresh ACK: restoring state may
             // have changed native activation. Never infer an ACK by resizing.
@@ -8980,6 +9365,9 @@ mod parameter_metadata_tests;
 mod audio_bus_observation_tests;
 
 #[cfg(test)]
+mod processing_resource_tests;
+
+#[cfg(test)]
 #[allow(clippy::unnecessary_cast)]
 mod checked_native_note_tests {
     use super::*;
@@ -12149,6 +12537,8 @@ mod restored_audio_activation_tests {
         audio_info_failure: bool,
         audio_channels: i32,
         arrangement_queries: usize,
+        lifecycle: Vec<(&'static str, i32)>,
+        restored_audio_channels: Option<i32>,
         setups: usize,
         dsp_calls: usize,
         active: bool,
@@ -12245,10 +12635,14 @@ mod restored_audio_activation_tests {
             active: u8,
         ) -> tresult {
             let mut p = self.0.lock().unwrap();
-            assert_eq!(
-                media, kAudio as i32,
-                "reconciliation must not reset Event policy"
-            );
+            if media == kEvent as i32 {
+                assert!(!p.active && !p.processing);
+                assert_eq!((direction, index), (kInput as i32, 0));
+                p.lifecycle.push(("event_ack", i32::from(active)));
+                return kResultOk;
+            }
+            assert_eq!(media, kAudio as i32, "known native media");
+            p.lifecycle.push(("audio_ack", i32::from(active)));
             assert!(
                 !p.active && !p.processing,
                 "activation belongs to cold setup"
@@ -12278,9 +12672,13 @@ mod restored_audio_activation_tests {
         unsafe fn setState(&self, _: *mut IBStream) -> tresult {
             let mut p = self.0.lock().unwrap();
             assert!(!p.active && !p.processing);
+            p.lifecycle.push(("set_state", 0));
             if let Some((inputs, outputs)) = p.restored.take() {
                 p.inputs = inputs;
                 p.outputs = outputs;
+            }
+            if let Some(channels) = p.restored_audio_channels.take() {
+                p.audio_channels = channels;
             }
             p.apply_result
         }
@@ -12305,9 +12703,11 @@ mod restored_audio_activation_tests {
         unsafe fn getLatencySamples(&self) -> u32 {
             0
         }
-        unsafe fn setupProcessing(&self, _: *mut ProcessSetup) -> tresult {
+        unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
             let mut p = self.0.lock().unwrap();
             assert!(!p.active && !p.processing);
+            p.lifecycle
+                .push(("setup", unsafe { (*setup).maxSamplesPerBlock }));
             p.setups += 1;
             p.setup_result
         }
@@ -12358,15 +12758,32 @@ mod restored_audio_activation_tests {
     }
     impl Fixture {
         fn new(inputs: Vec<bool>, outputs: Vec<bool>) -> Self {
-            let activation = BusActivationState {
-                audio_inputs: inputs.clone(),
-                audio_outputs: outputs.clone(),
-                event_inputs: vec![EventBusActivation {
-                    role: crate::audio::NativeEventBusRole::Main,
-                    channel_count: 16,
-                    active: true,
-                }],
-                ..BusActivationState::default()
+            Self::with_preparation(
+                inputs,
+                outputs,
+                crate::host::PluginLoadPreparation::Eager,
+                None,
+            )
+        }
+        fn with_preparation(
+            inputs: Vec<bool>,
+            outputs: Vec<bool>,
+            preparation: crate::host::PluginLoadPreparation,
+            bounds: Option<crate::audio::ProcessingResourceBounds>,
+        ) -> Self {
+            let activation = if preparation == crate::host::PluginLoadPreparation::Deferred {
+                BusActivationState::default()
+            } else {
+                BusActivationState {
+                    audio_inputs: inputs.clone(),
+                    audio_outputs: outputs.clone(),
+                    event_inputs: vec![EventBusActivation {
+                        role: crate::audio::NativeEventBusRole::Main,
+                        channel_count: 16,
+                        active: true,
+                    }],
+                    ..BusActivationState::default()
+                }
             };
             let probe = Arc::new(Mutex::new(Probe {
                 inputs,
@@ -12379,6 +12796,8 @@ mod restored_audio_activation_tests {
                 audio_info_failure: false,
                 audio_channels: 2,
                 arrangement_queries: 0,
+                lifecycle: Vec::with_capacity(64),
+                restored_audio_channels: None,
                 setups: 0,
                 dsp_calls: 0,
                 active: false,
@@ -12433,6 +12852,8 @@ mod restored_audio_activation_tests {
                 dirty_caches: DirtyCaches::default(),
                 unit_cache: Mutex::new(None),
                 process_data: None,
+                processing_resource_bounds: bounds,
+                load_preparation: preparation,
                 component_handler: None,
                 connection: None,
                 pending_param_changes: Vec::new(),
@@ -12455,7 +12876,9 @@ mod restored_audio_activation_tests {
                 _host_app: super::super::com_implementations::create_host_application(),
                 control_thread: thread::current().id(),
             };
-            plugin.setup_processing().unwrap();
+            if preparation == crate::host::PluginLoadPreparation::Eager {
+                plugin.setup_processing().unwrap();
+            }
             Self { plugin, probe }
         }
         fn restore(&mut self, inputs: Vec<bool>, outputs: Vec<bool>) -> Result<()> {
@@ -12848,6 +13271,141 @@ mod restored_audio_activation_tests {
         assert_eq!(after.retirement_lineage(), witness.retirement_lineage() + 2);
         assert_eq!(a.probe.lock().unwrap().dsp_calls, 0);
         assert_eq!(b.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn deferred_processing_prepares_saved_shape_before_first_event_and_audio_ack() {
+        use crate::audio::ProcessingResourceBounds;
+        use crate::host::PluginLoadPreparation::Deferred;
+        let bounds = ProcessingResourceBounds::new(1, 2, 4, 4).unwrap();
+        let mut f = Fixture::with_preparation(vec![true], vec![true], Deferred, Some(bounds));
+        f.probe.lock().unwrap().audio_channels = 4; // Default is outside the final saved-state bounds.
+        let original = f.plugin.component.as_ptr();
+        let initial =
+            unsafe { PluginImpl::initial_load_buses(&f.plugin.component, Deferred, Some(bounds)) }
+                .unwrap();
+        assert!(
+            initial.audio_inputs.is_empty()
+                && initial.audio_outputs.is_empty()
+                && initial.event_inputs.is_empty()
+                && initial.event_outputs.is_empty()
+        );
+        f.plugin.finish_load_preparation().unwrap();
+        assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+        assert!(f.probe.lock().unwrap().bus_calls.is_empty());
+        assert!(f.plugin.process_data.is_none());
+        assert_eq!(f.plugin.prepared_meter_channels(), Some(None));
+        f.probe.lock().unwrap().restored_audio_channels = Some(2);
+        f.restore(vec![true], vec![true]).unwrap();
+        assert_eq!(f.plugin.component.as_ptr(), original);
+        assert_eq!(
+            f.probe.lock().unwrap().lifecycle,
+            [
+                ("set_state", 0),
+                ("setup", 4),
+                ("event_ack", 0),
+                ("audio_ack", 1),
+                ("audio_ack", 1),
+            ]
+        );
+        assert_eq!(
+            f.plugin.bus_activation.event_inputs[0].channel_count, 16,
+            "event channels do not inherit the audio channel cap"
+        );
+        assert_eq!(f.plugin.prepared_meter_channels(), Some(Some(2)));
+        let event_owner = f.plugin.bus_activation.event_inputs.as_ptr();
+        f.probe.lock().unwrap().lifecycle.clear();
+        f.plugin.setup_processing().unwrap();
+        assert_eq!(f.plugin.bus_activation.event_inputs.as_ptr(), event_owner);
+        assert_eq!(
+            f.probe.lock().unwrap().lifecycle,
+            [("setup", 4), ("audio_ack", 1), ("audio_ack", 1)]
+        );
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn deferred_processing_refuses_default_or_restored_excess_without_ready_meters() {
+        use crate::audio::ProcessingResourceBounds;
+        use crate::host::PluginLoadPreparation::Deferred;
+        let bounds = ProcessingResourceBounds::new(1, 2, 4, 4).unwrap();
+        for restore in [false, true] {
+            let f = Fixture::with_preparation(vec![true], vec![true], Deferred, Some(bounds));
+            if restore {
+                f.probe.lock().unwrap().restored_audio_channels = Some(3);
+            } else {
+                f.probe.lock().unwrap().audio_channels = 3;
+            }
+            let probe = Arc::clone(&f.probe);
+            let mut plugin = super::processing_resource_tests::wrap(f.plugin, bounds);
+            let meter = plugin.audio_levels.lock().unwrap().channels.as_ptr();
+            assert!(plugin.audio_levels.lock().unwrap().channels.is_empty());
+            let state = encode_state_snapshot(&StateSnapshot {
+                component: vec![1],
+                controller: None,
+            })
+            .unwrap();
+            let result = if restore {
+                plugin.load_state(&state)
+            } else {
+                plugin.start_processing()
+            };
+            assert!(matches!(
+                result,
+                Err(Error::ProcessingResources(
+                    crate::error::ProcessingResourceError::ChannelCount
+                ))
+            ));
+            let levels = plugin.audio_levels.lock().unwrap();
+            assert!(levels.channels.is_empty());
+            assert_eq!(levels.channels.as_ptr(), meter);
+            drop(levels);
+            assert!(!plugin.is_processing());
+            assert_eq!(probe.lock().unwrap().dsp_calls, 0);
+            assert_eq!(probe.lock().unwrap().setups, 1);
+        }
+    }
+    #[test]
+    fn deferred_processing_pending_input_precedes_geometry_and_preserves_owners() {
+        let bounds = crate::audio::ProcessingResourceBounds::new(1, 2, 4, 4).unwrap();
+        let mut f = Fixture::with_preparation(
+            vec![true],
+            vec![true],
+            crate::host::PluginLoadPreparation::Deferred,
+            Some(bounds),
+        );
+        f.plugin.block_size = 5;
+        f.plugin.pending_param_changes.push(ParameterChange {
+            id: 7,
+            value: 0.5,
+            sample_offset: 0,
+        });
+        let old = f.plugin.pending_param_changes.as_ptr();
+        let (result, operations) =
+            super::super::data_exchange::measure_host_allocator_operations_for_test(|| {
+                f.plugin.setup_processing()
+            });
+        assert!(matches!(result, Err(Error::PendingParameterDelivery)));
+        assert_eq!(operations, 0);
+        assert_eq!(f.plugin.pending_param_changes.as_ptr(), old);
+        assert_eq!(f.plugin.pending_param_changes.len(), 1);
+        assert!(f.plugin.process_data.is_none());
+        assert!(f.plugin.applied_setup.is_none());
+        assert!(f.probe.lock().unwrap().lifecycle.is_empty());
+    }
+    #[test]
+    fn processing_resource_bounds_check_geometry_before_buffer_reservations() {
+        super::processing_resource_tests::geometry();
+    }
+    #[test]
+    fn processing_resource_bounds_preserve_real_process_and_activation_overlap() {
+        let mut f = Fixture::new(vec![true], vec![true]);
+        super::processing_resource_tests::rebuild(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
+    fn processing_resource_bounds_apply_to_public_caller_buffers_and_cached_meters() {
+        let f = Fixture::new(vec![true], vec![true]);
+        super::processing_resource_tests::caller_and_meter(f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
     }
     #[test]
     fn bounded_audio_bus_observation_preserves_owned_three_stage_query_order() {

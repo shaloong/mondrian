@@ -25,12 +25,25 @@ fn clamp_output_channels(reported: i32) -> usize {
     }
 }
 
+/// Native load preparation policy, independent of processing resource limits.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PluginLoadPreparation {
+    /// Preserve the legacy eager default activation, arrangement echo and setup.
+    #[default]
+    Eager,
+    /// Initialize/connect the same native owner, then prepare only through an
+    /// explicit state/mode/reconfigure/start operation using its current shape.
+    Deferred,
+}
+
 /// VST3 host instance
 pub struct Vst3Host {
     /// Immutable plug-in interface declarations for loaded native contexts.
     pub(crate) plugin_interfaces: PluginInterfaceSupport,
     /// Audio configuration
     pub(crate) config: AudioConfig,
+    pub(crate) processing_resource_bounds: Option<crate::audio::ProcessingResourceBounds>,
+    pub(crate) load_preparation: PluginLoadPreparation,
     /// Custom plugin scan paths
     pub(crate) custom_paths: Vec<PathBuf>,
     /// Whether to use process isolation for plugin loading
@@ -289,13 +302,28 @@ impl Vst3Host {
     /// Load a plugin in-process
     fn load_plugin_internal(&mut self, path: &Path, class_id: Option<&str>) -> Result<Plugin> {
         // Load the plugin implementation directly - it will handle path resolution
-        let mut plugin_impl = match class_id {
-            Some(class_id) => crate::internal::plugin_impl::PluginImpl::load_class(
+        let mut plugin_impl = if self.processing_resource_bounds.is_some()
+            || self.load_preparation == PluginLoadPreparation::Deferred
+        {
+            crate::internal::plugin_impl::PluginImpl::load_with_preparation(
                 path,
                 class_id,
                 self.plugin_interfaces,
-            )?,
-            None => crate::internal::plugin_impl::PluginImpl::load(path, self.plugin_interfaces)?,
+                self.config,
+                self.processing_resource_bounds,
+                self.load_preparation,
+            )?
+        } else {
+            match class_id {
+                Some(class_id) => crate::internal::plugin_impl::PluginImpl::load_class(
+                    path,
+                    class_id,
+                    self.plugin_interfaces,
+                )?,
+                None => {
+                    crate::internal::plugin_impl::PluginImpl::load(path, self.plugin_interfaces)?
+                }
+            }
         };
 
         // Apply the builder's audio config (sample rate / block size) so the plugin actually
@@ -316,9 +344,22 @@ impl Vst3Host {
 
         // Size meters to the plugin's real output channel count (bus-aware), not a stereo
         // assumption; fall back to 2 only when the plugin reports no output channels.
-        let output_channels = match plugin_impl.output_channel_count() {
-            0 => 2,
-            n => n,
+        let levels = if let Some(bounds) = self.processing_resource_bounds {
+            let mut levels = crate::audio::processing_resources::reserved_levels(bounds)?;
+            if let Some(Some(channels)) = plugin_impl.prepared_meter_channels() {
+                levels
+                    .channels
+                    .resize(channels.max(2), crate::audio::ChannelLevel::default());
+            }
+            levels
+        } else if self.load_preparation == PluginLoadPreparation::Deferred {
+            crate::audio::AudioLevels::new(0)
+        } else {
+            let channels = match plugin_impl.output_channel_count() {
+                0 => 2,
+                n => n,
+            };
+            crate::audio::AudioLevels::new(channels)
         };
 
         let plugin = Plugin {
@@ -326,7 +367,7 @@ impl Vst3Host {
             compatibility,
             sample_rate: self.config.sample_rate,
             block_size: self.config.block_size,
-            audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(output_channels))),
+            audio_levels: Arc::new(Mutex::new(levels)),
             parameter_change_callback: None,
             audio_callback: None,
             internal: Some(Box::new(plugin_impl)),
@@ -441,6 +482,8 @@ impl Default for Vst3Host {
         Self {
             plugin_interfaces: PluginInterfaceSupport::default(),
             config: AudioConfig::default(),
+            processing_resource_bounds: None,
+            load_preparation: PluginLoadPreparation::Eager,
             custom_paths: Vec::new(),
             use_process_isolation: false,
             scan_default_paths: true,
@@ -461,6 +504,8 @@ impl Default for Vst3Host {
 pub struct Vst3HostBuilder {
     plugin_interfaces: PluginInterfaceSupport,
     config: AudioConfig,
+    processing_resource_bounds: Option<crate::audio::ProcessingResourceBounds>,
+    load_preparation: PluginLoadPreparation,
     custom_paths: Vec<PathBuf>,
     use_process_isolation: bool,
     scan_default_paths: bool,
@@ -480,6 +525,23 @@ impl Vst3HostBuilder {
     /// Safe discovery/probe helpers remain standalone library-default probes.
     pub fn plugin_interfaces(mut self, interfaces: PluginInterfaceSupport) -> Self {
         self.plugin_interfaces = interfaces;
+        self
+    }
+
+    /// Bound the known host processing-buffer family before the first native setup.
+    /// One caller buffer set is covered; plugin heap and complete SDK heap are not.
+    pub fn processing_resource_bounds(
+        mut self,
+        bounds: crate::audio::ProcessingResourceBounds,
+    ) -> Self {
+        self.processing_resource_bounds = Some(bounds);
+        self
+    }
+
+    /// Select eager legacy preparation or explicit deferred native preparation.
+    /// Deferred loading performs no default bus ACK, arrangement echo or setup.
+    pub fn load_preparation(mut self, preparation: PluginLoadPreparation) -> Self {
+        self.load_preparation = preparation;
         self
     }
 
@@ -603,6 +665,19 @@ impl Vst3HostBuilder {
     /// `1.0 / sampleRate` generate NaN coefficients, and a `time_signature(4, 3)` built a host
     /// whose transport every runtime setter refuses.
     pub fn build(self) -> Result<Vst3Host> {
+        if self.use_process_isolation && self.load_preparation == PluginLoadPreparation::Deferred {
+            return Err(Error::ProcessingResources(
+                crate::error::ProcessingResourceError::UnsupportedBackend,
+            ));
+        }
+        if let Some(bounds) = self.processing_resource_bounds {
+            if self.use_process_isolation {
+                return Err(Error::ProcessingResources(
+                    crate::error::ProcessingResourceError::UnsupportedBackend,
+                ));
+            }
+            bounds.frames(self.config.block_size)?;
+        }
         if self.use_process_isolation && self.plugin_interfaces != PluginInterfaceSupport::default()
         {
             return Err(Error::InvalidParameter(
@@ -637,6 +712,8 @@ impl Vst3HostBuilder {
         Ok(Vst3Host {
             plugin_interfaces: self.plugin_interfaces,
             config: self.config,
+            processing_resource_bounds: self.processing_resource_bounds,
+            load_preparation: self.load_preparation,
             custom_paths: self.custom_paths,
             use_process_isolation: self.use_process_isolation,
             scan_default_paths: self.scan_default_paths,

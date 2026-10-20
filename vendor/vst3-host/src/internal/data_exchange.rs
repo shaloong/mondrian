@@ -1088,6 +1088,18 @@ mod data_exchange_storage_contracts {
         let (value, trace) = capture(operation);
         (value, trace.len)
     }
+    pub(crate) fn visit_host_allocator_events_for_test<T>(
+        operation: impl FnOnce() -> T,
+        mut visitor: impl FnMut(u8, usize, usize, usize),
+    ) -> T {
+        // capture retains the existing panic guard and asserts the same fixed
+        // journal did not overflow before exposing any borrowed event facts.
+        let (value, trace) = capture(operation);
+        for event in &trace.entries[..trace.len] {
+            visitor(event.operation, event.address, event.bytes, event.alignment);
+        }
+        value
+    }
     #[test]
     #[ignore = "requires existing owned MNE1 SDK DLL; Rust host allocator success-path observation only"]
     fn native_event_constraint_census_has_no_rust_host_allocator_operations() {
@@ -1366,4 +1378,6 @@ mod data_exchange_storage_contracts {
 }
 
 #[cfg(test)]
-pub(crate) use data_exchange_storage_contracts::measure_host_allocator_operations_for_test;
+pub(crate) use data_exchange_storage_contracts::{
+    measure_host_allocator_operations_for_test, visit_host_allocator_events_for_test,
+};

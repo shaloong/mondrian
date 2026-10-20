@@ -1452,6 +1452,16 @@ pub(crate) trait PluginInternal: Send {
 
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
+    /// Immutable policy of this same implementation; not another mutable cache.
+    fn processing_resource_bounds(&self) -> Option<crate::audio::ProcessingResourceBounds> {
+        None
+    }
+    /// None is legacy; Some(None) is opted-in but not yet prepared. A prepared
+    /// value is cached same-owner storage only, never another native census.
+    fn prepared_meter_channels(&self) -> Option<Option<usize>> {
+        None
+    }
+
     /// Query the current per-bus channel counts and activation state.
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         Err(Error::Other(
@@ -2072,6 +2082,35 @@ impl Plugin {
         self.block_size
     }
 
+    fn synchronize_prepared_audio_levels(&self) -> Result<()> {
+        let Some(Some(channels)) = self
+            .internal
+            .as_ref()
+            .and_then(|inner| inner.prepared_meter_channels())
+        else {
+            return Ok(());
+        };
+        let needed = channels.max(2);
+        let bounded = self
+            .internal
+            .as_ref()
+            .and_then(|inner| inner.processing_resource_bounds())
+            .is_some();
+        let mut levels = self
+            .audio_levels
+            .lock()
+            .map_err(|_| Error::Other("audio levels owner is poisoned".to_owned()))?;
+        if bounded && needed > levels.channels.capacity() {
+            return Err(Error::ProcessingResources(
+                crate::error::ProcessingResourceError::AllocationExtent,
+            ));
+        }
+        levels
+            .channels
+            .resize(needed, crate::audio::ChannelLevel::default());
+        Ok(())
+    }
+
     /// Reconfigure the plugin for a new sample rate and/or maximum block size, re-running the
     /// plugin's `setupProcessing` and rebuilding its audio buffers.
     ///
@@ -2105,7 +2144,7 @@ impl Plugin {
 
         self.sample_rate = sample_rate;
         self.block_size = block_size;
-        Ok(())
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Switch the plugin between real-time and offline processing, re-running the plugin's
@@ -2125,7 +2164,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .set_process_mode(mode)
+            .set_process_mode(mode)?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Query the current speaker arrangement of each audio input/output bus. Works both
@@ -2159,7 +2199,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .set_bus_arrangements(inputs, outputs)
+            .set_bus_arrangements(inputs, outputs)?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Activate or deactivate a single bus on the plugin (`IComponent::activateBus`).
@@ -2194,7 +2235,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .set_bus_active(media_type, direction, bus_index, active)
+            .set_bus_active(media_type, direction, bus_index, active)?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Get all parameters
@@ -2872,7 +2914,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .start_processing()
+            .start_processing()?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Stop audio processing
@@ -3007,11 +3050,25 @@ impl Plugin {
                 "bus audio block size must be greater than zero".to_string(),
             ));
         }
-        Ok(BusAudioBuffers::new(
-            &self.audio_bus_layout()?,
-            block_size,
-            self.sample_rate,
-        ))
+        let bounds = self
+            .internal
+            .as_ref()
+            .and_then(|value| value.processing_resource_bounds());
+        if let Some(bounds) = bounds {
+            bounds.frames(block_size)?;
+            crate::audio::processing_resources::caller_buffers(
+                bounds,
+                &self.audio_bus_layout()?,
+                block_size,
+                self.sample_rate,
+            )
+        } else {
+            Ok(BusAudioBuffers::new(
+                &self.audio_bus_layout()?,
+                block_size,
+                self.sample_rate,
+            ))
+        }
     }
 
     /// Process audio without flattening VST3 bus boundaries.
@@ -3525,10 +3582,13 @@ impl Plugin {
     /// lifecycle. The returned flags still describe every request; in particular,
     /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
     pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
-        self.internal
+        let flags = self
+            .internal
             .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .service_host_requests()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_owned()))?
+            .service_host_requests()?;
+        self.synchronize_prepared_audio_levels()?;
+        Ok(flags)
     }
 
     /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
@@ -3667,7 +3727,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .load_state(data)
+            .load_state(data)?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
@@ -3685,7 +3746,8 @@ impl Plugin {
         self.internal
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .load_state_with_context(data, context)
+            .load_state_with_context(data, context)?;
+        self.synchronize_prepared_audio_levels()
     }
 
     /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`

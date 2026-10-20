@@ -125,6 +125,29 @@ pub enum MusicalTimeError {
     EventInputUnsupported,
 }
 
+/// Allocation-free refusals for the opt-in host processing-buffer family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingResourceError {
+    /// A configured extent cannot be represented by the native processing API.
+    InvalidGeometry,
+    /// Checked size/layout arithmetic overflowed.
+    ExtentOverflow,
+    /// An actual native or cached direction exceeds its bus limit.
+    BusCount,
+    /// One declared bus exceeds its channel limit.
+    ChannelCount,
+    /// The combined declared channel inventory exceeds its limit.
+    TotalChannels,
+    /// An actual processing/caller block exceeds its limit.
+    BlockFrames,
+    /// The exact requested vector storage could not be reserved.
+    AllocationFailed,
+    /// Actual retained capacity exceeded the qualified exact request.
+    AllocationExtent,
+    /// The standalone SDK isolation wire does not carry this policy.
+    UnsupportedBackend,
+}
+
 /// Main error type for vst3-host operations.
 ///
 /// Marked `#[non_exhaustive]`: match with a wildcard arm, as new variants may be added in
@@ -132,6 +155,9 @@ pub enum MusicalTimeError {
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
+    /// An opt-in host processing-buffer geometry or allocation request was refused.
+    #[error("processing resource bounds refused: {0:?}")]
+    ProcessingResources(ProcessingResourceError),
     /// Plugin file not found
     #[error("Plugin not found: {0}")]
     PluginNotFound(String),

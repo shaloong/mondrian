@@ -1,6 +1,10 @@
 //! Audio types and utilities for VST3 host
 
 mod musical_time;
+pub(crate) mod processing_resources;
+
+/// Immutable opt-in geometry for the known host processing-buffer family.
+pub use processing_resources::ProcessingResourceBounds;
 
 /// Canonical signal timeline facts for the next native process block.
 ///
