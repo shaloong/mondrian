@@ -179,17 +179,26 @@ publication permission. SDK calls and allocation precede the caller's commit
 guard; cancellation is checked again after acquiring that guard, before the
 irreversible Source commit. Release the guard before Ack or owner retirement.
 Only the original producer and retirement paths may own this prepared storage
-while a future Media consumer waits for canonical publication; UI receives facts,
-not the prepared native owner. This cross-queue consumer is not implemented yet.
+while the existing Media queue parks the original work for canonical publication.
+UI receives facts and a typed work/phase key, not the prepared native owner.
+Actual Audio preparation precedes the App's canonical commit. The App publishes
+the resulting snapshot once and resumes that same prepared work with its exact
+key. A later refusal retains the accepted document and pending group; retry
+cannot recreate the candidate or repeat an already completed acknowledgement.
 An obsolete completion must transfer any remaining request owner to the existing
 retirement queue. Rejecting its identity never permits destruction on the UI path.
 
-The App's single accepted author work slot is independent of its editor surface.
+The App's single author work slot selects either a single-owner gesture or a
+terminal frontier and is independent of its editor surface.
 It retains the captured weak Source, original gesture, prefix and execution
 snapshot; removing presentation never discards that custody. Only a matching
 surface may follow its receipts. Successful SourceClose clears both slots;
-failed author operations preserve the Session barrier. New-prefix admission
-still uses the existing GUI path until the terminal consumer is integrated.
+failed author operations preserve the Session barrier. Historical author intent
+does not itself authorize execution. Strong renderer upgrades first match the
+actual Media slot; a Weak liveness check grants no native permission. Terminal,
+direct-root, same-object prefixes may enter the headless path only through the
+actual Media delivery and preparation protocol. Other new prefixes retain the
+existing GUI admission path.
 
 ## Consequences
 
