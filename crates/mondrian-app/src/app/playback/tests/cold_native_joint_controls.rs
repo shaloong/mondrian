@@ -86,10 +86,16 @@ fn prepare_app_native_control(
         Some(expected_state_bytes)
     );
 
-    prepare_app_native_control_with_instance(clap, vst3, config, instance)
+    prepare_app_native_control_with_instance(clap, vst3, config, instance, |_, _, _| {})
 }
 
 fn prepare_app_clap_editor_control() -> ColdNativeControl {
+    prepare_app_clap_editor_control_with_initializer(|_, _, _| {})
+}
+
+fn prepare_app_clap_editor_control_with_initializer(
+    initialize: impl FnOnce(&mut Sequence, &Arc<AssetLibrary>, &std::path::Path),
+) -> ColdNativeControl {
     const PLUGIN: &str = "org.mondrian.fixture.sample-gain";
     let helper = std::path::PathBuf::from(
         std::env::var_os("MONDRIAN_CLAP_TEST_HELPER").expect("current normal Product helper"),
@@ -147,7 +153,7 @@ fn prepare_app_clap_editor_control() -> ColdNativeControl {
         instance.opaque_state.as_ref().expect("actual four-byte CLAP state").as_slice(),
         &1.0_f32.to_le_bytes()
     );
-    prepare_app_native_control_with_instance(clap, vst3, config, instance)
+    prepare_app_native_control_with_instance(clap, vst3, config, instance, initialize)
 }
 
 fn prepare_app_native_control_with_instance(
@@ -155,6 +161,7 @@ fn prepare_app_native_control_with_instance(
     vst3: Arc<mondrian_audio::InstalledVst3AudioProcessorSpecResolver>,
     config: mondrian_media::AudioPlaybackConfig,
     instance: mondrian_timeline::audio::AudioProcessorInstance,
+    initialize: impl FnOnce(&mut Sequence, &Arc<AssetLibrary>, &std::path::Path),
 ) -> ColdNativeControl {
     let mut state = AppState::with_native_audio_catalogs(clap, vst3);
     // App construction leaves the default device manager dormant.
@@ -182,6 +189,7 @@ fn prepare_app_native_control_with_instance(
         config.channel_layout
     );
     sequence.audio_program.outputs[0].strip.pre_fader.processors.push(instance);
+    initialize(&mut sequence, &library, directory.path());
     state.test_set_sequence(Some(sequence));
     state.test_set_asset_library(Some(library));
 
@@ -720,7 +728,16 @@ fn assert_editor_configuration(bytes: &[u8], gain: f64, balance: f64, controller
 fn poll_gui_until(
     state: &mut AppState,
     generation: u64,
+    observe: impl FnMut(&AudioPlaybackEvent) -> bool,
+) {
+    poll_gui_until_after_proposal(state, generation, observe, |_| {});
+}
+
+fn poll_gui_until_after_proposal(
+    state: &mut AppState,
+    generation: u64,
     mut observe: impl FnMut(&AudioPlaybackEvent) -> bool,
+    mut after_proposal: impl FnMut(&mut AppState),
 ) {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -738,9 +755,19 @@ fn poll_gui_until(
         let mut completed = false;
         for event in poll.events {
             completed |= observe(&event);
+            let author_proposal = matches!(
+                &event,
+                AudioPlaybackEvent::NativeAuthorProposalObserved { .. }
+            );
             state
                 .handle_audio_playback_event(event, Instant::now())
                 .expect("original App consumer");
+            if author_proposal {
+                // The original consumer admitted this proposal to Session;
+                // no later poll has consumed its producer handoff/Ack yet.
+                // Runtime/editor locks are not held across this test hook.
+                after_proposal(state);
+            }
         }
         if completed {
             return;
@@ -1317,9 +1344,17 @@ struct ClosedOwnedClapAuthorControl {
     verifier: mondrian_core::AudioOwnerInstallationVerifier,
     installed_verifier: mondrian_core::AudioOwnerInstallationVerifier,
     installed_claim: mondrian_core::AudioOwnerInstallationClaim,
+    target: mondrian_core::NativeAudioEditorTarget,
 }
 
 fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
+    prepare_app_clap_editor_author_closed_with_hooks(|_, _, _| {}, |_| {})
+}
+
+fn prepare_app_clap_editor_author_closed_with_hooks(
+    initialize: impl FnOnce(&mut Sequence, &Arc<AssetLibrary>, &std::path::Path),
+    mut before_ack: impl FnMut(&mut AppState),
+) -> ClosedOwnedClapAuthorControl {
     use super::super::super::product_action::{
         AudioNativeEditorPayload, AudioProductAction, ProductAction,
     };
@@ -1334,7 +1369,7 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
     };
 
     let ColdNativeControl { mut state, _directory, output, renderer: weak } =
-        prepare_app_clap_editor_control();
+        prepare_app_clap_editor_control_with_initializer(initialize);
     let sequence = state.active_sequence().expect("actual author Sequence");
     assert!(sequence.audio_program.note_lanes.is_empty());
     let native_output = &sequence.audio_program.outputs[0];
@@ -1565,7 +1600,7 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
     ];
     let mut delivered: Option<mondrian_core::NativeAudioAuthorProposal> = None;
     let mut acknowledged = None;
-    poll_gui_until(&mut state, generation, |event| match event {
+    let observe = |event: &AudioPlaybackEvent| match event {
         AudioPlaybackEvent::NativeAuthorProposalObserved {
             renderer_id: actual,
             generation: observed,
@@ -1654,7 +1689,8 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
             false
         }
         other => panic!("unexpected restart, transport or editor work: {other:?}"),
-    });
+    };
+    poll_gui_until_after_proposal(&mut state, generation, observe, &mut before_ack);
     let acknowledged = acknowledged.unwrap();
     let delivered = delivered.unwrap();
     assert_eq!(
@@ -1907,6 +1943,7 @@ fn prepare_app_clap_editor_author_closed() -> ClosedOwnedClapAuthorControl {
         verifier,
         installed_verifier,
         installed_claim,
+        target: acknowledged,
     }
 }
 
@@ -2440,7 +2477,7 @@ fn app_surge_xt_effects_clap_editor_opens_and_closes_through_same_source() {
     );
     assert!(!instance.opaque_state.as_ref().expect("actual captured state").is_empty());
     let ColdNativeControl { mut state, _directory, output, renderer: weak } =
-        prepare_app_native_control_with_instance(clap, vst3, config, instance);
+        prepare_app_native_control_with_instance(clap, vst3, config, instance, |_, _, _| {});
     let sequence = state.active_sequence().unwrap();
     assert!(sequence.audio_program.note_lanes.is_empty());
     let native_output = &sequence.audio_program.outputs[0];
@@ -3289,3 +3326,5 @@ fn app_owned_clap_project_close_releases_native_source_before_app_shutdown() {
     assert!(target_released,
         "PROJECT_CLOSE_NATIVE_CUSTODY_BEFORE_APP_SHUTDOWN: claim={claim_before_app_shutdown:?}, media_source_available={source_available_before_app_shutdown}, renderer_released={renderer_released_before_app_shutdown}, project_released={project_released_before_app_shutdown}");
 }
+
+mod project_state_roundtrip;

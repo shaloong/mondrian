@@ -178,6 +178,20 @@ impl TimelineAudioPcmRenderer {
         })
     }
 
+    /// Read the original prepared owner without admitting state entry or DSP.
+    #[cfg(all(test, windows))]
+    pub(in crate::app) fn visit_unentered_continuity_for_test(
+        &self,
+        visitor: &mut impl mondrian_audio::AudioContinuityEvidenceVisitor,
+    ) -> Result<(), mondrian_audio::AudioExecutionError> {
+        let state = self.state.lock();
+        assert!(
+            state.generation.is_none(),
+            "the fresh Timeline source has not entered DSP"
+        );
+        state.delivery.visit_continuity_evidence(visitor)
+    }
+
     pub(super) fn bind_author_snapshot(
         &mut self,
         snapshot: mondrian_editor_state::AuthorExecutionSnapshot,
