@@ -999,6 +999,138 @@ bool curveSourceLifecycle(const std::string& operation, const void* handle, OfxP
       (sampled ? derivative != -999.0 : std::abs(derivative - (endpoint - 1.0)/24.0) > 1e-14)) { return false; }
   return true;
 }
+// Scalar Angle test values stay in degrees, including negative/multiple turns.
+// angleSource is only an expected-source oracle, not temporal query authority.
+bool angleMode(const std::string& selected) {
+  return selected == "angle" || selected == "angle_time" || selected == "angle_compound";
+}
+bool defineAngle(const void* handle, const std::string& selected) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "scale", &parameter, &props) != kOfxStatOK) { return false; }
+  if (selected == "angle_compound" &&
+      gParamHost->paramDefine(params, kOfxParamTypeDouble2D, "anglePair", &props) != kOfxStatOK) { return false; }
+  if (gPropHost->propSetString(props, kOfxParamPropDoubleType, 0,
+        selected == "angle_time" ? kOfxParamDoubleTypeTime : kOfxParamDoubleTypeAngle) != kOfxStatOK ||
+      gPropHost->propSetString(props, kOfxPropLabel, 0, "Angle") != kOfxStatOK ||
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 1) != kOfxStatOK) { return false; }
+  for (int channel = 0; channel < (selected == "angle_compound" ? 2 : 1); ++channel) {
+    if (gPropHost->propSetDouble(props, kOfxParamPropDefault, channel, 350.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(props, kOfxParamPropMin, channel, -1440.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(props, kOfxParamPropMax, channel, 1440.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(props, kOfxParamPropDisplayMin, channel, -720.0) != kOfxStatOK ||
+        gPropHost->propSetDouble(props, kOfxParamPropDisplayMax, channel, 720.0) != kOfxStatOK) { return false; }
+  }
+  if (selected != "angle") { return true; }
+  return gParamHost->paramDefine(params, kOfxParamTypeInteger, "angleSource", &props) == kOfxStatOK &&
+      gPropHost->propSetString(props, kOfxPropLabel, 0, "Angle source oracle") == kOfxStatOK &&
+      gPropHost->propSetInt(props, kOfxParamPropDefault, 0, 0) == kOfxStatOK &&
+      gPropHost->propSetInt(props, kOfxParamPropMin, 0, 0) == kOfxStatOK &&
+      gPropHost->propSetInt(props, kOfxParamPropMax, 0, 4) == kOfxStatOK &&
+      gPropHost->propSetInt(props, kOfxParamPropAnimates, 0, 0) == kOfxStatOK;
+}
+bool angleSource(const void* handle, int& source) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle parameter = nullptr;
+  return gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) == kOfxStatOK &&
+      gParamHost->paramGetHandle(params, "angleSource", &parameter, nullptr) == kOfxStatOK &&
+      gParamHost->paramGetValueAtTime(parameter, 0.0, &source) == kOfxStatOK && source >= 0 && source <= 4;
+}
+bool angleQueries(const std::string& operation, const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle angle = nullptr;
+  OfxPropertySetHandle props = nullptr;
+  int source = -1;
+  if (!angleSource(handle, source) || gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "scale", &angle, &props) != kOfxStatOK) { return false; }
+  auto found = actions.find(handle);
+  if (operation == kOfxActionInstanceChanged) {
+    char* name = nullptr;
+    if (found == actions.end() || gPropHost->propGetString(in, kOfxPropName, 0, &name) != kOfxStatOK || !name) { return false; }
+    if (std::strcmp(name, "scale") == 0) { ++found->second.scaleChanges; }
+    return true; // Query only the fully published source after EndInstanceChanged.
+  }
+  double now = 0.0, current = -999;
+  if (operation == kOfxImageEffectActionRender && gPropHost->propGetDouble(in, kOfxPropTime, 0, &now) != kOfxStatOK) { return false; }
+  const bool curve = source == 2 || source == 3, sampled = source == 1;
+  int animating = -1;
+  if (gPropHost->propGetInt(props, kOfxParamPropIsAnimating, 0, &animating) != kOfxStatOK ||
+      animating != (curve || sampled ? 1 : 0) || gParamHost->paramGetValueAtTime(angle, now, &current) != kOfxStatOK) { return false; }
+  if (operation == kOfxImageEffectActionRender && source != 0 && found != actions.end() && found->second.renders < 9) {
+    const int phase = found->second.renders;
+    const int expected = phase < 2 ? 0 : phase < 4 ? 1 : phase < 6 ? 2 : phase < 8 ? 3 : 4;
+    if (found->second.scaleChanges != expected) { return false; }
+  }
+  for (double frame : {-12.0, 0.0, 6.0, 12.0, 24.0, 36.0}) {
+    double value = -999;
+    const bool unavailable = sampled && frame != now;
+    const double expected = curve ? 350.0 + (source == 3 ? 40.0 : 20.0) * std::clamp(frame / 24.0, 0.0, 1.0) : current;
+    if (gParamHost->paramGetValueAtTime(angle, frame, &value) != (unavailable ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+        (unavailable ? value != -999 : !std::isfinite(value) || std::abs(value - expected) > 1e-10)) { return false; }
+  }
+  unsigned count = 999;
+  if (gParamHost->paramGetNumKeys(angle, &count) != (sampled ? kOfxStatErrMissingHostFeature : kOfxStatOK) ||
+      count != (sampled ? 999U : curve ? 2U : 0U) || (curve && !curveKeys(angle))) { return false; }
+  double value = -999, slope = -999, area = -999, reverse = -999;
+  if (gParamHost->paramGetValueAtTime(angle, std::numeric_limits<double>::quiet_NaN(), &value) != kOfxStatErrValue || value != -999) { return false; }
+  const auto status = sampled ? kOfxStatErrMissingHostFeature : kOfxStatOK;
+  if (gParamHost->paramGetDerivative(angle, 6.0, &slope) != status ||
+      gParamHost->paramGetIntegral(angle, 0.0, 24.0, &area) != status ||
+      gParamHost->paramGetIntegral(angle, 24.0, 0.0, &reverse) != status) { return false; }
+  if (sampled) {
+    if (slope != -999 || area != -999 || reverse != -999) { return false; }
+  } else {
+    const double expectedSlope = curve ? (source == 3 ? 40.0 : 20.0) / 24.0 : 0.0;
+    const double expectedArea = curve ? (source == 3 ? 8880.0 : 8640.0) : 24.0 * current;
+    if (!std::isfinite(slope) || !std::isfinite(area) || !std::isfinite(reverse) ||
+        std::abs(slope - expectedSlope) > 1e-12 || std::abs(area - expectedArea) > 1e-9 || std::abs(reverse + expectedArea) > 1e-9) { return false; }
+  }
+  if (operation != kOfxImageEffectActionRender) { return true; }
+  double after = -999;
+  return gParamHost->paramSetValue(angle, 17.0) == kOfxStatErrUnsupported &&
+      gParamHost->paramSetValueAtTime(angle, now, 17.0) == kOfxStatErrUnsupported &&
+      gParamHost->paramGetValueAtTime(angle, now, &after) == kOfxStatOK && after == current;
+}
+OfxStatus angleOutput(const void* handle, OfxPropertySetHandle in) {
+  OfxParamSetHandle params = nullptr;
+  OfxParamHandle angle = nullptr;
+  double time = 0.0, degrees = 0.0;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &params) != kOfxStatOK ||
+      gParamHost->paramGetHandle(params, "scale", &angle, nullptr) != kOfxStatOK ||
+      gPropHost->propGetDouble(in, kOfxPropTime, 0, &time) != kOfxStatOK ||
+      gParamHost->paramGetValueAtTime(angle, time, &degrees) != kOfxStatOK) { return kOfxStatFailed; }
+  OfxPropertySetHandle images[2]{};
+  void* data[2]{};
+  int bounds[2][4]{}, stride[2]{};
+  bool valid = true;
+  const char* names[] = {"Source", "Output"};
+  for (int index = 0; index < 2; ++index) {
+    OfxImageClipHandle clip = nullptr;
+    if (gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, names[index], &clip, nullptr) != kOfxStatOK ||
+        gEffectHost->clipGetImage(clip, time, nullptr, &images[index]) != kOfxStatOK ||
+        gPropHost->propGetPointer(images[index], kOfxImagePropData, 0, &data[index]) != kOfxStatOK || !data[index] ||
+        gPropHost->propGetIntN(images[index], kOfxImagePropBounds, 4, bounds[index]) != kOfxStatOK ||
+        gPropHost->propGetInt(images[index], kOfxImagePropRowBytes, 0, &stride[index]) != kOfxStatOK) { valid = false; break; }
+  }
+  if (valid && !std::equal(bounds[0], bounds[0] + 4, bounds[1])) { valid = false; }
+  if (valid) {
+    const float gain = static_cast<float>(degrees / 360.0);
+    for (int y = 0; y < bounds[0][3] - bounds[0][1]; ++y) {
+      const auto* source = reinterpret_cast<const OfxRGBAColourF*>(static_cast<const char*>(data[0]) + y * stride[0]);
+      auto* output = reinterpret_cast<OfxRGBAColourF*>(static_cast<char*>(data[1]) + y * stride[1]);
+      for (int x = 0; x < bounds[0][2] - bounds[0][0]; ++x) {
+        output[x] = {source[x].r * gain, source[x].g * gain, source[x].b * gain, source[x].a};
+      }
+    }
+  }
+  for (auto image : images) {
+    if (image && gEffectHost->clipReleaseImage(image) != kOfxStatOK) { valid = false; }
+  }
+  return valid ? kOfxStatOK : kOfxStatFailed;
+}
+
 // Bool and numeric-index Choice animation are independent of StrChoice/String.
 bool booleanAnimationCapabilities() {
   for (const char* name : {kOfxParamHostPropSupportsBooleanAnimation,
@@ -2547,6 +2679,12 @@ OfxStatus probeAction(const char* action, const void* handle,
           selected == "curve_group_interpolation_authoring" ? AuthorHistoryEdit::Interpolation :
           selected == "curve_reset_authoring" ? AuthorHistoryEdit::Reset :
           AuthorHistoryEdit::Time)) { return kOfxStatFailed; }
+  if ((selected == "angle_time" || selected == "angle_compound") &&
+      (operation == kOfxActionCreateInstance || operation == kOfxImageEffectActionRender)) { std::abort(); }
+  if (selected == "angle" &&
+      (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged ||
+       operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
+      !angleQueries(operation, handle, in)) { return kOfxStatFailed; }
   if (selected == "boolean_hold" &&
       (operation == kOfxActionCreateInstance || operation == kOfxActionInstanceChanged ||
        operation == kOfxImageEffectActionRender || operation == kOfxActionDestroyInstance) &&
@@ -2659,7 +2797,10 @@ OfxStatus probeAction(const char* action, const void* handle,
         gParamHost->paramGetNumKeys(scalar, &keyCount) != kOfxStatOK) { return kOfxStatFailed; }
     // Canonical curves reject SDK author writes. A reset constant retains the
     // existing instance-local initialization contract; it does not edit Project.
-    const bool authorCurve = (selected == "canonical_curves" || isCurveLifecycleMode(selected) ||
+    int angleSourceKind = 0;
+    if (selected == "angle" && !angleSource(handle, angleSourceKind)) { return kOfxStatFailed; }
+    const bool angleCurve = selected == "angle" && (angleSourceKind == 2 || angleSourceKind == 3);
+    const bool authorCurve = angleCurve || (selected == "canonical_curves" || isCurveLifecycleMode(selected) ||
                               selected == "curve_authoring" || isAuthorHistoryMode(selected)) &&
                              !(selected == "curve_reset_authoring" && keyCount == 0);
     if (gParamHost->paramSetValue(scalar, scale) != (authorCurve ? kOfxStatErrUnsupported : kOfxStatOK) ||
@@ -2695,7 +2836,9 @@ OfxStatus probeAction(const char* action, const void* handle,
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
-      ? fixedCanvasPartialOutput(handle, in) : pluginMain(action, handle, in, out);
+      ? fixedCanvasPartialOutput(handle, in)
+      : selected == "angle" && operation == kOfxImageEffectActionRender
+      ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
     if (selected == "optional_unmapped" && operation == kOfxImageEffectActionDescribeInContext) {
       OfxPropertySetHandle clip = nullptr;
@@ -2800,6 +2943,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       result == kOfxStatOK && !canonicalCoordinateOutput(handle, in)) { return kOfxStatFailed; }
   if ((isCurveLifecycleMode(selected) || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
+  if (angleMode(selected) && result == kOfxStatOK &&
+      operation == kOfxImageEffectActionDescribeInContext && !defineAngle(handle, selected)) { return kOfxStatFailed; }
   if (selected == "boolean_hold" && result == kOfxStatOK) {
     // Basic acquires its suites inside Describe, not Load or setHost. Query
     // capabilities only after that original Describe has succeeded.
@@ -2998,9 +3143,10 @@ OfxStatus probe(const char* action, const void* handle,
   }
   // This mode checks every Render in-process. Keep the existing 32-row receipt
   // bounded across its nine source-revision renders and expose pre-Create refusal.
-  if (mode() == "boolean_hold" || mode() == "choice_hold") {
+  if (mode() == "boolean_hold" || mode() == "choice_hold" || angleMode(mode())) {
     if (std::strcmp(action, kOfxImageEffectActionRender) == 0) { observed = nullptr; }
-    if (std::strcmp(action, kOfxActionCreateInstance) == 0) { observed = action; }
+    if (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+        (angleMode(mode()) && std::strcmp(action, kOfxActionDestroyInstance) == 0)) { observed = action; }
   }
   if (choiceHoldMode(mode()) && std::strcmp(action, kOfxActionCreateInstance) == 0) { observed = action; }
   // These Describe-only modes must prove that Create was never entered. Keep
