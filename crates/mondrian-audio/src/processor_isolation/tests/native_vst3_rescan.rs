@@ -1260,7 +1260,8 @@ fn installed_vst3_runtime_peer_pending_preserves_single_owner_admission() {
     assert!(
         before.processors.iter().all(|processor| matches!(processor.state,
         AudioProcessorCursorState::Active { epoch, next_input_signal_sample }
-            if epoch == 619 && next_input_signal_sample.sample() == 4))
+            if epoch == AudioContinuityEpoch::new(619)
+                && next_input_signal_sample.sample() == 4))
     );
     let reads = media.reads.load(Ordering::Relaxed);
     assert!(reads > 0);
