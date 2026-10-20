@@ -2310,8 +2310,6 @@ OfxStatus probeAction(const char* action, const void* handle,
     }
   }
   if (selected == "aux_describe_load_failure" && operation == kOfxActionLoad) { return kOfxStatFailed; }
-  if (selected == "boolean_hold" && operation == kOfxActionDescribe &&
-      !booleanAnimationCapabilities()) { return kOfxStatFailed; }
   if (selected == "host_properties_readonly" && operation == kOfxActionDescribe &&
       !readonlyHostProperties(gHost)) { return kOfxStatFailed; }
   if (selected == "host_parameter_limit" && operation == kOfxActionDescribe &&
@@ -2683,6 +2681,9 @@ OfxStatus probeAction(const char* action, const void* handle,
   if ((isCurveLifecycleMode(selected) || selected == "curve_authoring" || isAuthorHistoryMode(selected)) && result == kOfxStatOK &&
       operation == kOfxImageEffectActionRender && !lifecycleOutput(handle, in)) { return kOfxStatFailed; }
   if (selected == "boolean_hold" && result == kOfxStatOK) {
+    // Basic acquires its suites inside Describe, not Load or setHost. Query
+    // capabilities only after that original Describe has succeeded.
+    if (operation == kOfxActionDescribe && !booleanAnimationCapabilities()) { return kOfxStatFailed; }
     if (operation == kOfxImageEffectActionDescribeInContext && !defineBooleanHold(handle)) { return kOfxStatFailed; }
     if (operation == kOfxImageEffectActionRender && !applyDiscreteGain(handle, in, "enabled")) { return kOfxStatFailed; }
   }
