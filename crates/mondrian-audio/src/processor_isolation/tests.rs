@@ -1775,8 +1775,9 @@ pub(super) fn pure_seed_factory(
 ) -> IsolatedAudioProcessorFactory {
     let payload = match format {
         NativeConfigurationFormat::Vst3ComponentAndController => serde_json::json!({
-            "schema_version":3,
+            "schema_version":4,
             "main_audio_input":Vst3MainAudioInput::Present,
+            "audio_output_count":1,
             "event_bus_contract":{"schema_version":1,"inputs":[],"outputs":[]},
             "binary_path":"nonexistent-owned-plugin.vst3", "class_id":"00112233445566778899AABBCCDDEEFF",
             "vendor":"Owned", "binary_sha256":vec![7_u8; 32], "state":state,
