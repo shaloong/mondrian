@@ -4,6 +4,7 @@
 
 use super::*;
 mod native_reprepare;
+mod native_reprepare_seek;
 mod native_vst3_reprepare;
 use crate::app::playback::{poll_audio_playback_at_for_test, AppAudioPlayback};
 use crate::app::product_action::{AudioProductAction, ProductAction};

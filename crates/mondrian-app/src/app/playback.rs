@@ -278,6 +278,17 @@ impl AppAudioPlayback {
         }
     }
 
+    fn seek_native_reprepare(
+        &mut self,
+        generation: u64,
+        anchor: AudioSamplePosition,
+    ) -> Result<bool, AudioPlaybackError> {
+        match self {
+            Self::Available(playback) => playback.seek_native_reprepare(generation, anchor),
+            Self::Unavailable { .. } => Ok(false),
+        }
+    }
+
     fn finish_native_reprepare(
         &mut self,
         generation: u64,
@@ -1113,18 +1124,34 @@ impl AppState {
                 "timeline frame must be non-negative",
             ));
         }
-        // Resume retains the exact pending installation; a fresh seek requires
-        // a separate qualified cancellation/migration path. Refuse before any
-        // observation-clock or Engine mutation, without replacing that owner.
-        if self.audio_playback.has_retained_native_reprepare() {
-            return Err(transport_action_error(
-                "seek",
-                "native restart is pending; fresh seek is not yet available",
-            ));
-        }
+        // This branch retires only PCM/output for the actual retained Source.
+        // Validate its identity before touching either observation or transport
+        // clocks; a stale Weak must never fall back to a cold renderer.
+        let retained_restart = if self.audio_playback.has_retained_native_reprepare() {
+            let sequence = self.active_sequence().expect("checked transport Sequence").id;
+            let _source = self.retained_native_reprepare_source("seek", sequence)?;
+            let generation = self
+                .audio_playback
+                .native_reprepare_pending_generation()
+                .ok_or_else(|| transport_action_error("seek", "native restart is unavailable"))?;
+            let next = generation.checked_add(1).ok_or_else(|| {
+                transport_action_error("seek", "native restart generation overflowed")
+            })?;
+            Some((generation, next))
+        } else {
+            None
+        };
         let observed_at = Instant::now();
-        self.synchronize_playback_observation_clock(observed_at);
-        let playback_now = self.playback_engine.monotonic_high_water();
+        let playback_now = if retained_restart.is_some() {
+            // A seek during HOLD has its own Engine target, never the old frozen
+            // callback's phase. Keep failed candidate admission non-mutating.
+            self.playback_timestamp_for_observation(observed_at)
+                .map_err(|error| transport_action_error("seek", error))?
+                .max(self.playback_engine.monotonic_high_water())
+        } else {
+            self.synchronize_playback_observation_clock(observed_at);
+            self.playback_engine.monotonic_high_water()
+        };
         let was_running = self.is_playing();
         let realtime_audio = self.playback_engine.snapshot().rate.supports_realtime_audio();
         let end_frame = self.last_content_frame()?;
@@ -1133,7 +1160,7 @@ impl AppState {
             .playback_timeline_binding(end_frame)
             .map_err(|error| transport_action_error("seek", error))?;
         let timeline_anchor = FramePosition::new(frame, time_base);
-        let renderer = (was_running && realtime_audio)
+        let renderer = (retained_restart.is_none() && was_running && realtime_audio)
             .then(|| self.audio_playback_renderer("seek"))
             .transpose()?
             .flatten();
@@ -1145,7 +1172,25 @@ impl AppState {
         self.audio_playback
             .validate_anchor(audio_anchor)
             .map_err(|error| transport_action_error("seek", error))?;
-        if was_running {
+        if let Some((generation, next)) = retained_restart {
+            // Finish all fallible Engine work before Media retires PCM. The
+            // actual work/provider retains its original admission generation.
+            if was_running {
+                engine
+                    .hold_for_native_audio_control(next, None, playback_now)
+                    .map_err(|error| transport_action_error("seek", error))?;
+            }
+            if !self
+                .audio_playback
+                .seek_native_reprepare(generation, audio_anchor)
+                .map_err(|error| transport_action_error("seek", error))?
+            {
+                return Err(transport_action_error(
+                    "seek",
+                    "retained native restart no longer accepts a seek",
+                ));
+            }
+        } else if was_running {
             self.commit_audio_playback("seek", audio_anchor, renderer)?;
         } else {
             self.audio_playback
@@ -5634,6 +5679,38 @@ pub(in crate::app) mod tests {
     }
 
     #[test]
+    fn successive_seeks_preserve_latest_paused_intent_and_reject_old_ready() {
+        let mut state = state_with_sequence(30);
+        play_ready(&mut state);
+        state.seek(0).expect("seek to Timeline origin");
+        let origin = state.pending_playback_frame_demand_identity().unwrap();
+        state.seek(10).expect("replace with nonzero intent");
+        let intermediate = state.pending_playback_frame_demand_identity().unwrap();
+        state.pause().expect("pause the latest intent");
+        state.seek(3).expect("seek while paused");
+        assert_eq!(state.current_frame(), 3);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Paused
+        );
+        let before = state.playback_engine.snapshot();
+        let observed_at = state.playback_observation_instant_anchor;
+        for stale in [origin, intermediate] {
+            assert!(!state.observe_frame_delivery_candidate(
+                FrameDeliveryCandidate::for_demand(stale, FrameDeliveryKind::Ready),
+                observed_at,
+            ));
+            assert_eq!(state.playback_engine.snapshot(), before);
+        }
+        play_ready(&mut state);
+        assert_eq!(state.current_frame(), 3);
+        assert_eq!(
+            state.playback_engine.snapshot().state,
+            TransportState::Playing
+        );
+    }
+
+    #[test]
     fn seek_records_preview_access_source() {
         let mut state = state_with_sequence(30);
 
@@ -7179,7 +7256,9 @@ pub(in crate::app) mod tests {
         let invalid = state.seek_with_source(-1, TimelineSeekSource::Settled).unwrap_err();
         assert!(invalid.to_string().contains("non-negative"));
         let error = state.seek_with_source(100, TimelineSeekSource::Settled).unwrap_err();
-        assert!(error.to_string().contains("native restart is pending"));
+        assert!(error.to_string().contains(
+            "retained native restart Source cannot be replaced or resumed under changed execution"
+        ));
         assert_eq!(state.playback_engine.snapshot(), engine);
         assert_eq!(state.playback_engine.monotonic_high_water(), clock);
         assert_eq!(state.playback_observation_instant_anchor, observation);
