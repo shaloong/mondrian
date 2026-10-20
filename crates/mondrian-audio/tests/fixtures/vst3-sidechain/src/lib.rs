@@ -600,6 +600,54 @@ impl IAudioProcessorTrait for GainProcessor {
         }
         let data = &*data;
         let mode = self.mode.load(Ordering::Relaxed);
+        if data.numSamples == 0 {
+            // A normative parameter flush has no sample grid, audio-pointer or
+            // musical-context access. Both absent I/O and the original declared
+            // bus counts are valid; zero counts never require null pointers.
+            let inputs = if mode == 2 { 2 } else { 3 };
+            if (data.numInputs != 0 && data.numInputs != inputs)
+                || (data.numOutputs != 0 && data.numOutputs != 1)
+                || data.symbolicSampleSize != SymbolicSampleSizes_::kSample32
+            {
+                return kInvalidArgument;
+            }
+            let mut gain = f64::from_bits(self.gain.load(Ordering::Relaxed));
+            if let Some(changes) = ComRef::from_raw(data.inputParameterChanges) {
+                let count = changes.getParameterCount();
+                if count < 0 {
+                    return kInvalidArgument;
+                }
+                for index in 0..count {
+                    let Some(queue) = ComRef::from_raw(changes.getParameterData(index)) else {
+                        continue;
+                    };
+                    if queue.getParameterId() != 0 {
+                        continue;
+                    }
+                    let count = queue.getPointCount();
+                    if count < 0 {
+                        return kInvalidArgument;
+                    }
+                    for index in 0..count {
+                        let mut offset = 0;
+                        let mut value = 0.0;
+                        if queue.getPoint(index, &mut offset, &mut value) != kResultOk
+                            || offset != 0
+                            || !value.is_finite()
+                            || !(0.0..=1.0).contains(&value)
+                        {
+                            return kInvalidArgument;
+                        }
+                        gain = value;
+                    }
+                    break;
+                }
+            }
+            // Commit only the complete parameter input. No delay, position,
+            // restart, output event or transport state advances without samples.
+            self.gain.store(gain.to_bits(), Ordering::Relaxed);
+            return kResultOk;
+        }
         let canonical_music = if mode == 8 {
             if self.configured_latency.load(Ordering::Relaxed) != 3 {
                 return kInvalidArgument;
@@ -1115,4 +1163,230 @@ extern "system" fn ModuleExit() -> bool {
 #[no_mangle]
 extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
     ComWrapper::new(Factory {}).to_com_ptr::<IPluginFactory>().unwrap().into_raw()
+}
+
+#[cfg(test)]
+mod zero_sample_contracts {
+    use super::*;
+
+    struct Queue(Vec<(i32, f64)>);
+    impl Class for Queue {
+        type Interfaces = (IParamValueQueue,);
+    }
+    impl IParamValueQueueTrait for Queue {
+        unsafe fn getParameterId(&self) -> ParamID {
+            0
+        }
+        unsafe fn getPointCount(&self) -> i32 {
+            self.0.len() as i32
+        }
+        unsafe fn getPoint(&self, index: i32, offset: *mut i32, value: *mut f64) -> tresult {
+            let Some(&(at, scalar)) = usize::try_from(index).ok().and_then(|i| self.0.get(i))
+            else {
+                return kInvalidArgument;
+            };
+            if offset.is_null() || value.is_null() {
+                return kInvalidArgument;
+            }
+            *offset = at;
+            *value = scalar;
+            kResultOk
+        }
+        unsafe fn addPoint(&self, _offset: i32, _value: f64, _index: *mut i32) -> tresult {
+            kNotImplemented
+        }
+    }
+    struct Changes {
+        queue: Option<ComPtr<IParamValueQueue>>,
+        writes: Cell<usize>,
+    }
+    impl Class for Changes {
+        type Interfaces = (IParameterChanges,);
+    }
+    impl IParameterChangesTrait for Changes {
+        unsafe fn getParameterCount(&self) -> i32 {
+            i32::from(self.queue.is_some())
+        }
+        unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
+            if index == 0 {
+                self.queue.as_ref().map_or(ptr::null_mut(), ComPtr::as_ptr)
+            } else {
+                ptr::null_mut()
+            }
+        }
+        unsafe fn addParameterData(
+            &self,
+            _id: *const ParamID,
+            _index: *mut i32,
+        ) -> *mut IParamValueQueue {
+            self.writes.set(self.writes.get() + 1);
+            ptr::null_mut()
+        }
+    }
+    struct Events(Cell<usize>);
+    impl Class for Events {
+        type Interfaces = (IEventList,);
+    }
+    impl IEventListTrait for Events {
+        unsafe fn getEventCount(&self) -> i32 {
+            0
+        }
+        unsafe fn getEvent(&self, _index: i32, _event: *mut Event) -> tresult {
+            kInvalidArgument
+        }
+        unsafe fn addEvent(&self, _event: *mut Event) -> tresult {
+            self.0.set(self.0.get() + 1);
+            kResultOk
+        }
+    }
+    fn changes(points: Vec<(i32, f64)>) -> ComPtr<IParameterChanges> {
+        ComWrapper::new(Changes {
+            queue: Some(ComWrapper::new(Queue(points)).to_com_ptr().unwrap()),
+            writes: Cell::new(0),
+        })
+        .to_com_ptr()
+        .unwrap()
+    }
+    fn data() -> ProcessData {
+        ProcessData {
+            processMode: ProcessModes_::kRealtime,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32,
+            numSamples: 0,
+            numInputs: 0,
+            numOutputs: 0,
+            inputs: ptr::null_mut(),
+            outputs: ptr::null_mut(),
+            inputParameterChanges: ptr::null_mut(),
+            outputParameterChanges: ptr::null_mut(),
+            inputEvents: ptr::null_mut(),
+            outputEvents: ptr::null_mut(),
+            processContext: ptr::null_mut(),
+        }
+    }
+    fn dsp_state(processor: &GainProcessor) -> ([u32; 14], usize, u32, u64) {
+        (
+            std::array::from_fn(|i| processor.delay[i].load(Ordering::Relaxed)),
+            processor.position.load(Ordering::Relaxed),
+            processor.mode.load(Ordering::Relaxed),
+            processor.musical_attempts.load(Ordering::Relaxed),
+        )
+    }
+
+    #[test]
+    fn zero_sample_process_uses_real_com_queues_without_advancing_dsp_or_emitting_output() {
+        let wrapper = ComWrapper::new(GainProcessor::new());
+        let processor = wrapper.to_com_ptr::<IAudioProcessor>().unwrap();
+        wrapper.position.store(2, Ordering::Relaxed);
+        wrapper.musical_attempts.store(17, Ordering::Relaxed);
+        for (index, slot) in wrapper.delay.iter().enumerate() {
+            slot.store(index as u32 + 1, Ordering::Relaxed);
+        }
+        let output = ComWrapper::new(Changes { queue: None, writes: Cell::new(0) });
+        let output_parameters = output.to_com_ptr::<IParameterChanges>().unwrap();
+        let events = ComWrapper::new(Events(Cell::new(0)));
+        let output_events = events.to_com_ptr::<IEventList>().unwrap();
+        for mode in 0..=8 {
+            wrapper.mode.store(mode, Ordering::Relaxed);
+            let before = dsp_state(&wrapper);
+            let gain = wrapper.gain.load(Ordering::Relaxed);
+            let mut block = data();
+            block.outputParameterChanges = output_parameters.as_ptr();
+            block.outputEvents = output_events.as_ptr();
+            assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+            assert_eq!(wrapper.gain.load(Ordering::Relaxed), gain);
+            let input = changes(vec![(0, 0.75)]);
+            block.inputParameterChanges = input.as_ptr();
+            assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+            assert_eq!(wrapper.gain.load(Ordering::Relaxed), 0.75_f64.to_bits());
+            // Declared bus metadata remains legal with no audio samples. No
+            // pointers or context are read, including non-null zero-count I/O.
+            let mut untouched: [AudioBusBuffers; 3] = std::array::from_fn(|_| AudioBusBuffers {
+                numChannels: 2,
+                silenceFlags: 7,
+                __field0: AudioBusBuffers__type0 { channelBuffers32: ptr::null_mut() },
+            });
+            block.inputs = untouched.as_mut_ptr();
+            block.outputs = untouched.as_mut_ptr();
+            assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+            block.numInputs = if mode == 2 { 2 } else { 3 };
+            block.numOutputs = 1;
+            assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+            assert!(untouched.iter().all(|bus| bus.silenceFlags == 7));
+            assert_eq!(dsp_state(&wrapper), before);
+            assert_eq!(output.writes.get(), 0);
+            assert_eq!(events.0.get(), 0);
+            for (offset, value) in [
+                (-1, 0.25),
+                (1, 0.25),
+                (0, f64::NAN),
+                (0, f64::INFINITY),
+                (0, -0.25),
+                (0, 1.25),
+            ] {
+                let input = changes(vec![(0, 0.25), (offset, value)]);
+                block.inputParameterChanges = input.as_ptr();
+                assert_eq!(unsafe { processor.process(&mut block) }, kInvalidArgument);
+                assert_eq!(wrapper.gain.load(Ordering::Relaxed), 0.75_f64.to_bits());
+                assert_eq!(dsp_state(&wrapper), before);
+            }
+            block.inputParameterChanges = ptr::null_mut();
+            for count in [-1, 4] {
+                block.numInputs = count;
+                assert_eq!(unsafe { processor.process(&mut block) }, kInvalidArgument);
+            }
+        }
+    }
+
+    #[test]
+    fn positive_process_preserves_bus_automation_and_delay_after_zero_sample_control() {
+        let wrapper = ComWrapper::new(GainProcessor::new());
+        let processor = wrapper.to_com_ptr::<IAudioProcessor>().unwrap();
+        let input = changes(vec![(0, 0.25)]);
+        let mut block = data();
+        block.inputParameterChanges = input.as_ptr();
+        assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+        let mut samples = [[0.0_f32; 4]; 6];
+        samples[0] = [1.0, 2.0, 3.0, 4.0];
+        samples[1] = [-1.0, -2.0, -3.0, -4.0];
+        let mut pointers: [[*mut f32; 2]; 3] = std::array::from_fn(|bus| {
+            [
+                samples[bus * 2].as_mut_ptr(),
+                samples[bus * 2 + 1].as_mut_ptr(),
+            ]
+        });
+        let mut buses: [AudioBusBuffers; 3] = std::array::from_fn(|bus| AudioBusBuffers {
+            numChannels: 2,
+            silenceFlags: 0,
+            __field0: AudioBusBuffers__type0 { channelBuffers32: pointers[bus].as_mut_ptr() },
+        });
+        let mut left = [99.0_f32; 4];
+        let mut right = [99.0_f32; 4];
+        let mut output_pointers = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            numChannels: 2,
+            silenceFlags: 0,
+            __field0: AudioBusBuffers__type0 { channelBuffers32: output_pointers.as_mut_ptr() },
+        };
+        let automated = changes(vec![(0, 0.5)]);
+        block.numSamples = 4;
+        block.numInputs = 3;
+        block.numOutputs = 1;
+        block.inputs = buses.as_mut_ptr();
+        block.outputs = &mut output;
+        block.inputParameterChanges = automated.as_ptr();
+        wrapper.active_buses.store(0x107, Ordering::Relaxed);
+        block.numInputs = 2;
+        assert_eq!(unsafe { processor.process(&mut block) }, kInvalidArgument);
+        block.numInputs = 3;
+        assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+        assert_eq!(left, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(right, [0.0, 0.0, 0.0, -1.0]);
+        assert_eq!(wrapper.gain.load(Ordering::Relaxed), 0.5_f64.to_bits());
+        samples[0].copy_from_slice(&[5.0, 6.0, 7.0, 8.0]);
+        samples[1].copy_from_slice(&[-5.0, -6.0, -7.0, -8.0]);
+        block.inputParameterChanges = ptr::null_mut();
+        assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
+        assert_eq!(left, [2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(right, [-2.0, -3.0, -4.0, -5.0]);
+    }
 }
