@@ -6,11 +6,13 @@ use clack_extensions::latency::{PluginLatency, PluginLatencyImpl};
 use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::render::{PluginRender, PluginRenderImpl, RenderMode};
 use clack_extensions::thread_check::HostThreadCheck;
+use clack_extensions::timer::{HostTimer, PluginTimer, PluginTimerImpl, TimerId};
 use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::tail::{PluginTail, PluginTailImpl, TailLength};
 use clack_plugin::prelude::*;
 use clack_plugin::events::event_types::TransportFlags;
 use clack_plugin::stream::{InputStream, OutputStream};
+use std::cell::Cell;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
@@ -49,7 +51,8 @@ impl Plugin for SidechainFixture {
             .register::<PluginState>()
             .register::<PluginLatency>()
             .register::<PluginTail>()
-            .register::<PluginRender>();
+            .register::<PluginRender>()
+            .register::<PluginTimer>();
     }
 }
 
@@ -85,10 +88,10 @@ impl DefaultPluginFactory for SidechainFixture {
     }
 
     fn new_main_thread<'a>(
-        _host: HostMainThreadHandle<'a>,
+        host: HostMainThreadHandle<'a>,
         shared: &'a Shared<'a>,
     ) -> Result<Main<'a>, PluginError> {
-        Ok(Main(shared))
+        Ok(Main(shared, host, Cell::new(TimerFixtureState::Dormant)))
     }
 }
 
@@ -150,10 +153,126 @@ impl Drop for Shared<'_> {
     fn drop(&mut self) { let _ = self.check_role(RoleRequirement::Main); }
 }
 
-/// Main-thread port metadata and state adapter.
-pub struct Main<'a>(&'a Shared<'a>);
+#[derive(Clone, Copy)]
+enum TimerFixtureState {
+    Dormant,
+    Registered { a: TimerId, b: TimerId },
+    Finished,
+}
+
+/// Main-thread port metadata, state and owned timer adapter.
+pub struct Main<'a>(
+    &'a Shared<'a>,
+    HostMainThreadHandle<'a>,
+    Cell<TimerFixtureState>,
+);
+
+impl Main<'_> {
+    fn timer_log(&self, message: &'static std::ffi::CStr) -> Result<(), PluginError> {
+        let logger = self
+            .0
+            .host
+            .get_extension::<HostLog>()
+            .ok_or(PluginError::Message("timer fixture requires host log"))?;
+        logger.log(&self.0.host, LogSeverity::Info, message);
+        Ok(())
+    }
+
+    fn timer_main_role(&self) -> Result<(), PluginError> {
+        self.0.check_role(RoleRequirement::Main)?;
+        let check = self
+            .0
+            .host
+            .get_extension::<HostThreadCheck>()
+            .ok_or(PluginError::Message("timer fixture requires thread check"))?;
+        if check.is_main_thread(&self.0.host) != Some(true)
+            || check.is_audio_thread(&self.0.host) != Some(false)
+        {
+            return Err(PluginError::Message(
+                "timer callback must be main, not audio",
+            ));
+        }
+        Ok(())
+    }
+
+    fn register_fixture_timers(&self) -> Result<(), PluginError> {
+        self.timer_main_role()?;
+        // Never register again after a failure or after A consumes this pair.
+        self.2.set(TimerFixtureState::Finished);
+        let timer = self
+            .1
+            .get_extension::<HostTimer>()
+            .ok_or(PluginError::Message("standard host timer unavailable"))?;
+        let a = timer.register_timer(&self.1, 1)?;
+        self.timer_log(c"timer:registered:A")?;
+        let b = timer.register_timer(&self.1, 1)?;
+        if a == b {
+            return Err(PluginError::Message("live timer IDs must be distinct"));
+        }
+        let registered_b = std::time::Instant::now();
+        self.2.set(TimerFixtureState::Registered { a, b });
+        self.timer_log(c"timer:registered:B-distinct")?;
+        // This owned mode creates a due pair, not a cadence benchmark. The
+        // current host assigns the first two empty slots to A then B. Its
+        // service_main_tick samples due time AFTER this main callback returns,
+        // so both registered one-millisecond deadlines must be in that snapshot.
+        // No DSP callback sleeps, and no independent idle scheduling is claimed.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        if registered_b.elapsed() < std::time::Duration::from_millis(1) {
+            return Err(PluginError::Message("timer due-pair precondition failed"));
+        }
+        self.timer_log(c"timer:both-due-before-main-return")
+    }
+
+    fn consume_fixture_timer(&self, id: TimerId) -> Result<(), PluginError> {
+        self.timer_main_role()?;
+        let TimerFixtureState::Registered { a, b } = self.2.get() else {
+            return Err(PluginError::Message("unexpected repeated timer callback"));
+        };
+        if id != a {
+            return Err(PluginError::Message(
+                "B must be skipped after A unregisters it",
+            ));
+        }
+        self.2.set(TimerFixtureState::Finished);
+        self.timer_log(c"timer:A:main=true:audio=false")?;
+        let timer = self
+            .1
+            .get_extension::<HostTimer>()
+            .ok_or(PluginError::Message("standard host timer disappeared"))?;
+        timer.unregister_timer(&self.1, b)?;
+        self.timer_log(c"timer:unregistered:B")?;
+        timer.unregister_timer(&self.1, a)?;
+        self.timer_log(c"timer:unregistered:A")?;
+        if timer.unregister_timer(&self.1, b).is_ok() {
+            return Err(PluginError::Message("duplicate B unregister must fail"));
+        }
+        self.timer_log(c"timer:duplicate-unregister:B:refused")?;
+        if timer.unregister_timer(&self.1, a).is_ok() {
+            return Err(PluginError::Message("duplicate A unregister must fail"));
+        }
+        self.timer_log(c"timer:duplicate-unregister:A:refused")
+    }
+}
+
 impl<'a> PluginMainThread<'a, Shared<'a>> for Main<'a> {
-    fn on_main_thread(&self) { let _ = self.0.check_role(RoleRequirement::Main); }
+    fn on_main_thread(&self) {
+        let _ = self.0.check_role(RoleRequirement::Main);
+        if self.0.mode.load(Ordering::Relaxed) == 14
+            && matches!(self.2.get(), TimerFixtureState::Dormant)
+            && self.register_fixture_timers().is_err()
+        {
+            let _ = self.timer_log(c"timer:registration-failed");
+        }
+    }
+}
+
+impl PluginTimerImpl for Main<'_> {
+    fn on_timer(&self, id: TimerId) {
+        if self.consume_fixture_timer(id).is_err() {
+            let _ = self.timer_log(c"timer:unexpected-callback-or-unregister-failure");
+        }
+    }
 }
 
 impl PluginStateImpl for Main<'_> {
@@ -282,7 +401,7 @@ const ECHO_FRAMES: usize = 256;
 // Isolated mode13 appends only a bounded configuration generation 0..=2.
 fn configuration_gain(bytes: [u8; 5]) -> Result<f32, PluginError> {
     let gain = f32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-    if bytes[0] > 13 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
+    if bytes[0] > 14 || !gain.is_finite() || !(0.0..=1.0).contains(&gain) {
         return Err(PluginError::Message("invalid fixture state"));
     }
     Ok(gain)
@@ -365,6 +484,11 @@ impl<'a> PluginAudioProcessor<'a, Shared<'a>, Main<'a>> for Processor<'a> {
         config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
         shared.check_role(RoleRequirement::Main)?;
+        if shared.mode.load(Ordering::Relaxed) == 14 {
+            // Registration runs through the actual plugin main callback, after
+            // the normal restored-state/render-mode/activation path.
+            shared.host.request_callback();
+        }
         if config.max_frames_count == 0 || config.max_frames_count > 65_536 {
             return Err(PluginError::Message("fixture block extent"));
         }
@@ -621,7 +745,7 @@ mod finite_echo_tests {
         for _ in 0..=ECHO_FRAMES {
             assert_eq!(live.process_frame([0.0; 2]), [0.0; 2]);
         }
-        bytes[0] = 14;
+        bytes[0] = 15;
         assert!(configuration_gain(bytes).is_err());
     }
 }
@@ -644,7 +768,7 @@ mod repeat_restart_tests {
         }
         assert!(read_repeat_restart_count(&mut &[][..]).is_err());
         assert!(read_repeat_restart_count(&mut &[3][..]).is_err());
-        header[0] = 14;
+        header[0] = 15;
         assert!(configuration_gain(header).is_err());
     }
 

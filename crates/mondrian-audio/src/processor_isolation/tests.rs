@@ -1761,6 +1761,10 @@ mod external_vendor;
 mod native_host_log_tests;
 
 #[cfg(target_os = "windows")]
+#[path = "tests/native_clap_timer.rs"]
+mod native_clap_timer_tests;
+
+#[cfg(target_os = "windows")]
 mod native_editor_window;
 
 pub(super) fn pure_seed_factory(
