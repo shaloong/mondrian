@@ -837,13 +837,16 @@ fn close_after_real_refused_restart(paused: bool) {
     }));
     drop(release);
     let cleanup = state.shutdown_for_endurance(Instant::now() + Duration::from_secs(2));
+    if let Err(panic) = result {
+        if !cleanup.all_resources_released() {
+            eprintln!("REFUSED_CLOSE_CLEANUP_HOLD after original failure: {cleanup:?}");
+        }
+        std::panic::resume_unwind(panic);
+    }
     assert!(
         cleanup.all_resources_released(),
         "REFUSED_CLOSE_CLEANUP_HOLD: {cleanup:?}"
     );
-    if let Err(panic) = result {
-        std::panic::resume_unwind(panic);
-    }
 }
 
 #[test]
