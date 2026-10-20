@@ -86,6 +86,31 @@ fn deactivated_parameters(
     state: Option<&[u8]>,
     observed: bool,
 ) -> Result<DeactivatedParameterList, AudioProcessorHostError> {
+    let (shared, mut instance) = deactivated_instance(entry, plugin_id, state)?;
+    let mut capture = observed.then(ParameterQueryCapture::default);
+    let before_metadata = observe_main_source(&shared);
+    // Keep the Result owned: an original failure cannot discard the same-call
+    // capture or cause a diagnostic catch-up query.
+    let parameters = list_parameters_observed(&instance.plugin_handle(), capture.as_mut());
+    let after_metadata = observe_main_source(&shared);
+    drop(instance);
+    let after_drop = observe_main_source(&shared);
+    Ok(DeactivatedParameterList {
+        parameters,
+        capture,
+        before_metadata,
+        after_metadata,
+        after_drop,
+    })
+}
+
+// This is the original diagnostic setup on its actual owning main thread.
+// Neither caller activates or processes the returned instance.
+pub(super) fn deactivated_instance(
+    entry: &PluginEntry,
+    plugin_id: &str,
+    state: Option<&[u8]>,
+) -> Result<(ClapHostShared, PluginInstance<ClapHost>), AudioProcessorHostError> {
     if state.is_some_and(|bytes| bytes.len() > MAX_CAPTURED_STATE_BYTES) {
         return Err(invalid("diagnostic CLAP state exceeds its bound"));
     }
@@ -137,21 +162,7 @@ fn deactivated_parameters(
     }
     configure_render_mode(&instance.plugin_handle(), AudioProcessingMode::Offline)?;
     shared.service_callbacks(&mut instance)?;
-    let mut capture = observed.then(ParameterQueryCapture::default);
-    let before_metadata = observe_main_source(&shared);
-    // Keep the Result owned: an original failure cannot discard the same-call
-    // capture or cause a diagnostic catch-up query.
-    let parameters = list_parameters_observed(&instance.plugin_handle(), capture.as_mut());
-    let after_metadata = observe_main_source(&shared);
-    drop(instance);
-    let after_drop = observe_main_source(&shared);
-    Ok(DeactivatedParameterList {
-        parameters,
-        capture,
-        before_metadata,
-        after_metadata,
-        after_drop,
-    })
+    Ok((shared, instance))
 }
 
 fn bits(bits: u64) -> String {
@@ -299,10 +310,10 @@ fn source_json(observation: MainSourceObservation) -> serde_json::Value {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Binding {
-    path: PathBuf,
-    bytes: u64,
-    sha256: String,
+pub(super) struct Binding {
+    pub(super) path: PathBuf,
+    pub(super) bytes: u64,
+    pub(super) sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -336,7 +347,7 @@ impl DiagnosticMode {
     }
 }
 
-fn require_actual_job() {
+pub(super) fn require_actual_job() {
     let mut inside = 0;
     // SAFETY: valid current-process pseudo handle and live BOOL output; null
     // job asks membership only. The external receipt binds the actual Job.
@@ -351,7 +362,7 @@ fn require_actual_job() {
     assert_ne!(inside, 0, "frozen outer native Job required");
 }
 
-fn no_reparse(path: &Path) {
+pub(super) fn no_reparse(path: &Path) {
     assert!(path.is_absolute(), "absolute diagnostic input required");
     for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() {
@@ -366,7 +377,7 @@ fn no_reparse(path: &Path) {
     }
 }
 
-fn lease_binding(binding: &Binding, cap: u64) -> fs::File {
+pub(super) fn lease_binding(binding: &Binding, cap: u64) -> fs::File {
     no_reparse(&binding.path);
     assert!(
         binding.bytes > 0 && binding.bytes <= cap,
