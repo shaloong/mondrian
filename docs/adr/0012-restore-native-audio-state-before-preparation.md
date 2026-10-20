@@ -64,14 +64,22 @@ order is now static metadata, native start, then execution facts. The official
 permits these UI queries in Processing. No extra activation API or state owner is
 introduced, and failed matching remains terminal with the original hold/fees.
 
+The Host's `initial_process_mode` seeds the existing PluginImpl mode in that same
+load body, before preparation. Worker and probe builders use their original
+request mode; Fresh reuses the same Host. The default remains Realtime, and the
+existing later setters remain in place. Explicit non-Realtime Eager loads also
+receive the builder's actual rate/block size at first setup. Prefetch reuses the
+existing capability check before preparation or Deferred return; the standalone
+SDK helper rejects non-Realtime initial modes rather than dropping this input.
+
 ## Migration and validation
 
-Finite Windows qualification is complete for this buffer family: SDK401,
+Finite Windows qualification is complete for this buffer family: SDK404,
 Audio770 and App181 ordinary controls, plus 27 native exact controls (ten SDK,
 sixteen Audio/Product and one App). Eager/no-bounds 33-bus, zero-channel and
 fallback controls remain passing. The real DLL default-six-channel to saved
-Stereo case, first 48k/4-frame setup, Event16, original Note/initial-input/zero
-paths and real MDA rescan pass. The actual Runtime latency failure turns green
+Stereo case, first Offline/48k/4-frame setup, Event16, original Note/initial-input/
+zero paths and real MDA rescan pass. The actual Runtime latency failure turns green
 under its unchanged assertions after the activation-phase correction; seed and
 App regressions pass. Resource tests cover checked geometry, actual overlap and
 exact/one-byte-short parent admission. These are finite functional conditions,
@@ -83,7 +91,8 @@ heap usage, realtime safety, other platforms or every SDK load path. Audio DAG,
 author state, Timeline semantics, project format and retirement authority remain
 unchanged. The current capability matrices remain the qualification authority.
 
-Initial processing mode is a separate existing gap: cold/Fresh restore prepares
-with the SDK's default Realtime mode before the Worker sets Offline. The current
-rate/block-size qualification does not certify the first setup's mode. A later
-initial-mode input must follow the same load body without preparing default buses.
+The SDK real-DLL control verifies first-setup mode with an explicit Offline
+positive and a default-Realtime refusal under the same restored state/rate/block
+conditions, preserving the original state audit and PCM assertions. Root wiring
+and its existing Product/App regressions pass; those Product controls do not
+independently capture the mode of the first native setup.

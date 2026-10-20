@@ -422,10 +422,12 @@ this is a known subset, not the entire native host. Windows VST3 cold/Fresh now
 adds optional geometry bounds and U=2P+2A+Q+W+2L+M for the known audio-buffer
 family through that same profile. Deferred loading restores before preparation;
 exact latency/tail is checked after native start and before Ready/Fresh install.
-SDK401/Audio770/App181 and 27 native exact controls pass within the conditions in
-the qualification matrix. Discovery/manual validation Root admission and the
-first restore setup mode remain separate gaps. Complete nested SDK, COM,
-state, descriptor and message lifetimes still require owning visitors and
+SDK404/Audio770/App181 and 27 native exact controls pass within the conditions in
+the qualification matrix. The original request mode now seeds the existing mode
+before preparation; the SDK real-DLL first-Offline positive/default-Realtime
+refusal passes. Product first-setup mode is not independently captured, and
+Discovery/manual validation Root admission remains separate. Complete nested SDK,
+COM, state, descriptor and message lifetimes still require owning visitors and
 incremental old/new/temporary peak admission. Bounded shared mappings alone
 do not describe that full memory footprint. Unknown third-party heap/RSS and
 OS/allocator bookkeeping require a separately described supervised envelope,

@@ -385,7 +385,11 @@ fn probe_loaded(
     if state.is_some_and(|state| state.len() > MAX_STATE_BYTES) {
         return Err(invalid("VST3 probe state exceeds the limit"));
     }
-    let mode = if offline { ProcessMode::Offline } else { ProcessMode::Realtime };
+    let mode = if offline {
+        ProcessMode::Offline
+    } else {
+        ProcessMode::Realtime
+    };
     let mut host = Vst3Host::builder()
         .plugin_interfaces(super::vst3_worker::product_plugin_interfaces())
         .initial_process_mode(mode)
