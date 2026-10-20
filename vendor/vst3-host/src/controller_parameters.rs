@@ -1,7 +1,9 @@
-//! Bounded borrowed observations of the native edit controller, on its owner thread.
+//! Borrowed native controller query frames, used on the control owner.
 //!
-//! This API does not drain deferred DSP feedback, mutate the controller, cache values,
-//! publish author edits, or retire restart callbacks. The caller owns those decisions.
+//! Strict author/presentation observation does not drain deferred DSP feedback or
+//! mutate the controller. The legacy-compatible `Plugin::visit_parameters_bounded`
+//! entry retains its original once-before-query deferred controller drain instead.
+//! Neither frame publishes author edits, caches values, or retires restart callbacks.
 
 use vst3::Steinberg::Vst::ParameterInfo;
 
@@ -61,7 +63,8 @@ impl<'a> ControllerParameterRef<'a> {
         self.frame.info.flags & vst3::Steinberg::Vst::ParameterInfo_::ParameterFlags_::kIsReadOnly
             != 0
     }
-    /// Current controller value; the consumer must validate finiteness and range.
+    /// Current controller value. Strict author consumers validate finiteness and
+    /// range; compatibility metadata scans retain legacy query-only semantics.
     pub fn normalized(self) -> f64 {
         self.frame.value
     }
