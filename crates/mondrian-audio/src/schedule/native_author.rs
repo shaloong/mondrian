@@ -17,18 +17,40 @@ fn strip_target(locator: NativeAudioEditorLocator, owner: Owner, insertion: Inse
     locator.owner == owner && locator.insertion == insertion
 }
 
+#[derive(Clone, Copy)]
+enum AuthorRackSite {
+    Strip(Owner, Insertion),
+    Scope(mondrian_core::AudioProcessingScopeId),
+}
+
+impl AuthorRackSite {
+    fn contains(self, locator: NativeAudioEditorLocator) -> bool {
+        match self {
+            Self::Strip(owner, insertion) => strip_target(locator, owner, insertion),
+            Self::Scope(id) => {
+                matches!(locator.owner, Owner::Contribution { scope_id, .. }
+                if scope_id == id)
+                    && locator.insertion == Insertion::Scope
+            }
+        }
+    }
+}
+
 fn compatible_rack(
     old: &CompiledRack,
     next: &CompiledRack,
-    allow_target: bool,
-    locator: NativeAudioEditorLocator,
+    site: AuthorRackSite,
+    locators: &[NativeAudioEditorLocator],
     changed: &mut usize,
 ) -> Result<(), AudioCompileError> {
     if old.processors.len() != next.processors.len() {
         return Err(refused("native author handoff changed processor topology"));
     }
     for (old, next) in old.processors.iter().zip(&next.processors) {
-        if allow_target && old.instance_id == locator.instance {
+        if locators
+            .iter()
+            .any(|locator| site.contains(*locator) && old.instance_id == locator.instance)
+        {
             if old.instance_id != next.instance_id
                 || old.definition != next.definition
                 || old.parameters.len() != next.parameters.len()
@@ -58,7 +80,7 @@ fn compatible_strip(
     old: &CompiledChannelStrip,
     next: &CompiledChannelStrip,
     owner: Owner,
-    locator: NativeAudioEditorLocator,
+    locators: &[NativeAudioEditorLocator],
     changed: &mut usize,
 ) -> Result<(), AudioCompileError> {
     if old.input_trim_db.to_bits() != next.input_trim_db.to_bits()
@@ -70,17 +92,49 @@ fn compatible_strip(
     compatible_rack(
         &old.pre_fader,
         &next.pre_fader,
-        strip_target(locator, owner, Insertion::PreFader),
-        locator,
+        AuthorRackSite::Strip(owner, Insertion::PreFader),
+        locators,
         changed,
     )?;
     compatible_rack(
         &old.post_fader,
         &next.post_fader,
-        strip_target(locator, owner, Insertion::PostFader),
-        locator,
+        AuthorRackSite::Strip(owner, Insertion::PostFader),
+        locators,
         changed,
     )
+}
+
+// Count each borrowed canonical locator without allocating a second membership
+// table. Runtime separately authenticates the actual retained Hosted members.
+fn locator_count(program: &CompiledAudioProgram, locator: NativeAudioEditorLocator) -> usize {
+    let rack = |rack: &CompiledRack, site: AuthorRackSite| {
+        rack.processors
+            .iter()
+            .filter(|processor| site.contains(locator) && processor.instance_id == locator.instance)
+            .count()
+    };
+    let strip = |strip: &CompiledChannelStrip, owner| {
+        rack(
+            &strip.pre_fader,
+            AuthorRackSite::Strip(owner, Insertion::PreFader),
+        ) + rack(
+            &strip.post_fader,
+            AuthorRackSite::Strip(owner, Insertion::PostFader),
+        )
+    };
+    program
+        .processing_scopes
+        .values()
+        .map(|scope| rack(&scope.rack, AuthorRackSite::Scope(scope.id)))
+        .sum::<usize>()
+        + program
+            .track_channels
+            .iter()
+            .map(|(id, track)| strip(&track.strip, Owner::Track(*id)))
+            .sum::<usize>()
+        + program.buses.iter().map(|(id, bus)| strip(bus, Owner::Bus(*id))).sum::<usize>()
+        + strip(&program.output, Owner::Output(program.output_id))
 }
 
 // Plain AudioNote PartialEq loses the distinction between -0.0 and +0.0.
@@ -108,6 +162,14 @@ fn compatible_program(
     next: &CompiledAudioProgram,
     locator: NativeAudioEditorLocator,
 ) -> Result<(), AudioCompileError> {
+    compatible_program_selection(old, next, std::slice::from_ref(&locator))
+}
+
+fn compatible_program_selection(
+    old: &CompiledAudioProgram,
+    next: &CompiledAudioProgram,
+    locators: &[NativeAudioEditorLocator],
+) -> Result<(), AudioCompileError> {
     if !same_note_score(&old.note_lanes, &next.note_lanes) {
         return Err(refused(
             "native author handoff changed immutable Note score",
@@ -128,9 +190,9 @@ fn compatible_program(
             "native author handoff changed signal topology or source/time mapping",
         ));
     }
-    if let Owner::Contribution { .. } = locator.owner
-        && locator.insertion != Insertion::Scope
-    {
+    if locators.iter().any(|locator| {
+        matches!(locator.owner, Owner::Contribution { .. }) && locator.insertion != Insertion::Scope
+    }) {
         return Err(refused("native author handoff Scope insertion is invalid"));
     }
     // The exact selected occurrence was admitted against its actual retained
@@ -146,10 +208,13 @@ fn compatible_program(
         {
             return Err(refused("native author handoff changed Scope mathematics"));
         }
-        let allow = matches!(locator.owner, Owner::Contribution { scope_id, .. }
-            if scope_id == *id)
-            && locator.insertion == Insertion::Scope;
-        compatible_rack(&old.rack, &next.rack, allow, locator, &mut changed)?;
+        compatible_rack(
+            &old.rack,
+            &next.rack,
+            AuthorRackSite::Scope(*id),
+            locators,
+            &mut changed,
+        )?;
     }
     for (id, old) in &old.track_channels {
         let next = &next.track_channels[id];
@@ -160,21 +225,30 @@ fn compatible_program(
             &old.strip,
             &next.strip,
             Owner::Track(*id),
-            locator,
+            locators,
             &mut changed,
         )?;
     }
     for (id, old) in &old.buses {
-        compatible_strip(old, &next.buses[id], Owner::Bus(*id), locator, &mut changed)?;
+        compatible_strip(
+            old,
+            &next.buses[id],
+            Owner::Bus(*id),
+            locators,
+            &mut changed,
+        )?;
     }
     compatible_strip(
         &old.output,
         &next.output,
         Owner::Output(old.output_id),
-        locator,
+        locators,
         &mut changed,
     )?;
-    if changed != 1 {
+    if locators.is_empty()
+        || changed != locators.len()
+        || locators.iter().any(|locator| locator_count(old, *locator) != 1)
+    {
         return Err(refused(
             "native author handoff requires one exact canonical processor",
         ));
@@ -240,6 +314,22 @@ impl PreparedAudioPlan {
         locator: NativeAudioEditorLocator,
     ) -> Result<usize, AudioCompileError> {
         compatible_program(self.program.as_ref(), next_program, locator)?;
+        self.requested_compatible_native_author_logical_bytes(next_program)
+    }
+
+    pub(crate) fn requested_terminal_author_logical_bytes(
+        &self,
+        next_program: &CompiledAudioProgram,
+        locators: &[NativeAudioEditorLocator],
+    ) -> Result<usize, AudioCompileError> {
+        compatible_program_selection(self.program.as_ref(), next_program, locators)?;
+        self.requested_compatible_native_author_logical_bytes(next_program)
+    }
+
+    fn requested_compatible_native_author_logical_bytes(
+        &self,
+        next_program: &CompiledAudioProgram,
+    ) -> Result<usize, AudioCompileError> {
         let base = Self::requested_base_logical_bytes(next_program)?;
         let notes = self
             .schedule
@@ -267,6 +357,22 @@ impl PreparedAudioPlan {
         locator: NativeAudioEditorLocator,
     ) -> Result<Self, AudioCompileError> {
         compatible_program(&self.program, &next_program, locator)?;
+        self.prepare_compatible_native_author_parameters(next_program)
+    }
+
+    pub(crate) fn prepare_terminal_author_parameters(
+        &self,
+        next_program: Arc<CompiledAudioProgram>,
+        locators: &[NativeAudioEditorLocator],
+    ) -> Result<Self, AudioCompileError> {
+        compatible_program_selection(&self.program, &next_program, locators)?;
+        self.prepare_compatible_native_author_parameters(next_program)
+    }
+
+    fn prepare_compatible_native_author_parameters(
+        &self,
+        next_program: Arc<CompiledAudioProgram>,
+    ) -> Result<Self, AudioCompileError> {
         let sample_rate = AudioSampleRate::new(self.contract.sample_rate)
             .map_err(|_| refused("native author handoff sample rate is invalid"))?;
         let note_clone_upper = self
@@ -560,6 +666,101 @@ mod note_handoff_tests {
         assert_eq!(
             program.note_lanes[0].notes[0].on_velocity.to_bits(),
             (-0.0_f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn terminal_parameter_selection_requires_exact_union_and_preserves_other_owners() {
+        let sequence = SequenceId::new();
+        let output_id = ProgramOutputId::new();
+        let ids = [
+            AudioProcessorInstanceId::new(),
+            AudioProcessorInstanceId::new(),
+            AudioProcessorInstanceId::new(),
+        ];
+        let strip = CompiledChannelStrip {
+            input_trim_db: 0.0,
+            pre_fader: CompiledRack::default(),
+            fader_db: 0.0,
+            fader_automation: None,
+            post_fader: CompiledRack::default(),
+        };
+        let mut program = CompiledAudioProgram {
+            musical_time_reference: None,
+            output_id,
+            contributions: Vec::new(),
+            processing_scopes: BTreeMap::new(),
+            transitions: Vec::new(),
+            track_channels: BTreeMap::new(),
+            buses: BTreeMap::new(),
+            bus_order: Vec::new(),
+            output: strip,
+            routes: Vec::new(),
+            sidechain_routes: Vec::new(),
+            note_lanes: Vec::new(),
+        };
+        for id in ids {
+            program.output.pre_fader.processors.push(CompiledProcessor {
+                instance_id: id,
+                definition: AudioProcessorDefinitionRef::Clap {
+                    plugin_id: "owned.union.ir".to_owned(),
+                    schema_version: 1,
+                    binary_sha256: Some([1; 32]),
+                },
+                parameters: BTreeMap::new(),
+                opaque_state: Some(vec![0]),
+            });
+        }
+        let locators = ids[..2]
+            .iter()
+            .map(|id| NativeAudioEditorLocator {
+                sequence,
+                instance: *id,
+                owner: Owner::Output(output_id),
+                insertion: Insertion::PreFader,
+            })
+            .collect::<Vec<_>>();
+        let mut joint = program.clone();
+        joint.output.pre_fader.processors[0].opaque_state = Some(vec![1]);
+        joint.output.pre_fader.processors[1].opaque_state = Some(vec![2]);
+        assert!(compatible_program_selection(&program, &joint, &locators).is_ok());
+        for locator in &locators {
+            assert!(
+                compatible_program(&program, &joint, *locator).is_err(),
+                "the old singleton still refuses an unrelated changed owner"
+            );
+        }
+        assert!(compatible_program_selection(&program, &joint, &[]).is_err());
+        assert!(compatible_program_selection(&program, &joint, &locators[..1]).is_err());
+        assert!(
+            compatible_program_selection(&program, &joint, &[locators[0], locators[0]]).is_err()
+        );
+        let mut foreign = locators.clone();
+        foreign[1].instance = AudioProcessorInstanceId::new();
+        assert!(compatible_program_selection(&program, &joint, &foreign).is_err());
+        for change in 0..5 {
+            let mut invalid = joint.clone();
+            match change {
+                0 => invalid.output.pre_fader.processors[2].opaque_state = Some(vec![3]),
+                1 => {
+                    invalid.output.pre_fader.processors[0].definition =
+                        AudioProcessorDefinitionRef::Clap {
+                            plugin_id: "other.definition".to_owned(),
+                            schema_version: 1,
+                            binary_sha256: Some([1; 32]),
+                        }
+                }
+                2 => invalid.output.input_trim_db = -0.0,
+                3 => invalid.note_lanes = score(),
+                4 => invalid.output.pre_fader.processors.swap(0, 1),
+                _ => unreachable!(),
+            }
+            assert!(compatible_program_selection(&program, &invalid, &locators).is_err(),
+                "union permission never changes other owners/schema/channel math/Note bits/order: {change}");
+        }
+        assert_eq!(
+            program.output.pre_fader.processors[0].opaque_state,
+            Some(vec![0])
         );
     }
 }
