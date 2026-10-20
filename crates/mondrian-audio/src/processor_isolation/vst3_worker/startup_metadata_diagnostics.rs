@@ -528,6 +528,7 @@ fn native_startup_metadata_phase_observation() {
         payload: serde_json::to_vec(&Vst3Payload {
             schema_version: PAYLOAD_VERSION,
             main_audio_input,
+            audio_output_count: 1,
             event_bus_contract,
             class_id,
             vendor,
