@@ -558,6 +558,7 @@ impl Vst3AudioProcessorWorkerFactory {
         );
         let mut host_builder = Vst3Host::builder()
             .plugin_interfaces(product_plugin_interfaces())
+            .initial_process_mode(mode)
             .sample_rate(f64::from(render.sample_rate))
             .block_size(render.max_block_frames)
             .input_channels(channels)

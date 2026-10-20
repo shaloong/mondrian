@@ -385,8 +385,10 @@ fn probe_loaded(
     if state.is_some_and(|state| state.len() > MAX_STATE_BYTES) {
         return Err(invalid("VST3 probe state exceeds the limit"));
     }
+    let mode = if offline { ProcessMode::Offline } else { ProcessMode::Realtime };
     let mut host = Vst3Host::builder()
         .plugin_interfaces(super::vst3_worker::product_plugin_interfaces())
+        .initial_process_mode(mode)
         .sample_rate(f64::from(sample_rate))
         .block_size(max_block_frames)
         .input_channels(channels)
@@ -405,11 +407,7 @@ fn probe_loaded(
             .map_err(|error| unavailable(format!("VST3 probe state restore failed: {error}")))?;
     }
     plugin
-        .set_process_mode(if offline {
-            ProcessMode::Offline
-        } else {
-            ProcessMode::Realtime
-        })
+        .set_process_mode(mode)
         .map_err(|error| invalid(format!("VST3 probe mode is unsupported: {error}")))?;
     let (main_audio_input, audio_inputs) = prepare_audio_inputs(&mut plugin, layout)?;
     let event_bus_contract = Vst3EventBusContractV1::observe(&plugin)?;
