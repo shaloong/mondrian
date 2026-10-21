@@ -37,14 +37,14 @@ fn block_context(start: i64) -> AudioProcessorProcessContext {
     )
 }
 
-fn assert_captured_mode13(state: &[u8]) {
+fn assert_captured_mode13(state: &[u8], gain: f64) {
     // Independent native state envelope and fixture audit, not a second SDK object.
     assert_eq!(state.len(), 28 + 24 + 44);
     assert_eq!(&state[..16], b"VST3HOST_STATE\0\0");
     for (at, expected) in [(16, 1_u32), (20, 24), (24, 44)] {
         assert_eq!(&state[at..at + 4], &expected.to_le_bytes());
     }
-    let expected = fixture_state(0.75, 13);
+    let expected = fixture_state(gain, 13);
     assert_eq!(&state[28..48], &expected[28..48]);
     assert_eq!(&state[52..72], &expected[48..68]);
     let calls = u32::from_le_bytes(state[48..52].try_into().unwrap());
@@ -241,6 +241,7 @@ fn installed_vst3_rescan_prefix_crosses_product_ipc_and_ack_keeps_parent_hold() 
     );
     assert_captured_mode13(
         delivery.configuration().expect("same actual component/controller capture"),
+        0.75,
     );
     let expected_await = Delivery::AwaitingAcknowledgement {
         binding: source_binding,
@@ -658,7 +659,7 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
         );
         assert_eq!(after.processors[0].state, before.processors[0].state);
     }
-    fn pcm(runtime: &mut AudioProgramRuntime, start: usize) {
+    fn pcm(runtime: &mut AudioProgramRuntime, start: usize, gain: f32) {
         let mut output = [93.0; 8];
         runtime
             .render_into(
@@ -666,11 +667,8 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
                 &mut output,
             )
             .expect("actual contiguous Runtime PCM after exact Source/Ack admission");
-        let expected: Vec<_> = INPUT[start..start + 4]
-            .iter()
-            .flatten()
-            .map(|sample| sample * 0.75_f32)
-            .collect();
+        let expected: Vec<_> =
+            INPUT[start..start + 4].iter().flatten().map(|sample| sample * gain).collect();
         assert_eq!(output.as_slice(), expected.as_slice());
     }
 
@@ -773,11 +771,11 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
         unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 0) },
         258
     );
-    pcm(&mut runtime, 0);
+    pcm(&mut runtime, 0, 0.75);
     let mut previous = None;
-    // Two fixed real prefixes: A from the first successful PCM block, then the
-    // natural B from the resumed block's same-value setter. This is no Poll loop.
-    for next in [4, 8] {
+    // Two fixed real prefixes: A from the initial .75 PCM, then B from the
+    // resumed block's explicitly authored .5. No repeated constant is required.
+    for (next, expected_gain) in [(4, 0.75_f64), (8, 0.5_f64)] {
         let old = owner(&runtime);
         let old_root = runtime.resource_root_identity();
         let before = cursors(&runtime);
@@ -834,8 +832,8 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
             panic!("one actual ordered typed rescan");
         };
         assert_eq!(*kind, NativeAudioParameterRescanKind::Values);
-        assert_eq!(values.as_slice(), [(gain.clone(), 0.75_f64.to_bits())]);
-        assert_captured_mode13(proposal.state().unwrap().as_slice());
+        assert_eq!(values.as_slice(), [(gain.clone(), expected_gain.to_bits())]);
+        assert_captured_mode13(proposal.state().unwrap().as_slice(), expected_gain);
         let a = runtime
             .find_resource_session(old_root)
             .unwrap()
@@ -897,6 +895,35 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
                 .as_ref(),
             proposal.state()
         );
+        let accepted = &sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
+        let curve = accepted.parameters[&gain].automation.as_ref().unwrap();
+        assert!(curve.keyframes.is_empty());
+        assert_eq!(curve.default_value.to_bits(), expected_gain.to_bits());
+        if next == 4 {
+            let schema = accepted.parameters[&gain].schema.clone();
+            // A's actual .75/state was accepted above. A separate canonical
+            // host intent changes only the next installed unkeyed value; it
+            // neither fabricates B nor changes the captured native state.
+            let stimulus = apply_audio_processor_rack_edit(
+                &mut sequence,
+                &AudioProcessorRackEditRequest {
+                    address: request.address,
+                    edit: AudioProcessorRackEdit::SetParameterStaticValue {
+                        processor_id: instance,
+                        parameter_id: gain.clone(),
+                        value: 0.5,
+                    },
+                },
+            )
+            .expect("explicit canonical host intent supplies B's changed value");
+            assert!(stimulus.changed);
+            let changed = &sequence.audio_program.outputs[0].strip.pre_fader.processors[0];
+            assert_eq!(changed.parameters[&gain].schema, schema);
+            let curve = changed.parameters[&gain].automation.as_ref().unwrap();
+            assert!(curve.keyframes.is_empty());
+            assert_eq!(curve.default_value.to_bits(), 0.5_f64.to_bits());
+            assert_eq!(changed.opaque_state.as_ref(), proposal.state());
+        }
         let programs = [NativeAudioAuthorProgram {
             sequence: sequence.id,
             program: Arc::new(
@@ -997,13 +1024,14 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
             .pending_reprepare_ticket()
             .is_none());
         if next == 4 {
-            pcm(&mut runtime, 4);
+            pcm(&mut runtime, 4, 0.5);
         }
     }
     assert!(media.reads.load(Ordering::Relaxed) > 0);
     assert_eq!(media.resolves.load(Ordering::Relaxed), 1);
     // Main-input effect only; no Note ledger, live suffix arriving during Ack,
     // native callback count, ReleasePending, physical GUI or RT qualification.
+    // The explicit host stimulus is not App permission to edit a pending gesture.
     drop(runtime);
     assert_eq!(
         unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), 2_000) },
@@ -1110,7 +1138,7 @@ fn run_terminal_peer_contract(install_batch: bool) {
             (proposal.open_parameter_edits(), proposal.group_depth()),
             (0, 0)
         );
-        assert_captured_mode13(proposal.state().unwrap().as_slice());
+        assert_captured_mode13(proposal.state().unwrap().as_slice(), 0.75);
         let request = AudioProcessorRackEditRequest {
             address: AudioProcessorRackAddress::ChannelStrip {
                 owner: AudioChannelStripOwner::ProgramOutput {
