@@ -2342,6 +2342,135 @@ bool rawPropertyQueryCounts(const void* handle, OfxPropertySetHandle in) {
   describeActionReceipt("raw-property-count", "strings", attempted, accepted, kOfxStatOK);
   return true;
 }
+
+// Fixed-size String properties and the existing variable PageChild property.
+// Empty Icon defaults are valid unset icons; this checks dimension-two storage,
+// not GUI icon loading. The first scalar boundary check is the safe RED.
+bool fixedPropertySetCounts(const void* handle) {
+  unsigned attempted = 0, accepted = 0;
+  const auto failure = [&](const std::string& point, OfxStatus status) {
+    describeActionReceipt("fixed-property-set", point.c_str(), attempted, accepted, status);
+    return false;
+  };
+  OfxParamSetHandle parameters = nullptr;
+  OfxParamHandle scale = nullptr;
+  OfxPropertySetHandle properties = nullptr;
+  if (gEffectHost->getParamSet((OfxImageEffectHandle)handle, &parameters) != kOfxStatOK ||
+      gParamHost->paramGetHandle(parameters, "scale", &scale, nullptr) != kOfxStatOK || !scale ||
+      gParamHost->paramGetPropertySet(scale, &properties) != kOfxStatOK || !properties) {
+    return failure("parameter-handle", kOfxStatFailed);
+  }
+  const auto hasStrings = [&](OfxPropertySetHandle set, const char* name,
+                              const char* const* values, int count) {
+    int dimension = -1;
+    if (gPropHost->propGetDimension(set, name, &dimension) != kOfxStatOK || dimension != count) { return false; }
+    for (int component = 0; component < count; ++component) {
+      char* actual = nullptr;
+      if (gPropHost->propGetString(set, name, component, &actual) != kOfxStatOK ||
+          !actual || std::strcmp(actual, values[component]) != 0) { return false; }
+    }
+    return true;
+  };
+  const char* originalLabel[] = {"scale"};
+  const char* updatedLabel[] = {"setter-label"};
+  const char* prefixLabel[] = {"prefix-label"};
+  const char* emptyIcons[] = {"", ""};
+  const char* threeIcons[] = {"", "", ""};
+  if (!hasStrings(properties, kOfxPropLabel, originalLabel, 1) ||
+      !hasStrings(properties, kOfxPropIcon, emptyIcons, 2)) { return failure("initial-fixed-state", kOfxStatFailed); }
+  const auto scalar = [&](const char* name, const char* label, int index, const char* value,
+                          OfxStatus expectedStatus, const char* const* expected, int dimension) {
+    ++attempted;
+    const auto status = gPropHost->propSetString(properties, name, index, value);
+    if (status != expectedStatus) { return failure(std::string(label) + "-index" + std::to_string(index) + "-status", status); }
+    if (!hasStrings(properties, name, expected, dimension)) { return failure(std::string(label) + "-scalar-state", status); }
+    ++accepted;
+    return true;
+  };
+  const auto bulk = [&](OfxPropertySetHandle set, const char* name, const char* label, int count,
+                        const char* const* values, OfxStatus expectedStatus,
+                        const char* const* expected, int dimension) {
+    ++attempted;
+    const auto status = gPropHost->propSetStringN(set, name, count, values);
+    if (status != expectedStatus) { return failure(std::string(label) + "-count" + std::to_string(count) + "-status", status); }
+    if (!hasStrings(set, name, expected, dimension)) { return failure(std::string(label) + "-bulk-state", status); }
+    ++accepted;
+    return true;
+  };
+  // The old setter accepts index == dimension and grows its vector. No output
+  // allocation is indexed by the test, and failure returns before zero-count.
+  if (!scalar(kOfxPropLabel, "ParamLabel", 1, "outside", kOfxStatErrBadIndex, originalLabel, 1) ||
+      !scalar(kOfxPropLabel, "ParamLabel", -1, "outside", kOfxStatErrBadIndex, originalLabel, 1) ||
+      !scalar(kOfxPropLabel, "ParamLabel", 0, updatedLabel[0], kOfxStatOK, updatedLabel, 1) ||
+      !scalar(kOfxPropLabel, "ParamLabel", 0, originalLabel[0], kOfxStatOK, originalLabel, 1)) { return false; }
+  const char* oversizedLabel[] = {"outside", "outside"};
+  if (!bulk(properties, kOfxPropLabel, "ParamLabel", -1, originalLabel, kOfxStatErrBadIndex, originalLabel, 1) ||
+      !bulk(properties, kOfxPropLabel, "ParamLabel", 0, originalLabel, kOfxStatOK, originalLabel, 1) ||
+      !bulk(properties, kOfxPropLabel, "ParamLabel", 1, prefixLabel, kOfxStatOK, prefixLabel, 1) ||
+      !bulk(properties, kOfxPropLabel, "ParamLabel", 2, oversizedLabel, kOfxStatErrBadIndex, prefixLabel, 1) ||
+      !bulk(properties, kOfxPropLabel, "ParamLabel", 1, originalLabel, kOfxStatOK, originalLabel, 1)) { return false; }
+  // A one-value prefix and zero leave the real second Icon slot addressable,
+  // even though both unset-icon values are empty strings.
+  if (!bulk(properties, kOfxPropIcon, "ParamIcon", 2, emptyIcons, kOfxStatOK, emptyIcons, 2) ||
+      !bulk(properties, kOfxPropIcon, "ParamIcon", 1, emptyIcons, kOfxStatOK, emptyIcons, 2) ||
+      !bulk(properties, kOfxPropIcon, "ParamIcon", 0, emptyIcons, kOfxStatOK, emptyIcons, 2) ||
+      !bulk(properties, kOfxPropIcon, "ParamIcon", 3, threeIcons, kOfxStatErrBadIndex, emptyIcons, 2) ||
+      !bulk(properties, kOfxPropIcon, "ParamIcon", -1, emptyIcons, kOfxStatErrBadIndex, emptyIcons, 2) ||
+      !scalar(kOfxPropIcon, "ParamIcon", 2, "", kOfxStatErrBadIndex, emptyIcons, 2) ||
+      !scalar(kOfxPropIcon, "ParamIcon", 1, "", kOfxStatOK, emptyIcons, 2)) { return false; }
+  const char* originalType[] = {kOfxParamTypeDouble};
+  const auto priority = [&](const char* point, OfxStatus status, OfxStatus expectedStatus) {
+    ++attempted;
+    if (status != expectedStatus || !hasStrings(properties, kOfxPropLabel, originalLabel, 1) ||
+        !hasStrings(properties, kOfxParamPropType, originalType, 1)) { return failure(point, status); }
+    ++accepted;
+    return true;
+  };
+  // Existing handle/name/type/readonly refusals precede index/count admission.
+  if (!priority("scalar-handle-priority", gPropHost->propSetString(nullptr, kOfxPropLabel, 1, "outside"), kOfxStatErrBadHandle) ||
+      !priority("scalar-name-priority", gPropHost->propSetString(properties, "MondrianMissingFixedSetProperty", 1, "outside"), kOfxStatErrUnknown) ||
+      !priority("scalar-type-priority", gPropHost->propSetInt(properties, kOfxPropLabel, 1, 7), kOfxStatErrUnknown) ||
+      !priority("scalar-readonly-priority", gPropHost->propSetString(properties, kOfxParamPropType, 1, "outside"), kOfxStatErrValue) ||
+      !priority("bulk-handle-priority", gPropHost->propSetStringN(nullptr, kOfxPropLabel, -1, originalLabel), kOfxStatErrBadHandle) ||
+      !priority("bulk-name-priority", gPropHost->propSetStringN(properties, "MondrianMissingFixedSetProperty", -1, originalLabel), kOfxStatErrUnknown)) { return false; }
+  const int integer = 7;
+  if (!priority("bulk-type-priority", gPropHost->propSetIntN(properties, kOfxPropLabel, -1, &integer), kOfxStatErrUnknown) ||
+      !priority("bulk-readonly-priority", gPropHost->propSetStringN(properties, kOfxParamPropType, -1, originalLabel), kOfxStatErrValue)) { return false; }
+  describeActionReceipt("fixed-property-set", "fixed", attempted, accepted, kOfxStatOK);
+  attempted = accepted = 0;
+  OfxParamHandle page = nullptr;
+  OfxPropertySetHandle pageProperties = nullptr;
+  if (gParamHost->paramGetHandle(parameters, "Main", &page, nullptr) != kOfxStatOK || !page ||
+      gParamHost->paramGetPropertySet(page, &pageProperties) != kOfxStatOK || !pageProperties) {
+    return failure("page-handle", kOfxStatFailed);
+  }
+  const char* children[] = {"scale", "scaleComponents", "scaleR", "scaleG", "scaleB", "scaleA"};
+  if (!hasStrings(pageProperties, kOfxParamPropPageChild, children, 6)) { return failure("initial-variable-state", kOfxStatFailed); }
+  // Variable nonnegative counts retain exact resize semantics. Restore all
+  // original child names before Basic renders; no GUI/page refresh is tested.
+  if (!bulk(pageProperties, kOfxParamPropPageChild, "PageChild", -1, children, kOfxStatErrBadIndex, children, 6) ||
+      !bulk(pageProperties, kOfxParamPropPageChild, "PageChild", 3, children, kOfxStatOK, children, 3) ||
+      !bulk(pageProperties, kOfxParamPropPageChild, "PageChild", 1, children, kOfxStatOK, children, 1) ||
+      !bulk(pageProperties, kOfxParamPropPageChild, "PageChild", 0, children, kOfxStatOK, children, 0)) { return false; }
+  for (int index : {0, 1}) {
+    ++attempted;
+    const auto status = gPropHost->propSetString(pageProperties, kOfxParamPropPageChild, index, children[index]);
+    if (status != kOfxStatOK || !hasStrings(pageProperties, kOfxParamPropPageChild, children, index + 1)) {
+      return failure("PageChild-grow", status);
+    }
+    ++accepted;
+  }
+  if (!bulk(pageProperties, kOfxParamPropPageChild, "PageChild", 6, children, kOfxStatOK, children, 6)) { return false; }
+  ++attempted;
+  const auto negativeIndex = gPropHost->propSetString(pageProperties, kOfxParamPropPageChild, -1, "outside");
+  if (negativeIndex != kOfxStatErrBadIndex || !hasStrings(pageProperties, kOfxParamPropPageChild, children, 6)) {
+    return failure("PageChild-negative-index", negativeIndex);
+  }
+  ++accepted;
+  describeActionReceipt("fixed-property-set", "variable", attempted, accepted, kOfxStatOK);
+  return true;
+}
+
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -3204,6 +3333,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       !effectDoubleQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "raw_property_query_count" && operation == kOfxImageEffectActionRender &&
       !rawPropertyQueryCounts(handle, in)) { return kOfxStatFailed; }
+  if (selected == "fixed_property_set_count" && operation == kOfxImageEffectActionRender &&
+      !fixedPropertySetCounts(handle)) { return kOfxStatFailed; }
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
@@ -3543,6 +3674,10 @@ OfxStatus probe(const char* action, const void* handle,
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   if (mode() == "raw_property_query_count" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "fixed_property_set_count" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
