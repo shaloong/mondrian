@@ -2594,6 +2594,7 @@ dependencies = [
 name = "mondrian-audio"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "bytemuck",
  "clack-extensions",
  "clack-host",
