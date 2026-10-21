@@ -92,6 +92,7 @@ mod surge_fx_clap_probe;
 
 mod mda_dx10_runtime;
 mod surge_instrument_runtime;
+mod surge_vst3_instrument_runtime;
 
 // Steady native bypass through the public Runtime/Graph; finite real-plugin case.
 mod ring_out_runtime_pcm;

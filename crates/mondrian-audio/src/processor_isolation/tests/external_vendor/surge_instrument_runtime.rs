@@ -61,12 +61,14 @@ impl AudioMediaResolver for NoMedia {
 
 // The App's Rescan policy, applied through the original canonical transaction
 // and Source installation. A copied proposal never supplies its own Ack.
-fn accept_actual_rescans(
+pub(super) fn accept_actual_rescans(
     runtime: &mut AudioProgramRuntime,
     sequence: &mut Sequence,
     source: &AudioOwnerInstallationSource,
     expected_object: crate::NativeAudioObjectObservation,
     reference: Option<MusicalTimeReference>,
+    max_rescan_values: usize,
+    max_state_bytes: usize,
 ) -> (usize, usize) {
     let cancel = ExecutionCancellationToken::new();
     assert_eq!(sequence.audio_program.musical_time_reference, reference);
@@ -173,7 +175,7 @@ fn accept_actual_rescans(
         );
         let state = proposal.state().expect("closed actual rescan requires coherent state");
         assert!(
-            !state.is_empty() && state.len() <= 64 * 1024,
+            !state.is_empty() && state.len() <= max_state_bytes,
             "actual bounded coherent state"
         );
         let mut writes = Vec::new();
@@ -182,7 +184,10 @@ fn accept_actual_rescans(
             match callback {
                 NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } => {
                     scanned = scanned.checked_add(values.len()).expect("bounded rescan sum");
-                    assert!(scanned <= 1024, "original actual rescan value bound");
+                    assert!(
+                        scanned <= max_rescan_values,
+                        "explicit actual rescan value bound"
+                    );
                     assert!(kind.refreshes_values() || values.is_empty());
                     for (id, bits) in values {
                         let parameter = current.parameters.get(id).expect("unknown rescan schema");
@@ -597,8 +602,15 @@ fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>
             start_sample: 0,
         })
         .expect("actual instrument state entry, no seek/reset substitute");
-    let (mut author_handoffs, mut rescan_handoffs) =
-        accept_actual_rescans(&mut runtime, &mut sequence, &source, cold, reference);
+    let (mut author_handoffs, mut rescan_handoffs) = accept_actual_rescans(
+        &mut runtime,
+        &mut sequence,
+        &source,
+        cold,
+        reference,
+        1024,
+        64 * 1024,
+    );
     let mut energy = 0.0_f64;
     let mut peak = 0.0_f32;
     for (completed_blocks, start) in (0..TOTAL).step_by(BLOCK).enumerate() {
@@ -681,8 +693,15 @@ fn run_captured_state_notes_main_runtime(reference: Option<MusicalTimeReference>
             pcm.iter().all(|sample| sample.is_finite()),
             "all requested stereo PCM must be written and finite"
         );
-        let (handoffs, rescans) =
-            accept_actual_rescans(&mut runtime, &mut sequence, &source, cold, reference);
+        let (handoffs, rescans) = accept_actual_rescans(
+            &mut runtime,
+            &mut sequence,
+            &source,
+            cold,
+            reference,
+            1024,
+            64 * 1024,
+        );
         author_handoffs += handoffs;
         rescan_handoffs += rescans;
         for sample in pcm {
