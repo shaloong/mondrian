@@ -28,23 +28,19 @@ pre-DSP output-owner capacity admission、parent-issued instance namespace 已�
 4096接受/4097拒绝；两个属性门还执行现有 resident/共享 Graph 闭环。
 这只验证上述 owned probe 子集，未新增性能、第三方或其它平台资格。
 
-2026-10-17 Windows x64：`ImageMemoryOwnership` 通过真实 HostSupport、产品 Host
-及官方 Basic 的真实 Instance，分别注入一次图像字节分配失败。两条 fallback
-旧源均泄漏一个 owner；RAII 修复后均释放一次、剩余为零，仍返回 ErrMemory/null。
-测试断言未改，原180秒/2秒 Job 回收通过并经独立复核。新正常 Product 的既有
-bootstrap memory 门也 exact1/stderr0 通过，覆盖 discovery、两次 fresh resident
-及共享 Graph。这是上述异常所有权与正常分配闭环的有限资格，不是整宿主泄漏、
-内存预算、性能或其它平台结论。
-
-同日追加的 Source/Output `FrameImage` 对象分配失败控制，在修复前均错误返回
-ErrBadHandle；`clipGetImage` 现单独将 `std::bad_alloc` 映射为 ErrMemory/null。
-重建的独立原生测试四项全部通过：原有两项字节分配控制保持原计数，新两项
-均无残留 image handle、未改写像素，且随后正常取图和释放成功；stderr 为空，
-原180秒/2秒 Job 回收通过并经独立复核。正常 Product 已重链，前次 bootstrap
-memory 门通过；本轮配对 Product 在同门 `shutdown()` 超时（2441行），Graph 未执行，
-整门保持 HOLD。新增故障注入资格仍限真实 Host/官方 Basic Suite，不扩展到
-全部 Product OOM 点或 GPU；不原样重跑关闭失败。
-
+2026-10-22 Windows x64：ImageMemoryOwnership 通过真实 HostSupport、产品 Host
+及官方 Basic 的八项控制，并经独立源码、构建和实际结果复核。原四项保持：
+Host/Instance 字节分配失败各释放唯一 owner，返回 ErrMemory/null；Source/Output
+FrameImage 分配失败不残留 handle、不改像素，随后正常取图和释放成功。
+新增真实 root/Filter Descriptor 错误类型控制：旧转换在原四项通过后访问违规；
+仅增加既有 Base/Instance RTTI 准入后，两者均 BadHandle/null、零分配。
+同一 Host/Instance 随后通过 257B 分配、16 字节对齐、嵌套锁、重锁内容保持、
+多余 unlock 无操作及一次完整释放。八行全部通过，stderr0、原180秒/185秒外层/
+2秒清理与原 owner 正常退出；测试在修复前后逐字一致。
+资格限真实有效 Base 的错误类型及上述有限 Suite 内存生命周期，不保证任意野指针、
+整宿主泄漏、RSS/预算、性能、GPU或其它平台。全量构建保留三条既有 C++ 警告。
+这次直接 Host/Basic 验收不授正常 Product IPC 资格；此前 Product bootstrap memory
+曾通过，后来配对门在 shutdown 超时（2441行）、Graph 未执行，仍保持 HOLD。
 2026-10-17 修复前 Product 的新增压力门仍有缺口：4096 总参数用例在
 resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner 已于约53.77ms
 返回，父侧约101.07ms仍无 OS 退出观察。4097 拒绝用例另有 libtest 通过但
@@ -171,7 +167,7 @@ NEXT；页脚显示 1.5.1 并不证明所有后续符号已发布。
 | B05 | suites name/version/null，必需 | 部分：unknown suite=null；MultiThread 与 Message/Progress/Timeline 接产品实现。各自边界见下；Interact 尚未接入，不因 non-null 计支持 | `host_descriptor.cpp::Host::fetchSuite`; `thread_suite.*`; `aux_suite.*` | [Suite inventory](https://openfx.readthedocs.io/en/main/Reference/suites/ofxSuiteReference.html) |
 | B06 | Property V1 全部 typed scalar/N set/get、reset/dimension，必需 | 部分验证：Host 身份/私有指针属性对插件只读；MaxParameters=4096 与 descriptor 准入共用常量；六项元数据门覆盖 label、Group/Page 与数值。Windows owned Clip Int/Double、Effect Double 和四种 raw getter/Clip String 的两帧 Direct/Graph 功能断言通过；共享 GetN 负 count guard 覆盖每帧18项Image/优先级与12项String。固定 setter 按声明维度判断，真实 Param Label/Icon 与变长 Main PageChild 每帧24+8项及两路径像素/Source/author/恢复值通过；CPU/PAR/String 三原回归通过。五项整门仍原 shared100ms shutdown FAIL；完整 Property V1、GUI刷新与4096实例退休未验收 | `vendor/host/src/ofxhPropertySuite.cpp`; `ofxhClip.cpp`; `ofxhImageEffect.cpp`; `Host::kMaxParameters`; `tests/openfx_host.rs` | [Property](https://openfx.readthedocs.io/en/main/Reference/suites/ofxPropertySuiteReference.html) |
 | B07 | Memory V1 alloc/free，必需 | 实现 malloc/free；null/adversarial ABI与内存不足行为全面资格未完成；不纳入父图预算 | `vendor/host/src/ofxhHost.cpp::Memory` | [Memory](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMemory_8h.html) |
-| B08 | imageMemory alloc/free/lock/unlock，必需 | 实现，部分验证：bootstrap memory 已验证 Host 所有权；两条 fallback 在字节分配成功前用 RAII 持有 owner，真实 Host/Basic Instance 的失败注入证明异常释放。nested lock/完整生命周期/RSS ceiling 尚待验收 | `vendor/host/src/ofxhMemory.cpp`; `ofxhImageEffect.cpp`; `tests/openfx_reference/image_memory_ownership.cpp`; `OwnedImageEffectCache` | [Image suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxImageEffectSuiteReference.html) |
+| B08 | imageMemory alloc/free/lock/unlock，必需 | 部分验证：真实 Host/Basic 八项控制通过原字节/FrameImage 失败恢复、真实 Descriptor 错误类型拒绝、Host/Instance 正常分配、16对齐、nested lock/relock 内容与完整释放。类型准入及 RAII 保留唯一 owner；不纳入父图预算。任意野指针、完整生命周期矩阵/RSS ceiling 未验收；Product shutdown 缺口见上方 | vendor/host/src/ofxhMemory.cpp; ofxhImageEffect.cpp; tests/openfx_reference/image_memory_ownership.cpp; OwnedImageEffectCache | [Image suite](https://openfx.readthedocs.io/en/main/Reference/suites/ofxImageEffectSuiteReference.html) |
 | B09 | Message V1 log/info/warning/error/fatal，必需 | 实现：AuxSuite 区分 NULL/descriptor/instance；Render notice 经 owner/invocation 校验，Describe-only 经独立 schema2 整请求结果交给当前 Catalog。Log 入 tracing，拒绝不完整/Fatal 定义。Windows 有上述有限原生资格，非全场景 Message 资格 | `aux_suite.cpp::message`; `openfx_host/description.rs`; `app/openfx_catalog`; `app/preview_processor_feedback` | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
 | B10 | Message V1 question reply，interactive 条件必需 | 实现受控 question：实际 GUI/control 授权与当前 invocation 才可请求 Yes/No，非交互明确 Failed；完整 GUI 生命周期与平台资格另行验收 | `aux_suite.cpp::message/bindControl`; live question transport | [Message](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
 | B11 | Message V2 persistent set/clear，optional exposed | 实现实例级 persistent revision、set/clear 与当前 scope 通知；Error 阻断，author change 后可同 owner 恢复，拒绝 stale feedback；本轮未重跑对应原生控制 | `aux_suite.cpp::persistent/clear`; `resident.rs`; `app/preview_processor_feedback.rs` | [Message V2](https://openfx.readthedocs.io/en/main/Reference/api/file/ofxMessage_8h.html) |
