@@ -360,7 +360,10 @@ mod author_instance_contracts {
                 .map(|descriptor| descriptor.authoring_schema().unwrap())
                 .collect::<Vec<_>>();
             let mut instance = author_instance_from_probe(source, supplied).unwrap();
-            assert_eq!(instance.opaque_state.as_deref(), expected_state.as_deref());
+            assert_eq!(
+                instance.opaque_state.as_deref().map(Vec::as_slice),
+                expected_state.as_deref()
+            );
             assert_eq!(instance.parameters.len(), 2, "readonly only is excluded");
             for (index, id) in [&gain, &stepped].into_iter().enumerate() {
                 let parameter = &instance.parameters[id];

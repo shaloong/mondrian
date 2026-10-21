@@ -3838,7 +3838,10 @@ mod tests {
             let mut instance =
                 author_instance_from_probe(registration.clone(), opaque_state.clone())
                     .expect("authored CLAP instance");
-            assert_eq!(instance.opaque_state.as_deref(), opaque_state.as_deref());
+            assert_eq!(
+                instance.opaque_state.as_deref().map(Vec::as_slice),
+                opaque_state.as_deref()
+            );
             assert_eq!(instance.parameters.len(), 2);
             let visible_id = mondrian_core::ParameterId::new("clap.param.1").unwrap();
             let hidden_id = mondrian_core::ParameterId::new("clap.param.2").unwrap();
