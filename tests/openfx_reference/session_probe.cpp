@@ -2027,6 +2027,90 @@ bool clipIntegerQueryCounts(const void* handle) {
   return true;
 }
 
+// A short prefix is legal even for a two-value range. Four valid slots make
+// the old extra write observable without writing beyond the test allocation.
+bool clipDoubleQueryCounts(const void* handle) {
+  struct Property {
+    const char* label;
+    const char* name;
+    int dimension;
+    double values[2];
+  };
+  // These are the current real FilterClipInstance facts at PAR2/24fps and
+  // [0,100]. In particular the disconnected clip has these same timing getters.
+  const Property properties[] = {
+    {"FrameRange", kOfxImageEffectPropFrameRange, 2, {0.0, 100.0}},
+    {"UnmappedFrameRange", kOfxImageEffectPropUnmappedFrameRange, 2, {0.0, 100.0}},
+    {"PixelAspectRatio", kOfxImagePropPixelAspectRatio, 1, {2.0, 0.0}},
+    {"FrameRate", kOfxImageEffectPropFrameRate, 1, {24.0, 0.0}},
+    {"UnmappedFrameRate", kOfxImageEffectPropUnmappedFrameRate, 1, {24.0, 0.0}},
+  };
+  const char* names[] = {"Source", "Output", "DisconnectedOptional"};
+  std::array<OfxPropertySetHandle, 3> clips{};
+  unsigned attempted = 0, accepted = 0;
+  const auto failure = [&](const std::string& point, OfxStatus status) {
+    describeActionReceipt("clip-double-count", point.c_str(), attempted, accepted, status);
+    return false;
+  };
+  for (unsigned index = 0; index < clips.size(); ++index) {
+    OfxImageClipHandle clip = nullptr;
+    auto status = gEffectHost->clipGetHandle((OfxImageEffectHandle)handle, names[index], &clip, &clips[index]);
+    if (status != kOfxStatOK || !clip || !clips[index]) { return failure(std::string(names[index]) + "-handle", status); }
+    for (const auto& property : properties) {
+      const std::string point = std::string(names[index]) + "-" + property.label;
+      int dimension = -1;
+      status = gPropHost->propGetDimension(clips[index], property.name, &dimension);
+      if (status != kOfxStatOK || dimension != property.dimension) { return failure(point + "-dimension", status); }
+      for (int component = 0; component < dimension; ++component) {
+        double value = -8192.25;
+        status = gPropHost->propGetDouble(clips[index], property.name, component, &value);
+        if (status != kOfxStatOK || value != property.values[component]) { return failure(point + "-scalar", status); }
+      }
+      // Source FrameRange/count1 is deliberately the first bulk query. Never
+      // reach any negative scalar index until every bulk case has succeeded.
+      const int counts[] = {1, 0, -1, dimension + 1, dimension};
+      const int cases = dimension == 2 ? 5 : 4;
+      for (int query = 0; query < cases; ++query) {
+        const int count = counts[query];
+        const std::array<double, 4> untouched{{-8192.25, -16384.5, -32768.75, -65536.125}};
+        auto values = untouched;
+        auto expectedValues = untouched;
+        const bool validCount = count >= 0 && count <= dimension;
+        if (validCount) {
+          for (int component = 0; component < count; ++component) { expectedValues[component + 1] = property.values[component]; }
+        }
+        ++attempted;
+        status = gPropHost->propGetDoubleN(clips[index], property.name, count, values.data() + 1);
+        const auto expectedStatus = validCount ? kOfxStatOK : kOfxStatErrBadIndex;
+        const auto queryPoint = point + "-count" + std::to_string(count);
+        if (status != expectedStatus) { return failure(queryPoint + "-status", status); }
+        if (values != expectedValues) { return failure(queryPoint + "-write", status); }
+        ++accepted;
+      }
+    }
+  }
+  describeActionReceipt("clip-double-count", "bulk", attempted, accepted, kOfxStatOK);
+  attempted = accepted = 0;
+  // The old scalar range hook could read range[-1]. This phase is unreachable
+  // on the old host: the first safe four-slot count1 check already returns RED.
+  for (unsigned index = 0; index < clips.size(); ++index) {
+    for (const auto& property : properties) {
+      for (int component : {-1, property.dimension}) {
+        const std::array<double, 3> untouched{{-8192.25, -16384.5, -32768.75}};
+        auto values = untouched;
+        ++attempted;
+        const auto status = gPropHost->propGetDouble(clips[index], property.name, component, values.data() + 1);
+        if (status != kOfxStatErrBadIndex || values != untouched) {
+          return failure(std::string(names[index]) + "-" + property.label + "-index" + std::to_string(component), status);
+        }
+        ++accepted;
+      }
+    }
+  }
+  describeActionReceipt("clip-double-count", "scalar", attempted, accepted, kOfxStatOK);
+  return true;
+}
+
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -2883,6 +2967,8 @@ OfxStatus probeAction(const char* action, const void* handle,
        operation == kOfxActionDestroyInstance) && !canonicalCurves(handle)) { return kOfxStatFailed; }
   if (selected == "clip_integer_query_count" && operation == kOfxImageEffectActionRender &&
       !clipIntegerQueryCounts(handle)) { return kOfxStatFailed; }
+  if (selected == "clip_double_query_count" && operation == kOfxImageEffectActionRender &&
+      !clipDoubleQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
@@ -2890,7 +2976,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       : selected == "angle" && operation == kOfxImageEffectActionRender
       ? angleOutput(handle, in) : pluginMain(action, handle, in, out);
   if (result == kOfxStatOK || result == kOfxStatReplyDefault) {
-    if ((selected == "optional_unmapped" || selected == "clip_integer_query_count") &&
+    if ((selected == "optional_unmapped" || selected == "clip_integer_query_count" ||
+         selected == "clip_double_query_count") &&
         operation == kOfxImageEffectActionDescribeInContext) {
       OfxPropertySetHandle clip = nullptr;
       if (gEffectHost->clipDefine((OfxImageEffectHandle)handle, "DisconnectedOptional", &clip) != kOfxStatOK || !clip ||
@@ -3209,6 +3296,10 @@ OfxStatus probe(const char* action, const void* handle,
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   if (mode() == "clip_integer_query_count" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "clip_double_query_count" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }

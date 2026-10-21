@@ -2901,7 +2901,7 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
     session.shutdown().expect("original bounded shutdown of the same resident");
 }
 
-fn clip_integer_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
+fn clip_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(directory.join(format!("actions-{pid}.txt")))
@@ -2925,7 +2925,13 @@ fn clip_integer_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
         .collect()
 }
 
-fn assert_clip_integer_query_actions(rows: &[String], cleanup: &str) {
+fn assert_clip_query_actions(
+    rows: &[String],
+    marker: &str,
+    expected_checks: &[&str],
+    cleanup: &str,
+) {
+    let marker_prefix = format!("{marker} ");
     let actual: Vec<_> = rows
         .iter()
         .filter(|row| {
@@ -2934,7 +2940,7 @@ fn assert_clip_integer_query_actions(rows: &[String], cleanup: &str) {
                 "OfxActionDestroyInstance ",
                 "OfxImageEffectActionGetClipPreferences ",
                 "OfxImageEffectActionRender ",
-                "clip-int-count ",
+                marker_prefix.as_str(),
             ]
             .iter()
             .any(|prefix| row.starts_with(prefix))
@@ -2961,9 +2967,12 @@ fn assert_clip_integer_query_actions(rows: &[String], cleanup: &str) {
             "OfxImageEffectActionGetClipPreferences enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
             "OfxImageEffectActionGetClipPreferences return attempted=0 accepted=0 status=0 complete=1".to_owned(),
             "OfxImageEffectActionRender enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
-            "clip-int-count checks attempted=24 accepted=24 status=0 complete=1".to_owned(),
-            "OfxImageEffectActionRender return attempted=0 accepted=0 status=0 complete=1".to_owned(),
         ]);
+        expected.extend(expected_checks.iter().map(|row| (*row).to_owned()));
+        expected.push(
+            "OfxImageEffectActionRender return attempted=0 accepted=0 status=0 complete=1"
+                .to_owned(),
+        );
     }
     expected.extend([
         "OfxActionDestroyInstance enter attempted=0 accepted=0 status=0 complete=1".to_owned(),
@@ -2975,9 +2984,11 @@ fn assert_clip_integer_query_actions(rows: &[String], cleanup: &str) {
     );
 }
 
-#[test]
-#[ignore = "requires current Product, SessionProbe clip_integer_query_count and an empty action-receipt directory"]
-fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
+fn qualify_clip_query_counts_resident_and_graph(
+    mode: &str,
+    action_marker: &str,
+    expected_checks: &[&str],
+) {
     use mondrian_effects::{
         EffectExecutionSession, EffectExecutionSessionConfig, EffectProcessorControl,
     };
@@ -2987,7 +2998,7 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
     );
     assert!(directory.is_absolute() && directory.is_dir());
     assert!(std::fs::read_dir(&directory).expect("action directory").next().is_none());
-    let inspection = cpu_contract_probe("clip_integer_query_count");
+    let inspection = cpu_contract_probe(mode);
     assert_eq!(inspection.plugins.len(), 1);
     let identifier = "uk.co.thefoundry.BasicGainPlugin";
     let description = describe_openfx_filter(product_executable(), &inspection, identifier)
@@ -3037,8 +3048,13 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
     // Always consume the same owner before asserting the target RED. Its
     // original shutdown failure remains visible beside a query failure.
     let shutdown = direct.shutdown();
-    let direct_rows = clip_integer_query_action_rows(&directory, direct_pid);
-    assert_clip_integer_query_actions(&direct_rows, &format!("{shutdown:?}"));
+    let direct_rows = clip_query_action_rows(&directory, direct_pid);
+    assert_clip_query_actions(
+        &direct_rows,
+        action_marker,
+        expected_checks,
+        &format!("{shutdown:?}"),
+    );
     assert_eq!(direct_outputs.len(), 2);
     for output in direct_outputs {
         assert_half_gain(&output.expect("Basic renders after all real clip queries"));
@@ -3142,7 +3158,10 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
             .read_to_end(&mut bytes)
             .expect("bounded native action read");
         assert!(bytes.len() <= 4096 && bytes.is_ascii());
-        if std::str::from_utf8(&bytes).expect("ASCII actions").contains(" clip-int-count ") {
+        if std::str::from_utf8(&bytes)
+            .expect("ASCII actions")
+            .contains(&format!(" {action_marker} "))
+        {
             rendered_pids.push(pid);
         }
     }
@@ -3156,8 +3175,10 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
         .iter()
         .find(|pid| **pid != direct_pid)
         .expect("distinct actual Graph resident");
-    assert_clip_integer_query_actions(
-        &clip_integer_query_action_rows(&directory, graph_pid),
+    assert_clip_query_actions(
+        &clip_query_action_rows(&directory, graph_pid),
+        action_marker,
+        expected_checks,
         "retired Graph owner",
     );
     assert_eq!(graph_outputs.len(), 2);
@@ -3168,6 +3189,29 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
     assert_eq!(
         effect, original_effect,
         "queries do not mutate canonical author state"
+    );
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_integer_query_count and an empty action-receipt directory"]
+fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
+    qualify_clip_query_counts_resident_and_graph(
+        "clip_integer_query_count",
+        "clip-int-count",
+        &["clip-int-count checks attempted=24 accepted=24 status=0 complete=1"],
+    );
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe clip_double_query_count and an empty action-receipt directory"]
+fn product_worker_preserves_clip_double_query_counts_in_resident_and_graph() {
+    qualify_clip_query_counts_resident_and_graph(
+        "clip_double_query_count",
+        "clip-double-count",
+        &[
+            "clip-double-count bulk attempted=66 accepted=66 status=0 complete=1",
+            "clip-double-count scalar attempted=30 accepted=30 status=0 complete=1",
+        ],
     );
 }
 
