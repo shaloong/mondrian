@@ -8,6 +8,7 @@
 #include "effect_instance.h"
 #include "image_clip.h"
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -106,6 +107,86 @@ bool failureCase(const OfxImageEffectSuiteV1& suite, OfxImageEffectHandle instan
   return passed;
 }
 
+bool descriptorRefusal(const OfxImageEffectSuiteV1& suite,
+                       const OFX::Host::ImageEffect::Descriptor& descriptor, const char* path) {
+  // This is a live Base from the actual Basic plugin, not a forged pointer.
+  // Descriptor and instance handles share the Base type but not its contract.
+  OfxImageMemoryHandle memory = reinterpret_cast<OfxImageMemoryHandle>(&probe);
+  probe = {};
+  probe.armed = true;
+  OfxStatus status;
+  try {
+    status = suite.imageMemoryAlloc(descriptor.getHandle(), 257, &memory);
+  } catch (...) {
+    probe.armed = false;
+    std::fprintf(stderr, "imageMemoryAlloc exception escaped for %s\n", path);
+    return false;
+  }
+  probe.armed = false;
+  const bool passed = status == kOfxStatErrBadHandle && !memory && !probe.unexpected &&
+      probe.scalar_allocations == 0 && probe.scalar_deletions == 0 &&
+      probe.array_calls == 0 && probe.array_failures == 0 && probe.live_owners == 0;
+  std::printf("{\"path\":\"%s\",\"status\":%d,\"out_null\":%s,"
+              "\"scalar_allocations\":%u,\"scalar_deletions\":%u,\"array_calls\":%u,"
+              "\"array_failures\":%u,\"live_owners\":%d,\"unexpected\":%s,\"passed\":%s}\n",
+              path, status, memory ? "false" : "true", probe.scalar_allocations,
+              probe.scalar_deletions, probe.array_calls, probe.array_failures,
+              probe.live_owners, probe.unexpected ? "true" : "false", passed ? "true" : "false");
+  return passed;
+}
+
+bool memoryAllocationRecovery(const OfxImageEffectSuiteV1& suite,
+                              OfxImageEffectHandle instance, const char* path) {
+  OfxImageMemoryHandle memory = nullptr;
+  probe = {};
+  probe.armed = true;
+  OfxStatus status = kOfxStatFailed, freeStatus = kOfxStatFailed;
+  bool aligned = false, nestedPreserved = false, relockPreserved = false, unmatchedUnlock = false;
+  try {
+    status = suite.imageMemoryAlloc(instance, 257, &memory);
+    if (status == kOfxStatOK && memory) {
+      unsigned char expected[257];
+      for (size_t index = 0; index < sizeof(expected); ++index) {
+        expected[index] = static_cast<unsigned char>(index);
+      }
+      void *first = nullptr, *second = nullptr, *third = nullptr;
+      if (suite.imageMemoryLock(memory, &first) == kOfxStatOK && first) {
+        aligned = reinterpret_cast<std::uintptr_t>(first) % 16 == 0;
+        std::memcpy(first, expected, sizeof(expected));
+        const bool nested = suite.imageMemoryLock(memory, &second) == kOfxStatOK && second == first;
+        const bool unlockedNested = suite.imageMemoryUnlock(memory) == kOfxStatOK;
+        nestedPreserved = nested && unlockedNested && std::memcmp(first, expected, sizeof(expected)) == 0;
+        const bool unlocked = suite.imageMemoryUnlock(memory) == kOfxStatOK;
+        unmatchedUnlock = unlocked && suite.imageMemoryUnlock(memory) == kOfxStatOK;
+        if (suite.imageMemoryLock(memory, &third) == kOfxStatOK && third) {
+          relockPreserved = std::memcmp(third, expected, sizeof(expected)) == 0 &&
+              suite.imageMemoryUnlock(memory) == kOfxStatOK;
+        }
+      }
+      freeStatus = suite.imageMemoryFree(memory);
+    }
+  } catch (...) {
+    probe.armed = false;
+    std::fprintf(stderr, "image memory recovery exception escaped for %s\n", path);
+    return false;
+  }
+  probe.armed = false;
+  const bool passed = status == kOfxStatOK && memory && freeStatus == kOfxStatOK &&
+      aligned && nestedPreserved && relockPreserved && unmatchedUnlock && !probe.unexpected &&
+      probe.scalar_allocations == 1 && probe.scalar_deletions == 1 &&
+      probe.array_calls == 1 && probe.array_failures == 0 && probe.live_owners == 0;
+  std::printf("{\"path\":\"%s\",\"status\":%d,\"out_nonnull\":%s,\"free_status\":%d,"
+              "\"aligned\":%s,\"nested_preserved\":%s,\"relock_preserved\":%s,\"unmatched_unlock\":%s,"
+              "\"scalar_allocations\":%u,\"scalar_deletions\":%u,\"array_calls\":%u,"
+              "\"array_failures\":%u,\"live_owners\":%d,\"unexpected\":%s,\"passed\":%s}\n",
+              path, status, memory ? "true" : "false", freeStatus,
+              aligned ? "true" : "false", nestedPreserved ? "true" : "false",
+              relockPreserved ? "true" : "false", unmatchedUnlock ? "true" : "false",
+              probe.scalar_allocations, probe.scalar_deletions, probe.array_calls,
+              probe.array_failures, probe.live_owners, probe.unexpected ? "true" : "false", passed ? "true" : "false");
+  return passed;
+}
+
 bool imageFetchFailureAndRecovery(const OfxImageEffectSuiteV1& suite,
                                   MondrianOpenFx::FilterClipInstance& clip,
                                   MondrianOpenFx::FrameState& frame, const char* path) {
@@ -197,7 +278,17 @@ int exercise(MondrianOpenFx::Host& host, const char* binaryPath, const char* bun
   const MondrianOpenFx::ImageAccess imagesAvailable(frame, true, true);
   const bool sourcePassed = imageFetchFailureAndRecovery(*suite, *source, frame, "source-image");
   const bool outputPassed = imageFetchFailureAndRecovery(*suite, *output, frame, "output-image");
-  return hostPassed && instancePassed && sourcePassed && outputPassed ? 0 : 1;
+  auto* context = plugin->getContext(kOfxImageEffectContextFilter);
+  if (!context || context == &plugin->getDescriptor()) {
+    throw std::runtime_error("actual Basic root/context descriptors are missing or aliased");
+  }
+  std::fflush(stdout); // Preserve the original four controls if the old invalid cast crashes.
+  const bool rootRefused = descriptorRefusal(*suite, plugin->getDescriptor(), "root-descriptor");
+  const bool contextRefused = descriptorRefusal(*suite, *context, "filter-descriptor");
+  const bool hostRecovered = memoryAllocationRecovery(*suite, nullptr, "host-recovery");
+  const bool instanceRecovered = memoryAllocationRecovery(*suite, instance->getHandle(), "instance-recovery");
+  return hostPassed && instancePassed && sourcePassed && outputPassed &&
+      rootRefused && contextRefused && hostRecovered && instanceRecovered ? 0 : 1;
 }
 }
 
