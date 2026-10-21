@@ -7,7 +7,7 @@ use std::fmt;
 
 use super::vst3_worker::MAX_STATE_BYTES;
 
-const MAX_ENCODED_BYTES: usize = (MAX_STATE_BYTES + 2) / 3 * 4;
+const MAX_ENCODED_BYTES: usize = MAX_STATE_BYTES.div_ceil(3) * 4;
 
 pub(super) fn encoded_len(raw: usize) -> Option<usize> {
     (raw <= MAX_STATE_BYTES).then_some(())?;
@@ -18,7 +18,7 @@ pub(super) fn encoded_len(raw: usize) -> Option<usize> {
 // before allocating the sole decoded owner. No decode/re-encode String is used.
 fn decoded_len(encoded: &str) -> Result<usize, &'static str> {
     let bytes = encoded.as_bytes();
-    if bytes.len() > MAX_ENCODED_BYTES || bytes.len() % 4 != 0 {
+    if bytes.len() > MAX_ENCODED_BYTES || !bytes.len().is_multiple_of(4) {
         return Err("VST3 state base64 length exceeds its bound or lacks padding");
     }
     if bytes.is_empty() {

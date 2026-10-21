@@ -276,12 +276,11 @@ impl PreparedProcessorFactoryBinding {
                     .to_owned(),
             ));
         }
-        if let Some(registrar) = native_child_settlement {
-            if self.native_child_settlement_requirement()
+        if let Some(registrar) = native_child_settlement
+            && self.native_child_settlement_requirement()
                 == mondrian_core::NativeChildSettlementRequirement::Unavailable
-            {
-                registrar.mark_unavailable();
-            }
+        {
+            registrar.mark_unavailable();
         }
         isolate_adapter_call("instance creation", || {
             self.factory.create(native_child_settlement)

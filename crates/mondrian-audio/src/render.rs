@@ -366,12 +366,12 @@ impl AudioRenderSession {
         &self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
     ) -> Result<(), mondrian_core::NativeChildSettlementError> {
-        if let Some(current) = &self.native_child_settlement {
-            if !current.same_domain(registrar) {
-                current.mark_unavailable();
-                registrar.mark_unavailable();
-                return Err(mondrian_core::NativeChildSettlementError::ForeignDomain);
-            }
+        if let Some(current) = &self.native_child_settlement
+            && !current.same_domain(registrar)
+        {
+            current.mark_unavailable();
+            registrar.mark_unavailable();
+            return Err(mondrian_core::NativeChildSettlementError::ForeignDomain);
         }
         Ok(())
     }
