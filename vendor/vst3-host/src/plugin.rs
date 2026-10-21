@@ -738,8 +738,9 @@ impl RestartCohort {
 /// resulting callback. This is not a one-shot author/install permission; the
 /// caller must retain the real delivered prefix and its own acceptance receipt.
 /// It cannot be serialized or constructed for another loaded native object.
-/// An exact-16 witness only identifies a source: its caller must separately
-/// prove that the complete admitted parameter-info projection is unchanged.
+/// An exact-16 witness only identifies a source. Its caller must separately
+/// admit a stable processing contract and invalidate/refresh caption facts.
+/// The witness neither compares parameter metadata nor refreshes presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestartSourceWitness {
     pub(crate) owner: NativeEditorAttachmentOwner,
@@ -767,7 +768,8 @@ impl RestartSourceWitness {
 }
 
 /// Local settlement of an already delivered and accepted exact-kind prefix.
-/// Values (4) and verified unchanged parameter information (16) remain distinct.
+/// Values (4) and caller-admitted stable processing information (16) remain
+/// distinct; caption presentation remains the caller's separate responsibility.
 /// Neither disposition authorizes an author transaction or another native block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartSourceSettlement {
@@ -3510,7 +3512,7 @@ impl Plugin {
             .and_then(|inner| inner.pending_restart_cohort())
     }
 
-    /// Capture coherent local source/cohort/retirement facts for exact flags 4.
+    /// Capture coherent local source/cohort/retirement facts for exact flags 4 or 16.
     ///
     /// Requires the native control thread, a healthy closed source and no DSP
     /// feedback. Take it after coherent state capture and before moving that
@@ -3529,8 +3531,9 @@ impl Plugin {
     ///
     /// The exact old prefix must already have been drained. This verifies the
     /// same loaded owner and uninterrupted raw-retirement lineage. New source
-    /// bounds/feedback are preserved; a newer exact-4 suffix keeps all its raw
-    /// flags. No native callback, allocation or source drain occurs here. A
+    /// bounds/feedback are preserved; a newer same-kind exact-4 or exact-16 suffix
+    /// keeps all its raw flags. Mixed kinds remain unsupported. No native
+    /// callback, allocation or source drain occurs here. A
     /// witness is immutable evidence, not canonical acceptance or once authority.
     pub fn settle_restart_source_prefix(
         &mut self,
