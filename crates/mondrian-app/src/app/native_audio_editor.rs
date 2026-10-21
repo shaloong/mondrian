@@ -1829,6 +1829,16 @@ mod attachment_continuity_contracts {
             state
                 .commit_audio_playback("custody Source-close control", anchor, Some(source))
                 .unwrap();
+            let installed = state.native_audio_renderer.clone().unwrap();
+            // Media installs bindings asynchronously. Settle that original job
+            // before testing quiescent handoff; a concurrent Runtime is busy.
+            crate::app::playback::tests::project_close_audio_contracts::settle_builtin_binding(
+                &mut state,
+            );
+            assert!(std::sync::Weak::ptr_eq(
+                &installed,
+                state.native_audio_renderer.as_ref().unwrap(),
+            ));
             assert!(state.project_audio_source_is_current());
             let mut surface = context();
             surface.attachment_target = None;
@@ -1842,6 +1852,8 @@ mod attachment_continuity_contracts {
                     outstanding: None,
                     state_entry_accepted: true,
                 }));
+            assert!(state.native_audio_editor.is_some());
+            assert!(state.native_audio_author_work.is_some());
             // No native processor is modeled: this is the original registered
             // builtin Source/Media Closed or clear boundary, not native proof.
             if serial_close {
