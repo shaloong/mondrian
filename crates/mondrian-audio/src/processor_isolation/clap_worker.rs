@@ -516,7 +516,7 @@ impl DiscoveredClapAudioProcessorSpecResolver {
         self.plugins.values().map(|(descriptor, _, _)| descriptor).collect()
     }
 
-    /// Capture one selected plugin's current plain values into a portable author instance.
+    /// Capture one selected plugin's native state and complete author parameter schema.
     ///
     /// The selected binary is probed again for this render contract and state;
     /// a later Preview or Export preparation repeats the same probe.
@@ -564,13 +564,20 @@ fn author_instance_from_probe(
                 hidden: descriptor.hidden,
             })
             .map_err(|error| invalid(format!("CLAP parameter UI metadata is invalid: {error}")))?;
-        parameter
-            .set_automation(
-                ExactAutomationCurve::new(parameter_id.clone(), descriptor.current_value).map_err(
-                    |error| invalid(format!("CLAP current parameter value is invalid: {error}")),
-                )?,
-            )
-            .map_err(|error| invalid(format!("CLAP parameter value is invalid: {error}")))?;
+        if opaque_state.is_some() {
+            // Native state owns the initial value; from_schema's default curve
+            // is not an explicit author override, including for an empty state.
+            parameter.automation = None;
+        } else {
+            parameter
+                .set_automation(
+                    ExactAutomationCurve::new(parameter_id.clone(), descriptor.current_value)
+                        .map_err(|error| {
+                            invalid(format!("CLAP current parameter value is invalid: {error}"))
+                        })?,
+                )
+                .map_err(|error| invalid(format!("CLAP parameter value is invalid: {error}")))?;
+        }
         parameters.insert(parameter_id, parameter);
     }
     Ok(AudioProcessorInstance {
@@ -3820,29 +3827,96 @@ mod tests {
             auxiliary_inputs: AudioProcessorAuxiliaryInputContract::default(),
             parameters: vec![
                 descriptor(1, "Output Gain", false, false),
-                descriptor(2, "Private meter", true, false),
+                super::super::ClapParameterDescriptor {
+                    automatable: false,
+                    ..descriptor(2, "Private meter", true, false)
+                },
                 descriptor(3, "Read only", false, true),
             ],
         };
-        let instance = author_instance_from_probe(registration, Some(vec![7, 8]))
-            .expect("authored CLAP instance");
-        assert_eq!(instance.parameters.len(), 2);
-        let visible = &instance.parameters
-            [&mondrian_core::ParameterId::new("clap.param.1").expect("visible ID")];
-        assert_eq!(visible.ui.display_name.as_deref(), Some("Output Gain"));
-        assert!(!visible.ui.hidden);
-        assert_eq!(
-            visible.automation.as_ref().expect("bound host curve").default_value,
-            0.25
-        );
-        let hidden = &instance.parameters
-            [&mondrian_core::ParameterId::new("clap.param.2").expect("hidden ID")];
-        assert!(hidden.ui.hidden);
-        let reopened: AudioProcessorInstance = serde_json::from_slice(
-            &serde_json::to_vec(&instance).expect("serialize CLAP instance"),
-        )
-        .expect("reopen CLAP instance");
-        assert_eq!(reopened, instance);
+        for opaque_state in [Some(vec![7, 8]), Some(Vec::new()), None] {
+            let mut instance =
+                author_instance_from_probe(registration.clone(), opaque_state.clone())
+                    .expect("authored CLAP instance");
+            assert_eq!(instance.opaque_state.as_deref(), opaque_state.as_deref());
+            assert_eq!(instance.parameters.len(), 2);
+            let visible_id = mondrian_core::ParameterId::new("clap.param.1").unwrap();
+            let hidden_id = mondrian_core::ParameterId::new("clap.param.2").unwrap();
+            let visible = &instance.parameters[&visible_id];
+            assert_eq!(visible.ui.display_name.as_deref(), Some("Output Gain"));
+            assert!(!visible.ui.hidden);
+            let hidden = &instance.parameters[&hidden_id];
+            assert_eq!(hidden.ui.display_name.as_deref(), Some("Private meter"));
+            assert!(hidden.ui.hidden);
+            assert!(
+                !hidden.schema.is_animatable,
+                "nonautomatable writable is retained"
+            );
+            for (index, id) in [&visible_id, &hidden_id].into_iter().enumerate() {
+                let parameter = &instance.parameters[id];
+                assert_eq!(
+                    parameter.schema,
+                    registration.parameters[index].authoring_schema().unwrap()
+                );
+                if opaque_state.is_some() {
+                    assert!(parameter.automation.is_none());
+                } else {
+                    assert_eq!(
+                        parameter.automation.as_ref().unwrap().default_value,
+                        0.25,
+                        "stateless fallback retains current rather than default 0.5"
+                    );
+                }
+            }
+            let reopened: AudioProcessorInstance = serde_json::from_slice(
+                &serde_json::to_vec(&instance).expect("serialize CLAP instance"),
+            )
+            .expect("reopen CLAP instance");
+            assert_eq!(reopened, instance);
+            instance
+                .parameters
+                .get_mut(&visible_id)
+                .unwrap()
+                .set_automation(ExactAutomationCurve::new(visible_id.clone(), 0.875).unwrap())
+                .unwrap();
+            let reopened: AudioProcessorInstance =
+                serde_json::from_slice(&serde_json::to_vec(&instance).unwrap()).unwrap();
+            assert_eq!(reopened, instance, "explicit Some survives save/load");
+            assert_eq!(
+                reopened.parameters[&visible_id].automation.as_ref().unwrap().default_value,
+                0.875
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_native_state_does_not_bypass_current_value_validation() {
+        for opaque_state in [Some(Vec::new()), Some(vec![7, 8]), None] {
+            let registration = ClapPluginRegistration {
+                auxiliary_outputs: Default::default(),
+                main_audio_output_id: 0,
+                main_audio_input: ClapMainAudioInput::Present,
+                plugin_id: "org.example.gain".to_owned(),
+                library_path: std::env::current_exe().unwrap(),
+                binary_sha256: [3; 32],
+                execution_contract: contract(),
+                auxiliary_inputs: Default::default(),
+                parameters: vec![super::super::ClapParameterDescriptor {
+                    id: 1,
+                    name: "Output Gain".to_owned(),
+                    min_value: 0.0,
+                    max_value: 1.0,
+                    default_value: 0.5,
+                    current_value: f64::NAN,
+                    automatable: true,
+                    stepped: false,
+                    enumeration: false,
+                    read_only: false,
+                    hidden: false,
+                }],
+            };
+            assert!(author_instance_from_probe(registration, opaque_state).is_err());
+        }
     }
 
     #[test]
@@ -4542,14 +4616,35 @@ mod tests {
             .map(|(id, parameter)| (id.clone(), parameter.clone()))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(parameters.len(), 1);
-        assert_eq!(
+        assert!(
             parameters[&mondrian_core::ParameterId::new("clap.param.1").expect("volume ID")]
                 .automation
-                .as_ref()
-                .expect("bound host curve")
-                .default_value,
-            0.5
+                .is_none()
         );
+        let (_, library_path, _) = resolver
+            .plugins
+            .get("org.rust-audio.clack.gain")
+            .expect("selected reference plugin");
+        let (restored, _) = probe_clap_plugin_registration_with_state(
+            &resolver.helper_executable,
+            library_path,
+            "org.rust-audio.clack.gain",
+            AudioRenderContract {
+                sample_rate: 48_000,
+                channel_layout: AudioChannelLayout::Stereo,
+                max_block_frames: 512,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes: 1024 * 1024,
+                public_output_lookahead_budget_frames: 4096,
+                compensation_delay_scratch_budget_bytes: 1024 * 1024,
+            },
+            Some(&state),
+            false,
+        )
+        .expect("query actual current value after native state restore");
+        assert_eq!(restored.parameters.len(), 1);
+        assert_eq!(restored.parameters[0].id, 1);
+        assert_eq!(restored.parameters[0].current_value, 0.5);
         let request = AudioProcessorPrepareRequest::new(
             AudioProcessorOccurrence {
                 instance_id: AudioProcessorInstanceId::new(),
