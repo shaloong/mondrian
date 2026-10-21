@@ -2011,13 +2011,15 @@ fn audio_bus_observation_matches(
             "VST3 requires bounded inputs and one Main plus bounded auxiliary outputs",
         ));
     }
-    for (native, prepared, speakers) in [
+    for (direction, native, prepared, speakers) in [
         (
+            BusDirection::Input,
             observed.native_inputs,
             observed.layout_inputs,
             observed.input_arrangements,
         ),
         (
+            BusDirection::Output,
             observed.native_outputs,
             observed.layout_outputs,
             observed.output_arrangements,
@@ -2036,9 +2038,19 @@ fn audio_bus_observation_matches(
                 || prepared.channel_count != bus.channel_count
                 || *arrangement != speaker_layout
             {
-                return Err(invalid(
-                    "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout",
-                ));
+                return Err(audio_bus_shape_refusal(AudioBusShapeFailure {
+                    stage: "retained",
+                    direction,
+                    index,
+                    native_role: bus.role,
+                    expected_role: role,
+                    native_channels: bus.channel_count,
+                    prepared_channels: prepared.channel_count,
+                    host_active: prepared.active,
+                    arrangement: *arrangement,
+                    expected_arrangement: speaker_layout,
+                    expected_layout: channel_layout,
+                }));
             }
         }
     }
@@ -2079,6 +2091,47 @@ fn canonical_audio_input_key_matches(key: &str, index: usize) -> bool {
         && suffix.parse::<usize>() == Ok(index)
 }
 
+// Scalars from the already completed census, used only by a rejected bus.
+// No plugin name, second query or retained diagnostic owner is involved.
+struct AudioBusShapeFailure {
+    stage: &'static str,
+    direction: BusDirection,
+    index: usize,
+    native_role: AudioBusRole,
+    expected_role: AudioBusRole,
+    native_channels: usize,
+    prepared_channels: usize,
+    host_active: bool,
+    arrangement: SpeakerArrangement,
+    expected_arrangement: SpeakerArrangement,
+    expected_layout: AudioChannelLayout,
+}
+
+#[cold]
+fn audio_bus_shape_refusal(facts: AudioBusShapeFailure) -> AudioProcessorHostError {
+    // Match the existing predicate order to identify the first failed field.
+    let expected_channels = facts.expected_layout.channel_count();
+    let reason = if facts.native_role != facts.expected_role {
+        "role"
+    } else if facts.native_channels != expected_channels {
+        "native_channels"
+    } else if facts.prepared_channels != facts.native_channels {
+        "prepared_channels"
+    } else {
+        "arrangement"
+    };
+    let direction = match facts.direction {
+        BusDirection::Input => "input",
+        BusDirection::Output => "output",
+    };
+    invalid(format!(
+        "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage={} reason={reason} direction={direction} index={} native_role={:?} expected_role={:?} native_channels={} prepared_channels={} host_active={} actual_arrangement_raw={:016X} expected_arrangement_raw={:016X} expected_layout={:?} expected_channels={expected_channels}",
+        facts.stage, facts.index, facts.native_role, facts.expected_role,
+        facts.native_channels, facts.prepared_channels, facts.host_active,
+        facts.arrangement.raw(), facts.expected_arrangement.raw(), facts.expected_layout,
+    ))
+}
+
 /// Read roles from the actual restored component and activate admitted audio ports.
 pub(super) fn prepare_audio_inputs(
     plugin: &mut Plugin,
@@ -2093,7 +2146,13 @@ pub(super) fn prepare_audio_inputs(
     let arrangements = plugin
         .bus_arrangements()
         .map_err(|error| invalid(format!("VST3 speaker arrangement query failed: {error}")))?;
-    let expected = audio_inputs_from_metadata(&metadata, &layout, &arrangements, channel_layout)?;
+    let expected = audio_inputs_from_metadata(
+        &metadata,
+        &layout,
+        &arrangements,
+        channel_layout,
+        "before_activation",
+    )?;
     let audio_output_count = metadata.outputs.len() as u8; // Validated within 1..=32 above.
     for (direction, buses) in [
         (BusDirection::Input, &layout.inputs),
@@ -2123,6 +2182,7 @@ pub(super) fn prepare_audio_inputs(
             &active,
             &current_arrangements,
             channel_layout,
+            "after_activation",
         )? != expected
     {
         return Err(invalid("VST3 bus contract changed during activation"));
@@ -2148,6 +2208,7 @@ fn audio_inputs_from_metadata(
     layout: &AudioBusLayout,
     arrangements: &BusArrangements,
     channel_layout: AudioChannelLayout,
+    stage: &'static str,
 ) -> Result<(Vst3MainAudioInput, AudioProcessorAuxiliaryInputContract), AudioProcessorHostError> {
     let speaker_layout = match channel_layout {
         AudioChannelLayout::Mono => SpeakerArrangement::MONO,
@@ -2165,9 +2226,19 @@ fn audio_inputs_from_metadata(
             "VST3 requires bounded inputs and one Main plus bounded auxiliary outputs",
         ));
     }
-    for (native, prepared, speakers) in [
-        (&metadata.inputs, &layout.inputs, &arrangements.inputs),
-        (&metadata.outputs, &layout.outputs, &arrangements.outputs),
+    for (direction, native, prepared, speakers) in [
+        (
+            BusDirection::Input,
+            &metadata.inputs,
+            &layout.inputs,
+            &arrangements.inputs,
+        ),
+        (
+            BusDirection::Output,
+            &metadata.outputs,
+            &layout.outputs,
+            &arrangements.outputs,
+        ),
     ] {
         for (index, ((bus, prepared), arrangement)) in
             native.iter().zip(prepared).zip(speakers).enumerate()
@@ -2182,9 +2253,19 @@ fn audio_inputs_from_metadata(
                 || prepared.channel_count != bus.channel_count
                 || *arrangement != speaker_layout
             {
-                return Err(invalid(
-                    "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout",
-                ));
+                return Err(audio_bus_shape_refusal(AudioBusShapeFailure {
+                    stage,
+                    direction,
+                    index,
+                    native_role: bus.role,
+                    expected_role: role,
+                    native_channels: bus.channel_count,
+                    prepared_channels: prepared.channel_count,
+                    host_active: prepared.active,
+                    arrangement: *arrangement,
+                    expected_arrangement: speaker_layout,
+                    expected_layout: channel_layout,
+                }));
             }
         }
     }
@@ -2968,8 +3049,8 @@ mod bus_contract_tests {
         admitted_auxiliary: &AudioProcessorAuxiliaryInputContract,
         admitted_outputs: u8,
     ) {
-        let owned = audio_inputs_from_metadata(native, layout, arrangements, channels).and_then(
-            |(main, auxiliary)| {
+        let owned = audio_inputs_from_metadata(native, layout, arrangements, channels, "retained")
+            .and_then(|(main, auxiliary)| {
                 if layout.inputs.iter().chain(&layout.outputs).any(|bus| !bus.active) {
                     return Err(invalid(
                         "VST3 retained activation left an admitted bus inactive",
@@ -2978,8 +3059,7 @@ mod bus_contract_tests {
                 Ok(main == admitted_main
                     && &auxiliary == admitted_auxiliary
                     && native.outputs.len() == usize::from(admitted_outputs))
-            },
-        );
+            });
         let scalar = |buses: &[NativeAudioBusInfo]| {
             buses
                 .iter()
@@ -3279,6 +3359,7 @@ mod bus_contract_tests {
                 &layout,
                 &arrangements,
                 AudioChannelLayout::Stereo,
+                "before_activation",
             )
             .unwrap();
             assert_borrowed_matches_owned(
@@ -3340,7 +3421,8 @@ mod bus_contract_tests {
             &native,
             &layout,
             &arrangements,
-            AudioChannelLayout::Stereo
+            AudioChannelLayout::Stereo,
+            "before_activation",
         )
         .is_err());
     }
@@ -3677,9 +3759,14 @@ mod bus_contract_tests {
     #[test]
     fn vst3_auxiliary_contract_uses_native_roles_indices_and_exact_speakers() {
         let (mut native, mut layout, mut arrangements) = metadata();
-        let expected =
-            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
-                .expect("native sidechains");
+        let expected = audio_inputs_from_metadata(
+            &native,
+            &layout,
+            &arrangements,
+            AudioChannelLayout::Stereo,
+            "before_activation",
+        )
+        .expect("native sidechains");
         assert_eq!(
             expected.1.buses.iter().map(|bus| bus.bus_key.as_str()).collect::<Vec<_>>(),
             ["vst3.audio-input.1", "vst3.audio-input.2"]
@@ -3687,8 +3774,14 @@ mod bus_contract_tests {
         native.inputs[1].name = "Localized renamed duplicate".into();
         layout.inputs[1].active = true;
         assert_eq!(
-            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
-                .expect("display and activation are not bus identity"),
+            audio_inputs_from_metadata(
+                &native,
+                &layout,
+                &arrangements,
+                AudioChannelLayout::Stereo,
+                "before_activation"
+            )
+            .expect("display and activation are not bus identity"),
             expected
         );
         native.inputs[1].role = AudioBusRole::Main;
@@ -3696,14 +3789,21 @@ mod bus_contract_tests {
             &native,
             &layout,
             &arrangements,
-            AudioChannelLayout::Stereo
+            AudioChannelLayout::Stereo,
+            "before_activation",
         )
         .is_err());
         native.inputs[1].role = AudioBusRole::Auxiliary;
         arrangements.inputs[1] = SpeakerArrangement::STEREO_SURROUND;
         assert!(
-            audio_inputs_from_metadata(&native, &layout, &arrangements, AudioChannelLayout::Stereo)
-                .is_err(),
+            audio_inputs_from_metadata(
+                &native,
+                &layout,
+                &arrangements,
+                AudioChannelLayout::Stereo,
+                "before_activation"
+            )
+            .is_err(),
             "two channels do not imply L/R stereo"
         );
         arrangements.inputs[1] = SpeakerArrangement::STEREO;
@@ -3712,9 +3812,111 @@ mod bus_contract_tests {
             &native,
             &layout,
             &arrangements,
-            AudioChannelLayout::Stereo
+            AudioChannelLayout::Stereo,
+            "before_activation",
         )
         .is_err());
+    }
+
+    #[test]
+    fn vst3_bus_refusal_reports_existing_scalars_and_actual_validation_stage() {
+        let (mut native, mut layout, mut arrangements) = metadata();
+        native.outputs[0].name = "not diagnostic identity".into();
+        native.outputs[0].default_active = false;
+        layout.outputs[0].channel_count = 4;
+        layout.outputs[0].active = false;
+        arrangements.outputs[0] = SpeakerArrangement::MONO;
+        for (stage, expected) in [
+            ("before_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=before_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Stereo expected_channels=2"),
+            ("after_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=after_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Stereo expected_channels=2"),
+        ] {
+            assert_eq!(
+                audio_inputs_from_metadata(&native, &layout, &arrangements,
+                    AudioChannelLayout::Stereo, stage).unwrap_err(),
+                invalid(expected),
+            );
+        }
+        // The borrowed path has the same facts, but labels its real retained
+        // census rather than claiming either activation-stage observation.
+        assert_borrowed_matches_owned(
+            &native,
+            &layout,
+            &arrangements,
+            AudioChannelLayout::Stereo,
+            Vst3MainAudioInput::Absent,
+            &AudioProcessorAuxiliaryInputContract::default(),
+            1,
+        );
+    }
+
+    #[test]
+    fn vst3_bus_refusal_keeps_first_field_direction_and_native_index_order() {
+        let (native, layout, arrangements) = metadata();
+        for (change, expected) in [
+            (
+                0,
+                "reason=role direction=input index=1 native_role=Main expected_role=Auxiliary",
+            ),
+            (1, "reason=native_channels direction=input index=1"),
+            (2, "reason=prepared_channels direction=input index=1"),
+            (3, "reason=arrangement direction=input index=1"),
+            (4, "reason=native_channels direction=input index=2"),
+            (5, "reason=role direction=output index=0"),
+        ] {
+            let mut n = native.clone();
+            let mut l = layout.clone();
+            let mut a = arrangements.clone();
+            // A later output failure may not preempt an earlier input/index.
+            n.outputs[0].role = AudioBusRole::Auxiliary;
+            n.inputs[2].channel_count = 4;
+            if change < 4 {
+                a.inputs[1] = SpeakerArrangement::STEREO_SURROUND;
+                if change < 3 {
+                    l.inputs[1].channel_count = 4;
+                }
+                if change < 2 {
+                    n.inputs[1].channel_count = 1;
+                }
+                if change == 0 {
+                    n.inputs[1].role = AudioBusRole::Main;
+                }
+            } else if change == 5 {
+                n.inputs[2].channel_count = 2;
+            }
+            let error =
+                audio_inputs_from_metadata(&n, &l, &a, AudioChannelLayout::Stereo, "retained")
+                    .unwrap_err();
+            let AudioProcessorHostError::InvalidContract(detail) = error else {
+                panic!("shape refusal must retain InvalidContract");
+            };
+            assert!(detail.contains(expected), "{detail}");
+            // Inactivity and admitted-identity mismatch are deliberately also
+            // present. They must remain later than the same first shape error.
+            assert_borrowed_matches_owned(
+                &n,
+                &l,
+                &a,
+                AudioChannelLayout::Stereo,
+                Vst3MainAudioInput::Absent,
+                &AudioProcessorAuxiliaryInputContract::default(),
+                1,
+            );
+        }
+        let (mut native, layout, arrangements) = metadata();
+        native.inputs[0].role = AudioBusRole::Auxiliary;
+        native.outputs.clear();
+        assert_eq!(
+            audio_inputs_from_metadata(
+                &native,
+                &layout,
+                &arrangements,
+                AudioChannelLayout::Stereo,
+                "before_activation"
+            )
+            .unwrap_err(),
+            invalid("VST3 requires bounded inputs and one Main plus bounded auxiliary outputs"),
+            "inventory extent refusal must still precede bus-field diagnostics",
+        );
     }
 
     #[test]
@@ -3736,18 +3938,28 @@ mod bus_contract_tests {
             };
             arrangements.inputs[0] = speakers;
             arrangements.outputs[0] = speakers;
-            let present =
-                audio_inputs_from_metadata(&native, &layout, &arrangements, channel_layout)
-                    .unwrap();
+            let present = audio_inputs_from_metadata(
+                &native,
+                &layout,
+                &arrangements,
+                channel_layout,
+                "before_activation",
+            )
+            .unwrap();
             assert_eq!(present.0, Vst3MainAudioInput::Present);
             assert!(present.1.buses.is_empty());
 
             native.inputs.clear();
             layout.inputs.clear();
             arrangements.inputs.clear();
-            let absent =
-                audio_inputs_from_metadata(&native, &layout, &arrangements, channel_layout)
-                    .unwrap();
+            let absent = audio_inputs_from_metadata(
+                &native,
+                &layout,
+                &arrangements,
+                channel_layout,
+                "before_activation",
+            )
+            .unwrap();
             assert_eq!(absent.0, Vst3MainAudioInput::Absent);
             assert!(absent.1.buses.is_empty());
             assert_ne!(
@@ -3774,7 +3986,14 @@ mod bus_contract_tests {
                         a.outputs.push(speakers);
                     }
                 }
-                assert!(audio_inputs_from_metadata(&n, &l, &a, channel_layout).is_err());
+                assert!(audio_inputs_from_metadata(
+                    &n,
+                    &l,
+                    &a,
+                    channel_layout,
+                    "before_activation"
+                )
+                .is_err());
             }
             native.inputs.push(NativeAudioBusInfo {
                 role: AudioBusRole::Auxiliary,
@@ -3785,8 +4004,14 @@ mod bus_contract_tests {
             layout.inputs.push(layout.outputs[0]);
             arrangements.inputs.push(speakers);
             assert!(
-                audio_inputs_from_metadata(&native, &layout, &arrangements, channel_layout)
-                    .is_err(),
+                audio_inputs_from_metadata(
+                    &native,
+                    &layout,
+                    &arrangements,
+                    channel_layout,
+                    "before_activation"
+                )
+                .is_err(),
                 "an auxiliary bus at index zero is not an absent-main instrument"
             );
         }
@@ -3802,7 +4027,8 @@ mod bus_contract_tests {
                 native,
                 layout,
                 arrangements,
-                AudioChannelLayout::Stereo
+                AudioChannelLayout::Stereo,
+                "before_activation",
             )
             .is_err());
         };
