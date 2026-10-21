@@ -10,6 +10,29 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 
+/// Only these homogeneous restart kinds have a retained-prefix consumer.
+/// Information witnesses identify source ownership, not metadata admission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestartSourceParameterKind {
+    Values,
+    UnchangedInfo,
+}
+impl RestartSourceParameterKind {
+    fn from_flags(flags: i32) -> Option<Self> {
+        match flags {
+            4 => Some(Self::Values),
+            16 => Some(Self::UnchangedInfo),
+            _ => None,
+        }
+    }
+    fn flags(self) -> i32 {
+        match self {
+            Self::Values => 4,
+            Self::UnchangedInfo => 16,
+        }
+    }
+}
+
 pub(super) fn visit_event_payload(
     event: &PluginEvent,
     visitor: &mut dyn crate::host_storage::HostStorageVisitor,
@@ -2255,6 +2278,8 @@ impl ComponentHandler {
         {
             return Err(Failure::InvalidSource);
         }
+        let kind = RestartSourceParameterKind::from_flags(cohort.flags().bits())
+            .ok_or(Failure::Conflict)?;
         let mut last = None;
         for event in &source.events {
             if let Event::ParameterRescanRequested {
@@ -2262,8 +2287,8 @@ impl ComponentHandler {
                 cohort: marker,
             } = event
             {
-                if *flags != 4
-                    || marker.flags().bits() != 4
+                if *flags != kind.flags()
+                    || marker.flags().bits() != kind.flags()
                     || marker.serial() == 0
                     || marker.exhausted()
                     || last.is_some_and(|prior: crate::plugin::RestartCohort| {
@@ -2275,7 +2300,7 @@ impl ComponentHandler {
                 last = Some(*marker);
             }
         }
-        if cohort.flags().bits() != 4 || cohort.serial() == 0 || last != Some(cohort) {
+        if cohort.serial() == 0 || last != Some(cohort) {
             return Err(Failure::Conflict);
         }
         Ok(crate::plugin::RestartSourceWitness {
@@ -2329,14 +2354,16 @@ impl ComponentHandler {
             .revision
             .checked_sub(witness.source.revision())
             .and_then(|value| usize::try_from(value).ok());
-        if delta != Some(source.events.len()) || witness.cohort.flags().bits() != 4 {
+        let kind = RestartSourceParameterKind::from_flags(witness.cohort.flags().bits())
+            .ok_or(Failure::Conflict)?;
+        if delta != Some(source.events.len()) {
             return Err(Failure::Conflict);
         }
         let mut last = witness.cohort;
         for event in &source.events {
             if let Event::ParameterRescanRequested { flags, cohort } = event {
-                if *flags != 4
-                    || cohort.flags().bits() != 4
+                if *flags != kind.flags()
+                    || cohort.flags().bits() != kind.flags()
                     || cohort.exhausted()
                     || cohort.serial() <= last.serial()
                 {
@@ -2355,12 +2382,14 @@ impl ComponentHandler {
                 Err(Failure::Conflict)
             };
         }
-        if current.flags().bits() != 4 || current.serial() <= witness.cohort.serial() {
+        if current.flags().bits() != kind.flags() || current.serial() <= witness.cohort.serial() {
             return Err(Failure::Conflict);
         }
         // Lineage equality proves no raw clear occurred after publication.
-        // The intact suffix explains the new exact-4 cohort. Settle only the
-        // old caller-held prefix; leave all current raw/source state untouched.
+        // The intact suffix explains the newer same-kind cohort. Mixed 4/16
+        // unions and unknown requests refuse; neither kind can settle the other.
+        // Settle only the old caller-held prefix; leave all current raw/source
+        // state untouched.
         Ok(Settlement::NewerParameterSuffixPending { cohort: current })
     }
 
@@ -7254,6 +7283,120 @@ mod restart_retirement_lineage_tests {
             handler.editor_event_source_status().revision(),
             source.revision() + 1
         );
+    }
+
+    #[test]
+    fn parameter_info_prefix_settles_only_its_same_kind_suffix() {
+        for later in [false, true] {
+            let handler = handler();
+            let owner = Owner::issue().unwrap();
+            unsafe {
+                assert_eq!(handler.restartComponent(16), kResultOk);
+                assert_eq!(handler.setDirty(0), kResultOk);
+            }
+            let witness = handler.capture_restart_source_witness(owner).unwrap();
+            assert_eq!(witness.cohort().flags().bits(), 16);
+            assert_eq!(witness.source().pending_events(), 2);
+            let _ = handler.take_editor_events();
+            if later {
+                unsafe {
+                    assert_eq!(handler.restartComponent(16), kResultOk);
+                    assert_eq!(handler.beginEdit(7), kResultOk);
+                    assert_eq!(handler.performEdit(7, 0.625), kResultOk);
+                }
+            }
+            let before = snapshot(&handler);
+            let expected = if later {
+                Ok(Settlement::NewerParameterSuffixPending { cohort: before.3 })
+            } else {
+                Ok(Settlement::Retired)
+            };
+            assert_eq!(
+                handler.settle_restart_source_prefix(owner, witness),
+                expected
+            );
+            let after = snapshot(&handler);
+            if later {
+                assert_eq!(
+                    after, before,
+                    "new Info prefix was not validated or retired"
+                );
+            } else {
+                assert_eq!((after.0, after.1, after.2), (before.0, before.1, before.2));
+                assert_eq!(after.3.serial(), before.3.serial());
+                assert!(!after.3.pending());
+                assert_eq!(after.4, before.4 + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn parameter_restart_prefix_refuses_both_cross_kind_unions() {
+        for (prefix, suffix) in [(4, 16), (16, 4)] {
+            let handler = handler();
+            let owner = Owner::issue().unwrap();
+            unsafe {
+                assert_eq!(handler.restartComponent(prefix), kResultOk);
+            }
+            let witness = handler.capture_restart_source_witness(owner).unwrap();
+            let _ = handler.take_editor_events();
+            unsafe {
+                assert_eq!(handler.restartComponent(suffix), kResultOk);
+            }
+            let before = snapshot(&handler);
+            assert_eq!(before.3.flags().bits(), 20);
+            assert_eq!(
+                handler.capture_restart_source_witness(owner),
+                Err(Failure::Conflict)
+            );
+            assert_eq!(
+                handler.settle_restart_source_prefix(owner, witness),
+                Err(Failure::Conflict)
+            );
+            assert_eq!(snapshot(&handler), before);
+        }
+    }
+
+    #[test]
+    fn parameter_info_prefix_requires_original_owner_drain_and_retirement_lineage() {
+        for case in [
+            "missing_drain",
+            "other_owner",
+            "external_retire",
+            "unknown_suffix",
+        ] {
+            let handler = handler();
+            let owner = Owner::issue().unwrap();
+            unsafe {
+                assert_eq!(handler.restartComponent(16), kResultOk);
+            }
+            let witness = handler.capture_restart_source_witness(owner).unwrap();
+            if case != "missing_drain" {
+                let _ = handler.take_editor_events();
+            }
+            if case == "external_retire" {
+                assert_eq!(handler.take_restart_flags().bits(), 16);
+                unsafe {
+                    assert_eq!(handler.restartComponent(16), kResultOk);
+                }
+            }
+            if case == "unknown_suffix" {
+                unsafe {
+                    assert_eq!(handler.restartComponent(1 << 29), kResultOk);
+                }
+            }
+            let target = if case == "other_owner" {
+                Owner::issue().unwrap()
+            } else {
+                owner
+            };
+            let before = snapshot(&handler);
+            assert_eq!(
+                handler.settle_restart_source_prefix(target, witness),
+                Err(Failure::Conflict)
+            );
+            assert_eq!(snapshot(&handler), before, "case={case}");
+        }
     }
 
     #[test]

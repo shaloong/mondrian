@@ -738,6 +738,8 @@ impl RestartCohort {
 /// resulting callback. This is not a one-shot author/install permission; the
 /// caller must retain the real delivered prefix and its own acceptance receipt.
 /// It cannot be serialized or constructed for another loaded native object.
+/// An exact-16 witness only identifies a source: its caller must separately
+/// prove that the complete admitted parameter-info projection is unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestartSourceWitness {
     pub(crate) owner: NativeEditorAttachmentOwner,
@@ -764,13 +766,14 @@ impl RestartSourceWitness {
     }
 }
 
-/// Local settlement of an already delivered and accepted exact-4 prefix.
+/// Local settlement of an already delivered and accepted exact-kind prefix.
+/// Values (4) and verified unchanged parameter information (16) remain distinct.
 /// Neither disposition authorizes an author transaction or another native block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartSourceSettlement {
     /// The prefix's exact raw cohort was retired; source suffixes remain intact.
     Retired,
-    /// The old prefix is settled while this newer exact-4 cohort and its entire
+    /// The old prefix is settled while this newer same-kind cohort and its entire
     /// source suffix remain pending. No raw retirement occurs in this branch.
     NewerParameterSuffixPending {
         /// Actual still-pending raw callback cohort.
@@ -814,8 +817,9 @@ pub enum RestartSourceError {
 ///
 /// - [`param_values_changed`](Self::param_values_changed) — re-read values with
 ///   [`Plugin::get_parameters`].
-/// - [`param_titles_changed`](Self::param_titles_changed) — re-read the parameter list itself
-///   (ids, names, ranges may all differ).
+/// - [`param_titles_changed`](Self::param_titles_changed) — re-read parameter information:
+///   titles, short titles, units, defaults, step counts and flags may differ.
+///   This is separate from current values and parameter-ID remapping.
 /// - [`latency_changed`](Self::latency_changed) — re-read [`Plugin::latency_samples`] and adjust
 ///   delay compensation. Requires stopping processing first, per the VST3 spec.
 /// - [`io_changed`](Self::io_changed) — the bus layout changed; re-query
@@ -853,7 +857,9 @@ impl RestartFlags {
         self.has(vst3::Steinberg::Vst::RestartFlags_::kReloadComponent)
     }
 
-    /// `kParamTitlesChanged`: the parameter list itself changed (ids, names, ranges, count).
+    /// `kParamTitlesChanged`: titles, short titles, units, defaults, step counts
+    /// or parameter flags changed. Re-read infos; this does not refresh values
+    /// or authorize a parameter-ID remapping.
     pub fn param_titles_changed(self) -> bool {
         self.has(vst3::Steinberg::Vst::RestartFlags_::kParamTitlesChanged)
     }

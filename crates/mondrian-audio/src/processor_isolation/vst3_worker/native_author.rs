@@ -282,7 +282,7 @@ impl Vst3Worker {
             Ok(rescan) => rescan,
             Err(reason) => return Ok(Some(refused(source, reason))),
         };
-        if let Some(cohort) = rescan {
+        if let Some((kind, cohort)) = rescan {
             if self.initial_signal_phase != InitialSignalPhase::Entered
                 || self.prepared_author_entry.is_some()
                 || !matches!(
@@ -292,7 +292,7 @@ impl Vst3Worker {
             {
                 return Ok(Some(refused(source, Refusal::UnsupportedAdapter)));
             }
-            return self.collect_single_rescan(binding, source, cohort).map(Some);
+            return self.collect_single_rescan(binding, source, kind, cohort).map(Some);
         }
         if source.pending_events == 0 {
             return Ok(Some(NativeAudioAuthorObservation {
@@ -489,14 +489,19 @@ impl Vst3Worker {
                 return Ok(refused(source, Refusal::StaleDelivery));
             };
             let cohort = witness.cohort();
+            let Some(kind) = RescanKind::from_flags(cohort.flags().bits()) else {
+                return Ok(refused(source, Refusal::StaleDelivery));
+            };
             let prefix = Some(crate::NativeRequestCohort {
                 serial: cohort.serial(),
-                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 },
+                request: mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                    flags: kind.flags() as u32,
+                },
             });
             if configuration.is_none()
                 || *revision != witness.source().revision()
                 || *request_cohort != prefix
-                || cohort.flags().bits() != 4
+                || cohort.flags().bits() != kind.flags()
                 || cohort.serial() == 0
                 || cohort.exhausted()
                 || plugin.native_editor_attachment_owner() != Some(witness.owner())
@@ -569,11 +574,39 @@ fn current_source(
     )
 }
 
+/// Native Values and verified unchanged Info are different author contracts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RescanKind {
+    Values,
+    UnchangedInfo,
+}
+impl RescanKind {
+    fn from_flags(flags: i32) -> Option<Self> {
+        match flags {
+            4 => Some(Self::Values),
+            16 => Some(Self::UnchangedInfo),
+            _ => None,
+        }
+    }
+    fn flags(self) -> i32 {
+        match self {
+            Self::Values => 4,
+            Self::UnchangedInfo => 16,
+        }
+    }
+    fn projection(self) -> mondrian_core::NativeAudioParameterRescanKind {
+        match self {
+            Self::Values => mondrian_core::NativeAudioParameterRescanKind::Values,
+            Self::UnchangedInfo => mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh,
+        }
+    }
+}
+
 fn classify_rescan(
     events: &[vst3_host::plugin::NativeEditorEvent],
     source: NativeAudioAuthorSourceStatus,
     current: Option<vst3_host::plugin::RestartCohort>,
-) -> Result<Option<vst3_host::plugin::RestartCohort>, Refusal> {
+) -> Result<Option<(RescanKind, vst3_host::plugin::RestartCohort)>, Refusal> {
     use vst3_host::plugin::NativeEditorEvent;
     let has_marker = events
         .iter()
@@ -582,21 +615,22 @@ fn classify_rescan(
     if !has_marker && !parameter_request {
         return Ok(None);
     }
-    let [NativeEditorEvent::ParameterRescanRequested { flags: 4, cohort }] = events else {
+    let [NativeEditorEvent::ParameterRescanRequested { flags, cohort }] = events else {
         return Err(Refusal::UnsupportedAdapter);
     };
+    let kind = RescanKind::from_flags(*flags).ok_or(Refusal::UnsupportedAdapter)?;
     if !source.boundaries_closed()
         || source.failure.is_some()
         || source.pending_dsp_feedback_values != 0
         || source.pending_events != 1
-        || cohort.flags().bits() != 4
+        || cohort.flags().bits() != kind.flags()
         || cohort.serial() == 0
         || cohort.exhausted()
         || current != Some(*cohort)
     {
         return Err(Refusal::UnsupportedAdapter);
     }
-    Ok(Some(*cohort))
+    Ok(Some((kind, *cohort)))
 }
 
 impl Vst3Worker {
@@ -604,6 +638,7 @@ impl Vst3Worker {
         &mut self,
         binding: crate::NativeAudioObjectBindRequest,
         baseline: NativeAudioAuthorSourceStatus,
+        kind: RescanKind,
         cohort: vst3_host::plugin::RestartCohort,
     ) -> Result<NativeAudioAuthorObservation, AudioProcessorHostError> {
         use vst3_host::plugin::NativeEditorEventDrain;
@@ -614,7 +649,9 @@ impl Vst3Worker {
             return Ok(refused(baseline, Refusal::ResourceLimit));
         }
         let mut values = Vec::new();
-        if values.try_reserve_exact(writable).is_err() || values.capacity() > MAX_PARAMETERS {
+        if kind == RescanKind::Values
+            && (values.try_reserve_exact(writable).is_err() || values.capacity() > MAX_PARAMETERS)
+        {
             return Ok(refused(baseline, Refusal::ResourceLimit));
         }
         let mut frame = vst3_host::controller_parameters::ControllerParameterQueryFrame::default();
@@ -625,7 +662,10 @@ impl Vst3Worker {
             &mut frame,
             &mut |index, normalized| {
                 let descriptor = &parameters[index];
-                if descriptor.read_only {
+                // The shared visitor proves the complete ordered admitted
+                // descriptor projection, including names/defaults/steps/flags.
+                // Its current values never become overrides for Info-only.
+                if kind == RescanKind::UnchangedInfo || descriptor.read_only {
                     return Ok(());
                 }
                 let projected = (|| {
@@ -711,10 +751,7 @@ impl Vst3Worker {
         {
             return Ok(refused(source, Refusal::ResourceLimit));
         }
-        projected.push(Event::ParameterValuesRescanned {
-            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
-            values,
-        });
+        projected.push(Event::ParameterValuesRescanned { kind: kind.projection(), values });
         projected.extend((1..count).map(|_| Event::DirtyChanged(false)));
         let request_cohort = Some(crate::NativeRequestCohort {
             serial: witness.cohort().serial(),
@@ -747,7 +784,7 @@ impl Vst3Worker {
             }
         };
         let after = current_source(plugin);
-        let exact = captured_rescan_prefix(&events, count, cohort)
+        let exact = captured_rescan_prefix(&events, count, kind, cohort)
             && plugin.pending_restart_cohort() == Some(cohort);
         let reason = match &after {
             Ok(after)
@@ -787,13 +824,14 @@ impl Vst3Worker {
 fn captured_rescan_prefix(
     events: &[vst3_host::plugin::NativeEditorEvent],
     count: usize,
+    kind: RescanKind,
     cohort: vst3_host::plugin::RestartCohort,
 ) -> bool {
     use vst3_host::plugin::NativeEditorEvent;
     count != 0 && events.len() == count && events.iter().enumerate().all(|(index, event)| {
         if index == 0 {
-            matches!(event, NativeEditorEvent::ParameterRescanRequested { flags: 4, cohort: actual }
-                if *actual == cohort)
+            matches!(event, NativeEditorEvent::ParameterRescanRequested { flags, cohort: actual }
+                if *flags == kind.flags() && *actual == cohort)
         } else {
             matches!(event, NativeEditorEvent::DirtyChanged(false))
         }
@@ -833,7 +871,7 @@ mod rescan_tests {
         let exact = cohort(3, 4);
         assert_eq!(
             classify_rescan(&[marker(exact)], source(1), Some(exact)),
-            Ok(Some(exact))
+            Ok(Some((RescanKind::Values, exact)))
         );
         for (events, live) in [
             (
@@ -842,7 +880,6 @@ mod rescan_tests {
             ),
             (vec![marker(exact), Raw::GroupEditStarted], Some(exact)),
             (vec![marker(exact), Raw::DirtyChanged(false)], Some(exact)),
-            (vec![marker(cohort(3, 16))], Some(cohort(3, 16))),
             (vec![marker(cohort(3, 20))], Some(cohort(3, 20))),
             (vec![marker(cohort(3, 36))], Some(cohort(3, 36))),
             (vec![marker(exact)], Some(cohort(3, 0))),
@@ -863,6 +900,77 @@ mod rescan_tests {
         open = source(1);
         open.pending_dsp_feedback_values = 1;
         assert!(classify_rescan(&[marker(exact)], open, Some(exact)).is_err());
+    }
+
+    #[test]
+    fn unchanged_info_rescan_is_a_distinct_exact_single_current_kind() {
+        let info = cohort(3, 16);
+        assert_eq!(
+            classify_rescan(&[marker(info)], source(1), Some(info)),
+            Ok(Some((RescanKind::UnchangedInfo, info)))
+        );
+        assert_eq!(
+            RescanKind::UnchangedInfo.projection(),
+            mondrian_core::NativeAudioParameterRescanKind::NoValueRefresh
+        );
+        for (events, live) in [
+            (
+                vec![marker(info), marker(cohort(4, 16))],
+                Some(cohort(4, 16)),
+            ),
+            (vec![marker(info), Raw::DirtyChanged(false)], Some(info)),
+            (vec![marker(info)], Some(cohort(3, 20))),
+            (vec![marker(info)], Some(cohort(3, 4))),
+            (vec![marker(info)], Some(cohort(4, 16))),
+            (vec![marker(info)], None),
+            (vec![marker(cohort(0, 16))], Some(cohort(0, 16))),
+            (
+                vec![marker(cohort(u32::MAX, 16))],
+                Some(cohort(u32::MAX, 16)),
+            ),
+        ] {
+            assert_eq!(
+                classify_rescan(&events, source(events.len()), live),
+                Err(Refusal::UnsupportedAdapter)
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_info_capture_keeps_the_kind_and_dirty_false_boundary() {
+        let info = cohort(3, 16);
+        let events = [marker(info), Raw::DirtyChanged(false)];
+        assert!(captured_rescan_prefix(
+            &events,
+            2,
+            RescanKind::UnchangedInfo,
+            info
+        ));
+        assert!(!captured_rescan_prefix(
+            &events,
+            2,
+            RescanKind::Values,
+            info
+        ));
+        assert!(!captured_rescan_prefix(
+            &events,
+            1,
+            RescanKind::UnchangedInfo,
+            info
+        ));
+        for suffix in [
+            marker(cohort(4, 4)),
+            marker(cohort(4, 16)),
+            Raw::DirtyChanged(true),
+            Raw::GroupEditStarted,
+        ] {
+            assert!(!captured_rescan_prefix(
+                &[marker(info), suffix],
+                2,
+                RescanKind::UnchangedInfo,
+                info
+            ));
+        }
     }
 
     #[test]
@@ -888,16 +996,36 @@ mod rescan_tests {
             Raw::DirtyChanged(false),
             Raw::DirtyChanged(false),
         ];
-        assert!(captured_rescan_prefix(&complete, 3, exact));
-        assert!(!captured_rescan_prefix(&complete, 2, exact));
-        assert!(!captured_rescan_prefix(&complete, 3, cohort(4, 4)));
-        assert!(!captured_rescan_prefix(&[], 0, exact));
+        assert!(captured_rescan_prefix(
+            &complete,
+            3,
+            RescanKind::Values,
+            exact
+        ));
+        assert!(!captured_rescan_prefix(
+            &complete,
+            2,
+            RescanKind::Values,
+            exact
+        ));
+        assert!(!captured_rescan_prefix(
+            &complete,
+            3,
+            RescanKind::Values,
+            cohort(4, 4)
+        ));
+        assert!(!captured_rescan_prefix(&[], 0, RescanKind::Values, exact));
         for suffix in [
             Raw::DirtyChanged(true),
             marker(cohort(4, 4)),
             Raw::GroupEditStarted,
         ] {
-            assert!(!captured_rescan_prefix(&[marker(exact), suffix], 2, exact));
+            assert!(!captured_rescan_prefix(
+                &[marker(exact), suffix],
+                2,
+                RescanKind::Values,
+                exact
+            ));
         }
     }
 }

@@ -4010,10 +4010,24 @@ impl PluginInternal for PluginImpl {
         if thread::current().id() != self.control_thread {
             return Err(Failure::WrongThread);
         }
-        self.component_handler
+        let witness = self
+            .component_handler
             .as_ref()
             .ok_or(Failure::Unsupported)?
-            .capture_restart_source_witness(self.native_editor_owner)
+            .capture_restart_source_witness(self.native_editor_owner)?;
+        // Gate the actual captured kind, not an earlier racy raw-cohort peek.
+        // These consumers require their original cache invalidation service.
+        if witness.cohort().flags().bits() == 16
+            && (self
+                ._host_app
+                .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+                || self
+                    ._host_app
+                    .consumes_plugin_interface(crate::PluginInterface::UnitInfo))
+        {
+            return Err(Failure::Unsupported);
+        }
+        Ok(witness)
     }
 
     fn settle_restart_source_prefix(
@@ -4029,6 +4043,17 @@ impl PluginInternal for PluginImpl {
         }
         if witness.owner() != self.native_editor_owner {
             return Err(Failure::Conflict);
+        }
+        // No retirement may bypass enabled MIDI/program-unit cache consumers.
+        if witness.cohort().flags().bits() == 16
+            && (self
+                ._host_app
+                .consumes_plugin_interface(crate::PluginInterface::MidiMapping)
+                || self
+                    ._host_app
+                    .consumes_plugin_interface(crate::PluginInterface::UnitInfo))
+        {
+            return Err(Failure::Unsupported);
         }
         self.component_handler
             .as_ref()

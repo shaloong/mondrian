@@ -823,3 +823,67 @@ fn native_cache_policy_independent_alternatives_and_stream_interfaces() {
         );
     }
 }
+
+#[test]
+#[ignore = "owned SDK fixture/native Job required; no Process"]
+fn native_parameter_info_witness_refuses_enabled_cache_consumers_before_retirement() {
+    use crate::plugin::{NativeEditorEventDrain, RestartSourceError as Failure};
+    for policy in [
+        PluginInterfaceSupport::none(),
+        PluginInterfaceSupport::none().with(InterfaceKind::MidiMapping),
+        PluginInterfaceSupport::none().with(InterfaceKind::UnitInfo),
+        PluginInterfaceSupport::none()
+            .with(InterfaceKind::MidiMapping)
+            .with(InterfaceKind::UnitInfo),
+    ] {
+        let mut p = Probe::new(policy);
+        let blocked = p
+            .native
+            ._host_app
+            .consumes_plugin_interface(InterfaceKind::MidiMapping)
+            || p.native
+                ._host_app
+                .consumes_plugin_interface(InterfaceKind::UnitInfo);
+        let handler = p.native.component_handler.as_ref().unwrap();
+        assert!(handler.editor_event_source_status().closed_empty());
+        unsafe {
+            assert_eq!(handler.restartComponent(16), kResultOk);
+        }
+        // This internal witness is setup for the negative settle control; the
+        // public PluginImpl wrapper must independently enforce its own policy.
+        let witness = handler
+            .capture_restart_source_witness(p.native.native_editor_owner)
+            .unwrap();
+        let source = handler.editor_event_source_status();
+        let cohort = handler.pending_restart_cohort();
+        let calls = p.calls.snapshot();
+        let captured = p.native.capture_restart_source_witness();
+        if blocked {
+            assert_eq!(captured, Err(Failure::Unsupported));
+        } else {
+            assert_eq!(captured, Ok(witness));
+        }
+        let handler = p.native.component_handler.as_ref().unwrap();
+        assert_eq!(handler.editor_event_source_status(), source);
+        assert_eq!(handler.pending_restart_cohort(), cohort);
+        assert!(
+            matches!(handler.take_editor_events(), NativeEditorEventDrain::Complete { events }
+            if events.len() == 1)
+        );
+        let source = handler.editor_event_source_status();
+        let settled = p.native.settle_restart_source_prefix(witness);
+        if blocked {
+            assert_eq!(settled, Err(Failure::Unsupported));
+            assert_eq!(p.native.pending_restart_cohort(), Some(cohort));
+        } else {
+            assert_eq!(settled, Ok(crate::plugin::RestartSourceSettlement::Retired));
+            assert!(!p.native.pending_restart_cohort().unwrap().pending());
+        }
+        assert_eq!(p.native.editor_event_source_status().unwrap(), source);
+        assert_eq!(
+            p.calls.snapshot(),
+            calls,
+            "no cache getter, setter or lifecycle service"
+        );
+    }
+}
