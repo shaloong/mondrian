@@ -248,6 +248,8 @@ pub const AUDIO_SET_TRACK_SOLO: &str = "set_track_solo";
 pub const AUDIO_SELECT_SCOPE_OCCURRENCE: &str = "select_scope_occurrence";
 /// External action for one exact native editor product surface.
 pub const AUDIO_NATIVE_EDITOR: &str = "native_editor";
+/// Explicit single-row native presentation query; never an author transaction.
+pub const AUDIO_QUERY_NATIVE_PARAMETER: &str = "query_native_parameter";
 
 /// External custom-action namespace for Project Asset Library operations.
 pub const ASSET_NAMESPACE: &str = "ui.asset";
@@ -475,6 +477,8 @@ pub enum ViewerProductAction {
 pub enum AudioProductAction {
     /// Open or close the exact selected native author surface.
     NativeEditor(AudioNativeEditorPayload),
+    /// Read one currently selected native-owned parameter without adopting it.
+    QueryNativeParameter(AudioNativeParameterQueryPayload),
     /// Navigate a shared Scope curve using an explicit Component occurrence.
     SelectScopeOccurrence(AudioScopeOccurrencePayload),
     /// Query or cancel transient processor input observation.
@@ -759,6 +763,11 @@ impl ProductAction {
                 ))),
                 AUDIO_QUERY_PROCESSOR_INPUTS => {
                     Ok(Some(Self::Audio(AudioProductAction::QueryProcessorInputs(
+                        decode_payload(namespace, name, payload)?,
+                    ))))
+                }
+                AUDIO_QUERY_NATIVE_PARAMETER => {
+                    Ok(Some(Self::Audio(AudioProductAction::QueryNativeParameter(
                         decode_payload(namespace, name, payload)?,
                     ))))
                 }
@@ -1166,6 +1175,11 @@ impl ProductAction {
             Self::Audio(AudioProductAction::QueryProcessorInputs(payload)) => (
                 AUDIO_NAMESPACE,
                 AUDIO_QUERY_PROCESSOR_INPUTS,
+                serde_json::json!(payload),
+            ),
+            Self::Audio(AudioProductAction::QueryNativeParameter(payload)) => (
+                AUDIO_NAMESPACE,
+                AUDIO_QUERY_NATIVE_PARAMETER,
                 serde_json::json!(payload),
             ),
             Self::Audio(AudioProductAction::NativeEditor(payload)) => (
@@ -1916,6 +1930,15 @@ pub struct AudioProcessorRebindVst3Payload {
     pub address: mondrian_timeline::AudioProcessorRackAddress,
     /// Stable processor instance identity.
     pub processor_id: AudioProcessorInstanceId,
+}
+
+/// Captured single-row query intent. The current App surface and schema must
+/// still match at submission and completion; no child ticket is serialized here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioNativeParameterQueryPayload {
+    pub(crate) target: Box<super::parameter_gesture::AudioScalarGestureTarget>,
+    pub(crate) expected_author_generation: u64,
 }
 
 /// Closed native editor surface intent; metadata cannot mint runtime permission.

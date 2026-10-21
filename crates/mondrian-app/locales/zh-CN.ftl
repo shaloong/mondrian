@@ -1581,3 +1581,5 @@ native-editor-failed = 原生编辑器请求失败
 
 audio-rack-native-controlled-parameter = 由插件控制
 audio-rack-adopt-displayed-value = 采用显示值
+audio-rack-query-native-parameter = 读取当前值
+native-parameter-query-unavailable = 当前插件值暂不可用

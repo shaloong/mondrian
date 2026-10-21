@@ -95,8 +95,29 @@ pub(super) struct NativeAudioEditorProductContext {
     queued: Option<Intent>,
     target: Option<NativeAudioEditorTarget>,
     attachment_target: Option<NativeAudioEditorTarget>,
+    surface_renderer_id: Option<mondrian_core::AudioPcmRendererMaterializationId>,
+    parameter_query: Option<NativeParameterQueryPending>,
     // Only a genuine Opened receipt binds this presentation surface.
     surface_renderer: Option<std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>>,
+}
+
+fn native_parameter_query_transport_is_stationary(
+    state: mondrian_playback::TransportState,
+) -> bool {
+    matches!(
+        state,
+        mondrian_playback::TransportState::Stopped
+            | mondrian_playback::TransportState::Paused
+            | mondrian_playback::TransportState::Ended
+    )
+}
+struct NativeParameterQueryPending {
+    ticket: std::num::NonZeroU64,
+    generation: u64,
+    renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+    renderer: std::sync::Weak<super::audio_rendering::TimelineAudioPcmRenderer>,
+    query: mondrian_core::NativeAudioParameterQuery,
+    payload: super::product_action::AudioNativeParameterQueryPayload,
 }
 
 /// Custody of the already accepted single author transaction, independent of
@@ -188,6 +209,7 @@ impl NativeAudioEditorProductContext {
         if self.target != target {
             self.parameter_observation = None;
             self.parameter_revision_floor = 0;
+            self.parameter_query = None;
         }
         self.target = target;
     }
@@ -282,6 +304,7 @@ impl AppState {
     pub(super) fn invalidate_native_audio_parameter_presentation(&mut self) {
         if let Some(context) = &mut self.native_audio_editor {
             context.parameter_observation = None;
+            context.parameter_query = None;
         }
     }
 
@@ -366,6 +389,8 @@ impl AppState {
             queued: None,
             target: None,
             attachment_target: None,
+            surface_renderer_id: None,
+            parameter_query: None,
             surface_renderer: None,
         })
     }
@@ -481,6 +506,8 @@ impl AppState {
                 context.queued = None;
                 context.set_target(None);
                 context.attachment_target = None;
+                context.surface_renderer_id = None;
+                context.parameter_query = None;
             }
             self.set_status_hint(AppMessage::new("native-editor-owner-changed"), true);
             return Ok(());
@@ -492,6 +519,7 @@ impl AppState {
         let key = match outcome {
             Outcome::Opened { target, .. } if context.locator.matches_target(target) => {
                 context.surface_renderer = self.native_audio_renderer.clone();
+                context.surface_renderer_id = Some(renderer_id);
                 context.set_target(Some(target));
                 context.attachment_target = Some(target);
                 "native-editor-opened"
@@ -501,6 +529,8 @@ impl AppState {
                 // only the genuine view attachment controls the UI open state.
                 context.set_target(Some(target));
                 context.attachment_target = None;
+                context.surface_renderer_id = None;
+                context.parameter_query = None;
                 "native-editor-closed"
             }
             Outcome::Refused(reason) => refusal_key(reason),
@@ -550,6 +580,175 @@ impl AppState {
         }
     }
 
+    fn native_parameter_query_context(
+        &self,
+        payload: &super::product_action::AudioNativeParameterQueryPayload,
+    ) -> Option<mondrian_core::NativeAudioParameterQuery> {
+        use super::parameter_gesture::AudioScalarOwner;
+        if !native_parameter_query_transport_is_stationary(self.playback_engine.snapshot().state)
+            || self.audio_playback.native_control_hold_generation().is_some()
+            || payload.expected_author_generation == 0
+            || payload.expected_author_generation != self.project_author_generation()
+            || self.authoring_session_id() != Some(payload.target.lease.session_id)
+            || self.active_sequence_id() != Some(payload.target.lease.sequence_id)
+            || self.active_parameter_gesture.is_some()
+            || self
+                .native_audio_author_work
+                .as_ref()
+                .is_some_and(NativeAudioAuthorWork::blocks_source_replacement)
+        {
+            return None;
+        }
+        let AudioScalarOwner::Parameter { owner, processor_id, definition, parameter_schema } =
+            &payload.target.owner
+        else {
+            return None;
+        };
+        if !matches!(
+            definition,
+            mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { .. }
+        ) {
+            return None;
+        }
+        let processor = self.current_audio_scalar_processor(*owner, *processor_id, definition)?;
+        let parameter = processor.parameters.get(&parameter_schema.parameter_id)?;
+        if parameter.schema != **parameter_schema
+            || parameter.automation.is_some()
+            || parameter.schema.numeric.is_none()
+        {
+            return None;
+        }
+        let context = self.native_audio_editor.as_ref()?;
+        let target = context.target?;
+        if context.queued.is_some()
+            || context.parameter_query.is_some()
+            || context.attachment_target != Some(target)
+            || context.surface_renderer_id.is_none()
+            || context.payload.session_id != payload.target.lease.session_id
+            || context.payload.sequence_id != payload.target.lease.sequence_id
+            || context.payload.processor_id != *processor_id
+            || context.payload.definition != *definition
+            || Some(context.payload.address) != payload.target.owner.processor_address()
+            || context.schemas.get(&parameter_schema.parameter_id) != Some(&**parameter_schema)
+            || context.parameter_fact(&parameter_schema.parameter_id).is_some()
+        {
+            return None;
+        }
+        let surface = context.surface_renderer.as_ref()?;
+        if !self
+            .native_audio_renderer
+            .as_ref()
+            .is_some_and(|current| std::sync::Weak::ptr_eq(current, surface))
+        {
+            return None;
+        }
+        let erased: std::sync::Weak<dyn mondrian_media::AudioPcmRenderer> = surface.clone();
+        if !self.audio_playback.matches_source_weak(&erased)
+            || !surface.upgrade()?.native_author_snapshot_current()
+        {
+            return None;
+        }
+        Some(mondrian_core::NativeAudioParameterQuery {
+            target,
+            parameter: parameter_schema.parameter_id.clone(),
+        })
+    }
+
+    pub(crate) fn displayed_native_parameter_query(
+        &self,
+        target: super::parameter_gesture::AudioScalarGestureTarget,
+    ) -> Option<super::product_action::AudioNativeParameterQueryPayload> {
+        let payload = super::product_action::AudioNativeParameterQueryPayload {
+            target: Box::new(target),
+            expected_author_generation: self.project_author_generation(),
+        };
+        self.native_parameter_query_context(&payload)?;
+        Some(payload)
+    }
+
+    pub(super) fn query_native_audio_parameter_product(
+        &mut self,
+        payload: super::product_action::AudioNativeParameterQueryPayload,
+    ) -> Result<()> {
+        let Some(query) = self.native_parameter_query_context(&payload) else {
+            self.set_status_hint(AppMessage::new("native-parameter-query-unavailable"), false);
+            return Ok(());
+        };
+        let Some(next) = self.native_parameter_query_serial.checked_add(1) else {
+            self.set_status_hint(AppMessage::new("native-parameter-query-unavailable"), true);
+            return Ok(());
+        };
+        self.native_parameter_query_serial = next;
+        let ticket = std::num::NonZeroU64::new(next).expect("checked positive App query serial");
+        let context = self.native_audio_editor.as_ref().expect("validated surface");
+        let pending = NativeParameterQueryPending {
+            ticket,
+            generation: self.audio_playback_snapshot().generation,
+            renderer_id: context.surface_renderer_id.expect("actual Opened renderer"),
+            renderer: context.surface_renderer.clone().expect("actual Opened Source"),
+            query: query.clone(),
+            payload,
+        };
+        if self
+            .audio_playback
+            .request_native_parameter_query(ticket, query)
+            .map_err(failure)?
+            .is_ok()
+        {
+            self.native_audio_editor.as_mut().expect("same surface").parameter_query =
+                Some(pending);
+        } else {
+            self.set_status_hint(AppMessage::new("native-parameter-query-unavailable"), false);
+        }
+        Ok(())
+    }
+
+    pub(super) fn observe_native_audio_parameter_query(
+        &mut self,
+        ticket: std::num::NonZeroU64,
+        renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+        generation: u64,
+        query: mondrian_core::NativeAudioParameterQuery,
+        completion: mondrian_media::AudioNativeParameterQueryCompletion,
+    ) {
+        let Some(context) = &mut self.native_audio_editor else {
+            return;
+        };
+        if context.parameter_query.as_ref().is_none_or(|pending| pending.ticket != ticket) {
+            return;
+        }
+        // Only this exact ticket may release its own pending slot. An old A
+        // completion cannot clear a newer B, even after Close/Open or replacement.
+        let pending = context.parameter_query.take().expect("matched own ticket");
+        if pending.renderer_id != renderer_id
+            || pending.generation != generation
+            || pending.query != query
+            || self.audio_playback_snapshot().generation != generation
+            || self.native_parameter_query_context(&pending.payload).as_ref() != Some(&query)
+            || !self
+                .native_audio_editor
+                .as_ref()
+                .and_then(|c| c.surface_renderer.as_ref())
+                .is_some_and(|current| std::sync::Weak::ptr_eq(current, &pending.renderer))
+        {
+            return;
+        }
+        let mondrian_media::AudioNativeParameterQueryCompletion::Completed(outcome) = completion
+        else {
+            return;
+        };
+        if let mondrian_core::NativeAudioParameterQueryOutcome::Observed(observation) = outcome {
+            if observation.target() != query.target
+                || observation.facts().len() != 1
+                || observation.facts()[0].parameter != query.parameter
+            {
+                return;
+            }
+            self.observe_native_audio_parameter_observation(*observation);
+        } else {
+            self.set_status_hint(AppMessage::new("native-parameter-query-unavailable"), false);
+        }
+    }
     pub(super) fn observe_native_audio_parameter_observation(
         &mut self,
         observation: mondrian_core::NativeAudioParameterObservation,
@@ -995,6 +1194,8 @@ impl AppState {
                     context.set_target(if state_entry { None } else { Some(*target) });
                     if state_entry {
                         context.attachment_target = None;
+                        context.surface_renderer_id = None;
+                        context.parameter_query = None;
                         self.set_status_hint(AppMessage::new("native-editor-closed"), false);
                     } else if context.attachment_target.is_some() {
                         self.set_status_hint(AppMessage::new("native-editor-opened"), false);
@@ -1010,6 +1211,8 @@ impl AppState {
                         == mondrian_media::AudioPcmNativeAuthorHandoffContinuity::StateEntryRequired
                     {
                         context.attachment_target = None;
+                        context.surface_renderer_id = None;
+                        context.parameter_query = None;
                     }
                     context.set_target(Some(*target));
                 }
@@ -1300,6 +1503,8 @@ mod attachment_continuity_contracts {
             queued: None,
             target: Some(target),
             attachment_target: Some(target),
+            surface_renderer_id: None,
+            parameter_query: None,
             surface_renderer: None,
         }
     }
@@ -3024,3 +3229,6 @@ mod displayed_parameter_adoption_contracts {
         }
     }
 }
+
+#[cfg(test)]
+mod parameter_query_contracts;
