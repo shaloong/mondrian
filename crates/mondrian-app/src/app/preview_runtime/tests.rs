@@ -1383,7 +1383,7 @@ fn custom_u8_effect_graph(
     static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
     let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
     let effect_type =
-        mondrian_effects::EffectType::Plugin(format!("test.preview.custom.{label}.{suffix}"));
+        mondrian_effects::EffectType::External(format!("test.preview.custom.{label}.{suffix}"));
     let determinism = match cache_policy {
         EffectCachePolicy::Deterministic => mondrian_effects::EffectDeterminism::Deterministic,
         EffectCachePolicy::FrameDependent => mondrian_effects::EffectDeterminism::FrameSeeded,
@@ -19129,7 +19129,7 @@ fn ticketless_gpu_inputs_retain_physical_residency_without_current_protection() 
 fn uncacheable_cpu_adjustment_fixture() -> (AppState, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     static NEXT_TYPE: AtomicU64 = AtomicU64::new(1);
-    let effect_type = mondrian_effects::EffectType::Plugin(format!(
+    let effect_type = mondrian_effects::EffectType::External(format!(
         "test.preview.cpu-working-once.{}",
         NEXT_TYPE.fetch_add(1, Ordering::Relaxed)
     ));

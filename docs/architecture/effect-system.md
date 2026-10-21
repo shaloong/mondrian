@@ -3,7 +3,7 @@
 Built-in Effect definitions project their category path from the canonical
 `EffectType::category_path` contract. The registry supplies that same path to
 the Effect Browser; it does not maintain a second built-in category table.
-Plugin definitions declare their own category paths.
+Externally registered effect definitions declare their own category paths.
 
 Timeline text generation is not an Effect capability. Basic Title is closed
 Clip content whose generated working-linear frame enters this effect system at
@@ -43,7 +43,7 @@ not share `EffectNode`, RGBA capabilities, JSON parameters, or runtime graphs.
 ## Data vs Execution
 
 - `mondrian-core::effect_data` defines `EffectType` and `EffectNode` as pure serializable data.
-- `mondrian-effects` owns definitions, defaults, graph compilation, execution, caching, and plugin contracts.
+- `mondrian-effects` owns definitions, defaults, graph compilation, execution, caching, and external effect contracts.
 - `mondrian-timeline::Clip` stores effect instances and namespaces their properties by `EffectId`.
 
 Adding an executable effect is a definition-bound authoring operation. Product
@@ -216,7 +216,7 @@ the intersection of the operation's real implementation and its owning
 Definition contract; neither side can broaden the other. Callers cannot mutate
 graph or execution semantics without recompiling all derived evidence.
 
-`EffectRenderGraph` is the authoring/compiler input used by built-in and plugin
+`EffectRenderGraph` is the authoring/compiler input used by built-in and external
 Definition builders. It is not an executable production IR. Raw graph
 scheduling remains compiler-internal and raw plan/graph execution exists only
 as test reference Implementation; Preview, Export, and renderer Adapters must
@@ -227,8 +227,8 @@ Graph construction is fallible. `EffectGraphBuildError` identifies an enabled
 instance by persistent `EffectId` and stable definition key when the definition
 is missing, modeled but not executable, runtime-disabled, missing a required
 resource, panics, or produces an invalid graph. Builders stage mutations in a
-temporary graph and commit only after successful return. Built-in and plugin
-builders share this boundary; the plugin SDK additionally exposes fallible
+temporary graph and commit only after successful return. Built-in and external
+builders share this boundary; the Effect SDK additionally exposes fallible
 builder registration for definition-specific resource checks.
 
 ## Execution Contract and Preparation
@@ -258,13 +258,13 @@ extent, and ROI may only be equally or more conservative; and retained
 dependencies require an adequate resource lifetime. Violations produce a typed
 `EffectExecutionContractViolation` before the graph can enter Preview, Export,
 or a Prepared Program. The check repeats when animated or topology-affecting
-parameters reveal a new graph shape. A plugin therefore cannot label a
+parameters reveal a new graph shape. A definition therefore cannot label a
 Gaussian branch pixel-local, label frame-dependent output deterministic, or
 advertise a float Custom processor while supplying only the encoded RGBA8 ABI.
 
-The plugin default is deliberately conservative: no execution mode is admitted,
+The external-definition default is deliberately conservative: no execution mode is admitted,
 temporal demand and ROI are unbounded/full-frame, and continuity state is
-required. A plugin becomes executable only after replacing that complete
+required. A definition becomes executable only after replacing that complete
 contract and binding a fallible evaluator. Unknown or incomplete capabilities
 therefore block preparation instead of authorizing plausible-looking identity
 output.
@@ -310,7 +310,7 @@ cannot change this number. A shared `Arc` may be charged to more than one
 Program so each cache owner is independently safe. Dynamic topology charges
 appear only in the owning `EffectExecutionSession` diagnostics. These numbers
 are for cache admission and regression evidence; they are not allocator usage,
-GPU memory, process Working Set, or RSS. A plugin preparer that captures an
+GPU memory, process Working Set, or RSS. A definition preparer that captures an
 opaque immutable payload must add its logical charge through
 `PreparedEffectEvaluator::with_retained_resource_bytes(...)`.
 
@@ -691,35 +691,35 @@ emitted graph node. Compiled execution never resolves that node by mutable
 string lookup. Replacing a Definition creates a new binding and graph
 signature; already prepared Preview or Export work continues to own its
 original processor until the program is retired. There is no parallel Custom
-processor registry: `EffectDefinition` / `EffectPluginDefinitionBuilder`
+processor registry: `EffectDefinition` / `EffectExtensionDefinitionBuilder`
 evaluation is the sole implementation-binding path. Compilation fails closed
 when any reachable raw Custom node remains unbound, so ambient process state
 cannot change the meaning of an author/program revision. No compile-time or
 per-frame global Custom implementation lookup exists.
 
 Disabled instances are the only implicit identity operation. An enabled
-effect without an executable evaluator, missing plugin definition,
+effect without an executable evaluator, missing external effect definition,
 unbound/invalid LUT, or failed builder never becomes an unchanged frame. The
 shared timeline render-plan compiler maps these failures into
 `MondrianError::EffectGraphEvaluationFailed`,
 so preview and export both stop before publishing a misleading result. Any
-future operator-approved plugin bypass must be an explicit, diagnosable policy
+future operator-approved effect bypass must be an explicit, diagnosable policy
 above this compiler seam rather than a warning followed by identity output.
-`EffectPluginRuntimeFailurePolicy` controls whether a failed definition remains
+`EffectExtensionRuntimeFailurePolicy` controls whether a failed definition remains
 callable or becomes disabled; the quarantine key combines the persistent effect
 key with the exact Definition Registry revision frozen into preparation.
 Consequently a late failure from an older compiled Program cannot disable a
 replacement Definition using the same key. The Contract has no independently
 mutable Registry: it is installed only as part of `EffectDefinition`.
-`EffectPluginLibraryPolicy` controls only whether the current unavailable
+`EffectExtensionLibraryPolicy` controls only whether the current unavailable
 Definition generation appears in new-insertion UI. Neither contract changes
 frame semantics or authorizes identity fallback.
 
 ## Effect Color Domains
 
-Every `EffectDefinition`, including plugin-authored definitions, declares an
+Every `EffectDefinition`, including externally authored definitions, declares an
 `EffectColorDomainContract` at registration. There is no implicit compatibility
-default in the definition or plugin-builder APIs. A builder may resolve a
+default in the definition or SDK builder APIs. A builder may resolve a
 topology-affecting parameter to a stricter per-instance contract through
 `append_unary_in_domain`; graph construction scopes that override to the one
 node and restores the definition contract afterwards. The resolved domain is
@@ -1049,7 +1049,7 @@ legal RGB transitions through
 `apply_compiled_effect_graph_rgba_f32_with_domain_processor(...)`; transition
 failures and domain blockers are fail-closed and never authorize RGBA8
 execution. The encoded executor returns `EffectExecutionError` for any domain
-plan because it has no typed OCIO runtime. Custom/plugin processors bind an
+plan because it has no typed OCIO runtime. Custom effect processors bind an
 explicit RGBA8 or Float32 callback to the compiled graph. The graph derives
 exact admission from that binding; it never converts a Float32 frame through
 RGBA8 to invoke an encoded processor. Float32 callbacks preserve extended and

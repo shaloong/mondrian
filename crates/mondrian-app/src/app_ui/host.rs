@@ -16090,11 +16090,13 @@ mod tests {
         };
         use mondrian_effects::{
             instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+            EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
         };
-        let kind = EffectType::Plugin("plugin.test.numeric_keyboard_wide_integer_host".to_owned());
+        let kind =
+            EffectType::External("plugin.test.numeric_keyboard_wide_integer_host".to_owned());
         let path = "plugin.test.numeric_keyboard_wide_integer_host.integer".to_owned();
         let range = ParameterNumericRange { min: i64::MIN as f64, max: i64::MAX as f64 };
         let property = PropertyDescriptor::new(
@@ -16112,7 +16114,7 @@ mod tests {
                 invalid_value_policy: ParameterInvalidValuePolicy::Reject,
             },
         );
-        let builder = EffectPluginDefinitionBuilder::new(
+        let builder = EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Exact keyboard integer",
             EffectColorDomainContract::SCENE_LINEAR,

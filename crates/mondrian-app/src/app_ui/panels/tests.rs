@@ -5546,7 +5546,7 @@ fn effect_panel_localizes_labels_while_preserving_tree_and_action_identity() {
         .collect();
     assert!(
         root_categories.starts_with(&["Color", "Transform", "Keying"]),
-        "built-in roots must retain their order when plugin tests register extra roots: {root_categories:?}"
+        "built-in roots must retain their order when extension tests register extra roots: {root_categories:?}"
     );
     let color = model
         .items
@@ -6852,11 +6852,11 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
     use mondrian_core::automation::PropertyDescriptor;
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
-    let kind = EffectType::Plugin("plugin.test.precise_inspector".to_owned());
+    let kind = EffectType::External("plugin.test.precise_inspector".to_owned());
     let cases = [
         (
             "float",
@@ -6939,7 +6939,7 @@ fn precise_inspector_entry_commits_and_undoes_exact_integer_and_double_values() 
             PropertyValue::IntVec3([0, i32::MIN, i32::MIN]),
         ),
     ];
-    let mut builder = EffectPluginDefinitionBuilder::new(
+    let mut builder = EffectExtensionDefinitionBuilder::new(
         kind.key(),
         "Precise Inspector",
         EffectColorDomainContract::SCENE_LINEAR,
@@ -7524,12 +7524,12 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
     use mondrian_core::automation::PropertyDescriptor;
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
     let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
-    let kind = EffectType::Plugin("plugin.test.long_text_controls".to_owned());
+    let kind = EffectType::External("plugin.test.long_text_controls".to_owned());
     let cases = [
         (
             "long",
@@ -7548,7 +7548,7 @@ fn effect_long_text_controls_confirm_or_cancel_without_partial_author_writes() {
             "Changed".to_owned(),
         ),
     ];
-    let mut builder = EffectPluginDefinitionBuilder::new(
+    let mut builder = EffectExtensionDefinitionBuilder::new(
         kind.key(),
         "Text controls",
         EffectColorDomainContract::SCENE_LINEAR,
@@ -7784,18 +7784,18 @@ fn effect_vector_controls_preserve_current_siblings_keys_and_exact_history() {
     use mondrian_core::automation::PropertyDescriptor;
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
     let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
-    let kind = EffectType::Plugin("plugin.test.sparse_vector_controls".to_owned());
+    let kind = EffectType::External("plugin.test.sparse_vector_controls".to_owned());
     let initial = [
         PropertyValue::Vec2(glam::Vec2::new(f32::from_bits(0x3f800001), 0.75)),
         PropertyValue::Vec3(glam::Vec3::new(f32::from_bits(0x3f800001), 0.75, 0.5)),
         PropertyValue::Vec4([f32::from_bits(0x3f800001), 0.75, 0.5, 0.25]),
     ];
-    let mut builder = EffectPluginDefinitionBuilder::new(
+    let mut builder = EffectExtensionDefinitionBuilder::new(
         kind.key(),
         "Sparse vector controls",
         EffectColorDomainContract::SCENE_LINEAR,
@@ -8523,8 +8523,8 @@ fn panel_domain_accents_use_theme_tokens() {
         colors.media_solid
     );
     assert_eq!(
-        effect_node_accent(&EffectType::Plugin("demo.plugin".to_owned())),
-        colors.effect_plugin
+        effect_node_accent(&EffectType::External("extension.demo".to_owned())),
+        colors.effect_external
     );
     assert_eq!(
         effect_node_accent(&EffectType::GaussianBlur),
@@ -9980,13 +9980,13 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor, PropertyMutation};
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
     use mondrian_ui_core::tree::{WidgetTree, WidgetTreeView};
     let _guard = crate::app_ui::test_utils::theme_test_guard();
-    let kind = EffectType::Plugin("plugin.test.rejected_float_preview".into());
+    let kind = EffectType::External("plugin.test.rejected_float_preview".into());
     let path = "plugin.test.rejected_float_preview.value";
     let parameter_id = kind.parameter_id("value").expect("parameter");
     let numeric = ParameterNumericContract::closed(
@@ -9997,7 +9997,7 @@ fn effect_curve_rejected_native_float_preview_preserves_geometry_and_author_hist
     )
     .expect("declared bounds");
     register_effect_definition(
-        EffectPluginDefinitionBuilder::new(
+        EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Float preview",
             EffectColorDomainContract::SCENE_LINEAR,
@@ -10213,11 +10213,11 @@ fn effect_curve_author_contract(
     use mondrian_core::automation::{ParameterUnit, PropertyDescriptor};
     use mondrian_effects::{
         instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-        EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-        EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-        EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
+        EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+        EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+        EffectResourceLifetime, EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent,
     };
-    let kind = EffectType::Plugin(format!("plugin.test.curve_axis_{case}"));
+    let kind = EffectType::External(format!("plugin.test.curve_axis_{case}"));
     let parameter_id = kind.parameter_id("value").expect("parameter");
     let (min, max) = (numeric.hard_range.min, numeric.hard_range.max);
     let path = format!("plugin.test.curve_axis_{case}.value");
@@ -10226,7 +10226,7 @@ fn effect_curve_author_contract(
         .with_animatable(true)
         .with_numeric_contract(ParameterUnit::Normalized, numeric);
     register_effect_definition(
-        EffectPluginDefinitionBuilder::new(
+        EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Curve precision",
             EffectColorDomainContract::SCENE_LINEAR,

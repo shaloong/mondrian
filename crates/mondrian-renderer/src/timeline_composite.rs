@@ -3117,7 +3117,7 @@ mod tests {
     ) -> Arc<CompiledEffectGraph> {
         static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
         let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
-        let effect_type = EffectType::Plugin(format!("test.renderer.custom.{label}.{suffix}"));
+        let effect_type = EffectType::External(format!("test.renderer.custom.{label}.{suffix}"));
         let determinism = match cache_policy {
             EffectCachePolicy::Deterministic => EffectDeterminism::Deterministic,
             EffectCachePolicy::FrameDependent => EffectDeterminism::FrameSeeded,
@@ -3164,7 +3164,7 @@ mod tests {
         static NEXT_DEFINITION: AtomicU64 = AtomicU64::new(1);
         let suffix = NEXT_DEFINITION.fetch_add(1, Ordering::Relaxed);
         let effect_type =
-            EffectType::Plugin(format!("test.renderer.identity_admission.{label}.{suffix}"));
+            EffectType::External(format!("test.renderer.identity_admission.{label}.{suffix}"));
         register_effect_definition(
             EffectDefinition::new(
                 effect_type.key(),

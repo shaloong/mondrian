@@ -20,8 +20,13 @@ on a local disk.
 | Media, LUT, font and image processing | Container/codec metadata, pixels, color profiles, LUT values and font tables | Bound resources; validate assumptions before indexing or FFI; contain child lifetime and failure |
 | Storage and publication | Destinations, existing objects, links and concurrent replacement | Publish the intended object; preserve foreign replacements; cleanup only objects owned by the operation |
 | Native libraries and helpers | FFmpeg/OCIO and device bridges, executables and dependent libraries | Explicit lifetime/ownership contracts; trusted runtime selection; avoid shell evaluation of input |
-| Plugins and future network/AI integration | Contributed plugin code, workflow/config input, provider endpoints and credentials | Treat executable plugins as trusted code unless isolation is implemented; evaluate actual network/credential paths before making guarantees |
+| Native-format plugins | Installed OpenFX/CLAP/VST3 binaries and native dependencies | Treat executable native code as trusted unless a qualified security sandbox exists; supervised children establish crash/hang containment only |
+| Planned Extensions and future network/AI integration | Extension entries, workflow/config input, provider endpoints and credentials | General Extension execution is not implemented; its target requires restricted containers and brokered, scoped permissions; evaluate actual paths before making guarantees |
 | Build and release | PR code, Actions, registries, downloaded SDKs and packaged DLLs | Least privilege, immutable action identity, dependency provenance, trusted source qualification and review before publication |
+
+The [Extension platform](../architecture/extension-system.md) and
+[ADR 0011](../adr/0011-use-managed-extension-platform.md) define accepted future
+requirements. They do not add implemented controls to this evidence inventory.
 
 ## Existing controls and where to verify them
 
@@ -42,7 +47,7 @@ on a local disk.
 Do not claim arbitrary media, native libraries, executable plugins, drivers, or
 the desktop process are sandboxed. Source-crate SDK package distribution remains planned. Separate OpenFX and
 CLAP/VST3 adapters load installed native plugins in supervised children; see
-[Plugin System](../architecture/plugin-system.md) for their admitted operations.
+[Native-format Plugin Hosts](../architecture/native-plugin-hosts.md) for their admitted operations.
 Crash/hang containment does not establish a hostile-code security sandbox. A compromised OS, driver or toolchain invalidates
 assumptions and needs an explicit deployment-specific analysis, rather than an
 automatic exclusion of a reported problem.

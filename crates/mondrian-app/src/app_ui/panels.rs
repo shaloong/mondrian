@@ -2833,7 +2833,7 @@ impl InspectorPanelModel {
                 .effects
                 .iter()
                 .map(|effect| InspectorEffectModel {
-                    native_author_view: matches!(effect.effect_type, EffectType::Plugin(_))
+                    native_author_view: matches!(effect.effect_type, EffectType::External(_))
                         .then(|| {
                             state.native_visual_author_view(sequence.id, clip.id, effect.id).ok()
                         })
@@ -4062,7 +4062,7 @@ fn timeline_transition_views_for_track(
                 .max(end_frame);
             let label = match &transition.transition_type {
                 VideoTransitionType::CrossDissolve => "Cross Dissolve".to_owned(),
-                VideoTransitionType::Plugin { definition_id } => definition_id.clone(),
+                VideoTransitionType::External { definition_id } => definition_id.clone(),
             };
             let mut view = TimelineTransition::new(
                 label,
@@ -4691,7 +4691,7 @@ fn asset_kind_icon(kind: &AssetKind) -> AppIcon {
 fn effect_node_accent(effect_type: &EffectType) -> Color {
     let colors = current_theme().colors.clone();
     match effect_type {
-        EffectType::Plugin(_) => colors.effect_plugin,
+        EffectType::External(_) => colors.effect_external,
         EffectType::GaussianBlur | EffectType::Sharpen => colors.effect_filter,
         EffectType::Lut3D => colors.effect_lut,
         EffectType::ChromaKey | EffectType::LumaKey => colors.effect_key,
@@ -5249,7 +5249,7 @@ fn asset_grid_rename_action(_index: usize, item: &AssetGridItem, name: &str) -> 
 
 fn effect_badge(effect_type: &EffectType) -> &'static str {
     match effect_type {
-        EffectType::Plugin(_) => "PLG",
+        EffectType::External(_) => "PLG",
         EffectType::GaussianBlur | EffectType::Sharpen => "GPU",
         EffectType::Lut3D => "3D",
         EffectType::ChromaKey | EffectType::LumaKey => "KEY",

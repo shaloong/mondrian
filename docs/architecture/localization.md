@@ -23,7 +23,7 @@ category path IDs for tree state and action payloads. Locale changes rebuild
 only displayed labels, then restore the retained panel state by stable IDs.
 Categories use a semantic order independent of translated spelling; effects
 within each category sort by their displayed name. Third-party effect names
-fall back to their declared display name until plugin catalogs are supported.
+fall back to their declared display name until Extension catalogs are supported.
 Asset Browser construction formats labels while reading the library snapshot;
 the folder name, Asset ID, folder ID, drag payload, and action payload stay
 canonical. Context menus are captured in the same locale snapshot so a
@@ -94,7 +94,7 @@ Other product surfaces still contain literal Chinese and must migrate before
 English can be advertised as a complete product language.
 
 The application owns one machine-local UI locale. The Project, Timeline,
-Effects, Audio, Export, and plugin authoring contracts persist stable IDs,
+Effects, Audio, Export, and Extension authoring contracts persist stable IDs,
 numeric values, exact time, and resource references; they never persist a
 translated label. A Project reopened under another UI locale must retain the
 same execution and cache identities.
@@ -111,10 +111,18 @@ from the UI model. Widgets receive already-formatted text; neither domain
 modules nor widgets query a process-global locale.
 
 Stable `ParameterSchema::message_id` and `ParameterEnumOption::message_id`
-already identify definition-owned labels. Built-in definitions and plugin
-manifests provide translation catalogs keyed by these IDs. Missing plugin
-translations fall back to the plugin's declared default display name and emit
-a diagnostic; they do not change the parameter's stable key or execution.
+already identify definition-owned labels. Built-in catalogs use these stable
+identities. Future Extension catalogs will use definition-owned namespaces;
+Extension manifest/catalog loading is not implemented. Missing third-party
+translations should fall back to the definition's declared default display name
+and emit a diagnostic, without changing the stable key or execution.
+
+Language packs are resource-only contributions in the planned
+[Extension system](extension-system.md). Future locale discovery must replace
+the closed built-in locale list without changing the current Fluent resource
+semantics or product fallback. Loading a language pack requires no executable
+Extension runtime; namespace ownership, catalog conflicts, update/disable and
+fallback must be validated before advertising external language packs.
 
 ## Locale and formatting boundaries
 

@@ -239,6 +239,7 @@ pub(crate) fn effect_category_message_id(category: &str) -> Option<&'static str>
         "变换" => Some("effect-category-transform"),
         "抠像" => Some("effect-category-keying"),
         "插件" => Some("effect-category-plugins"),
+        "外部效果" => Some("effect-category-external"),
         _ => None,
     }
 }
@@ -895,7 +896,7 @@ mod tests {
                 );
             }
         }
-        for id in ["effect-empty", "effect-search"] {
+        for id in ["effect-empty", "effect-search", "effect-category-external"] {
             assert!(
                 chinese.requested.get_message(id).is_some(),
                 "missing zh-CN: {id}"

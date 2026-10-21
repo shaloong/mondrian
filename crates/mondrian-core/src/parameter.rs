@@ -37,7 +37,7 @@ impl ParameterId {
     /// Construct an ID embedded in a built-in schema definition.
     ///
     /// Invalid static definitions are programmer errors and fail immediately;
-    /// runtime/plugin input must use [`Self::new`] and handle validation.
+    /// external runtime input must use [`Self::new`] and handle validation.
     #[track_caller]
     pub fn new_static(value: &'static str) -> Self {
         Self::new(value)

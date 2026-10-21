@@ -36,6 +36,12 @@ must not suppress reports through the security policy.
 
 ## Native and distributed dependencies
 
+The workspace locally patches Harfrust 0.5.2 while cosmic-text 0.19 requires
+that version series. [Patch provenance](../../vendor/harfrust/MONDRIAN-PATCH.md)
+records the upstream long-line counter fix, changed files, MIT notice, regression
+coverage and removal condition. Only the matching index/callback arithmetic is
+backported; shaping, kerning and complete input text remain enabled.
+
 Cargo advisory checks do not cover the complete shipped runtime. Inventory
 FFmpeg, OCIO, vcpkg ports, transitive DLL/dylib/ELF dependencies, fonts, device SDKs,
 and independently supplied native tools. Record exact source revision and

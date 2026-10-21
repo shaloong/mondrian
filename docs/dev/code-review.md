@@ -14,7 +14,7 @@ material change, including generated code and workflow changes.
 - Major new behavior includes automated tests. Bug fixes should add a regression
   test reproducing the failure before the fix; explain exceptions in the PR.
   Review failure paths, cancellation and cleanup, not only successful behavior.
-- Validate schema/project/plugin compatibility and document migrations. Review
+- Validate schema/project, Extension API, and native-plugin compatibility and document migrations. Review
   performance-sensitive paths using the existing product/reference gates.
 - Check input limits, integer arithmetic, allocation, archive/path handling,
   FFI lifetimes, subprocess arguments/environment, resource ownership and

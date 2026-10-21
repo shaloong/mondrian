@@ -2768,12 +2768,12 @@ mod tests {
         }
     }
 
-    fn prepare_custom_u8_plugin(
+    fn prepare_custom_u8_extension(
         key: &str,
         determinism: crate::EffectDeterminism,
         processor: CustomEffectRenderProcessor,
     ) -> Arc<CompiledEffectGraph> {
-        let effect_type = mondrian_core::effect_data::EffectType::Plugin(key.to_owned());
+        let effect_type = mondrian_core::effect_data::EffectType::External(key.to_owned());
         let params_builder: crate::EffectRenderParamsBuilder =
             Arc::new(|_, _| Ok(Some(serde_json::json!({}))));
         crate::register_effect_definition(
@@ -2791,22 +2791,22 @@ mod tests {
                 processor,
             ),
         )
-        .expect("register legal test plugin");
+        .expect("register legal test extension");
         crate::PreparedEffectProgram::prepare(
             &[crate::EffectNode::new(effect_type)],
             &[],
             mondrian_core::WorkingColorSpace::LinearRec709,
         )
-        .expect("prepare legal test plugin")
+        .expect("prepare legal test extension")
         .evaluate(mondrian_core::TimelineTime::ZERO)
-        .expect("evaluate legal test plugin")
+        .expect("evaluate legal test extension")
     }
 
     #[test]
     fn definition_frame_seed_contract_constrains_deterministic_custom_cache_keys() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        let compiled = prepare_custom_u8_plugin(
+        let compiled = prepare_custom_u8_extension(
             "test.cache.definition-frame-seeded",
             crate::EffectDeterminism::FrameSeeded,
             Arc::new(move |pixels, _, _, _, frame_seed| {
@@ -2852,7 +2852,7 @@ mod tests {
     fn definition_nondeterministic_contract_disables_all_compiled_caches() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_for_processor = Arc::clone(&calls);
-        let compiled = prepare_custom_u8_plugin(
+        let compiled = prepare_custom_u8_extension(
             "test.cache.definition-nondeterministic",
             crate::EffectDeterminism::Nondeterministic,
             Arc::new(move |pixels, _, _, _, _| {
@@ -2889,7 +2889,7 @@ mod tests {
 
     #[test]
     fn compiled_cpu_executors_admit_contract_before_identity_fast_paths() {
-        let effect_type = mondrian_core::effect_data::EffectType::Plugin(
+        let effect_type = mondrian_core::effect_data::EffectType::External(
             "test.execution.identity-stateful".to_owned(),
         );
         crate::register_effect_definition(

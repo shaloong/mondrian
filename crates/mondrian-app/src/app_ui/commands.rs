@@ -1,7 +1,7 @@
 //! App UI command registry.
 //!
 //! Commands are the presentation-facing layer above [`Action`]. Menus,
-//! shortcuts, command palette entries, and future plugin entry points should
+//! shortcuts, command palette entries, and future Extension entry points should
 //! read ids, labels, default bindings, and action factories from this module
 //! instead of each keeping a private command table.
 
@@ -23,7 +23,7 @@ use crate::app::ui_actions::{
 /// Stable command descriptor consumed by menus, shortcuts, and preferences.
 #[derive(Debug, Clone)]
 pub struct AppUiCommandDescriptor {
-    /// Stable id used by user preferences and future plugin APIs.
+    /// Stable id used by user preferences and future Extension APIs.
     pub id: &'static str,
     /// Short user-facing label for command pickers and shortcut preferences.
     pub title: &'static str,

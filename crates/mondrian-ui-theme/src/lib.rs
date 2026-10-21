@@ -27,7 +27,7 @@ pub struct Theme {
 
 /// 主题预设
 ///
-/// Dark 和 Light 是内置主题。用户可通过 plugin 或直接构造 `Theme` 来扩展。
+/// Dark 和 Light 是内置主题。代码可直接构造 `Theme`；Extension 主题贡献尚未开放。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemePreset {
     Dark,
@@ -346,7 +346,7 @@ mod tests {
                 colors.effect_filter,
                 colors.effect_lut,
                 colors.effect_key,
-                colors.effect_plugin,
+                colors.effect_external,
                 colors.effect_default,
                 colors.node_source,
                 colors.node_output,

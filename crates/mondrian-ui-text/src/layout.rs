@@ -81,3 +81,28 @@ impl TextLayout {
         &self.buffer
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shaping_preserves_every_glyph_across_the_u16_counter_boundary() {
+        let mut fonts = FontSystem::new();
+        let attrs = Attrs::new().family(cosmic_text::Family::SansSerif);
+        for count in [65_535, 65_536, 65_537] {
+            let text = "a".repeat(count);
+            let single = TextLayout::new_single_line(&mut fonts, &text, attrs.clone(), 14.0);
+            let glyphs = single.glyphs();
+            assert_eq!(glyphs.len(), count);
+            assert_eq!(glyphs.last().expect("last glyph").end, text.len());
+            assert!(single.size().0.is_finite() && single.size().0 > 0.0);
+
+            let wrapped = TextLayout::new_multiline(&mut fonts, &text, attrs.clone(), 14.0, 128.0);
+            let glyphs = wrapped.glyphs();
+            assert_eq!(glyphs.len(), count);
+            assert_eq!(glyphs.last().expect("last wrapped glyph").end, text.len());
+            assert!(wrapped.size().1 > single.size().1);
+        }
+    }
+}
