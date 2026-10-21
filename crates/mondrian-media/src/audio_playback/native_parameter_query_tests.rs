@@ -1,4 +1,4 @@
-//! Portable serial queue and Source custody controls, not native COM evidence.
+// Portable serial queue and Source custody controls, not native COM evidence.
 use super::*;
 use mondrian_core::{
     NativeAudioEditorControlIntent as Intent, NativeAudioEditorControlOutcome as EditorOut,
