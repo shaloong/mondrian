@@ -368,11 +368,15 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
         unsafe { IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) },
         0
     );
-    assert_ne!(in_job, 0, "the original native Job must own both SDK arms");
+    assert_ne!(
+        in_job, 0,
+        "the original native Job must own all three SDK arms"
+    );
 
     const CLASS: &str = "ABCDEF019182FAEB566D624153675854";
     const BLOCK: usize = 256;
     const BLOCKS: usize = 48;
+    const ARMS: usize = 3;
     const ON: usize = 127;
     const OFF: usize = 8_193;
     const MID_START: usize = 8;
@@ -409,12 +413,15 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
     let mut expected_census: Option<Vec<ParameterCensusRow>> = None;
     let mut expected_initial_source: Option<(bool, bool, Vec<NativeEditorEvent>, Vec<(u32, f64)>)> =
         None;
-    let mut reports = Vec::with_capacity(2);
-    let mut middle_energy = [0.0_f64; 2];
-    let mut middle_nonzero_blocks = [0_usize; 2];
-    let mut pre_on_nonzero = [0_usize; 2];
-    let mut final_source_valid = [false; 2];
-    for (arm, replay) in [false, true].into_iter().enumerate() {
+    let mut reports = Vec::with_capacity(ARMS);
+    let mut middle_energy = [0.0_f64; ARMS];
+    let mut middle_nonzero_blocks = [0_usize; ARMS];
+    let mut pre_on_nonzero = [0_usize; ARMS];
+    let mut final_source_valid = [false; ARMS];
+    // A is native state plus common Source input. B is the pre-9fec periodic
+    // override policy. C isolates the fixed constant-only candidate's first
+    // complete override; no later author value changes are modeled here.
+    for arm in 0..ARMS {
         let (host, mut plugin, class_id) = load_external_stopped_plugin();
         assert_eq!(class_id, CLASS);
         assert_eq!(plugin.info().uid, CLASS);
@@ -523,7 +530,7 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
         assert_eq!(after.pending_dsp_feedback_values(), 0);
         assert_eq!(after_cohort.serial(), cohort.serial());
         assert_eq!(after_cohort.flags().bits(), 0);
-        // Legal input produced by this exact Source is common to A/B. Its
+        // Legal input produced by this exact Source is common to A/B/C. Its
         // original COM points remain for the first normal PCM/Note call; no
         // empty-input fiction, separate warm-up, flush or replacement is used.
         if let Some((expected_before, expected_after, expected_events, expected_feedback)) =
@@ -635,7 +642,7 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
                                 reference,
                             )
                             .unwrap();
-                        if replay {
+                        if arm == 1 || (arm == 2 && block == 0) {
                             for &(id, normalized) in &overrides {
                                 processor.queue_parameter_at(id, normalized, 0).unwrap();
                             }
@@ -717,9 +724,22 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
         drop(plugin);
         drop(host);
         reports.push(serde_json::json!({
-            "arm":if replay {"B_full_product_constants"} else {"A_no_additional_host_constants"},
+            "arm":match arm {
+                0 => "A_no_additional_host_constants",
+                1 => "B_full_product_constants",
+                2 => "C_single_initial_override",
+                _ => unreachable!(),
+            },
+            "policy":match arm {
+                0 => "native_state_with_common_source_input",
+                1 => "pre9fec_periodic_full_constants",
+                2 => "single_initial_full_constants_fixed_author",
+                _ => unreachable!(),
+            },
             "owner_serial":owner.serial().get(),"census_parameters":census.len(),
-            "per_block_overrides":if replay {overrides.len()} else {0},
+            "per_block_overrides":(arm != 2).then_some(if arm == 1 {overrides.len()} else {0}),
+            "first_block_overrides":if arm == 0 {0} else {overrides.len()},
+            "later_block_overrides":if arm == 1 {overrides.len()} else {0},
             "initial":initial,"after_fixed_dsp":final_status,
             "pre_on_nonzero_samples":pre_on_nonzero[arm],
             "attack_energy":attack_energy,"middle_energy":middle_energy[arm],
@@ -732,11 +752,25 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
                 Some((input_before, input_after, source_events, source_feedback));
         }
     }
-    let supports_replay_suppression = final_source_valid.iter().all(|valid| *valid)
-        && pre_on_nonzero == [0, 0]
+    // Preserve the original A/B oracle independently of the new arm. C uses
+    // the same predeclared middle window and ratio; an invalid control is not
+    // evidence either for or against the single-initial-override hypothesis.
+    let supports_replay_suppression = final_source_valid[..2].iter().all(|valid| *valid)
+        && pre_on_nonzero[..2] == [0, 0]
         && middle_energy[0] > MIN_A_MIDDLE_ENERGY
         && middle_nonzero_blocks[0] == MID_END - MID_START
         && middle_energy[1] <= middle_energy[0] * MAX_B_A_MIDDLE_RATIO;
+    let h4_testable =
+        supports_replay_suppression && final_source_valid[2] && pre_on_nonzero[2] == 0;
+    let supports_single_initial_suppression =
+        h4_testable && middle_energy[2] <= middle_energy[0] * MAX_B_A_MIDDLE_RATIO;
+    let h4_outcome = if !h4_testable {
+        "unqualified_control_failure"
+    } else if supports_single_initial_suppression {
+        "supported"
+    } else {
+        "falsified"
+    };
     println!(
         "{}",
         serde_json::json!({
@@ -747,6 +781,9 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
             "attack_window":[0,1024],"middle_window":[2048,6144],"tail_window":[10240,12288],
             "minimum_A_middle_energy_exclusive":MIN_A_MIDDLE_ENERGY,
             "maximum_B_A_middle_energy_ratio_inclusive":MAX_B_A_MIDDLE_RATIO,
+            "maximum_C_A_middle_energy_ratio_inclusive":MAX_B_A_MIDDLE_RATIO,
+            "supports_single_initial_override_suppression":supports_single_initial_suppression,
+            "single_initial_override_hypothesis":h4_outcome,
             "supports_whole_replay_suppression":supports_replay_suppression,"arms":reports,
             "native_owners_dropped_before_report":true,"unserviced_source_preserved":true,
             "specific_midi_proxy_causality_qualified":false,"product_runtime_qualified":false,
@@ -754,12 +791,12 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
         })
     );
     assert!(
-        final_source_valid.iter().all(|valid| *valid),
+        final_source_valid[..2].iter().all(|valid| *valid),
         "unexpected Source failure, open edit/group or retained processor input"
     );
     assert_eq!(
-        pre_on_nonzero,
-        [0, 0],
+        &pre_on_nonzero[..2],
+        &[0, 0],
         "no unexpected pre-On PCM in either fresh native owner"
     );
     assert!(
@@ -774,5 +811,17 @@ fn external_surge_vst3_full_parameter_replay_sustained_note_ab() {
     assert!(
         supports_replay_suppression,
         "full replay suppression hypothesis did not meet the predeclared differential"
+    );
+    assert!(
+        final_source_valid[2],
+        "C Source or retained input control failed"
+    );
+    assert_eq!(
+        pre_on_nonzero[2], 0,
+        "no unexpected pre-On PCM in fresh C owner"
+    );
+    assert!(
+        supports_single_initial_suppression,
+        "H4 falsified: one initial full override did not meet the predeclared suppression ratio"
     );
 }
