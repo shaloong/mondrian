@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::{ptr, slice};
 
 use vst3::{uid, Class, ComPtr, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
@@ -54,6 +54,11 @@ unsafe fn len_wstring(string: *const TChar) -> usize {
 
 const PLUGIN_NAME: &str = "Mondrian Sidechain Fixture";
 const STATE_MAGIC: [u8; 4] = *b"MSS1";
+// One foreground queue with one four-byte component-profile notification. The
+// host owns the allocation; this is a payload bound, not its complete resource fee.
+const PROFILE_CONTEXT: u32 = 0x4d535335;
+const PROFILE_BYTES: u32 = 4;
+
 const STATE_VERSION: u32 = 1;
 
 unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
@@ -282,6 +287,7 @@ fn canonical_musical_context(data: &ProcessData, prepared_rate: u64) -> Option<(
 
 struct GainProcessor {
     mode: AtomicU32,
+    active: AtomicBool,
     active_buses: AtomicU32,
     delay: [AtomicU32; 14],
     configured_latency: AtomicUsize,
@@ -292,6 +298,14 @@ struct GainProcessor {
     sample_rate: AtomicU64,
     // Mode7-only, non-restorable diagnostic count of actual process attempts.
     musical_attempts: AtomicU64,
+    // The factory records this object's stable COM identity without retaining a
+    // self-reference. It remains valid until the component's final COM release.
+    exchange_processor: AtomicPtr<IAudioProcessor>,
+    // Lifecycle changes are main-only and cannot overlap process(). During DSP
+    // this retained handler is borrowed read-only; no COM owner is created/dropped.
+    exchange: RefCell<Option<ComPtr<IDataExchangeHandler>>>,
+    profile_queue: AtomicU32,
+    profile_notification_pending: AtomicBool,
 }
 
 impl Class for GainProcessor {
@@ -306,7 +320,12 @@ impl GainProcessor {
             gain: AtomicU64::new(0.5f64.to_bits()),
             sample_rate: AtomicU64::new(0),
             musical_attempts: AtomicU64::new(0),
+            exchange_processor: AtomicPtr::new(ptr::null_mut()),
+            exchange: RefCell::new(None),
+            profile_queue: AtomicU32::new(InvalidDataExchangeQueueID),
+            profile_notification_pending: AtomicBool::new(false),
             mode: AtomicU32::new(0),
+            active: AtomicBool::new(false),
             active_buses: AtomicU32::new(0),
             delay: std::array::from_fn(|_| AtomicU32::new(0)),
             position: AtomicUsize::new(0),
@@ -315,15 +334,85 @@ impl GainProcessor {
             control_thread: Cell::new(None),
         }
     }
+
+    unsafe fn open_profile_queue(&self) -> tresult {
+        if self.control_thread.get() != Some(thread::current().id())
+            || self.active.load(Ordering::Acquire) || self.connection.borrow().is_none()
+        {
+            return kInvalidArgument;
+        }
+        if self.profile_queue.load(Ordering::Acquire) != InvalidDataExchangeQueueID {
+            return kResultOk;
+        }
+        let exchange = self.exchange.borrow();
+        let Some(exchange) = exchange.as_ref() else { return kNoInterface; };
+        let processor = self.exchange_processor.load(Ordering::Acquire);
+        if processor.is_null() { return kInvalidArgument; }
+        let mut queue = InvalidDataExchangeQueueID;
+        let result = exchange.openQueue(processor, PROFILE_BYTES, 1, 4, PROFILE_CONTEXT, &mut queue);
+        if result != kResultOk && result != kResultTrue { return result; }
+        if queue == InvalidDataExchangeQueueID { return kInvalidArgument; }
+        self.profile_queue.store(queue, Ordering::Release);
+        kResultOk
+    }
+
+    unsafe fn close_profile_queue(&self) -> tresult {
+        let queue = self.profile_queue.load(Ordering::Acquire);
+        if queue == InvalidDataExchangeQueueID { return kResultOk; }
+        if self.control_thread.get() != Some(thread::current().id())
+            || self.active.load(Ordering::Acquire)
+        { return kInvalidArgument; }
+        let exchange = self.exchange.borrow();
+        let Some(exchange) = exchange.as_ref() else { return kNoInterface; };
+        let result = exchange.closeQueue(queue);
+        if result != kResultOk && result != kResultTrue { return result; }
+        self.profile_queue.store(InvalidDataExchangeQueueID, Ordering::Release);
+        self.profile_notification_pending.store(false, Ordering::Release);
+        kResultOk
+    }
+
+    unsafe fn send_profile_notification(&self) -> tresult {
+        if !self.profile_notification_pending.load(Ordering::Acquire) { return kResultOk; }
+        let exchange = self.exchange.borrow();
+        let Some(exchange) = exchange.as_ref() else { return kNoInterface; };
+        let queue = self.profile_queue.load(Ordering::Acquire);
+        if queue == InvalidDataExchangeQueueID { return kInvalidArgument; }
+        let mut block = DataExchangeBlock {
+            data: ptr::null_mut(), size: 0, blockID: InvalidDataExchangeBlockID,
+        };
+        let result = exchange.lockBlock(queue, &mut block);
+        // A temporarily unavailable block is not a blocking wait or an invented
+        // notification. Keep the pending fact for a later actual DSP call.
+        if result == kOutOfMemory { return kResultOk; }
+        if result != kResultOk && result != kResultTrue { return result; }
+        if block.blockID == InvalidDataExchangeBlockID { return kInvalidArgument; }
+        if block.data.is_null() || block.size != PROFILE_BYTES {
+            let _ = exchange.freeBlock(queue, block.blockID, 0);
+            return kInvalidArgument;
+        }
+        ptr::copy_nonoverlapping(6_u32.to_le_bytes().as_ptr(), block.data.cast(), 4);
+        let result = exchange.freeBlock(queue, block.blockID, 1);
+        if result == kResultOk || result == kResultTrue {
+            self.profile_notification_pending.store(false, Ordering::Release);
+            kResultOk
+        } else {
+            result
+        }
+    }
 }
 
 impl IPluginBaseTrait for GainProcessor {
-    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+    unsafe fn initialize(&self, context: *mut FUnknown) -> tresult {
         self.control_thread.set(Some(thread::current().id()));
+        *self.exchange.borrow_mut() = ComRef::from_raw(context)
+            .and_then(|host| host.cast::<IDataExchangeHandler>());
         kResultOk
     }
 
     unsafe fn terminate(&self) -> tresult {
+        let result = self.close_profile_queue();
+        if result != kResultOk { return result; }
+        self.exchange.borrow_mut().take();
         self.connection.borrow_mut().take();
         self.control_thread.set(None);
         kResultOk
@@ -473,7 +562,17 @@ impl IComponentTrait for GainProcessor {
     }
 
     unsafe fn setActive(&self, state: TBool) -> tresult {
+        if state != 0 && self.active.load(Ordering::Acquire) { return kResultOk; }
         let mode = self.mode.load(Ordering::Acquire);
+        let result = if state == 0 {
+            // The owning host already stopped DSP. Complete this component's
+            // inactive transition before closing its main-thread queue.
+            self.active.store(false, Ordering::Release);
+            self.close_profile_queue()
+        } else if mode == 5 {
+            self.open_profile_queue()
+        } else { kResultOk };
+        if result != kResultOk { return result; }
         if matches!(mode, 4 | 5 | 6) && state != 0 {
             let gain = f64::from_bits(self.gain.load(Ordering::Acquire));
             let latency = if mode == 6 || (mode == 4 && gain >= 0.75) { 7 } else { 3 };
@@ -481,6 +580,7 @@ impl IComponentTrait for GainProcessor {
             for sample in &self.delay { sample.store(0, Ordering::Relaxed); }
             self.position.store(0, Ordering::Relaxed);
         }
+        self.active.store(state != 0, Ordering::Release);
         kResultOk
     }
 
@@ -792,8 +892,9 @@ impl IAudioProcessorTrait for GainProcessor {
             // until the host's later deactivate/reactivate. No main-thread SDK
             // interface or restartComponent is called from process().
             self.mode.store(6, Ordering::Release);
+            self.profile_notification_pending.store(true, Ordering::Release);
         }
-        kResultOk
+        self.send_profile_notification()
     }
 
     unsafe fn getTailSamples(&self) -> u32 {
@@ -820,10 +921,11 @@ struct GainController {
     host: RefCell<Option<ComPtr<IHostApplication>>>,
     connection: RefCell<Option<ComPtr<IConnectionPoint>>>,
     control_thread: Cell<Option<ThreadId>>,
+    profile_queue_open: Cell<bool>,
 }
 
 impl Class for GainController {
-    type Interfaces = (IEditController, IConnectionPoint);
+    type Interfaces = (IEditController, IConnectionPoint, IDataExchangeReceiver);
 }
 
 impl GainController {
@@ -834,7 +936,45 @@ impl GainController {
             gain: Cell::new(0.5), mode: Cell::new(0),
             handler: RefCell::new(None), host: RefCell::new(None),
             connection: RefCell::new(None), control_thread: Cell::new(None),
+            profile_queue_open: Cell::new(false),
         }
+    }
+}
+
+impl IDataExchangeReceiverTrait for GainController {
+    unsafe fn queueOpened(&self, context: u32, size: u32, background: *mut TBool) {
+        if !background.is_null() { *background = 0; }
+        if self.control_thread.get() == Some(thread::current().id())
+            && context == PROFILE_CONTEXT && size == PROFILE_BYTES
+        {
+            self.profile_queue_open.set(true);
+        }
+    }
+
+    unsafe fn queueClosed(&self, context: u32) {
+        if self.control_thread.get() == Some(thread::current().id()) && context == PROFILE_CONTEXT {
+            self.profile_queue_open.set(false);
+        }
+    }
+
+    unsafe fn onDataExchangeBlocksReceived(
+        &self, context: u32, count: u32, blocks: *mut DataExchangeBlock, background: TBool,
+    ) {
+        if self.control_thread.get() != Some(thread::current().id()) || background != 0
+            || context != PROFILE_CONTEXT || !self.profile_queue_open.get()
+            || count != 1 || blocks.is_null() || self.mode.get() != 5
+        { return; }
+        let block = &*blocks;
+        if block.size != PROFILE_BYTES || block.data.is_null()
+            || block.blockID == InvalidDataExchangeBlockID
+            || u32::from_le_bytes(ptr::read_unaligned(block.data.cast::<[u8; 4]>())) != 6
+        { return; }
+        let Some(handler) = self.handler.borrow().clone() else { return; };
+        // The component emitted this fact only after real DSP changed its desired
+        // profile. Record it before foreign reentry so either this foreground
+        // notification or the ordinary scalar-sync path requests restart once.
+        self.mode.set(6);
+        let _ = handler.restartComponent(RestartFlags_::kLatencyChanged);
     }
 }
 
@@ -849,6 +989,7 @@ impl IPluginBaseTrait for GainController {
     }
 
     unsafe fn terminate(&self) -> tresult {
+        self.profile_queue_open.set(false);
         self.connection.borrow_mut().take();
         self.handler.borrow_mut().take();
         self.host.borrow_mut().take();
@@ -1110,7 +1251,12 @@ impl IPluginFactoryTrait for Factory {
         obj: *mut *mut c_void,
     ) -> tresult {
         let instance = match *(cid as *const TUID) {
-            GainProcessor::CID => ComWrapper::new(GainProcessor::new()).to_com_ptr::<FUnknown>(),
+            GainProcessor::CID => {
+                let component = ComWrapper::new(GainProcessor::new());
+                let processor = component.to_com_ptr::<IAudioProcessor>().unwrap();
+                component.exchange_processor.store(processor.as_ptr(), Ordering::Release);
+                component.to_com_ptr::<FUnknown>()
+            },
             GainController::CID => ComWrapper::new(GainController::new()).to_com_ptr::<FUnknown>(),
             _ => None,
         };
@@ -1388,5 +1534,423 @@ mod zero_sample_contracts {
         assert_eq!(unsafe { processor.process(&mut block) }, kResultOk);
         assert_eq!(left, [2.0, 3.0, 4.0, 5.0]);
         assert_eq!(right, [-2.0, -3.0, -4.0, -5.0]);
+    }
+}
+
+
+#[cfg(test)]
+mod profile_notification_contracts {
+    use super::*;
+    use std::cell::UnsafeCell;
+    use std::sync::Arc;
+
+    // This minimal COM transport owns exactly one block. Tests join the actual
+    // DSP thread before main dispatch/lifecycle work, matching the ABI ownership
+    // phases; none of these Cell/UnsafeCell owners is accessed concurrently.
+    struct ExchangeHost {
+        owner: ThreadId,
+        processor: *mut IAudioProcessor,
+        receiver: ComPtr<IDataExchangeReceiver>,
+        bytes: UnsafeCell<[u8; 4]>,
+        open: Cell<bool>,
+        locked: Cell<bool>,
+        pending: Cell<bool>,
+        busy: Cell<bool>,
+        opens: Cell<usize>,
+        closes: Cell<usize>,
+        sends: Cell<usize>,
+        returns: Cell<usize>,
+        restarts: AtomicUsize,
+        wrong_restart_thread: AtomicBool,
+        dropped: Arc<AtomicBool>,
+    }
+    impl Class for ExchangeHost {
+        type Interfaces = (IDataExchangeHandler, IComponentHandler);
+    }
+    impl ExchangeHost {
+        unsafe fn dispatch(&self) {
+            if self.pending.replace(false) {
+                let mut block = DataExchangeBlock {
+                    data: self.bytes.get().cast(),
+                    size: PROFILE_BYTES,
+                    blockID: 0,
+                };
+                self.receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut block, 0);
+            }
+        }
+    }
+    impl Drop for ExchangeHost {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+    impl IDataExchangeHandlerTrait for ExchangeHost {
+        unsafe fn openQueue(
+            &self,
+            processor: *mut IAudioProcessor,
+            size: u32,
+            count: u32,
+            alignment: u32,
+            context: u32,
+            out: *mut u32,
+        ) -> tresult {
+            if thread::current().id() != self.owner
+                || processor != self.processor
+                || size != 4
+                || count != 1
+                || alignment != 4
+                || context != PROFILE_CONTEXT
+                || out.is_null()
+                || self.open.get()
+            {
+                return kInvalidArgument;
+            }
+            self.open.set(true);
+            self.opens.set(self.opens.get() + 1);
+            let mut background = 1;
+            self.receiver.queueOpened(context, size, &mut background);
+            if background != 0 {
+                return kInvalidArgument;
+            }
+            *out = 9;
+            kResultTrue
+        }
+        unsafe fn closeQueue(&self, queue: u32) -> tresult {
+            if thread::current().id() != self.owner
+                || queue != 9
+                || !self.open.get()
+                || self.locked.get()
+            {
+                return kInvalidArgument;
+            }
+            self.dispatch();
+            self.receiver.queueClosed(PROFILE_CONTEXT);
+            self.open.set(false);
+            self.closes.set(self.closes.get() + 1);
+            kResultTrue
+        }
+        unsafe fn lockBlock(&self, queue: u32, out: *mut DataExchangeBlock) -> tresult {
+            if queue != 9 || !self.open.get() || out.is_null() {
+                return kInvalidArgument;
+            }
+            if self.busy.get() || self.locked.get() || self.pending.get() {
+                return kOutOfMemory;
+            }
+            self.locked.set(true);
+            *out = DataExchangeBlock { data: self.bytes.get().cast(), size: 4, blockID: 0 };
+            kResultTrue
+        }
+        unsafe fn freeBlock(&self, queue: u32, block: u32, send: TBool) -> tresult {
+            if queue != 9 || block != 0 || !self.locked.replace(false) {
+                return kInvalidArgument;
+            }
+            self.returns.set(self.returns.get() + 1);
+            if send != 0 {
+                self.pending.set(true);
+                self.sends.set(self.sends.get() + 1);
+            }
+            kResultTrue
+        }
+    }
+    impl IComponentHandlerTrait for ExchangeHost {
+        unsafe fn beginEdit(&self, _: u32) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn performEdit(&self, _: u32, _: f64) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn endEdit(&self, _: u32) -> tresult {
+            kNotImplemented
+        }
+        unsafe fn restartComponent(&self, flags: i32) -> tresult {
+            if thread::current().id() != self.owner {
+                self.wrong_restart_thread.store(true, Ordering::Release);
+                return kInvalidArgument;
+            }
+            if flags != RestartFlags_::kLatencyChanged {
+                return kInvalidArgument;
+            }
+            self.restarts.fetch_add(1, Ordering::AcqRel);
+            kResultOk
+        }
+    }
+
+    struct Fixture {
+        component: ComWrapper<GainProcessor>,
+        signal: ComPtr<IAudioProcessor>,
+        controller: ComWrapper<GainController>,
+        host: ComWrapper<ExchangeHost>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let component = ComWrapper::new(GainProcessor::new());
+            let signal = component.to_com_ptr::<IAudioProcessor>().unwrap();
+            component.exchange_processor.store(signal.as_ptr(), Ordering::Release);
+            let controller = ComWrapper::new(GainController::new());
+            controller.control_thread.set(Some(thread::current().id()));
+            controller.mode.set(5);
+            let host = ComWrapper::new(ExchangeHost {
+                owner: thread::current().id(),
+                processor: signal.as_ptr(),
+                receiver: controller.to_com_ptr::<IDataExchangeReceiver>().unwrap(),
+                bytes: UnsafeCell::new([0; 4]),
+                open: Cell::new(false),
+                locked: Cell::new(false),
+                pending: Cell::new(false),
+                busy: Cell::new(false),
+                opens: Cell::new(0),
+                closes: Cell::new(0),
+                sends: Cell::new(0),
+                returns: Cell::new(0),
+                restarts: AtomicUsize::new(0),
+                wrong_restart_thread: AtomicBool::new(false),
+                dropped: Arc::new(AtomicBool::new(false)),
+            });
+            unsafe {
+                let base = host.to_com_ptr::<FUnknown>().unwrap();
+                let control = component.to_com_ptr::<IComponent>().unwrap();
+                assert_eq!(control.initialize(base.as_ptr()), kResultOk);
+                let component_peer = component.to_com_ptr::<IConnectionPoint>().unwrap();
+                let controller_peer = controller.to_com_ptr::<IConnectionPoint>().unwrap();
+                assert_eq!(component_peer.connect(controller_peer.as_ptr()), kResultOk);
+                assert_eq!(controller_peer.connect(component_peer.as_ptr()), kResultOk);
+                component.mode.store(5, Ordering::Release);
+                let handler = host.to_com_ptr::<IComponentHandler>().unwrap();
+                let editor = controller.to_com_ptr::<IEditController>().unwrap();
+                assert_eq!(editor.setComponentHandler(handler.as_ptr()), kResultOk);
+                assert_eq!(control.setActive(1), kResultOk);
+            }
+            Self { component, signal, controller, host }
+        }
+        fn process_without_host_points(&self) {
+            let signal = self.signal.clone();
+            // Real OS thread separation, not an onBackgroundThread flag oracle.
+            thread::spawn(move || {
+                let mut input = [[1.0_f32; 4]; 6];
+                let mut input_pointers: [[*mut f32; 2]; 3] = std::array::from_fn(|bus| {
+                    [input[bus * 2].as_mut_ptr(), input[bus * 2 + 1].as_mut_ptr()]
+                });
+                let mut inputs: [AudioBusBuffers; 3] = std::array::from_fn(|bus| AudioBusBuffers {
+                    numChannels: 2,
+                    silenceFlags: 0,
+                    __field0: AudioBusBuffers__type0 {
+                        channelBuffers32: input_pointers[bus].as_mut_ptr(),
+                    },
+                });
+                let mut samples = [[f32::NAN; 4]; 2];
+                let mut output_pointers = [samples[0].as_mut_ptr(), samples[1].as_mut_ptr()];
+                let mut output = AudioBusBuffers {
+                    numChannels: 2,
+                    silenceFlags: 0,
+                    __field0: AudioBusBuffers__type0 {
+                        channelBuffers32: output_pointers.as_mut_ptr(),
+                    },
+                };
+                let mut data = ProcessData {
+                    processMode: ProcessModes_::kRealtime,
+                    symbolicSampleSize: SymbolicSampleSizes_::kSample32,
+                    numSamples: 4,
+                    numInputs: 3,
+                    numOutputs: 1,
+                    inputs: inputs.as_mut_ptr(),
+                    outputs: &mut output,
+                    inputParameterChanges: ptr::null_mut(),
+                    outputParameterChanges: ptr::null_mut(),
+                    inputEvents: ptr::null_mut(),
+                    outputEvents: ptr::null_mut(),
+                    processContext: ptr::null_mut(),
+                };
+                assert_eq!(unsafe { signal.process(&mut data) }, kResultOk);
+                assert!(samples.iter().flatten().all(|value| value.is_finite()));
+            })
+            .join()
+            .unwrap();
+        }
+        fn retire(self) {
+            let dropped = Arc::clone(&self.host.dropped);
+            unsafe {
+                let control = self.component.to_com_ptr::<IComponent>().unwrap();
+                assert_eq!(control.setActive(0), kResultOk);
+                let component_peer = self.component.to_com_ptr::<IConnectionPoint>().unwrap();
+                let controller_peer = self.controller.to_com_ptr::<IConnectionPoint>().unwrap();
+                assert_eq!(
+                    component_peer.disconnect(controller_peer.as_ptr()),
+                    kResultOk
+                );
+                assert_eq!(
+                    controller_peer.disconnect(component_peer.as_ptr()),
+                    kResultOk
+                );
+                assert_eq!(control.terminate(), kResultOk);
+                assert_eq!(
+                    self.controller.to_com_ptr::<IEditController>().unwrap().terminate(),
+                    kResultOk
+                );
+            }
+            assert!(!self.host.open.get());
+            assert!(!self.host.locked.get());
+            assert!(!self.host.pending.get());
+            assert!(!self.controller.profile_queue_open.get());
+            assert!(!self.host.wrong_restart_thread.load(Ordering::Acquire));
+            assert_eq!(self.host.opens.get(), 1);
+            assert_eq!(self.host.closes.get(), 1);
+            drop(self);
+            assert!(
+                dropped.load(Ordering::Acquire),
+                "no retained host/controller COM cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn native_owned_dsp_profile_notifies_main_once_without_host_parameter_points() {
+        let fixture = Fixture::new();
+        fixture.process_without_host_points();
+        assert_eq!(fixture.component.mode.load(Ordering::Acquire), 6);
+        assert_eq!(
+            fixture.component.configured_latency.load(Ordering::Acquire),
+            3
+        );
+        assert_eq!(
+            unsafe { fixture.component.to_com_ptr::<IComponent>().unwrap().setActive(1) },
+            kResultOk
+        );
+        assert_eq!(
+            fixture.component.configured_latency.load(Ordering::Acquire),
+            3,
+            "repeated active does not realize the new latency without deactivation"
+        );
+        assert_eq!(fixture.host.opens.get(), 1);
+        assert_eq!(
+            fixture.component.gain.load(Ordering::Acquire),
+            0.5_f64.to_bits()
+        );
+        assert_eq!(
+            fixture.host.restarts.load(Ordering::Acquire),
+            0,
+            "no handler call on DSP thread"
+        );
+        assert_eq!(fixture.host.sends.get(), 1);
+        assert_eq!(fixture.host.returns.get(), 1);
+        assert_eq!(unsafe { *fixture.host.bytes.get() }, 6_u32.to_le_bytes());
+        fixture.process_without_host_points();
+        assert_eq!(
+            fixture.host.sends.get(),
+            1,
+            "one notification, even before main dispatch"
+        );
+        unsafe {
+            fixture.host.dispatch();
+            fixture.host.dispatch();
+        }
+        assert_eq!(fixture.host.restarts.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.controller.mode.get(), 6);
+        assert_eq!(fixture.controller.gain.get(), 0.5);
+        unsafe {
+            let receiver = fixture.controller.to_com_ptr::<IDataExchangeReceiver>().unwrap();
+            let mut duplicate = DataExchangeBlock {
+                data: fixture.host.bytes.get().cast(),
+                size: 4,
+                blockID: 0,
+            };
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut duplicate, 0);
+            assert_eq!(
+                fixture.host.restarts.load(Ordering::Acquire),
+                1,
+                "duplicate profile stays idempotent"
+            );
+        }
+        unsafe {
+            let editor = fixture.controller.to_com_ptr::<IEditController>().unwrap();
+            assert_eq!(editor.setParamNormalized(0, 0.5), kResultOk);
+            assert_eq!(
+                fixture.host.restarts.load(Ordering::Acquire),
+                1,
+                "later scalar sync stays idempotent"
+            );
+            let control = fixture.component.to_com_ptr::<IComponent>().unwrap();
+            assert_eq!(control.setActive(0), kResultOk);
+            assert_eq!(control.setActive(1), kResultOk);
+        }
+        assert_eq!(
+            fixture.component.configured_latency.load(Ordering::Acquire),
+            7
+        );
+        fixture.retire();
+    }
+
+    #[test]
+    fn foreground_profile_receiver_rejects_wrong_os_thread_background_shape_and_late_delivery() {
+        let fixture = Fixture::new();
+        let receiver = fixture.controller.to_com_ptr::<IDataExchangeReceiver>().unwrap();
+        let other_thread_receiver = receiver.clone();
+        thread::spawn(move || {
+            let mut value = 6_u32.to_le_bytes();
+            let mut block = DataExchangeBlock {
+                data: value.as_mut_ptr().cast(),
+                size: 4,
+                blockID: 0,
+            };
+            unsafe {
+                other_thread_receiver.onDataExchangeBlocksReceived(
+                    PROFILE_CONTEXT,
+                    1,
+                    &mut block,
+                    0,
+                );
+            }
+        })
+        .join()
+        .unwrap();
+        let mut value = 6_u32.to_le_bytes();
+        let mut block = DataExchangeBlock {
+            data: value.as_mut_ptr().cast(),
+            size: 4,
+            blockID: 0,
+        };
+        unsafe {
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut block, 1);
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT + 1, 1, &mut block, 0);
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 0, &mut block, 0);
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, ptr::null_mut(), 0);
+            block.size = 3;
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut block, 0);
+            assert_eq!(
+                fixture.component.to_com_ptr::<IComponent>().unwrap().setActive(0),
+                kResultOk
+            );
+            block.size = 4;
+            receiver.onDataExchangeBlocksReceived(PROFILE_CONTEXT, 1, &mut block, 0);
+        }
+        assert_eq!(fixture.host.restarts.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.controller.mode.get(), 5);
+        drop(receiver);
+        fixture.retire();
+    }
+
+    #[test]
+    fn unavailable_profile_block_keeps_real_change_pending_and_close_retires_notification() {
+        let fixture = Fixture::new();
+        fixture.host.busy.set(true);
+        fixture.process_without_host_points();
+        assert_eq!(fixture.component.mode.load(Ordering::Acquire), 6);
+        assert!(fixture.component.profile_notification_pending.load(Ordering::Acquire));
+        assert_eq!(fixture.host.sends.get(), 0);
+        assert_eq!(fixture.host.restarts.load(Ordering::Acquire), 0);
+        fixture.host.busy.set(false);
+        fixture.process_without_host_points();
+        assert!(!fixture.component.profile_notification_pending.load(Ordering::Acquire));
+        assert_eq!(fixture.host.sends.get(), 1);
+        assert_eq!(fixture.host.returns.get(), 1);
+        // No explicit dispatch: legal queue close delivers the pending foreground
+        // notification before queueClosed, exactly as the existing host does.
+        assert_eq!(
+            unsafe { fixture.component.to_com_ptr::<IComponent>().unwrap().setActive(0) },
+            kResultOk
+        );
+        assert_eq!(fixture.host.restarts.load(Ordering::Acquire), 1);
+        assert!(!fixture.host.pending.get());
+        assert!(!fixture.controller.profile_queue_open.get());
+        fixture.retire();
     }
 }

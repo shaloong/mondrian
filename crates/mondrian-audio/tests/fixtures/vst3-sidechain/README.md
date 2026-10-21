@@ -54,9 +54,11 @@ returning a fatal error alone is insufficient acceptance.
 ## Constant component configuration service controls (modes 5/6)
 
 Mode 5 initially activates with a three-frame delay. Actual DSP records desired
-mode 6 without changing the active contract. A later main-thread ConnectionPoint
-query observes this component fact and requests latency reactivation exactly
-once; the controller does not manufacture the component profile. Legal
+mode 6 without changing the active contract. One four-byte foreground DataExchange
+block reports this real DSP change on the host's existing main-thread service,
+including when all author lanes are None. Ordinary scalar synchronization can
+also observe the component through ConnectionPoint; whichever arrives first
+requests latency reactivation once, without manufacturing its profile. Legal
 deactivate/reactivate realizes seven-frame delay/tail, and the actual saved
 component/controller configuration restores that profile into independent fresh
 instances. Unchanged host parameter delivery after the controller observed mode
