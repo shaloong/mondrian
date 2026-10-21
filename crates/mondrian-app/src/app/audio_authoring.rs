@@ -67,6 +67,9 @@ impl AppState {
         action: AudioProductAction,
     ) -> Result<()> {
         match action {
+            AudioProductAction::QueryNativeParameter(payload) => {
+                self.query_native_audio_parameter_product(payload)
+            }
             AudioProductAction::NativeEditor(payload) => {
                 self.control_native_audio_editor_product(payload)
             }

@@ -254,6 +254,20 @@ impl AppAudioPlayback {
         }
     }
 
+    pub(super) fn request_native_parameter_query(
+        &mut self,
+        ticket: std::num::NonZeroU64,
+        query: mondrian_core::NativeAudioParameterQuery,
+    ) -> Result<Result<(), mondrian_core::NativeAudioParameterQueryRefusal>, AudioPlaybackError>
+    {
+        match self {
+            Self::Available(playback) => playback.request_native_parameter_query(ticket, query),
+            Self::Unavailable { .. } => Ok(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::Unavailable,
+            )),
+        }
+    }
+
     pub(super) fn request_native_audio_editor(
         &mut self,
         intent: mondrian_core::NativeAudioEditorControlIntent,
@@ -314,7 +328,7 @@ impl AppAudioPlayback {
         }
     }
 
-    fn native_control_hold_generation(&self) -> Option<u64> {
+    pub(super) fn native_control_hold_generation(&self) -> Option<u64> {
         match self {
             Self::Available(playback) => playback.native_control_hold_generation(),
             Self::Unavailable { .. } => None,
@@ -1904,6 +1918,22 @@ impl AppState {
             }
             AudioPlaybackEvent::NativeEditorAttachmentObserved { observation, .. } => {
                 self.observe_native_audio_editor_attachment(*observation);
+                Ok(())
+            }
+            AudioPlaybackEvent::NativeParameterQueryCompleted {
+                ticket,
+                renderer_id,
+                generation,
+                query,
+                completion,
+            } => {
+                self.observe_native_audio_parameter_query(
+                    ticket,
+                    renderer_id,
+                    generation,
+                    query,
+                    completion,
+                );
                 Ok(())
             }
             AudioPlaybackEvent::NativeParameterObservationsObserved { observation, .. } => {

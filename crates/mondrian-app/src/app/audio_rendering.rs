@@ -348,6 +348,41 @@ impl AudioPcmRenderer for TimelineAudioPcmRenderer {
         }
     }
 
+    fn query_native_parameter(
+        &self,
+        query: &mondrian_core::NativeAudioParameterQuery,
+        cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<mondrian_core::NativeAudioParameterQueryOutcome> {
+        use mondrian_core::{
+            NativeAudioParameterQueryOutcome as Out, NativeAudioParameterQueryRefusal as Refusal,
+        };
+        if cancellation.is_canceled() {
+            return Err(mondrian_core::MondrianError::Cancelled);
+        }
+        if !self.native_author_snapshot_current() {
+            return Ok(Out::Refused(Refusal::OwnerChanged));
+        }
+        let outcome = self.state.lock().delivery.query_native_parameter(query, cancellation);
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(mondrian_audio::AudioNativeOwnerError::Cancelled) => {
+                return Err(mondrian_core::MondrianError::Cancelled)
+            }
+            Err(error) => {
+                return Err(audio_render_error(
+                    "native_audio_parameter_query",
+                    error.to_string(),
+                ))
+            }
+        };
+        if cancellation.is_canceled() {
+            return Err(mondrian_core::MondrianError::Cancelled);
+        }
+        if !self.native_author_snapshot_current() {
+            return Ok(Out::Refused(Refusal::OwnerChanged));
+        }
+        Ok(outcome)
+    }
     fn control_native_editor(
         &self,
         intent: mondrian_core::NativeAudioEditorControlIntent,

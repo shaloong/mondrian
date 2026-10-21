@@ -2420,6 +2420,16 @@ fn app_owned_clap_editor_undo_redo_restores_native_state() {
 #[test]
 #[ignore = "current normal Product and pinned Surge XT 1.3.4 VST3; real Realtime App Idle GUI, no edit/device/PCM"]
 fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
+    run_surge_xt_vst3_app_editor_control(false);
+}
+
+#[test]
+#[ignore = "current normal Product and pinned Surge XT 1.3.4 VST3; explicit one-ID App query in full 2855 directory, no edit/device/PCM"]
+fn app_surge_xt_vst3_explicit_parameter_query_preserves_native_owned_values() {
+    run_surge_xt_vst3_app_editor_control(true);
+}
+
+fn run_surge_xt_vst3_app_editor_control(explicit_query: bool) {
     use super::super::super::product_action::{
         AudioNativeEditorPayload, AudioProductAction, ProductAction,
     };
@@ -2537,9 +2547,34 @@ fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
     let mut native_object = None;
     let mut unexpected_value_edit = false;
     let mut phase = 0;
+    let mut query_requested = false;
+    let mut query_completed = false;
+    let mut query_ticket = None;
+    // Deterministic canonical author-key order, not native catalog ordinal.
+    let query_selection = original
+        .parameters
+        .iter()
+        .enumerate()
+        .skip(2048)
+        .find(|(_, (_, parameter))| {
+            !parameter.ui.hidden
+                && parameter.schema.numeric.is_some()
+                && parameter.automation.is_none()
+        })
+        .map(|(index, (id, _))| (index, id.clone()));
+    let (query_canonical_index, query_parameter) = query_selection
+        .clone()
+        .unwrap_or_else(|| (0, original.parameters.keys().next().unwrap().clone()));
+    let mut query_caption = None;
+    let mut query_finite = false;
+    let mut query_history = None;
     // Always consume original Audio cleanup even if a new target assertion fails.
     // The expected parameter model remains the independent initial snapshot.
     let target_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert!(
+            !explicit_query || query_selection.is_some(),
+            "visible numeric native-owned row after canonical index 2048"
+        );
         for current_phase in 0..3 {
             phase = current_phase;
             if phase != 0 {
@@ -2754,6 +2789,53 @@ fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
                             assert!(locator.matches_target(observation.target()));
                             // Optional facts never provide a required PID or bootstrap this gate.
                         }
+                        AudioPlaybackEvent::NativeParameterQueryCompleted {
+                            ticket,
+                            renderer_id: actual,
+                            generation: observed,
+                            query,
+                            completion,
+                        } => {
+                            assert!(explicit_query && query_requested && !query_completed);
+                            assert_eq!(phase, 1);
+                            assert_eq!(Some(*ticket), query_ticket);
+                            assert_eq!(Some(*actual), renderer_id);
+                            assert_eq!(*observed, generation);
+                            assert_eq!(Some(query.target), current_target);
+                            assert_eq!(query.parameter, query_parameter);
+                            let mondrian_media::AudioNativeParameterQueryCompletion::Completed(
+                                mondrian_core::NativeAudioParameterQueryOutcome::Observed(
+                                    observation,
+                                ),
+                            ) = completion
+                            else {
+                                panic!("explicit query refused or cancelled: {completion:?}")
+                            };
+                            assert_eq!(observation.target(), query.target);
+                            assert_eq!(observation.facts().len(), 1);
+                            let fact = &observation.facts()[0];
+                            assert_eq!(fact.parameter, query_parameter);
+                            assert!(matches!(
+                                fact.origin,
+                                mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. }
+                            ));
+                            assert!(fact
+                                .value_bits
+                                .is_some_and(|bits| f64::from_bits(bits).is_finite()));
+                            assert!(fact
+                                .author_value_bits
+                                .is_some_and(|bits| f64::from_bits(bits).is_finite()));
+                            assert!(fact.name.as_ref().is_some_and(|name| !name.is_empty()));
+                            if let Some(object) = native_object {
+                                assert_eq!(
+                                    (observation.process_id(), observation.object_serial()),
+                                    object
+                                );
+                            }
+                            query_caption = fact.name.clone();
+                            query_finite = true;
+                            query_completed = true;
+                        }
                         AudioPlaybackEvent::NativeDiagnosticsObserved {
                             renderer_id: actual,
                             generation: observed,
@@ -2813,7 +2895,7 @@ fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
                     && installations == acknowledgements
                     && state.authoring.as_ref().unwrap().history().diagnostics().pending_entries
                         == 0;
-                let complete = match phase {
+                let mut complete = match phase {
                     0 => renderer_id.is_some(),
                     1 => {
                         opened.is_some()
@@ -2828,6 +2910,66 @@ fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
                     }
                     _ => unreachable!(),
                 };
+                if phase == 1 && complete && explicit_query && !query_requested {
+                    use crate::app_ui::audio_automation::AudioAutomationTimeContext;
+                    use crate::app_ui::audio_processor_rack::{
+                        bind_audio_scalar_author_lease, project_audio_processor_rack,
+                    };
+                    use crate::app_ui::localization::{AppUiLocale, Localizer};
+                    assert!(state
+                        .native_audio_parameter_presentation(&payload, &query_parameter)
+                        .is_none());
+                    let sequence = state.active_sequence().unwrap();
+                    let localizer = Localizer::new(AppUiLocale::EnUs).unwrap();
+                    let mut rack = project_audio_processor_rack(
+                        sequence,
+                        payload.address,
+                        &localizer,
+                        AudioAutomationTimeContext::at_sequence_time(sequence, TimelineTime::ZERO),
+                    );
+                    bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), &state);
+                    let request = rack
+                        .processors
+                        .iter()
+                        .find(|processor| processor.processor_id == original.id)
+                        .unwrap()
+                        .parameters
+                        .iter()
+                        .find(|parameter| parameter.parameter_id == query_parameter)
+                        .unwrap()
+                        .native_query
+                        .clone()
+                        .expect(
+                            "actual visible Idle Opened/noFact None row has a manual query action",
+                        );
+                    let scalar = (*request.target).clone();
+                    query_history = Some(state.authoring.as_ref().unwrap().history().diagnostics());
+                    state
+                        .dispatch_action(
+                            ProductAction::Audio(AudioProductAction::QueryNativeParameter(request))
+                                .into_external_action(),
+                        )
+                        .expect("manual explicit App query action");
+                    query_ticket = std::num::NonZeroU64::new(state.native_parameter_query_serial);
+                    assert!(query_ticket.is_some());
+                    assert!(
+                        state.displayed_native_parameter_query(scalar).is_none(),
+                        "at most one App query is pending"
+                    );
+                    query_requested = true;
+                    complete = false;
+                }
+                if phase == 1 && explicit_query {
+                    complete &= query_completed;
+                    if complete {
+                        let fact = state.native_audio_parameter_presentation(&payload, &query_parameter).expect("original single Fact cache receives only the exact query completion");
+                        assert_eq!(fact.name, query_caption);
+                        assert_eq!(
+                            Some(state.authoring.as_ref().unwrap().history().diagnostics()),
+                            query_history
+                        );
+                    }
+                }
                 if complete {
                     break;
                 }
@@ -2892,11 +3034,13 @@ fn app_surge_xt_vst3_editor_opens_and_closes_through_same_source() {
     println!(
         "{}",
         serde_json::json!({
-            "case":"app-surge-vst3-editor", "plugin_version":"1.3.4", "parameters":2855,
+            "case":if explicit_query { "app-surge-vst3-query" } else { "app-surge-vst3-editor" }, "plugin_version":"1.3.4", "parameters":2855,
             "mode":"Realtime", "rate":config.sample_rate, "block":config.chunk_frames,
             "phase":phase, "initialization_proposals":proposals, "installations":installations,
             "exact_acknowledgements":acknowledgements, "opened":opened.is_some(), "closed":closed,
             "attachment_object_observed":native_object.is_some(), "unexpected_value_edit":unexpected_value_edit,
+            "explicit_query_requested":query_requested, "explicit_query_completed":query_completed,
+            "query_canonical_index":explicit_query.then_some(query_canonical_index), "query_parameter":explicit_query.then_some(&query_parameter), "query_caption":query_caption, "query_finite":query_finite,
             "target_failure":failure, "pcm_qualified":false, "device_qualified":false,
             "large_census_presentation_qualified":false, "realtime_qualified":false,
             "graceful_100ms_qualified":false

@@ -469,7 +469,7 @@ impl ParameterGestureAction {
 }
 
 impl AppState {
-    fn current_audio_scalar_processor(
+    pub(super) fn current_audio_scalar_processor(
         &self,
         owner: mondrian_audio::AudioProcessorInputInspectionTarget,
         processor_id: mondrian_core::AudioProcessorInstanceId,

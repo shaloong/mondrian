@@ -69,6 +69,8 @@ pub(crate) struct AudioProcessorParameterModel {
     pub(crate) native_presentation: Option<mondrian_core::NativeAudioParameterFact>,
     /// One-shot adoption of the displayed canonical snapshot, never a slider lease.
     pub(crate) native_adoption: Option<crate::app::parameter_gesture::AdoptDisplayedNativeParameterEdit>,
+    /// Manual single-row query available only for a current Opened None/noFact surface.
+    pub(crate) native_query: Option<crate::app::product_action::AudioNativeParameterQueryPayload>,
     /// Persisted discovery visibility used only until an actual same-owner query.
     pub(crate) metadata_hidden: bool,
     pub(crate) keyframe_count: usize,
@@ -175,6 +177,25 @@ pub(crate) fn bind_audio_scalar_author_lease(
                 .filter(|_| rack.is_editable && processor.native_format.is_some())
                 .zip(rack.input_inspection_target);
             for parameter in &mut processor.parameters {
+                parameter.native_query = adoption_owner
+                    .filter(|_| {
+                        parameter.static_value.is_none()
+                            && parameter.native_presentation.is_none()
+                            && processor.native_format == Some(NativeAudioFormat::Vst3)
+                    })
+                    .and_then(|(lease, owner)| {
+                        state.displayed_native_parameter_query(
+                            crate::app::parameter_gesture::AudioScalarGestureTarget {
+                                lease,
+                                owner: crate::app::parameter_gesture::AudioScalarOwner::Parameter {
+                                    owner,
+                                    processor_id: processor.processor_id,
+                                    definition: processor.definition.clone(),
+                                    parameter_schema: Box::new(parameter.schema.clone()),
+                                },
+                            },
+                        )
+                    });
                 parameter.native_adoption = adoption_owner
                     .filter(|_| {
                         parameter.static_value.is_none()
@@ -681,6 +702,7 @@ fn project_processor(
                     static_value: parameter.automation.as_ref().map(|curve| curve.default_value),
                     native_presentation: None,
                     native_adoption: None,
+                    native_query: None,
                     metadata_hidden: parameter.ui.hidden,
                     keyframe_count: parameter
                         .automation

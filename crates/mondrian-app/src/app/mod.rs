@@ -483,6 +483,8 @@ pub struct AppState {
     pub(crate) authoring: Option<AuthoringSession>,
     pub(crate) active_parameter_gesture: Option<parameter_gesture::ActiveParameterGesture>,
     native_audio_editor: Option<native_audio_editor::NativeAudioEditorProductContext>,
+    // App lifetime, not surface lifetime: replaced/closed contexts cannot reuse A.
+    native_parameter_query_serial: u64,
     native_audio_author_work: Option<native_audio_editor::NativeAudioAuthorWork>,
     native_audio_renderer: Option<std::sync::Weak<audio_rendering::TimelineAudioPcmRenderer>>,
     pub(super) parameter_gesture_command: Option<parameter_gesture::ParameterGestureCommand>,
@@ -727,6 +729,7 @@ impl AppState {
             authoring: None,
             active_parameter_gesture: None,
             native_audio_editor: None,
+            native_parameter_query_serial: 0,
             native_audio_author_work: None,
             native_audio_renderer: None,
             parameter_gesture_command: None,

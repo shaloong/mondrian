@@ -1649,3 +1649,5 @@ native-editor-failed = The native editor request failed
 
 audio-rack-native-controlled-parameter = Controlled by plugin
 audio-rack-adopt-displayed-value = Adopt displayed value
+audio-rack-query-native-parameter = Read current value
+native-parameter-query-unavailable = Current plugin value is unavailable
