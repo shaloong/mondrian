@@ -67,9 +67,9 @@ pub use audio_output::{
 pub use audio_playback::AudioPlaybackValidationError;
 pub use audio_playback::{
     handoff_unqualified_audio_pcm_renderer, validate_audio_playback_anchor,
-    AudioNativeObservationPollRefusal, AudioOutputAdapter, AudioOutputLifecycleDiagnostics,
-    AudioOutputLossSnapshot, AudioPcmContinuity, AudioPcmContinuityModel,
-    AudioPcmNativeAuthorHandoff, AudioPcmNativeAuthorHandoffContinuity,
+    AudioNativeObservationPollRefusal, AudioNativeParameterQueryCompletion, AudioOutputAdapter,
+    AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot, AudioPcmContinuity,
+    AudioPcmContinuityModel, AudioPcmNativeAuthorHandoff, AudioPcmNativeAuthorHandoffContinuity,
     AudioPcmNativeAuthorHandoffIntent, AudioPcmNativeAuthorHandoffMode,
     AudioPcmNativeAuthorHandoffOutcome, AudioPcmNativeAuthorHandoffRefusal,
     AudioPcmNativeAuthorHandoffStatus, AudioPcmNativeAuthorResumeKey,
