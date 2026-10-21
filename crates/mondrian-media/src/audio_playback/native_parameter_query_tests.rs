@@ -363,16 +363,51 @@ fn native_parameter_query_media_same_generation_detach_completes_cancelled() {
     renderer.release.store(true, Ordering::Release);
 }
 
+// Cancel only the scheduling generation while retaining the actual native
+// installation and its already-opened target. Fresh reprime is a different
+// contract: it publishes a new claim and correctly refuses this old target.
+fn suspend_opened_query(
+    playback: &mut AudioPlayback,
+    renderer: &Arc<QueryRenderer>,
+    query: &Query,
+) -> (AudioOwnerInstallationVerifier, AudioOwnerInstallationClaim) {
+    let verifier = renderer.installed.verifier();
+    let claim = verifier.current_claim().unwrap();
+    let generation = playback.generation;
+    let pcm = playback.generation_cancellation.clone();
+    let materialization = playback.renderer.as_ref().unwrap().materialization_id;
+    let attachment = playback.native_editor_attachment;
+    assert_eq!(query.target.installed_generation, claim.generation());
+    assert_eq!(attachment, Some((materialization, query.target)));
+    verifier.validate(&claim).unwrap();
+    playback.suspend(sample_position(0)).unwrap();
+    assert!(pcm.is_canceled());
+    assert_ne!(playback.generation, generation);
+    verifier.validate(&claim).unwrap();
+    assert_eq!(
+        verifier.current_claim().unwrap().generation(),
+        claim.generation()
+    );
+    assert!(verifier.same_registration(&renderer.installed.verifier()));
+    assert_eq!(
+        playback.renderer.as_ref().unwrap().materialization_id,
+        materialization
+    );
+    assert!(playback.matches_source(&(renderer.clone() as Arc<dyn AudioPcmRenderer>)));
+    assert_eq!(playback.native_editor_attachment, attachment);
+    (verifier, claim)
+}
+
 #[test]
 fn native_parameter_query_media_old_reply_cannot_release_new_pending() {
     let (mut playback, renderer, query) = pending_query_with_open_surface();
-    playback.reprime(sample_position(0)).unwrap();
+    let (verifier, claim) = suspend_opened_query(&mut playback, &renderer, &query);
     wait_event(&mut playback, |e| {
         matches!(e,
         AudioPlaybackEvent::NativeParameterQueryCompleted { ticket, completion: AudioNativeParameterQueryCompletion::Cancelled, .. } if ticket.get() == 31)
     });
     playback
-        .request_native_parameter_query(NonZeroU64::new(32).unwrap(), query)
+        .request_native_parameter_query(NonZeroU64::new(32).unwrap(), query.clone())
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -388,12 +423,36 @@ fn native_parameter_query_media_old_reply_cannot_release_new_pending() {
         AudioPlaybackEvent::NativeParameterQueryCompleted { ticket, .. } if ticket.get() == 31)));
     assert_eq!(renderer.calls.load(Ordering::Acquire), 2);
     assert!(playback.native_parameter_query_pending.is_none());
+
+    // A real Fresh publication must invalidate that original target instead.
+    // Keep the independent old query rather than synthesizing a new receipt.
+    playback.reprime(sample_position(0)).unwrap();
+    assert_eq!(
+        verifier.validate(&claim),
+        Err(AudioOwnerInstallationError::Superseded)
+    );
+    assert_ne!(
+        verifier.current_claim().unwrap().generation(),
+        claim.generation()
+    );
+    assert_eq!(
+        playback
+            .request_native_parameter_query(NonZeroU64::new(35).unwrap(), query)
+            .unwrap(),
+        Err(Refusal::OwnerChanged),
+    );
+    assert_eq!(
+        renderer.calls.load(Ordering::Acquire),
+        2,
+        "old-target refusal never reads another value"
+    );
+    assert!(playback.native_parameter_query_pending.is_none());
 }
 
 #[test]
 fn native_parameter_query_media_queued_shutdown_cancels_without_executing_query() {
     let (mut playback, renderer, query) = pending_query_with_open_surface();
-    playback.reprime(sample_position(0)).unwrap();
+    let _ = suspend_opened_query(&mut playback, &renderer, &query);
     wait_event(&mut playback, |e| {
         matches!(e,
         AudioPlaybackEvent::NativeParameterQueryCompleted { ticket, completion: AudioNativeParameterQueryCompletion::Cancelled, .. } if ticket.get() == 31)
