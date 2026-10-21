@@ -8,6 +8,39 @@ pub const NATIVE_AUDIO_PARAMETER_FACTS: usize = 1152;
 /// Maximum aggregate owned bytes of the fact vector and its strings.
 pub const NATIVE_AUDIO_PARAMETER_FACT_BYTES: usize = 256 * 1024;
 
+/// One explicit presentation query for an existing installed object and schema ID.
+/// This control request grants neither an owner lease nor author permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeAudioParameterQuery {
+    /// Exact current installed address; the Runtime revalidates its own lease.
+    pub target: NativeAudioEditorTarget,
+    /// One canonical writable ID from that occurrence's existing processing plan.
+    pub parameter: ParameterId,
+}
+
+/// A safe presentation refusal leaves the original native owner and callbacks intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeAudioParameterQueryRefusal {
+    /// This adapter has no explicit parameter query implementation.
+    UnsupportedAdapter,
+    /// The requested occurrence is not currently installed or available.
+    Unavailable,
+    /// The actual installed binding or native object no longer matches.
+    OwnerChanged,
+    /// Original author, configuration or native cleanup work must finish first.
+    Busy,
+    /// The selected ID or its coherent current presentation is unavailable.
+    ParameterUnavailable,
+}
+
+/// Result of one explicit control query, never a parameter transaction or cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeAudioParameterQueryOutcome {
+    /// Exactly one current fact for the requested installed target and ID.
+    Observed(NativeAudioParameterObservation),
+    /// Safe control refusal without substituting a value or descriptor default.
+    Refused(NativeAudioParameterQueryRefusal),
+}
 /// Actual origin of a parameter observation; flush has no sample clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeAudioParameterObservationOrigin {
