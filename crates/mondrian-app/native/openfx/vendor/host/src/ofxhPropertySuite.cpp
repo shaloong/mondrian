@@ -244,6 +244,8 @@ namespace OFX {
       // get multiple values
       template<class T>
       void PropertyTemplate<T>::getValueN(typename T::APIType *values, int count) const {
+        // Admit the signed count before hook dispatch or raw size conversion.
+        if (count < 0) throw Exception(kOfxStatErrBadIndex);
         if (_getHook) {
           _getHook->getPropertyN<T>(_name, values, count);
         }
