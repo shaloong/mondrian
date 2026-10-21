@@ -296,6 +296,25 @@ pub(crate) fn native_parameter_query_payload(
     processor_id: mondrian_core::AudioProcessorInstanceId,
     parameter: &mondrian_core::ParameterId,
 ) -> Option<crate::app::product_action::AudioNativeParameterQueryPayload> {
+    native_parameter_row(state, address, processor_id, parameter)?.native_query
+}
+
+/// Select the existing Adopt action from the same actual visible Rack row.
+pub(crate) fn native_parameter_adoption_payload(
+    state: &crate::app::AppState,
+    address: mondrian_timeline::AudioProcessorRackAddress,
+    processor_id: mondrian_core::AudioProcessorInstanceId,
+    parameter: &mondrian_core::ParameterId,
+) -> Option<crate::app::parameter_gesture::AdoptDisplayedNativeParameterEdit> {
+    native_parameter_row(state, address, processor_id, parameter)?.native_adoption
+}
+
+fn native_parameter_row(
+    state: &crate::app::AppState,
+    address: mondrian_timeline::AudioProcessorRackAddress,
+    processor_id: mondrian_core::AudioProcessorInstanceId,
+    parameter: &mondrian_core::ParameterId,
+) -> Option<super::audio_processor_rack::AudioProcessorParameterModel> {
     use super::audio_automation::AudioAutomationTimeContext;
     use super::audio_processor_rack::{
         bind_audio_scalar_author_lease, project_audio_processor_rack,
@@ -311,13 +330,11 @@ pub(crate) fn native_parameter_query_payload(
     );
     bind_audio_scalar_author_lease(std::slice::from_mut(&mut rack), state);
     rack.processors
-        .iter()
+        .into_iter()
         .find(|processor| processor.processor_id == processor_id)?
         .parameters
-        .iter()
-        .find(|row| &row.parameter_id == parameter)?
-        .native_query
-        .clone()
+        .into_iter()
+        .find(|row| &row.parameter_id == parameter)
 }
 
 /// Native primary modifier for actual text/NumberInput Host fixture events.
