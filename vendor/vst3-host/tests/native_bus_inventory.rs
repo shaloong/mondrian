@@ -1,7 +1,7 @@
-//! Stopped external VST3 audio-bus observation through the existing SDK loader.
-//! This ignored Windows gate supplies no restore blob, requests no state capture,
-//! and processes no PCM.
-//! It does not qualify Product admission or the plug-in's audio behavior.
+//! Stopped external VST3 observations through the existing SDK loader.
+//! The original inventory gate does not capture state. The separate bounded
+//! capture gate supplies no restore blob and processes no PCM. Neither gate
+//! qualifies Product admission or the plug-in's audio behavior.
 #![cfg(target_os = "windows")]
 
 use std::path::PathBuf;
@@ -10,9 +10,7 @@ use vst3_host::host::PluginLoadPreparation;
 use vst3_host::plugin::ProcessMode;
 use vst3_host::{PluginInterface, PluginInterfaceSupport, Vst3Host};
 
-#[test]
-#[ignore = "requires an explicit external VST3 DLL and class ID in the native Job"]
-fn external_vst3_stopped_bounded_audio_bus_inventory() {
+fn load_external_stopped_plugin() -> (Vst3Host, vst3_host::Plugin, String) {
     let path = PathBuf::from(
         std::env::var_os("MONDRIAN_VST3_INVENTORY_PLUGIN")
             .expect("set MONDRIAN_VST3_INVENTORY_PLUGIN to an existing absolute VST3 DLL"),
@@ -73,6 +71,13 @@ fn external_vst3_stopped_bounded_audio_bus_inventory() {
     assert_eq!(plugin.block_size(), 256);
     assert!(!plugin.is_processing());
 
+    (host, plugin, class_id)
+}
+
+#[test]
+#[ignore = "requires an explicit external VST3 DLL and class ID in the native Job"]
+fn external_vst3_stopped_bounded_audio_bus_inventory() {
+    let (host, plugin, class_id) = load_external_stopped_plugin();
     let mut frame = AudioBusQueryFrame::default();
     let observed = plugin
         .observe_audio_buses_bounded(&mut frame)
@@ -151,5 +156,124 @@ fn external_vst3_stopped_bounded_audio_bus_inventory() {
     // host_active above is the retained host ACK, not a native GetActive query.
     drop(plugin);
     drop(host);
+    println!("{report}");
+}
+
+#[test]
+#[ignore = "requires an explicit external VST3 DLL/class and the original 10s Job with 2s cleanup"]
+fn external_vst3_stopped_bounded_default_state_capture() {
+    use std::io::Write as _;
+
+    const STATE_LIMIT: usize = 128 * 1024;
+    const BUFFER_GRANT: usize = 3 * STATE_LIMIT;
+    const HEADER_BYTES: usize = 28;
+    // The grant covers capture buffers, not Eager loading or the native heap.
+    // Only the caller may authorize a raw output path. No default path or
+    // directory is created, and an existing artifact is never overwritten.
+    let output = std::env::var_os("MONDRIAN_VST3_INVENTORY_STATE_OUTPUT").map(PathBuf::from);
+    if let Some(path) = &output {
+        assert!(
+            path.is_absolute(),
+            "explicit absolute state output required"
+        );
+        assert!(path.file_name().is_some(), "state output must name a file");
+        assert!(
+            path.parent().is_some_and(|parent| parent.is_dir()),
+            "state output parent must already exist"
+        );
+        assert!(!path.exists(), "state output must be fresh");
+    }
+    let (host, mut plugin, class_id) = load_external_stopped_plugin();
+    // This is the Eager/stopped SDK phase, before Product's complete bus and
+    // parameter admission. Bounded streams expose IBStream only; Product's
+    // legacy save_state stream additionally supplies Project attributes.
+    let captured = plugin
+        .save_state_bounded(STATE_LIMIT, BUFFER_GRANT)
+        .expect("actual stopped bounded native state capture; pending input is not bypassed");
+    assert!(!plugin.is_processing(), "capture must not start processing");
+    let receipt = captured.buffer_receipt();
+    let bytes = captured.bytes();
+    assert!(
+        (HEADER_BYTES..=STATE_LIMIT).contains(&bytes.len()),
+        "complete canonical state extent"
+    );
+    assert_eq!(&bytes[..16], b"VST3HOST_STATE\0\0");
+    let word = |offset: usize| {
+        u32::from_le_bytes(
+            bytes[offset..offset + 4]
+                .try_into()
+                .expect("bounded state header"),
+        )
+    };
+    assert_eq!(
+        word(16),
+        1,
+        "canonical component/controller envelope version"
+    );
+    let component_bytes = word(20) as usize;
+    let controller_bytes = match word(24) {
+        u32::MAX => None,
+        length => Some(length as usize),
+    };
+    assert_eq!(
+        HEADER_BYTES
+            .checked_add(component_bytes)
+            .and_then(|n| n.checked_add(controller_bytes.unwrap_or(0))),
+        Some(bytes.len()),
+        "complete native state payload, without truncation"
+    );
+    assert!(receipt.envelope_capacity_bytes >= bytes.len());
+    assert!(receipt.envelope_capacity_bytes <= STATE_LIMIT);
+    let stream_extent = STATE_LIMIT - HEADER_BYTES;
+    assert!(
+        receipt.stream_payload_bytes == stream_extent
+            || receipt.stream_payload_bytes == 2 * stream_extent,
+        "one component stream and at most one separate controller stream"
+    );
+    let peak = receipt
+        .peak_buffer_bytes()
+        .expect("checked capture buffer receipt");
+    assert!(
+        peak <= BUFFER_GRANT,
+        "capture buffers remain within the original SDK grant"
+    );
+    let bytes = captured.into_bytes();
+    let raw_bytes = bytes.len();
+    // No native owner remains while writing the optional bounded raw artifact
+    // or publishing the successful observation. All failures above stay FAIL.
+    drop(plugin);
+    drop(host);
+    if let Some(path) = &output {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("fresh explicitly authorized state output");
+        file.write_all(&bytes)
+            .expect("write the exact bounded raw state");
+        file.flush().expect("complete bounded state output");
+        assert_eq!(
+            file.metadata().expect("state output metadata").len(),
+            raw_bytes as u64
+        );
+    }
+    let report = serde_json::json!({
+        "scope": "sdk_stopped_bounded_default_state_capture",
+        "class_id": class_id,
+        "phase": "after_eager_load_and_stopped_offline_setup",
+        "sample_rate": 48000,
+        "max_block_frames": 256,
+        "process_mode": "offline",
+        "stream_attributes": "unavailable",
+        "raw_state_bytes": raw_bytes,
+        "component_bytes": component_bytes,
+        "controller_bytes": controller_bytes,
+        "state_limit_bytes": STATE_LIMIT,
+        "stream_payload_allocation_bytes": receipt.stream_payload_bytes,
+        "envelope_capacity_bytes": receipt.envelope_capacity_bytes,
+        "peak_capture_buffer_bytes": peak,
+        "capture_buffer_grant_bytes": BUFFER_GRANT,
+        "raw_output_written": output.is_some(),
+    });
     println!("{report}");
 }
