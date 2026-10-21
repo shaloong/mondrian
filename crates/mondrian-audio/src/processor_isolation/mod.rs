@@ -1026,6 +1026,38 @@ struct IsolatedAudioProcessor {
     native_plugin_contract: AudioProcessorExecutionContract,
 }
 
+/// Retire only a matching successful child Ack, not metadata admission.
+/// The producer/Hosted path already owns each exact-kind and Source proof.
+fn retire_acknowledged_reprepare(
+    consumption: crate::NativeAudioObservationConsumption,
+    observations: &mut crate::NativeAudioObservations,
+    pending_reprepare: &mut Option<crate::NativeObservedRequest>,
+) {
+    if let crate::NativeAudioObservationConsumption::AcknowledgeAuthor(expected) = consumption
+        && observations.object == Some(expected.installed_binding.expected_object)
+        && expected.source_binding.expected_object == expected.installed_binding.expected_object
+        && let Some(crate::NativeAudioAuthorDeliveryState::Acknowledged {
+            acknowledgement,
+            request_cohort: Some(original),
+        }) = observations.author.as_ref().map(|author| &author.delivery)
+        && *acknowledgement == expected
+        && original.serial != 0
+        && !original.exhausted()
+        && matches!(
+            original.request,
+            mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 }
+                | mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 16 }
+        )
+    {
+        // Only this exact successful Ack retires its original A from the
+        // adapter cache. A later/unknown fact stays held; Poll/None cannot
+        // establish retirement or merge a sticky fact into an ordinary reply.
+        *pending_reprepare = observations.pending_reprepare.or((*pending_reprepare)
+            .filter(|request| *request != crate::NativeObservedRequest::Cohort(*original)));
+        observations.pending_reprepare = *pending_reprepare;
+    }
+}
+
 impl AudioProcessor for IsolatedAudioProcessor {
     fn bind_native_child_settlement(
         &mut self,
@@ -1098,30 +1130,11 @@ impl AudioProcessor for IsolatedAudioProcessor {
         }
         match self.worker.poll_native_observations(consumption) {
             Ok(mut observations) => {
-                if let crate::NativeAudioObservationConsumption::AcknowledgeAuthor(expected) =
-                    consumption
-                    && observations.object == Some(expected.installed_binding.expected_object)
-                    && expected.source_binding.expected_object
-                        == expected.installed_binding.expected_object
-                    && let Some(crate::NativeAudioAuthorDeliveryState::Acknowledged {
-                        acknowledgement,
-                        request_cohort: Some(original),
-                    }) = observations.author.as_ref().map(|author| &author.delivery)
-                    && *acknowledgement == expected
-                    && original.serial != 0
-                    && !original.exhausted()
-                    && original.request
-                        == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
-                {
-                    // Only this exact successful Ack retires its original A
-                    // from the adapter cache. A later/unknown fact stays held;
-                    // ordinary Poll/None cannot establish retirement.
-                    self.pending_reprepare =
-                        observations.pending_reprepare.or(self.pending_reprepare.filter(
-                            |request| *request != crate::NativeObservedRequest::Cohort(*original),
-                        ));
-                    observations.pending_reprepare = self.pending_reprepare;
-                }
+                retire_acknowledged_reprepare(
+                    consumption,
+                    &mut observations,
+                    &mut self.pending_reprepare,
+                );
                 Ok(observations)
             }
             Err(error) => {

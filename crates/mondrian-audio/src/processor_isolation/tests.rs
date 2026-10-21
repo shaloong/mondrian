@@ -2330,6 +2330,206 @@ fn isolated_observed_request_completed_then_poll_retains_each_original_identity_
     );
 }
 
+// Manual reply facts for the private adapter-state transition only. No native
+// child, metadata admission, installed lease or successful plugin is inferred.
+fn adapter_ack_control(
+    flags: u32,
+) -> (
+    crate::NativeAudioAuthorAcknowledgement,
+    NativeRequestCohort,
+    crate::NativeAudioObservations,
+) {
+    let object = crate::NativeAudioObjectObservation::new(
+        std::num::NonZeroU32::new(7).unwrap(),
+        std::num::NonZeroU64::new(11).unwrap(),
+    );
+    let binding = || crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: object,
+    };
+    let ack = crate::NativeAudioAuthorAcknowledgement {
+        source_binding: binding(),
+        installed_binding: binding(),
+        revision: 9,
+    };
+    let original = NativeRequestCohort::new(
+        101,
+        mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags },
+    )
+    .unwrap();
+    let observation = crate::NativeAudioObservations {
+        owner_process_id: 7,
+        object: Some(object),
+        author: Some(crate::NativeAudioAuthorObservation {
+            source: crate::NativeAudioAuthorSourceStatus {
+                revision: 9,
+                pending_events: 0,
+                pending_parameter_observations: 0,
+                pending_dsp_feedback_values: 0,
+                open_parameter_edits: 0,
+                group_depth: 0,
+                failure: None,
+                parameter_flush_pending: false,
+                publishing: false,
+            },
+            delivery: crate::NativeAudioAuthorDeliveryState::Acknowledged {
+                acknowledgement: ack,
+                request_cohort: Some(original),
+            },
+        }),
+        ..Default::default()
+    };
+    (ack, original, observation)
+}
+
+#[test]
+fn isolated_author_ack_retires_only_its_exact_values_or_info_cached_cohort() {
+    use crate::{
+        NativeAudioObservationConsumption as Consumption, NativeObservedRequest as Request,
+    };
+    for flags in [4, 16] {
+        let (ack, original, reply) = adapter_ack_control(flags);
+        assert_ne!(
+            ack.source_binding.binding, ack.installed_binding.binding,
+            "same-object publication may rebind the original Source"
+        );
+        let a = Request::Cohort(original);
+        let b = Request::Cohort(NativeRequestCohort { serial: original.serial + 1, ..original });
+        let unknown =
+            Request::RequestOnly(mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                flags: 1 << 29,
+            });
+        let mixed = Request::Cohort(
+            NativeRequestCohort::new(
+                103,
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 20 },
+            )
+            .unwrap(),
+        );
+        for (cached, observed, expected) in [
+            (Some(a), None, None),
+            (Some(b), None, Some(b)),
+            (Some(a), Some(b), Some(b)),
+            (Some(unknown), None, Some(unknown)),
+            (Some(a), Some(unknown), Some(unknown)),
+            (Some(a), Some(mixed), Some(mixed)),
+            (Some(a), Some(a), Some(a)),
+        ] {
+            let mut cached = cached;
+            let mut actual = reply.clone();
+            actual.pending_reprepare = observed;
+            retire_acknowledged_reprepare(
+                Consumption::AcknowledgeAuthor(ack),
+                &mut actual,
+                &mut cached,
+            );
+            assert_eq!(cached, expected, "flags={flags}");
+            assert_eq!(actual.pending_reprepare, expected);
+            assert_eq!(actual.author, reply.author);
+            assert_eq!(actual.object, reply.object);
+        }
+        for consumption in [
+            Consumption::Preserve,
+            Consumption::Drain,
+            Consumption::DrainAuthor(ack.installed_binding),
+        ] {
+            let mut cached = Some(a);
+            let mut actual = reply.clone();
+            retire_acknowledged_reprepare(consumption, &mut actual, &mut cached);
+            assert_eq!(cached, Some(a), "ordinary Poll/None is not retirement");
+            assert_eq!(
+                actual, reply,
+                "non-Ack must not merge sticky into a None reply"
+            );
+        }
+    }
+}
+
+#[test]
+fn isolated_author_ack_rejects_wrong_receipts_objects_and_unproved_request_kinds() {
+    use crate::{
+        NativeAudioAuthorDeliveryState as Delivery,
+        NativeAudioObservationConsumption as Consumption, NativeObservedRequest as Request,
+    };
+    let (ack, original, reply) = adapter_ack_control(16);
+    let other = crate::NativeAudioObjectObservation::new(
+        ack.installed_binding.expected_object.process_id(),
+        std::num::NonZeroU64::new(12).unwrap(),
+    );
+    for case in [
+        "reply_object",
+        "source_object",
+        "revision",
+        "binding",
+        "refused",
+        "no_author",
+        "no_cohort",
+        "zero_serial",
+        "exhausted",
+        "mixed_kind",
+        "unknown_kind",
+    ] {
+        let mut expected_ack = ack;
+        let mut actual = reply.clone();
+        let mut held = original;
+        match case {
+            "reply_object" => actual.object = Some(other),
+            "source_object" => expected_ack.source_binding.expected_object = other,
+            "revision" => expected_ack.revision += 1,
+            "binding" => {
+                expected_ack.installed_binding.binding =
+                    mondrian_core::AudioProcessorBindingId::new()
+            }
+            "refused" => {
+                actual.author.as_mut().unwrap().delivery =
+                    Delivery::Refused(crate::NativeAudioAuthorRefusal::StaleDelivery)
+            }
+            "no_author" => actual.author = None,
+            "no_cohort" => {
+                actual.author.as_mut().unwrap().delivery =
+                    Delivery::Acknowledged { acknowledgement: ack, request_cohort: None }
+            }
+            "zero_serial" => held.serial = 0,
+            "exhausted" => held.serial = u32::MAX,
+            "mixed_kind" => {
+                held.request = mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 20 }
+            }
+            "unknown_kind" => {
+                held.request =
+                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 1 << 29 }
+            }
+            _ => unreachable!(),
+        }
+        if matches!(
+            case,
+            "zero_serial" | "exhausted" | "mixed_kind" | "unknown_kind"
+        ) {
+            actual.author.as_mut().unwrap().delivery =
+                Delivery::Acknowledged { acknowledgement: ack, request_cohort: Some(held) };
+        }
+        if case == "source_object" {
+            // Make the returned receipt match: the separate same-object gate,
+            // rather than a receipt mismatch, must reject this source owner.
+            actual.author.as_mut().unwrap().delivery = Delivery::Acknowledged {
+                acknowledgement: expected_ack,
+                request_cohort: Some(held),
+            };
+        }
+        let before = actual.clone();
+        let mut cached = Some(Request::Cohort(held));
+        retire_acknowledged_reprepare(
+            Consumption::AcknowledgeAuthor(expected_ack),
+            &mut actual,
+            &mut cached,
+        );
+        assert_eq!(cached, Some(Request::Cohort(held)), "case={case}");
+        assert_eq!(
+            actual, before,
+            "failed Ack keeps the original reply, including None: {case}"
+        );
+    }
+}
+
 #[derive(Default)]
 struct ColdChildCounts {
     scopes: std::sync::atomic::AtomicUsize,
