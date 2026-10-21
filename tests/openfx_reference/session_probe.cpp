@@ -2111,6 +2111,82 @@ bool clipDoubleQueryCounts(const void* handle) {
   return true;
 }
 
+// Query the real Effect Instance GetHook, rather than the raw descriptor set.
+// Literal values follow the Product FrameState contract for the 3x5/PAR2 input.
+bool effectDoubleQueryCounts(const void* handle) {
+  struct Property {
+    const char* label;
+    const char* name;
+    int dimension;
+    double values[2];
+  };
+  const Property properties[] = {
+    {"ProjectSize", kOfxImageEffectPropProjectSize, 2, {6.0, 5.0}},
+    {"ProjectOffset", kOfxImageEffectPropProjectOffset, 2, {0.0, 0.0}},
+    {"ProjectExtent", kOfxImageEffectPropProjectExtent, 2, {6.0, 5.0}},
+    {"ProjectPixelAspectRatio", kOfxImageEffectPropProjectPixelAspectRatio, 1, {2.0, 0.0}},
+    {"EffectDuration", kOfxImageEffectInstancePropEffectDuration, 1, {100.0, 0.0}},
+    {"FrameRate", kOfxImageEffectPropFrameRate, 1, {24.0, 0.0}},
+  };
+  unsigned attempted = 0, accepted = 0;
+  const auto failure = [&](const std::string& point, OfxStatus status) {
+    describeActionReceipt("effect-double-count", point.c_str(), attempted, accepted, status);
+    return false;
+  };
+  OfxPropertySetHandle effect = nullptr;
+  auto status = gEffectHost->getPropertySet((OfxImageEffectHandle)handle, &effect);
+  if (status != kOfxStatOK || !effect) { return failure("effect-handle", status); }
+  for (const auto& property : properties) {
+    int dimension = -1;
+    status = gPropHost->propGetDimension(effect, property.name, &dimension);
+    if (status != kOfxStatOK || dimension != property.dimension) { return failure(std::string(property.label) + "-dimension", status); }
+    for (int component = 0; component < dimension; ++component) {
+      double value = -8192.25;
+      status = gPropHost->propGetDouble(effect, property.name, component, &value);
+      if (status != kOfxStatOK || value != property.values[component]) { return failure(std::string(property.label) + "-scalar", status); }
+    }
+    // ProjectSize/count1 is first. Four valid slots safely reveal the old
+    // two-slot write, then return before any negative scalar index is reached.
+    const int counts[] = {1, 0, -1, dimension + 1, dimension};
+    const int cases = dimension == 2 ? 5 : 4;
+    for (int query = 0; query < cases; ++query) {
+      const int count = counts[query];
+      const std::array<double, 4> untouched{{-8192.25, -16384.5, -32768.75, -65536.125}};
+      auto values = untouched;
+      auto expectedValues = untouched;
+      const bool validCount = count >= 0 && count <= dimension;
+      if (validCount) {
+        for (int component = 0; component < count; ++component) { expectedValues[component + 1] = property.values[component]; }
+      }
+      ++attempted;
+      status = gPropHost->propGetDoubleN(effect, property.name, count, values.data() + 1);
+      const auto expectedStatus = validCount ? kOfxStatOK : kOfxStatErrBadIndex;
+      const auto point = std::string(property.label) + "-count" + std::to_string(count);
+      if (status != expectedStatus) { return failure(point + "-status", status); }
+      if (values != expectedValues) { return failure(point + "-write", status); }
+      ++accepted;
+    }
+  }
+  describeActionReceipt("effect-double-count", "bulk", attempted, accepted, kOfxStatOK);
+  attempted = accepted = 0;
+  // Only the complete safe bulk phase admits these scalar boundary checks.
+  // The old hook would index its local ProjectSize/Offset/Extent array at -1.
+  for (const auto& property : properties) {
+    for (int component : {-1, property.dimension}) {
+      const std::array<double, 3> untouched{{-8192.25, -16384.5, -32768.75}};
+      auto values = untouched;
+      ++attempted;
+      status = gPropHost->propGetDouble(effect, property.name, component, values.data() + 1);
+      if (status != kOfxStatErrBadIndex || values != untouched) {
+        return failure(std::string(property.label) + "-index" + std::to_string(component), status);
+      }
+      ++accepted;
+    }
+  }
+  describeActionReceipt("effect-double-count", "scalar", attempted, accepted, kOfxStatOK);
+  return true;
+}
+
 // Fixed-canvas oracle only: time selects independent output, never invocation
 // history. Rust checks separate literal tables in top-down storage order.
 OfxStatus fixedCanvasPartialOutput(const void* handle, OfxPropertySetHandle in) {
@@ -2969,6 +3045,8 @@ OfxStatus probeAction(const char* action, const void* handle,
       !clipIntegerQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "clip_double_query_count" && operation == kOfxImageEffectActionRender &&
       !clipDoubleQueryCounts(handle)) { return kOfxStatFailed; }
+  if (selected == "effect_double_query_count" && operation == kOfxImageEffectActionRender &&
+      !effectDoubleQueryCounts(handle)) { return kOfxStatFailed; }
   if (selected == "optional_unmapped" && operation == kOfxImageEffectActionRender &&
       !optionalUnmappedFormat(handle, in)) { return kOfxStatFailed; }
   const OfxStatus result = selected == "fixed_canvas_partial_output" && operation == kOfxImageEffectActionRender
@@ -3300,6 +3378,10 @@ OfxStatus probe(const char* action, const void* handle,
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
   if (mode() == "clip_double_query_count" &&
+      (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
+       std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
+       std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }
+  if (mode() == "effect_double_query_count" &&
       (std::strcmp(action, kOfxActionCreateInstance) == 0 ||
        std::strcmp(action, kOfxActionDestroyInstance) == 0 ||
        std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0)) { observed = action; }

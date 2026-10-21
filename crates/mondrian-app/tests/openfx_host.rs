@@ -2901,7 +2901,7 @@ fn product_worker_reports_none_for_disconnected_optional_clip_unmapped_format() 
     session.shutdown().expect("original bounded shutdown of the same resident");
 }
 
-fn clip_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
+fn property_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(directory.join(format!("actions-{pid}.txt")))
@@ -2925,7 +2925,7 @@ fn clip_query_action_rows(directory: &Path, pid: u32) -> Vec<String> {
         .collect()
 }
 
-fn assert_clip_query_actions(
+fn assert_property_query_actions(
     rows: &[String],
     marker: &str,
     expected_checks: &[&str],
@@ -2984,7 +2984,7 @@ fn assert_clip_query_actions(
     );
 }
 
-fn qualify_clip_query_counts_resident_and_graph(
+fn qualify_property_query_counts_resident_and_graph(
     mode: &str,
     action_marker: &str,
     expected_checks: &[&str],
@@ -3002,7 +3002,7 @@ fn qualify_clip_query_counts_resident_and_graph(
     assert_eq!(inspection.plugins.len(), 1);
     let identifier = "uk.co.thefoundry.BasicGainPlugin";
     let description = describe_openfx_filter(product_executable(), &inspection, identifier)
-        .expect("actual Basic descriptor with a disconnected optional clip");
+        .expect("actual Basic descriptor");
     let input = cpu_contract_input();
     let original_input = input.clone();
     let assert_half_gain = |output: &EffectFloatFrame| {
@@ -3048,8 +3048,8 @@ fn qualify_clip_query_counts_resident_and_graph(
     // Always consume the same owner before asserting the target RED. Its
     // original shutdown failure remains visible beside a query failure.
     let shutdown = direct.shutdown();
-    let direct_rows = clip_query_action_rows(&directory, direct_pid);
-    assert_clip_query_actions(
+    let direct_rows = property_query_action_rows(&directory, direct_pid);
+    assert_property_query_actions(
         &direct_rows,
         action_marker,
         expected_checks,
@@ -3057,7 +3057,7 @@ fn qualify_clip_query_counts_resident_and_graph(
     );
     assert_eq!(direct_outputs.len(), 2);
     for output in direct_outputs {
-        assert_half_gain(&output.expect("Basic renders after all real clip queries"));
+        assert_half_gain(&output.expect("Basic renders after all real property queries"));
     }
     assert_eq!(
         input, original_input,
@@ -3180,15 +3180,15 @@ fn qualify_clip_query_counts_resident_and_graph(
         .iter()
         .find(|pid| **pid != direct_pid)
         .expect("distinct actual Graph resident");
-    assert_clip_query_actions(
-        &clip_query_action_rows(&directory, graph_pid),
+    assert_property_query_actions(
+        &property_query_action_rows(&directory, graph_pid),
         action_marker,
         expected_checks,
         "retired Graph owner",
     );
     assert_eq!(graph_outputs.len(), 2);
     for output in graph_outputs {
-        assert_half_gain(&output.expect("canonical Basic output after all real clip queries"));
+        assert_half_gain(&output.expect("canonical Basic output after all real property queries"));
     }
     assert_eq!(input, original_input);
     assert_eq!(
@@ -3201,7 +3201,7 @@ fn qualify_clip_query_counts_resident_and_graph(
 #[test]
 #[ignore = "requires current Product, SessionProbe clip_integer_query_count and an empty action-receipt directory"]
 fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
-    qualify_clip_query_counts_resident_and_graph(
+    qualify_property_query_counts_resident_and_graph(
         "clip_integer_query_count",
         "clip-int-count",
         &["clip-int-count checks attempted=24 accepted=24 status=0 complete=1"],
@@ -3211,12 +3211,25 @@ fn product_worker_preserves_clip_integer_query_counts_in_resident_and_graph() {
 #[test]
 #[ignore = "requires current Product, SessionProbe clip_double_query_count and an empty action-receipt directory"]
 fn product_worker_preserves_clip_double_query_counts_in_resident_and_graph() {
-    qualify_clip_query_counts_resident_and_graph(
+    qualify_property_query_counts_resident_and_graph(
         "clip_double_query_count",
         "clip-double-count",
         &[
             "clip-double-count bulk attempted=66 accepted=66 status=0 complete=1",
             "clip-double-count scalar attempted=30 accepted=30 status=0 complete=1",
+        ],
+    );
+}
+
+#[test]
+#[ignore = "requires current Product, SessionProbe effect_double_query_count and an empty action-receipt directory"]
+fn product_worker_preserves_effect_double_query_counts_in_resident_and_graph() {
+    qualify_property_query_counts_resident_and_graph(
+        "effect_double_query_count",
+        "effect-double-count",
+        &[
+            "effect-double-count bulk attempted=27 accepted=27 status=0 complete=1",
+            "effect-double-count scalar attempted=12 accepted=12 status=0 complete=1",
         ],
     );
 }
