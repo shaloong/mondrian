@@ -1515,7 +1515,20 @@ fn mne7_configuration(outputs: u32, channels: u32, input: bool, nan_call: u32) -
     state.extend_from_slice(&component);
     state
 }
-fn mne7_sdk_case(
+// MNE8 retains the same 20-byte component/controller envelope as MNE7.
+// Its extra bits independently choose Aux input0 and the output Main prefix.
+fn mne8_configuration(auxiliary_input: bool, main_outputs: u32) -> Vec<u8> {
+    let mut state = mne7_configuration(3, 2, true, 0);
+    for offset in [28, 48] {
+        state[offset..offset + 4].copy_from_slice(b"MNE8");
+        state[offset + 4..offset + 8].copy_from_slice(&8_u32.to_le_bytes());
+        let shape =
+            3 | (2 << 8) | (1 << 16) | (u32::from(auxiliary_input) << 17) | (main_outputs << 18);
+        state[offset + 12..offset + 16].copy_from_slice(&shape.to_le_bytes());
+    }
+    state
+}
+fn multi_output_sdk_case(
     rate: u32,
     outputs: usize,
     channels: usize,
@@ -1523,9 +1536,11 @@ fn mne7_sdk_case(
     scoped: bool,
     some: bool,
     partitions: &[usize],
+    native_roles: bool,
 ) {
     use vst3_host::audio::{
-        AudioBusRole, ProcessMusicalReference, ProcessTimelineContext, SpeakerArrangement,
+        AudioBusQueryFrame, AudioBusRole, ProcessMusicalReference, ProcessTimelineContext,
+        SpeakerArrangement,
     };
     const ABSENT_L: [f32; 14] = [
         0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.0, 0.125, 0.125, 0.125, 0.125, 0.0, 0.0, 0.0,
@@ -1578,7 +1593,8 @@ fn mne7_sdk_case(
     ];
     let directory = PathBuf::from(std::env::var_os("MONDRIAN_VST3_MAIN_NOTE_AUDIT_DIR").unwrap());
     assert!(directory.is_absolute() && directory.is_dir());
-    let path = directory.join(format!("mne7-{}.audit", std::process::id()));
+    let mode = if native_roles { 8 } else { 7 };
+    let path = directory.join(format!("mne{mode}-{}.audit", std::process::id()));
     let prefix = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or_else(|e| {
         assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
         0
@@ -1592,8 +1608,13 @@ fn mne7_sdk_case(
         .build()
         .unwrap();
     let mut plugin = host.load_plugin_class(fixture(), CLASS).unwrap();
-    let state = mne7_configuration(outputs as u32, channels as u32, input, 0);
-    plugin.load_state(&state).expect("explicit inactive MNE7 restore");
+    let state = if native_roles {
+        assert_eq!((outputs, channels, input), (3, 2, true));
+        mne8_configuration(true, 3)
+    } else {
+        mne7_configuration(outputs as u32, channels as u32, input, 0)
+    };
+    plugin.load_state(&state).expect("explicit inactive multi-output restore");
     assert_eq!(plugin.save_state().unwrap(), state);
     for (bad_outputs, bad_channels) in [(0, 2), (33, 2), (3, 0), (3, 3)] {
         assert!(plugin
@@ -1605,23 +1626,45 @@ fn mne7_sdk_case(
             "malformed shape cannot mutate the same object"
         );
     }
+    if native_roles {
+        for invalid in [0_u32, 0x010f0203, 0x00030203, 0x00130203, 0x000e0203] {
+            let mut bad = state.clone();
+            for offset in [40, 60] {
+                bad[offset..offset + 4].copy_from_slice(&invalid.to_le_bytes());
+            }
+            assert!(plugin.load_state(&bad).is_err());
+            assert_eq!(
+                plugin.save_state().unwrap(),
+                state,
+                "invalid MNE8 shape is atomic"
+            );
+        }
+    }
     let audio = plugin.native_audio_bus_info().unwrap();
     assert_eq!(audio.inputs.len(), usize::from(input));
     assert_eq!(audio.outputs.len(), outputs);
     for (index, bus) in audio.outputs.iter().enumerate() {
         assert_eq!(
             bus.role,
-            if index == 0 {
+            if native_roles || index == 0 {
                 AudioBusRole::Main
             } else {
                 AudioBusRole::Auxiliary
             }
         );
         assert_eq!(bus.channel_count, channels);
-        assert!(bus.default_active);
+        assert_eq!(bus.default_active, !native_roles || index == 0);
     }
     if input {
         assert_eq!(audio.inputs[0].channel_count, channels);
+        assert_eq!(
+            audio.inputs[0].role,
+            if native_roles {
+                AudioBusRole::Auxiliary
+            } else {
+                AudioBusRole::Main
+            }
+        );
     }
     let events = plugin.native_event_bus_info().unwrap();
     assert_eq!(events.inputs.len(), 2);
@@ -1647,6 +1690,26 @@ fn mne7_sdk_case(
     let actual = plugin.bus_arrangements().unwrap();
     assert_eq!(actual.inputs, ins);
     assert_eq!(actual.outputs, vec![arrangement; outputs]);
+    if native_roles {
+        let mut frame = AudioBusQueryFrame::default();
+        let observed = plugin.observe_audio_buses_bounded(&mut frame).unwrap();
+        assert_eq!(observed.native_inputs.len(), 1);
+        assert_eq!(observed.native_outputs.len(), 3);
+        assert_eq!(observed.layout_inputs.len(), 1);
+        assert_eq!(observed.layout_outputs.len(), 3);
+        assert_eq!(observed.input_arrangements, [SpeakerArrangement::STEREO]);
+        assert_eq!(
+            observed.output_arrangements,
+            [SpeakerArrangement::STEREO; 3]
+        );
+        assert_eq!(observed.native_inputs[0].role, AudioBusRole::Auxiliary);
+        assert!(observed.native_outputs.iter().all(|bus| bus.role == AudioBusRole::Main));
+        assert_eq!(
+            observed.layout_outputs.iter().map(|bus| bus.active).collect::<Vec<_>>(),
+            [true, false, false],
+            "secondary native Main outputs begin inactive"
+        );
+    }
     if input {
         plugin.set_bus_active(MediaType::Audio, BusDirection::Input, 0, true).unwrap();
     }
@@ -1675,6 +1738,15 @@ fn mne7_sdk_case(
         .unwrap();
     let layout = plugin.audio_bus_layout().unwrap();
     assert!(layout.outputs.iter().all(|b| b.active && b.channel_count == channels));
+    if native_roles {
+        let mut frame = AudioBusQueryFrame::default();
+        let observed = plugin.observe_audio_buses_bounded(&mut frame).unwrap();
+        assert!(observed
+            .layout_inputs
+            .iter()
+            .chain(observed.layout_outputs)
+            .all(|bus| bus.active && bus.channel_count == 2));
+    }
     assert_eq!(plugin.latency_samples(), 3);
     plugin.start_processing().unwrap();
     let events = [
@@ -1781,7 +1853,7 @@ fn mne7_sdk_case(
     drop(plugin);
     let bytes = std::fs::read(path).unwrap();
     assert!(bytes.len() >= prefix && bytes.len() <= 2 * 1024 * 1024);
-    let records = main_file_audits_with_shape(&bytes[prefix..], 7, if input { 7 } else { 6 });
+    let records = main_file_audits_with_shape(&bytes[prefix..], mode, if input { 7 } else { 6 });
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].sample_rate_bits, f64::from(rate).to_bits());
     assert_eq!(records[0].max_frames, 4);
@@ -1795,7 +1867,7 @@ fn installed_vst3_mne7_outputs_preserve_native_shape_latency_pcm_and_note_histor
         for scoped in [false, true] {
             for some in [false, true] {
                 for partitions in [&[14_usize][..], &[3, 2, 4, 5], &[1; 14]] {
-                    mne7_sdk_case(rate, 3, 2, false, scoped, some, partitions);
+                    multi_output_sdk_case(rate, 3, 2, false, scoped, some, partitions, false);
                 }
             }
         }
@@ -1809,8 +1881,25 @@ fn installed_vst3_mne7_outputs_cover_mono_present_input_and_32_bus_storage() {
             for (outputs, channels, input) in
                 [(3, 1, false), (32, 1, true), (3, 2, true), (32, 2, false)]
             {
-                mne7_sdk_case(rate, outputs, channels, input, scoped, true, &[3, 2, 4, 5]);
+                multi_output_sdk_case(
+                    rate,
+                    outputs,
+                    channels,
+                    input,
+                    scoped,
+                    true,
+                    &[3, 2, 4, 5],
+                    false,
+                );
             }
         }
+    }
+}
+
+#[test]
+#[ignore = "rebuilt owned MNE8 and existing audit directory; actual Aux0/three-Main SDK roles, ACKs, delay3, literal PCM and four Notes"]
+fn installed_vst3_mne8_roles_sdk_preserve_aux_input_main_prefix_and_pcm() {
+    for partitions in [&[14_usize][..], &[3, 2, 4, 5]] {
+        multi_output_sdk_case(48_000, 3, 2, true, true, true, partitions, true);
     }
 }
