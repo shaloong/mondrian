@@ -336,7 +336,7 @@ mod tests {
     fn one() -> Presentations {
         let expected = parameter(0);
         capture_with(
-            &[expected.clone()],
+            std::slice::from_ref(&expected),
             &[0],
             || Some(snapshot()),
             |_, visit| {
@@ -520,7 +520,7 @@ mod tests {
             let mut queries = 0;
             if !after.healthy() {
                 assert!(capture_with(
-                    &[expected.clone()],
+                    std::slice::from_ref(&expected),
                     &[0],
                     || Some(after),
                     |_, _| {
@@ -533,7 +533,7 @@ mod tests {
             }
             let mut reads = 0;
             assert!(capture_with(
-                &[expected.clone()],
+                std::slice::from_ref(&expected),
                 &[0],
                 || {
                     reads += 1;
