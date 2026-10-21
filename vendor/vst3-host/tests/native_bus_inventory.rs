@@ -142,9 +142,9 @@ fn external_vst3_stopped_bounded_audio_bus_inventory() {
         "state": null,
         "input_count": observed.native_inputs.len(),
         "output_count": observed.native_outputs.len(),
-        // This existing API returns raw, zero-initialized arrangements and
-        // deliberately ignores each native getBusArrangement status code.
-        "arrangement_query_status": "legacy_ignored",
+        // Each fresh arrangement is published only after kResultOk. A failed
+        // query rejects the complete census before this report can be emitted.
+        "arrangement_query_status": "checked_success",
         "buses": rows,
     });
     // All native owners are destroyed on this same test thread before stdout.
