@@ -51,15 +51,15 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
     let captured = strict_json(&probe_lease.read());
     exact_keys(&list, &["kind", "schema_version", "descriptors"]);
     let DiscoveryResponse::List { schema_version, descriptors } =
-        serde_json::from_value(list.clone()).expect("strict current List5")
+        serde_json::from_value(list.clone()).expect("strict current List6")
     else {
         panic!("current List response required");
     };
-    assert_eq!(schema_version, 5);
+    assert_eq!(schema_version, 6);
     assert_eq!(
         list,
         json!({
-            "kind":"list_v5", "schema_version":5,
+            "kind":"list_v6", "schema_version":6,
             "descriptors":[
                 {"class_id":CLASS_ID,"name":"AGain Sample Accurate","vendor":"Steinberg Media Technologies","version":"3.8.0.0"},
                 {"class_id":"CC48BF25529043DA80223510FFE8BD02","name":"Advanced Tutorial","vendor":"Steinberg Media Technologies","version":"3.8.0.0"}
@@ -78,6 +78,7 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
             "event_bus_contract",
             "main_audio_input",
             "audio_output_count",
+            "main_audio_output_count",
             "class_id",
             "vendor",
             "latency_frames",
@@ -94,6 +95,7 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         event_bus_contract,
         main_audio_input,
         audio_output_count,
+        main_audio_output_count,
         class_id,
         vendor,
         latency_frames,
@@ -103,13 +105,14 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
         captured_state,
         auxiliary_buses,
         input_names,
-    } = serde_json::from_value(captured.clone()).expect("strict current Probe5")
+    } = serde_json::from_value(captured.clone()).expect("strict current Probe6")
     else {
         panic!("current Probe response required");
     };
-    assert_eq!(schema_version, 5);
+    assert_eq!(schema_version, 6);
     assert_eq!(main_audio_input, crate::Vst3MainAudioInput::Present);
     assert_eq!(audio_output_count, 1);
+    assert_eq!(main_audio_output_count, 1);
     assert_eq!(class_id, CLASS_ID);
     assert_eq!(vendor.as_deref(), Some("Steinberg Media Technologies"));
     assert_eq!((latency_frames, tail_frames), (0, 0));
@@ -168,6 +171,10 @@ fn external_vst3_again_runtime_gain_and_native_bypass_pcm() {
     assert_eq!(actual.registration.event_bus_contract, event_bus_contract);
     assert_eq!(actual.registration.main_audio_input, main_audio_input);
     assert_eq!(actual.registration.audio_output_count, audio_output_count);
+    assert_eq!(
+        actual.registration.main_audio_output_count,
+        main_audio_output_count
+    );
     assert_eq!(actual.input_names, input_names);
     assert!(actual.registration.auxiliary_inputs.buses.is_empty());
     assert_eq!(
