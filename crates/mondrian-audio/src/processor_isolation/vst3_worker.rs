@@ -3827,8 +3827,8 @@ mod bus_contract_tests {
         layout.outputs[0].active = false;
         arrangements.outputs[0] = SpeakerArrangement::MONO;
         for (stage, expected) in [
-            ("before_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=before_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Stereo expected_channels=2"),
-            ("after_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=after_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Stereo expected_channels=2"),
+            ("before_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=before_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
+            ("after_activation", "VST3 host requires Main bus zero followed only by auxiliary buses with the exact render layout; stage=after_activation reason=prepared_channels direction=output index=0 native_role=Main expected_role=Main native_channels=2 prepared_channels=4 host_active=false actual_arrangement_raw=0000000000080000 expected_arrangement_raw=0000000000000003 expected_layout=Speakers(AudioSpeakerSet(3)) expected_channels=2"),
         ] {
             assert_eq!(
                 audio_inputs_from_metadata(&native, &layout, &arrangements,
