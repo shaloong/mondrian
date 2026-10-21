@@ -1197,7 +1197,7 @@ impl PreparedProcessorHost {
                 ));
             }
         };
-        Ok(Out::Observed(observation))
+        Ok(Out::Observed(Box::new(observation)))
     }
     pub(crate) fn control_native_editor(
         &mut self,
