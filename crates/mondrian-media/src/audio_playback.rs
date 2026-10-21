@@ -1557,6 +1557,10 @@ impl RetiredRenderOwners {
             .saturating_add(self.native_author_requests.len())
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return rejected owners intact without allocating or dropping them on the caller."
+    )]
     fn merge(&mut self, mut other: Self) -> Result<(), Self> {
         if self.owner_units().saturating_add(other.owner_units()) > MAX_RETIRED_RENDER_OWNERS {
             return Err(other);
@@ -1592,6 +1596,10 @@ impl RenderOwnerRetirementQueue {
         }
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "Return rejected owners intact without allocating or dropping them on the caller."
+    )]
     fn push(&self, retired: RetiredRenderOwners) -> Result<(), RetiredRenderOwners> {
         if retired.is_empty() {
             return Ok(());
