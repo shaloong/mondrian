@@ -73,7 +73,7 @@ unsafe fn read_gain_state(stream: *mut IBStream) -> Option<(f64, u32)> {
     }
     let gain = f64::from_le_bytes(bytes[8..16].try_into().ok()?);
     let mode = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
-    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 15).then_some((gain, mode))
+    (gain.is_finite() && (0.0..=1.0).contains(&gain) && mode <= 20).then_some((gain, mode))
 }
 
 unsafe fn write_gain_state(stream: *mut IBStream, gain: f64, mode: u32) -> tresult {
@@ -703,6 +703,9 @@ impl IProcessContextRequirementsTrait for GainProcessor {
 
 struct GainController {
     armed: Cell<bool>,
+    // Modes16–20 change their metadata only at the real armed setter, never
+    // merely because setProcessing armed the controller or a getter ran.
+    late_info_changed: Cell<bool>,
     mode14_edit_result: Cell<Option<tresult>>,
     metadata_reads: Cell<u32>,
     value_reads: Cell<u32>,
@@ -727,6 +730,7 @@ impl GainController {
     fn new() -> GainController {
         GainController {
             armed: Cell::new(false),
+            late_info_changed: Cell::new(false),
             mode14_edit_result: Cell::new(None),
             metadata_reads: Cell::new(0),
             value_reads: Cell::new(0),
@@ -836,6 +840,7 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
+        self.late_info_changed.set(false);
         if matches!(mode, 14 | 15) {
             self.mode.set(mode);
             return self.restore_mode14_value();
@@ -864,6 +869,7 @@ impl IEditControllerTrait for GainController {
         let Some((gain, mode)) = read_gain_state(state) else {
             return kResultFalse;
         };
+        self.late_info_changed.set(false);
         if matches!(mode, 14 | 15) {
             self.mode.set(mode);
             return self.restore_mode14_value();
@@ -940,6 +946,15 @@ impl IEditControllerTrait for GainController {
         info.defaultNormalizedValue = 0.5;
         info.unitId = 0;
         info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate;
+        if self.late_info_changed.get() {
+            match self.mode.get() {
+                17 => info.defaultNormalizedValue = 0.625,
+                18 => info.stepCount = 4,
+                19 => info.flags = ParameterInfo_::ParameterFlags_::kNoFlags,
+                20 => copy_wstring("Gain Updated", &mut info.title),
+                _ => {} // Mode16 deliberately leaves the admitted projection unchanged.
+            }
+        }
         kResultOk
     }
 
@@ -1036,13 +1051,19 @@ impl IEditControllerTrait for GainController {
             return kInvalidArgument;
         }
         self.gain.set(value);
-        if self.armed.get() && self.mode.get() == 13 {
+        if self.armed.get() && matches!(self.mode.get(), 13 | 16..=20) {
             let Some(handler) = self.handler.borrow().clone() else {
                 return kResultFalse;
             };
             // A real control-thread setter reached by deferred mirror service.
             // Preserve the callback's actual status; do not synthesize an Ack.
-            return handler.restartComponent(4);
+            let flags = if self.mode.get() == 13 {
+                4
+            } else {
+                self.late_info_changed.set(true);
+                16
+            };
+            return handler.restartComponent(flags);
         }
         kResultOk
     }
