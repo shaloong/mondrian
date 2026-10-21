@@ -1146,9 +1146,10 @@ mod tests {
             roi_propagation: crate::EffectRoiPropagation::UnknownRequiresFullFrame,
             ..EffectExecutionContract::IDENTITY
         })
-        .with_plugin_contract(
-            EffectPluginContract::new("1.0.0")
-                .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition),
+        .with_extension_contract(
+            EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                EffectExtensionRuntimeFailurePolicy::DisableDefinition,
+            ),
         )
         .with_custom_float_processor_factory(
             Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
@@ -1163,8 +1164,8 @@ mod tests {
     fn graph_with_tail(factory: Arc<ProbeFactory>, gpu_tail: bool) -> Arc<CompiledEffectGraph> {
         let key = register_probe_factory(factory);
         let first =
-            instantiate_effect_node(EffectType::Plugin(key.clone())).expect("first occurrence");
-        let second = instantiate_effect_node(EffectType::Plugin(key)).expect("second occurrence");
+            instantiate_effect_node(EffectType::External(key.clone())).expect("first occurrence");
+        let second = instantiate_effect_node(EffectType::External(key)).expect("second occurrence");
         let mut effects = vec![first, second];
         if gpu_tail {
             let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
@@ -1218,7 +1219,7 @@ mod tests {
                 op: EffectRenderOp::Custom { key, .. }, ..
             } = &node.kind
             {
-                let status = effect_plugin_runtime_status(key).expect("status");
+                let status = effect_extension_runtime_status(key).expect("status");
                 assert!(!status.disabled);
                 assert_eq!(status.last_error, None);
             }
@@ -1368,7 +1369,7 @@ mod tests {
         let EffectRenderOp::Custom { key, .. } = &op else {
             unreachable!()
         };
-        assert!(effect_plugin_runtime_status(key).expect("plugin status").disabled);
+        assert!(effect_extension_runtime_status(key).expect("plugin status").disabled);
     }
 
     #[test]
@@ -1426,7 +1427,7 @@ mod tests {
                 // A later checkpoint cannot resume a stopped invocation.
                 assert!(control.check().is_err());
                 assert_eq!(control.stop_reason(), Some(reason));
-                let status = effect_plugin_runtime_status(key).expect("plugin status");
+                let status = effect_extension_runtime_status(key).expect("plugin status");
                 assert!(!status.disabled);
                 assert_eq!(status.last_error, None);
                 crate::adjustment::apply_custom_render_op_f32(
@@ -1606,7 +1607,7 @@ mod tests {
                 op: EffectRenderOp::Custom { key, .. }, ..
             } = &node.kind
             {
-                let status = effect_plugin_runtime_status(key).expect("plugin status");
+                let status = effect_extension_runtime_status(key).expect("plugin status");
                 assert!(!status.disabled);
                 assert_eq!(status.last_error, None);
             }
@@ -1748,7 +1749,9 @@ mod tests {
                             ..
                         } = &node.kind
                         {
-                            assert!(!effect_plugin_runtime_status(key).expect("status").disabled);
+                            assert!(
+                                !effect_extension_runtime_status(key).expect("status").disabled
+                            );
                         }
                     }
                 } else {
@@ -1801,8 +1804,8 @@ mod tests {
                 )
                 .expect("set GPU tail");
             let effects = [
-                instantiate_effect_node(EffectType::Plugin(keys[0].clone())).expect("first"),
-                instantiate_effect_node(EffectType::Plugin(keys[1].clone())).expect("second"),
+                instantiate_effect_node(EffectType::External(keys[0].clone())).expect("first"),
+                instantiate_effect_node(EffectType::External(keys[1].clone())).expect("second"),
                 correction,
             ];
             let graph =
@@ -1874,7 +1877,7 @@ mod tests {
             assert_eq!(provider.0, 0, "{route}: media must not be fetched");
             assert_eq!(session.diagnostics().processor_instances, 0);
             for key in keys {
-                let status = effect_plugin_runtime_status(&key).expect("status");
+                let status = effect_extension_runtime_status(&key).expect("status");
                 assert!(!status.disabled);
                 assert_eq!(status.last_error, None);
             }
@@ -1923,7 +1926,7 @@ mod tests {
         );
         assert_eq!(pixels, original);
         assert_eq!(factory.created.load(Ordering::SeqCst), 0);
-        let status = effect_plugin_runtime_status(key).expect("runtime status");
+        let status = effect_extension_runtime_status(key).expect("runtime status");
         assert!(!status.disabled);
         assert_eq!(status.last_error, None);
         config.max_working_bytes = 128;
@@ -2247,9 +2250,9 @@ mod tests {
                 roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
-            .with_plugin_contract(
-                EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                    EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            .with_extension_contract(
+                EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                    EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                 ),
             )
             .with_custom_float_processor_factory(
@@ -2261,7 +2264,7 @@ mod tests {
         )
         .expect("register typed probe");
         let native =
-            instantiate_effect_node(EffectType::Plugin(key.clone())).expect("native occurrence");
+            instantiate_effect_node(EffectType::External(key.clone())).expect("native occurrence");
         let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
         correction
             .set_static_value_by_parameter(
@@ -2315,7 +2318,7 @@ mod tests {
             1,
             "valid raw native state is not a plugin failure"
         );
-        let status = effect_plugin_runtime_status(&key).expect("provider status");
+        let status = effect_extension_runtime_status(&key).expect("provider status");
         assert!(!status.disabled);
         assert_eq!(status.last_error, None);
         factory.emission.store(false, Ordering::SeqCst);
@@ -2631,9 +2634,9 @@ mod tests {
                 roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
-            .with_plugin_contract(
-                EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                    EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            .with_extension_contract(
+                EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                    EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                 ),
             )
             .with_custom_float_processor_factory(
@@ -2645,7 +2648,7 @@ mod tests {
         )
         .expect("registered bounded provider");
         let mut nodes =
-            vec![instantiate_effect_node(EffectType::Plugin(key.clone()))
+            vec![instantiate_effect_node(EffectType::External(key.clone()))
                 .expect("native occurrence")];
         if gpu_tail {
             let mut correction = EffectNode::with_defaults(EffectType::BasicCorrection);
@@ -2710,7 +2713,7 @@ mod tests {
             assert_eq!(session.diagnostics().processor_instances, 1);
             assert_eq!(provider.created.load(Ordering::SeqCst), 1);
             assert_eq!(provider.dsp_calls.load(Ordering::SeqCst), 0);
-            let status = effect_plugin_runtime_status(&key).expect("availability");
+            let status = effect_extension_runtime_status(&key).expect("availability");
             assert!(!status.disabled);
             assert_eq!(status.last_error, None);
             provider.refuse.store(false, Ordering::SeqCst);
@@ -3229,7 +3232,7 @@ mod tests {
             ),
         )
         .expect("register exact recipe");
-        let effect = instantiate_effect_node(EffectType::Plugin(key)).expect("author occurrence");
+        let effect = instantiate_effect_node(EffectType::External(key)).expect("author occurrence");
         let graph = PreparedEffectProgram::prepare(&[effect], &[], WorkingColorSpace::LinearRec709)
             .expect("prepare immutable program")
             .evaluate(TimelineTime::ZERO)
@@ -3621,9 +3624,10 @@ mod feedback_contract_tests {
             roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
             ..EffectExecutionContract::IDENTITY
         })
-        .with_plugin_contract(
-            EffectPluginContract::new("1.0.0")
-                .with_runtime_failure_policy(EffectPluginRuntimeFailurePolicy::DisableDefinition),
+        .with_extension_contract(
+            EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                EffectExtensionRuntimeFailurePolicy::DisableDefinition,
+            ),
         )
         .with_custom_float_processor_factory(
             Arc::new(|_, _| Ok(Some(serde_json::json!({})))),
@@ -3634,7 +3638,7 @@ mod feedback_contract_tests {
         register_effect_definition(definition).expect("one immutable feedback provider");
         let effects: Vec<_> = (0..EFFECT_PROCESSOR_FEEDBACK_SLOTS + 1)
             .map(|_| {
-                instantiate_effect_node(EffectType::Plugin(key.clone()))
+                instantiate_effect_node(EffectType::External(key.clone()))
                     .expect("distinct author occurrence")
             })
             .collect();
@@ -3659,7 +3663,7 @@ mod feedback_contract_tests {
         ));
         assert_eq!(value.created.load(Ordering::SeqCst), 0);
         assert_eq!(value.calls.load(Ordering::SeqCst), 0);
-        let status = effect_plugin_runtime_status(&key).expect("actual definition status");
+        let status = effect_extension_runtime_status(&key).expect("actual definition status");
         assert!(!status.disabled);
         assert!(status.last_error.is_none());
     }
@@ -3713,9 +3717,9 @@ mod feedback_contract_tests {
                 roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
-            .with_plugin_contract(
-                EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                    EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            .with_extension_contract(
+                EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                    EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                 ),
             )
             .with_custom_float_processor_factory(
@@ -3727,7 +3731,7 @@ mod feedback_contract_tests {
         )
         .expect("immutable actual provider");
         let node =
-            instantiate_effect_node(EffectType::Plugin(key.clone())).expect("actual occurrence");
+            instantiate_effect_node(EffectType::External(key.clone())).expect("actual occurrence");
         let graph = PreparedEffectProgram::prepare(&[node], &[], WorkingColorSpace::LinearRec709)
             .expect("canonical prepared program")
             .evaluate(TimelineTime::ZERO)
@@ -3804,7 +3808,7 @@ mod feedback_contract_tests {
         assert_eq!(value.calls.load(Ordering::SeqCst), 0);
         assert!(sink.receipts.lock().expect("consumer").is_empty());
         assert_eq!(session.diagnostics().processor_instances, 0);
-        let status = effect_plugin_runtime_status(&key).expect("provider");
+        let status = effect_extension_runtime_status(&key).expect("provider");
         assert!(!status.disabled);
         assert!(status.last_error.is_none());
     }
@@ -3840,7 +3844,7 @@ mod feedback_contract_tests {
         assert_eq!(value.dropped.load(Ordering::SeqCst), 1);
         assert_eq!(session.diagnostics().processor_instances, 0);
         assert_eq!(sink.receipts.lock().expect("consumer").len(), 1);
-        let status = effect_plugin_runtime_status(&key).expect("provider");
+        let status = effect_extension_runtime_status(&key).expect("provider");
         assert!(!status.disabled);
         assert!(status.last_error.is_none());
     }
@@ -4166,9 +4170,9 @@ mod completion_boundary_tests {
                 roi_propagation: EffectRoiPropagation::UnknownRequiresFullFrame,
                 ..EffectExecutionContract::IDENTITY
             })
-            .with_plugin_contract(
-                EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                    EffectPluginRuntimeFailurePolicy::DisableDefinition,
+            .with_extension_contract(
+                EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                    EffectExtensionRuntimeFailurePolicy::DisableDefinition,
                 ),
             )
             .with_custom_float_processor_factory(
@@ -4180,7 +4184,7 @@ mod completion_boundary_tests {
         )
         .expect("actual immutable provider");
         let node =
-            instantiate_effect_node(EffectType::Plugin(key.clone())).expect("author occurrence");
+            instantiate_effect_node(EffectType::External(key.clone())).expect("author occurrence");
         let graph = PreparedEffectProgram::prepare(
             &[node],
             &[],
@@ -4245,7 +4249,7 @@ mod completion_boundary_tests {
                 );
                 assert_eq!(session.diagnostics().processor_instances, 0);
                 let status =
-                    effect_plugin_runtime_status(&key).expect("registered provider status");
+                    effect_extension_runtime_status(&key).expect("registered provider status");
                 assert!(
                     !status.disabled,
                     "owner stop is not an invalid provider fault"
@@ -4283,7 +4287,7 @@ mod completion_boundary_tests {
             "uncacheable invokes exactly once per authorized frame"
         );
         assert_eq!(probe.dropped.load(Ordering::SeqCst), 0);
-        let status = effect_plugin_runtime_status(&key).expect("registered provider");
+        let status = effect_extension_runtime_status(&key).expect("registered provider");
         assert!(!status.disabled);
         assert!(status.last_error.is_none());
         drop(session);

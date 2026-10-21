@@ -9,7 +9,7 @@
 Mondrian 是使用 Rust 构建的原生非线性视频编辑器，提供多轨时间线、GPU 预览、色彩处理和媒体导出。
 
 > [!NOTE]
-> Mondrian 正在积极开发中。核心编辑、预览和导出管线已可运行；效果、音频及插件接口仍会持续演进。
+> Mondrian 正在积极开发中。核心编辑、预览和导出管线已可运行；效果与音频接口仍会持续演进；通用 Extension 平台尚在规划中。
 
 ## 🏗️ 系统架构概览
 
@@ -158,7 +158,8 @@ cargo test -p mondrian-renderer golden
 | [执行资源协调](docs/architecture/execution-resource-coordination.md) | 媒体与 CPU 工作调度    |
 | [素材资产系统](docs/architecture/project-model.md)   | 跨项目复用架构    |
 | [效果系统](docs/architecture/effect-system.md)     | LUT / 滤镜 / 转场 |
-| [插件开发手册](docs/plugins/README.md) | 插件开发者完整手册 |
+| [Extension 平台](docs/extensions/README.md) | 通用扩展、沙箱和权限规划（尚未实现） |
+| [效果扩展开发手册](docs/extensions/effects/README.md) | 当前源码级 Rust Effect SDK |
 | [导出系统](docs/architecture/professional-delivery.md)      | 渲染队列设计      |
 | [设计准则](docs/ui/design-system.md)               | UI/UX 设计基线    |
 | [技术栈选型](docs/architecture/overview.md)                    | 选型理由与对比    |
@@ -173,6 +174,6 @@ cargo test -p mondrian-renderer golden
 
 ## 📄 许可证
 
-Mondrian 提供 **AGPL-3.0-or-later 开源许可**及另行协商的**商业许可**。独立插件和扩展可依[插件附加许可](LICENSES/PLUGIN-EXCEPTION.md)自主选择许可条款并决定是否收费，包括改变或替换 Mondrian 功能；复制或改编的 Mondrian 实现不因此豁免。
+Mondrian 提供 **AGPL-3.0-or-later 开源许可**及另行协商的**商业许可**。独立插件和扩展可依[扩展附加许可](LICENSES/EXTENSION-EXCEPTION.md)自主选择许可条款并决定是否收费，包括改变或替换 Mondrian 功能；复制或改编的 Mondrian 实现不因此豁免。
 
 完整条款见 [LICENSE](LICENSE)。商业许可仅覆盖有权授权的内容，不替代第三方许可。商业授权联系 **contact@shaloong.com**。

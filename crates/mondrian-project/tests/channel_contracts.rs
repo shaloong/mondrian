@@ -27,7 +27,7 @@ fn world_bezier_equal_endpoint_excursion_survives_durable_archive_reopen() {
     use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
     let parameter_id = ParameterId::new_static("test.archive.world_bezier");
     let mut document = current_document();
-    let mut effect = EffectNode::new(EffectType::Plugin("test.archive.world_bezier".to_owned()));
+    let mut effect = EffectNode::new(EffectType::External("test.archive.world_bezier".to_owned()));
     effect.define_property(
         PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(2.0))
             .with_parameter_id(parameter_id.clone())
@@ -119,7 +119,7 @@ fn asymmetric_channel_contracts_and_keys_survive_a_durable_archive_reopen() {
     };
     let mut document = current_document();
     let parameter_id = ParameterId::new_static("test.channel_contracts.point");
-    let mut effect = EffectNode::new(EffectType::Plugin("test.channel_contracts".to_owned()));
+    let mut effect = EffectNode::new(EffectType::External("test.channel_contracts".to_owned()));
     let path = "point".to_owned();
     effect.define_property(
         PropertyDescriptor::new(path.clone(), "Point", vector(0.25, 20.0))
@@ -218,7 +218,7 @@ fn precise_compound_types_defaults_and_keys_survive_durable_archive_reopen() {
         PropertyValue::IntVec3([i32::MIN, 0, i32::MAX]),
     ];
     let mut document = current_document();
-    let mut effect = EffectNode::new(EffectType::Plugin("test.precise.compound".to_owned()));
+    let mut effect = EffectNode::new(EffectType::External("test.precise.compound".to_owned()));
     for (index, value) in cases.into_iter().enumerate() {
         let path = format!("component{index}");
         let descriptor = PropertyDescriptor::new(path.clone(), path.clone(), value.clone());
@@ -258,7 +258,9 @@ fn invalid_visual_handle_document_cannot_replace_a_durable_archive() {
     use mondrian_core::automation::{ExactBezierHandle, KeyframeInterpolation};
     let parameter_id = ParameterId::new_static("test.archive.visual.handle");
     let mut document = current_document();
-    let mut effect = EffectNode::new(EffectType::Plugin("test.archive.visual.handle".to_owned()));
+    let mut effect = EffectNode::new(EffectType::External(
+        "test.archive.visual.handle".to_owned(),
+    ));
     effect.define_property(
         PropertyDescriptor::new("amount", "Amount", PropertyValue::Double(0.0))
             .with_parameter_id(parameter_id.clone())

@@ -1208,7 +1208,7 @@ Headless callers still receive exact execution failures.
 
 A visual Transition is a Sequence-owned, typed two-input author entity. It has
 a stable `VideoTransitionId`, two strong Clip endpoints, one exact Sequence-time
-range, a built-in or plugin definition identity, a complete Property Bag, and
+range, a built-in or external definition identity, a complete Property Bag, and
 explicit enabled state. It deliberately does not persist `track_id`: endpoint
 Track membership is derived from the two Clips, preventing two authorities from
 disagreeing.

@@ -4761,9 +4761,9 @@ mod tests {
             std::sync::atomic::AtomicU64::new(1);
         let definition_id = NEXT_DEFINITION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let cpu_type =
-            EffectType::Plugin(format!("test.heterogeneous.cpu-dag.{definition_id}.cpu"));
+            EffectType::External(format!("test.heterogeneous.cpu-dag.{definition_id}.cpu"));
         let gpu_type =
-            EffectType::Plugin(format!("test.heterogeneous.cpu-dag.{definition_id}.gpu"));
+            EffectType::External(format!("test.heterogeneous.cpu-dag.{definition_id}.gpu"));
         register_effect_definition(
             EffectDefinition::new(
                 cpu_type.key(),
@@ -4829,10 +4829,10 @@ mod tests {
         static NEXT_DEFINITION_ID: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let definition_id = NEXT_DEFINITION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mask_type = EffectType::Plugin(format!(
+        let mask_type = EffectType::External(format!(
             "test.heterogeneous.mask-source.{definition_id}.cpu"
         ));
-        let gpu_type = EffectType::Plugin(format!(
+        let gpu_type = EffectType::External(format!(
             "test.heterogeneous.mask-source.{definition_id}.gpu"
         ));
         register_effect_definition(
@@ -4925,10 +4925,10 @@ mod tests {
         static NEXT_DEFINITION_ID: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
         let definition_id = NEXT_DEFINITION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let cpu_type = EffectType::Plugin(format!(
+        let cpu_type = EffectType::External(format!(
             "test.heterogeneous.resource-lifetime.{definition_id}.cpu"
         ));
-        let gpu_type = EffectType::Plugin(format!(
+        let gpu_type = EffectType::External(format!(
             "test.heterogeneous.resource-lifetime.{definition_id}.gpu"
         ));
         let cpu_definition = EffectDefinition::new(

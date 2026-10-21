@@ -1612,7 +1612,7 @@ Readback is allowed for:
 - thumbnails or cached previews that explicitly require CPU pixels
 - tests/golden images
 - debug/profiling captures
-- interoperability with CPU-only plugins
+- interoperability with CPU-only effect providers, including native-format plugins
 
 Readback is not allowed as an invisible hop between ordinary render passes. All
 readback callers must use `GpuColorFrameReadbackPlan`; ad hoc

@@ -1333,8 +1333,8 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
             _ => None,
         })
         .expect("compiled native occurrence");
-    let runtime_before =
-        mondrian_effects::effect_plugin_runtime_status(&key).expect("registered native definition");
+    let runtime_before = mondrian_effects::effect_extension_runtime_status(&key)
+        .expect("registered native definition");
     assert!(!runtime_before.disabled);
     assert!(runtime_before.last_error.is_none());
     let host_storage = OpenFxFilterSession::storage(1, 1).expect("native owner charge");
@@ -1383,7 +1383,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
         assert_eq!(session.diagnostics().processor_instances, 0);
         assert_eq!(session.diagnostics().processor_bytes, 0);
         assert_eq!(
-            mondrian_effects::effect_plugin_runtime_status(&key)
+            mondrian_effects::effect_extension_runtime_status(&key)
                 .expect("budget refusal preserves definition"),
             runtime_before,
         );
@@ -1494,7 +1494,7 @@ fn authored_native_factory_reuses_instances_and_rejects_stale_output() {
 #[ignore = "set MONDRIAN_OPENFX_SESSION_PROBE_BINARY and MONDRIAN_OPENFX_SESSION_PROBE_MODE=hang"]
 fn authored_native_factory_observes_mixed_execution_deadline() {
     use mondrian_effects::{
-        effect_plugin_runtime_status, EffectColorDomain, EffectExecutionEnvironment,
+        effect_extension_runtime_status, EffectColorDomain, EffectExecutionEnvironment,
         EffectExecutionLane, EffectExecutionLaneId, EffectExecutionSession,
         EffectExecutionTransfer, EffectFrameExtent, EffectGraphExecutionBudget,
         EffectGraphExecutionRequest, EffectProcessingBackend, EffectValueFormat,
@@ -1594,7 +1594,7 @@ fn authored_native_factory_observes_mixed_execution_deadline() {
     );
     assert_eq!(input.as_slice(), [[0.25, 1.5, -0.75, 0.5]]);
     assert_eq!(session.diagnostics().processor_instances, 0);
-    let status = effect_plugin_runtime_status(&key).expect("plugin status");
+    let status = effect_extension_runtime_status(&key).expect("plugin status");
     assert!(!status.disabled);
     assert_eq!(status.last_error, None);
 }
@@ -1707,7 +1707,7 @@ fn authored_native_factory_observes_scalar_and_timeline_owner_stops() {
             _ => None,
         })
         .expect("native key");
-    let status = mondrian_effects::effect_plugin_runtime_status(key).expect("plugin status");
+    let status = mondrian_effects::effect_extension_runtime_status(key).expect("plugin status");
     assert!(!status.disabled);
     assert_eq!(status.last_error, None);
 }
@@ -4590,7 +4590,7 @@ fn native_persistent_error_repairs_through_real_effects_residency_without_owner_
         "uk.co.thefoundry.BasicGainPlugin",
     )
     .expect("native definition");
-    let mondrian_effects::EffectType::Plugin(ref provider_key) = kind else {
+    let mondrian_effects::EffectType::External(ref provider_key) = kind else {
         panic!("native provider key");
     };
     let mut effect = instantiate_effect_node(kind.clone()).expect("actual authored occurrence");
@@ -4748,8 +4748,8 @@ fn native_persistent_error_repairs_through_real_effects_residency_without_owner_
             assert_eq!(recovered.retention, EffectProcessorRetention::Evicted);
         }
         assert_eq!(session.diagnostics().processor_instances, optional_count);
-        let status =
-            mondrian_effects::effect_plugin_runtime_status(provider_key).expect("registry state");
+        let status = mondrian_effects::effect_extension_runtime_status(provider_key)
+            .expect("registry state");
         assert!(
             !status.disabled,
             "persistent user error is not plugin quarantine"
@@ -4917,7 +4917,7 @@ fn native_live_progress_flows_through_real_effects_residency_before_frame_comple
         "uk.co.thefoundry.BasicGainPlugin",
     )
     .expect("actual immutable App factory");
-    let mondrian_effects::EffectType::Plugin(ref key) = kind else {
+    let mondrian_effects::EffectType::External(ref key) = kind else {
         panic!("actual provider");
     };
     let provider = key.clone();
@@ -5029,7 +5029,7 @@ fn native_live_progress_flows_through_real_effects_residency_before_frame_comple
         "the sole bank retained its actual valid owner, not an App-held clone"
     );
     let status =
-        mondrian_effects::effect_plugin_runtime_status(&provider).expect("actual provider");
+        mondrian_effects::effect_extension_runtime_status(&provider).expect("actual provider");
     assert!(!status.disabled);
     assert!(status.last_error.is_none());
     session.retire_processor_resources();

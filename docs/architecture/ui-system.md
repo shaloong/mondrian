@@ -459,6 +459,12 @@ measurement keeps its existing minimum-size policy. This is measurement-owner
 reuse within one UI thread, not a process-global lock or a change to the
 separate text rasterization owner's lifetime.
 
+Text length above the measurement-cache byte budget bypasses retention, not
+shaping or measurement. Single-line and wrapped layout preserve the complete
+input and kerning across the 65,535-glyph boundary. The current text dependency
+uses the documented [Harfrust compatibility patch](../../vendor/harfrust/MONDRIAN-PATCH.md)
+until cosmic-text can consume the upstream fixed version series.
+
 Timeline Track Targeting and Sync-Lock are editor interaction policy, not
 renderable Sequence fields. `TimelineTargetingState` is keyed by stable
 Sequence/Track identity in the open editor Session and stores only exceptions
@@ -609,7 +615,7 @@ model refresh so translated trigger widths receive correct hit regions.
 
 ## Commands
 
-Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
+Menus, shortcut preferences, command palette, and future Extensions should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
 
 Editorial transport commands are first-class descriptors and editor actions:
 `J` dispatches reverse shuttle, `K` dispatches stop-shuttle/Pause, and `L`
@@ -853,7 +859,7 @@ local input-routing state, not a second product Action hierarchy.
 
 Inside each migrated App slice, product meaning is carried by the closed
 `ProductAction` algebra. `Action::Custom` remains the external Widget,
-scripting, and plugin transport Seam; it must not become a second product-domain
+scripting, and Extension transport Seam; it must not become a second product-domain
 model. The current Timeline slice covers Clip selection, Clip movement, bulk
 trim, seek, exact In/Out mutation, atomic Lift/Extract intent, the complete
 current-selection edit algebra, Basic Title creation, direct Asset placement,
@@ -931,7 +937,7 @@ the existing workflow error path. File-manager reveal follows the same rule:
 dispatch failure is observable and is never presented as successful execution.
 Viewer gestures that manipulate picture geometry do not create a second Viewer
 transform model: they emit the same `ClipProductAction` used by Inspector,
-Headless, scripting, and future plugin Adapters.
+Headless, scripting, and future Extension Adapters.
 
 `ClipProductAction` closes enabled state, typed Solid Color source edits,
 atomic direct-parameter writes, and stable-key numeric curve edits. A direct
@@ -2694,9 +2700,9 @@ and validates the installed binary before authoring one undoable Rack edit;
 failed or canceled attempts leave the Project unchanged.
 
 The Effect Browser reads category paths from registered executable Definitions,
-including native plugin definitions, instead of reducing every Plugin key to
+including native plugin definitions, instead of reducing every External effect key to
 the generic core-data category. Built-in categories retain their semantic
-ordering and plugin subcategories retain stable tree IDs across locale changes.
+ordering and external-effect subcategories retain stable tree IDs across locale changes.
 
 The Mixer and shared Inspector/Mixer Audio Processor Rack widgets format their
 own control labels from the shell's captured Fluent locale. Their projected

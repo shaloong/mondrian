@@ -6218,8 +6218,8 @@ mod tests {
             PropertyValue, ResourcePathKind, ResourcePathSelection, TimelineTime,
         };
         use mondrian_effects::*;
-        let kind = EffectType::Plugin(format!("test.resource.async.{}", uuid::Uuid::new_v4()));
-        let builder = EffectPluginDefinitionBuilder::new(
+        let kind = EffectType::External(format!("test.resource.async.{}", uuid::Uuid::new_v4()));
+        let builder = EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Async resource",
             EffectColorDomainContract::SCENE_LINEAR,
@@ -6819,9 +6819,10 @@ mod tests {
         use mondrian_core::{ParameterResourceReference, PropertyValue, TimelineTime};
         use mondrian_effects::{
             instantiate_effect_node, register_effect_definition, EffectColorDomainContract,
-            EffectDeterminism, EffectExecutionContract, EffectExecutionModes, EffectGraphTopology,
-            EffectPluginDefinitionBuilder, EffectRenderOp, EffectResourceLifetime,
-            EffectRoiPropagation, EffectStateModel, EffectTemporalInputExtent, EffectType,
+            EffectDeterminism, EffectExecutionContract, EffectExecutionModes,
+            EffectExtensionDefinitionBuilder, EffectGraphTopology, EffectRenderOp,
+            EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+            EffectTemporalInputExtent, EffectType,
         };
         use mondrian_ui_core::{FocusManager, TreeWalker};
         use mondrian_ui_events::EventRouter;
@@ -6838,8 +6839,8 @@ mod tests {
             .expect("library")
             .create_solid_color_asset(Some("Film other"))
             .expect("other asset");
-        let kind = EffectType::Plugin("test.resource.live-catalog".to_owned());
-        let builder = EffectPluginDefinitionBuilder::new(
+        let kind = EffectType::External("test.resource.live-catalog".to_owned());
+        let builder = EffectExtensionDefinitionBuilder::new(
             kind.key(),
             "Live resource catalog",
             EffectColorDomainContract::SCENE_LINEAR,

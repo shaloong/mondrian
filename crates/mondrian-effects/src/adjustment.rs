@@ -2739,7 +2739,7 @@ mod tests {
     #[test]
     fn failure_from_old_compiled_custom_binding_does_not_quarantine_replacement_definition() {
         let key = "plugin.render.generation_isolation";
-        let effect_type = crate::EffectType::Plugin(key.to_owned());
+        let effect_type = crate::EffectType::External(key.to_owned());
         let contract = crate::EffectExecutionContract {
             execution_modes: crate::EffectExecutionModes::CPU_U8,
             determinism: crate::EffectDeterminism::Deterministic,
@@ -2749,9 +2749,9 @@ mod tests {
             resource_lifetime: crate::EffectResourceLifetime::Frame,
             topology: crate::EffectGraphTopology::LinearChain,
         };
-        let plugin_contract = crate::EffectPluginContract::new("1.0.0")
+        let extension_contract = crate::EffectExtensionContract::new("1.0.0")
             .with_runtime_failure_policy(
-                crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+                crate::EffectExtensionRuntimeFailurePolicy::DisableDefinition,
             );
         crate::register_effect_definition(
             crate::EffectDefinition::new(
@@ -2772,7 +2772,7 @@ mod tests {
                     })
                 }),
             )
-            .with_plugin_contract(plugin_contract.clone()),
+            .with_extension_contract(extension_contract.clone()),
         )
         .expect("register old definition");
         let old_graph = crate::PreparedEffectProgram::prepare(
@@ -2801,11 +2801,11 @@ mod tests {
                     Ok(())
                 }),
             )
-            .with_plugin_contract(plugin_contract),
+            .with_extension_contract(extension_contract),
         )
         .expect("register replacement definition");
         let current_before =
-            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+            crate::effect_extension_runtime_status(key).expect("replacement runtime status");
         assert!(!current_before.disabled);
 
         let error = apply_compiled_effect_graph(&[0, 0, 0, 255], 1, 1, old_graph.as_ref(), 0)
@@ -2815,7 +2815,7 @@ mod tests {
             crate::EffectExecutionError::CustomProcessorFailed { .. }
         ));
         let current_after =
-            crate::effect_plugin_runtime_status(key).expect("replacement runtime status");
+            crate::effect_extension_runtime_status(key).expect("replacement runtime status");
         assert_eq!(
             current_after, current_before,
             "old Program failure must not mutate replacement Definition quarantine"
@@ -2982,9 +2982,9 @@ mod panic_payload_contract_tests {
             crate::EffectColorDomainContract::SCENE_LINEAR,
         )
         .with_execution_contract(contract(modes))
-        .with_plugin_contract(
-            crate::EffectPluginContract::new("1.0.0").with_runtime_failure_policy(
-                crate::EffectPluginRuntimeFailurePolicy::DisableDefinition,
+        .with_extension_contract(
+            crate::EffectExtensionContract::new("1.0.0").with_runtime_failure_policy(
+                crate::EffectExtensionRuntimeFailurePolicy::DisableDefinition,
             ),
         )
     }
@@ -2992,7 +2992,7 @@ mod panic_payload_contract_tests {
     fn compiled_operation(definition: crate::EffectDefinition, key: &str) -> EffectRenderOp {
         crate::register_effect_definition(definition).expect("register actual provider");
         let graph = crate::PreparedEffectProgram::prepare(
-            &[crate::EffectNode::new(crate::EffectType::Plugin(
+            &[crate::EffectNode::new(crate::EffectType::External(
                 key.to_owned(),
             ))],
             &[],
@@ -3037,7 +3037,7 @@ mod panic_payload_contract_tests {
                 if failed_key == key && reason == "custom render processor panicked"
         ));
         assert_eq!(counts.payload_drops.load(Ordering::SeqCst), 0);
-        let status = crate::effect_plugin_runtime_status(key).expect("actual provider status");
+        let status = crate::effect_extension_runtime_status(key).expect("actual provider status");
         assert!(
             status.disabled,
             "actual provider fault must enter its quarantine"
@@ -3291,7 +3291,7 @@ mod panic_payload_contract_tests {
             assert_eq!(counts.instance_drops.load(Ordering::SeqCst), 1);
             assert_eq!(session.diagnostics().processor_instances, 0);
             assert!(
-                !crate::effect_plugin_runtime_status(&key)
+                !crate::effect_extension_runtime_status(&key)
                     .expect("actual provider status")
                     .disabled,
                 "owner stop is not quarantine"
@@ -3389,7 +3389,7 @@ mod panic_payload_contract_tests {
         );
         assert_eq!(session.diagnostics().processor_instances, 0);
         assert!(
-            crate::effect_plugin_runtime_status(&key)
+            crate::effect_extension_runtime_status(&key)
                 .expect("actual provider status")
                 .disabled
         );

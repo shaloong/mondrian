@@ -714,7 +714,7 @@ fn compile_transition(
                 },
             )))
         }
-        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+        FlatVideoTransitionDefinition::External { definition_id } => {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "compile_video_transition".to_owned(),
                 reason: format!(
@@ -746,7 +746,7 @@ fn validate_flat_transition_definition(transition: &FlatVideoTransition) -> Resu
                 transition.transition_id
             ),
         }),
-        FlatVideoTransitionDefinition::Plugin { definition_id } => {
+        FlatVideoTransitionDefinition::External { definition_id } => {
             Err(MondrianError::WorkflowStepFailed {
                 step_id: "compile_video_transition".to_owned(),
                 reason: format!(
@@ -1568,7 +1568,7 @@ mod tests {
 
     #[test]
     fn unavailable_transition_definition_fails_closed() {
-        let mut sequence = Sequence::new("missing transition plugin");
+        let mut sequence = Sequence::new("missing external transition");
         let time_base = sequence.time_base();
         let left = Clip::new(AssetId::new(), tt(0, time_base), tt(10, time_base)).expect("left");
         let right = Clip::new(AssetId::new(), tt(10, time_base), tt(10, time_base)).expect("right");
@@ -1581,7 +1581,7 @@ mod tests {
             mondrian_core::TimelineTimeRange::new(tt(8, time_base), tt(4, time_base))
                 .expect("transition range"),
         );
-        transition.transition_type = mondrian_timeline::VideoTransitionType::Plugin {
+        transition.transition_type = mondrian_timeline::VideoTransitionType::External {
             definition_id: "vendor.missing.transition".to_owned(),
         };
         sequence.video_transitions.push(transition);
@@ -1590,7 +1590,7 @@ mod tests {
             &sequence,
             TimelineEvaluationRequest::preview(fp(10, time_base), 1.0),
         )
-        .expect_err("missing plugin must not substitute Cross Dissolve");
+        .expect_err("missing external definition must not substitute Cross Dissolve");
         assert!(error.to_string().contains("unavailable definition"));
     }
 

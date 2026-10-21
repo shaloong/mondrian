@@ -37,7 +37,7 @@ Mondrian 不应与 Resolve、Premiere 比“AI 功能数量”，而应集中形
 | P2 | Clean-plate Remove / Auto Reframe / SmartSwitch | **复用前述资产渐进实现** | 不引入新的通用大模型平台 |
 | Gate | Camera Solve | **仅做研究样机，需求达标后立项** | COLMAP 4.x incremental/global 双基线；学习模型只做初始化候选 |
 | Gate | OFX Host | **推迟到有明确插件/OEM 合作** | 不承诺 beta 前完成 |
-| Gate | 表达式脚本、WASM/WGSL SDK | **先属性链接，脚本与 GPU 插件后置** | 不阻塞核心剪辑能力 |
+| Gate | 表达式脚本、WASM/WGSL SDK | **先属性链接，脚本与 GPU 扩展后置** | 不阻塞核心剪辑能力 |
 | Watch | 生成式视频、重型修复、3DGS | **API/外部工具优先，不自建主线** | 只做有限、可标记、可撤销的补丁型输出 |
 
 ### 0.3 最重要的路线修正
@@ -330,7 +330,7 @@ SmartSwitch 也不能简化成 Light-ASD：
 
 Mondrian 仍应坚持补丁型入口，因为它能限制成本和失败范围。云端 provider 必须逐任务显示上传范围和预估成本，生成结果作为新媒体 Asset，并记录 provider/model/prompt/seed/hash/费用与来源声明；普通项目语义不能依赖云模型仍在线。端侧 Wan 2.2 只保留实验包：官方 TI2V-5B 的 5 秒 720p 在 RTX 4090 仍约需数分钟，不是面向普通用户的默认隐私档（[Wan 2.2 model card](https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B)）。
 
-## 4. 表达式与插件生态的重新排序
+## 4. 表达式与 Extension 生态的重新排序
 
 ### 4.1 表达式
 
@@ -342,7 +342,7 @@ Mondrian 仍应坚持补丁型入口，因为它能限制成本和失败范围�
 - 进入现有 Effect/automation fingerprint 和缓存身份；
 - 不允许 IO、动态 eval、反射式遍历项目或运行时发现依赖。
 
-Rhai 即使禁 IO，也不能自动满足纯函数、静态依赖和可重现性；把它放进逐帧属性求值会给 MFR、缓存和故障隔离引入长期负担。只有插件作者和高级用户的真实需求量证明 L0 不够时，再设计离线脚本动作，而不是 render-hot-path 脚本。
+Rhai 即使禁 IO，也不能自动满足纯函数、静态依赖和可重现性；把它放进逐帧属性求值会给 MFR、缓存和故障隔离引入长期负担。只有扩展作者和高级用户的真实需求量证明 L0 不够时，再设计离线脚本动作，而不是 render-hot-path 脚本。
 
 ### 4.2 OpenFX
 
@@ -358,7 +358,7 @@ OFX 不是“bindgen + 2–4 人月”。一个可用 host 还包括：参数/cl
 
 ### 4.3 WASM / WGSL
 
-WASM 适合参数逻辑、自动化和 CPU 小算子；WGSL 插件不应以字符串片段注入融合 shader。第一版如启动，应是独立 pass、固定 bind-group schema、Naga 验证、资源上限、超时/设备丢失证据和明确色彩域。等自用 Effect API 稳定、出现外部开发者后再公开 SDK。
+WASM 适合参数逻辑、自动化和 CPU 小算子；WGSL 扩展不应以字符串片段注入融合 shader。第一版如启动，应是独立 pass、固定 bind-group schema、Naga 验证、资源上限、超时/设备丢失证据和明确色彩域。等自用 Effect API 稳定、出现外部开发者后再公开 SDK。
 
 ### 4.4 LLM 剪辑助手
 
@@ -516,7 +516,7 @@ AI-BOM 可映射到 SPDX 3.0 AI Profile，签名可使用 Sigstore/cosign 的 bl
 | GLOMAP + VGGT 是 3D 近期路线 | 独立 GLOMAP 已归档；用 COLMAP 4.x incremental/global 双基线，VGGT-commercial/DA3/GLUEMAP 只做 spike |
 | L0 DSL + Rhai 是既定 P0 | P2 先稳定 ID 属性链接；Rhai 不进逐帧热路径 |
 | OFX beta 前完成，2–4 人月 | 只够 1–2 人月 spike；Windows CPU 可发布子集 12–18，跨平台/GPU/UI 累计 24–40+ |
-| WASM + WGSL 片段注入融合 pass | 延后；GPU 插件先独立 pass、固定 ABI、验证与资源上限 |
+| WASM + WGSL 片段注入融合 pass | 延后；GPU 扩展先独立 pass、固定 ABI、验证与资源上限 |
 | NC 模型可作 teacher 自研规避 | 删除默认建议，必须逐许可证与法务确认训练/输出权利 |
 | 画质增强绑定一长串 SOTA | 先建真实退化评测与确定性修复；重型模型通过用户等待意愿和目标语料 gate |
 | 智能音频全链路纯 MIT | 分开审代码、权重、对齐器和说话人模型；SenseVoice/pyannote 等均有独立条款 |

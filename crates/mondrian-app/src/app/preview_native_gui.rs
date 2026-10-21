@@ -976,7 +976,7 @@ pub(crate) mod question_contract_tests {
             TimelineTime::ONE,
         )
         .expect("visual Clip");
-        let effect = EffectNode::new(EffectType::Plugin("owned.question.fixture".to_owned()));
+        let effect = EffectNode::new(EffectType::External("owned.question.fixture".to_owned()));
         let effect_id = effect.id;
         clip.effects.push(effect);
         let clip_id = clip.id;

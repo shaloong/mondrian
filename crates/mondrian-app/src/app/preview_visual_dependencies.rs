@@ -1,7 +1,7 @@
 //! Low-frequency external-dependency observation for immutable visual programs.
 //!
 //! Timeline evaluation only binds immutable [`PreparedVisualProgram`] values.
-//! This Adapter moves filesystem/plugin revalidation off the UI and frame
+//! This Adapter moves filesystem/effect-definition revalidation off the UI and frame
 //! execution domains, then reports exact program instances that must be
 //! evicted. It never interprets Timeline or Effect author state.
 

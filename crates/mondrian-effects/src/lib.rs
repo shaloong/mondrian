@@ -24,6 +24,8 @@ pub mod execution;
 pub mod execution_contract;
 pub mod execution_planning;
 mod execution_session;
+pub mod extension_contract;
+pub mod extension_sdk;
 pub mod gamut_mapping;
 pub mod gpu_plan;
 pub mod graph;
@@ -33,8 +35,6 @@ pub mod hsl;
 pub mod lut;
 pub mod mask;
 pub mod mask_raster;
-pub mod plugin_contract;
-pub mod plugin_sdk;
 pub mod prepared;
 pub mod primary_grade;
 mod processor_feedback;
@@ -102,6 +102,12 @@ pub use execution_planning::{
 pub use execution_session::{
     EffectExecutionSession, EffectExecutionSessionConfig, EffectExecutionSessionDiagnostics,
 };
+pub use extension_contract::{
+    effect_extension_runtime_status, EffectExtensionApiVersion, EffectExtensionContract,
+    EffectExtensionLibraryPolicy, EffectExtensionRuntimeFailurePolicy,
+    EffectExtensionRuntimeStatus, CURRENT_EFFECT_EXTENSION_API_VERSION,
+};
+pub use extension_sdk::{EffectExtensionDefinitionBuilder, EffectGraphDsl};
 pub use gamut_mapping::{GamutCompressionGrade, GamutMappingError, HighlightRecoveryGrade};
 pub use gpu_plan::{
     get_or_lower_effect_graph_to_gpu_plan, lower_effect_graph_node_to_gpu_point_plan,
@@ -143,12 +149,6 @@ pub use mask::{
     MaskShapeKeyframe, MAX_MASK_PATH_POINTS,
 };
 pub use mask_raster::{rasterize_mask_shape, MaskRasterError, PreparedMaskRaster};
-pub use plugin_contract::{
-    effect_plugin_runtime_status, EffectPluginApiVersion, EffectPluginContract,
-    EffectPluginLibraryPolicy, EffectPluginRuntimeFailurePolicy, EffectPluginRuntimeStatus,
-    CURRENT_EFFECT_PLUGIN_API_VERSION,
-};
-pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectProgram,
     PreparedEffectStack, PreparedGradeGraph,

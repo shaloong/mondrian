@@ -593,7 +593,7 @@ _Avoid_: Process-global LUT cache, mtime/size or hot-time-window validity, files
 
 **Effect Execution Contract**:
 The Definition-owned declaration of exact admitted `(processing backend, sample representation)` modes, determinism, continuity state, past/future temporal input, ROI propagation, resource lifetime, and maximum graph topology for one visual Effect stage.
-_Avoid_: Renderer inference from Effect type, Cartesian-product capability inferred from separate backend and precision sets, optimistic plugin defaults, ROI smaller than the admitted parameter range, capability booleans copied into parameters
+_Avoid_: Renderer inference from Effect type, Cartesian-product capability inferred from separate backend and precision sets, optimistic external-definition defaults, ROI smaller than the admitted parameter range, capability booleans copied into parameters
 
 **Effect Execution Envelope**:
 The ordered per-stage Effect Execution Contracts plus their aggregate temporal/ROI/state/lifetime evidence and homogeneous exact-mode intersection. An empty exact-mode intersection denotes a valid heterogeneous chain whose execution needs explicit backend and/or representation transitions; it is not invalid author state.
@@ -605,7 +605,7 @@ _Avoid_: Hidden current-frame assumption, overflow-prone pixel arithmetic, treat
 
 **Prepared Temporal Value Program**:
 The private time-expanded execution projection that references the unique `CompiledEffectGraph` IR by exact `(Clip time, graph value)` addresses. A `TemporalFrameBlend` samples its stable Definition-stage input at `time + sample_offset`; when earlier stages exist, the same `PreparedEffectProgram` is reevaluated at that exact time, so animated parameters, dynamic topology, frame seeds, and Masks retain their own semantics. Ordinary edges remain in one context and every cross-time edge strictly lowers the Definition stage index. Exact values/source times and use counts are de-duplicated; scalar dry-run and execution consume the same schedule. Stable stage contracts, declared temporal/spatial coverage, stateless CPU-F32 admission, 512-context and 65,536-value caps are mandatory. Internal same-stage temporal addresses, unbounded demand, or continuity state fail closed.
-_Avoid_: Past-only offset type, one fetch per node for duplicate time, releasing a shared value before last use, separate Preview/Export temporal IR, output-time parameters applied to a sampled frame, treating internal plugin nodes as stable cross-time identities
+_Avoid_: Past-only offset type, one fetch per node for duplicate time, releasing a shared value before last use, separate Preview/Export temporal IR, output-time parameters applied to a sampled frame, treating internal effect nodes as stable cross-time identities
 
 **Prepared Mask Raster**:
 The immutable, frame-extent-bound execution form of one evaluated Mask. Preparation validates finite geometry, enforces the 4,096-point author Path bound, flattens cubic Path segments once, and builds the nearest-segment index once. Direct and tiled consumers rasterize exact contained regions in full-canvas normalized coordinates, use bounded row scratch, and share cooperative cancellation and Float32 coverage semantics. Prepared geometry and row scratch are explicit Effect execution working-set obligations; they are neither author state nor a process-global cache.
@@ -793,7 +793,7 @@ _Avoid_: UI-rate parameter polling, per-block heap construction, plugin paramete
 
 **Audio Transition**:
 An explicit Sequence-time-bounded relationship between two Audio Component Edits that applies a declared pair of sample-domain gain curves after their component/scope-local processing.
-_Avoid_: Overlap inferred as crossfade, unary fade plugin, Track-wide dissolve
+_Avoid_: Overlap inferred as crossfade, unary fade processor, Track-wide dissolve
 
 **Audio Role**:
 A Sequence-owned single-valued semantic classification for an Audio Component Edit, optionally parented to another local Audio Role; “role” and “subrole” describe hierarchy position rather than different entity types.
@@ -812,7 +812,7 @@ A typed reference that must resolve inside its owning validation closure before 
 _Avoid_: Missing local node or Project-contained nested Sequence/output treated as runtime availability
 
 **Recoverable Dependency Reference**:
-A stable reference to media, plugin, font, or another real-world provider binding outside the closed Project author graph that retains its expected contract while the current binding remains derived.
+A stable reference to media, native-format plugin, font, or another real-world provider binding outside the closed Project author graph that retains its expected contract while the current binding remains derived.
 An Asset Library record is a Project-contained strong entity; only the concrete source/component provider binding inside it is recoverable. A missing Project-owned Asset record is not an offline-media condition.
 _Avoid_: Missing internal Route endpoint, missing Project-contained Asset or nested Sequence/output, persisted resolved flag
 
@@ -838,7 +838,7 @@ _Avoid_: Consumer purpose, scheduler window, hash alone
 
 **Audio State Domain**:
 The mutable DSP state scope determined by a Signal Closure, continuity epoch, processor origins, nested instance path, time mapping, direction, and processing mode.
-_Avoid_: Global plugin state, cache entry, fingerprint-equivalent graph
+_Avoid_: Global processor state, cache entry, fingerprint-equivalent graph
 
 **Sequence Output Port**:
 A stable typed audio output explicitly exposed by one Sequence for nesting, playback, analysis, or delivery.
@@ -1289,3 +1289,14 @@ Asset thumbnails include their exact representative Source Sample Target in
 request, failure and raster identities. Known videos use ten percent of their
 stream duration capped at thirty seconds; proven stills and unknown durations
 use zero. This temporal selection does not inspect brightness or infer color.
+
+## Extension platform (accepted target)
+
+The general Extension platform is planned after native OpenFX/VST3/CLAP plugin
+host work. It covers resource-only language packs and themes, managed
+contributions, real HTML/CSS/DOM Web UI and restricted Web/Rust execution with
+host-owned permissions. Existing domain semantics remain authoritative.
+See [Extension vocabulary](docs/domain/extensions.md),
+[architecture](docs/architecture/extension-system.md),
+[ADR 0011](docs/adr/0011-use-managed-extension-platform.md) and the
+[developer entry](docs/extensions/README.md).
