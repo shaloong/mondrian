@@ -7163,6 +7163,7 @@ mod temporal_handle_tests {
 #[cfg(test)]
 mod displayed_native_parameter_control_contracts {
     use super::*;
+    use super::super::tests::owned_panel_status_painted_text;
     use crate::app::parameter_gesture::ParameterGestureAction;
     use crate::app_ui::audio_processor_rack::{
         bind_audio_scalar_author_lease, project_audio_processor_rack, static_parameter_target,
@@ -7222,29 +7223,40 @@ mod displayed_native_parameter_control_contracts {
         let mut missing = parameter.clone();
         missing.native_presentation = None;
         missing.native_adoption = None;
-        let unavailable = audio_processor_static_parameter_control(
+        let mut unavailable = audio_processor_static_parameter_control(
             &rack, processor, &missing, numeric, true, &localizer,
         );
         assert_eq!(
-            unavailable.as_any().unwrap().downcast_ref::<Label>().unwrap().text(),
-            localizer.text("audio-rack-native-controlled-parameter")
+            owned_panel_status_painted_text(unavailable.as_mut()),
+            vec![localizer.text("audio-rack-native-controlled-parameter")]
         );
+        assert_eq!(unavailable.child_count(), 0);
+        assert!(!unavailable.can_focus() && unavailable.control_inspection_state().is_none());
 
-        let control = audio_processor_static_parameter_control(
+        let mut control = audio_processor_static_parameter_control(
             &rack, processor, parameter, numeric, true, &localizer,
         );
         assert_eq!(control.child_count(), 2);
-        let label = control.child(0).unwrap().as_any().unwrap().downcast_ref::<Label>().unwrap();
-        assert!(label.text().contains(&localizer.text("audio-rack-native-controlled-parameter")));
+        let painted = owned_panel_status_painted_text(control.as_mut());
+        let label = painted.iter().find(|text|
+            text.contains(&localizer.text("audio-rack-native-controlled-parameter")))
+            .expect("actual painted native-owned label");
         assert!(
-            label.text().contains("0.38"),
+            label.contains("0.38"),
             "canonical schema-formatted fallback"
         );
-        assert!(control.child(1).unwrap().as_any().unwrap().is::<Button>());
-        let disabled = audio_processor_static_parameter_control(
+        assert!(painted.iter().any(|text| text == &localizer.text("audio-rack-adopt-displayed-value")));
+        let button = control.child(1).unwrap();
+        assert_eq!(button.control_inspection_state().unwrap().role,
+            mondrian_ui_core::AccessibilityRole::Button);
+        assert!(button.can_focus());
+        let mut disabled = audio_processor_static_parameter_control(
             &rack, processor, parameter, numeric, false, &localizer,
         );
-        assert!(disabled.as_any().unwrap().is::<Label>());
+        assert_eq!(disabled.child_count(), 0);
+        assert!(!disabled.can_focus() && disabled.control_inspection_state().is_none());
+        let disabled_paint = owned_panel_status_painted_text(disabled.as_mut());
+        assert_eq!(disabled_paint, vec![label.clone()]);
         assert!(state.active_sequence().unwrap().author_state_eq_ignoring_revision(&before));
         assert_eq!(state.project_author_generation(), generation);
         assert_eq!(state.authoring_history().unwrap().diagnostics(), history);

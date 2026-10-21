@@ -13815,7 +13815,7 @@ impl mondrian_ui_core::DrawCommandEncoder for OwnedPanelStatusPaintEncoder {
     fn pop_transform(&mut self) {}
 }
 
-fn owned_panel_status_painted_text(widget: &mut dyn Widget) -> Vec<String> {
+pub(super) fn owned_panel_status_painted_text(widget: &mut dyn Widget) -> Vec<String> {
     let bounds = Rect::new(0.0, 0.0, 720.0, 420.0);
     widget.layout(bounds);
     let theme = mondrian_ui_theme::ThemePreset::Dark.build();
