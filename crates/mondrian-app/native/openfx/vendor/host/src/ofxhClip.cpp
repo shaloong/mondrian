@@ -314,8 +314,9 @@ namespace OFX {
       // get the virtuals for viewport size, pixel scale, background colour
       void ClipInstance::getIntPropertyN(const std::string &name, int *values, int n) const
       {
-        if(n!=0) throw Property::Exception(kOfxStatErrValue);
-        *values = getIntProperty(name, 0);
+        // n is a value count, not an index. Empty queries never write.
+        if(n < 0 || n > 1) throw Property::Exception(kOfxStatErrBadIndex);
+        if(n == 1) *values = getIntProperty(name, 0);
       }
 
       // get the virtuals for viewport size, pixel scale, background colour
