@@ -664,6 +664,18 @@ pub trait AudioPcmRenderer: Send + Sync + 'static {
         ))
     }
 
+    /// Query one selected parameter on the existing serial native owner. This
+    /// presentation control neither drains callbacks nor grants author values.
+    fn query_native_parameter(
+        &self,
+        _query: &mondrian_core::NativeAudioParameterQuery,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> mondrian_core::Result<mondrian_core::NativeAudioParameterQueryOutcome> {
+        Ok(mondrian_core::NativeAudioParameterQueryOutcome::Refused(
+            mondrian_core::NativeAudioParameterQueryRefusal::UnsupportedAdapter,
+        ))
+    }
+
     /// Execute a closed editor intent on the existing serial render worker.
     /// Address facts are not authority: the actual current Runtime must compare
     /// its installed opaque binding and actual native object before SDK work.
@@ -775,6 +787,16 @@ pub struct AudioOutputLifecycleDiagnostics {
     pub last_lost_generation: Option<u64>,
     /// Frozen evidence for the most recent concrete loss.
     pub last_loss: Option<AudioOutputLossSnapshot>,
+}
+
+/// Completion of one explicit asynchronous presentation query. Cancellation is
+/// ordinary completion, independent of native failure or Source retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioNativeParameterQueryCompletion {
+    /// Actual result from the current installed renderer.
+    Completed(mondrian_core::NativeAudioParameterQueryOutcome),
+    /// The original work was cancelled; no presentation is published.
+    Cancelled,
 }
 
 /// Structured lifecycle and render evidence emitted by one poll.
@@ -972,6 +994,19 @@ pub enum AudioPlaybackEvent {
         /// Historical install/ack result and current-owner admission.
         status: AudioPcmNativeAuthorHandoffStatus,
     },
+    /// Completion of one parent-ticketed explicit query on the serial worker.
+    NativeParameterQueryCompleted {
+        /// Parent UI request serial; never sent to the native child.
+        ticket: std::num::NonZeroU64,
+        /// Actual current renderer materialization.
+        renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+        /// Original Media work generation.
+        generation: u64,
+        /// Exact selected installed target and canonical schema identity.
+        query: mondrian_core::NativeAudioParameterQuery,
+        /// Ordinary cancellation or the original bounded query result.
+        completion: AudioNativeParameterQueryCompletion,
+    },
     /// Actual native editor control evidence from the same serial worker.
     /// Open requires the current install; Close also admits the retained actual
     /// attachment through Runtime. Neither authorizes callbacks or history.
@@ -1117,9 +1152,36 @@ enum RenderWork {
     NativeReprepare(Box<native_reprepare::NativeReprepareWork>),
     Pcm(PcmRenderWork),
     NativeEditor(Box<NativeEditorWork>),
+    NativeParameterQuery(Box<NativeParameterQueryWork>),
     NativeObservations(NativeObservationWork),
     NativeAuthorHandoff(Box<native_author::NativeAuthorHandoffWork>),
     NativeOwnerBindings(NativeOwnerBindingWork),
+}
+
+struct NativeParameterQueryPending {
+    ticket: std::num::NonZeroU64,
+    generation: u64,
+    renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+    query: mondrian_core::NativeAudioParameterQuery,
+}
+struct NativeParameterQueryWork {
+    ticket: std::num::NonZeroU64,
+    generation: u64,
+    renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+    renderer: Arc<dyn AudioPcmRenderer>,
+    claim: AudioOwnerInstallationClaim,
+    cancellation: ExecutionCancellationToken,
+    query: mondrian_core::NativeAudioParameterQuery,
+}
+
+struct NativeParameterQueryCompletion {
+    ticket: std::num::NonZeroU64,
+    generation: u64,
+    renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
+    installed_generation: std::num::NonZeroU64,
+    cancellation: ExecutionCancellationToken,
+    query: mondrian_core::NativeAudioParameterQuery,
+    completion: AudioNativeParameterQueryCompletion,
 }
 
 struct NativeEditorWork {
@@ -1169,6 +1231,7 @@ enum RenderCompletion {
     NativeAuthorTerminalBatch(author_batch::Completion),
     Pcm(PcmRenderCompletion),
     NativeEditor(Box<NativeEditorCompletion>),
+    NativeParameterQuery(Box<NativeParameterQueryCompletion>),
     NativeObservations {
         generation: u64,
         renderer_id: mondrian_core::AudioPcmRendererMaterializationId,
@@ -1301,7 +1364,8 @@ impl RenderWorkQueue {
         let limit = match &work {
             RenderWork::Pcm(_) => self.pcm_capacity,
             RenderWork::NativeEditor(_) => MAX_PENDING_NATIVE_EDITOR_WORK,
-            RenderWork::NativeObservations(_)
+            RenderWork::NativeParameterQuery(_)
+            | RenderWork::NativeObservations(_)
             | RenderWork::NativeReprepare(_)
             | RenderWork::NativeAuthorHandoff(_)
             | RenderWork::NativeOwnerBindings(_) => 1,
@@ -2013,6 +2077,7 @@ pub struct AudioPlayback {
         mondrian_core::AudioPcmRendererMaterializationId,
         mondrian_core::NativeAudioEditorTarget,
     )>,
+    native_parameter_query_pending: Option<NativeParameterQueryPending>,
     source_close_admission: Option<source_close::SourceCloseAdmission>,
     native_diagnostic_in_flight: Option<(u64, mondrian_core::AudioPcmRendererMaterializationId)>,
     native_author_handoff_in_flight:
@@ -2292,6 +2357,7 @@ impl AudioPlayback {
             owner_installation: Arc::new(AudioOwnerInstallationSource::new()),
             native_owner_binding_status: None,
             native_editor_attachment: None,
+            native_parameter_query_pending: None,
             source_close_admission: None,
             native_diagnostic_in_flight: None,
             native_author_handoff_in_flight: None,
@@ -3033,6 +3099,84 @@ impl AudioPlayback {
         self.renderer.is_some()
     }
 
+    /// Queue one explicit query from an actually opened current surface. The
+    /// parent ticket correlates only this asynchronous request, not native work.
+    pub fn request_native_parameter_query(
+        &mut self,
+        ticket: std::num::NonZeroU64,
+        query: mondrian_core::NativeAudioParameterQuery,
+    ) -> Result<Result<(), mondrian_core::NativeAudioParameterQueryRefusal>, AudioPlaybackError>
+    {
+        use mondrian_core::NativeAudioParameterQueryRefusal as Refusal;
+        self.ensure_source_close_idle()?;
+        self.ensure_render_execution_available()?;
+        if query.parameter.storage_owner().capacity() > 255 {
+            return Ok(Err(Refusal::ParameterUnavailable));
+        }
+        if self.native_parameter_query_pending.is_some() || self.native_control_hold.is_some() {
+            return Ok(Err(Refusal::Busy));
+        }
+        let Some(renderer) = self.renderer.as_ref() else {
+            return Ok(Err(Refusal::Unavailable));
+        };
+        let Some(claim) = self.owner_installation.current_claim()? else {
+            return Ok(Err(Refusal::Unavailable));
+        };
+        if claim.generation() != query.target.installed_generation
+            || self.native_editor_attachment != Some((renderer.materialization_id, query.target))
+        {
+            return Ok(Err(Refusal::OwnerChanged));
+        }
+        let pending = NativeParameterQueryPending {
+            ticket,
+            generation: self.generation,
+            renderer_id: renderer.materialization_id,
+            query: query.clone(),
+        };
+        let work = RenderWork::NativeParameterQuery(Box::new(NativeParameterQueryWork {
+            ticket,
+            generation: self.generation,
+            renderer_id: renderer.materialization_id,
+            renderer: Arc::clone(&renderer.owner),
+            claim,
+            cancellation: self.generation_cancellation.clone(),
+            query,
+        }));
+        if let Err(work) = self.render_queue.push(work) {
+            self.handoff_retired_render_owners(VecDeque::from([work]), None);
+            return Ok(Err(Refusal::Busy));
+        }
+        self.native_parameter_query_pending = Some(pending);
+        Ok(Ok(()))
+    }
+
+    // Complete accepted parent work even if its queued native request was
+    // retired without execution. Keep one bounded pending request until Poll
+    // emits its terminal event; an older worker reply cannot release a new one.
+    fn cancel_stale_native_parameter_query(&mut self, events: &mut Vec<AudioPlaybackEvent>) {
+        let stale = self.native_parameter_query_pending.as_ref().is_some_and(|pending| {
+            self.shutdown_requested
+                || self.render_execution_unavailable
+                || self.native_control_hold.is_some()
+                || pending.generation != self.generation
+                || self
+                    .renderer
+                    .as_ref()
+                    .is_none_or(|renderer| renderer.materialization_id != pending.renderer_id)
+                || self.native_editor_attachment
+                    != Some((pending.renderer_id, pending.query.target))
+        });
+        if stale {
+            let pending = self.native_parameter_query_pending.take().expect("stale pending query");
+            events.push(AudioPlaybackEvent::NativeParameterQueryCompleted {
+                ticket: pending.ticket,
+                renderer_id: pending.renderer_id,
+                generation: pending.generation,
+                query: pending.query,
+                completion: AudioNativeParameterQueryCompletion::Cancelled,
+            });
+        }
+    }
     /// Queue one closed editor intent through the existing bounded render work.
     /// This performs no foreign Runtime getter or DSP mutex wait on the caller;
     /// current metadata only admits queuing, never native or author permission.
@@ -3936,6 +4080,7 @@ impl AudioPlayback {
     ) -> Result<AudioPlaybackPoll, AudioPlaybackError> {
         let mut events = Vec::new();
         if self.render_execution_unavailable || self.shutdown_requested {
+            self.cancel_stale_native_parameter_query(&mut events);
             return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
         if self.render_retirement_faulted.load(AtomicOrdering::Acquire) {
@@ -3944,12 +4089,14 @@ impl AudioPlayback {
                     reason: "render-owner retirement became unavailable".to_owned(),
                 });
             }
+            self.cancel_stale_native_parameter_query(&mut events);
             return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
         if let Some(reason) = self.finished_render_worker_reason() {
             if self.mark_render_execution_unavailable() {
                 events.push(AudioPlaybackEvent::RenderWorkerStoppedUnexpectedly { reason });
             }
+            self.cancel_stale_native_parameter_query(&mut events);
             return Ok(AudioPlaybackPoll { snapshot: self.snapshot(mode), events });
         }
 
@@ -3957,6 +4104,7 @@ impl AudioPlayback {
         // generation rotation and the largest sample-cursor advance before an
         // output event, completion, queue entry, or callback state is consumed.
         let preflight = self.validate_poll_arithmetic(mode, authority)?;
+        self.cancel_stale_native_parameter_query(&mut events);
         let mut elapsed_skip_frames = preflight.elapsed_skip_frames;
         let mut admission_target_frames = preflight.admission_target_frames;
         let mut generation_rotations = 0_u64;
@@ -4147,6 +4295,49 @@ impl AudioPlayback {
                 }
                 RenderCompletion::NativeAuthorHandoff(completion) => {
                     self.accept_native_author_handoff_completion(*completion, &mut events);
+                    continue;
+                }
+                RenderCompletion::NativeParameterQuery(completion) => {
+                    let NativeParameterQueryCompletion {
+                        ticket,
+                        generation,
+                        renderer_id,
+                        installed_generation,
+                        cancellation,
+                        query,
+                        mut completion,
+                    } = *completion;
+                    if !self.native_parameter_query_pending.as_ref().is_some_and(|pending| {
+                        (pending.ticket, pending.generation, pending.renderer_id)
+                            == (ticket, generation, renderer_id)
+                    }) {
+                        self.stale_completion_count = self.stale_completion_count.saturating_add(1);
+                        continue;
+                    }
+                    if cancellation.is_canceled() {
+                        completion = AudioNativeParameterQueryCompletion::Cancelled;
+                    }
+                    let current = generation == self.generation
+                        && self
+                            .renderer
+                            .as_ref()
+                            .is_some_and(|renderer| renderer.materialization_id == renderer_id)
+                        && self
+                            .owner_installation
+                            .current_claim()?
+                            .is_some_and(|claim| claim.generation() == installed_generation)
+                        && self.native_editor_attachment == Some((renderer_id, query.target));
+                    self.native_parameter_query_pending = None;
+                    if !current {
+                        completion = AudioNativeParameterQueryCompletion::Cancelled;
+                    }
+                    events.push(AudioPlaybackEvent::NativeParameterQueryCompleted {
+                        ticket,
+                        renderer_id,
+                        generation,
+                        query,
+                        completion,
+                    });
                     continue;
                 }
                 RenderCompletion::NativeEditor(completion) => {
@@ -5207,6 +5398,10 @@ fn retire_render_completion(
             }
             None
         }
+        RenderCompletion::NativeParameterQuery(completion) => {
+            drop(completion);
+            None
+        }
         RenderCompletion::NativeEditor(completion) => {
             let NativeEditorCompletion {
                 renderer_id,
@@ -5405,6 +5600,106 @@ fn run_render_worker(
                 if !publish_render_completion(
                     completion_tx,
                     RenderCompletion::NativeAuthorHandoff(Box::new(completion)),
+                    worker_queue,
+                ) {
+                    break;
+                }
+                continue;
+            }
+            RenderWork::NativeParameterQuery(work) => {
+                use mondrian_core::{
+                    NativeAudioParameterQueryOutcome as Out,
+                    NativeAudioParameterQueryRefusal as Refusal,
+                };
+                use AudioNativeParameterQueryCompletion as Completion;
+                let NativeParameterQueryWork {
+                    ticket,
+                    generation,
+                    renderer_id,
+                    renderer,
+                    claim,
+                    cancellation,
+                    query,
+                } = *work;
+                let installed_generation = claim.generation();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if cancellation.is_canceled() {
+                        return Err(mondrian_core::MondrianError::Cancelled);
+                    }
+                    let Some(verifier) = renderer.owner_installation_verifier() else {
+                        return Ok(Out::Refused(Refusal::UnsupportedAdapter));
+                    };
+                    if verifier.validate(&claim).is_err() {
+                        return Ok(Out::Refused(Refusal::OwnerChanged));
+                    }
+                    let outcome = renderer.query_native_parameter(&query, &cancellation)?;
+                    if cancellation.is_canceled() {
+                        return Err(mondrian_core::MondrianError::Cancelled);
+                    }
+                    if verifier.validate(&claim).is_err() {
+                        return Ok(Out::Refused(Refusal::OwnerChanged));
+                    }
+                    Ok(outcome)
+                }));
+                let completion = match result {
+                    Ok(Ok(outcome)) => Completion::Completed(outcome),
+                    Ok(Err(mondrian_core::MondrianError::Cancelled)) => Completion::Cancelled,
+                    Ok(Err(error)) => {
+                        enqueue_retired_render_owners(
+                            &worker_queue.retirement_queue,
+                            &worker_queue.retirement_tracker,
+                            RetiredRenderOwners {
+                                pending: VecDeque::new(),
+                                renderers: VecDeque::new(),
+                                errors: VecDeque::from([error]),
+                                native_author_requests: VecDeque::new(),
+                            },
+                        );
+                        Completion::Completed(Out::Refused(Refusal::Unavailable))
+                    }
+                    Err(payload) => {
+                        enqueue_retired_render_owners(
+                            &worker_queue.retirement_queue,
+                            &worker_queue.retirement_tracker,
+                            RetiredRenderOwners {
+                                pending: VecDeque::new(),
+                                renderers: VecDeque::from([renderer]),
+                                errors: VecDeque::new(),
+                                native_author_requests: VecDeque::new(),
+                            },
+                        );
+                        return if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                            RENDER_WORKER_TERMINAL_OPAQUE_PANIC_ABANDONED
+                        } else {
+                            RENDER_WORKER_TERMINAL_PANICKED
+                        };
+                    }
+                };
+                // Retire only this temporary work alias via the original queue;
+                // ordinary cancellation never removes the installed Source.
+                enqueue_retired_render_owners(
+                    &worker_queue.retirement_queue,
+                    &worker_queue.retirement_tracker,
+                    RetiredRenderOwners {
+                        pending: VecDeque::new(),
+                        renderers: VecDeque::from([renderer]),
+                        errors: VecDeque::new(),
+                        native_author_requests: VecDeque::new(),
+                    },
+                );
+                if !publish_render_completion(
+                    completion_tx,
+                    RenderCompletion::NativeParameterQuery(Box::new(
+                        NativeParameterQueryCompletion {
+                            ticket,
+                            generation,
+                            renderer_id,
+                            installed_generation,
+                            cancellation,
+                            query,
+                            completion,
+                        },
+                    )),
                     worker_queue,
                 ) {
                     break;
@@ -5837,6 +6132,9 @@ fn validate_rendered_buffer(
 #[cfg(test)]
 mod tests {
     mod host_output_fader_contracts;
+    mod native_parameter_query_contracts {
+        include!("audio_playback/native_parameter_query_tests.rs");
+    }
     mod source_close_contracts {
         include!("audio_playback/source_close_tests.rs");
     }

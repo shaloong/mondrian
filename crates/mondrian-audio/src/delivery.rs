@@ -185,6 +185,15 @@ impl AudioProgramDeliveryRuntime {
         self.runtime.native_editor_target(address)
     }
 
+    /// Forward one explicit presentation query to the same owned Runtime.
+    pub fn query_native_parameter(
+        &mut self,
+        query: &mondrian_core::NativeAudioParameterQuery,
+        cancellation: &mondrian_core::ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        self.runtime.query_native_parameter(query, cancellation)
+    }
+
     /// Forward one closed editor intent to the same owned Runtime.
     pub fn control_native_editor(
         &mut self,
