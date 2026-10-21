@@ -2535,7 +2535,7 @@ fn explicit_parameter_query_discards_fact_on_actual_source_revocation_or_cancell
         let query = Query { target: lease.editor_target(), parameter: id };
         let cancel = ExecutionCancellationToken::new();
         if revoke {
-            *state.query_revoke_source.lock().unwrap() = Some(source.clone());
+            *state.query_revoke_source.lock().unwrap() = Some(source);
         } else {
             *state.query_cancel.lock().unwrap() = Some(cancel.clone());
         }
