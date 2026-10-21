@@ -1579,3 +1579,4 @@ native-editor-cleanup-pending = 原生编辑器尚待清理
 native-editor-failed = 原生编辑器请求失败
 
 audio-rack-native-controlled-parameter = 由插件控制
+audio-rack-adopt-displayed-value = 采用显示值

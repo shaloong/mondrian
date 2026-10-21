@@ -552,6 +552,74 @@ impl AppState {
         observation.facts().iter().rev().find(|fact| &fact.parameter == id)
     }
 
+    /// Read the sole presentation cache after checking the complete static
+    /// owner and installed identity. This never queries the plug-in.
+    pub(super) fn native_audio_parameter_adoption_snapshot(
+        &self,
+        scalar: &super::parameter_gesture::AudioScalarGestureTarget,
+    ) -> Option<super::parameter_gesture::DisplayedNativeParameterIdentity> {
+        use super::parameter_gesture::{AudioScalarOwner, DisplayedNativeParameterIdentity};
+        let AudioScalarOwner::Parameter {
+            owner, processor_id, definition, parameter_schema,
+        } = &scalar.owner else {
+            return None;
+        };
+        let context = self.native_audio_editor.as_ref()?;
+        if context.queued.is_some()
+            || self.native_audio_author_work.as_ref()
+                .is_some_and(NativeAudioAuthorWork::blocks_source_replacement)
+            || context.payload.session_id != scalar.lease.session_id
+            || context.payload.sequence_id != scalar.lease.sequence_id
+            || context.payload.processor_id != *processor_id
+            || context.payload.definition != *definition
+            || Some(context.payload.address) != scalar.owner.processor_address()
+            || context.schemas.get(&parameter_schema.parameter_id) != Some(&**parameter_schema)
+        {
+            return None;
+        }
+        let (occurrence, native_owner, insertion) = match *owner {
+            mondrian_audio::AudioProcessorInputInspectionTarget::ChannelStrip { owner, rack } => {
+                let native_owner = match owner {
+                    AudioChannelStripOwner::Track { track_id } => Owner::Track(track_id),
+                    AudioChannelStripOwner::Bus { bus_id } => Owner::Bus(bus_id),
+                    AudioChannelStripOwner::ProgramOutput { output_id } => Owner::Output(output_id),
+                };
+                let insertion = match rack {
+                    AudioChannelStripRack::PreFader => Insertion::PreFader,
+                    AudioChannelStripRack::PostFader => Insertion::PostFader,
+                };
+                (None, native_owner, insertion)
+            }
+            mondrian_audio::AudioProcessorInputInspectionTarget::ProcessingScope {
+                scope_id, occurrence,
+            } => (
+                Some(occurrence),
+                Owner::Contribution { edit_id: occurrence.edit_id, scope_id },
+                Insertion::Scope,
+            ),
+        };
+        let locator = NativeAudioEditorLocator {
+            sequence: scalar.lease.sequence_id,
+            instance: *processor_id,
+            owner: native_owner,
+            insertion,
+        };
+        let observation = context.parameter_observation.as_ref()?;
+        if context.payload.occurrence != occurrence
+            || context.locator != locator
+            || context.target != Some(observation.target())
+            || !locator.matches_target(observation.target())
+        {
+            return None;
+        }
+        let fact = observation.facts().iter().rev()
+            .find(|fact| fact.parameter == parameter_schema.parameter_id)?;
+        if !matches!(fact.origin, mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. }) {
+            return None;
+        }
+        DisplayedNativeParameterIdentity::from_observation(observation, fact)
+    }
+
     pub(super) fn observe_native_audio_author_proposal(
         &mut self,
         proposal: mondrian_core::NativeAudioAuthorProposal,

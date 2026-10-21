@@ -2357,12 +2357,18 @@ pub(super) fn audio_processor_static_parameter_control(
     localizer: &Localizer,
 ) -> Box<dyn Widget> {
     let Some(static_value) = parameter.static_value else {
-        // A native plain observation is presentation only. It does not create
-        // Some(automation), enable a host slider or fabricate a default value.
-        let text = parameter
-            .native_presentation
-            .as_ref()
-            .and_then(|fact| fact.value_bits.and(fact.display.as_ref()))
+        // Native plain/display data never supplies the canonical author value.
+        // A snapshot stays native-owned until the explicit one-shot adoption.
+        let display = parameter.native_presentation.as_ref().and_then(|fact| {
+            fact.value_bits.and(fact.display.clone()).or_else(|| {
+                fact.author_value_bits.map(f64::from_bits).filter(|value| value.is_finite())
+                    .map(|value| {
+                        let decimals = audio_processor_parameter_decimals(numeric.step);
+                        format!("{value:.decimals$}")
+                    })
+            })
+        });
+        let text = display.as_ref()
             .map(|display| {
                 format!(
                     "{} · {}",
@@ -2371,7 +2377,26 @@ pub(super) fn audio_processor_static_parameter_control(
                 )
             })
             .unwrap_or_else(|| localizer.text("audio-rack-native-controlled-parameter"));
-        return Box::new(Label::new(text).muted());
+        let label = Box::new(Label::new(text).muted());
+        let action = parameter.native_adoption.as_ref().filter(|_| can_edit).map(|edit| {
+            crate::app::parameter_gesture::ParameterGestureAction::AdoptDisplayedNativeParameter {
+                edit: edit.clone(),
+            }.action()
+        });
+        let Some(action) = action else {
+            return label;
+        };
+        let adopt = Button::new(localizer.text("audio-rack-adopt-displayed-value"))
+            .with_control_inspection_key(audio_rack_control_inspection_key(
+                rack, Some(processor), "parameter-adopt-displayed",
+                AudioRackControlSubject::Parameter(&parameter.schema),
+            ))
+            .minimal()
+            .on_click(Some(action));
+        return Box::new(FlexContainer::row(vec![
+            FlexChild::flex(label, 1.0),
+            FlexChild::fixed(Box::new(adopt)),
+        ]).with_gap(mondrian_ui_theme::current_theme().spacing.xs));
     };
     let target = can_edit
         .then(|| {

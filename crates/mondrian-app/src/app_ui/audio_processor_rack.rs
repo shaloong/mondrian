@@ -67,6 +67,8 @@ pub(crate) struct AudioProcessorParameterModel {
     pub(crate) schema: ParameterSchema,
     pub(crate) static_value: Option<f64>,
     pub(crate) native_presentation: Option<mondrian_core::NativeAudioParameterFact>,
+    /// One-shot adoption of the displayed canonical snapshot, never a slider lease.
+    pub(crate) native_adoption: Option<crate::app::parameter_gesture::AdoptDisplayedNativeParameterEdit>,
     /// Persisted discovery visibility used only until an actual same-owner query.
     pub(crate) metadata_hidden: bool,
     pub(crate) keyframe_count: usize,
@@ -169,6 +171,26 @@ pub(crate) fn bind_audio_scalar_author_lease(
                     action,
                 }
             });
+            let adoption_owner = rack.scalar_author_lease
+                .filter(|_| rack.is_editable && processor.native_format.is_some())
+                .zip(rack.input_inspection_target);
+            for parameter in &mut processor.parameters {
+                parameter.native_adoption = adoption_owner
+                    .filter(|_| parameter.static_value.is_none())
+                    .and_then(|(lease, owner)| {
+                        state.displayed_native_parameter_adoption(
+                            crate::app::parameter_gesture::AudioScalarGestureTarget {
+                                lease,
+                                owner: crate::app::parameter_gesture::AudioScalarOwner::Parameter {
+                                    owner,
+                                    processor_id: processor.processor_id,
+                                    definition: processor.definition.clone(),
+                                    parameter_schema: Box::new(parameter.schema.clone()),
+                                },
+                            },
+                        )
+                    });
+            }
             for route in &mut processor.sidechain_routes {
                 route.scalar_target = rack.scalar_author_lease.filter(|_| rack.is_editable && route.is_editable && route.static_gain.is_some())
                     .zip(rack.input_inspection_target).map(|(lease, owner)| crate::app::parameter_gesture::AudioScalarGestureTarget {
@@ -651,6 +673,7 @@ fn project_processor(
                     schema: parameter.schema.clone(),
                     static_value: parameter.automation.as_ref().map(|curve| curve.default_value),
                     native_presentation: None,
+                    native_adoption: None,
                     metadata_hidden: parameter.ui.hidden,
                     keyframe_count: parameter
                         .automation

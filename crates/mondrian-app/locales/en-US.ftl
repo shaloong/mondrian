@@ -1647,3 +1647,4 @@ native-editor-cleanup-pending = Native editor cleanup is pending
 native-editor-failed = The native editor request failed
 
 audio-rack-native-controlled-parameter = Controlled by plugin
+audio-rack-adopt-displayed-value = Adopt displayed value

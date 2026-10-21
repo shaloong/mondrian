@@ -155,6 +155,57 @@ pub(crate) struct AudioScalarValueEdit {
     pub(crate) value: f64,
 }
 
+/// Dynamic installation identity of an already displayed canonical MainQuery value.
+/// The scalar owner supplies instance/occurrence/insertion; this is no native lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DisplayedNativeParameterIdentity {
+    pub(crate) root_plan: mondrian_core::AudioPreparedPlanId,
+    pub(crate) root_session: mondrian_core::AudioRenderSessionId,
+    pub(crate) local_plan: mondrian_core::AudioPreparedPlanId,
+    pub(crate) local_session: mondrian_core::AudioRenderSessionId,
+    pub(crate) continuity_epoch: Option<u64>,
+    pub(crate) binding: mondrian_core::AudioProcessorBindingId,
+    pub(crate) installed_generation: std::num::NonZeroU64,
+    pub(crate) process_id: std::num::NonZeroU32,
+    pub(crate) object_serial: std::num::NonZeroU64,
+    pub(crate) source_revision: u64,
+    pub(crate) fact_revision: u64,
+    pub(crate) author_value_bits: u64,
+}
+
+impl DisplayedNativeParameterIdentity {
+    pub(super) fn from_observation(
+        observation: &mondrian_core::NativeAudioParameterObservation,
+        fact: &mondrian_core::NativeAudioParameterFact,
+    ) -> Option<Self> {
+        let target = observation.target();
+        Some(Self {
+            root_plan: target.root_plan,
+            root_session: target.root_session,
+            local_plan: target.local_plan,
+            local_session: target.local_session,
+            continuity_epoch: target.continuity_epoch,
+            binding: target.binding,
+            installed_generation: target.installed_generation,
+            process_id: observation.process_id(),
+            object_serial: observation.object_serial(),
+            source_revision: observation.source_revision(),
+            fact_revision: fact.revision,
+            author_value_bits: fact.author_value_bits?,
+        })
+    }
+}
+
+/// One explicit adoption of the canonical snapshot painted by a fresh control.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdoptDisplayedNativeParameterEdit {
+    pub(crate) target: Box<AudioScalarGestureTarget>,
+    pub(crate) expected_author_generation: u64,
+    pub(crate) expected: DisplayedNativeParameterIdentity,
+}
+
 /// Stable owner of a local numeric curve draft, before its single release commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "owner", rename_all = "snake_case", deny_unknown_fields)]
@@ -195,6 +246,10 @@ impl ParameterCurveGestureTarget {
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 /// Explicit lifecycle events; no nested or opaque author commands are admitted.
 pub(crate) enum ParameterGestureAction {
+    /// Adopt one displayed native snapshot into a previously unowned parameter.
+    AdoptDisplayedNativeParameter {
+        edit: AdoptDisplayedNativeParameterEdit,
+    },
     /// Confirm one exact audio scalar value from keyboard or numeric input.
     SetAudioScalar {
         edit: AudioScalarValueEdit,
@@ -535,6 +590,75 @@ impl AppState {
         }
     }
 
+    /// Project a one-shot intent from the same current author and presentation view.
+    pub(crate) fn displayed_native_parameter_adoption(
+        &self,
+        target: AudioScalarGestureTarget,
+    ) -> Option<AdoptDisplayedNativeParameterEdit> {
+        let edit = AdoptDisplayedNativeParameterEdit {
+            expected: self.native_audio_parameter_adoption_snapshot(&target)?,
+            target: Box::new(target),
+            expected_author_generation: self.project_author_generation(),
+        };
+        self.validate_displayed_native_parameter_adoption(&edit)?;
+        Some(edit)
+    }
+
+    fn validate_displayed_native_parameter_adoption(
+        &self,
+        edit: &AdoptDisplayedNativeParameterEdit,
+    ) -> Option<f64> {
+        if edit.expected_author_generation == 0
+            || self.project_author_generation() != edit.expected_author_generation
+            || self.authoring_session_id() != Some(edit.target.lease.session_id)
+            || self.active_sequence_id() != Some(edit.target.lease.sequence_id)
+        {
+            return None;
+        }
+        let AudioScalarOwner::Parameter {
+            owner, processor_id, definition, parameter_schema,
+        } = &edit.target.owner else {
+            return None;
+        };
+        let processor =
+            self.current_audio_scalar_processor(*owner, *processor_id, definition)?;
+        let parameter = processor.parameters.get(&parameter_schema.parameter_id)?;
+        if parameter.schema != **parameter_schema || parameter.automation.is_some() {
+            return None;
+        }
+        let current = self.native_audio_parameter_adoption_snapshot(&edit.target)?;
+        if current != edit.expected {
+            return None;
+        }
+        let value = f64::from_bits(current.author_value_bits);
+        // Validate through the unique Timeline implementation before finish or
+        // author mutation. This clone is never installed or sent to a worker.
+        let mut candidate = parameter.clone();
+        candidate.set_automation(
+            mondrian_core::ExactAutomationCurve::new(
+                parameter_schema.parameter_id.clone(), value,
+            ).ok()?,
+        ).ok()?;
+        Some(value)
+    }
+
+    fn adopt_displayed_native_parameter(
+        &mut self,
+        edit: AdoptDisplayedNativeParameterEdit,
+    ) -> Result<()> {
+        self.validate_displayed_native_parameter_adoption(&edit)
+            .ok_or_else(|| gesture_error("displayed native parameter is no longer current"))?;
+        self.finish_parameter_gesture()?;
+        let value = self.validate_displayed_native_parameter_adoption(&edit)
+            .ok_or_else(|| gesture_error("displayed native parameter changed while finishing"))?;
+        self.dispatch_product_action(
+            ParameterGestureEdit::AudioScalar(AudioScalarValueEdit {
+                target: edit.target,
+                value,
+            }).into_product(),
+        )
+    }
+
     fn parameter_target_is_current(&self, target: &ParameterGestureTarget) -> bool {
         let target = match target {
             ParameterGestureTarget::Visual(target) => target,
@@ -709,6 +833,9 @@ impl AppState {
         action: ParameterGestureAction,
     ) -> Result<()> {
         let (id, edit, begin) = match action {
+            ParameterGestureAction::AdoptDisplayedNativeParameter { edit } => {
+                return self.adopt_displayed_native_parameter(edit);
+            }
             ParameterGestureAction::SetAudioScalar { edit } => {
                 if !self.audio_scalar_target_is_current(&edit.target) {
                     return Err(gesture_error("audio scalar author owner changed"));
