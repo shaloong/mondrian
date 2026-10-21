@@ -4,7 +4,7 @@
 //! values or run DSP. The caller must hold the actual initial lifecycle right.
 
 /// Maximum distinct parameters admitted by this initial-only operation.
-pub const MAX_INITIAL_PARAMETERS: usize = 1024;
+pub const MAX_INITIAL_PARAMETERS: usize = 4096;
 
 /// One current controller value proved against the admitted parameter metadata.
 #[derive(Debug, Clone, Copy, Default)]

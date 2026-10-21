@@ -378,6 +378,59 @@ mod tests {
     }
 
     #[test]
+    fn initial_handoff_full_4096_values_preserves_source_on_refusal_then_transfers_every_input() {
+        let handler = handler();
+        let values = (0..4096)
+            .map(|id| value(id, if id % 2 == 0 { 0.25 } else { 0.75 }))
+            .collect::<Vec<_>>();
+        for value in &values {
+            unsafe {
+                assert_eq!(handler.performEdit(value.id, value.normalized), kResultOk);
+            }
+        }
+        let before = source_snapshot(&handler);
+        let cohort = handler.pending_restart_cohort();
+        assert_eq!(
+            cohort.flags().bits(),
+            0,
+            "exactly 4096 real Value events need no synthetic marker"
+        );
+        let input = ParameterChanges::default();
+        let storage = storage_request(values.len()).unwrap();
+        let short = Storage {
+            com_payload_bytes: storage.com_payload_bytes - 1,
+            ..storage
+        };
+        assert_eq!(
+            handler.handoff_initial_parameters(&input, cohort, before.0, &values, short),
+            Err(Failure::StorageCapacity)
+        );
+        assert_eq!(source_snapshot(&handler), before);
+        assert_eq!(handler.pending_restart_cohort(), cohort);
+        assert_eq!(input.queues.lock().unwrap().capacity(), 0);
+        handler
+            .handoff_initial_parameters(&input, cohort, before.0, &values, storage)
+            .unwrap();
+        assert_eq!(input.used.load(Ordering::Relaxed), 4096);
+        {
+            let queues = input.queues.lock().unwrap();
+            assert_eq!(queues.len(), 4096);
+            for (queue, expected) in queues.iter().zip(&values) {
+                assert_eq!(queue.param_id(), expected.id);
+                assert!(queue.has_initial_origin());
+                assert_eq!(*queue.points.lock().unwrap(), [(0, expected.normalized)]);
+            }
+        }
+        assert!(handler.editor_event_source_status().closed_empty());
+        assert_eq!(
+            handler
+                .editor_event_source_status()
+                .pending_dsp_feedback_values(),
+            0
+        );
+        assert!(!handler.pending_restart_cohort().pending());
+    }
+    #[test]
     fn initial_handoff_refuses_capacity_stale_unknown_and_changed_cohort_without_consumption() {
         for case in 0..5 {
             let handler = handler();

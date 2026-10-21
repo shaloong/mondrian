@@ -264,7 +264,8 @@ fn validate(
                     parameter_storage(total, parameter)
                 }
                 NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values } => {
-                    if values.capacity() > 1024 || (!kind.refreshes_values() && !values.is_empty())
+                    if values.capacity() > mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES
+                        || (!kind.refreshes_values() && !values.is_empty())
                     {
                         return Err(invalid("native rescan shape"));
                     }
@@ -530,14 +531,16 @@ pub(super) fn read_author(
                         let kind = rescan_kind(u32_read(reader)?)?;
                         let count = usize::try_from(u32_read(reader)?)
                             .map_err(|_| invalid("native rescan count"))?;
-                        if count > 1024 || (!kind.refreshes_values() && count != 0) {
+                        if count > mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES
+                            || (!kind.refreshes_values() && count != 0)
+                        {
                             return Err(invalid("native rescan shape"));
                         }
                         let mut values = Vec::new();
                         values
                             .try_reserve_exact(count)
                             .map_err(|_| invalid("native rescan allocation"))?;
-                        if values.capacity() > 1024 {
+                        if values.capacity() > mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES {
                             return Err(invalid("native rescan capacity"));
                         }
                         storage = storage
@@ -796,6 +799,22 @@ mod native_author_wire_contracts {
                     "unknown kind refuses before reading the value count or reserving values"
                 );
             }
+            if kind.refreshes_values() {
+                for oversized in [4097_u32, u32::MAX] {
+                    let mut bad = bytes.clone();
+                    bad[offset + 8..offset + 12].copy_from_slice(&oversized.to_le_bytes());
+                    let mut reader = Cursor::new(bad);
+                    assert_eq!(
+                        read_author(&mut reader, Some(object())).unwrap_err().to_string(),
+                        "native rescan shape"
+                    );
+                    assert_eq!(
+                        reader.position(),
+                        (offset + 12) as u64,
+                        "oversized value count refuses before values or state"
+                    );
+                }
+            }
             if kind == NativeAudioParameterRescanKind::NoValueRefresh {
                 bytes[offset + 8..offset + 12].copy_from_slice(&1_u32.to_le_bytes());
                 let mut reader = Cursor::new(bytes);
@@ -816,7 +835,8 @@ mod native_author_wire_contracts {
             Some(NativeAudioAuthorScalar::admit(0.625).unwrap()),
         )
         .unwrap();
-        let mut oversized = Vec::with_capacity(1025);
+        let mut oversized =
+            Vec::with_capacity(mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES + 1);
         oversized.push(parameter.clone());
         for (kind, values) in [
             (
@@ -845,6 +865,28 @@ mod native_author_wire_contracts {
         }
     }
 
+    #[test]
+    fn native_rescan_wire_preserves_complete_4096_value_payload() {
+        let mut observation = complete();
+        let NativeAudioAuthorDeliveryState::Delivered(delivery) = &mut observation.delivery else {
+            panic!("fixture")
+        };
+        let values = (0..4096)
+            .map(|id| {
+                NativeAudioAuthorParameterEvent::admit(
+                    mondrian_core::ParameterId::new(format!("vst3.full{id}")).unwrap(),
+                    NativeAudioAuthorParameterPhase::Value,
+                    Some(NativeAudioAuthorScalar::admit(0.625).unwrap()),
+                )
+                .unwrap()
+            })
+            .collect();
+        delivery.events = vec![NativeAudioAuthorEvent::ParameterValuesRescanned {
+            kind: NativeAudioParameterRescanKind::Values,
+            values,
+        }];
+        assert_eq!(roundtrip(&observation), observation);
+    }
     #[test]
     fn native_author_parameter_completion_wire_has_independent_kind_and_no_state() {
         use mondrian_core::NativeAudioAuthorCompletion as Completion;

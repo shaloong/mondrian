@@ -11,17 +11,20 @@ use vst3_host::controller_parameters::{
 };
 use vst3_host::plugin::{PluginEditorControl, RestartCohort};
 
+// Presentation selection remains distinct from the complete native directory.
+const MAX_SELECTED_PARAMETERS: usize = 1024;
+
 /// Fixed main-thread scratch, explicitly included in the existing inline fee.
 /// The seen bits validate unique selected identities independently of visit count.
 pub(super) struct ParameterPresentationFrame {
     controller: ControllerParameterPresentationFrame,
-    seen: [bool; MAX_PARAMETERS],
+    seen: [bool; MAX_SELECTED_PARAMETERS],
 }
 impl Default for ParameterPresentationFrame {
     fn default() -> Self {
         Self {
             controller: ControllerParameterPresentationFrame::default(),
-            seen: [false; MAX_PARAMETERS],
+            seen: [false; MAX_SELECTED_PARAMETERS],
         }
     }
 }
@@ -149,7 +152,7 @@ fn capture_with(
     ) -> vst3_host::Result<usize>,
 ) -> Option<Presentations> {
     if parameters.len() > MAX_PARAMETERS
-        || selected.len() > MAX_PARAMETERS
+        || selected.len() > MAX_SELECTED_PARAMETERS
         || selected.is_empty()
         || selected.iter().enumerate().any(|(index, id)| selected[..index].contains(id))
     {
@@ -161,7 +164,7 @@ fn capture_with(
     }
     let mut facts = Vec::new();
     facts.try_reserve_exact(selected.len()).ok()?;
-    if facts.capacity() > MAX_PARAMETERS {
+    if facts.capacity() > MAX_SELECTED_PARAMETERS {
         return None;
     }
     let mut frame = ParameterPresentationFrame::default();
@@ -525,7 +528,7 @@ mod tests {
             }
         )
         .is_err());
-        let parameters = (0..MAX_PARAMETERS as u32).map(parameter).collect::<Vec<_>>();
+        let parameters = (0..MAX_SELECTED_PARAMETERS as u32).map(parameter).collect::<Vec<_>>();
         let selected = parameters.iter().map(|parameter| parameter.id).collect::<Vec<_>>();
         assert_eq!(
             capture_with(
@@ -536,21 +539,62 @@ mod tests {
                     for parameter in &parameters {
                         visit(current(parameter, &title, &title))?;
                     }
-                    Ok(MAX_PARAMETERS)
+                    Ok(MAX_SELECTED_PARAMETERS)
                 }
             )
             .unwrap()
             .facts
             .len(),
-            MAX_PARAMETERS
+            MAX_SELECTED_PARAMETERS
         );
-        let mut too_many = parameters.clone();
-        too_many.push(parameter(1024));
+        let full = (0..MAX_PARAMETERS as u32).map(parameter).collect::<Vec<_>>();
+        let tail = &full[MAX_PARAMETERS - MAX_SELECTED_PARAMETERS..];
+        let tail_ids = tail.iter().map(|parameter| parameter.id).collect::<Vec<_>>();
+        let observed = capture_with(
+            &full,
+            &tail_ids,
+            || Some(snapshot()),
+            |_, visit| {
+                for parameter in tail {
+                    visit(current(parameter, &title, &title))?;
+                }
+                Ok(full.len())
+            },
+        )
+        .unwrap();
+        assert_eq!(observed.facts.len(), MAX_SELECTED_PARAMETERS);
+        assert_eq!(observed.facts[0].parameter, tail[0].parameter_id().unwrap());
+        let last = full.last().unwrap();
+        let single = capture_with(
+            &full,
+            &[last.id],
+            || Some(snapshot()),
+            |_, visit| {
+                visit(current(last, &title, &title))?;
+                Ok(full.len())
+            },
+        )
+        .unwrap();
+        assert_eq!(single.facts.len(), 1);
+        assert_eq!(single.facts[0].parameter, last.parameter_id().unwrap());
+        let mut too_many = full.clone();
+        too_many.push(parameter(MAX_PARAMETERS as u32));
         assert!(capture_with(
             &too_many,
             &selected,
             || Some(snapshot()),
-            |_, _| panic!("count bound before query")
+            |_, _| panic!("full directory bound before query")
+        )
+        .is_none());
+        let too_many_selected = full[..MAX_SELECTED_PARAMETERS + 1]
+            .iter()
+            .map(|parameter| parameter.id)
+            .collect::<Vec<_>>();
+        assert!(capture_with(
+            &full,
+            &too_many_selected,
+            || panic!("selection bound before snapshot"),
+            |_, _| panic!("selection bound before query")
         )
         .is_none());
         let mut long = [0; 128];
@@ -569,7 +613,7 @@ mod tests {
                     for parameter in &large {
                         visit(current(parameter, &long, &long))?;
                     }
-                    Ok(MAX_PARAMETERS)
+                    Ok(MAX_SELECTED_PARAMETERS)
                 }
             )
             .is_none(),

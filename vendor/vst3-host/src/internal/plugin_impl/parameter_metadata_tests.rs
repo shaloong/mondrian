@@ -10,6 +10,7 @@ struct Probe {
     title: [u16; 128],
     units: [u16; 128],
     value: f64,
+    full_writable: bool,
 }
 impl Probe {
     fn new() -> Self {
@@ -24,6 +25,7 @@ impl Probe {
             title,
             units,
             value: 0.25,
+            full_writable: false,
         }
     }
 }
@@ -66,9 +68,17 @@ impl IEditControllerTrait for Controller {
         (*info).units = p.units;
         (*info).defaultNormalizedValue = -0.0;
         (*info).stepCount = 0;
-        (*info).flags = ParameterInfo_::ParameterFlags_::kCanAutomate
-            | ParameterInfo_::ParameterFlags_::kIsReadOnly
-            | (1 << 30);
+        (*info).flags = if p.full_writable {
+            if index % 2 == 0 {
+                ParameterInfo_::ParameterFlags_::kCanAutomate
+            } else {
+                0
+            }
+        } else {
+            ParameterInfo_::ParameterFlags_::kCanAutomate
+                | ParameterInfo_::ParameterFlags_::kIsReadOnly
+                | (1 << 30)
+        };
         kResultOk
     }
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
@@ -288,6 +298,72 @@ pub(super) fn bounds_and_allocations(plugin: &mut PluginImpl) {
             probe.lock().unwrap().calls,
             [("set", 101), ("count", 0)],
             "original drain precedes the single count; no INFO/value query after over-limit rejection"
+        );
+        assert!(plugin.deferred_controller_sync.is_empty());
+    }
+    // The product's complete initial-directory policy is independently bounded
+    // from callers that deliberately keep the original 1024 limit above.
+    let maximum = crate::initial_parameter_input::MAX_INITIAL_PARAMETERS;
+    for count in [2855, 4096] {
+        {
+            let mut p = probe.lock().unwrap();
+            p.count = count;
+            p.skip = None;
+            p.full_writable = true;
+            p.value = 0.625;
+            p.calls.clear();
+            p.calls.reserve(2 * count as usize + 2);
+        }
+        let mut seen = 0;
+        let mut nonautomatable = 0;
+        let (result, operations) =
+            crate::internal::data_exchange::measure_host_allocator_operations_for_test(|| {
+                plugin.visit_parameters_bounded(maximum, &mut frame, &mut |dense, row| {
+                    assert_eq!(dense, seen);
+                    assert_eq!(row.id(), 100 + dense as u32);
+                    assert!(!row.is_read_only());
+                    assert_eq!(row.can_automate(), dense % 2 == 0);
+                    assert_eq!(row.normalized().to_bits(), 0.625_f64.to_bits());
+                    nonautomatable += usize::from(!row.can_automate());
+                    seen += 1;
+                })
+            });
+        assert_eq!(result.unwrap(), count as usize);
+        assert_eq!(seen, count as usize);
+        assert_eq!(
+            nonautomatable,
+            count as usize / 2,
+            "nonautomatable writable rows cannot be filtered"
+        );
+        assert_eq!(
+            operations, 0,
+            "trace and one query frame were prepared before observation"
+        );
+        let expected = std::iter::once(("count", 0))
+            .chain((0..count as u32).flat_map(|index| [("info", index), ("value", 100 + index)]))
+            .collect::<Vec<_>>();
+        assert_eq!(probe.lock().unwrap().calls, expected);
+    }
+    for count in [4097, i32::MAX] {
+        {
+            let mut p = probe.lock().unwrap();
+            p.count = count;
+            p.skip = Some(0);
+            p.calls.clear();
+        }
+        plugin.deferred_controller_sync.push((101, 0.75)).unwrap();
+        let mut seen = 0;
+        let error = plugin
+            .visit_parameters_bounded(maximum, &mut frame, &mut |_, _| seen += 1)
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidParameter(detail) if detail == format!("native parameter count exceeds admitted bound: reported={count} maximum=4096"))
+        );
+        assert_eq!(seen, 0);
+        assert_eq!(
+            probe.lock().unwrap().calls,
+            [("set", 101), ("count", 0)],
+            "over-limit native count must precede every Info/value/visitor"
         );
         assert!(plugin.deferred_controller_sync.is_empty());
     }

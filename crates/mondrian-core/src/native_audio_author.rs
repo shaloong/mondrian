@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub const NATIVE_AUDIO_AUTHOR_CALLBACKS: usize = 4096;
 /// Maximum combined retained value capacities across rescan callbacks in one
 /// native author completion. Initialized value counts do not replace capacities.
-pub const NATIVE_AUDIO_AUTHOR_RESCAN_VALUES: usize = 1024;
+pub const NATIVE_AUDIO_AUTHOR_RESCAN_VALUES: usize = 4096;
 /// Maximum coherent component/controller bytes in one product completion.
 pub const NATIVE_AUDIO_AUTHOR_STATE_BYTES: usize = 128 * 1024;
 
@@ -474,13 +474,19 @@ mod typed_rescan_contracts {
         .is_ok());
         assert_eq!(
             project(
-                vec![rescan(Values, 513), rescan(Values, 513)],
+                vec![rescan(Values, 2048), rescan(Values, 2049)],
                 ParametersOnly,
                 None
             ),
             Err(NativeAudioAuthorProjectionError::Extent)
         );
-        let mut oversized = Vec::with_capacity(1025);
+        assert!(project(
+            vec![rescan(Values, 2048), rescan(Values, 2048)],
+            ParametersOnly,
+            None
+        )
+        .is_ok());
+        let mut oversized = Vec::with_capacity(NATIVE_AUDIO_AUTHOR_RESCAN_VALUES + 1);
         oversized.push((ParameterId::new("test.value").unwrap(), 0.5_f64.to_bits()));
         assert_eq!(
             project(

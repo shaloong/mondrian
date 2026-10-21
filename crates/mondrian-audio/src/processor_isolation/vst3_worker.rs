@@ -150,7 +150,7 @@ pub(super) fn product_plugin_interfaces() -> vst3_host::PluginInterfaceSupport {
         .with(Interface::DataExchangeReceiver);
     interfaces
 }
-const MAX_PARAMETERS: usize = 1024;
+const MAX_PARAMETERS: usize = vst3_host::initial_parameter_input::MAX_INITIAL_PARAMETERS;
 const MAX_EVENTS_PER_BLOCK: usize = 4096;
 
 /// Stable VST3 parameter facts in normalized VST3 coordinates.
@@ -3694,6 +3694,51 @@ mod bus_contract_tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn full_vst3_parameter_capacity_keeps_nonautomatable_input_and_complete_shared_storage() {
+        let mut parameters = (0..2855)
+            .map(|id| Vst3ParameterDescriptor {
+                id,
+                name: format!("Parameter{id}"),
+                default_normalized: 0.5,
+                step_count: 0,
+                can_automate: id % 2 == 0,
+                read_only: false,
+                flags: u32::from(id % 2 == 0),
+            })
+            .collect::<Vec<_>>();
+        let profile = native_worker_lane_profile_for_parameters(&parameters).unwrap().unwrap();
+        let full =
+            vst3_host::initial_parameter_input::InitialParameterStorage::for_parameter_count(2855)
+                .unwrap();
+        assert_eq!(
+            profile.processor_input_storage(),
+            (full.vector_bytes, full.com_payload_bytes),
+            "all writable values, including nonautomatable ones, require original COM storage"
+        );
+        let shared =
+            super::super::protocol::SharedBlockLayout::new(512, 2, 0, parameters.len()).unwrap();
+        assert_eq!(shared.event_capacity, 512 * 2855);
+        assert_eq!(
+            shared.total_bytes - shared.events_offset,
+            23_388_160,
+            "retain the complete B*L*16 reservation"
+        );
+        let template = parameters[0].clone();
+        parameters
+            .extend((2855..4096).map(|id| Vst3ParameterDescriptor { id, ..template.clone() }));
+        let maximum = native_worker_lane_profile_for_parameters(&parameters).unwrap().unwrap();
+        let full =
+            vst3_host::initial_parameter_input::InitialParameterStorage::for_parameter_count(4096)
+                .unwrap();
+        assert_eq!(
+            maximum.processor_input_storage(),
+            (full.vector_bytes, full.com_payload_bytes)
+        );
+        parameters.push(Vst3ParameterDescriptor { id: 4096, ..parameters[0].clone() });
+        assert!(native_worker_lane_profile_for_parameters(&parameters).is_err());
+    }
     #[cfg(windows)]
     #[test]
     fn retained_vst3_bus_scratch_is_charged_once_in_original_main_inline() {

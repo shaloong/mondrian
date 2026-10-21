@@ -2226,55 +2226,58 @@ fn native_author_rescan_runtime_poll_preserves_all_1024_ordered_values() {
 
 #[test]
 fn native_author_rescan_runtime_poll_preserves_exact_512_plus_512_aggregate() {
-    let state = Arc::new(OwnerProbeState::default());
-    let root = sequence_with_parallel_hosted_delay();
-    let mut runtime = owner_probe_runtime(&root, &[], &state);
-    let source = mondrian_core::AudioOwnerInstallationSource::new();
-    let (verifier, claim) = install_probe_runtime(&mut runtime, &source);
-    let mut events = Vec::with_capacity(2);
-    for kind in [mondrian_core::NativeAudioParameterRescanKind::Values; 2] {
-        let values = native_rescan_probe_values(512);
-        assert_eq!(values.len(), 512);
-        assert!(values.capacity() <= 1024);
-        events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
-    }
-    let target = publish_native_rescan_probe(&mut runtime, &state, events);
-    let batch = runtime
-        .poll_native_observations(&ExecutionCancellationToken::new())
-        .expect("the exact combined retained-value boundary must project")
-        .expect("actual installed source observation");
-    let proposal = batch.author.expect("both complete rescan callbacks retained");
-    assert_eq!(proposal.target(), target);
-    assert_eq!(proposal.sequence(), root.id);
-    assert_eq!(proposal.revision(), 8);
-    assert_eq!(
-        proposal.completion(),
-        mondrian_core::NativeAudioAuthorCompletion::ParametersOnly
-    );
-    assert!(proposal.state().is_none());
-    assert_eq!(proposal.callbacks().len(), 2);
-    let mut actual_capacity = 0;
-    for callback in proposal.callbacks() {
-        let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } =
-            callback
-        else {
-            panic!("each original ordered rescan must be retained")
-        };
-        assert_eq!(*kind, mondrian_core::NativeAudioParameterRescanKind::Values);
-        assert_eq!(values.len(), 512);
-        actual_capacity += values.capacity();
-        for (index, (parameter, bits)) in values.iter().enumerate() {
-            assert_eq!(parameter.as_str(), format!("clap.param.{index}"));
-            assert_eq!(*bits, (index as f64 / 1024.0).to_bits());
+    for count in [512, 2048] {
+        let state = Arc::new(OwnerProbeState::default());
+        let root = sequence_with_parallel_hosted_delay();
+        let mut runtime = owner_probe_runtime(&root, &[], &state);
+        let source = mondrian_core::AudioOwnerInstallationSource::new();
+        let (verifier, claim) = install_probe_runtime(&mut runtime, &source);
+        let mut events = Vec::with_capacity(2);
+        for kind in [mondrian_core::NativeAudioParameterRescanKind::Values; 2] {
+            let values = native_rescan_probe_values(count);
+            assert_eq!(values.len(), count);
+            assert!(values.capacity() <= mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES);
+            events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
         }
+        let target = publish_native_rescan_probe(&mut runtime, &state, events);
+        let batch = runtime
+            .poll_native_observations(&ExecutionCancellationToken::new())
+            .expect("the exact combined retained-value boundary must project")
+            .expect("actual installed source observation");
+        let proposal = batch.author.expect("both complete rescan callbacks retained");
+        assert_eq!(proposal.target(), target);
+        assert_eq!(proposal.sequence(), root.id);
+        assert_eq!(proposal.revision(), 8);
+        assert_eq!(
+            proposal.completion(),
+            mondrian_core::NativeAudioAuthorCompletion::ParametersOnly
+        );
+        assert!(proposal.state().is_none());
+        assert_eq!(proposal.callbacks().len(), 2);
+        let mut actual_capacity = 0;
+        for callback in proposal.callbacks() {
+            let mondrian_core::NativeAudioAuthorCallback::ParameterValuesRescanned { kind, values } =
+                callback
+            else {
+                panic!("each original ordered rescan must be retained")
+            };
+            assert_eq!(*kind, mondrian_core::NativeAudioParameterRescanKind::Values);
+            assert_eq!(values.len(), count);
+            actual_capacity += values.capacity();
+            for (index, (parameter, bits)) in values.iter().enumerate() {
+                assert_eq!(parameter.as_str(), format!("clap.param.{index}"));
+                assert_eq!(*bits, (index as f64 / 1024.0).to_bits());
+            }
+        }
+        assert_eq!(
+            actual_capacity,
+            2 * count,
+            "actual aggregate capacity, not only initialized count"
+        );
+        verifier.validate(&claim).expect("poll grants no new Source generation");
+        assert_eq!(state.entries.load(Ordering::Acquire), 0);
+        assert_eq!(state.processes.load(Ordering::Acquire), 0);
     }
-    assert_eq!(
-        actual_capacity, 1024,
-        "actual aggregate capacity, not only initialized count"
-    );
-    verifier.validate(&claim).expect("poll grants no new Source generation");
-    assert_eq!(state.entries.load(Ordering::Acquire), 0);
-    assert_eq!(state.processes.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -2285,10 +2288,10 @@ fn native_author_rescan_runtime_poll_refuses_aggregate_values_above_existing_ext
     let source = mondrian_core::AudioOwnerInstallationSource::new();
     install_probe_runtime(&mut runtime, &source);
     let mut events = Vec::with_capacity(2);
-    for _ in 0..2 {
-        let values = native_rescan_probe_values(513);
-        assert_eq!(values.len(), 513);
-        assert!(values.capacity() <= 1024);
+    for count in [2048, 2049] {
+        let values = native_rescan_probe_values(count);
+        assert_eq!(values.len(), count);
+        assert!(values.capacity() <= mondrian_core::NATIVE_AUDIO_AUTHOR_RESCAN_VALUES);
         events.push(crate::NativeAudioAuthorEvent::ParameterValuesRescanned {
             kind: mondrian_core::NativeAudioParameterRescanKind::Values,
             values,
@@ -2297,7 +2300,7 @@ fn native_author_rescan_runtime_poll_refuses_aggregate_values_above_existing_ext
     publish_native_rescan_probe(&mut runtime, &state, events);
     let error = runtime
         .poll_native_observations(&ExecutionCancellationToken::new())
-        .expect_err("two individually bounded rescans cannot bypass the aggregate 1024 limit");
+        .expect_err("two individually bounded rescans cannot bypass the aggregate 4096 limit");
     assert!(
         matches!(error, AudioProcessorHostError::InvalidContract(detail)
         if detail == "native author completion extent is invalid")

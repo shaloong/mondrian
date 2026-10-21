@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::num::NonZeroU64;
 
 const MAGIC: u32 = u32::from_le_bytes(*b"MANC");
-const MAX_LANES: usize = 1024;
+const MAX_LANES: usize = 4096;
 const MAX_STATE: usize = 128 * 1024;
 const MAX_BUFFER_GRANT: usize = 1024 * 1024;
 const REQUEST_SIZE: usize = 40;
@@ -573,6 +573,56 @@ mod tests {
         assert!(read_reply(&mut oversized.as_slice(), &request).is_err());
     }
 
+    #[test]
+    fn native_configuration_wire_keeps_full_4096_lane_admission_and_independent_byte_limits() {
+        let values = (0..4096)
+            .map(|index| if index % 2 == 0 { 0.25 } else { 0.75 })
+            .collect::<Vec<_>>();
+        let request = NativeConfigurationControlRequest {
+            expected_cohort: NativeRequestCohort::new(1, NativeAudioReprepareRequest::ClapRestart)
+                .unwrap(),
+            control_token: NonZeroU64::new(17).unwrap(),
+            canonical_constant_values: &values,
+            configuration_limit_bytes: MAX_STATE,
+            control_buffer_grant_bytes: MAX_BUFFER_GRANT,
+        };
+        let mut bytes = Vec::new();
+        write_request(&mut bytes, &request).unwrap();
+        let decoded = read_request(&mut bytes.as_slice(), 4096).unwrap();
+        assert_eq!(decoded.values, values);
+        assert!(
+            read_request(&mut bytes.as_slice(), 2855).is_err(),
+            "the prepared processor's exact lane count remains authoritative"
+        );
+        let mut bad = bytes.clone();
+        put_u32(&mut bad, 20, 4097);
+        let mut reader = bad.as_slice();
+        assert_eq!(
+            read_request(&mut reader, 4097).err().unwrap().to_string(),
+            "native control request bounds rejected before allocation"
+        );
+        assert_eq!(bad.len() - reader.len(), REQUEST_SIZE);
+        let mut bad = bytes.clone();
+        put_u64(&mut bad, 32, (values.len() * size_of::<f64>() - 1) as u64);
+        let mut reader = bad.as_slice();
+        assert_eq!(
+            read_request(&mut reader, 4096).err().unwrap().to_string(),
+            "native control request bounds rejected before allocation"
+        );
+        assert_eq!(bad.len() - reader.len(), REQUEST_SIZE);
+        let mut bad = bytes;
+        put_u64(&mut bad, 24, (MAX_STATE + 1) as u64);
+        assert!(read_request(&mut bad.as_slice(), 4096).is_err());
+        let too_many = vec![0.5; 4097];
+        let invalid = NativeConfigurationControlRequest {
+            canonical_constant_values: &too_many,
+            control_buffer_grant_bytes: MAX_BUFFER_GRANT,
+            ..request
+        };
+        let mut unpublished = Vec::new();
+        assert!(write_request(&mut unpublished, &invalid).is_err());
+        assert!(unpublished.is_empty());
+    }
     #[test]
     fn native_configuration_wire_keeps_exact_tokens_codecs_and_separate_parent_capacity() {
         let cohort =
