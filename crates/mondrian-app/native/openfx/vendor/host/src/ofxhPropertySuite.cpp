@@ -286,7 +286,7 @@ namespace OFX {
       /// set one value
       template<class T> void PropertyTemplate<T>::setValue(const typename T::Type &value, int index)
       {
-        if (index < 0 || ((size_t)index > _value.size() && _dimension)) {
+        if (index < 0 || (_dimension && index >= _dimension)) {
           throw Exception(kOfxStatErrBadIndex);
         }
 
@@ -301,10 +301,10 @@ namespace OFX {
       /// set multiple values
       template<class T> void PropertyTemplate<T>::setValueN(const typename T::APIType *value, int count)
       {
-        if (_dimension && ((size_t)count > _value.size())) {
+        if (count < 0 || (_dimension && count > _dimension)) {
           throw Exception(kOfxStatErrBadIndex);
         }
-        if (_value.size() != (size_t)count) {
+        if (!_dimension && _value.size() != (size_t)count) {
           _value.resize(count);
         }
         for (int i=0;i<count;i++) {
