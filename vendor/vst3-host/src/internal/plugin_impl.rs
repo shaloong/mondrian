@@ -13568,6 +13568,12 @@ mod restored_audio_activation_tests {
         assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
     }
     #[test]
+    fn audio_bus_arrangement_status_failures_keep_owned_borrowed_error_order_and_frame_reuse() {
+        let mut f = Fixture::new(vec![true, false], vec![true, false]);
+        super::audio_bus_observation_tests::arrangement_status(&mut f.plugin);
+        assert_eq!(f.probe.lock().unwrap().dsp_calls, 0);
+    }
+    #[test]
     fn bounded_audio_bus_observation_caps_each_actual_direction_before_iteration() {
         let mut f = Fixture::new(vec![true; 32], vec![true; 32]);
         super::audio_bus_observation_tests::bounds(&mut f.plugin);

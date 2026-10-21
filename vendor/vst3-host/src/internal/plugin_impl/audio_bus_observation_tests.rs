@@ -17,6 +17,7 @@ struct Probe {
     role: Option<i32>,
     arrangement: Option<u64>,
     arrangement_result: tresult,
+    fail_arrangement: Option<(i32, i32, tresult)>,
 }
 impl Probe {
     fn reset(&mut self, counts: [i32; 4]) {
@@ -122,7 +123,10 @@ impl IAudioProcessorTrait for Component {
         if let Some(value) = p.arrangement {
             *output = value;
         }
-        p.arrangement_result
+        p.fail_arrangement
+            .filter(|(dir, bus, _)| *dir == direction && *bus == index)
+            .map(|(_, _, status)| status)
+            .unwrap_or(p.arrangement_result)
     }
     unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
         self.processor.canProcessSampleSize(size)
@@ -152,6 +156,7 @@ fn attach(plugin: &mut PluginImpl, counts: [i32; 4]) -> Arc<Mutex<Probe>> {
         role: None,
         arrangement: Some(3),
         arrangement_result: kResultOk,
+        fail_arrangement: None,
     }));
     let component = ComWrapper::new(Component {
         original: plugin.component.clone(),
@@ -210,12 +215,12 @@ pub(super) fn query_order(plugin: &mut PluginImpl) {
     assert_eq!(observed.output_arrangements, arrangements.outputs);
     assert_eq!(probe.lock().unwrap().calls, calls);
 
-    // Status is ignored even when failure writes an arrangement; a following
-    // failure that writes nothing must observe zero rather than the prior value.
-    for value in [Some(5), None] {
+    // Successful queries preserve the raw mask, including an explicit zero or
+    // an untouched zero-initialized output. A prior value cannot leak through.
+    for value in [Some(5), Some(0), None] {
         let mut p = probe.lock().unwrap();
         p.reset([2, 1, 2, 1]);
-        p.arrangement_result = kResultFalse;
+        p.arrangement_result = kResultOk;
         p.arrangement = value;
         drop(p);
         let observed = plugin.observe_audio_buses_bounded(&mut frame).unwrap();
@@ -226,6 +231,117 @@ pub(super) fn query_order(plugin: &mut PluginImpl) {
             .all(|v| v.raw() == value.unwrap_or(0)));
         assert_eq!(probe.lock().unwrap().calls, calls);
     }
+}
+
+// Exercise the same three successful stages as the borrowed observation. This
+// helper owns only test results; it does not introduce a production query path.
+fn owned_arrangements(plugin: &PluginImpl) -> Result<crate::audio::BusArrangements> {
+    plugin.native_audio_bus_info()?;
+    plugin.audio_bus_layout()?;
+    plugin.bus_arrangements()
+}
+
+fn arrangement_failure_detail(direction: i32, index: i32, status: tresult) -> String {
+    let direction = if direction == kInput as i32 {
+        "input"
+    } else {
+        "output"
+    };
+    format!("getBusArrangement failed: direction={direction} index={index} status={status:#x}")
+}
+
+pub(super) fn arrangement_status(plugin: &mut PluginImpl) {
+    let probe = attach(plugin, [2; 4]);
+    let mut frame = AudioBusQueryFrame::default();
+    let full_calls = [
+        Call::Count(kInput as i32, 2),
+        Call::Info(kInput as i32, 0),
+        Call::Info(kInput as i32, 1),
+        Call::Count(kOutput as i32, 2),
+        Call::Info(kOutput as i32, 0),
+        Call::Info(kOutput as i32, 1),
+        Call::Count(kInput as i32, 2),
+        Call::Arrangement(kInput as i32, 0),
+        Call::Arrangement(kInput as i32, 1),
+        Call::Count(kOutput as i32, 2),
+        Call::Arrangement(kOutput as i32, 0),
+        Call::Arrangement(kOutput as i32, 1),
+    ];
+    // No-bounds and bounded owning APIs must agree with the fixed-frame borrow.
+    for bounded in [false, true] {
+        plugin.processing_resource_bounds =
+            bounded.then(|| crate::audio::ProcessingResourceBounds::new(2, 2, 8, 4).unwrap());
+        for direction in [kInput as i32, kOutput as i32] {
+            for index in [0, 1] {
+                let stop = full_calls
+                    .iter()
+                    .position(|call| *call == Call::Arrangement(direction, index))
+                    .unwrap()
+                    + 1;
+                let expected_calls = &full_calls[..stop];
+                for status in [kResultFalse, kInvalidArgument, kNotImplemented] {
+                    // Even a plausible stereo mask, arbitrary bits, or untouched
+                    // output cannot turn a failed native query into a fact.
+                    for value in [Some(3), Some(u64::MAX), None] {
+                        let configure = || {
+                            let mut p = probe.lock().unwrap();
+                            p.reset([2; 4]);
+                            p.arrangement = value;
+                            p.arrangement_result = kResultOk;
+                            p.fail_arrangement = Some((direction, index, status));
+                            // Legal native roles may already fail a host's shape;
+                            // the complete SDK census must succeed before that
+                            // separate domain comparison can consume these facts.
+                            p.role = Some(BusTypes_::kAux as i32);
+                        };
+                        let expected = arrangement_failure_detail(direction, index, status);
+                        configure();
+                        let error = owned_arrangements(plugin).expect_err(
+                            "native arrangement failure must not produce an owned inventory",
+                        );
+                        let Error::InterfaceError(detail) = error else {
+                            panic!("owned arrangement error must retain InterfaceError: {error:?}");
+                        };
+                        assert_eq!(detail, expected);
+                        assert_eq!(probe.lock().unwrap().calls, expected_calls);
+                        configure();
+                        match plugin.observe_audio_buses_bounded(&mut frame) {
+                            Err(Stage::Arrangements(Error::InterfaceError(detail))) => {
+                                assert_eq!(detail, expected);
+                            }
+                            other => panic!(
+                                "borrowed arrangement error must retain stage and facts: {other:?}"
+                            ),
+                        }
+                        assert_eq!(probe.lock().unwrap().calls, expected_calls);
+                        // Reuse the same frame after the failed prefix. All of
+                        // its successful rows must come from this new zero mask.
+                        {
+                            let mut p = probe.lock().unwrap();
+                            p.reset([2; 4]);
+                            p.fail_arrangement = None;
+                            p.arrangement = Some(0);
+                        }
+                        let observed = plugin.observe_audio_buses_bounded(&mut frame).unwrap();
+                        assert_eq!(observed.input_arrangements.len(), 2);
+                        assert_eq!(observed.output_arrangements.len(), 2);
+                        assert!(observed
+                            .input_arrangements
+                            .iter()
+                            .chain(observed.output_arrangements)
+                            .all(|mask| mask.raw() == 0));
+                        assert_eq!(probe.lock().unwrap().calls, full_calls);
+                        probe.lock().unwrap().reset([2; 4]);
+                        let owned = owned_arrangements(plugin).unwrap();
+                        assert_eq!(observed.input_arrangements, owned.inputs);
+                        assert_eq!(observed.output_arrangements, owned.outputs);
+                        assert_eq!(probe.lock().unwrap().calls, full_calls);
+                    }
+                }
+            }
+        }
+    }
+    plugin.processing_resource_bounds = None;
 }
 
 pub(super) fn bounds(plugin: &mut PluginImpl) {
