@@ -1,5 +1,5 @@
-//! Owned VST3 presentation adoption and public Project persistence only.
-//! Host-origin Adopt has no native proposal/Ack and qualifies no DSP recovery.
+//! Owned VST3 automatic MainQuery adoption and public Project persistence only.
+//! Manual queries are qualified separately; Host-origin Adopt has no native proposal/Ack or DSP recovery.
 use super::*;
 use crate::app::parameter_gesture::ParameterGestureAction;
 use crate::app::product_action::{AudioNativeEditorPayload, AudioProductAction, ProductAction};
@@ -10,10 +10,42 @@ use mondrian_core::{
     NativeAudioEditorControlIntent as Intent, NativeAudioEditorControlOutcome as Outcome,
 };
 
-fn passive(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MainQueryIdentity {
+    target: mondrian_core::NativeAudioEditorTarget,
+    process_id: std::num::NonZeroU32,
+    object_serial: std::num::NonZeroU64,
+    revision: u64,
+}
+
+const EXPECTED_PARAMETERS: [(&str, f64, &str); 3] = [
+    ("vst3.param.0", 0.5, "Gain"),
+    ("vst3.param.1", 0.5, "Balance"),
+    ("vst3.param.2", 0.0, "Fixture failure scenario"),
+];
+
+fn assert_main_query_fact(
+    fact: &mondrian_core::NativeAudioParameterFact,
+    expected: (&str, f64, &str),
+    revision: u64,
+) {
+    let (id, value, name) = expected;
+    assert_eq!(fact.parameter.as_str(), id);
+    assert_eq!(fact.revision, revision);
+    assert_eq!(fact.value_bits, Some(value.to_bits()));
+    assert_eq!(fact.author_value_bits, Some(value.to_bits()));
+    assert_eq!(fact.name.as_deref(), Some(name));
+    assert!(matches!(
+        fact.origin,
+        mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { rescan_flags: 0 }
+    ));
+}
+
+fn observe_main_query(
     event: &AudioPlaybackEvent,
     renderer: mondrian_core::AudioPcmRendererMaterializationId,
     generation: u64,
+    identity: &mut Option<MainQueryIdentity>,
 ) -> bool {
     match event {
         AudioPlaybackEvent::NativeDiagnosticsObserved {
@@ -28,11 +60,25 @@ fn passive(
             observation,
         } => {
             assert_eq!((*renderer_id, *observed), (renderer, generation));
-            assert!(
-                observation.facts().is_empty(),
-                "the explicit query alone supplies this presentation"
-            );
-            false
+            assert_eq!(observation.facts().len(), EXPECTED_PARAMETERS.len());
+            let current = MainQueryIdentity {
+                target: observation.target(),
+                process_id: observation.process_id(),
+                object_serial: observation.object_serial(),
+                revision: observation.source_revision(),
+            };
+            for (fact, expected) in observation.facts().iter().zip(EXPECTED_PARAMETERS) {
+                assert_main_query_fact(fact, expected, current.revision);
+            }
+            if let Some(previous) = identity {
+                assert_eq!(
+                    *previous, current,
+                    "natural queries retain the exact native owner/revision"
+                );
+            } else {
+                *identity = Some(current);
+            }
+            true
         }
         other => panic!("unexpected author, Ack, hold, binding or PCM work: {other:?}"),
     }
@@ -74,8 +120,8 @@ fn assert_one_host_value(
 }
 
 #[test]
-#[ignore = "current normal Product and owned VST3 Editor DLL; explicit query/Open refusal/Close Adopt/public Project reload, no PCM/device"]
-fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
+#[ignore = "current normal Product and owned VST3 Editor DLL; automatic MainQuery/Open refusal/Close Adopt/public Project reload, no manual query/PCM/device"]
+fn app_owned_vst3_observed_value_adoption_after_close_persists_one_host_value() {
     let deadline = Instant::now() + Duration::from_secs(30);
     let files = tempfile::tempdir().expect("bounded public Project archive");
     let archive = files.path().join("查询采用后保存🙂.mdp");
@@ -147,6 +193,8 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
                     .into_external_action(),
             )
             .unwrap();
+        let query_serial = state.native_parameter_query_serial;
+        let mut observed_parameters = None;
         let mut opened = None;
         poll_gui_until(&mut state, generation, |event| match event {
             AudioPlaybackEvent::NativeEditorObserved {
@@ -165,7 +213,10 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
                 assert!(opened.replace(*target).is_none());
                 true
             }
-            event => passive(event, renderer, generation),
+            event => {
+                observe_main_query(event, renderer, generation, &mut observed_parameters);
+                false
+            }
         });
         let opened = opened.unwrap();
         assert_eq!(
@@ -176,57 +227,72 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
             state.active_parameter_gesture.is_none(),
             "the no-side-effect refusal case has no prior gesture to finish"
         );
-        assert!(state.native_audio_parameter_presentation(&payload, &gain).is_none());
-        let query = native_parameter_query_payload(&state, payload.address, original.id, &gain)
-            .expect("actual visible noFact row action");
-        state
-            .dispatch_action(
-                ProductAction::Audio(AudioProductAction::QueryNativeParameter(query))
-                    .into_external_action(),
-            )
-            .unwrap();
-        let ticket = std::num::NonZeroU64::new(state.native_parameter_query_serial).unwrap();
-        let mut native_object = None;
-        poll_gui_until(&mut state, generation, |event| match event {
-            AudioPlaybackEvent::NativeParameterQueryCompleted {
-                ticket: actual,
-                renderer_id,
-                generation: observed,
-                query,
-                completion,
-            } => {
-                assert_eq!(
-                    (*actual, *renderer_id, *observed),
-                    (ticket, renderer, generation)
-                );
-                assert_eq!((query.target, &query.parameter), (opened, &gain));
-                let mondrian_media::AudioNativeParameterQueryCompletion::Completed(
-                    mondrian_core::NativeAudioParameterQueryOutcome::Observed(observation),
-                ) = completion
-                else {
-                    panic!("actual query must succeed: {completion:?}")
-                };
-                assert_eq!(observation.target(), opened);
-                assert_eq!(observation.facts().len(), 1);
-                let fact = &observation.facts()[0];
-                assert_eq!(fact.parameter, gain);
-                assert_eq!(fact.value_bits, Some(0.5_f64.to_bits()));
-                assert_eq!(fact.author_value_bits, Some(0.5_f64.to_bits()));
-                assert_eq!(fact.name.as_deref(), Some("Gain"));
-                assert!(matches!(
-                    fact.origin,
-                    mondrian_core::NativeAudioParameterObservationOrigin::MainQuery { .. }
-                ));
-                native_object = Some((observation.process_id(), observation.object_serial()));
-                true
-            }
-            event => passive(event, renderer, generation),
-        });
-        let native_object = native_object.unwrap();
+        // The small admitted catalog is queried by the existing natural Drain.
+        // Opened and that real observation may complete in either order.
+        // A pre-Opened observation may correctly be rejected by the original handler.
+        // Wait for a new real observation after target installation, never replay it.
+        if state.native_audio_parameter_presentation(&payload, &gain).is_none() {
+            poll_gui_until(&mut state, generation, |event| {
+                observe_main_query(event, renderer, generation, &mut observed_parameters)
+            });
+        }
+        let observed = observed_parameters.expect("actual automatic MainQuery observation");
+        assert_eq!(observed.target, opened);
+        for expected in EXPECTED_PARAMETERS {
+            let id = mondrian_core::ParameterId::new(expected.0).unwrap();
+            let fact = state
+                .native_audio_parameter_presentation(&payload, &id)
+                .expect("original App handler installed the actual queried row");
+            assert_main_query_fact(fact, expected, observed.revision);
+        }
+        assert!(
+            native_parameter_query_payload(&state, payload.address, original.id, &gain).is_none(),
+            "an already observed row correctly offers Adopt instead of a manual query"
+        );
+        assert_eq!(state.native_parameter_query_serial, query_serial);
+        let native_object = (observed.process_id, observed.object_serial);
         let fact = state.native_audio_parameter_presentation(&payload, &gain).unwrap().clone();
         let open_edit =
             native_parameter_adoption_payload(&state, payload.address, original.id, &gain)
                 .expect("existing projected Adopt capability");
+        let expected = &open_edit.expected;
+        assert_eq!(
+            (
+                expected.root_plan,
+                expected.root_session,
+                expected.local_plan,
+                expected.local_session,
+                expected.continuity_epoch,
+                expected.binding,
+                expected.installed_generation
+            ),
+            (
+                opened.root_plan,
+                opened.root_session,
+                opened.local_plan,
+                opened.local_session,
+                opened.continuity_epoch,
+                opened.binding,
+                opened.installed_generation
+            )
+        );
+        assert_eq!(
+            (
+                expected.process_id,
+                expected.object_serial,
+                expected.source_revision,
+                expected.fact_revision,
+                expected.author_value_bits
+            ),
+            (
+                observed.process_id,
+                observed.object_serial,
+                observed.revision,
+                observed.revision,
+                0.5_f64.to_bits()
+            ),
+            "the visible Adopt capability comes from the actual handled observation"
+        );
         let document = serde_json::to_value(state.authoring.as_ref().unwrap().document()).unwrap();
         let history = state.authoring.as_ref().unwrap().history().diagnostics();
         let author_generation = state.project_author_generation();
@@ -286,7 +352,10 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
                 assert_eq!((*target, *closed), (opened, opened));
                 true
             }
-            event => passive(event, renderer, generation),
+            event => {
+                observe_main_query(event, renderer, generation, &mut observed_parameters);
+                false
+            }
         });
         assert_eq!(
             state.native_audio_editor_surface_state(&payload),
@@ -298,6 +367,7 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
             "Close retains this exact current Fact and floor"
         );
         assert!(verifier.validate(&claim).is_ok());
+        assert_eq!(state.native_parameter_query_serial, query_serial);
         let edit = native_parameter_adoption_payload(&state, payload.address, original.id, &gain)
             .expect("actual closed row retains Adopt qualification");
         assert_eq!(
@@ -410,7 +480,7 @@ fn app_owned_vst3_query_adoption_after_close_persists_one_host_value() {
         );
         println!(
             "{}",
-            serde_json::json!({"case":"app-owned-vst3-query-adopt-project", "parameters":3, "some":1, "remaining_none":2, "adopted_value":0.5, "opened":true, "open_refused":true, "closed":true, "history_delta":1, "project_reloaded":true, "native_identity_observed":true, "process":native_object.0.get(), "object":native_object.1.get(), "native_overlay_execution_qualified":false, "pcm_qualified":false, "device_qualified":false, "dsp_history_recovery_qualified":false, "realtime_qualified":false, "graceful_100ms_qualified":false})
+            serde_json::json!({"case":"app-owned-vst3-observed-adopt-project", "automatic_main_query_observed":true, "manual_query_qualified":false, "parameters":3, "some":1, "remaining_none":2, "adopted_value":0.5, "opened":true, "open_refused":true, "closed":true, "history_delta":1, "project_reloaded":true, "native_identity_observed":true, "process":native_object.0.get(), "object":native_object.1.get(), "native_overlay_execution_qualified":false, "pcm_qualified":false, "device_qualified":false, "dsp_history_recovery_qualified":false, "realtime_qualified":false, "graceful_100ms_qualified":false})
         );
     }));
     let old_cleanup = state.shutdown_audio_playback_and_wait();
