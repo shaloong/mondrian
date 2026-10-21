@@ -945,7 +945,9 @@ fn retained_restart_control(preparation: Preparation) {
                         source.current_claim().unwrap().unwrap().generation(),
                         current_claim.generation()
                     );
-                    drop(second);
+                    {
+                        let _expired_second = second;
+                    }
                     assert_eq!(runtime.resource_footprint(), normalized_two);
                 }
             } else {
@@ -1018,7 +1020,9 @@ fn retained_restart_control(preparation: Preparation) {
                 );
                 assert_eq!(unpublished, [99.0; 8]);
                 assert_eq!(cursors(&runtime), held);
-                drop(operation);
+                {
+                    let _expired_operation = operation;
+                }
                 assert_eq!(
                     runtime.resource_footprint(),
                     failed,
@@ -1028,8 +1032,10 @@ fn retained_restart_control(preparation: Preparation) {
             assert_eq!(serde_json::to_value(&sequence).unwrap(), author_before);
             return;
         }
-        drop(operation);
-        // Handle Drop cannot release parent candidate/preparation or child fees.
+        {
+            let _expired_operation = operation;
+        }
+        // Ending the external handle scope cannot release parent candidate/preparation or child fees.
         assert_eq!(runtime.resource_footprint(), retained_footprint);
         unpublished.fill(99.0);
         assert_eq!(

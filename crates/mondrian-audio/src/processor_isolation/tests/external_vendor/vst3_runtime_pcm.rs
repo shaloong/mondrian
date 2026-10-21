@@ -258,7 +258,7 @@ fn observe_runtime_pcm_inner(
         258
     );
     observe(&mut runtime, lease, &mut observations);
-    let mut render_pcm = || {
+    let render_pcm = || {
         let mut output = Vec::with_capacity(FRAMES * 2);
         let mut calls = 0;
         for start in (0..FRAMES).step_by(64) {
@@ -437,12 +437,14 @@ fn observe_runtime_pcm_inner(
     };
     // New target failures must settle the exact authenticated child before they
     // escape. Existing observation selectors retain their original unwind path.
-    let result = if control.is_some() {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut render_pcm))
-    } else {
-        Ok(render_pcm())
+    let result = {
+        let mut scoped_render_pcm = render_pcm;
+        if control.is_some() {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut scoped_render_pcm))
+        } else {
+            Ok(scoped_render_pcm())
+        }
     };
-    drop(render_pcm);
     let (output, calls) = match result {
         Ok(completed) => completed,
         Err(panic) => {
