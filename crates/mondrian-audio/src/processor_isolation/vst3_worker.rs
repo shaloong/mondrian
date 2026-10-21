@@ -1277,6 +1277,44 @@ impl IsolatedAudioProcessorWorker for Vst3Worker {
         )))
     }
 
+    fn query_native_parameter(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+        native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        use mondrian_core::NativeAudioParameterQueryRefusal as Refusal;
+        if !self.author_binding_current(binding)? {
+            return Ok(Err(Refusal::OwnerChanged));
+        }
+        if self.native_author_delivery.is_some()
+            || self.prepared_author_entry.is_some()
+            || self.configuration_phase.blocked_request().is_some()
+            || self.native_editor_detach_stage().is_some()
+        {
+            return Ok(Err(Refusal::Busy));
+        }
+        if !self.payload.parameter_ids.contains(&native_parameter_id) {
+            return Ok(Err(Refusal::ParameterUnavailable));
+        }
+        let selected = [native_parameter_id];
+        let current = self.plugin.as_mut().and_then(|plugin| {
+            let editor = plugin.borrow_editor_control().ok()?;
+            parameter_observations::capture(&editor, &self.payload.parameters, &selected)
+        });
+        // This authenticates the actual owner again after all native getters.
+        // Source/cohort equality inside capture preserves every query callback
+        // for the existing Poll; a copied request cannot manufacture a fact.
+        if !self.author_binding_current(binding)? {
+            return Ok(Err(Refusal::OwnerChanged));
+        }
+        let Some(current) = current else {
+            return Ok(Err(Refusal::ParameterUnavailable));
+        };
+        if current.owner != binding.expected_object.object_serial() || current.facts.len() != 1 {
+            return Ok(Err(Refusal::OwnerChanged));
+        }
+        Ok(Ok((current.revision, current.facts)))
+    }
     fn poll_native_observations(
         &mut self,
         consumption: crate::NativeAudioObservationConsumption,
@@ -2949,7 +2987,10 @@ pub(super) fn native_worker_lane_profile(
                 bytes: byte_limit.bytes,
                 alignment: align_of::<f64>(),
             },
-            reply_storage: byte_limit,
+            reply_storage: crate::NativeHostBufferLayout {
+                bytes: byte_limit.bytes,
+                alignment: align_of::<mondrian_core::NativeAudioParameterFact>(),
+            },
             staged_seed: byte_limit,
         };
         Ok(Some(

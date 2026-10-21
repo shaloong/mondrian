@@ -47,9 +47,9 @@ impl Snapshot {
     }
 }
 pub(super) struct Presentations {
-    owner: NonZeroU64,
-    revision: u64,
-    facts: Vec<Fact>,
+    pub(super) owner: NonZeroU64,
+    pub(super) revision: u64,
+    pub(super) facts: Vec<Fact>,
 }
 
 /// A query's fixed borrowed outputs; not a second parameter inventory or cache.
@@ -154,6 +154,7 @@ fn capture_with(
     selected: &[u32],
     mut snapshot: impl FnMut() -> Option<Snapshot>,
     query: impl FnOnce(
+        &[u32],
         &mut ControllerParameterPresentationFrame,
         &mut PresentationVisitor<'_>,
     ) -> vst3_host::Result<usize>,
@@ -175,7 +176,7 @@ fn capture_with(
         return None;
     }
     let mut frame = ParameterPresentationFrame::default();
-    let count = query(&mut frame.controller, &mut |value| {
+    let count = query(selected, &mut frame.controller, &mut |value| {
         let selected_index = selected
             .iter()
             .position(|id| *id == value.id)
@@ -216,7 +217,7 @@ pub(super) fn capture(
         parameters,
         selected,
         || Snapshot::capture(editor),
-        |frame, visitor| {
+        |selected, frame, visitor| {
             editor.visit_controller_parameter_presentations_bounded(
                 MAX_PARAMETERS,
                 selected,
@@ -340,7 +341,7 @@ mod tests {
             std::slice::from_ref(&expected),
             &[0],
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 visit(current(&expected, &wide("Gain"), &wide("250 Hz")))?;
                 Ok(1)
             },
@@ -357,7 +358,7 @@ mod tests {
             &[expected.clone(), unsupported],
             &[0],
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 visit(current(&expected, &wide("Gain"), &wide("250 Hz")))?;
                 Ok(2) // Full native census, not the one selected lane.
             },
@@ -407,7 +408,7 @@ mod tests {
                 std::slice::from_ref(&expected),
                 &[0],
                 || Some(snapshot()),
-                |_, visit| {
+                |_, _, visit| {
                     visit(current(&expected, &wide(caption), &wide("250 Hz")))?;
                     Ok(1)
                 },
@@ -462,7 +463,7 @@ mod tests {
             &parameters,
             &[0, 1],
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 for _ in 0..2 {
                     visit(current(&parameters[0], &wide("Gain"), &wide("250 Hz")))?;
                 }
@@ -474,7 +475,7 @@ mod tests {
             &parameters,
             &[0, 1],
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 visit(current(&parameters[0], &wide("Gain"), &wide("250 Hz")))?;
                 Ok(2)
             }
@@ -484,7 +485,7 @@ mod tests {
             &parameters,
             &[0, 0],
             || Some(snapshot()),
-            |_, _| panic!("duplicate selection before query")
+            |_, _, _| panic!("duplicate selection before query")
         )
         .is_none());
         assert!(
@@ -492,7 +493,7 @@ mod tests {
                 &parameters,
                 &[0],
                 || Some(snapshot()),
-                |_, visit| {
+                |_, _, visit| {
                     visit(current(&parameters[0], &wide("Gain"), &wide("250 Hz")))?;
                     Ok(1)
                 }
@@ -505,7 +506,7 @@ mod tests {
                 &parameters[..1],
                 &[0],
                 || Some(snapshot()),
-                |_, visit| {
+                |_, _, visit| {
                     let title = wide(if drift == 4 { "" } else { "Gain" });
                     let display = wide("250 Hz");
                     let mut value = current(&parameters[0], &title, &display);
@@ -552,7 +553,7 @@ mod tests {
                     std::slice::from_ref(&expected),
                     &[0],
                     || Some(after),
-                    |_, _| {
+                    |_, _, _| {
                         queries += 1;
                         Ok(1)
                     }
@@ -568,7 +569,7 @@ mod tests {
                     reads += 1;
                     Some(if reads == 1 { before } else { after })
                 },
-                |_, visit| {
+                |_, _, visit| {
                     queries += 1;
                     visit(current(&expected, &wide("Gain"), &wide("250 Hz")))?;
                     Ok(1)
@@ -604,7 +605,7 @@ mod tests {
                 &parameters,
                 &selected,
                 || Some(snapshot()),
-                |_, visit| {
+                |_, _, visit| {
                     for parameter in &parameters {
                         visit(current(parameter, &title, &title))?;
                     }
@@ -623,7 +624,7 @@ mod tests {
             &full,
             &tail_ids,
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 for parameter in tail {
                     visit(current(parameter, &title, &title))?;
                 }
@@ -638,7 +639,7 @@ mod tests {
             &full,
             &[last.id],
             || Some(snapshot()),
-            |_, visit| {
+            |_, _, visit| {
                 visit(current(last, &title, &title))?;
                 Ok(full.len())
             },
@@ -652,7 +653,7 @@ mod tests {
             &too_many,
             &selected,
             || Some(snapshot()),
-            |_, _| panic!("full directory bound before query")
+            |_, _, _| panic!("full directory bound before query")
         )
         .is_none());
         let too_many_selected = full[..MAX_SELECTED_PARAMETERS + 1]
@@ -663,7 +664,7 @@ mod tests {
             &full,
             &too_many_selected,
             || panic!("selection bound before snapshot"),
-            |_, _| panic!("selection bound before query")
+            |_, _, _| panic!("selection bound before query")
         )
         .is_none());
         let mut long = [0; 128];
@@ -678,7 +679,7 @@ mod tests {
                 &large,
                 &selected,
                 || Some(snapshot()),
-                |_, visit| {
+                |_, _, visit| {
                     for parameter in &large {
                         visit(current(parameter, &long, &long))?;
                     }
@@ -690,6 +691,93 @@ mod tests {
         );
     }
 
+    #[test]
+    fn explicit_tail_query_passes_actual_selection_with_complete_4096_census() {
+        let parameters = (0..MAX_PARAMETERS as u32).map(parameter).collect::<Vec<_>>();
+        let tail = parameters.last().unwrap();
+        let mut value_reads = vec![0; parameters.len()];
+        let result = capture_with(
+            &parameters,
+            &[tail.id],
+            || Some(snapshot()),
+            |selected, _, visit| {
+                assert_eq!(
+                    selected,
+                    [tail.id],
+                    "actual selected slice supplied to the SDK query provider"
+                );
+                // This consumer control proves selection, not native getter counts;
+                // the existing SDK COM counter gate proves getter exclusivity.
+                for parameter in &parameters {
+                    if selected.contains(&parameter.id) {
+                        value_reads[parameter.id as usize] += 1;
+                        visit(current(parameter, &wide("Current tail"), &wide("250 Hz")))?;
+                    }
+                }
+                Ok(parameters.len())
+            },
+        )
+        .unwrap();
+        assert_eq!(result.facts.len(), 1);
+        assert_eq!(result.facts[0].parameter, tail.parameter_id().unwrap());
+        assert_eq!(result.facts[0].name.as_deref(), Some("Current tail"));
+        assert_eq!(value_reads.iter().sum::<usize>(), 1);
+        assert_eq!(value_reads[MAX_PARAMETERS - 1], 1);
+        assert_eq!(MAX_PARAMETERS, 4096);
+        assert_eq!(MAX_SELECTED_PARAMETERS, 1024);
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explicit_query_reply_admission_preserves_actual_fact_alignment_and_original_byte_fee() {
+        let profile = native_worker_lane_profile().unwrap().unwrap();
+        let prepared = profile.control_overlap();
+        assert_eq!(
+            prepared.reply_storage.bytes,
+            super::super::super::protocol::MAX_CONTROL_FRAME_BYTES
+        );
+        assert_eq!(prepared.reply_storage.alignment, align_of::<Fact>());
+        let facts = one().facts;
+        let observed = crate::NativeWorkerControlOverlapLayout {
+            decoded_input: crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+            reply_storage: crate::NativeHostBufferLayout {
+                bytes: mondrian_core::NativeAudioParameterObservation::validate_facts(&facts)
+                    .unwrap(),
+                alignment: align_of::<Fact>(),
+            },
+            staged_seed: crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+        };
+        profile.admit_observed_lane_owners(profile.owning_layouts(), observed).unwrap();
+        let old_byte_only = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+            profile.owning_layouts(),
+            crate::NativeWorkerControlOverlapLayout {
+                reply_storage: crate::NativeHostBufferLayout {
+                    alignment: 1,
+                    ..prepared.reply_storage
+                },
+                ..prepared
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            old_byte_only.admit_observed_lane_owners(profile.owning_layouts(), observed),
+            Err(
+                crate::NativeWorkerLaneResourceError::ControlCapacityExceeded {
+                    owner: crate::NativeWorkerLaneStorageKind::ReplyStorage,
+                    ..
+                }
+            )
+        ));
+        // Changing a union's required alignment does not add an invented padded
+        // allocation: the original model sums each actual owned byte extent.
+        assert_eq!(
+            profile.known_storage_limit_bytes(),
+            old_byte_only.known_storage_limit_bytes()
+        );
+        assert_eq!(
+            profile.additional_session_reservation_bytes(),
+            old_byte_only.additional_session_reservation_bytes()
+        );
+    }
     fn acknowledgements() -> [Consumption; 2] {
         let object = observations().object.unwrap();
         let binding = crate::NativeAudioObjectBindRequest {
@@ -1030,6 +1118,54 @@ mod tests {
         assert_eq!(worker.native_binding, Some(binding));
         assert!(worker.native_author_delivery.is_none());
         assert!(worker.last_parameter_values.iter().all(Option::is_none));
+    }
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires current normal Product and owned editor DLL under native Job"]
+    fn native_vst3_explicit_parameter_query_keeps_same_owner_and_does_not_fill_author_values() {
+        use mondrian_core::NativeAudioParameterQueryRefusal as Refusal;
+        let mut worker = prepare_editor();
+        let receipt = worker.native_binding.unwrap();
+        let binding = crate::NativeAudioObjectBindRequest {
+            binding: receipt.binding(),
+            expected_object: receipt.object(),
+        };
+        let before = native_snapshot(&worker);
+        for id in [0, 2] {
+            let (revision, facts) = worker.query_native_parameter(binding, id).unwrap().unwrap();
+            assert_eq!(facts.len(), 1);
+            assert_eq!(facts[0].parameter.as_str(), format!("vst3.param.{id}"));
+            assert_eq!(facts[0].revision, revision);
+            assert_eq!(
+                facts[0].value_bits,
+                Some(if id == 2 { 1.0_f64 } else { 0.5_f64 }.to_bits())
+            );
+            assert_eq!(facts[0].origin, Origin::MainQuery { rescan_flags: 0 });
+            assert_eq!(native_snapshot(&worker), before);
+        }
+        let wrong = crate::NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            ..binding
+        };
+        assert_eq!(
+            worker.query_native_parameter(wrong, 0).unwrap(),
+            Err(Refusal::OwnerChanged)
+        );
+        assert_eq!(
+            worker.query_native_parameter(binding, 9999).unwrap(),
+            Err(Refusal::ParameterUnavailable)
+        );
+        assert_eq!(native_snapshot(&worker), before);
+        assert_eq!(worker.native_binding, Some(receipt));
+        assert!(worker.last_parameter_values.iter().all(Option::is_none));
+        assert!(worker.native_author_delivery.is_none());
+        assert!(worker.prepared_author_entry.is_none());
+        assert!(worker
+            .poll_native_observations(Consumption::Preserve)
+            .unwrap()
+            .parameters
+            .is_empty());
+        assert_eq!(native_snapshot(&worker), before);
     }
     #[cfg(target_os = "windows")]
     #[test]

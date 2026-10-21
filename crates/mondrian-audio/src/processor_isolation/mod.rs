@@ -32,6 +32,7 @@ mod native_audio_editor_wire;
 mod native_audio_log;
 mod native_audio_object_wire;
 mod native_audio_parameter_wire;
+mod native_audio_parameter_query_wire;
 mod native_configuration_control;
 mod native_configuration_seed;
 mod native_configuration_seed_wire;
@@ -1059,6 +1060,23 @@ fn retire_acknowledged_reprepare(
 }
 
 impl AudioProcessor for IsolatedAudioProcessor {
+    fn query_native_parameter(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+        native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        if self.failed {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        match self.worker.query_native_parameter(binding, native_parameter_id) {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
     fn bind_native_child_settlement(
         &mut self,
         registrar: &mondrian_core::NativeChildSettlementRegistrar,
@@ -1876,6 +1894,17 @@ pub trait IsolatedAudioProcessorWorker {
         ))
     }
 
+    /// Query one admitted native ID on the joined full owner, without author
+    /// flushing, callback consumption, DSP or state entry. Non-RT control only.
+    fn query_native_parameter(
+        &mut self,
+        _binding: crate::NativeAudioObjectBindRequest,
+        _native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        Ok(Err(
+            mondrian_core::NativeAudioParameterQueryRefusal::UnsupportedAdapter,
+        ))
+    }
     /// Attach this actual bound native object's view after DSP join.
     /// The sole Runtime has already admitted its installed owner lease.
     fn open_native_audio_editor(

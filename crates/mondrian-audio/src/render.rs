@@ -1291,6 +1291,34 @@ impl AudioRenderSession {
         )
     }
 
+    pub(crate) fn query_native_parameter(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        parameter: &mondrian_core::ParameterId,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        use mondrian_core::{
+            NativeAudioParameterQueryOutcome as Out, NativeAudioParameterQueryRefusal as Refusal,
+        };
+        if self.native_owner_lease(lease.address()) != Some(lease) {
+            return Ok(Out::Refused(Refusal::OwnerChanged));
+        }
+        // Reuse the exact installed plan's writable lanes. This is admission,
+        // not a second parameter directory, default map or UI selection cache.
+        if !self.plan.schedule.processors.iter().any(|processor| {
+            processor.occurrence == lease.address().occurrence
+                && processor.parameter_ids.contains(parameter)
+        }) {
+            return Ok(Out::Refused(Refusal::ParameterUnavailable));
+        }
+        let Some(native_id) = parameter
+            .as_str()
+            .strip_prefix("vst3.param.")
+            .and_then(|id| id.parse::<u32>().ok())
+        else {
+            return Ok(Out::Refused(Refusal::UnsupportedAdapter));
+        };
+        self.processor_host.query_native_parameter(lease, parameter, native_id)
+    }
     pub(crate) fn control_native_editor(
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,

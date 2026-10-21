@@ -446,3 +446,199 @@ fn author_drain_eligibility_controls_the_real_scoped_dsp_slot_before_owner_hando
         }
     }
 }
+
+/// Synthetic ABI control: real ingress, DSP thread join and the original owner
+/// dispatcher. It does not substitute for the separate owned COM query gate.
+#[test]
+fn explicit_parameter_query_returns_to_joined_full_owner_without_flush_process_or_ack() {
+    use super::super::native_audio_parameter_query_wire::{self as wire, QueryReply};
+    use super::super::native_worker_command::NativeCommand;
+    use super::super::native_worker_ingress::{
+        with_native_ingress, NativeCommandIngress, NativeReaderSlots,
+    };
+    use super::super::native_worker_processing::{
+        with_processing_scope, NativeDspDispatch, NativeProcessingSlots,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+    struct JoinedQuery {
+        binding: crate::NativeAudioObjectBindRequest,
+        finished: Arc<AtomicUsize>,
+        flushes: Arc<AtomicUsize>,
+        queries: usize,
+    }
+    impl IsolatedAudioProcessorWorker for JoinedQuery {
+        fn query_native_parameter(
+            &mut self,
+            binding: crate::NativeAudioObjectBindRequest,
+            id: u32,
+        ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+            assert_eq!(
+                self.finished.load(Ordering::Acquire),
+                1,
+                "real scope finished after DSP join before this full-owner getter"
+            );
+            assert_eq!(
+                self.flushes.load(Ordering::Acquire),
+                0,
+                "query cannot use author flush"
+            );
+            assert_eq!(binding, self.binding);
+            assert_eq!(id, 4095);
+            self.queries += 1;
+            Ok(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::ParameterUnavailable,
+            ))
+        }
+        fn execution_contract(&self) -> crate::AudioProcessorExecutionContract {
+            crate::AudioProcessorExecutionContract::stateless()
+        }
+        fn auxiliary_input_contract(&self) -> crate::AudioProcessorAuxiliaryInputContract {
+            Default::default()
+        }
+        fn enter_state(&mut self, _: i64) -> Result<(), AudioProcessorHostError> {
+            panic!("query is not state entry")
+        }
+        fn process(
+            &mut self,
+            _: IsolatedAudioProcessorWorkerBlock<'_>,
+        ) -> Result<(), AudioProcessorHostError> {
+            panic!("query is not PCM")
+        }
+        fn poll_native_observations(
+            &mut self,
+            _: crate::NativeAudioObservationConsumption,
+        ) -> Result<crate::NativeAudioObservations, AudioProcessorHostError> {
+            panic!("query cannot Drain or Ack")
+        }
+    }
+    let binding = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        expected_object: crate::NativeAudioObjectObservation::new(
+            std::num::NonZeroU32::new(std::process::id()).unwrap(),
+            std::num::NonZeroU64::new(29).unwrap(),
+        ),
+    };
+    let flushes = Arc::new(AtomicUsize::new(0));
+    let checks = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let pending = Arc::new(Mutex::new(vec![0.875]));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut parent = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (mut child, _) = listener.accept().unwrap();
+    for socket in [&parent, &child] {
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+    let owners = crate::NativeWorkerLaneOwnedLayouts {
+        adapter_resident: dispatch_empty(),
+        reader_slots: dispatch_layout(std::alloc::Layout::new::<NativeReaderSlots>()),
+        processing_slots: dispatch_layout(std::alloc::Layout::new::<NativeProcessingSlots>()),
+        main_inline: dispatch_layout(std::alloc::Layout::new::<(
+            NativeCommandIngress<'static>,
+            WorkerProcessContext<'static>,
+            NativeDspDispatch<'static>,
+        )>()),
+        runtime_main_role: dispatch_layout(std::alloc::Layout::new::<DispatchMain>()),
+        runtime_dsp_role: dispatch_layout(std::alloc::Layout::new::<DispatchDsp>()),
+        sdk_main_role: dispatch_empty(),
+        sdk_dsp_role: dispatch_empty(),
+    };
+    let bytes = super::super::protocol::MAX_CONTROL_FRAME_BYTES;
+    let profile = crate::NativeWorkerLaneResourceProfile::scoped_main_dsp(
+        owners,
+        crate::NativeWorkerControlOverlapLayout {
+            decoded_input: crate::NativeHostBufferLayout { bytes, alignment: align_of::<f64>() },
+            reply_storage: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+            staged_seed: crate::NativeHostBufferLayout { bytes, alignment: 1 },
+        },
+    )
+    .unwrap();
+    let render_contract = AudioRenderContract {
+        sample_rate: 48000,
+        channel_layout: mondrian_core::AudioChannelLayout::Stereo,
+        max_block_frames: 1,
+        processing_mode: crate::AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes: 0,
+        public_output_lookahead_budget_frames: 0,
+        compensation_delay_scratch_budget_bytes: 0,
+    };
+    let auxiliary = crate::AudioProcessorAuxiliaryInputContract::default();
+    let outputs = crate::AudioProcessorAuxiliaryOutputContract::default();
+    let notes = crate::AudioProcessorNoteInputContract::default();
+    let layout = SharedBlockLayout::new(2, 1, 0, 0).unwrap();
+    let context = WorkerProcessContext {
+        musical_time_reference: None,
+        layout,
+        auxiliary_inputs: &auxiliary,
+        auxiliary_outputs: &outputs,
+        note_input_contract: &notes,
+        parameter_ids: &[],
+        render_contract,
+    };
+    let mut storage = vec![0_u64; layout.total_bytes.div_ceil(size_of::<u64>())];
+    let shared = bytemuck::cast_slice_mut(&mut storage);
+    std::thread::scope(|scope| {
+        let child = scope.spawn(|| {
+            with_native_ingress(&mut child, 0, Some(profile), |control, ingress| {
+                let split = super::super::IsolatedAudioProcessorWorkerSplit {
+                    main: Box::new(DispatchMain {
+                        binding,
+                        eligible: true,
+                        checks: checks.clone(),
+                        finished: finished.clone(),
+                    }),
+                    processing: Box::new(DispatchDsp {
+                        calls: flushes.clone(),
+                        pending: pending.clone(),
+                    }),
+                };
+                let result =
+                    with_processing_scope(split, profile, shared, context, |main, dsp| {
+                        service_native_main_scope(main, Some(dsp), ingress, control)
+                    })?;
+                let NativeScopeExit::OwnerCommand(actual @ NativeCommand::QueryParameter(_, _)) =
+                    result.value
+                else {
+                    panic!("original query owner handoff");
+                };
+                assert_eq!(
+                    checks.load(Ordering::Acquire),
+                    0,
+                    "no MainRole getter or author binding probe"
+                );
+                let mut owner = JoinedQuery {
+                    binding,
+                    finished: finished.clone(),
+                    flushes: flushes.clone(),
+                    queries: 0,
+                };
+                assert!(dispatch_native_owner_command(
+                    &mut owner, actual, control, shared, context
+                )?);
+                assert_eq!(owner.queries, 1);
+                ingress.acknowledge()?;
+                Ok(())
+            })
+            .unwrap();
+        });
+        command(CommandKind::QueryParameter, 0).write_to(&mut parent).unwrap();
+        wire::write_request(&mut parent, binding, 4095).unwrap();
+        assert!(matches!(
+            wire::read_reply(&mut parent, binding, 4095).unwrap(),
+            QueryReply::Outcome(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::ParameterUnavailable
+            ))
+        ));
+        child.join().unwrap();
+    });
+    assert_eq!(finished.load(Ordering::Acquire), 1);
+    assert_eq!(flushes.load(Ordering::Acquire), 0);
+    assert_eq!(
+        *pending.lock().unwrap(),
+        [0.875],
+        "query preserved pending author input"
+    );
+}

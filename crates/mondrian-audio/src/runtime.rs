@@ -997,6 +997,61 @@ impl AudioProgramRuntime {
         Ok(found)
     }
 
+    /// Query one selected canonical ID on the current installed owner. This
+    /// non-RT control operation does not change author values or retained UI data.
+    pub fn query_native_parameter(
+        &mut self,
+        query: &mondrian_core::NativeAudioParameterQuery,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        use mondrian_core::{
+            NativeAudioParameterQueryOutcome as Out, NativeAudioParameterQueryRefusal as Refusal,
+        };
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        let address = crate::native_runtime_owner::editor_target_address(query.target);
+        let lease = match self.native_owner_lease(address) {
+            Ok(lease) if lease.editor_target() == query.target => lease,
+            Ok(_) | Err(crate::AudioNativeOwnerError::Installation(_)) => {
+                return Ok(Out::Refused(Refusal::OwnerChanged))
+            }
+            Err(
+                crate::AudioNativeOwnerError::OwnerUnavailable
+                | crate::AudioNativeOwnerError::UnregisteredRuntime
+                | crate::AudioNativeOwnerError::ContinuityUnavailable,
+            ) => return Ok(Out::Refused(Refusal::Unavailable)),
+            Err(error) => return Err(error),
+        };
+        let outcome = self.query_local_native_parameter(lease, &query.parameter)?;
+        if cancellation.is_canceled() {
+            return Err(crate::AudioNativeOwnerError::Cancelled);
+        }
+        if self.native_owner_lease(address) != Ok(lease) {
+            return Ok(Out::Refused(Refusal::OwnerChanged));
+        }
+        Ok(outcome)
+    }
+
+    fn query_local_native_parameter(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        parameter: &mondrian_core::ParameterId,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        if lease.address().local == self.session.native_owner_identity() {
+            return self.session.query_native_parameter(lease, parameter);
+        }
+        for source in self.sources.entries.values_mut() {
+            if let RuntimeSource::Nested(nested) = source
+                && nested.runtime.find_native_owner_lease(lease.address()) == Some(lease)
+            {
+                return nested.runtime.query_local_native_parameter(lease, parameter);
+            }
+        }
+        Ok(mondrian_core::NativeAudioParameterQueryOutcome::Refused(
+            mondrian_core::NativeAudioParameterQueryRefusal::Unavailable,
+        ))
+    }
     /// Execute a closed editor intent on this sole installed root and child.
     /// Current claim, exact root/local/occurrence/epoch/binding and actual native
     /// object are checked before SDK work. No DSP, author edit or Undo occurs.

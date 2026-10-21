@@ -607,6 +607,17 @@ pub trait AudioProcessor: Send {
         ))
     }
 
+    /// Query one admitted native ID on the joined full owner, without author
+    /// flushing, callback consumption, DSP or state entry. Non-RT control only.
+    fn query_native_parameter(
+        &mut self,
+        _binding: crate::NativeAudioObjectBindRequest,
+        _native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        Ok(Err(
+            mondrian_core::NativeAudioParameterQueryRefusal::UnsupportedAdapter,
+        ))
+    }
     /// Attach this actual bound native object's view after DSP join.
     /// The sole Runtime has already admitted its installed owner lease.
     fn open_native_audio_editor(

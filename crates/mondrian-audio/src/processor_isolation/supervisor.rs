@@ -893,6 +893,57 @@ impl SupervisedAudioWorker {
         }
     }
 
+    pub(super) fn query_native_parameter(
+        &mut self,
+        binding: crate::NativeAudioObjectBindRequest,
+        native_parameter_id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        use super::native_audio_parameter_query_wire::{self as wire, QueryReply};
+        let operation = "native parameter query";
+        if self.process.state != ProcessState::Running {
+            return Err(AudioProcessorHostError::PoisonedInstance);
+        }
+        if self.process.child.id() != binding.expected_object.process_id().get() {
+            return Ok(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::OwnerChanged,
+            ));
+        }
+        self.admit_native_object(binding.expected_object)?;
+        if let Err(error) = self.configure_control_timeout(self.state_entry_timeout) {
+            self.terminate();
+            return Err(worker_failed(operation, error));
+        }
+        let result = (|| -> io::Result<_> {
+            WorkerCommand {
+                kind: super::protocol::CommandKind::QueryParameter,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+                note_count: 0,
+            }
+            .write_to(&mut self.control)?;
+            wire::write_request(&mut self.control, binding, native_parameter_id)?;
+            wire::read_reply(&mut self.control, binding, native_parameter_id)
+        })();
+        match result {
+            Ok(QueryReply::Outcome(outcome)) => {
+                self.admit_native_object(binding.expected_object)?;
+                Ok(outcome)
+            }
+            Ok(QueryReply::Failed) => {
+                self.terminate();
+                Err(worker_failed_detail(
+                    operation,
+                    "native adapter query failed or panicked",
+                ))
+            }
+            Err(error) => {
+                let classified = self.classify_operation_io(operation, error);
+                self.terminate();
+                Err(classified)
+            }
+        }
+    }
     pub(super) fn query_native_configuration_cohort(
         &mut self,
     ) -> Result<Option<super::NativeRequestCohort>, AudioProcessorHostError> {

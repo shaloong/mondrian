@@ -554,7 +554,11 @@ fn dispatch_native_owner_command(
 ) -> Result<bool, AudioProcessorHostError> {
     use super::native_worker_command::NativeCommand;
     let input_layout = command.owned_input_layout()?;
-    admit_native_control_storage(processor, input_layout, 0)?;
+    admit_native_control_storage(
+        processor,
+        input_layout,
+        crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
+    )?;
     match command {
         NativeCommand::Plain(command) => {
             if command.kind == CommandKind::PollConfigurationCohort {
@@ -601,6 +605,7 @@ fn dispatch_native_owner_command(
                 | CommandKind::BindNativeObject
                 | CommandKind::EditorOpen
                 | CommandKind::EditorClose
+                | CommandKind::QueryParameter
                 | CommandKind::PrepareAuthorStateEntry => Err(invalid_contract(
                     "decoded control kind does not match its sole payload variant",
                 )),
@@ -633,6 +638,30 @@ fn dispatch_native_owner_command(
             );
             super::native_audio_object_wire::write_reply(control, reply)
                 .map_err(|error| worker_failed("native bind reply", error))?;
+            Ok(success)
+        }
+        NativeCommand::QueryParameter(binding, id) => {
+            use super::native_audio_parameter_query_wire::{self as wire, QueryReply};
+            let reply = match catch_unwind(AssertUnwindSafe(|| {
+                processor.query_native_parameter(binding, id)
+            })) {
+                Ok(Ok(outcome)) => QueryReply::Outcome(outcome),
+                Ok(Err(_)) | Err(_) => QueryReply::Failed,
+            };
+            let reply_storage = match &reply {
+                QueryReply::Outcome(Ok((_, facts))) => crate::NativeHostBufferLayout {
+                    bytes: mondrian_core::NativeAudioParameterObservation::validate_facts(facts)
+                        .map_err(|error| worker_failed("native parameter query storage", error))?,
+                    alignment: align_of::<mondrian_core::NativeAudioParameterFact>(),
+                },
+                QueryReply::Failed | QueryReply::Outcome(Err(_)) => {
+                    crate::NativeHostBufferLayout { bytes: 0, alignment: 1 }
+                }
+            };
+            admit_native_control_storage(processor, input_layout, reply_storage)?;
+            let success = !matches!(reply, QueryReply::Failed);
+            wire::write_reply(control, reply, binding.expected_object)
+                .map_err(|error| worker_failed("native parameter query reply", error))?;
             Ok(success)
         }
         NativeCommand::EditorOpen(request) => write_editor_operation_result(
@@ -691,7 +720,10 @@ fn dispatch_native_owner_command(
                         admit_native_control_storage(
                             processor,
                             input_layout,
-                            candidate.configuration.capacity(),
+                            crate::NativeHostBufferLayout {
+                                bytes: candidate.configuration.capacity(),
+                                alignment: align_of::<u8>(),
+                            },
                         )?;
                     }
                     ControlReply::Outcome(outcome)
@@ -717,7 +749,7 @@ fn dispatch_native_owner_command(
             admit_native_control_storage(
                 processor,
                 crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
-                0,
+                crate::NativeHostBufferLayout { bytes: 0, alignment: 1 },
             )?;
             write_seed_operation_result(control, result)
         }
@@ -735,7 +767,7 @@ fn dispatch_native_owner_command(
 fn admit_native_control_storage(
     processor: &dyn IsolatedAudioProcessorWorker,
     decoded_input: crate::NativeHostBufferLayout,
-    reply_bytes: usize,
+    reply_storage: crate::NativeHostBufferLayout,
 ) -> Result<(), AudioProcessorHostError> {
     let Some(profile) = processor.native_worker_lane_resources() else {
         return Ok(());
@@ -745,10 +777,7 @@ fn admit_native_control_storage(
             profile.owning_layouts(),
             crate::NativeWorkerControlOverlapLayout {
                 decoded_input,
-                reply_storage: crate::NativeHostBufferLayout {
-                    bytes: reply_bytes,
-                    alignment: align_of::<u8>(),
-                },
+                reply_storage,
                 staged_seed: processor.native_staged_seed_layout(),
             },
         )
@@ -965,6 +994,7 @@ fn run_native_command_service(
                     let cleanup_control = matches!(
                         &command,
                         super::native_worker_command::NativeCommand::EditorClose(_)
+                            | super::native_worker_command::NativeCommand::QueryParameter(_, _)
                             | super::native_worker_command::NativeCommand::AuthorStateEntry(_)
                             | super::native_worker_command::NativeCommand::PollObservations(_)
                             | super::native_worker_command::NativeCommand::Plain(WorkerCommand {

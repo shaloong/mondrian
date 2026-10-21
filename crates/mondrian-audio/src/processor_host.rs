@@ -1123,6 +1123,82 @@ impl PreparedProcessorHost {
         })
     }
 
+    pub(crate) fn query_native_parameter(
+        &mut self,
+        lease: crate::AudioNativeProcessorOwnerLease,
+        parameter: &mondrian_core::ParameterId,
+        native_id: u32,
+    ) -> Result<mondrian_core::NativeAudioParameterQueryOutcome, crate::AudioNativeOwnerError> {
+        use mondrian_core::{
+            NativeAudioParameterQueryOutcome as Out, NativeAudioParameterQueryRefusal as Refusal,
+        };
+        let object = match self.validate_native_owner(lease) {
+            Ok(object) => object,
+            Err(crate::AudioNativeOwnerError::OwnerUnavailable) => {
+                return Ok(Out::Refused(Refusal::OwnerChanged))
+            }
+            Err(error) => return Err(error),
+        };
+        let instance = self
+            .instances
+            .iter_mut()
+            .find(|instance| instance.occurrence == lease.address().occurrence)
+            .ok_or(crate::AudioNativeOwnerError::OwnerUnavailable)?;
+        if instance.native_author_outstanding.is_some() || instance.native_editor_detached.is_some()
+        {
+            return Ok(Out::Refused(Refusal::Busy));
+        }
+        let binding = crate::NativeAudioObjectBindRequest {
+            binding: lease.binding(),
+            expected_object: object,
+        };
+        let result = isolate_adapter_call("native parameter query", || {
+            instance.processor.query_native_parameter(binding, native_id)
+        });
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
+                return Err(error.into());
+            }
+        };
+        let (revision, facts) = match result {
+            Ok(current) => current,
+            Err(refusal) => return Ok(Out::Refused(refusal)),
+        };
+        if facts.len() != 1
+            || facts[0].parameter != *parameter
+            || facts[0].revision != revision
+            || facts[0].event_flags != 0
+            || facts[0].origin
+                != (mondrian_core::NativeAudioParameterObservationOrigin::MainQuery {
+                    rescan_flags: 0,
+                })
+        {
+            instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
+            return Err(crate::AudioNativeOwnerError::Processor(
+                AudioProcessorHostError::InvalidContract(
+                    "native parameter query did not return its exact selected ID".into(),
+                ),
+            ));
+        }
+        let observation = match mondrian_core::NativeAudioParameterObservation::project(
+            lease.editor_target(),
+            object.process_id(),
+            object.object_serial(),
+            revision,
+            facts,
+        ) {
+            Ok(observation) => observation,
+            Err(error) => {
+                instance.native_binding = crate::native_runtime_owner::NativeHostedBinding::Unbound;
+                return Err(crate::AudioNativeOwnerError::Processor(
+                    AudioProcessorHostError::InvalidContract(error.to_string()),
+                ));
+            }
+        };
+        Ok(Out::Observed(observation))
+    }
     pub(crate) fn control_native_editor(
         &mut self,
         lease: crate::AudioNativeProcessorOwnerLease,

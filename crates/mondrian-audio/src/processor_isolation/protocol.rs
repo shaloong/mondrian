@@ -251,6 +251,7 @@ pub(super) enum CommandKind {
     EditorOpen,
     EditorClose,
     PrepareAuthorStateEntry,
+    QueryParameter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +281,7 @@ impl WorkerCommand {
             CommandKind::EditorOpen => 11,
             CommandKind::EditorClose => 12,
             CommandKind::PrepareAuthorStateEntry => 13,
+            CommandKind::QueryParameter => 15,
         };
         let mut bytes = [0_u8; 32];
         bytes[0..4].copy_from_slice(&COMMAND_MAGIC.to_le_bytes());
@@ -319,6 +321,7 @@ impl WorkerCommand {
             11 => CommandKind::EditorOpen,
             12 => CommandKind::EditorClose,
             13 => CommandKind::PrepareAuthorStateEntry,
+            15 => CommandKind::QueryParameter,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -344,6 +347,7 @@ impl WorkerCommand {
                 | CommandKind::EditorOpen
                 | CommandKind::EditorClose
                 | CommandKind::PrepareAuthorStateEntry
+                | CommandKind::QueryParameter
         ) && (command.start_sample != 0 || command.frames != 0 || command.event_count != 0)
         {
             return Err(io::Error::new(

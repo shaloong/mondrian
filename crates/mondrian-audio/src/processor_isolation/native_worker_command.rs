@@ -15,6 +15,7 @@ pub(super) enum NativeCommand {
     StageSeed(DecodedStage),
     CommitSeed(NativeConfigurationSeedTicket),
     BindObject(crate::NativeAudioObjectBindRequest),
+    QueryParameter(crate::NativeAudioObjectBindRequest, u32),
     PollObservations(crate::NativeAudioObservationConsumption),
     EditorOpen(crate::NativeAudioEditorOpenRequest),
     EditorClose(crate::NativeAudioObjectBindRequest),
@@ -72,6 +73,11 @@ pub(super) fn decode(
         CommandKind::BindNativeObject => super::native_audio_object_wire::read_bind_request(stream)
             .map(NativeCommand::BindObject)
             .map_err(|error| failed("native bind request", error)),
+        CommandKind::QueryParameter => {
+            super::native_audio_parameter_query_wire::read_request(stream)
+                .map(|(binding, id)| NativeCommand::QueryParameter(binding, id))
+                .map_err(|error| failed("native parameter query request", error))
+        }
         CommandKind::EditorOpen => super::native_audio_editor_wire::read_open_request(stream)
             .map(NativeCommand::EditorOpen)
             .map_err(|error| failed("native editor open request", error)),
@@ -160,6 +166,45 @@ mod inline_command_contracts {
         test(&mut parent, &mut child);
     }
 
+    #[test]
+    fn explicit_query_decoder_preserves_id_zero_tail_and_refuses_non_control_headers() {
+        use super::super::native_audio_parameter_query_wire::write_request;
+        let binding = crate::NativeAudioObjectBindRequest {
+            binding: mondrian_core::AudioProcessorBindingId::new(),
+            expected_object: crate::NativeAudioObjectObservation::new(
+                std::num::NonZeroU32::new(42).unwrap(),
+                NonZeroU64::new(7).unwrap(),
+            ),
+        };
+        for id in [0, 4095, u32::MAX] {
+            let command = WorkerCommand {
+                kind: CommandKind::QueryParameter,
+                start_sample: 0,
+                frames: 0,
+                event_count: 0,
+                note_count: 0,
+            };
+            let mut bytes = Vec::new();
+            command.write_to(&mut bytes).unwrap();
+            write_request(&mut bytes, binding, id).unwrap();
+            assert_eq!(&bytes[8..12], &15_u32.to_le_bytes());
+            assert!(
+                matches!(decode(&mut bytes.as_slice(), 4096).unwrap(), NativeCommand::QueryParameter(actual, selected) if actual == binding && selected == id)
+            );
+            for offset in [12_usize, 16, 24, 28] {
+                let mut invalid = bytes.clone();
+                invalid[offset..offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+                let mut reader = std::io::Cursor::new(invalid);
+                assert!(decode(&mut reader, 4096).is_err());
+                assert_eq!(reader.position(), 32);
+            }
+            let mut old = bytes.clone();
+            old[8..12].copy_from_slice(&5_u32.to_le_bytes());
+            let mut reader = std::io::Cursor::new(old);
+            assert!(decode(&mut reader, 4096).is_err());
+            assert_eq!(reader.position(), 32);
+        }
+    }
     #[test]
     fn native_inline_decoder_rejects_old_dense_configuration_tag_before_body() {
         let mut bytes = Vec::new();
@@ -252,6 +297,9 @@ mod inline_command_contracts {
                     }
                     NativeCommand::StageSeed(_) => panic!("admitted body cannot become refusal"),
                     NativeCommand::BindObject(_) => panic!("old tag cannot decode as bind object"),
+                    NativeCommand::QueryParameter(_, _) => {
+                        panic!("old tag cannot decode as parameter query")
+                    }
                     NativeCommand::AuthorStateEntry(_) => {
                         panic!("old command cannot become state-entry")
                     }

@@ -231,3 +231,10 @@ impl NativeAudioObservations {
         std::num::NonZeroU32::new(self.owner_process_id)
     }
 }
+
+/// Full-owner result of one selected native presentation query. The serial
+/// parent projects its already validated target; the child carries no UI ticket.
+pub type NativeAudioParameterQueryResult = Result<
+    (u64, Vec<mondrian_core::NativeAudioParameterFact>),
+    mondrian_core::NativeAudioParameterQueryRefusal,
+>;

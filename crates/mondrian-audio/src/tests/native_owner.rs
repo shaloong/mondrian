@@ -23,6 +23,9 @@ struct OwnerProbeState {
     object_observations: AtomicUsize,
     observation_revoke_source:
         std::sync::Mutex<Option<mondrian_core::AudioOwnerInstallationSource>>,
+    parameter_queries: AtomicUsize,
+    query_revoke_source: std::sync::Mutex<Option<mondrian_core::AudioOwnerInstallationSource>>,
+    query_cancel: std::sync::Mutex<Option<ExecutionCancellationToken>>,
     editor_opens: AtomicUsize,
     editor_closes: AtomicUsize,
     editor_cleanup: AtomicBool,
@@ -189,6 +192,46 @@ impl AudioProcessor for OwnerProbeProcessor {
                 ),
             );
         Ok(observations)
+    }
+    fn query_native_parameter(
+        &mut self,
+        binding: NativeAudioObjectBindRequest,
+        id: u32,
+    ) -> Result<crate::NativeAudioParameterQueryResult, AudioProcessorHostError> {
+        if self.binding.is_none_or(|receipt| {
+            receipt.binding() != binding.binding || receipt.object() != self.object()
+        }) || binding.expected_object != self.object()
+        {
+            return Ok(Err(
+                mondrian_core::NativeAudioParameterQueryRefusal::OwnerChanged,
+            ));
+        }
+        self.state.parameter_queries.fetch_add(1, Ordering::AcqRel);
+        if let Some(source) = self.state.query_revoke_source.lock().unwrap().take() {
+            source.revoke().unwrap();
+        }
+        if let Some(cancel) = self.state.query_cancel.lock().unwrap().take() {
+            cancel.cancel();
+        }
+        Ok(Ok((
+            3,
+            vec![mondrian_core::NativeAudioParameterFact {
+                revision: 3,
+                parameter: ParameterId::new(format!("vst3.param.{id}")).unwrap(),
+                event_flags: 0,
+                value_bits: Some(0.25_f64.to_bits()),
+                author_value_bits: Some(0.25_f64.to_bits()),
+                origin: mondrian_core::NativeAudioParameterObservationOrigin::MainQuery {
+                    rescan_flags: 0,
+                },
+                hidden: Some(false),
+                periodic: None,
+                name: Some("Actual probe caption".into()),
+                module: None,
+                info_flags: Some(1),
+                display: Some("0.25".into()),
+            }],
+        )))
     }
     fn open_native_audio_editor(
         &mut self,
@@ -2342,4 +2385,168 @@ fn native_author_rescan_runtime_poll_refuses_missing_scalar_without_fabricating_
     );
     assert_eq!(state.entries.load(Ordering::Acquire), 0);
     assert_eq!(state.processes.load(Ordering::Acquire), 0);
+}
+
+// Portable explicit ABI adapter: this exercises Runtime/plan/Hosted admission,
+// not a real VST3 binary or GUI. Actual COM query qualification is separate.
+fn parameter_query_probe_runtime(
+    state: &Arc<OwnerProbeState>,
+) -> (AudioProgramRuntime, ParameterId) {
+    struct Resolver(Arc<OwnerProbeState>);
+    impl AudioProcessorResolver for Resolver {
+        fn prepare(
+            &self,
+            request: AudioProcessorPrepareRequest<'_>,
+        ) -> Result<Arc<dyn AudioProcessorFactory>, AudioProcessorHostError> {
+            if matches!(request.definition(), mondrian_timeline::AudioProcessorDefinitionRef::Vst3 { class_id, .. }
+                if class_id == "00112233445566778899AABBCCDDEEFF")
+            {
+                return Ok(Arc::new(OwnerProbeFactory {
+                    state: self.0.clone(),
+                    contract: AudioProcessorExecutionContract::new(
+                        0,
+                        AudioProcessorTail::None,
+                        true,
+                        true,
+                        true,
+                        0,
+                    )?,
+                }));
+            }
+            BuiltInAudioProcessorResolver.prepare(request)
+        }
+    }
+    let id = ParameterId::new("vst3.param.0").unwrap();
+    let schema =
+        mondrian_core::ParameterSchema::v1(id.clone(), mondrian_core::PropertyValue::Double(0.5));
+    let mut parameter =
+        mondrian_timeline::audio::AudioProcessorParameter::from_schema(schema).unwrap();
+    parameter.automation = None;
+    let mut processor = AudioProcessorInstance {
+        id: mondrian_core::AudioProcessorInstanceId::new(),
+        definition: mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+            class_id: "00112233445566778899AABBCCDDEEFF".into(),
+            vendor: None,
+            schema_version: 1,
+            binary_sha256: Some([3; 32]),
+        },
+        bypassed: false,
+        parameters: Default::default(),
+        opaque_state: None,
+    };
+    processor.parameters.insert(id.clone(), parameter);
+    let root = sequence_with_parallel_processor(processor);
+    let runtime = AudioProgramRuntime::build_with_processor_resolver(
+        &root,
+        &[],
+        &RampResolver,
+        &Resolver(state.clone()),
+        owner_probe_contract(),
+        None,
+    )
+    .unwrap();
+    (runtime, id)
+}
+
+#[test]
+fn explicit_parameter_query_requires_current_target_and_admitted_id_without_author_or_dsp_work() {
+    use mondrian_core::{
+        NativeAudioParameterQuery as Query, NativeAudioParameterQueryOutcome as Out,
+        NativeAudioParameterQueryRefusal as Refusal,
+    };
+    let state = Arc::new(OwnerProbeState::default());
+    let (mut runtime, id) = parameter_query_probe_runtime(&state);
+    let source = mondrian_core::AudioOwnerInstallationSource::new();
+    let (_, claim) = install_probe_runtime(&mut runtime, &source);
+    let lease = runtime.native_owner_lease(owner_addresses(&runtime)[0]).unwrap();
+    let query = Query {
+        target: lease.editor_target(),
+        parameter: id.clone(),
+    };
+    let cancel = ExecutionCancellationToken::new();
+    let Out::Observed(actual) = runtime.query_native_parameter(&query, &cancel).unwrap() else {
+        panic!("installed exact query");
+    };
+    assert_eq!(actual.target(), query.target);
+    assert_eq!(
+        actual.object_serial(),
+        NonZeroU64::new(state.next_load.load(Ordering::Acquire)).unwrap()
+    );
+    assert_eq!(actual.process_id().get(), std::process::id());
+    assert_eq!(actual.facts().len(), 1);
+    assert_eq!(actual.facts()[0].parameter, id);
+    assert_eq!(
+        actual.facts()[0].name.as_deref(),
+        Some("Actual probe caption")
+    );
+    assert_eq!(state.parameter_queries.load(Ordering::Acquire), 1);
+    let mut wrong = query.clone();
+    wrong.parameter = ParameterId::new("vst3.param.4095").unwrap();
+    assert_eq!(
+        runtime.query_native_parameter(&wrong, &cancel).unwrap(),
+        Out::Refused(Refusal::ParameterUnavailable)
+    );
+    wrong = query.clone();
+    wrong.target.binding = mondrian_core::AudioProcessorBindingId::new();
+    assert_eq!(
+        runtime.query_native_parameter(&wrong, &cancel).unwrap(),
+        Out::Refused(Refusal::OwnerChanged)
+    );
+    assert_eq!(state.parameter_queries.load(Ordering::Acquire), 1);
+    assert_eq!(state.created.load(Ordering::Acquire), 1);
+    assert_eq!(state.processes.load(Ordering::Acquire), 0);
+    assert_eq!(state.editor_opens.load(Ordering::Acquire), 0);
+    assert_eq!(runtime.native_owner_lease(lease.address()).unwrap(), lease);
+    assert!(
+        runtime
+            .find_resource_session(runtime.resource_root_identity())
+            .unwrap()
+            .resource_plan()
+            .schedule
+            .processors
+            .iter()
+            .filter(|p| p.occurrence == lease.address().occurrence)
+            .flat_map(|p| &p.parameter_curves)
+            .all(Option::is_none),
+        "query does not fill None or mutate author automation"
+    );
+    source.revoke().unwrap();
+    assert!(matches!(
+        runtime.query_native_parameter(&query, &cancel).unwrap(),
+        Out::Refused(Refusal::OwnerChanged | Refusal::Unavailable)
+    ));
+    assert_eq!(state.parameter_queries.load(Ordering::Acquire), 1);
+    drop(claim);
+}
+
+#[test]
+fn explicit_parameter_query_discards_fact_on_actual_source_revocation_or_cancellation_during_query()
+{
+    use mondrian_core::{
+        NativeAudioParameterQuery as Query, NativeAudioParameterQueryOutcome as Out,
+        NativeAudioParameterQueryRefusal as Refusal,
+    };
+    for revoke in [false, true] {
+        let state = Arc::new(OwnerProbeState::default());
+        let (mut runtime, id) = parameter_query_probe_runtime(&state);
+        let source = mondrian_core::AudioOwnerInstallationSource::new();
+        install_probe_runtime(&mut runtime, &source);
+        let lease = runtime.native_owner_lease(owner_addresses(&runtime)[0]).unwrap();
+        let query = Query { target: lease.editor_target(), parameter: id };
+        let cancel = ExecutionCancellationToken::new();
+        if revoke {
+            *state.query_revoke_source.lock().unwrap() = Some(source.clone());
+        } else {
+            *state.query_cancel.lock().unwrap() = Some(cancel.clone());
+        }
+        let result = runtime.query_native_parameter(&query, &cancel);
+        if revoke {
+            assert_eq!(result.unwrap(), Out::Refused(Refusal::OwnerChanged));
+        } else {
+            assert_eq!(result.unwrap_err(), AudioNativeOwnerError::Cancelled);
+        }
+        assert_eq!(state.parameter_queries.load(Ordering::Acquire), 1);
+        assert_eq!(state.created.load(Ordering::Acquire), 1);
+        assert_eq!(state.processes.load(Ordering::Acquire), 0);
+    }
 }

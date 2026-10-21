@@ -2493,3 +2493,73 @@ fn native_parameter_info_ack_keeps_same_kind_suffix_and_refuses_mixed_or_retired
         assert_eq!(worker.last_end, cursor);
     }
 }
+
+#[test]
+#[ignore = "requires existing owned initial-values COM DLL under native Job"]
+fn native_explicit_parameter_query_counts_actual_getters_and_pre_refuses_wrong_binding_or_id() {
+    use mondrian_core::NativeAudioParameterQueryRefusal as Refusal;
+    let (mut worker, binding) = entered_rescan_worker_for_mode(1);
+    let before = audit(&worker);
+    let source = worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap();
+    let cohort = worker.plugin.as_ref().unwrap().pending_restart_cohort();
+    assert!(source.closed_empty());
+    assert!(!cohort.unwrap().pending());
+    let object = worker.native_audio_object_observation().unwrap();
+    let payload = worker.payload.state.clone();
+    let cursor = worker.last_end;
+    let (revision, facts) = worker.query_native_parameter(binding, 0).unwrap().unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].parameter.as_str(), "vst3.param.0");
+    assert_eq!(facts[0].revision, revision);
+    assert_eq!(facts[0].value_bits, Some(0.375_f64.to_bits()));
+    let after = audit(&worker);
+    assert_eq!(after.metadata, before.metadata + 1);
+    assert_eq!(after.values, before.values + 1);
+    assert_eq!(
+        (after.process, after.setters, after.wrong_thread),
+        (before.process, before.setters, 0)
+    );
+    let wrong = crate::NativeAudioObjectBindRequest {
+        binding: mondrian_core::AudioProcessorBindingId::new(),
+        ..binding
+    };
+    assert_eq!(
+        worker.query_native_parameter(wrong, 0).unwrap(),
+        Err(Refusal::OwnerChanged)
+    );
+    assert_eq!(
+        worker.query_native_parameter(binding, 1).unwrap(),
+        Err(Refusal::ParameterUnavailable)
+    );
+    let refused = audit(&worker);
+    assert_eq!(
+        (
+            refused.metadata,
+            refused.values,
+            refused.process,
+            refused.setters,
+            refused.wrong_thread
+        ),
+        (
+            after.metadata,
+            after.values,
+            after.process,
+            after.setters,
+            0
+        )
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().editor_event_source_status().unwrap(),
+        source
+    );
+    assert_eq!(
+        worker.plugin.as_ref().unwrap().pending_restart_cohort(),
+        cohort
+    );
+    assert_eq!(worker.native_audio_object_observation().unwrap(), object);
+    assert_eq!(worker.payload.state, payload);
+    assert_eq!(worker.last_end, cursor);
+    assert!(worker.last_parameter_values.iter().all(Option::is_none));
+    assert!(worker.native_author_delivery.is_none());
+    assert!(worker.prepared_author_entry.is_none());
+}

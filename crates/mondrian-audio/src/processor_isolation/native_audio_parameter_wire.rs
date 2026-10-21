@@ -145,12 +145,34 @@ pub(super) fn read_parameters(
     reader: &mut impl Read,
     object: Option<crate::NativeAudioObjectObservation>,
 ) -> io::Result<(u64, Vec<Fact>)> {
+    read_parameters_bounded(
+        reader,
+        object,
+        mondrian_core::NATIVE_AUDIO_PARAMETER_FACTS,
+        false,
+    )
+}
+
+/// The explicit single-ID reply rejects an invalid count before any allocation.
+pub(super) fn read_single_parameter(
+    reader: &mut impl Read,
+    object: crate::NativeAudioObjectObservation,
+) -> io::Result<(u64, Vec<Fact>)> {
+    read_parameters_bounded(reader, Some(object), 1, true)
+}
+
+fn read_parameters_bounded(
+    reader: &mut impl Read,
+    object: Option<crate::NativeAudioObjectObservation>,
+    maximum: usize,
+    single: bool,
+) -> io::Result<(u64, Vec<Fact>)> {
     let revision = u64_read(reader)?;
     if u32_read(reader)? != PARAMETER_FACT_FORMAT {
         return Err(invalid("parameter fact format"));
     }
     let count = usize::try_from(u32_read(reader)?).map_err(|_| invalid("parameter count"))?;
-    if count > mondrian_core::NATIVE_AUDIO_PARAMETER_FACTS || (count != 0 && object.is_none()) {
+    if count > maximum || (single && count != 1) || (count != 0 && object.is_none()) {
         return Err(invalid("parameter count/object"));
     }
     let mut storage = std::alloc::Layout::array::<Fact>(count)
