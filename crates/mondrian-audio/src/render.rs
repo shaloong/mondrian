@@ -1032,8 +1032,10 @@ impl AudioRenderSession {
         if let Some(original) = original
             && original.serial != 0
             && !original.exhausted()
-            && original.request
-                == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
+            && matches!(
+                original.request,
+                mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 | 16 }
+            )
         {
             let occurrence = crate::native_runtime_owner::editor_target_address(target).occurrence;
             let epoch = match self.continuity {

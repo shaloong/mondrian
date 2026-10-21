@@ -348,6 +348,12 @@ impl HandoffFixture {
         })
     }
     fn with_definition(definition: mondrian_timeline::AudioProcessorDefinitionRef) -> Self {
+        Self::with_definition_and_native_owned_parameter(definition, false)
+    }
+    fn with_definition_and_native_owned_parameter(
+        definition: mondrian_timeline::AudioProcessorDefinitionRef,
+        native_owned: bool,
+    ) -> Self {
         use mondrian_core::automation::{ParameterSchema, PropertyValue};
         let probe = Arc::new(Mutex::new(HandoffProbe {
             vst_rescan_abi: matches!(
@@ -365,14 +371,16 @@ impl HandoffFixture {
             parameters: Default::default(),
             opaque_state: None,
         };
-        processor.parameters.insert(
-            parameter.clone(),
+        let mut author_parameter =
             mondrian_timeline::audio::AudioProcessorParameter::from_schema(ParameterSchema::v1(
-                parameter,
+                parameter.clone(),
                 PropertyValue::Double(0.5),
             ))
-            .expect("numeric author schema"),
-        );
+            .expect("numeric author schema");
+        if native_owned {
+            author_parameter.automation = None;
+        }
+        processor.parameters.insert(parameter, author_parameter);
         let processor_id = processor.id;
         let output = sequence.audio_program.outputs[0].id;
         sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
@@ -2144,20 +2152,40 @@ mod continuing_rescan_controls {
         fixture: &mut HandoffFixture,
         a: crate::NativeRequestCohort,
     ) -> mondrian_core::NativeAudioAuthorProposal {
+        rescan_with_projection(
+            fixture,
+            a,
+            mondrian_core::NativeAudioParameterRescanKind::Values,
+            true,
+            None,
+        )
+    }
+    fn rescan_with_projection(
+        fixture: &mut HandoffFixture,
+        a: crate::NativeRequestCohort,
+        kind: mondrian_core::NativeAudioParameterRescanKind,
+        include_value: bool,
+        dirty: Option<bool>,
+    ) -> mondrian_core::NativeAudioAuthorProposal {
         let mut probe = fixture.probe.lock().unwrap();
         assert_eq!(probe.open, 0);
         probe.request_cohort = Some(a);
-        probe.revision += 1;
+        probe.revision += 1 + u64::from(dirty.is_some());
         probe.configuration = Some(0.75_f64.to_le_bytes().to_vec());
-        probe.pending.push(NativeAudioAuthorEvent::ParameterValuesRescanned {
-            kind: mondrian_core::NativeAudioParameterRescanKind::Values,
-            values: vec![NativeAudioAuthorParameterEvent::admit(
+        let values = if include_value {
+            vec![NativeAudioAuthorParameterEvent::admit(
                 ParameterId::new_static("native.gain"),
                 NativeAudioAuthorParameterPhase::Value,
                 Some(NativeAudioAuthorScalar::admit(0.75).unwrap()),
             )
-            .unwrap()],
-        });
+            .unwrap()]
+        } else {
+            Vec::new()
+        };
+        probe.pending.push(NativeAudioAuthorEvent::ParameterValuesRescanned { kind, values });
+        if let Some(dirty) = dirty {
+            probe.pending.push(NativeAudioAuthorEvent::DirtyChanged(dirty));
+        }
         drop(probe);
         let proposal = fixture.drain();
         assert_eq!(
@@ -2193,6 +2221,13 @@ mod continuing_rescan_controls {
         fixture: &mut HandoffFixture,
         proposal: &mondrian_core::NativeAudioAuthorProposal,
     ) -> [NativeAudioAuthorProgram; 1] {
+        programs_with_values(fixture, proposal, true)
+    }
+    fn programs_with_values(
+        fixture: &mut HandoffFixture,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        refresh_values: bool,
+    ) -> [NativeAudioAuthorProgram; 1] {
         let strip = match fixture.target.owner {
             mondrian_core::NativeAudioEditorOccurrenceOwner::Output(_) => {
                 &mut fixture.sequence.audio_program.outputs[0].strip
@@ -2213,11 +2248,14 @@ mod continuing_rescan_controls {
             .find(|processor| processor.id == fixture.target.instance)
             .unwrap();
         processor.opaque_state = proposal.state().cloned();
-        processor
-            .set_parameter_automation(
-                ExactAutomationCurve::new(ParameterId::new_static("native.gain"), 0.75).unwrap(),
-            )
-            .unwrap();
+        if refresh_values {
+            processor
+                .set_parameter_automation(
+                    ExactAutomationCurve::new(ParameterId::new_static("native.gain"), 0.75)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
         [NativeAudioAuthorProgram {
             sequence: fixture.sequence.id,
             program: Arc::new(
@@ -2236,10 +2274,20 @@ mod continuing_rescan_controls {
         PreparedNativeAudioParameterHandoff,
         mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
     ) {
+        prepare_with_values(fixture, proposal, true)
+    }
+    fn prepare_with_values(
+        fixture: &mut HandoffFixture,
+        proposal: &mondrian_core::NativeAudioAuthorProposal,
+        refresh_values: bool,
+    ) -> (
+        PreparedNativeAudioParameterHandoff,
+        mondrian_core::AudioOwnerRuntimeInstallationAuthorization,
+    ) {
         let claim = fixture.source.current_claim().unwrap().unwrap();
         let current = fixture.runtime.native_owner_installation_verifier().unwrap();
         current.validate(&claim).unwrap();
-        let programs = programs(fixture, proposal);
+        let programs = programs_with_values(fixture, proposal, refresh_values);
         let (registration, destination) = fixture.source.register().unwrap();
         let reservation = fixture.source.reserve_install(&registration, Some(&claim)).unwrap();
         let authorization = fixture.source.authorize_runtime_installation(reservation).unwrap();
@@ -2348,6 +2396,312 @@ mod continuing_rescan_controls {
             p.ack_attempts,
             p.accepted_acks,
         )
+    }
+
+    #[test]
+    fn authentic_vst_info_rescan_handoff_preserves_some_and_absent_author_curves() {
+        use mondrian_core::{
+            NativeAudioAuthorCallback as Callback, NativeAudioParameterRescanKind as Kind,
+        };
+        for native_owned in [false, true] {
+            let mut f = HandoffFixture::with_definition_and_native_owned_parameter(
+                mondrian_timeline::AudioProcessorDefinitionRef::Vst3 {
+                    class_id: "portable.actual.rescan".into(),
+                    vendor: None,
+                    schema_version: 1,
+                    binary_sha256: None,
+                },
+                native_owned,
+            );
+            let id = ParameterId::new_static("native.gain");
+            let original = f.sequence.audio_program.outputs[0].strip.pre_fader.processors[0]
+                .parameters
+                .get(&id)
+                .unwrap()
+                .clone();
+            assert_eq!(original.automation.is_none(), native_owned);
+            if !native_owned {
+                f.block(0, 0.5);
+            }
+            let a = cohort(151, 16);
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            let proposal = rescan_with_projection(&mut f, a, Kind::NoValueRefresh, false, Some(false));
+            assert!(matches!(proposal.callbacks(), [
+                    Callback::ParameterValuesRescanned { kind: Kind::NoValueRefresh, values },
+                    Callback::DirtyChanged(false),
+                ] if values.is_empty()));
+            assert_eq!(
+                ticket(&f),
+                None,
+                "no DSP after the callback manufactured a Session ticket"
+            );
+            let before = counts(&f);
+            let old_cursors = cursors(&f);
+            let (mut prepared, mut authorization) = prepare_with_values(&mut f, &proposal, false);
+            let after_prepare = counts(&f);
+            assert_eq!(
+                after_prepare,
+                (
+                    before.0,
+                    before.1 + 1,
+                    before.2,
+                    before.3,
+                    before.4,
+                    before.5
+                )
+            );
+            install(&mut f, &proposal, &mut prepared, &mut authorization);
+            f.ack(&proposal);
+            assert_eq!(ticket(&f), None);
+            assert_eq!(f.probe.lock().unwrap().retained, None);
+            assert_eq!(
+                f.probe.lock().unwrap().accepted_seed.as_deref(),
+                Some(0.75_f64.to_le_bytes().as_slice())
+            );
+            assert_eq!(
+                f.sequence.audio_program.outputs[0].strip.pre_fader.processors[0]
+                    .parameters
+                    .get(&id),
+                Some(&original)
+            );
+            assert_eq!(
+                f.runtime.resource_plan().program().output.pre_fader.processors[0]
+                    .parameters
+                    .get(&id),
+                Some(&original)
+            );
+            let installed = cursors(&f);
+            assert_eq!(installed.sessions[0].state, old_cursors.sessions[0].state);
+            assert_eq!(
+                installed.processors[0].state,
+                old_cursors.processors[0].state
+            );
+            let after = counts(&f);
+            assert_eq!(
+                (after.0, after.1, after.2, after.3),
+                (
+                    after_prepare.0,
+                    after_prepare.1,
+                    after_prepare.2,
+                    after_prepare.3
+                )
+            );
+            assert_eq!((after.4, after.5), (1, 1));
+            if !native_owned {
+                f.block(1, 0.5);
+            }
+            // The portable DSP deliberately requires a host point. The None
+            // branch proves only Plan/Source handoff, not native-owned PCM.
+        }
+    }
+
+    #[test]
+    fn authentic_vst_info_rescan_final_bind_rechecks_source_without_session_ticket() {
+        use mondrian_core::NativeAudioParameterRescanKind as Kind;
+        for (flags, kind, refresh_values) in
+            [(4, Kind::Values, true), (16, Kind::NoValueRefresh, false)]
+        {
+            for case in 0..4 {
+                let mut f = fixture();
+                f.block(0, 0.5);
+                let a = cohort(161, flags);
+                f.probe.lock().unwrap().live_request = Some(observed(a));
+                let proposal = rescan_with_projection(&mut f, a, kind, refresh_values, None);
+                let (mut prepared, mut authorization) =
+                    prepare_with_values(&mut f, &proposal, refresh_values);
+                assert_eq!(ticket(&f), None);
+                let before = cursors(&f);
+                let c = counts(&f);
+                let root = f.runtime.resource_root_identity();
+                let claim = f.source.current_claim().unwrap().unwrap();
+                {
+                    let mut p = f.probe.lock().unwrap();
+                    match case {
+                        0 => {
+                            p.source_failure = Some(crate::NativeAudioAuthorSourceFailure::WrongThread)
+                        }
+                        1 => p.reported_request_cohort = Some(None),
+                        2 => p.live_request = Some(observed(cohort(162, 20))),
+                        _ => p.live_request = None,
+                    }
+                }
+                let error = f
+                    .runtime
+                    .install_native_author_parameter_handoff(
+                        &mut prepared,
+                        &mut authorization,
+                        &ExecutionCancellationToken::new(),
+                    )
+                    .err()
+                    .expect("Bind must not bypass final Source/current-cohort validation");
+                let expected = match case {
+                    0 => NativeAudioAuthorHoldReason::SourceFailure(
+                        crate::NativeAudioAuthorSourceFailure::WrongThread,
+                    ),
+                    1 => NativeAudioAuthorHoldReason::OutstandingDelivery,
+                    _ => NativeAudioAuthorHoldReason::PendingCallbacks,
+                };
+                assert!(
+                    matches!(error, NativeAudioParameterHandoffError::Admission(
+                    NativeAudioAuthorAdmissionError::Pending { reason, .. }) if reason == expected),
+                    "flags={flags}, case={case}, actual={error:?}"
+                );
+                assert_eq!(ticket(&f), None);
+                assert_eq!(cursors(&f), before);
+                assert_eq!(counts(&f), c);
+                assert_eq!(f.runtime.resource_root_identity(), root);
+                assert_eq!(
+                    f.source.current_claim().unwrap().unwrap().generation(),
+                    claim.generation()
+                );
+                assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(a));
+                {
+                    let mut p = f.probe.lock().unwrap();
+                    p.source_failure = None;
+                    p.reported_request_cohort = None;
+                    p.live_request = Some(observed(a));
+                }
+                install(&mut f, &proposal, &mut prepared, &mut authorization);
+                f.ack(&proposal);
+                assert_eq!(ticket(&f), None);
+                f.block(1, if refresh_values { 0.75 } else { 0.5 });
+            }
+        }
+    }
+
+    #[test]
+    fn authentic_vst_info_rescan_ack_settles_only_original_hold_and_preserves_later_requests() {
+        use mondrian_core::NativeAudioParameterRescanKind as Kind;
+        let a = cohort(181, 16);
+        let b = cohort(182, 16);
+        for existing_b in [false, true] {
+            for live in [
+                None,
+                Some(observed(b)),
+                Some(crate::NativeObservedRequest::RequestOnly(
+                    mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 20 },
+                )),
+            ] {
+                let mut f = fixture();
+                f.block(0, 0.5);
+                f.probe.lock().unwrap().live_request = Some(observed(if existing_b { b } else { a }));
+                let original = hold(&mut f);
+                let proposal = rescan_with_projection(&mut f, a, Kind::NoValueRefresh, false, None);
+                let (mut prepared, mut authorization) = prepare_with_values(&mut f, &proposal, false);
+                let claim = install(&mut f, &proposal, &mut prepared, &mut authorization);
+                let installed = ticket(&f).unwrap();
+                assert_eq!(installed.request, original.request);
+                assert_eq!(
+                    installed.prepared_plan_id,
+                    f.runtime.resource_root_identity().prepared_plan_id
+                );
+                let before = cursors(&f);
+                let c = counts(&f);
+                f.probe.lock().unwrap().live_after_ack = Some(live);
+                f.ack(&proposal);
+                let expected = if existing_b {
+                    Some(installed)
+                } else {
+                    live.map(|request| AudioProcessorReprepareTicket { request, ..installed })
+                };
+                assert_eq!(
+                    ticket(&f),
+                    expected,
+                    "existing_b={existing_b}, live={live:?}"
+                );
+                assert_eq!(cursors(&f), before);
+                assert_eq!(
+                    f.source.current_claim().unwrap().unwrap().generation(),
+                    claim.generation()
+                );
+                assert_eq!(f.probe.lock().unwrap().retained, None);
+                let after = counts(&f);
+                assert_eq!((after.0, after.1, after.2, after.3), (c.0, c.1, c.2, c.3));
+                assert_eq!((after.4, after.5), (1, 1));
+                if let Some(expected) = expected {
+                    assert_eq!(
+                        hold(&mut f),
+                        expected,
+                        "a later or unknown request keeps PCM held"
+                    );
+                    assert_eq!(cursors(&f), before);
+                    assert_eq!(counts(&f), after);
+                } else {
+                    f.block(1, 0.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pending_info_rescan_permission_requires_exact_callback_kind_and_empty_values() {
+        use mondrian_core::{
+            NativeAudioAuthorCallback as Callback, NativeAudioParameterRescanKind as Kind,
+        };
+        for (flags, kind, include_value, dirty) in [
+            (4, Kind::NoValueRefresh, false, None),
+            (16, Kind::Values, false, None),
+            (16, Kind::Values, true, None),
+            (16, Kind::ParameterSetAndValues, true, None),
+            (20, Kind::NoValueRefresh, false, None),
+            (20, Kind::Values, true, None),
+            (16, Kind::NoValueRefresh, false, Some(true)),
+        ] {
+            let mut f = fixture();
+            f.block(0, 0.5);
+            let a = cohort(171, flags);
+            f.probe.lock().unwrap().live_request = Some(observed(a));
+            let proposal = rescan_with_projection(&mut f, a, kind, include_value, dirty);
+            let before = cursors(&f);
+            let c = counts(&f);
+            let root = f.runtime.resource_root_identity();
+            let claim = f.source.current_claim().unwrap().unwrap();
+            let programs = programs_with_values(&mut f, &proposal, include_value);
+            let (_, destination) = f.source.register().unwrap();
+            let error = f
+                .runtime
+                .prepare_native_author_parameter_handoff(
+                    &programs,
+                    &proposal,
+                    destination,
+                    &ExecutionCancellationToken::new(),
+                )
+                .err()
+                .expect("a mismatched callback cannot acquire retained cohort permission");
+            assert!(matches!(error, NativeAudioParameterHandoffError::Admission(
+                    NativeAudioAuthorAdmissionError::Pending {
+                        reason: NativeAudioAuthorHoldReason::OutstandingDelivery, .. })),
+                    "flags={flags}, kind={kind:?}, value={include_value}, dirty={dirty:?}, actual={error:?}");
+            assert_eq!(cursors(&f), before);
+            assert_eq!(counts(&f), c);
+            assert_eq!(f.runtime.resource_root_identity(), root);
+            assert_eq!(
+                f.source.current_claim().unwrap().unwrap().generation(),
+                claim.generation()
+            );
+            assert_eq!(f.probe.lock().unwrap().retained.unwrap().2, Some(a));
+        }
+        // Core refuses nonempty NoValueRefresh before a Hosted receipt exists.
+        // Do not fabricate an impossible proposal to bypass that shared boundary.
+        let f = fixture();
+        assert_eq!(
+            mondrian_core::NativeAudioAuthorProposal::project(
+                f.target,
+                f.sequence.id,
+                1,
+                mondrian_core::NativeAudioAuthorBoundaryFacts {
+                    completion: mondrian_core::NativeAudioAuthorCompletion::CoherentConfiguration,
+                    open_parameter_edits: 0,
+                    group_depth: 0,
+                },
+                vec![Callback::ParameterValuesRescanned {
+                    kind: Kind::NoValueRefresh,
+                    values: vec![(ParameterId::new_static("native.gain"), 0.75_f64.to_bits())],
+                }],
+                Some(0.75_f64.to_le_bytes().to_vec()),
+            ),
+            Err(mondrian_core::NativeAudioAuthorProjectionError::Callback)
+        );
     }
 
     #[test]

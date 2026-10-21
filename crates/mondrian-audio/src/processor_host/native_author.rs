@@ -109,7 +109,7 @@ fn pending(
     NativeAudioAuthorAdmissionError::Pending { target: Box::new(lease.editor_target()), reason }
 }
 
-/// Only the authentic, coherent VST3 value-rescan prefix may continue while a
+/// Only an authentic, coherent VST3 value/info-rescan prefix may continue while a
 /// later request remains held. This reads the original Hosted receipt, never a
 /// later live request as a substitute for that prefix's identity.
 fn continuing_rescan_cohort(
@@ -128,10 +128,25 @@ fn continuing_rescan_cohort(
     let Some(cohort) = retained.request_cohort else {
         return Ok(None);
     };
+    let rescan_matches_cohort = proposal.callbacks().split_first().is_some_and(|(first, suffix)| {
+        use mondrian_core::{
+            NativeAudioAuthorCallback as Callback, NativeAudioParameterRescanKind as Kind,
+            NativeAudioReprepareRequest as Request,
+        };
+        let Callback::ParameterValuesRescanned { kind, values } = first else {
+            return false;
+        };
+        let matches = match (cohort.request, *kind) {
+            (Request::Vst3Restart { flags: 4 }, Kind::Values) => true,
+            (Request::Vst3Restart { flags: 16 }, Kind::NoValueRefresh) => values.is_empty(),
+            _ => false,
+        };
+        matches && suffix.iter().all(|callback| matches!(callback, Callback::DirtyChanged(false)))
+    });
     let address = lease.address();
     if cohort.serial == 0
         || cohort.exhausted()
-        || cohort.request != (mondrian_core::NativeAudioReprepareRequest::Vst3Restart { flags: 4 })
+        || !rescan_matches_cohort
         || retained.installed.is_some()
         || retained.reentered.is_some()
         || lease.editor_target() != proposal.target()
@@ -608,10 +623,12 @@ impl PreparedProcessorHost {
                 && (ticket.is_some()
                     || instance.native_author_outstanding.as_ref().is_some_and(|retained| {
                         retained.request_cohort.is_some_and(|cohort| {
-                            cohort.request
-                                == (mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
-                                    flags: 4,
-                                })
+                            matches!(
+                                cohort.request,
+                                mondrian_core::NativeAudioReprepareRequest::Vst3Restart {
+                                    flags: 4 | 16,
+                                }
+                            )
                         })
                     }))
             {
@@ -666,26 +683,24 @@ impl PreparedProcessorHost {
                         crate::NativeAudioAuthorHoldReason::OutstandingDelivery,
                     ));
                 }
-                if observation.pending_reprepare.is_some() || ticket.is_some() {
-                    let original = continuing_rescan_cohort(
-                        instance,
+                let original = continuing_rescan_cohort(
+                    instance,
+                    record.prior_lease,
+                    record.object,
+                    proposal,
+                    program,
+                )?
+                .ok_or_else(|| {
+                    pending(
                         record.prior_lease,
-                        record.object,
-                        proposal,
-                        program,
-                    )?
-                    .ok_or_else(|| {
-                        pending(
-                            record.prior_lease,
-                            crate::NativeAudioAuthorHoldReason::PendingCallbacks,
-                        )
-                    })?;
-                    admit_rescan_live_request(
-                        record.prior_lease,
-                        original,
-                        observation.pending_reprepare,
-                    )?;
-                }
+                        crate::NativeAudioAuthorHoldReason::PendingCallbacks,
+                    )
+                })?;
+                admit_rescan_live_request(
+                    record.prior_lease,
+                    original,
+                    observation.pending_reprepare,
+                )?;
             }
             if let Some(notes) = &instance.notes {
                 notes
