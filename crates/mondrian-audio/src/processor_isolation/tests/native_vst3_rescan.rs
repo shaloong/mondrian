@@ -790,7 +790,9 @@ fn installed_vst3_runtime_rescan_handoff_resumes_pcm() {
                 AudioRenderRequest { start_sample: next, frames: 4 },
                 &mut sentinel,
             )
-            .expect_err("ordered real rescan Source must hold before any next PCM");
+            .expect_err(&format!(
+                "ordered real rescan Source must hold before any next PCM: next={next}, previous={previous:?}"
+            ));
         let AudioExecutionError::NativeAuthorPending(held) = error else {
             panic!("expected Source-first hold, actual={error:?}");
         };
