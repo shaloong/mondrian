@@ -2465,7 +2465,14 @@ mod continuing_rescan_controls {
                 Some(&original)
             );
             assert_eq!(
-                f.runtime.resource_plan().program().output.pre_fader.processors[0]
+                f.runtime
+                    .find_resource_session(f.runtime.resource_root_identity())
+                    .unwrap()
+                    .resource_plan()
+                    .program()
+                    .output
+                    .pre_fader
+                    .processors[0]
                     .parameters
                     .get(&id),
                 Some(&original)
