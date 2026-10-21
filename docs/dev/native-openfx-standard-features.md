@@ -29,21 +29,23 @@ pre-DSP output-owner capacity admission、parent-issued instance namespace 已�
 这只验证上述 owned probe 子集，未新增性能、第三方或其它平台资格。
 
 2026-10-22 Windows x64：ImageMemoryOwnership 通过真实 HostSupport、产品 Host
-及官方 Basic 的十四项控制。原八项保持：
+及官方 Basic 的二十项控制。原八项保持：
 Host/Instance 字节分配失败各释放唯一 owner，返回 ErrMemory/null；Source/Output
 FrameImage 分配失败不残留 handle、不改像素，随后正常取图和释放成功。
 真实 root/Filter Descriptor 的 imageMemoryAlloc 均 BadHandle/null、零分配。
 同一 Host/Instance 随后通过 257B 分配、16 字节对齐、嵌套锁、重锁内容保持、
-多余 unlock 无操作及一次完整释放。新增真实 Source/Output ClipDescriptor 的图像与
-RoD 四项拒绝：旧版在原八项通过后的首个 Source 图像查询终止于0xC0000409，
-其余新查询未到达；修复仅在两入口按 ClipBase/ClipInstance RTTI 准入，四项均返回
+多余 unlock 无操作及一次完整释放。真实 Source/Output ClipDescriptor 的图像与
+RoD 四项按 ClipBase/ClipInstance RTTI 准入，均返回
 BadHandle、清空对应输出且零分配，像素、handle数及fetch/lifetime状态不变。
 同实例 Source/Output 的 clipGetHandle、RoD、取图与释放两项随后成功。
-同一测试源修复前后逐字一致；十四行全过、stderr0、原180秒/185秒外层/2秒清理与
-owner正常退出，独立源码、构建和结果复核通过；两次增量构建无警告或错误。
+另外四项 root/Filter Effect Descriptor 的 Source/Output clipGetHandle 均
+BadHandle、clip/property输出为空、零分配且图像状态不变，随后两项实例恢复成功。
+该入口原将有效 Base 强转 Instance；同一测试源修复前原十四项通过后触发
+0xC0000005，修复为 RTTI 实例准入并清空失败输出后二十项全过、stderr0。
+原180秒/185秒外层/2秒清理与owner正常退出，独立源码、构建和结果复核通过。
 资格限真实有效 Base/ClipBase 错误类型及有限内存/图像生命周期；不保证任意野指针、
-整宿主泄漏、RSS/预算、性能、GPU或其它平台。新 Clip 修复已重链正常 Product，
-直接 Host/Basic 验收不授其 IPC 资格；此前 Product bootstrap memory
+整宿主泄漏、RSS/预算、实时性/性能、GPU或其它平台。图像/RoD 修复此前已重链正常 Product，
+本次 clipGetHandle 修复尚未重链；直接 Host/Basic 验收不授 IPC 资格。此前 Product bootstrap memory
 曾通过，后来配对门在 shutdown 超时（2441行）、Graph 未执行，仍保持 HOLD。
 2026-10-17 修复前 Product 的新增压力门仍有缺口：4096 总参数用例在
 resident `shutdown()` 超时，后续 Graph 未执行；单次观测中 inner 已于约53.77ms
@@ -235,7 +237,7 @@ Contexts 是协商能力，标准并不要求任意 Host 支持六个。
 | I06 | Output Straight/PM/Opaque，条件必需 | 实现：clip/image 与 Output preference 一致；public output 为 actual StraightFloat/PMFloat/Opaque typed frame，PM 不再强制除回 coverage；Opaque A=1，所有实际输出 lane finite/extent checked。r103 raw output、Source association 与 nested/opaque product 控制通过，整批 source/artifact lease 稳定 | `render.cpp::outputAlpha`; `resident.rs::materialize_native_output`; `EffectFloatFrame::from_pixels_controlled` | [Clip preferences](https://openfx.readthedocs.io/en/main/Reference/ofxClipPreferences.html) |
 | I07 | 完整 finite Float PM/RGBA，包括HDR/负色/zeroα emission，条件必需 | 实现限定域：native→Core/Effects→Normal Over→缓存→nested→opaque output 的 finite Float signal 已接实际调用链；r103 原始 cache bits、独立 nested oracle 与真实 opaque 输出闭环通过。PM zero-alpha emission、signed/>1/HDR/negative 不 clamp。非线性 blend/OCIO/GPU coverage consumer 经 explicit format/admission，不能直接消费所有 Float。r76 GPU 独立 overflow/recovery GREEN，其他新载体待验收 | `mondrian-core::ColorFrameAlpha`; `EffectFloatFrame`; `float_frame::over_float_sample`; `float_frame/exact_over.rs`; `heterogeneous_gpu.rs`; render-cache typed header | [Pixels](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h)，[OpenEXR association](https://openexr.com/en/latest/TechnicalIntroduction.html) |
 | I08 | PAR/canonical project size/extent/offset/clipRoD，必需 | 实现：canonical x=width*PAR/y=height/offset0；Rust/native按结果是否finite拒绝overflow；imagebounds/renderwindow保持pixel坐标 | `getProjectSize/Extent`; `getRegionOfDefinition`; `loadFrame`; geometry fixtures | [Coordinates](https://openfx.readthedocs.io/en/main/Reference/ofxCoordSystem.html) |
-| I09 | 底部原点、negative rowBytes/连续RGBA存储，必需 | 实现并有不对称raster oracle；Source/Output scope handles独立，parent借用mapping只在action内。`clipGetImage` bad_alloc 返回 ErrMemory/null；图像与RoD两入口按实际Clip实例准入，拒绝真实Descriptor且保留正常实例恢复。Host/Basic十四项有限控制通过；新Clip修复无正常Product IPC资格，完整故障/生命周期边界见上方 | `FrameImage`; `ImageAccess`; `imageHandles`; actualBasic fixtures | [Images](https://openfx.readthedocs.io/en/main/Reference/ofxImages.html) |
+| I09 | 底部原点、negative rowBytes/连续RGBA存储，必需 | 实现并有不对称raster oracle；Source/Output scope handles独立，parent借用mapping只在action内。`clipGetImage` bad_alloc 返回 ErrMemory/null；图像、RoD与clipGetHandle按实际实例准入，拒绝真实Descriptor且保留正常实例恢复。Host/Basic二十项有限控制通过；新修复无正常Product IPC资格，完整故障/生命周期边界见上方 | `FrameImage`; `ImageAccess`; `imageHandles`; actualBasic fixtures | [Images](https://openfx.readthedocs.io/en/main/Reference/ofxImages.html) |
 | I10 | `kOfxImagePropUniqueIdentifier`，必需image metadata | 实现：parent 单次 typed EffectProcessorOwnerId namespace 经 wire4 Prepare/16-byte CABI 初始化，session generation 每次 image authority 改变递增，Source/Output distinct，同 action repeated fetch stable；fresh worker/seek 不重用裸 process-local namespace。r76 原实现跨子进程 stale-analysis 实际 RED；r103 新 namespace 的 native 与 public cache 断言通过，整批 source/artifact lease 稳定 | `frame_state.h::FrameState`; `image_clip.cpp::FrameImage`; `resident.rs::{Prepare,OpenFxFilterSession::prepare}` | [Image header](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
 | I11 | Progressive FieldNone，必需image metadata | 实现：实际 Source/Output Image 的 Field=FieldNone，clip order 与 Render field 亦 None；仅 progressive CPU，不含 interlaced 调度。r103 对应真实 native field 断言通过，整批 source/artifact lease 稳定 | `image_clip.cpp::FrameImage`; `getFieldOrder`; `render.cpp::render` | [Fields](https://github.com/AcademySoftwareFoundation/openfx/blob/OFX_Release_1.5.1/include/ofxImageEffect.h) |
 | I12 | Upper/Lower/Both/field extraction、half-frame，协商 | 拒绝/未实现；setableFielding=false，无合法field scheduling/Sourceimageextract | `Host`; fixedRenderFieldNone | [Rendering](https://openfx.readthedocs.io/en/main/Reference/ofxRendering.html) |
