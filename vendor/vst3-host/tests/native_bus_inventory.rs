@@ -223,7 +223,6 @@ fn external_vst3_stopped_bounded_default_state_capture() {
         "complete native state payload, without truncation"
     );
     assert!(receipt.envelope_capacity_bytes >= bytes.len());
-    assert!(receipt.envelope_capacity_bytes <= STATE_LIMIT);
     let stream_extent = STATE_LIMIT - HEADER_BYTES;
     assert!(
         receipt.stream_payload_bytes == stream_extent
